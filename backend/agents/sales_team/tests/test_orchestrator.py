@@ -8,6 +8,7 @@ LLM clients never run.
 
 from __future__ import annotations
 
+import json
 from typing import Any, List
 from unittest.mock import MagicMock
 
@@ -36,10 +37,12 @@ from sales_team.models import (
     Prospect,
     ProspectDossier,
     ProspectList,
+    QualificationScore,
     QualificationScoreBody,
     ROIModel,
     SalesPipelineConfig,
     SalesPipelineRequest,
+    SalesProposal,
     SalesProposalBody,
     SPINQuestions,
 )
@@ -1313,7 +1316,14 @@ def test_outreach_critic_multi_iteration_refinement(
     stub_orch.outreach_critic.review.side_effect = _critic_side_effect
 
     sequence = stub_orch._generate_outreach_with_critic(
-        sample_prospect, sample_dossier, "p", "v", "", "", None, sample_icp,
+        sample_prospect,
+        sample_dossier,
+        "p",
+        "v",
+        "",
+        "",
+        None,
+        sample_icp,
         max_refinements=2,
     )
     # 1 initial + 2 refinement emits = 3 outreach calls
@@ -1366,8 +1376,16 @@ def test_proposal_critic_fail_then_refine(
     stub_orch.proposal_critic.review.side_effect = _critic_side_effect
 
     proposal = stub_orch._generate_proposal_with_critic(
-        sample_prospect, "p", "v", 25000.0, "", "", "", None,
-        sample_dossier, None,
+        sample_prospect,
+        "p",
+        "v",
+        25000.0,
+        "",
+        "",
+        "",
+        None,
+        sample_dossier,
+        None,
         max_refinements=2,
     )
     # 1 initial emit + 1 refinement (after first FAIL) + 1 more refinement (after second FAIL) = 3
@@ -1403,3 +1421,133 @@ def test_propose_only_forwards_config_critic_refinements(
     proposal = stub_orch.propose_only(req)
     assert proposal is not None
     stub_orch.proposal_critic.review.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Regression: discovery and negotiation must match prospects by id, not company_name
+# ---------------------------------------------------------------------------
+
+
+def test_discovery_and_negotiation_match_by_id_not_company_name(stub_orch, sample_icp) -> None:
+    """Two prospects sharing company_name must each receive their own data — matched by id.
+
+    Regression guard for the bug where _run_discovery and _run_negotiation looked
+    up per-prospect data via a linear scan on ``company_name``, which is non-unique
+    when the deep-research path generates multiple decision-makers at one account.
+
+    This test calls _run_discovery and _run_negotiation directly (the same pattern
+    used by test_stage_methods_are_individually_callable throughout this file) because
+    exercising them through the public run() API would require mocking every upstream
+    stage (prospecting, outreach, qualification, dossier loading) just to reach
+    discovery, which would obscure the specific per-prospect matching behaviour
+    under test.
+    """
+    p1 = Prospect(id="prs_shared_1", company_name="SharedCo", contact_name="Alice")
+    p2 = Prospect(id="prs_shared_2", company_name="SharedCo", contact_name="Bob")
+
+    bant = BANTScore(budget=8, authority=9, need=7, timeline=8)
+    meddic = MEDDICScore(
+        metrics_identified=True,
+        economic_buyer_known=True,
+        decision_criteria_understood=True,
+        decision_process_mapped=True,
+        identify_pain=True,
+        champion_found=True,
+    )
+    qual_p1 = QualificationScore(
+        prospect=p1,
+        bant=bant,
+        meddic=meddic,
+        overall_score=0.9,
+        value_creation_level=3,
+        recommended_action="advance",
+        qualification_notes="alice-specific-notes",
+    )
+    qual_p2 = QualificationScore(
+        prospect=p2,
+        bant=bant,
+        meddic=meddic,
+        overall_score=0.7,
+        value_creation_level=2,
+        recommended_action="advance",
+        qualification_notes="bob-specific-notes",
+    )
+
+    ctx = orch_mod._RunContext(
+        request=SalesPipelineRequest(
+            product_name="P",
+            value_proposition="A valid long value proposition",
+            icp=sample_icp,
+        ),
+        job_id="j-id-match",
+        icp_json=sample_icp.model_dump_json(indent=2),
+        product="P",
+        vp="A valid long value proposition",
+        company_context="",
+        cases="",
+        entry=PipelineStage.PROSPECTING,
+        insights_ctx="",
+        config=SalesPipelineConfig(),
+        update=orch_mod._noop_update,
+    )
+
+    # -- _run_discovery -------------------------------------------------------
+    discovery_received: dict = {}
+
+    def _capture_discovery(prospect_json, qual_json, *a, **kw):
+        pid = json.loads(prospect_json)["id"]
+        discovery_received[pid] = qual_json
+        return _discovery_body()
+
+    stub_orch.discovery.prepare.side_effect = _capture_discovery
+
+    plans = stub_orch._run_discovery(ctx, [p1, p2], [qual_p1, qual_p2])
+    assert len(plans) == 2
+    assert {plan.prospect.id for plan in plans} == {p1.id, p2.id}
+
+    # Each prospect must have received its OWN qual JSON — no cross-contamination.
+    assert "alice-specific-notes" in discovery_received["prs_shared_1"]
+    assert "bob-specific-notes" in discovery_received["prs_shared_2"]
+    assert "bob-specific-notes" not in discovery_received["prs_shared_1"]
+    assert "alice-specific-notes" not in discovery_received["prs_shared_2"]
+
+    # -- _run_negotiation -----------------------------------------------------
+    roi = ROIModel(
+        annual_cost_usd=25000.0,
+        estimated_annual_benefit_usd=70000.0,
+        payback_months=6.0,
+        roi_percentage=180.0,
+    )
+    prop_p1 = SalesProposal(
+        prospect=p1,
+        executive_summary="alice-proposal-summary",
+        situation_analysis="...",
+        proposed_solution="...",
+        roi_model=roi,
+    )
+    prop_p2 = SalesProposal(
+        prospect=p2,
+        executive_summary="bob-proposal-summary",
+        situation_analysis="...",
+        proposed_solution="...",
+        roi_model=roi,
+    )
+
+    negotiation_received: dict = {}
+
+    def _capture_negotiation(prospect_json, prop_json, *a, **kw):
+        pid = json.loads(prospect_json)["id"]
+        negotiation_received[pid] = prop_json
+        return _closer_body()
+
+    stub_orch.closer.develop_strategy.side_effect = _capture_negotiation
+
+    strategies = stub_orch._run_negotiation(ctx, [p1, p2], [prop_p1, prop_p2])
+    assert len(strategies) == 2
+    assert {strategy.prospect.id for strategy in strategies} == {p1.id, p2.id}
+
+    # Each prospect must have received its OWN proposal JSON — no cross-contamination.
+    assert "alice-proposal-summary" in negotiation_received["prs_shared_1"]
+    assert "bob-proposal-summary" in negotiation_received["prs_shared_2"]
+    assert "bob-proposal-summary" not in negotiation_received["prs_shared_1"]
+    assert "alice-proposal-summary" not in negotiation_received["prs_shared_2"]
