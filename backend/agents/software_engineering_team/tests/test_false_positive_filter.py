@@ -252,6 +252,17 @@ def test_coerce_verdict_variants() -> None:
     # false but low confidence → keep
     _, v = _coerce_verdict({"index": 0, "is_real_issue": False, "confidence": "low"})
     assert v.is_false_positive is False
+    # false but an UNRECOGNIZED confidence → keep. The gate is an allowlist
+    # ("high"/"medium"), not a denylist, so an off-contract value ("unsure",
+    # "none", "n/a", or a non-string the model returned) is treated as
+    # not-confident and the finding is kept — a regression to `not in ("","low")`
+    # would drop these and must fail here.
+    for off_contract in ("unsure", "none", "n/a", "uncertain"):
+        _, v = _coerce_verdict({"index": 0, "is_real_issue": False, "confidence": off_contract})
+        assert v.is_false_positive is False, off_contract
+    # a non-string confidence the model might emit also coerces to a kept verdict
+    _, v = _coerce_verdict({"index": 0, "is_real_issue": False, "confidence": 1})
+    assert v.is_false_positive is False
     # false but no confidence → keep
     _, v = _coerce_verdict({"index": 0, "is_real_issue": False})
     assert v.is_false_positive is False

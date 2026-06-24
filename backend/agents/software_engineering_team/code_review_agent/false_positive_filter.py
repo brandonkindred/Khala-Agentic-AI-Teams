@@ -37,19 +37,17 @@ import json
 import logging
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
 
-from llm_service import LLMClient, get_strands_model
+from llm_service import LLMClient
 from shared_env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import (
-    compute_code_review_map_chunk_chars,
-    parse_env_int,
-)
+from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
+from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
 
@@ -75,16 +73,24 @@ _SEARCH_MATCH_LIMIT = 60
 # or overflowing context. Normal task text is far below this.
 _CONTEXT_FIELD_CHARS = 4_000
 
-# How many per-file verification LLM calls may run at once. Verification reuses
-# the map phase's knob: the two phases run one after the other (all chunks
-# reviewed, then findings verified), so they share a single concurrency budget
-# rather than introducing a second one to tune. Floor 1 = fully sequential.
-_DEFAULT_VERIFY_PARALLELISM = 4
-
 
 def _verify_parallelism() -> int:
-    """Concurrency cap for per-group verification calls (floor 1)."""
-    return parse_env_int("CODE_REVIEW_MAP_PARALLELISM", _DEFAULT_VERIFY_PARALLELISM, 1)
+    """Concurrency cap for per-file verification calls.
+
+    Verification reuses the map phase's knob (``CODE_REVIEW_MAP_PARALLELISM``):
+    the two phases run one after the other (all chunks reviewed, then findings
+    verified), so they share one concurrency budget rather than a second one to
+    tune. Delegating to the coordinator's ``_map_parallelism`` keeps a single
+    definition of that knob and its default. Imported lazily because the
+    coordinator imports this module at load time.
+
+    Postconditions:
+        - Returns an int >= 1 (the coordinator clamps the env value to floor 1);
+          ``1`` runs the per-file verification calls sequentially.
+    """
+    from .coordinator import _map_parallelism
+
+    return _map_parallelism()
 
 
 @dataclass
@@ -98,12 +104,34 @@ class CodebaseIndex:
         - ``existing_codebase`` is the (already capped) pre-existing-code excerpt
           passed for context; it is exposed as the read-only pseudo-path
           ``<existing codebase>`` so the verifier can consult it like any file.
+        - ``_search_lines`` is a lowercased line index built once at construction
+          and never mutated afterwards, so the index stays read-only while
+          ``search`` runs concurrently across verification worker threads.
     """
 
     files: Dict[str, str]
     existing_codebase: str = ""
+    _search_lines: List[Tuple[str, int, str, str]] = field(
+        init=False, repr=False, compare=False, default_factory=list
+    )
 
     EXISTING_CODEBASE_PATH = "<existing codebase>"
+
+    def __post_init__(self) -> None:
+        """Precompute the ``(path, lineno, text, lowercased)`` index ``search`` scans.
+
+        Postconditions:
+            - ``_search_lines`` holds one tuple per line of every readable source
+              (``_readable_sources`` order), with the line pre-lowercased once so
+              ``search`` never re-lowercases the corpus on each call. Built here
+              (single-threaded, before any verification fan-out), so it is set
+              before concurrent ``search`` readers exist.
+        """
+        self._search_lines = [
+            (path, lineno, line.rstrip(), line.lower())
+            for path, content in self._readable_sources()
+            for lineno, line in enumerate(content.splitlines(), start=1)
+        ]
 
     @classmethod
     def from_input(cls, input_data: CodeReviewInput) -> "CodebaseIndex":
@@ -138,10 +166,14 @@ class CodebaseIndex:
     def _readable_sources(self) -> List[Tuple[str, str]]:
         """All ``(path, content)`` the verifier can read, existing-codebase last.
 
-        The submission's own files in insertion order, then the existing-codebase
-        excerpt under its ``<existing codebase>`` pseudo-path when a non-blank one
-        was provided. The single source of truth for :meth:`list_files` and
-        :meth:`search`, so both expose exactly the same set of readable sources.
+        The single source of truth for :meth:`list_files` and the search index,
+        so both expose exactly the same set of readable sources.
+
+        Postconditions:
+            - Returns the submission's own files as ``(path, content)`` in
+              insertion order, then the existing-codebase excerpt under the
+              ``<existing codebase>`` pseudo-path iff a non-blank one was
+              provided. Never raises; the returned list is a fresh copy.
         """
         sources = list(self.files.items())
         if self.existing_codebase.strip():
@@ -161,13 +193,45 @@ class CodebaseIndex:
     def _suffix_matches(self, key: str) -> List[str]:
         """File keys ``key`` selects by its final ``/``-segment (a bare name).
 
-        The model often cites a bare ``main.py`` for ``app/services/main.py``;
-        this returns every stored path whose last segment equals ``key`` (a
-        leading ``./`` is ignored). Shared by :meth:`resolve_path` (a single hit
-        resolves) and :meth:`read_file` (multiple hits report ambiguity).
+        Preconditions:
+            - ``key`` is a non-blank, already-stripped path string.
+
+        Postconditions:
+            - Returns every stored path whose last ``/``-segment equals ``key``
+              with a leading ``./`` ignored (the model often cites a bare
+              ``main.py`` for ``app/services/main.py``). Order follows ``files``
+              insertion order; the result is a fresh list and never raises.
         """
         normalized = key.lstrip("./")
         return [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
+
+    def _resolve(self, key: str) -> Tuple[Optional[str], List[str]]:
+        """Resolve a stripped ``key`` to ``(canonical_key_or_None, suffix_hits)``.
+
+        The one place suffix matching runs, shared by :meth:`resolve_path` and
+        :meth:`read_file` so neither rescans. ``suffix_hits`` is returned so a
+        caller can tell an absent path (empty) from an ambiguous one (>1) without
+        a second scan.
+
+        Preconditions:
+            - ``key`` is already whitespace-stripped.
+
+        Postconditions:
+            - ``(<existing codebase>, [])`` when ``key`` names the pseudo-path and
+              a non-blank excerpt exists; ``(None, [])`` when it names it without
+              one, or when ``key`` is blank.
+            - ``(exact_key, [])`` on an exact file match.
+            - ``(sole_hit, hits)`` when exactly one suffix match, else
+              ``(None, hits)`` — never raises.
+        """
+        if not key:
+            return None, []
+        if key == self.EXISTING_CODEBASE_PATH:
+            return (self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None), []
+        if key in self.files:
+            return key, []
+        hits = self._suffix_matches(key)
+        return (hits[0] if len(hits) == 1 else None), hits
 
     def resolve_path(self, path: str) -> Optional[str]:
         """Resolve a cited path to a canonical readable key, or None.
@@ -185,15 +249,8 @@ class CodebaseIndex:
               would have no single primary file to read, so the caller keeps the
               finding rather than verify it.
         """
-        key = (path or "").strip()
-        if not key:
-            return None
-        if key == self.EXISTING_CODEBASE_PATH:
-            return self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None
-        if key in self.files:
-            return key
-        suffix_hits = self._suffix_matches(key)
-        return suffix_hits[0] if len(suffix_hits) == 1 else None
+        resolved, _ = self._resolve((path or "").strip())
+        return resolved
 
     def read_file(self, path: str) -> str:
         """Return the full content of ``path``, resolving near-misses.
@@ -211,7 +268,7 @@ class CodebaseIndex:
         key = (path or "").strip()
         if not key:
             return "Error: no path provided."
-        resolved = self.resolve_path(key)
+        resolved, hits = self._resolve(key)
         if resolved == self.EXISTING_CODEBASE_PATH:
             return self.existing_codebase
         if resolved is not None:
@@ -220,11 +277,10 @@ class CodebaseIndex:
         # ambiguous citation from an absent one (and a missing excerpt).
         if key == self.EXISTING_CODEBASE_PATH:
             return "Error: no existing-codebase excerpt available."
-        suffix_hits = self._suffix_matches(key)
-        if len(suffix_hits) > 1:
+        if len(hits) > 1:
             return (
                 f"Error: path '{path}' is ambiguous; it matches "
-                f"{', '.join(sorted(suffix_hits))}. Use list_files() and read the exact path."
+                f"{', '.join(sorted(hits))}. Use list_files() and read the exact path."
             )
         return f"Error: file not found: {path}. Use list_files() to see available paths."
 
@@ -248,12 +304,11 @@ class CodebaseIndex:
         if not needle:
             return []
         results: List[Tuple[str, int, str]] = []
-        for path, content in self._readable_sources():
-            for lineno, line in enumerate(content.splitlines(), start=1):
-                if needle in line.lower():
-                    results.append((path, lineno, line.rstrip()))
-                    if len(results) >= max_matches:
-                        return results
+        for path, lineno, text, lowered in self._search_lines:
+            if needle in lowered:
+                results.append((path, lineno, text))
+                if len(results) >= max_matches:
+                    return results
         return results
 
 
@@ -323,9 +378,9 @@ class _Verdict:
 
     Invariants:
         - ``is_false_positive`` is True only when the verifier explicitly judged
-          the finding NOT a real issue with non-low confidence; every other
-          shape (real, low confidence, missing fields) leaves it False so the
-          finding is kept.
+          the finding NOT a real issue with ``"high"`` or ``"medium"``
+          confidence; every other shape (real, low/blank/missing or unrecognized
+          confidence) leaves it False so the finding is kept.
     """
 
     is_false_positive: bool = False
@@ -340,8 +395,12 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
         - Returns None for any item without a parseable integer ``index`` (a
           verdict we cannot map back to a finding is ignored, not guessed).
         - ``is_false_positive`` is True only for ``is_real_issue is False`` with
-          a confidence that is not ``"low"`` (and not blank); everything else is
-          kept. Never raises on malformed input.
+          an explicit ``"high"`` or ``"medium"`` confidence; every other shape —
+          real, low/blank/missing confidence, OR any unrecognized confidence
+          value — is kept. The allowlist is deliberate: an off-contract
+          confidence is an ambiguous verdict, and the fail-safe rule keeps
+          ambiguous findings rather than dropping them. Never raises on
+          malformed input.
     """
     if not isinstance(item, dict):
         return None
@@ -352,9 +411,11 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
         return None
     confidence = str(item.get("confidence", "") or "").strip().lower()
     is_real = item.get("is_real_issue")
-    # Drop only on an explicit, confident "not a real issue". A missing/None
-    # is_real_issue, or low/blank confidence, keeps the finding.
-    is_false_positive = is_real is False and confidence not in ("", "low")
+    # Drop ONLY on an explicit, confident "not a real issue". An allowlist (not a
+    # denylist) so an unrecognized confidence ("none", "unsure", a non-string the
+    # model returned, ...) is treated as not-confident and the finding is kept —
+    # dropping a real issue is far worse than keeping a questionable one.
+    is_false_positive = is_real is False and confidence in ("high", "medium")
     return index, _Verdict(
         is_false_positive=is_false_positive,
         confidence=confidence,
@@ -510,18 +571,6 @@ def _build_group_prompt(
     return "\n".join(parts)
 
 
-def _resolve_model(llm: LLMClient):
-    """Resolve the strands model the verification agent runs on.
-
-    Postconditions:
-        - Returns ``llm`` itself when it implements the strands ``Model``
-          interface (the test path injects such a client); otherwise the shared
-          ``get_strands_model("code_review")`` (production), mirroring how
-          ``chunk_reviewer`` and ``synthesis`` resolve their model.
-    """
-    return llm if isinstance(llm, _StrandsModel) else get_strands_model("code_review")
-
-
 def _verify_group(
     model: _StrandsModel,
     index: CodebaseIndex,
@@ -626,7 +675,7 @@ def _verify_and_filter(
         # cannot responsibly drop anything.
         return list(issues)
 
-    model = _resolve_model(llm)
+    model = resolve_code_review_model(llm)
     max_inline_chars = compute_code_review_map_chunk_chars(llm)
 
     # Group findings by the resolved canonical path of their cited file so each
