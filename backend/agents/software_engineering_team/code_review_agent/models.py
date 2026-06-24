@@ -10,7 +10,7 @@ from software_engineering_team.shared.models import SystemArchitecture
 ReviewProgressCallback = Callable[[str, str, float], None]
 """Progress callback signature: (step, detail, fraction in [0.0, 1.0]).
 
-Steps: ``preparing | reviewing | waiting_retry | parsing | finalizing | done``.
+Steps: ``preparing | reviewing | waiting_retry | parsing | verifying | finalizing | done``.
 
 Preconditions (on the callable a caller provides):
     - Should not raise; review progress is observability, never control flow.

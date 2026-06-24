@@ -240,8 +240,11 @@ excerpts repeated in every review map call. Defaults `16000` / `4000` / `8000`,
 floors `1000` / `500` / `500`.
 
 ### CODE_REVIEW_MAP_PARALLELISM
-Max concurrent review map calls per review run. Default `4`, floor `1`
-(`1` reviews chunks sequentially). Results merge in chunk order regardless.
+Max concurrent review LLM calls per review run, shared by both phases: the map
+phase (chunk reviews) and the later false-positive verification phase (one call
+per cited file). The two phases run sequentially, so this is a single budget,
+not two. Default `4`, floor `1` (`1` runs both phases' calls sequentially).
+Results merge in deterministic order regardless of completion order.
 
 ### CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS
 A failing chunk smaller than twice this is retried once as-is instead of being
@@ -251,6 +254,18 @@ bisected. Default `8000`, floor `1000`.
 Max bisect-and-retry recursion depth for a failing review chunk before the run
 fails with `CodeReviewUnavailableError`. Default `3`, floor `0` (`0` disables
 bisection; a chunk then gets only the single same-input retry).
+
+### CODE_REVIEW_FALSE_POSITIVE_FILTER
+Default-on toggle for the false-positive verification pass. After the map-reduce
+review merges its findings, each genuine finding is re-checked against the
+*whole* submission — the verifier has read access to every file under review
+(`read_file`/`list_files`/`search_codebase` tools), so it can confirm a finding
+the bounded chunk reviewer flagged in isolation (e.g. "symbol never defined")
+against the real cross-file code and drop it when it is a false positive.
+Fail-safe: a finding is removed only on an explicit, confident false-positive
+verdict; any ambiguity or verifier error keeps the finding, and the not-reviewed
+coverage findings are never removed. Set to `false`/`0`/`no` to disable the pass
+(any other value, or unset, leaves it enabled).
 
 ---
 

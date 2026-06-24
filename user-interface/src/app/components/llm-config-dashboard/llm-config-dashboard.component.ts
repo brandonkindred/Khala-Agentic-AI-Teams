@@ -15,6 +15,7 @@ import type {
   LlmConfigUpdate,
   LlmProvider,
   LlmStorageStatus,
+  OllamaModelsResponse,
 } from '../../models/llm-config.model';
 
 type OllamaMode = 'local' | 'cloud';
@@ -53,6 +54,10 @@ export class LlmConfigDashboardComponent implements OnInit {
   saving = false;
   error: string | null = null;
   success: string | null = null;
+  /** True while the live Ollama model list is being fetched. */
+  ollamaModelsLoading = false;
+  /** Soft, non-blocking note shown beside the Model field (e.g. fetch fell back). */
+  modelNote: string | null = null;
 
   provider: LlmProvider = 'ollama';
   model = '';
@@ -128,12 +133,16 @@ export class LlmConfigDashboardComponent implements OnInit {
     // Inputs are write-only; never echo a key back.
     this.claudeApiKey = '';
     this.ollamaApiKey = '';
+    // Refresh the live Ollama model list for the freshly-applied config (load or
+    // post-save). No-op for Claude; gated for keyless Cloud.
+    this.maybeLoadOllamaModels();
   }
 
   /** React to the Ollama Local/Cloud toggle by defaulting the base URL. */
   onOllamaModeChange(mode: OllamaMode): void {
     this.ollamaMode = mode;
     this.ollamaBaseUrl = mode === 'cloud' ? OLLAMA_CLOUD_URL : OLLAMA_LOCAL_DEFAULT;
+    this.maybeLoadOllamaModels();
   }
 
   /** React to a provider switch by loading that provider's own stored model.
@@ -147,11 +156,64 @@ export class LlmConfigDashboardComponent implements OnInit {
     this.provider = provider;
     const saved = provider === 'claude' ? this.claudeModel : this.ollamaModel;
     this.model = saved || (this.modelOptions.length ? this.modelOptions[0] : '');
+    // Switching to Ollama should surface its live models (or the keyless-Cloud
+    // hint); switching to Claude clears any Ollama note.
+    this.maybeLoadOllamaModels();
   }
 
   /** The model suggestions for the active provider. */
   get modelOptions(): string[] {
     return this.provider === 'claude' ? this.claudeModelOptions : this.ollamaModelSuggestions;
+  }
+
+  /** Decide whether to fetch live Ollama models for the current state, and do so.
+   *
+   * Local mode always fetches (no key needed). Cloud mode fetches only when a key
+   * is already configured; otherwise it shows a hint to save the key first and
+   * makes no request — the backend reads the key from the store, so an unsaved
+   * key could not authenticate the listing anyway. A no-op for Claude.
+   */
+  private maybeLoadOllamaModels(): void {
+    this.modelNote = null;
+    if (this.provider !== 'ollama') {
+      return;
+    }
+    if (this.ollamaMode === 'cloud' && !this.ollamaApiKeyConfigured) {
+      this.modelNote = 'Save your Ollama Cloud API key to load available models.';
+      return;
+    }
+    this.loadOllamaModels();
+  }
+
+  /** Fetch the live Ollama model list and populate the Model dropdown.
+   *
+   * On success with a non-empty list, replaces the dropdown suggestions with the
+   * live models. A `fallback` source (endpoint unreachable) or a request error
+   * leaves the current curated suggestions intact and surfaces a soft inline note
+   * — never the blocking error banner — so the page never regresses.
+   */
+  private loadOllamaModels(): void {
+    this.ollamaModelsLoading = true;
+    this.api
+      .getOllamaModels()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (res: OllamaModelsResponse) => {
+          if (res.models?.length) {
+            this.ollamaModelSuggestions = res.models;
+          }
+          this.modelNote =
+            res.source === 'fallback'
+              ? "Couldn't reach the Ollama endpoint — showing default suggestions."
+              : null;
+          this.ollamaModelsLoading = false;
+        },
+        error: () => {
+          // Keep the existing curated suggestions; soft note only.
+          this.modelNote = "Couldn't load Ollama models — showing default suggestions.";
+          this.ollamaModelsLoading = false;
+        },
+      });
   }
 
   /** True iff the URL's host is exactly ollama.com (the Cloud endpoint).

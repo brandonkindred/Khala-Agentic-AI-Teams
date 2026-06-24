@@ -13,6 +13,7 @@ from llm_service.clients.ollama import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     OllamaLLMClient,
     _parse_retry_after_seconds,
+    list_ollama_models,
 )
 from llm_service.interface import (
     LLMPermanentError,
@@ -1449,3 +1450,97 @@ def test_generic_temporary_error_retries_on_transient_schedule(
     assert result == {"ok": 1}
     assert len(waits) == 1
     assert 2.0 <= waits[0] <= 4.0
+
+
+def _make_tags_response(status_code: int, payload: object) -> MagicMock:
+    """Build a mocked /api/tags response with the given status and JSON payload."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = payload
+    return resp
+
+
+def _patch_tags_get(response: object) -> tuple[MagicMock, MagicMock]:
+    """Return (httpx.Client class mock, shared instance) whose .get yields `response`.
+
+    A non-MagicMock ``response`` (e.g. an exception instance) is used as the
+    ``side_effect`` so a raising client can be simulated.
+    """
+    mock_client = MagicMock()
+    if isinstance(response, BaseException):
+        mock_client.__enter__.return_value.get.side_effect = response
+    else:
+        mock_client.__enter__.return_value.get.return_value = response
+    mock_cls = MagicMock(return_value=mock_client)
+    return mock_cls, mock_client
+
+
+def _clear_ollama_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip env that would steer base-URL / key resolution so tests are deterministic."""
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    for var in ("LLM_BASE_URL", "OLLAMA_API_KEY", "LLM_OLLAMA_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_list_ollama_models_parses_and_sorts_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Names are de-duplicated, sorted, and prefer `name` then fall back to `model`.
+    _clear_ollama_env(monkeypatch)
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
+    payload = {
+        "models": [
+            {"name": "llama3.2", "model": "llama3.2:latest"},
+            {"name": "llama3.1"},
+            {"model": "qwen3-coder:480b-cloud"},  # no name -> falls back to model
+            {"name": "llama3.2"},  # duplicate -> collapsed
+            {"name": ""},  # blank -> dropped
+            "not-a-dict",  # ignored
+        ]
+    }
+    mock_cls, mock_client = _patch_tags_get(_make_tags_response(200, payload))
+    with patch("httpx.Client", mock_cls):
+        assert list_ollama_models() == ["llama3.1", "llama3.2", "qwen3-coder:480b-cloud"]
+    # The request targets {base_url}/api/tags.
+    called_url = mock_client.__enter__.return_value.get.call_args[0][0]
+    assert called_url == "http://localhost:11434/api/tags"
+
+
+def test_list_ollama_models_sends_bearer_only_with_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A resolved Ollama key adds an Authorization: Bearer header; none -> no header.
+    _clear_ollama_env(monkeypatch)
+    monkeypatch.setenv("LLM_BASE_URL", "https://ollama.com")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ok-secret")
+    mock_cls, mock_client = _patch_tags_get(_make_tags_response(200, {"models": [{"name": "m"}]}))
+    with patch("httpx.Client", mock_cls):
+        assert list_ollama_models() == ["m"]
+    headers = mock_client.__enter__.return_value.get.call_args.kwargs["headers"]
+    assert headers == {"Authorization": "Bearer ok-secret"}
+
+    # No key -> no Authorization header (local Ollama).
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    mock_cls2, mock_client2 = _patch_tags_get(_make_tags_response(200, {"models": [{"name": "m"}]}))
+    with patch("httpx.Client", mock_cls2):
+        assert list_ollama_models() == ["m"]
+    assert mock_client2.__enter__.return_value.get.call_args.kwargs["headers"] == {}
+
+
+def test_list_ollama_models_non_200_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_ollama_env(monkeypatch)
+    mock_cls, _ = _patch_tags_get(_make_tags_response(404, {"models": []}))
+    with patch("httpx.Client", mock_cls):
+        assert list_ollama_models() == []
+
+
+def test_list_ollama_models_malformed_body_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 200 whose body isn't the expected {"models": [...]} shape -> [] (never raises).
+    _clear_ollama_env(monkeypatch)
+    mock_cls, _ = _patch_tags_get(_make_tags_response(200, {"unexpected": True}))
+    with patch("httpx.Client", mock_cls):
+        assert list_ollama_models() == []
+
+
+def test_list_ollama_models_http_error_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A network/HTTP error is swallowed (best-effort discovery) -> [].
+    _clear_ollama_env(monkeypatch)
+    mock_cls, _ = _patch_tags_get(httpx.ConnectError("refused"))
+    with patch("httpx.Client", mock_cls):
+        assert list_ollama_models() == []

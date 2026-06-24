@@ -105,12 +105,21 @@
             [matAutocomplete]="modelAuto"
             placeholder="Model id"
           />
+          @if (ollamaModelsLoading) {
+            <mat-spinner matSuffix diameter="18"></mat-spinner>
+          }
           <mat-autocomplete #modelAuto="matAutocomplete">
             @for (m of modelOptions; track m) {
               <mat-option [value]="m">{{ m }}</mat-option>
             }
           </mat-autocomplete>
         </mat-form-field>
+
+        @if (ollamaModelsLoading) {
+          <p class="model-note" role="status">Loading available models…</p>
+        } @else if (modelNote) {
+          <p class="model-note" role="status">{{ modelNote }}</p>
+        }
       </mat-card-content>
 
       <mat-card-actions align="end">

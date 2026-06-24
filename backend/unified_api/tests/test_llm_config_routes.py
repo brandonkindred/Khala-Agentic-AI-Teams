@@ -492,6 +492,41 @@ def test_put_response_reports_available(app_client):
     assert body["storage_available"] is True
 
 
+def test_ollama_models_live_listing(app_client):
+    # A non-empty live listing from /api/tags is returned verbatim with source=live.
+    client, _calls, mp = app_client
+    mp.setattr(route, "list_ollama_models", lambda: ["llama3.2", "qwen3-coder:480b-cloud"])
+    resp = client.get("/api/llm-config/ollama-models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "live"
+    assert body["models"] == ["llama3.2", "qwen3-coder:480b-cloud"]
+    # base_url reflects the resolved effective endpoint (cloud default with no env).
+    assert body["base_url"] == "https://ollama.com"
+
+
+def test_ollama_models_falls_back_to_curated(app_client):
+    # When the endpoint can't be reached (empty list), the curated suggestions are
+    # returned so the dropdown is never empty, flagged source=fallback.
+    client, _calls, mp = app_client
+    mp.setattr(route, "list_ollama_models", lambda: [])
+    resp = client.get("/api/llm-config/ollama-models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "fallback"
+    assert body["models"] == list(route._OLLAMA_MODEL_SUGGESTIONS)
+    assert body["models"]  # non-empty curated fallback
+
+
+def test_ollama_models_base_url_reflects_resolved_endpoint(app_client):
+    # The reported base_url tracks the resolved Ollama endpoint (env override here).
+    client, _calls, mp = app_client
+    mp.setenv("LLM_BASE_URL", "http://localhost:11434")
+    mp.setattr(route, "list_ollama_models", lambda: ["llama3.1"])
+    body = client.get("/api/llm-config/ollama-models").json()
+    assert body["base_url"] == "http://localhost:11434"
+
+
 def test_provider_model_keys_cover_all_provider_options():
     # Every provider the UI offers must have a storage key in PROVIDER_MODEL_KEYS,
     # else PUT would KeyError (500) on save. Asserting equality makes the map an
