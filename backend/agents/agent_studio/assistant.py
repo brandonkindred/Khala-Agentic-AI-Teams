@@ -18,6 +18,8 @@ import logging
 import re
 from typing import Callable
 
+from pydantic import ValidationError
+
 from .models import AgentDefinition
 
 logger = logging.getLogger(__name__)
@@ -89,8 +91,23 @@ DEFAULT_SUGGESTIONS = [
 ]
 
 
-# Closing delimiters a malicious user might inject to escape the data wrappers.
-_DELIMITER_RE = re.compile(r"</?\s*(?:user_message|history)\s*>", re.IGNORECASE)
+# Content fields whose presence means the in-progress definition is worth echoing
+# back into the prompt (server-owned mode/cloned_from are excluded).
+_CONTENT_FIELDS = (
+    "name",
+    "role",
+    "description",
+    "tags",
+    "tools",
+    "system_prompt",
+    "input_schema",
+    "output_schema",
+)
+
+# Open/close delimiters a malicious user might inject to escape the data wrappers.
+# The optional ``(?:\s+[^>]*)?`` also matches attribute-bearing forgeries such as
+# ``<user_message foo="bar">``.
+_DELIMITER_RE = re.compile(r"</?\s*(?:user_message|history)(?:\s+[^>]*)?\s*>", re.IGNORECASE)
 
 
 def _neutralize(content: str) -> str:
@@ -135,20 +152,34 @@ def _strip_code_blocks(text: str) -> str:
     return text.strip()
 
 
-def _merge_definition(current: AgentDefinition, block: dict) -> AgentDefinition:
+def _merge_definition(current: AgentDefinition, block: dict) -> AgentDefinition | None:
     """Merge a parsed ``agent`` block onto the current definition.
 
     The LLM returns the full definition each turn; we overlay it on the current
     one so the durable handoff fields (``mode``, ``cloned_from``) are preserved
     regardless of what the model echoes.
+
+    Postconditions:
+        * Returns the merged definition, or ``None`` when the block carries a
+          wrong-typed value. The merge is re-validated (``model_validate`` —
+          ``model_copy(update=...)`` does *not* validate in Pydantic v2), so a bad
+          type yields ``None`` rather than a silently-corrupt field that 500s
+          downstream. ``None`` is treated as "no parseable update": the prose reply
+          still stands and the stored definition is left unchanged.
     """
-    updated = current.model_copy(
-        update={
+    merged = current.model_dump()
+    merged.update(
+        {
             k: v
             for k, v in block.items()
             if k in AgentDefinition.model_fields and k not in ("mode", "cloned_from")
         }
     )
+    try:
+        updated = AgentDefinition.model_validate(merged)
+    except ValidationError:
+        logger.warning("agent_studio: agent block had an invalid field type; ignoring the update")
+        return None
     # mode / cloned_from are server-owned; never let the model rewrite them.
     updated.mode = current.mode
     updated.cloned_from = current.cloned_from
@@ -221,7 +252,10 @@ class AgentDesignerAgent:
         server-built current-definition JSON is the only trusted block.
         """
         parts: list[str] = []
-        if current.name or current.role or current.tools:
+        # Include the current definition once any content field is set — not just
+        # name/role/tools — so context built only from description, tags, prompt, or
+        # schemas isn't dropped on the next turn.
+        if any(getattr(current, f) for f in _CONTENT_FIELDS):
             parts.append(
                 "Current agent definition (trusted, server-provided):\n```json\n"
                 + json.dumps(current.model_dump(mode="json"), indent=2)

@@ -161,3 +161,29 @@ def test_default_dependency_returns_module_service() -> None:
     import unified_api.routes.agent_studio as routes_mod
 
     assert routes_mod.get_agent_studio_service() is routes_mod._service
+
+
+def test_bad_typed_agent_block_returns_200_not_500(registry: FakeRegistry) -> None:
+    # An LLM block with a wrong-typed field must not surface as a 500; the turn
+    # succeeds (200) with the definition left unchanged.
+    from unified_api.routes.agent_studio import get_agent_studio_service, router
+
+    bad_reply = 'Sure.\n\n```agent\n{"name": 123}\n```'
+    service = AgentStudioService(
+        assistant=AgentDesignerAgent(complete=lambda _s, _p: bad_reply),
+        store=AgentStudioConversationStore(),
+        registry_getter=lambda: registry,
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_agent_studio_service] = lambda: service
+    c = TestClient(app)
+
+    started = c.post("/api/agent-studio/conversations", json={"mode": "new"}).json()
+    resp = c.post(
+        f"/api/agent-studio/conversations/{started['conversation_id']}/messages",
+        json={"message": "name it"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["definition"]["name"] == ""  # unchanged
+    app.dependency_overrides.clear()

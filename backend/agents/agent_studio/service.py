@@ -97,7 +97,8 @@ class AgentStudioService:
 
     def _handle_message(self, conversation_id: str, message: str) -> ConversationStateResponse:
         record = self._store.get(conversation_id)
-        assert record is not None  # callers validate first
+        if record is None:  # callers validate first; defensive guard
+            raise RuntimeError("Conversation record unexpectedly missing")  # pragma: no cover
         history = [(m.role, m.content) for m in record.messages]
         self._store.append_message(conversation_id, "user", message)
 
@@ -142,7 +143,8 @@ class AgentStudioService:
 
     def _state(self, conversation_id: str, *, suggestions: list[str]) -> ConversationStateResponse:
         record = self._store.get(conversation_id)
-        assert record is not None
+        if record is None:  # defensive guard; callers always create/validate first
+            raise RuntimeError("Conversation record unexpectedly missing")  # pragma: no cover
         return ConversationStateResponse(
             conversation_id=conversation_id,
             mode=record.mode,

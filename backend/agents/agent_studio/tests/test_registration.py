@@ -27,7 +27,8 @@ def test_studio_agent_id_falls_back_to_agent_slug() -> None:
 
 
 def test_studio_agent_id_rejects_blank() -> None:
-    with pytest.raises(AssertionError):
+    # Explicit raise (not assert) so it survives ``python -O``.
+    with pytest.raises(ValueError):
         studio_agent_id("   ")
 
 
@@ -58,7 +59,7 @@ def test_build_manifest_summary_fallback_when_no_role() -> None:
 
 
 def test_build_manifest_rejects_blank_name() -> None:
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         build_studio_agent_manifest(AgentDefinition(name="  "))
 
 

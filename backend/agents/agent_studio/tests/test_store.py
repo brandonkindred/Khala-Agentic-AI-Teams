@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from agent_studio.models import AgentDefinition
@@ -75,3 +77,40 @@ def test_default_max_conversations_garbage_falls_back(monkeypatch) -> None:
 def test_default_max_conversations_non_positive_falls_back(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_STUDIO_MAX_CONVERSATIONS", "-5")
     assert _default_max_conversations() == 1000
+
+
+def test_append_message_unknown_id_raises_lookup_error() -> None:
+    with pytest.raises(LookupError):
+        AgentStudioConversationStore().append_message("nope", "user", "hi")
+
+
+def test_set_definition_unknown_id_raises_lookup_error() -> None:
+    with pytest.raises(LookupError):
+        AgentStudioConversationStore().set_definition("nope", AgentDefinition())
+
+
+def test_concurrent_creates_are_thread_safe() -> None:
+    # Many threads hammering create() must not corrupt the OrderedDict or
+    # violate the cap; every returned id is unique.
+    cap = 50
+    store = AgentStudioConversationStore(max_conversations=cap)
+    ids: list[str] = []
+    ids_lock = threading.Lock()
+    barrier = threading.Barrier(20)
+
+    def worker() -> None:
+        barrier.wait()  # maximize contention
+        for _ in range(25):
+            cid = store.create("new", None, AgentDefinition())
+            with ids_lock:
+                ids.append(cid)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(ids) == 20 * 25
+    assert len(set(ids)) == len(ids)  # no duplicate / lost ids
+    assert len(store._records) == cap  # cap held under concurrency

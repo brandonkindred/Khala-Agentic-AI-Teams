@@ -11,16 +11,25 @@ evicts the oldest (FIFO) on overflow, so an unbounded stream of
 ``POST /conversations`` calls cannot grow process memory without limit. Eviction
 is the in-memory analogue of the TTL the durable store will carry.
 
+The store is **thread-safe**: every mutating/reading method holds a
+``threading.Lock``, so it is safe to share one instance across the FastAPI
+threadpool (sync handlers run there). The lock makes each individual operation
+atomic; serializing a whole multi-call conversation turn (the service's
+``_handle_message`` sequence) is a separate concern that arrives with the durable
+store and is out of scope here.
+
 Invariants:
     * A ``conversation_id`` returned by :meth:`create` resolves via :meth:`get`
       until it is evicted by the FIFO cap or the process exits; ids are never
       reused.
     * ``len(self._records) <= max_conversations`` holds after every operation.
+    * All access to ``self._records`` happens while holding ``self._lock``.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -65,6 +74,8 @@ class AgentStudioConversationStore:
         self._max = resolved
         # OrderedDict so the oldest entry is cheap to evict (FIFO).
         self._records: OrderedDict[str, ConversationRecord] = OrderedDict()
+        # Guards every read/write of ``_records`` (shared across the threadpool).
+        self._lock = threading.Lock()
 
     def create(
         self, mode: StudioMode, source_agent_id: str | None, definition: AgentDefinition
@@ -77,29 +88,46 @@ class AgentStudioConversationStore:
               record is evicted and no longer resolves via :meth:`get`.
         """
         conversation_id = str(uuid.uuid4())
-        self._records[conversation_id] = ConversationRecord(
-            conversation_id=conversation_id,
-            mode=mode,
-            source_agent_id=source_agent_id,
-            definition=definition,
-        )
-        while len(self._records) > self._max:
-            self._records.popitem(last=False)
+        with self._lock:
+            self._records[conversation_id] = ConversationRecord(
+                conversation_id=conversation_id,
+                mode=mode,
+                source_agent_id=source_agent_id,
+                definition=definition,
+            )
+            while len(self._records) > self._max:
+                self._records.popitem(last=False)
         return conversation_id
 
     def get(self, conversation_id: str) -> ConversationRecord | None:
         """Return the record, or ``None`` if the id is unknown."""
-        return self._records.get(conversation_id)
+        with self._lock:
+            return self._records.get(conversation_id)
 
     def append_message(self, conversation_id: str, role: str, content: str) -> None:
         """Append one message.
 
         Preconditions:
-            * ``conversation_id`` exists (caller validated it via :meth:`get`).
+            * ``conversation_id`` exists.
+        Postconditions:
+            * Raises :class:`LookupError` (→ 404) if the id is unknown, matching
+              the service's error contract, rather than a bare ``KeyError`` (→ 500).
         """
-        record = self._records[conversation_id]
-        record.messages.append(ConversationMessage(role=role, content=content))
+        with self._lock:
+            record = self._records.get(conversation_id)
+            if record is None:
+                raise LookupError(f"Unknown conversation: {conversation_id}")
+            record.messages.append(ConversationMessage(role=role, content=content))
 
     def set_definition(self, conversation_id: str, definition: AgentDefinition) -> None:
-        """Replace the in-progress definition for a conversation."""
-        self._records[conversation_id].definition = definition
+        """Replace the in-progress definition for a conversation.
+
+        Postconditions:
+            * Raises :class:`LookupError` if the id is unknown (see
+              :meth:`append_message`).
+        """
+        with self._lock:
+            record = self._records.get(conversation_id)
+            if record is None:
+                raise LookupError(f"Unknown conversation: {conversation_id}")
+            record.definition = definition

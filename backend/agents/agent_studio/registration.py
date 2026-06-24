@@ -47,7 +47,8 @@ def studio_agent_id(name: str) -> str:
     Postconditions:
         * Returns ``agent_studio.<slug>-<hash8>``; equal names map to equal ids.
     """
-    assert name.strip(), "studio_agent_id: name must be non-empty"
+    if not name.strip():
+        raise ValueError("studio_agent_id: name must be non-empty")
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "agent"
     # Non-cryptographic: a short, stable suffix that disambiguates equal slugs.
     digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
@@ -65,7 +66,8 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
           are the shared generated-agent runtime, and whose ``cognition`` carries
           the ``default_guardrails`` seed pack.
     """
-    assert definition.name.strip(), "build_studio_agent_manifest: name must be non-empty"
+    if not definition.name.strip():
+        raise ValueError("build_studio_agent_manifest: name must be non-empty")
     manifest = AgentManifest(
         id=studio_agent_id(definition.name),
         team=STUDIO_TEAM,
