@@ -15,20 +15,82 @@ Invariants:
     - Exactly one ``httpx.Client`` exists per (rounded) timeout bucket for the
       lifetime of the process (or until :func:`close_pool`).
     - All accessors are safe to call from multiple threads concurrently.
+    - Idle keep-alive sockets are recycled after ``keepalive_expiry`` seconds
+      (``HTTP_KEEPALIVE_EXPIRY_S``, default ``15.0``) so the client drops them
+      before an upstream/server closes an idle connection — otherwise reusing a
+      server-closed socket raises ``RemoteProtocolError`` ("server disconnected
+      without sending a response").
 """
 
 from __future__ import annotations
 
 import atexit
+import logging
 import math
+import os
 import threading
 
 import httpx
 
 __all__ = ["get_pooled_client", "close_pool", "DEFAULT_LIMITS"]
 
-# Bound concurrency so a burst of agent tasks cannot open unbounded sockets.
-DEFAULT_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=20)
+logger = logging.getLogger(__name__)
+
+# httpx's default keepalive_expiry is 5s; we set an explicit, slightly larger
+# value so the knob is visible and tunable. The ceiling stays well under the
+# typical 60s idle timeout of upstreams/proxies so idle sockets are recycled
+# before the far end closes them.
+_DEFAULT_KEEPALIVE_EXPIRY_S = 15.0
+# Floor: an expiry below ~1s recycles connections almost immediately, defeating
+# pooling. A positive override below this is clamped up (rather than discarded).
+_MIN_KEEPALIVE_EXPIRY_S = 1.0
+
+
+def _keepalive_expiry_seconds() -> float:
+    """Resolve the pool's idle keep-alive expiry from the environment.
+
+    Preconditions:
+        - None. Reads ``HTTP_KEEPALIVE_EXPIRY_S`` if set.
+    Postconditions:
+        - Returns a finite float ``>= _MIN_KEEPALIVE_EXPIRY_S`` (1.0s).
+        - Unset / non-numeric / non-finite / non-positive values fall back to
+          ``_DEFAULT_KEEPALIVE_EXPIRY_S``.
+        - A positive value below the 1.0s floor is clamped up to the floor — an
+          extremely short expiry would recycle sockets almost immediately and
+          defeat the pool.
+    """
+    raw = os.getenv("HTTP_KEEPALIVE_EXPIRY_S")
+    if raw is None:
+        return _DEFAULT_KEEPALIVE_EXPIRY_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid HTTP_KEEPALIVE_EXPIRY_S=%r; using %s", raw, _DEFAULT_KEEPALIVE_EXPIRY_S
+        )
+        return _DEFAULT_KEEPALIVE_EXPIRY_S
+    if not math.isfinite(value) or value <= 0:
+        logger.warning(
+            "HTTP_KEEPALIVE_EXPIRY_S=%r out of range; using %s", raw, _DEFAULT_KEEPALIVE_EXPIRY_S
+        )
+        return _DEFAULT_KEEPALIVE_EXPIRY_S
+    if value < _MIN_KEEPALIVE_EXPIRY_S:
+        logger.warning(
+            "HTTP_KEEPALIVE_EXPIRY_S=%r below %ss floor; clamping up",
+            raw,
+            _MIN_KEEPALIVE_EXPIRY_S,
+        )
+        return _MIN_KEEPALIVE_EXPIRY_S
+    return value
+
+
+# Bound concurrency so a burst of agent tasks cannot open unbounded sockets, and
+# recycle idle keep-alive sockets before the far end closes them.
+DEFAULT_LIMITS = httpx.Limits(
+    max_connections=50,
+    max_keepalive_connections=20,
+    keepalive_expiry=_keepalive_expiry_seconds(),
+)
 
 _lock = threading.Lock()
 _clients: dict[float, httpx.Client] = {}
