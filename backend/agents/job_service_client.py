@@ -138,6 +138,11 @@ class JobServiceClient:
         Postconditions:
             - Returns a successful ``httpx.Response`` (2xx) or raises the last
               transient error / HTTP status error after exhausting retries.
+            - Transient errors retried with backoff: ``ConnectError``,
+              ``ReadTimeout``, ``WriteTimeout``, ``PoolTimeout``, and
+              ``RemoteProtocolError`` (a stale pooled keep-alive connection the
+              server closed without sending a response — retrying lands the
+              request on a fresh socket). ``HTTPStatusError`` is never retried.
         """
         delays = [0.5, 1.0, 2.0]
         last_exc: Exception | None = None
@@ -155,6 +160,11 @@ class JobServiceClient:
                 httpx.ReadTimeout,
                 httpx.WriteTimeout,
                 httpx.PoolTimeout,
+                # A pooled keep-alive connection can be closed by the server (or
+                # an intermediary) while idle; reusing it yields "server
+                # disconnected without sending a response". No response bytes
+                # were received, so the request was not processed — safe to retry.
+                httpx.RemoteProtocolError,
             ) as exc:
                 last_exc = exc
                 if attempt < max_retries:

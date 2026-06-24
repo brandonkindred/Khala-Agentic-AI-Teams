@@ -6,7 +6,13 @@ import httpx
 import pytest
 
 import shared_http
-from shared_http import DEFAULT_LIMITS, close_pool, get_pooled_client
+from shared_http import (
+    _DEFAULT_KEEPALIVE_EXPIRY_S,
+    DEFAULT_LIMITS,
+    _keepalive_expiry_seconds,
+    close_pool,
+    get_pooled_client,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +56,13 @@ def test_default_limits_bound_concurrency():
     assert DEFAULT_LIMITS.max_keepalive_connections == 20
 
 
+def test_default_limits_recycle_idle_keepalive_sockets():
+    """Idle keep-alive sockets must expire (default 15s) so the client drops
+    them before an upstream closes them — avoiding ``RemoteProtocolError`` on
+    reuse of a server-closed connection."""
+    assert DEFAULT_LIMITS.keepalive_expiry == _DEFAULT_KEEPALIVE_EXPIRY_S == 15.0
+
+
 def test_pooled_client_applies_limits_and_timeout():
     client = get_pooled_client(12.0)
     assert isinstance(client, httpx.Client)
@@ -58,6 +71,25 @@ def test_pooled_client_applies_limits_and_timeout():
     pool = client._transport._pool  # noqa: SLF001 — assert pooling config
     assert pool._max_connections == DEFAULT_LIMITS.max_connections
     assert pool._max_keepalive_connections == DEFAULT_LIMITS.max_keepalive_connections
+    assert pool._keepalive_expiry == DEFAULT_LIMITS.keepalive_expiry
+
+
+def test_keepalive_expiry_defaults_when_env_unset(monkeypatch):
+    monkeypatch.delenv("HTTP_KEEPALIVE_EXPIRY_S", raising=False)
+    assert _keepalive_expiry_seconds() == _DEFAULT_KEEPALIVE_EXPIRY_S
+
+
+def test_keepalive_expiry_honours_valid_env(monkeypatch):
+    monkeypatch.setenv("HTTP_KEEPALIVE_EXPIRY_S", "42.5")
+    assert _keepalive_expiry_seconds() == 42.5
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "12s", "nan", "inf", "0", "-5"])
+def test_keepalive_expiry_falls_back_on_invalid_env(monkeypatch, bad):
+    """Garbage, non-finite, and non-positive values fall back to the default
+    rather than producing an unusable pool config."""
+    monkeypatch.setenv("HTTP_KEEPALIVE_EXPIRY_S", bad)
+    assert _keepalive_expiry_seconds() == _DEFAULT_KEEPALIVE_EXPIRY_S
 
 
 def test_replaces_externally_closed_client():
