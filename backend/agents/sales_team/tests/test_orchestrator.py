@@ -1434,6 +1434,13 @@ def test_discovery_and_negotiation_match_by_id_not_company_name(stub_orch, sampl
     Regression guard for the bug where _run_discovery and _run_negotiation looked
     up per-prospect data via a linear scan on ``company_name``, which is non-unique
     when the deep-research path generates multiple decision-makers at one account.
+
+    This test calls _run_discovery and _run_negotiation directly (the same pattern
+    used by test_stage_methods_are_individually_callable throughout this file) because
+    exercising them through the public run() API would require mocking every upstream
+    stage (prospecting, outreach, qualification, dossier loading) just to reach
+    discovery, which would obscure the specific per-prospect matching behaviour
+    under test.
     """
     p1 = Prospect(id="prs_shared_1", company_name="SharedCo", contact_name="Alice")
     p2 = Prospect(id="prs_shared_2", company_name="SharedCo", contact_name="Bob")
