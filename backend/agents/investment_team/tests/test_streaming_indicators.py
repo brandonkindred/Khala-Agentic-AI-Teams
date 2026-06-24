@@ -1449,7 +1449,7 @@ def _legacy_stochastic_k(bars: List[_Bar], k_period: int) -> float:
     return 100.0 * (bars[-1].close - lowest) / rng
 
 
-def _legacy_stochastic_d(bars: List[_Bar], k_period: int, d_period: int) -> Optional[float]:
+def _legacy_stochastic_d(bars: List[_Bar], k_period: int, d_period: int) -> float | None:
     """Cold reference for %D at bars[-1]."""
     if len(bars) < k_period + d_period - 1:
         return None
