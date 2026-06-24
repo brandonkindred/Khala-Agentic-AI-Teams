@@ -330,7 +330,7 @@ def test_dsn_defaults(monkeypatch):
     monkeypatch.setenv("POSTGRES_USER", "u")
     monkeypatch.setenv("POSTGRES_PASSWORD", "p")
     monkeypatch.setenv("POSTGRES_DB", "d")
-    dsn = client_mod._dsn()
+    dsn = client_mod.dsn()
     assert "host=h" in dsn
     assert "port=1234" in dsn
     assert "dbname=d" in dsn
@@ -341,7 +341,7 @@ def test_dsn_defaults(monkeypatch):
 def test_dsn_database_override(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "h")
     monkeypatch.setenv("POSTGRES_DB", "default_db")
-    dsn = client_mod._dsn("other_db")
+    dsn = client_mod.dsn("other_db")
     assert "dbname=other_db" in dsn
 
 
@@ -373,13 +373,13 @@ def test_get_or_create_pool_raises_when_disabled(monkeypatch):
 def test_dsn_includes_connect_timeout(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "h")
     monkeypatch.delenv("POSTGRES_CONNECT_TIMEOUT_S", raising=False)
-    assert "connect_timeout=3" in client_mod._dsn()
+    assert "connect_timeout=3" in client_mod.dsn()
 
 
 def test_connect_timeout_env_override(monkeypatch):
     monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "7")
     assert client_mod._connect_timeout() == 7
-    assert "connect_timeout=7" in client_mod._dsn()
+    assert "connect_timeout=7" in client_mod.dsn()
 
 
 def test_connect_timeout_floored_to_one(monkeypatch):
@@ -466,7 +466,7 @@ def test_check_connection_false_when_pool_errors(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# connect_timeout (public), _kv quoting, resolve_storage_status
+# connect_timeout / statement_timeout / dsn escaping (via make_conninfo) / budget
 # ---------------------------------------------------------------------------
 
 
@@ -475,35 +475,45 @@ def test_connect_timeout_public_matches_private(monkeypatch):
     assert client_mod.connect_timeout() == 11 == client_mod._connect_timeout()
 
 
-def test_kv_leaves_plain_values_unquoted():
-    assert client_mod._kv("plainvalue") == "plainvalue"
+def test_statement_timeout_ms(monkeypatch):
+    monkeypatch.delenv("POSTGRES_STATEMENT_TIMEOUT_MS", raising=False)
+    assert client_mod.statement_timeout_ms() == 5000
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "1500")
+    assert client_mod.statement_timeout_ms() == 1500
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "0")
+    assert client_mod.statement_timeout_ms() == 0  # 0 disables, floor allows it
 
 
-def test_kv_quotes_and_escapes_special_values():
-    assert client_mod._kv("my pass") == "'my pass'"
-    assert client_mod._kv("") == "''"  # empty must be quoted, not bare
-    assert client_mod._kv("a'b\\c") == "'a\\'b\\\\c'"
+def test_default_probe_budget(monkeypatch):
+    # connect_timeout + statement_timeout(s) + 1.0, so a statement_timeout-bounded
+    # worker finishes before the outer guard fires.
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "3")
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "5000")
+    assert client_mod.default_probe_budget() == 3 + 5.0 + 1.0
 
 
-def test_kv_quotes_all_whitespace_not_just_space():
-    # libpq terminates a keyword/value token on ANY whitespace, so tab/newline/CR must
-    # be quoted too — not just the ASCII space.
-    assert client_mod._kv("a\tb") == "'a\tb'"
-    assert client_mod._kv("a\nb") == "'a\nb'"
-    assert client_mod._kv("a\rb") == "'a\rb'"
-
-
-def test_dsn_quotes_space_password_but_not_plain(monkeypatch):
-    # A space in the password must be single-quoted so it can't terminate the keyword
-    # value early (and swallow the appended connect_timeout); a plain password stays
-    # unquoted so existing DSNs are unchanged.
+def test_dsn_escapes_special_user_and_password_via_make_conninfo(monkeypatch):
+    # make_conninfo owns libpq's quoting: a '@'-bearing user (Azure-style) stays intact
+    # in keyword form, a space-bearing password is single-quoted, and connect_timeout
+    # is carried — no hand-rolled escaper to drift.
     monkeypatch.setenv("POSTGRES_HOST", "h")
+    monkeypatch.setenv("POSTGRES_USER", "svc@prod")
     monkeypatch.setenv("POSTGRES_PASSWORD", "my pass")
-    dsn = client_mod._dsn()
+    dsn = client_mod.dsn()
+    assert "postgresql://" not in dsn  # keyword form
+    assert "user=svc@prod" in dsn
     assert "password='my pass'" in dsn
     assert "connect_timeout=" in dsn
-    monkeypatch.setenv("POSTGRES_PASSWORD", "plain")
-    assert "password=plain " in client_mod._dsn()
+
+
+def test_dsn_handles_whitespace_and_empty_password(monkeypatch):
+    # A tab/newline (which libpq also treats as a token terminator) and an empty
+    # password are quoted by make_conninfo, not left bare.
+    monkeypatch.setenv("POSTGRES_HOST", "h")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "a\tb")
+    assert "password='a\tb'" in client_mod.dsn()
+    monkeypatch.setenv("POSTGRES_PASSWORD", "")
+    assert "password=''" in client_mod.dsn()
 
 
 def test_resolve_storage_status_unconfigured(monkeypatch):

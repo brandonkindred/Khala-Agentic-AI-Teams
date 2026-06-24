@@ -41,7 +41,7 @@ from coding_team.clone_workspace import (
     clone_lock_path,
 )
 from coding_team.github_source.client import _pr_detail_from_payload
-from shared_postgres import connect_timeout
+from shared_postgres import bounded_probe
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,
@@ -1042,6 +1042,33 @@ def _build_github_config_response(
     )
 
 
+def _degraded_github_config_response() -> GitHubConfigResponse:
+    """Best-effort GitHub config when the credential store is unreachable.
+
+    Preconditions: none.
+    Postconditions: returns the JSON-only settings (owner/repo/enabled/default_label,
+        read via ``get_github_config_meta`` — NO Postgres) with ``token_configured=False``
+        and ``credential_store_unreachable=True``. Only the credential-derived fields are
+        unknown during a store outage; the saved settings are not, so the panel shows the
+        configured repo plus the unreachable warning instead of blanking everything (which
+        would conflate "store down" with "nothing configured"). Never raises — a failure
+        reading even the JSON falls back to empty settings.
+    """
+    try:
+        meta = get_github_config_meta()
+    except Exception:  # noqa: BLE001 - even the JSON read failed; degrade to empty settings
+        logger.exception("GitHub settings read failed during degraded fallback")
+        meta = {"enabled": False, "owner": "", "repo": "", "default_label": ""}
+    return GitHubConfigResponse(
+        enabled=bool(meta.get("enabled", False)),
+        token_configured=False,
+        owner=str(meta.get("owner", "")),
+        repo=str(meta.get("repo", "")),
+        default_label=str(meta.get("default_label", "")),
+        credential_store_unreachable=True,
+    )
+
+
 async def _github_config_response() -> GitHubConfigResponse:
     """Read the GitHub config off the event loop and report store reachability.
 
@@ -1050,13 +1077,13 @@ async def _github_config_response() -> GitHubConfigResponse:
         derived from the SAME single credential read that backs ``token_configured``
         (``get_github_config`` -> ``get_credential_status``), so the panel and the
         run/review routes can never disagree about reachability — no separate probe.
-        The read runs in a worker thread wrapped in ``asyncio.wait_for`` so a Postgres
-        that accepts the connection then stalls can't hang the request
-        (``connect_timeout`` bounds only the TCP connect; the inner query is bounded by
-        ``statement_timeout``). On timeout or any error, returns a degraded response
-        flagged ``credential_store_unreachable=True`` AND logs the cause (so a
-        non-connectivity bug isn't silently masked as "store down"). The abandoned
-        worker thread is the accepted residual. Never raises.
+        The read runs via the shared :func:`shared_postgres.bounded_probe`, whose budget
+        (``connect_timeout + statement_timeout + 1s``) is large enough that the
+        statement_timeout-bounded worker finishes — releasing the credential-store
+        ``_LOCK`` — before the outer guard fires, and that a within-bounds slow read isn't
+        falsely flagged. On timeout/error it logs and returns
+        :func:`_degraded_github_config_response`, which PRESERVES the JSON-only settings
+        (owner/repo) rather than blanking them. Never raises.
     """
 
     def _build() -> GitHubConfigResponse:
@@ -1068,19 +1095,11 @@ async def _github_config_response() -> GitHubConfigResponse:
             credential_store_unreachable=not cfg.get("store_reachable", True),
         )
 
-    ct = connect_timeout()
-    try:
-        return await asyncio.wait_for(asyncio.to_thread(_build), timeout=2 * ct + 1.0)
-    except Exception:  # noqa: BLE001 - timeout/any failure → degraded response, but record why
-        logger.exception("GitHub config read failed; reporting credential store unreachable")
-        return GitHubConfigResponse(
-            enabled=False,
-            token_configured=False,
-            owner="",
-            repo="",
-            default_label="",
-            credential_store_unreachable=True,
-        )
+    return await bounded_probe(
+        _build,
+        on_failure=_degraded_github_config_response,
+        label="GitHub config read",
+    )
 
 
 @router.get("/github", response_model=GitHubConfigResponse)

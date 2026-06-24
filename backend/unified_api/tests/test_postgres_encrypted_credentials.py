@@ -273,6 +273,29 @@ def test_status_undecryptable_row_is_absent_reachable(monkeypatch: pytest.Monkey
     assert mod.pg_get_credential_status("svc", "key") == ("", True)
 
 
+def test_status_passes_statement_timeout_options_to_connect(monkeypatch: pytest.MonkeyPatch):
+    # The connect must carry the statement_timeout options (default) so a post-connect
+    # stall is bounded; and the disabled path (ms=0) must still connect with options=''.
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    seen = {}
+
+    def _capture(*_a, **k):
+        seen["options"] = k.get("options")
+        return _fake_conn(None)
+
+    monkeypatch.setattr(psycopg, "connect", _capture)
+
+    monkeypatch.delenv("POSTGRES_STATEMENT_TIMEOUT_MS", raising=False)
+    mod.pg_get_credential_status("svc", "key")
+    assert seen["options"] == "-c statement_timeout=5000"
+
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "0")
+    mod.pg_get_credential_status("svc", "key")
+    assert seen["options"] == ""  # disabled → empty options, connect still works
+
+
 def test_pg_delete_credential_noop_when_disabled(monkeypatch: pytest.MonkeyPatch):
     """pg_delete_credential() is a no-op and does not raise when POSTGRES_HOST is unset."""
     mod = _reload(monkeypatch, postgres_host="")

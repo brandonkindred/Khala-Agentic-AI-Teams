@@ -17,8 +17,8 @@ import logging
 import os
 import threading
 
-from shared_env import parse_int
 from shared_postgres import dsn as _shared_dsn
+from shared_postgres import statement_timeout_ms
 from shared_postgres.metrics import timed_query
 from unified_api.integration_credentials import get_integration_fernet
 
@@ -73,11 +73,11 @@ def _dsn() -> str:
     Preconditions: ``POSTGRES_HOST`` is set (callers gate on
         :func:`postgres_credentials_enabled`).
     Postconditions: delegates to ``shared_postgres.dsn()`` so this direct (un-pooled)
-        connection uses the EXACT same builder as the shared pool — every field
-        ``_kv``-escaped (so a ``POSTGRES_USER``/``POSTGRES_PASSWORD`` containing ``@``,
-        ``:`` , spaces, or other special chars is handled identically) and carrying
-        ``connect_timeout``. Having one builder means the reachability probe and this
-        live read can't disagree because of escaping. Never raises.
+        connection uses the EXACT same builder as the shared pool — every field escaped
+        via ``psycopg.conninfo.make_conninfo`` (so a ``POSTGRES_USER``/``POSTGRES_PASSWORD``
+        containing ``@``, ``:``, spaces, or other special chars is handled identically)
+        and carrying ``connect_timeout``. Having one builder means the reachability probe
+        and this live read can't disagree because of escaping. Never raises.
     """
     return _shared_dsn()
 
@@ -86,15 +86,18 @@ def _statement_timeout_options() -> str:
     """libpq ``options`` that bound each credential query with ``statement_timeout``.
 
     Preconditions: none.
-    Postconditions: returns ``-c statement_timeout={ms}`` from
-        ``POSTGRES_STATEMENT_TIMEOUT_MS`` (default 5000, floor 0); returns ``""`` when
-        set to 0 (disabled). Scoped to the credential store's OWN connections so a
-        query that stalls *after* connect (which ``connect_timeout`` does not cover)
+    Postconditions: returns ``-c statement_timeout={ms}`` from the shared
+        :func:`shared_postgres.statement_timeout_ms` (default 5000, floor 0); returns
+        ``""`` when set to 0 (disabled — WARNING: that removes the post-connect
+        ``_LOCK``-release protection below). Sourcing the value from the shared helper
+        keeps it in lockstep with the request-level ``wait_for`` budgets that size
+        themselves off the same number. Scoped to the credential store's OWN connections
+        so a query that stalls *after* connect (which ``connect_timeout`` does not cover)
         errors out and releases ``_LOCK`` instead of pinning it across all credential
         consumers. The shared pool is intentionally NOT bounded this way (it would cap
         legitimate long team queries). Never raises.
     """
-    ms = parse_int("POSTGRES_STATEMENT_TIMEOUT_MS", 5000, minimum=0)
+    ms = statement_timeout_ms()
     return f"-c statement_timeout={ms}" if ms > 0 else ""
 
 

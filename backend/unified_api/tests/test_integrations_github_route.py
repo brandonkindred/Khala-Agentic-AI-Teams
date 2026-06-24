@@ -221,27 +221,49 @@ def test_get_github_not_flagged_when_postgres_unconfigured(mock_cfg):
     assert resp.json()["credential_store_unreachable"] is False
 
 
+@patch(
+    f"{_M}.get_github_config_meta",
+    return_value={"enabled": True, "owner": "acme", "repo": "widget", "default_label": "lbl"},
+)
 @patch(f"{_M}.get_github_config", side_effect=RuntimeError("store stalled"))
-def test_get_github_degrades_to_unreachable_on_build_failure(mock_cfg):
+def test_get_github_degrades_to_unreachable_on_build_failure(mock_cfg, mock_meta):
     # A synchronous error building the config response is caught and reported as a
-    # degraded unreachable response rather than 500-ing.
+    # degraded unreachable response rather than 500-ing — AND the JSON-only settings
+    # (owner/repo, no DB needed) are PRESERVED rather than blanked (fix: "store down" is
+    # not "nothing configured").
     resp = client.get(_GITHUB_CFG_ENDPOINT)
     assert resp.status_code == 200
-    assert resp.json()["credential_store_unreachable"] is True
+    body = resp.json()
+    assert body["credential_store_unreachable"] is True
+    assert (body["owner"], body["repo"]) == ("acme", "widget")
+    assert body["token_configured"] is False
 
 
-@patch(f"{_M}.connect_timeout", return_value=0)
+@patch(
+    f"{_M}.get_github_config_meta",
+    return_value={"enabled": True, "owner": "acme", "repo": "widget", "default_label": "lbl"},
+)
 @patch(f"{_M}.get_github_config")
-def test_get_github_degrades_on_probe_timeout(mock_cfg, mock_ct):
+def test_get_github_degrades_on_probe_timeout(mock_cfg, mock_meta, monkeypatch):
     # Exercises the wait_for TIMEOUT path (not just the synchronous-error path): _build
-    # blocks past the budget (2*0+1=1s), so the request returns degraded-unreachable
-    # instead of hanging.
+    # blocks past the budget, so the request returns degraded-unreachable (with settings
+    # preserved) instead of hanging. Patch the shared budget tiny so we can prove the
+    # timeout fired by elapsed time.
     import time
 
-    mock_cfg.side_effect = lambda: time.sleep(1.3) or dict(_GH_STATUS_CFG)
+    from shared_postgres import client as pg_client
+
+    monkeypatch.setattr(pg_client, "default_probe_budget", lambda: 0.2)
+    mock_cfg.side_effect = lambda: time.sleep(0.8) or {**dict(_GH_STATUS_CFG), "store_reachable": True}
+    t0 = time.monotonic()
     resp = client.get(_GITHUB_CFG_ENDPOINT)
+    elapsed = time.monotonic() - t0
+    body = resp.json()
     assert resp.status_code == 200
-    assert resp.json()["credential_store_unreachable"] is True
+    assert body["credential_store_unreachable"] is True
+    assert (body["owner"], body["repo"]) == ("acme", "widget")  # settings preserved
+    # Returned at ~budget (0.2s), NOT after the 0.8s sleep → the wait_for timeout fired.
+    assert elapsed < 0.6
 
 
 # ---------------------------------------------------------------------------

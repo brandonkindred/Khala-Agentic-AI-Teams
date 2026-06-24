@@ -25,7 +25,6 @@ to untrusted clients, gate these routes with a real auth dependency.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Literal
 from urllib.parse import urlparse
@@ -37,11 +36,14 @@ from llm_service import clear_client_cache, runtime_config
 from llm_service import config as llm_config
 from shared_postgres import (
     StorageStatus,
+    bounded_probe,
     connect_timeout,
     is_postgres_enabled,
     resolve_storage_status,
     set_secrets,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def _probe_storage_status() -> StorageStatus:
@@ -49,35 +51,26 @@ async def _probe_storage_status() -> StorageStatus:
 
     Preconditions: none.
     Postconditions: returns the shared :func:`resolve_storage_status` classification
-        (``available`` / ``unconfigured`` / ``unreachable``). The blocking probe runs
-        in a worker thread wrapped in ``asyncio.wait_for`` so a Postgres that accepts
-        the connection then stalls on the probe query can't hang the request —
-        ``connect_timeout`` only bounds the TCP connect. The inner pool-acquire bound
-        and the outer guard are both derived from ``connect_timeout`` so raising
-        ``POSTGRES_CONNECT_TIMEOUT_S`` actually widens the probe (they used to be
-        unrelated). On timeout or any error the store is reported ``unreachable`` (Save
-        stays disabled) AND the cause is logged, so a non-connectivity bug (e.g. a
-        Fernet/config error) isn't silently masked as "Postgres down". The abandoned
-        worker thread is the same residual the unified-API health probe accepts. Never
-        raises.
+        (``available`` / ``unconfigured`` / ``unreachable``). The blocking probe runs in
+        a worker thread via the shared :func:`shared_postgres.bounded_probe`, whose budget
+        (``connect_timeout + statement_timeout + 1s``) gives the inner ``SELECT 1`` real
+        headroom so a slow-but-alive store isn't falsely reported unreachable, and which
+        logs the cause on timeout/error rather than masking a non-connectivity bug as
+        "Postgres down". NOTE: this page probes the SHARED POOL (a ``SELECT 1``), a
+        different path than the GitHub panel (which reads the credential store); under
+        partial Postgres degradation the two surfaces can legitimately disagree, because
+        they check different stores. Never raises.
     """
     if not is_postgres_enabled():
         return "unconfigured"
-    ct = connect_timeout()
-    try:
-        # The inner check_connection can wait up to its pool-acquire bound (timeout_s)
-        # plus the TCP connect (ct); size the outer guard above both so it only fires
-        # on a genuine post-connect stall, not on a legitimately slow connect.
-        return await asyncio.wait_for(
-            asyncio.to_thread(resolve_storage_status, timeout_s=ct),
-            timeout=2 * ct + 1.0,
-        )
-    except Exception:  # noqa: BLE001 - any failure/timeout → unreachable, but record why
-        logger.exception("LLM provider storage probe failed; reporting store unreachable")
-        return "unreachable"
+    # The inner probe's own pool-acquire/connect bound is tied to connect_timeout; the
+    # shared bounded_probe budget adds statement_timeout headroom on top.
+    return await bounded_probe(
+        lambda: resolve_storage_status(timeout_s=connect_timeout()),
+        on_failure=lambda: "unreachable",
+        label="LLM provider storage probe",
+    )
 
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/llm-config", tags=["llm-config"])
 

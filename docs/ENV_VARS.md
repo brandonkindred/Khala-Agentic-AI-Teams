@@ -287,10 +287,14 @@ for the libpq default, defeating the bounded reachability probe. Note: it bounds
 ### POSTGRES_STATEMENT_TIMEOUT_MS
 `statement_timeout` (milliseconds) applied as a libpq `options` to the **unified-API credential
 store's** per-call connections (GitHub / Slack / Medium secret reads/writes). Default `5000`, floor
-`0` (set `0` to disable). Bounds the query phase that `connect_timeout` does not cover, so a Postgres
-that accepts the connection then stalls mid-query can't pin the credential store's `_LOCK` and
-cascade a stall across every credential consumer. Scoped to the credential store only — it is
-deliberately **not** applied to the shared pool, which would cap legitimate long-running team queries.
+`0`. Bounds the query phase that `connect_timeout` does not cover, so a Postgres that accepts the
+connection then stalls mid-query can't pin the credential store's `_LOCK` and cascade a stall across
+every credential consumer. The unified-API config-status routes also size their request-level
+`asyncio.wait_for` budgets off this value (`connect_timeout + statement_timeout + 1s`) so the bounded
+query finishes before the request gives up. **WARNING:** setting `0` disables the query bound — a
+post-connect stall can then pin `_LOCK` indefinitely, reintroducing the cascade this var prevents.
+Scoped to the credential store only — it is deliberately **not** applied to the shared pool, which
+would cap legitimate long-running team queries.
 
 ### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
 Per-worker memory watchdog used by every `team_service` microservice

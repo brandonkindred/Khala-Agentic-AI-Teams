@@ -22,12 +22,13 @@ set.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
-from typing import Literal, Optional
+from typing import Literal, Optional, TypeVar
 
 from shared_env import parse_int
 
@@ -78,48 +79,42 @@ def connect_timeout() -> int:
     return _connect_timeout()
 
 
-def _kv(value: str) -> str:
-    """Quote a libpq keyword/value string when it needs it.
+def statement_timeout_ms() -> int:
+    """Public accessor for the credential-store ``statement_timeout`` in milliseconds.
 
-    Preconditions: ``value`` is a string.
-    Postconditions: returns ``value`` unchanged when it is a non-empty run of
-        ordinary characters; otherwise returns it single-quoted with ``\\`` and ``'``
-        backslash-escaped, per libpq keyword/value rules. "Needs quoting" means the
-        value is empty, or contains a single-quote, a backslash, or ANY whitespace —
-        libpq terminates a keyword/value token on any whitespace (space, tab, newline,
-        CR, …), not just an ASCII space, so a ``POSTGRES_PASSWORD`` with a tab would
-        otherwise terminate early and corrupt every following keyword (including the
-        ``connect_timeout`` this DSN appends). Never raises.
+    Preconditions: none.
+    Postconditions: returns ``POSTGRES_STATEMENT_TIMEOUT_MS`` (default 5000, floor 0;
+        ``0`` disables it). Centralized so a caller sizing a request-level ``wait_for``
+        budget uses the SAME number that bounds the query — instead of re-deriving it and
+        drifting, which would let the outer guard fire before the bounded query finishes
+        (leaving an abandoned worker holding a lock). Never raises.
     """
-    if value and not (any(c.isspace() for c in value) or "'" in value or "\\" in value):
-        return value
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-
-
-def _dsn(database: Optional[str] = None) -> str:
-    """Build a libpq DSN for ``database`` (defaults to ``POSTGRES_DB``)."""
-    host = os.environ.get("POSTGRES_HOST", "localhost")
-    port = os.environ.get("POSTGRES_PORT", "5432")
-    user = os.environ.get("POSTGRES_USER", "postgres")
-    password = os.environ.get("POSTGRES_PASSWORD", "")
-    dbname = database or _default_database()
-    return (
-        f"host={_kv(host)} port={_kv(port)} dbname={_kv(dbname)} "
-        f"user={_kv(user)} password={_kv(password)} connect_timeout={_connect_timeout()}"
-    )
+    return parse_int("POSTGRES_STATEMENT_TIMEOUT_MS", 5000, minimum=0)
 
 
 def dsn(database: Optional[str] = None) -> str:
-    """Public accessor for the shared libpq keyword DSN.
+    """Build the one shared libpq keyword DSN for ``database`` (defaults to ``POSTGRES_DB``).
 
     Preconditions: none.
-    Postconditions: returns the exact DSN the connection pool uses — every field
-        ``_kv``-escaped and carrying ``connect_timeout`` — so a module that opens its
-        own ``psycopg`` connection outside the pool (e.g. the unified-API credential
-        store) builds an identically-escaped DSN. One DSN builder, no drift between the
-        reachability probe and the live read. Never raises.
+    Postconditions: returns a correctly-escaped libpq conninfo string (built by
+        ``psycopg.conninfo.make_conninfo``, which owns libpq's quoting rules — empty,
+        whitespace-bearing, quote, and backslash values are all escaped) carrying
+        ``connect_timeout``. This is the SINGLE DSN builder for the platform: the pool,
+        ``_connect``, and any module that opens its own connection (e.g. the unified-API
+        credential store) all call it, so escaping can never drift between the
+        reachability probe and the live read. Never raises here — ``psycopg`` is imported
+        lazily and is present wherever a connection is actually opened.
     """
-    return _dsn(database)
+    from psycopg.conninfo import make_conninfo
+
+    return make_conninfo(
+        host=os.environ.get("POSTGRES_HOST", "localhost"),
+        port=os.environ.get("POSTGRES_PORT", "5432"),
+        dbname=database or _default_database(),
+        user=os.environ.get("POSTGRES_USER", "postgres"),
+        password=os.environ.get("POSTGRES_PASSWORD", ""),
+        connect_timeout=_connect_timeout(),
+    )
 
 
 def _pool_sizes() -> tuple[int, int]:
@@ -152,7 +147,7 @@ def _connect(database: Optional[str] = None):
         raise RuntimeError(
             "psycopg is not installed; install psycopg[binary] to use shared_postgres."
         ) from e
-    return psycopg.connect(_dsn(database))
+    return psycopg.connect(dsn(database))
 
 
 def _get_or_create_pool(database: Optional[str] = None):
@@ -177,7 +172,7 @@ def _get_or_create_pool(database: Optional[str] = None):
             ) from e
         min_size, max_size = _pool_sizes()
         pool = ConnectionPool(
-            conninfo=_dsn(database),
+            conninfo=dsn(database),
             min_size=min_size,
             max_size=max_size,
             open=True,
@@ -259,6 +254,87 @@ def resolve_storage_status(*, timeout_s: float = 1.5) -> StorageStatus:
     if not is_postgres_enabled():
         return "unconfigured"
     return "available" if check_connection(timeout_s=timeout_s) else "unreachable"
+
+
+def default_probe_budget() -> float:
+    """Seconds an offloaded probe/credential read may run before the caller abandons it.
+
+    Preconditions: none.
+    Postconditions: returns ``connect_timeout + statement_timeout + 1.0`` seconds — large
+        enough that a worker bounded by the TCP connect (``connect_timeout``) and the
+        query (``statement_timeout``) finishes (releasing any lock it holds) BEFORE the
+        caller's ``asyncio.wait_for`` abandons it, and that a within-bounds slow read is
+        not falsely reported unreachable. When ``statement_timeout`` is disabled (0) the
+        query is unbounded, so this is a best-effort cap, not a guarantee. Never raises.
+    """
+    return float(_connect_timeout()) + statement_timeout_ms() / 1000.0 + 1.0
+
+
+_T = TypeVar("_T")
+
+
+async def bounded_probe(
+    fn: Callable[[], _T],
+    *,
+    on_failure: Callable[[], _T],
+    budget: Optional[float] = None,
+    label: str = "storage probe",
+) -> _T:
+    """Run blocking ``fn`` off the event loop, bounded so a stalled DB can't hang the request.
+
+    The single home for the "offload a blocking probe, time it out, log + degrade on
+    failure" pattern shared by the LLM Provider page and the GitHub config panel, so the
+    timeout math and the log-on-degrade policy can't drift between callers.
+
+    Preconditions: ``fn`` is a no-arg blocking callable; ``on_failure`` is a no-arg
+        callable returning the degraded result (same type as ``fn``).
+    Postconditions: returns ``fn()``'s result; on timeout or ANY exception, logs the
+        cause (so a non-connectivity bug isn't silently masked) and returns
+        ``on_failure()``. ``budget`` defaults to :func:`default_probe_budget`. The call
+        returns within ``budget`` seconds of wall-clock even if ``fn`` is still blocking.
+        ``fn`` runs in a DETACHED daemon thread (not the loop executor) and resolves a
+        ``asyncio.shield``-ed future, so on timeout nothing the event loop or ASGI server
+        tracks stays pending — ``asyncio.wait_for(asyncio.to_thread(...))`` does NOT bound
+        wall-clock (an executor future can't be cancelled, so it blocks until the thread
+        finishes). The detached thread is abandoned (the accepted residual; its own
+        ``statement_timeout`` releases any lock it holds before the budget elapses).
+        Never raises.
+    """
+    if budget is None:
+        budget = default_probe_budget()
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future = loop.create_future()
+
+    def _settle(value: Optional[_T], error: Optional[BaseException]) -> None:
+        if result.done():
+            return
+        if error is not None:
+            result.set_exception(error)
+        else:
+            result.set_result(value)
+
+    def _runner() -> None:
+        try:
+            value = fn()
+        except BaseException as e:  # noqa: BLE001 - relayed to the awaiter via the future
+            loop.call_soon_threadsafe(_settle, None, e)
+        else:
+            loop.call_soon_threadsafe(_settle, value, None)
+
+    threading.Thread(target=_runner, name="bounded_probe", daemon=True).start()
+    try:
+        # shield so a timeout cancels only our wait, never the future the detached thread
+        # will later resolve (which would raise InvalidStateError in that thread).
+        return await asyncio.wait_for(asyncio.shield(result), timeout=budget)
+    except asyncio.TimeoutError:
+        # Retrieve the eventual result/exception so the loop doesn't log it as unhandled,
+        # but do NOT await it — the thread is abandoned.
+        result.add_done_callback(lambda f: f.cancelled() or f.exception())
+        logger.warning("%s timed out after %.1fs; returning degraded result", label, budget)
+        return on_failure()
+    except Exception:  # noqa: BLE001 - any failure from fn → logged, degraded result
+        logger.exception("%s failed; returning degraded result", label)
+        return on_failure()
 
 
 def close_pool(database: Optional[str] = None) -> None:

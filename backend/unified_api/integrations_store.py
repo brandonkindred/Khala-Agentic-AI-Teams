@@ -537,10 +537,15 @@ def get_integrations_list() -> list[dict[str, Any]]:
 
 
 def get_github_config_meta() -> dict[str, Any]:
-    """Return the JSON-only GitHub settings (enabled/owner/repo/default_label/repo_path).
+    """Return the JSON-only GitHub settings — no credential-store read.
 
-    No credential-store read — so callers that only need the settings (and will read the
-    PAT themselves) don't pay an extra DB round-trip. Never returns the token.
+    Preconditions: none.
+    Postconditions: returns exactly the keys ``enabled`` (bool), ``owner``, ``repo``,
+        ``default_label``, ``repo_path`` (all stripped strings) from the JSON settings
+        file. Performs NO Postgres/credential read, so callers that only need the
+        settings (and will read the PAT themselves) don't pay a DB round-trip. NEVER
+        returns the token or any credential-derived field. Never raises beyond an
+        underlying JSON-read error.
     """
     with _LOCK:
         data = _read_raw()
@@ -555,16 +560,19 @@ def get_github_config_meta() -> dict[str, Any]:
 
 
 def get_github_config() -> dict[str, Any]:
-    """Return GitHub integration config. PAT presence/reachability from encrypted DB;
-    owner/repo from JSON.
+    """Return GitHub integration config (settings from JSON; PAT presence/reachability from DB).
 
-    Uses a SINGLE credential read (``get_credential_status``) to derive both
-    ``token_configured`` and ``store_reachable`` so callers (the config panel and the
-    run/review routes) share one source of reachability and can't disagree — and pay
-    one DB round-trip, not a read plus a separate probe. The raw token is deliberately
-    NEVER included (only ``token_configured``); routes that need the token value read it
-    explicitly via ``get_credential_status`` so the secret stays out of this widely
-    passed dict.
+    Preconditions: none.
+    Postconditions: returns :func:`get_github_config_meta`'s keys PLUS ``token_configured``
+        (bool) and ``store_reachable`` (bool), derived from a SINGLE
+        ``get_credential_status`` read — so the config panel and the run/review routes
+        share one source of reachability (they can't disagree) and pay one DB round-trip,
+        not a read plus a separate probe. The raw token is deliberately NEVER included
+        (only ``token_configured``); routes that need the token value read it explicitly
+        via ``get_credential_status`` so the secret stays out of this widely passed dict.
+        ``store_reachable`` is True when the credential store answered (or Postgres is
+        disabled — "absent", not an outage) and False only on a connection/query error.
+        Never raises (the credential read swallows its own errors).
     """
     meta = get_github_config_meta()
     token, store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")
