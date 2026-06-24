@@ -12,10 +12,14 @@ Pins the dual-objective design change:
 
 from __future__ import annotations
 
+import math
+
 from investment_team.models import ExpectancyForecast, StrategySpec
+from investment_team.strategy_lab.agents._response_schemas import _ExpectancyForecastWire
 from investment_team.strategy_lab.orchestrator import (
     StrategyLabOrchestrator,
     _coerce_expectancy_forecast,
+    build_spec_from_dict,
 )
 
 # ---------------------------------------------------------------------------
@@ -64,6 +68,36 @@ def test_expectancy_forecast_floors_negative_reward_and_frequency() -> None:
 def test_expectancy_forecast_allows_negative_projected_return() -> None:
     # A projected loss is a legitimate (if undesirable) forecast — not clamped.
     assert ExpectancyForecast(projected_annual_return_pct=-5.0).projected_annual_return_pct == -5.0
+
+
+def test_expectancy_forecast_sanitizes_non_finite_win_rate() -> None:
+    # NaN/±inf from a malformed payload must never survive on any numeric field.
+    # All non-finite collapses to 0.0 (uniform with the other numeric fields),
+    # rather than clamping +inf to the 1.0 upper bound.
+    assert ExpectancyForecast(forecast_win_rate=math.nan).forecast_win_rate == 0.0
+    assert ExpectancyForecast(forecast_win_rate=math.inf).forecast_win_rate == 0.0
+    assert ExpectancyForecast(forecast_win_rate=-math.inf).forecast_win_rate == 0.0
+
+
+def test_expectancy_forecast_sanitizes_non_finite_reward_and_frequency() -> None:
+    assert ExpectancyForecast(reward_risk=math.nan).reward_risk == 0.0
+    assert ExpectancyForecast(reward_risk=math.inf).reward_risk == 0.0
+    assert ExpectancyForecast(trades_per_year=math.inf).trades_per_year == 0.0
+
+
+def test_expectancy_forecast_sanitizes_non_finite_projected_return() -> None:
+    assert (
+        ExpectancyForecast(projected_annual_return_pct=math.nan).projected_annual_return_pct == 0.0
+    )
+    assert (
+        ExpectancyForecast(projected_annual_return_pct=-math.inf).projected_annual_return_pct == 0.0
+    )
+
+
+def test_wire_and_model_forecast_fields_match() -> None:
+    """Guard against drift: the wire mirror and the persisted model must expose
+    the same field names (their values diverge only by the model's validators)."""
+    assert set(_ExpectancyForecastWire.model_fields) == set(ExpectancyForecast.model_fields)
 
 
 # ---------------------------------------------------------------------------
@@ -160,12 +194,12 @@ def test_legacy_persisted_spec_without_forecast_loads_as_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _build_spec_from_dict — threads the forecast onto the spec
+# build_spec_from_dict — threads the forecast onto the spec
+# (module-level function; testable without instantiating the orchestrator)
 # ---------------------------------------------------------------------------
 
 
 def test_build_spec_from_dict_threads_forecast() -> None:
-    orch = StrategyLabOrchestrator()
     strategy_dict = {
         "asset_class": "stocks",
         "timeframe": "1d",
@@ -177,23 +211,31 @@ def test_build_spec_from_dict_threads_forecast() -> None:
             "consistency_note": "coherent",
         },
     }
-    spec = orch._build_spec_from_dict(strategy_dict, strategy_id="s1")
+    spec = build_spec_from_dict(strategy_dict, strategy_id="s1")
     assert spec.expectancy_forecast is not None
     assert spec.expectancy_forecast.forecast_win_rate == 0.6
 
 
 def test_build_spec_from_dict_without_forecast_is_none() -> None:
-    orch = StrategyLabOrchestrator()
-    spec = orch._build_spec_from_dict(
-        {"asset_class": "stocks", "timeframe": "1d"}, strategy_id="s1"
-    )
+    spec = build_spec_from_dict({"asset_class": "stocks", "timeframe": "1d"}, strategy_id="s1")
     assert spec.expectancy_forecast is None
 
 
 def test_build_spec_from_dict_drops_garbage_forecast() -> None:
-    orch = StrategyLabOrchestrator()
-    spec = orch._build_spec_from_dict(
+    spec = build_spec_from_dict(
         {"asset_class": "stocks", "timeframe": "1d", "expectancy_forecast": "garbage"},
         strategy_id="s1",
     )
     assert spec.expectancy_forecast is None
+
+
+def test_orchestrator_method_delegates_to_build_spec_from_dict() -> None:
+    """The retained ``_build_spec_from_dict`` method is a thin wrapper that
+    produces the same spec as the public function."""
+    orch = StrategyLabOrchestrator()
+    spec = orch._build_spec_from_dict(
+        {"asset_class": "stocks", "timeframe": "1d", "expectancy_forecast": {"reward_risk": 2.0}},
+        strategy_id="s1",
+    )
+    assert spec.expectancy_forecast is not None
+    assert spec.expectancy_forecast.reward_risk == 2.0

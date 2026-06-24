@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
@@ -262,14 +263,19 @@ class ExpectancyForecast(BaseModel):
     owning ``StrategySpec.expectancy_forecast`` and is still valid.
 
     Preconditions:
-        - ``forecast_win_rate`` is a probability; values outside ``[0, 1]`` are
-          clamped to the nearest bound rather than rejected.
+        - ``forecast_win_rate`` is a probability; *finite* values outside
+          ``[0, 1]`` are clamped to the nearest bound rather than rejected.
         - ``reward_risk`` and ``trades_per_year`` are non-negative; negatives
           are clamped to ``0.0``.
+        - Non-finite inputs (``NaN`` / ``±inf``) on any numeric field — which a
+          malformed LLM payload can produce — are sanitized to ``0.0`` so a slip
+          never propagates a ``NaN``/``inf`` into downstream consumers.
     Postconditions:
-        - A pure data record with no side effects. After construction,
-          ``forecast_win_rate`` ∈ ``[0, 1]`` and
-          ``reward_risk`` / ``trades_per_year`` ≥ ``0``.
+        - A pure data record with no side effects. After construction every
+          numeric field is finite: ``forecast_win_rate`` ∈ ``[0, 1]``,
+          ``reward_risk`` / ``trades_per_year`` ≥ ``0``, and
+          ``projected_annual_return_pct`` is a finite float (a negative
+          projected return is legitimate and preserved).
     Invariants:
         - Holds no references to engine or LLM state; safe to serialize into a
           persisted ``StrategySpec``.
@@ -287,6 +293,9 @@ class ExpectancyForecast(BaseModel):
         # A probability. The designer emits it as a fraction; a model slip
         # (a negative, or 84 emitted for "84%") is clamped into [0, 1] rather
         # than rejected, since the forecast is advisory and never gated.
+        # NaN/±inf (which `<`/`>` would silently pass through) collapse to 0.0.
+        if not math.isfinite(v):
+            return 0.0
         if v < 0.0:
             return 0.0
         if v > 1.0:
@@ -296,7 +305,18 @@ class ExpectancyForecast(BaseModel):
     @field_validator("reward_risk", "trades_per_year", mode="after")
     @classmethod
     def _floor_non_negative(cls, v: float) -> float:
-        return v if v > 0.0 else 0.0
+        # Floor at 0.0. Non-finite (NaN/±inf) also collapses to 0.0 so a
+        # malformed forecast never carries a NaN/inf forward.
+        if not math.isfinite(v) or v <= 0.0:
+            return 0.0
+        return v
+
+    @field_validator("projected_annual_return_pct", mode="after")
+    @classmethod
+    def _sanitize_projected_return(cls, v: float) -> float:
+        # A negative projected return is a legitimate (if undesirable) forecast,
+        # so finite values pass through unchanged; only non-finite collapses.
+        return v if math.isfinite(v) else 0.0
 
 
 class StrategySpec(BaseModel):
