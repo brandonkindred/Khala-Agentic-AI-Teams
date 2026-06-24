@@ -2,7 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
-import type { LlmConfigResponse, LlmConfigUpdate } from '../models/llm-config.model';
+import type { LlmConfigResponse, LlmConfigUpdate, OllamaModelsResponse } from '../models/llm-config.model';
 
 /**
  * Service for the LLM Provider settings API (`/api/llm-config`).
@@ -21,5 +21,13 @@ export class LlmConfigApiService {
   /** PUT /api/llm-config — persist provider/model/keys (empty fields unchanged). */
   updateConfig(body: LlmConfigUpdate): Observable<LlmConfigResponse> {
     return this.http.put<LlmConfigResponse>(this.baseUrl, body);
+  }
+
+  /**
+   * GET /api/llm-config/ollama-models — live model list from the effective Ollama
+   * endpoint (`/api/tags`), or the curated fallback when it can't be reached.
+   */
+  getOllamaModels(): Observable<OllamaModelsResponse> {
+    return this.http.get<OllamaModelsResponse>(`${this.baseUrl}/ollama-models`);
   }
 }

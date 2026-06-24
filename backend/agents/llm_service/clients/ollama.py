@@ -209,6 +209,64 @@ def _thinking_downgrade_enabled() -> bool:
     return llm_config.env_flag_enabled(llm_config.ENV_LLM_THINKING_DOWNGRADE_RETRY)
 
 
+def _ollama_tags_auth_headers() -> dict[str, str]:
+    """Return the Authorization header for an Ollama /api/tags request.
+
+    Mirrors ``OllamaLLMClient._ollama_auth_headers``: resolves the Ollama Cloud
+    key via :func:`llm_config.resolve_ollama_api_key` (runtime config set through
+    the settings UI, falling back to ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY``).
+
+    Preconditions: none.
+    Postconditions: returns ``{"Authorization": "Bearer <key>"}`` when a key is
+        resolved, else ``{}`` (local Ollama needs no auth). Never raises.
+    """
+    key = llm_config.resolve_ollama_api_key()
+    if not key:
+        return {}
+    return {"Authorization": f"Bearer {key}"}
+
+
+def list_ollama_models(timeout: float = 15.0) -> list[str]:
+    """Return the model ids available on the effective Ollama endpoint via /api/tags.
+
+    Calls ``GET {resolve_base_url()}/api/tags`` with the resolved Ollama key for
+    auth (no header when none is set, for local Ollama). The Ollama response shape
+    is ``{"models": [{"name": "...", "model": "..."}, ...]}``; each entry's
+    ``name`` is preferred, falling back to ``model``.
+
+    Preconditions: ``timeout`` is a positive number of seconds.
+    Postconditions: returns a de-duplicated, sorted list of non-empty model names.
+        Returns ``[]`` on any HTTP error, non-200 status, or unparseable body —
+        callers fall back to the curated suggestion list. Never raises. (Returning
+        ``[]`` on failure is the documented contract here, not a swallowed error:
+        live model discovery is best-effort and must degrade gracefully.)
+    """
+    base_url = llm_config.resolve_base_url()
+    url = f"{base_url.rstrip('/')}/api/tags"
+    try:
+        headers = _ollama_tags_auth_headers()
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(url, headers=headers)
+        if resp.status_code != 200:
+            logger.warning("Ollama /api/tags returned %s for %s", resp.status_code, url)
+            return []
+        data = resp.json()
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return []
+        names: set[str] = set()
+        for entry in models:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name") or entry.get("model")
+            if isinstance(name, str) and name.strip():
+                names.add(name.strip())
+        return sorted(names)
+    except (httpx.HTTPError, ValueError, TypeError, KeyError) as e:
+        logger.warning("Could not list Ollama models from %s: %s", url, e)
+        return []
+
+
 class _EmptyResponseSignal(Exception):
     """Internal control-flow signal: a 200 response produced no assistant content.
 
