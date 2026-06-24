@@ -89,6 +89,32 @@ class ConversationStateResponse(BaseModel):
     suggested_questions: list[str] = Field(default_factory=list)
 
 
+class SaveAgentRequest(BaseModel):
+    """Editable fields accepted by ``POST /agents``.
+
+    Excludes the server-owned ``mode`` / ``cloned_from`` fields carried on
+    :class:`AgentDefinition` (they describe authoring provenance and are
+    irrelevant to the saved manifest), so the save contract is unambiguous.
+    """
+
+    name: str = ""
+    role: str = ""
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    system_prompt: str = ""
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+
+    def to_definition(self) -> AgentDefinition:
+        """Project into an :class:`AgentDefinition` for the save pipeline.
+
+        Postconditions:
+            * Returns a ``new``-mode definition carrying only the editable fields.
+        """
+        return AgentDefinition(mode="new", **self.model_dump())
+
+
 class SaveAgentResponse(BaseModel):
     """Result of saving + registering an authored agent."""
 

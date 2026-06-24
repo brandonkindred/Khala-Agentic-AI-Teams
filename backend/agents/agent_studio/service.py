@@ -11,7 +11,7 @@ Error contract (translated to HTTP by the routes):
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Protocol
 
 from agent_registry.models import AgentManifest
 
@@ -20,12 +20,20 @@ from .models import AgentDefinition, ConversationStateResponse, StudioMode
 from .registration import build_studio_agent_manifest, clone_from_manifest
 from .store import AgentStudioConversationStore
 
-# A getter returning an object with ``.get(id)`` and ``.register(manifest)`` —
-# i.e. the process-wide ``AgentRegistry``.
-RegistryGetter = Callable[[], object]
+
+class RegistryLike(Protocol):
+    """The slice of ``agent_registry.AgentRegistry`` this service depends on."""
+
+    def get(self, agent_id: str) -> AgentManifest | None: ...
+
+    def register(self, manifest: AgentManifest) -> None: ...
 
 
-def _default_registry_getter() -> object:  # pragma: no cover - thin import wrapper
+# A getter returning the process-wide ``AgentRegistry`` (or a test double).
+RegistryGetter = Callable[[], RegistryLike]
+
+
+def _default_registry_getter() -> RegistryLike:  # pragma: no cover - thin import wrapper
     from agent_registry import get_registry
 
     return get_registry()
@@ -63,7 +71,7 @@ class AgentStudioService:
         if mode == "refine":
             if not source_agent_id:
                 raise ValueError("source_agent_id is required when mode == 'refine'")
-            manifest = self._get_registry().get(source_agent_id)  # type: ignore[attr-defined]
+            manifest = self._get_registry().get(source_agent_id)
             if manifest is None:
                 raise LookupError(f"Unknown source agent: {source_agent_id}")
             definition = clone_from_manifest(manifest)
@@ -107,7 +115,7 @@ class AgentStudioService:
         Preconditions:
             * ``agent_id`` names a registered agent.
         """
-        manifest = self._get_registry().get(agent_id)  # type: ignore[attr-defined]
+        manifest = self._get_registry().get(agent_id)
         if manifest is None:
             raise LookupError(f"Unknown source agent: {agent_id}")
         return clone_from_manifest(manifest)
@@ -127,7 +135,7 @@ class AgentStudioService:
                 f"Agent is not ready to save — missing required fields: {', '.join(missing)}"
             )
         manifest = build_studio_agent_manifest(definition)
-        self._get_registry().register(manifest)  # type: ignore[attr-defined]
+        self._get_registry().register(manifest)
         return manifest
 
     # ── Helpers ────────────────────────────────────────────────────────────────

@@ -1,32 +1,22 @@
 """Hermetic route-level tests for the Agent Studio Stage-1 endpoints.
 
-A fresh ``FastAPI`` app mounts only the agent-studio router, and the route
-module's module-level ``_service`` is swapped for one wired to a scripted
-assistant + fake registry, so no live LLM, Postgres, or process-wide registry
-is touched.
+A fresh ``FastAPI`` app mounts only the agent-studio router, and the service is
+injected via FastAPI's ``dependency_overrides`` — wired to a scripted assistant +
+fake registry, so no live LLM, Postgres, or process-wide registry is touched.
+``backend/conftest.py`` already puts ``agents/`` on ``sys.path``; imports below
+rely on that rather than manipulating the path here.
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
-
-_backend = Path(__file__).resolve().parent.parent.parent
-if str(_backend) not in sys.path:
-    sys.path.insert(0, str(_backend))
-_agents = _backend / "agents"
-if str(_agents) not in sys.path:
-    sys.path.insert(0, str(_agents))
-
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_studio.assistant import AgentDesignerAgent
 from agent_studio.service import AgentStudioService
 from agent_studio.store import AgentStudioConversationStore
+from agent_studio.testing import FakeRegistry, seed_manifest
 
 _DRAFT_REPLY = """\
 Drafted it.
@@ -41,56 +31,27 @@ Drafted it.
 """
 
 
-class _FakeRegistry:
-    def __init__(self) -> None:
-        self.registered: dict[str, AgentManifest] = {}
-        self._seed: dict[str, AgentManifest] = {}
-
-    def seed(self, manifest: AgentManifest) -> None:
-        self._seed[manifest.id] = manifest
-
-    def get(self, agent_id: str) -> AgentManifest | None:
-        return self._seed.get(agent_id) or self.registered.get(agent_id)
-
-    def register(self, manifest: AgentManifest) -> None:
-        self.registered[manifest.id] = manifest
-
-
-def _seed_manifest() -> AgentManifest:
-    return AgentManifest(
-        id="blogging.planner",
-        team="blogging",
-        name="Planner",
-        summary="Plans blog outlines",
-        tags=["content"],
-        cognition=CognitionSpec(rule_packs=["default_guardrails"], tools=["web.search"]),
-        source=SourceInfo(entrypoint="x:run"),
-    )
-
-
 @pytest.fixture()
-def registry() -> _FakeRegistry:
-    reg = _FakeRegistry()
-    reg.seed(_seed_manifest())
+def registry() -> FakeRegistry:
+    reg = FakeRegistry()
+    reg.seed(seed_manifest())
     return reg
 
 
 @pytest.fixture()
-def client(registry: _FakeRegistry) -> TestClient:
-    import unified_api.routes.agent_studio as routes_mod
+def client(registry: FakeRegistry) -> TestClient:
+    from unified_api.routes.agent_studio import get_agent_studio_service, router
 
-    original = routes_mod._service
-    routes_mod._service = AgentStudioService(
+    service = AgentStudioService(
         assistant=AgentDesignerAgent(complete=lambda _s, _p: _DRAFT_REPLY),
         store=AgentStudioConversationStore(),
         registry_getter=lambda: registry,
     )
     app = FastAPI()
-    app.include_router(routes_mod.router)
-    try:
-        yield TestClient(app)
-    finally:
-        routes_mod._service = original
+    app.include_router(router)
+    app.dependency_overrides[get_agent_studio_service] = lambda: service
+    yield TestClient(app)
+    app.dependency_overrides.clear()
 
 
 def test_start_new_conversation(client: TestClient) -> None:
@@ -179,7 +140,7 @@ def test_clone_from_registry_unknown_is_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
-def test_save_agent_registers(client: TestClient, registry: _FakeRegistry) -> None:
+def test_save_agent_registers(client: TestClient, registry: FakeRegistry) -> None:
     resp = client.post(
         "/api/agent-studio/agents",
         json={"name": "Saver", "role": "Saves things", "tags": ["util"]},
@@ -193,3 +154,10 @@ def test_save_agent_registers(client: TestClient, registry: _FakeRegistry) -> No
 def test_save_agent_not_ready_is_400(client: TestClient) -> None:
     resp = client.post("/api/agent-studio/agents", json={"name": "OnlyName"})
     assert resp.status_code == 400
+
+
+def test_default_dependency_returns_module_service() -> None:
+    # The un-overridden dependency resolves the process-wide default service.
+    import unified_api.routes.agent_studio as routes_mod
+
+    assert routes_mod.get_agent_studio_service() is routes_mod._service

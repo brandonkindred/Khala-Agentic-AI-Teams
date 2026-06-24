@@ -8,41 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
 from agent_studio.assistant import AgentDesignerAgent
 from agent_studio.models import AgentDefinition
 from agent_studio.service import AgentStudioService
 from agent_studio.store import AgentStudioConversationStore
-
-
-class _FakeRegistry:
-    def __init__(self) -> None:
-        self.registered: dict[str, AgentManifest] = {}
-        self._seed: dict[str, AgentManifest] = {}
-
-    def seed(self, manifest: AgentManifest) -> None:
-        self._seed[manifest.id] = manifest
-
-    def get(self, agent_id: str) -> AgentManifest | None:
-        return self._seed.get(agent_id) or self.registered.get(agent_id)
-
-    def register(self, manifest: AgentManifest) -> None:
-        self.registered[manifest.id] = manifest
-
-
-def _seed_manifest() -> AgentManifest:
-    return AgentManifest(
-        id="blogging.planner",
-        team="blogging",
-        name="Planner",
-        summary="Plans blog outlines",
-        tags=["content"],
-        cognition=CognitionSpec(rule_packs=["default_guardrails"], tools=["web.search"]),
-        inputs=IOSchema(schema_ref="x:In"),
-        outputs=IOSchema(schema_ref="x:Out"),
-        source=SourceInfo(entrypoint="x:run"),
-    )
-
+from agent_studio.testing import FakeRegistry, seed_manifest
 
 _DRAFT_REPLY = """\
 Drafted it.
@@ -53,8 +23,8 @@ Drafted it.
 """
 
 
-def _service(reply: str = _DRAFT_REPLY) -> tuple[AgentStudioService, _FakeRegistry]:
-    registry = _FakeRegistry()
+def _service(reply: str = _DRAFT_REPLY) -> tuple[AgentStudioService, FakeRegistry]:
+    registry = FakeRegistry()
     assistant = AgentDesignerAgent(complete=lambda _s, _p: reply)
     svc = AgentStudioService(
         assistant=assistant,
@@ -89,7 +59,7 @@ def test_start_new_with_initial_message_runs_a_turn() -> None:
 
 def test_start_refine_clones_source() -> None:
     svc, registry = _service()
-    registry.seed(_seed_manifest())
+    registry.seed(seed_manifest())
     state = svc.start_conversation("refine", "blogging.planner", None)
     assert state.mode == "refine"
     assert state.definition.mode == "refine"
@@ -140,7 +110,7 @@ def test_send_message_without_block_leaves_definition() -> None:
 
 def test_clone_from_registry_returns_refine_draft() -> None:
     svc, registry = _service()
-    registry.seed(_seed_manifest())
+    registry.seed(seed_manifest())
     draft = svc.clone_from_registry("blogging.planner")
     assert draft.mode == "refine"
     assert draft.cloned_from == "blogging.planner"

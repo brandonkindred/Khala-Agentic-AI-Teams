@@ -49,7 +49,8 @@ def studio_agent_id(name: str) -> str:
     """
     assert name.strip(), "studio_agent_id: name must be non-empty"
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "agent"
-    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+    # Non-cryptographic: a short, stable suffix that disambiguates equal slugs.
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
     return f"{STUDIO_TEAM}.{slug}-{digest}"
 
 
