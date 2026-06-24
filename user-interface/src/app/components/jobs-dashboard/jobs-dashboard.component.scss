@@ -131,7 +131,7 @@
 
   &:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 2px var(--kh-accent);
+    box-shadow: 0 0 0 2px var(--kh-focus-ring);
   }
 
   &.active,
@@ -206,7 +206,7 @@
 
   &:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 2px var(--kh-accent);
+    box-shadow: 0 0 0 2px var(--kh-focus-ring);
   }
 
   &.selected,
@@ -322,7 +322,7 @@
 
       &:focus-visible {
         outline: none;
-        box-shadow: inset 0 0 0 2px var(--kh-accent);
+        box-shadow: inset 0 0 0 2px var(--kh-focus-ring);
       }
 
       // Status left-border indicators
