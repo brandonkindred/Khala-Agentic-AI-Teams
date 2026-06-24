@@ -37,7 +37,7 @@ import json
 import logging
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from strands import Agent, tool
@@ -104,34 +104,15 @@ class CodebaseIndex:
         - ``existing_codebase`` is the (already capped) pre-existing-code excerpt
           passed for context; it is exposed as the read-only pseudo-path
           ``<existing codebase>`` so the verifier can consult it like any file.
-        - ``_search_lines`` is a lowercased line index built once at construction
-          and never mutated afterwards, so the index stays read-only while
-          ``search`` runs concurrently across verification worker threads.
+        - The index is read-only after construction: no method mutates ``files``
+          or ``existing_codebase``, so it is safe to share across the parallel
+          verification worker threads.
     """
 
     files: Dict[str, str]
     existing_codebase: str = ""
-    _search_lines: List[Tuple[str, int, str, str]] = field(
-        init=False, repr=False, compare=False, default_factory=list
-    )
 
     EXISTING_CODEBASE_PATH = "<existing codebase>"
-
-    def __post_init__(self) -> None:
-        """Precompute the ``(path, lineno, text, lowercased)`` index ``search`` scans.
-
-        Postconditions:
-            - ``_search_lines`` holds one tuple per line of every readable source
-              (``_readable_sources`` order), with the line pre-lowercased once so
-              ``search`` never re-lowercases the corpus on each call. Built here
-              (single-threaded, before any verification fan-out), so it is set
-              before concurrent ``search`` readers exist.
-        """
-        self._search_lines = [
-            (path, lineno, line.rstrip(), line.lower())
-            for path, content in self._readable_sources()
-            for lineno, line in enumerate(content.splitlines(), start=1)
-        ]
 
     @classmethod
     def from_input(cls, input_data: CodeReviewInput) -> "CodebaseIndex":
@@ -190,25 +171,10 @@ class CodebaseIndex:
         """
         return [path for path, _ in self._readable_sources()]
 
-    def _suffix_matches(self, key: str) -> List[str]:
-        """File keys ``key`` selects by its final ``/``-segment (a bare name).
-
-        Preconditions:
-            - ``key`` is a non-blank, already-stripped path string.
-
-        Postconditions:
-            - Returns every stored path whose last ``/``-segment equals ``key``
-              with a leading ``./`` ignored (the model often cites a bare
-              ``main.py`` for ``app/services/main.py``). Order follows ``files``
-              insertion order; the result is a fresh list and never raises.
-        """
-        normalized = key.lstrip("./")
-        return [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
-
     def _resolve(self, key: str) -> Tuple[Optional[str], List[str]]:
         """Resolve a stripped ``key`` to ``(canonical_key_or_None, suffix_hits)``.
 
-        The one place suffix matching runs, shared by :meth:`resolve_path` and
+        The one place path resolution runs, shared by :meth:`resolve_path` and
         :meth:`read_file` so neither rescans. ``suffix_hits`` is returned so a
         caller can tell an absent path (empty) from an ambiguous one (>1) without
         a second scan.
@@ -222,7 +188,8 @@ class CodebaseIndex:
               one, or when ``key`` is blank.
             - ``(exact_key, [])`` on an exact file match.
             - ``(sole_hit, hits)`` when exactly one suffix match, else
-              ``(None, hits)`` — never raises.
+              ``(None, hits)``, where ``hits`` are the bare-name suffix matches —
+              never raises.
         """
         if not key:
             return None, []
@@ -230,7 +197,12 @@ class CodebaseIndex:
             return (self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None), []
         if key in self.files:
             return key, []
-        hits = self._suffix_matches(key)
+        # Bare-name fallback: the model often cites ``main.py`` for
+        # ``app/services/main.py``. Match every stored path whose final
+        # ``/``-segment equals ``key`` (a leading ``./`` ignored); a unique hit
+        # resolves, and the full list lets ``read_file`` distinguish ambiguity.
+        normalized = key.lstrip("./")
+        hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
         return (hits[0] if len(hits) == 1 else None), hits
 
     def resolve_path(self, path: str) -> Optional[str]:
@@ -304,11 +276,12 @@ class CodebaseIndex:
         if not needle:
             return []
         results: List[Tuple[str, int, str]] = []
-        for path, lineno, text, lowered in self._search_lines:
-            if needle in lowered:
-                results.append((path, lineno, text))
-                if len(results) >= max_matches:
-                    return results
+        for path, content in self._readable_sources():
+            for lineno, line in enumerate(content.splitlines(), start=1):
+                if needle in line.lower():
+                    results.append((path, lineno, line.rstrip()))
+                    if len(results) >= max_matches:
+                        return results
         return results
 
 
