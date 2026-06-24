@@ -361,12 +361,18 @@ describe('findOffenses detector', () => {
   });
 
   it('flags a var() with a low-contrast gray fallback', () => {
-    expect(findOffenses('.x { color: var(--mat-sys-on-surface-variant, #555); }')[0]).toMatch(/low-contrast fallback/);
-    expect(findOffenses('.x { color: var(--kh-text-muted, #71717a); }')[0]).toMatch(/low-contrast fallback/);
+    const r1 = findOffenses('.x { color: var(--mat-sys-on-surface-variant, #555); }');
+    expect(r1).toHaveLength(1);
+    expect(r1[0]).toMatch(/low-contrast fallback/);
+    const r2 = findOffenses('.x { color: var(--kh-text-muted, #71717a); }');
+    expect(r2).toHaveLength(1);
+    expect(r2[0]).toMatch(/low-contrast fallback/);
   });
 
   it('flags a var() with a non-token gray fallback', () => {
-    expect(findOffenses('.x { color: var(--something, #aaa); }')[0]).toMatch(/non-token gray fallback/);
+    const r = findOffenses('.x { color: var(--something, #aaa); }');
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatch(/non-token gray fallback/);
   });
 
   it('does not flag a var() with a kh token and no fallback', () => {
