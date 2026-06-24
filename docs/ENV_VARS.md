@@ -297,14 +297,18 @@ Scoped to the credential store only — it is deliberately **not** applied to th
 would cap legitimate long-running team queries.
 
 ### POSTGRES_PROBE_MAX_WORKERS
-Caps the number of concurrent `shared_postgres.bounded_probe` worker threads — the bounded offload
-behind the LLM Provider page and GitHub config-status reads. Default `4`, floor `1`. A probe normally
-completes in milliseconds and frees its slot immediately; the cap only bites when that many workers
-are already *stuck* (a Postgres that accepts the connection then stalls mid-query, which
-`connect_timeout` doesn't cover and the shared-pool `SELECT 1` has no `statement_timeout` for). Once
-the cap is reached, further config-status requests degrade to "unreachable" immediately instead of
-spawning more threads, so a sustained stall can't grow abandoned threads / held connections without
-bound.
+Caps the number of concurrent `shared_postgres.bounded_probe` worker threads **per surface** — the
+bounded offload behind the LLM Provider page and the GitHub config-status reads each get their own
+budget of this size, so a stall on one can't starve the other. Default `4`, floor `1`. A probe
+normally completes in milliseconds and frees its slot immediately; the cap only bites when that many
+workers for a surface are already *stuck* (a Postgres that accepts the connection then stalls
+mid-query). The probe `SELECT 1` (via a transaction-local `statement_timeout`) and the credential
+read are both query-bounded, so a stuck worker normally releases its connection well before the cap
+matters; the cap is the backstop for paths left unbounded (e.g. `POSTGRES_STATEMENT_TIMEOUT_MS=0`).
+Once a surface's cap is reached, its further config-status requests degrade to "unreachable"
+immediately instead of spawning more threads. **Read once** when each surface's semaphore is first
+created (a semaphore can't be resized), so unlike the timeout knobs this takes effect only on a fresh
+process — not mid-run.
 
 ### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
 Per-worker memory watchdog used by every `team_service` microservice

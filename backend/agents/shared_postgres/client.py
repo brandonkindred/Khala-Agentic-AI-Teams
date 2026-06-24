@@ -215,10 +215,14 @@ def check_connection(database: Optional[str] = None, *, timeout_s: float = 1.5) 
     Preconditions: none.
     Postconditions: returns ``False`` immediately when Postgres is disabled; otherwise
         acquires a pooled connection (waiting at most ``timeout_s`` for a free slot,
-        and bounded on the TCP connect by ``POSTGRES_CONNECT_TIMEOUT_S``), runs
-        ``SELECT 1``, and returns whether the result is ``(1,)``. Swallows every
-        error (disabled, psycopg missing, host down, pool exhausted, timeout) and
-        returns ``False`` — never raises. This is a read-only probe with no side
+        bounded on the TCP connect by ``POSTGRES_CONNECT_TIMEOUT_S``), runs ``SELECT 1``
+        under a transaction-local ``statement_timeout`` of ``timeout_s`` so a server that
+        accepts the connection then stalls mid-query cannot pin the pooled connection past
+        the budget, and returns whether the result is ``(1,)``. Swallows every error
+        (disabled, psycopg missing, host down, pool exhausted, connect/query timeout) and
+        returns ``False`` — never raises. The ``statement_timeout`` is ``SET LOCAL`` (via
+        ``set_config(..., is_local=true)``) so it scopes to the probe's transaction and
+        never leaks onto the next user of the pooled connection. Read-only with no side
         effects beyond opening/reusing the shared pool.
     """
     if not is_postgres_enabled():
@@ -229,10 +233,20 @@ def check_connection(database: Optional[str] = None, *, timeout_s: float = 1.5) 
         # exposes no timeout knob. Mirrors the bounded probe in the unified API
         # health loop, which now delegates here.
         pool = _get_or_create_pool(database)
-        with pool.connection(timeout=timeout_s) as conn, conn.cursor() as cur:
-            cur.execute("SELECT 1")
-            row = cur.fetchone()
-            return row is not None and row[0] == 1
+        stmt_timeout_ms = max(1, int(timeout_s * 1000))
+        with pool.connection(timeout=timeout_s) as conn:
+            # Bound the query itself, not just slot acquisition: a post-connect stall on
+            # ``SELECT 1`` is otherwise unbounded (the shared pool sets no statement_timeout
+            # for team queries), so it would hold this pooled connection until the socket
+            # dies. ``set_config(..., is_local=true)`` == ``SET LOCAL`` — transaction-scoped,
+            # so it is rolled back with the probe transaction and never leaks.
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    "SELECT set_config('statement_timeout', %s, true)", (str(stmt_timeout_ms),)
+                )
+                cur.execute("SELECT 1")
+                row = cur.fetchone()
+                return row is not None and row[0] == 1
     except Exception:  # noqa: BLE001 - a probe must never raise; any failure is "unreachable"
         return False
 
@@ -261,13 +275,15 @@ def default_probe_budget() -> float:
 
     Preconditions: none.
     Postconditions: returns ``connect_timeout + statement_timeout + 1.0`` seconds — large
-        enough that, on the CREDENTIAL-STORE path (where ``statement_timeout`` bounds the
-        query), a worker finishes (releasing its lock) before the caller's
-        :func:`bounded_probe` abandons it, and that a within-bounds slow read is not falsely
-        reported unreachable. On the shared-pool ``SELECT 1`` path (no ``statement_timeout``)
-        or when ``statement_timeout`` is disabled (0), the query is unbounded and this is a
-        best-effort cap, not a guarantee — :func:`bounded_probe` caps the worker count for
-        that case. Never raises.
+        enough that a worker bounded by the TCP connect (``connect_timeout``) and the query
+        (``statement_timeout``: the credential store applies ``POSTGRES_STATEMENT_TIMEOUT_MS``,
+        the shared-pool ``SELECT 1`` probe applies its own per-call bound — see
+        :func:`check_connection`) finishes, releasing any lock/connection it holds, before
+        the caller's :func:`bounded_probe` abandons it, and that a within-bounds slow read is
+        not falsely reported unreachable. When ``statement_timeout`` is disabled (0) the
+        credential-store query is unbounded, so this is then a best-effort cap, not a
+        guarantee — :func:`bounded_probe`'s per-surface worker cap is the backstop. Never
+        raises.
     """
     return float(_connect_timeout()) + statement_timeout_ms() / 1000.0 + 1.0
 
@@ -276,29 +292,43 @@ _T = TypeVar("_T")
 
 # Concurrency cap on in-flight bounded_probe worker threads. A probe normally completes
 # in milliseconds and releases its slot immediately; the cap only bites when that many
-# workers are already STUCK (a Postgres that accepts the connection then stalls mid-query,
-# which connect_timeout doesn't cover and the shared-pool SELECT 1 has no statement_timeout
-# for). Capping bounds the abandoned-thread / held-connection count under a sustained
-# stall instead of spawning one unbounded daemon thread per request.
-_PROBE_SEM: Optional[threading.Semaphore] = None
+# workers are already STUCK (a Postgres that accepts the connection then stalls). Capping
+# bounds the abandoned-thread / held-connection count under a sustained stall instead of
+# spawning one unbounded daemon thread per request. Keyed PER CALLER (by ``label``) so a
+# stall on one surface (e.g. the GitHub credential read) can't starve the cap an unrelated,
+# healthy surface (e.g. the LLM Provider page SELECT 1) needs.
+_PROBE_SEMS: dict[str, threading.Semaphore] = {}
 _PROBE_SEM_LOCK = threading.Lock()
 
 
-def _probe_semaphore() -> threading.Semaphore:
-    """Return the lazily-sized probe-concurrency semaphore.
+class _ProbeWorkerError(Exception):
+    """Wrapper relayed to the awaiter when a probe worker hits a non-``Exception``.
 
-    Preconditions: none.
-    Postconditions: returns a process-wide ``Semaphore`` whose count is
-        ``POSTGRES_PROBE_MAX_WORKERS`` (default 4, floor 1), created once. Never raises.
+    Lets :func:`bounded_probe`'s ``except Exception`` degrade-and-log path fire for a
+    ``BaseException`` (e.g. ``SystemExit``) without that ``BaseException`` escaping the
+    awaiting coroutine — the original is re-raised inside the worker thread, not relayed.
     """
-    global _PROBE_SEM
-    if _PROBE_SEM is None:
+
+
+def _probe_semaphore(key: str) -> threading.Semaphore:
+    """Return the lazily-created probe-concurrency semaphore for ``key``.
+
+    Preconditions: ``key`` is a stable per-caller string (the ``bounded_probe`` ``label``).
+    Postconditions: returns a process-wide ``Semaphore`` for ``key`` whose count is
+        ``POSTGRES_PROBE_MAX_WORKERS`` (default 4, floor 1), created once per key. The count
+        is read ONCE when the key's semaphore is first created and fixed thereafter — a
+        ``Semaphore`` cannot be resized, so unlike the per-call env knobs (connect/statement
+        timeout) a runtime change to ``POSTGRES_PROBE_MAX_WORKERS`` takes effect only in a
+        fresh process. Never raises.
+    """
+    sem = _PROBE_SEMS.get(key)
+    if sem is None:
         with _PROBE_SEM_LOCK:
-            if _PROBE_SEM is None:
-                _PROBE_SEM = threading.Semaphore(
-                    parse_int("POSTGRES_PROBE_MAX_WORKERS", 4, minimum=1)
-                )
-    return _PROBE_SEM
+            sem = _PROBE_SEMS.get(key)
+            if sem is None:
+                sem = threading.Semaphore(parse_int("POSTGRES_PROBE_MAX_WORKERS", 4, minimum=1))
+                _PROBE_SEMS[key] = sem
+    return sem
 
 
 def _drain_future(fut: asyncio.Future) -> None:
@@ -325,29 +355,33 @@ async def bounded_probe(
     failure" pattern shared by the LLM Provider page and the GitHub config panel.
 
     Preconditions: ``fn`` is a no-arg blocking callable; ``on_failure`` is a no-arg
-        callable returning the degraded result (same type as ``fn``).
-    Postconditions: returns ``fn()``'s result; on timeout or any ``Exception`` from ``fn``
-        (a non-``Exception`` ``BaseException`` kills the worker thread instead of being
-        relayed), logs the cause and returns ``on_failure()``. ``budget`` defaults to
+        callable returning the degraded result (same type as ``fn``); ``label`` is a stable
+        per-caller string (it keys the concurrency cap, so distinct surfaces must pass
+        distinct labels).
+    Postconditions: returns ``fn()``'s result; on timeout or any exception from ``fn``, logs
+        the cause and returns ``on_failure()`` (a non-``Exception`` ``BaseException`` is
+        relayed WRAPPED so it degrades like any failure yet does not escape this coroutine,
+        and is re-raised inside the worker thread). ``budget`` defaults to
         :func:`default_probe_budget`. The call ALWAYS returns within ``budget`` seconds of
         wall-clock even if ``fn`` keeps blocking: ``fn`` runs in a detached daemon thread
         (NOT the loop executor — ``asyncio.wait_for(asyncio.to_thread(...))`` does not bound
         wall-clock, since an executor future can't be cancelled) and resolves an
         ``asyncio.shield``-ed future via a loop-closed-safe callback. Concurrent workers are
-        capped at ``POSTGRES_PROBE_MAX_WORKERS``; once that many are stuck, further calls
-        degrade immediately rather than spawn more threads, so a sustained stall can't grow
-        threads / held connections without bound. A timed-out worker is abandoned: it
-        releases its DB connection / lock only when ``fn`` finally returns — bounded by
-        ``statement_timeout`` on the credential-store path, but NOT on the shared-pool
-        ``SELECT 1`` path (only ``connect_timeout`` bounds that), which is exactly why the
-        worker count is capped. Never raises.
+        capped PER ``label`` at ``POSTGRES_PROBE_MAX_WORKERS``; once that many are stuck for a
+        surface, its further calls degrade immediately rather than spawn more threads, so a
+        sustained stall can't grow threads / held connections without bound and one surface's
+        stall can't starve another's cap. A timed-out worker is abandoned: it releases its DB
+        connection / lock only when ``fn`` finally returns — bounded by ``statement_timeout``
+        on both the credential-store path and the shared-pool ``SELECT 1`` probe (see
+        :func:`check_connection`); the per-surface cap is the backstop for any path that
+        leaves the query unbounded (e.g. ``POSTGRES_STATEMENT_TIMEOUT_MS=0``). Never raises.
     """
     if budget is None:
         budget = default_probe_budget()
-    sem = _probe_semaphore()
+    sem = _probe_semaphore(label)
     if not sem.acquire(blocking=False):
-        # That many probes are already stuck → the store is evidently not answering. Don't
-        # pile on another thread; degrade now.
+        # That many probes for this surface are already stuck → the store is evidently not
+        # answering. Don't pile on another thread; degrade now.
         logger.warning(
             "%s skipped: probe concurrency cap reached; returning degraded result", label
         )
@@ -376,14 +410,27 @@ async def bounded_probe(
         try:
             try:
                 value = fn()
-            except Exception as e:  # noqa: BLE001 - relayed to the awaiter; degrades the request
-                _safe_settle(None, e)
+            except BaseException as e:  # noqa: BLE001 - relayed to the awaiter; degrades the request
+                # Relay Exceptions as-is; relay a non-Exception BaseException (SystemExit,
+                # etc.) WRAPPED so the awaiter degrades immediately (instead of waiting the
+                # full budget) yet the BaseException doesn't escape the awaiting coroutine,
+                # then re-raise the original so the worker thread still terminates on it.
+                _safe_settle(None, e if isinstance(e, Exception) else _ProbeWorkerError(repr(e)))
+                if not isinstance(e, Exception):
+                    raise
             else:
                 _safe_settle(value, None)
         finally:
             sem.release()
 
-    threading.Thread(target=_runner, name="bounded_probe", daemon=True).start()
+    try:
+        threading.Thread(target=_runner, name="bounded_probe", daemon=True).start()
+    except BaseException:  # noqa: BLE001 - the worker never ran, so release the slot here
+        # _runner (which owns sem.release()) never started, so the slot would leak and the
+        # exception would escape, breaking "Never raises". Release and degrade instead.
+        sem.release()
+        logger.exception("%s could not start probe worker; returning degraded result", label)
+        return on_failure()
     try:
         # shield so a timeout cancels only our wait, never the future the detached thread
         # will later resolve (which would raise InvalidStateError in that thread).

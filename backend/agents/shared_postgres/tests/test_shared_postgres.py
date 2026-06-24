@@ -813,27 +813,115 @@ def test_bounded_probe_degrades_on_fn_exception():
     assert _run(client_mod.bounded_probe(boom, on_failure=lambda: "F", budget=0.5)) == "F"
 
 
+def _bounded_probe_threads():
+    import threading
+
+    return [t for t in threading.enumerate() if t.name == "bounded_probe"]
+
+
 def test_bounded_probe_caps_concurrent_workers(monkeypatch):
-    # Exhaust the semaphore (simulating that-many stuck probes); the next call must degrade
-    # immediately instead of spawning another thread — even with a generous budget.
+    # Exhaust the semaphore for a surface (simulating that-many stuck probes); the next call
+    # for that surface must degrade immediately WITHOUT spawning another thread — even with a
+    # generous budget.
+    import threading
     import time
 
-    monkeypatch.setattr(client_mod, "_PROBE_SEM", __import__("threading").Semaphore(1))
-    client_mod._PROBE_SEM.acquire()  # the one slot is now "stuck"
+    sem = threading.Semaphore(1)
+    sem.acquire()  # the one slot is now "stuck"
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {"capped": sem})
+    before = len(_bounded_probe_threads())
     t0 = time.monotonic()
-    result = _run(client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "CAP", budget=5.0))
+    result = _run(
+        client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "CAP", budget=5.0, label="capped")
+    )
     elapsed = time.monotonic() - t0
     assert result == "CAP"
     assert elapsed < 0.5  # did not wait on the (full) budget; degraded at once
+    # The cap must short-circuit BEFORE spawning a worker, not spawn-then-degrade.
+    assert len(_bounded_probe_threads()) == before
 
 
-def test_bounded_probe_survives_closed_loop_settle():
-    # A worker that finishes AFTER the loop is gone must not crash: _safe_settle swallows
-    # the "Event loop is closed" RuntimeError. Run a timed-out probe, then let the worker
-    # finish after asyncio.run() has torn the loop down.
+def test_bounded_probe_cap_is_per_label(monkeypatch):
+    # A stall on one surface must not starve the cap of an unrelated, healthy surface: the
+    # two labels get independent semaphores.
+    import threading
+
+    stuck = threading.Semaphore(1)
+    stuck.acquire()
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {"surface-a": stuck})
+    # "surface-a" is saturated → degrades; "surface-b" is untouched → its probe runs.
+    assert (
+        _run(client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "CAP", label="surface-a"))
+        == "CAP"
+    )
+    assert (
+        _run(client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "CAP", label="surface-b"))
+        == "ok"
+    )
+
+
+def test_bounded_probe_releases_slot_when_thread_start_fails(monkeypatch):
+    # If Thread.start() raises (resource exhaustion), the worker's finally never runs, so
+    # bounded_probe must release the slot itself and degrade — never leak the slot and never
+    # let the exception escape ("Never raises").
+    import threading
+
+    sem = threading.Semaphore(2)
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {"flaky": sem})
+
+    real_thread = threading.Thread
+
+    def _boom_thread(*a, **k):
+        t = real_thread(*a, **k)
+        t.start = lambda: (_ for _ in ()).throw(RuntimeError("can't start new thread"))
+        return t
+
+    monkeypatch.setattr(threading, "Thread", _boom_thread)
+    result = _run(
+        client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "F", budget=0.5, label="flaky")
+    )
+    assert result == "F"  # degraded, did not raise
+    # Both slots are free again (the acquired one was released on the failed start).
+    assert sem.acquire(blocking=False) and sem.acquire(blocking=False)
+
+
+def test_bounded_probe_degrades_on_base_exception(monkeypatch):
+    # A non-Exception BaseException from fn must degrade the request (not hang the full
+    # budget) AND not escape the coroutine; the original is re-raised inside the worker
+    # thread (captured here via excepthook so it is asserted rather than leaked as a warning).
+    import threading
+    import time
+
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {"be": threading.Semaphore(4)})
+    thread_errors = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_type))
+
+    def _boom():
+        raise SystemExit("fatal")
+
+    t0 = time.monotonic()
+    result = _run(client_mod.bounded_probe(_boom, on_failure=lambda: "F", budget=5.0, label="be"))
+    elapsed = time.monotonic() - t0
+    assert result == "F"
+    assert elapsed < 1.0  # relayed immediately, NOT after the 5s budget
+    # Give the worker a moment to re-raise, then confirm it terminated on the original type.
+    deadline = time.monotonic() + 2.0
+    while not thread_errors and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert thread_errors == [SystemExit]
+
+
+def test_bounded_probe_survives_closed_loop_settle(monkeypatch):
+    # A worker that finishes AFTER the loop is gone must not crash: _safe_settle swallows the
+    # "Event loop is closed" RuntimeError. Capture any uncaught worker-thread exception via
+    # threading.excepthook and assert there was none — `done == [True]` alone would pass even
+    # if the swallow were removed (daemon-thread exceptions don't fail the test).
+    import threading
     import time
 
     done = []
+    thread_errors = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_type))
 
     def _slow():
         time.sleep(0.3)
@@ -841,6 +929,10 @@ def test_bounded_probe_survives_closed_loop_settle():
         return "late"
 
     assert _run(client_mod.bounded_probe(_slow, on_failure=lambda: "F", budget=0.05)) == "F"
-    # Let the abandoned worker fire its call_soon_threadsafe against the now-closed loop.
-    time.sleep(0.5)
-    assert done == [True]  # the worker ran to completion without an uncaught crash
+    # Poll (generous ceiling) until the abandoned worker fires call_soon_threadsafe against
+    # the now-closed loop, instead of a fixed sleep that can flake on a slow CI runner.
+    deadline = time.monotonic() + 3.0
+    while not done and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert done == [True]  # the worker ran to completion
+    assert thread_errors == []  # _safe_settle swallowed the closed-loop RuntimeError
