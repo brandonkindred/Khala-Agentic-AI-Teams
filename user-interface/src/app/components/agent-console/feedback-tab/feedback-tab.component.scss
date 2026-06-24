@@ -29,7 +29,7 @@
   }
 
   &__empty {
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     padding: 24px;
     text-align: center;
   }
@@ -89,7 +89,7 @@
   }
 
   &__link-label {
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 
   &__link-value {

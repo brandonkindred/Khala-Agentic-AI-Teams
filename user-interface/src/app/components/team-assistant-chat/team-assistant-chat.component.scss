@@ -58,7 +58,7 @@
 
   .panel-subtitle {
     font-size: 0.8125rem;
-    color: var(--kh-text-muted, #8b949e);
+    color: var(--kh-text-muted);
     margin-left: auto;
   }
 }
@@ -106,7 +106,7 @@
 }
 
 .message-content { white-space: pre-wrap; word-break: break-word; }
-.message-time { font-size: 0.6875rem; color: var(--kh-text-muted, #8b949e); margin-top: 4px; }
+.message-time { font-size: 0.6875rem; color: var(--kh-text-muted); margin-top: 4px; }
 
 .typing-indicator {
   display: flex; gap: 4px; padding: 4px 0;
@@ -204,7 +204,7 @@
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--kh-text-muted, #8b949e);
+  color: var(--kh-text-muted);
 
   .required-marker {
     color: #58a6ff;
@@ -221,7 +221,7 @@
     font-size: 16px;
     width: 16px;
     height: 16px;
-    color: var(--kh-text-muted, #8b949e);
+    color: var(--kh-text-muted);
   }
 }
 
@@ -238,7 +238,7 @@
 
   .value-empty {
     font-size: 0.8125rem;
-    color: var(--kh-text-muted, #8b949e);
+    color: var(--kh-text-muted);
     font-style: italic;
   }
 }
@@ -267,7 +267,7 @@
 
 .no-fields-hint {
   font-size: 0.875rem;
-  color: var(--kh-text-muted, #8b949e);
+  color: var(--kh-text-muted);
   font-style: italic;
   text-align: center;
   padding: 24px 16px;
@@ -301,7 +301,7 @@
 
   .missing-label {
     font-size: 0.75rem;
-    color: var(--kh-text-muted, #8b949e);
+    color: var(--kh-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
