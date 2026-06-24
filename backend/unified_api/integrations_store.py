@@ -58,27 +58,8 @@ from unified_api.integration_credentials import (
     get_credential,
     set_credential,
 )
-from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
-
-#: Team slug recorded on profile associations for integration configs.
-_INTEGRATIONS_TEAM = "integrations"
-
-
-def _link_integration_to_profile(service: str, enabled: bool) -> None:
-    """Best-effort: link an *enabled* integration config to the default profile.
-
-    Only enabled configs are linked: saving a disabled config records nothing, so
-    the association registry doesn't accrue links to integrations the user has
-    turned off. The integration is identified by its service name (``slack``,
-    ``github``, ``medium``); re-saving an enabled config is idempotent.
-    ``record_association_safe`` never raises, so a profile-link failure can't break
-    saving integration config.
-    """
-    if not enabled:
-        return
-    record_association_safe(ArtifactType.INTEGRATION, _INTEGRATIONS_TEAM, service, label=service)
 
 
 _DEFAULT_CACHE_DIR = ".agent_cache"
@@ -260,7 +241,6 @@ def set_slack_config(
             "bot_user_id": bot_user_id or existing.get("bot_user_id", ""),
         }
         _write_raw(data)
-    _link_integration_to_profile("slack", enabled)
 
 
 def set_slack_oauth_token(
@@ -411,7 +391,6 @@ def set_medium_config(
             "linked_name": str(existing.get("linked_name", "")).strip(),
         }
         _write_raw(data)
-    _link_integration_to_profile("medium", enabled)
 
 
 def set_medium_google_oauth_identity(
@@ -600,7 +579,6 @@ def set_github_config(
             "repo_path": repo_path.strip() or existing.get("repo_path", ""),
         }
         _write_raw(data)
-    _link_integration_to_profile("github", enabled)
 
 
 def clear_github_config() -> None:

@@ -26,7 +26,6 @@ const ARTIFACT_GROUPS: { type: string; label: string; icon: string }[] = [
   { type: 'blog_post', label: 'Blog Posts', icon: 'article' },
   { type: 'project', label: 'Projects', icon: 'terminal' },
   { type: 'agentic_team', label: 'Agentic Teams', icon: 'groups' },
-  { type: 'integration', label: 'Integrations', icon: 'power' },
 ];
 
 /**

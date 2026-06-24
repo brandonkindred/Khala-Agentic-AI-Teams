@@ -11,8 +11,10 @@ later without a data-model change.
 - Stores the editable profile (`display_name`, `email`, `bio`, free-form
   `preferences`) in Postgres.
 - Records links between the profile and artifacts produced by other teams —
-  brands, blog posts, projects, agentic teams, and integration configs — without
-  copying any data. A link is just `(user_id, artifact_type, team, artifact_id)`.
+  brands, blog posts, projects, and agentic teams — without copying any data. A
+  link is just `(user_id, artifact_type, team, artifact_id)`. (Integrations are
+  surfaced via their own status-aware Integrations panel, not the registry, so
+  they are intentionally not recorded as associations.)
 
 ## Layout
 
@@ -39,8 +41,7 @@ record_association_safe(ArtifactType.BRAND, "branding", brand.id, label=brand.na
 ```
 
 Existing call sites: branding `create_brand`, blogging `create_blog_job`,
-planning-v3 / coding-team `create_job`, agentic `create_team`, and the
-integration setters in `unified_api/integrations_store.py`.
+planning-v3 / coding-team `create_job`, and agentic `create_team`.
 
 ## API
 

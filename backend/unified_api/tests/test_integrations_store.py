@@ -249,20 +249,3 @@ def test_clear_medium_session_storage_removes_disk_file(tmp_path: Path, monkeypa
     cfg = store.get_medium_config()
     assert cfg["session_configured"] is False
 
-
-def test_link_integration_to_profile_gated_on_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """_link_integration_to_profile records an association only when enabled."""
-    store, _ = _reload_modules(tmp_path, monkeypatch)
-    calls: list[tuple] = []
-    monkeypatch.setattr(store, "record_association_safe", lambda *a, **k: calls.append((a, k)))
-
-    # Disabled config records nothing — the registry doesn't accrue disabled links.
-    store._link_integration_to_profile("slack", enabled=False)
-    assert calls == []
-
-    # Enabled config records exactly one association for that service.
-    store._link_integration_to_profile("slack", enabled=True)
-    assert len(calls) == 1
-    args, kwargs = calls[0]
-    assert args[1] == "integrations" and args[2] == "slack"
-    assert kwargs.get("label") == "slack"
