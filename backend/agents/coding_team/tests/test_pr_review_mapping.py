@@ -127,43 +127,84 @@ def test_map_in_diff_line_becomes_inline_comment() -> None:
     ]
 
 
-def test_map_out_of_diff_line_goes_to_body() -> None:
+def test_map_out_of_diff_line_becomes_file_level_comment() -> None:
+    # The file changed but the cited line is not in the diff: the finding attaches
+    # to the file as a whole (no fabricated line) rather than becoming a leftover.
     valid = {"app/main.py": {2}}
     issues = [_Issue(file_path="app/main.py", line=99)]
-    inline, leftover = map_issues_to_comments(issues, valid)
-    assert inline == []
-    assert leftover == issues
+    comments, leftover = map_issues_to_comments(issues, valid)
+    assert leftover == []
+    assert comments == [
+        {"path": "app/main.py", "subject_type": "file", "body": format_comment_body(issues[0])}
+    ]
 
 
-def test_map_missing_line_goes_to_body() -> None:
+def test_map_missing_line_becomes_file_level_comment() -> None:
     valid = {"app/main.py": {2}}
     issues = [_Issue(file_path="app/main.py", line=None)]
-    inline, leftover = map_issues_to_comments(issues, valid)
-    assert inline == []
-    assert leftover == issues
+    comments, leftover = map_issues_to_comments(issues, valid)
+    assert leftover == []
+    assert comments == [
+        {"path": "app/main.py", "subject_type": "file", "body": format_comment_body(issues[0])}
+    ]
 
 
 def test_map_normalizes_leading_dot_slash() -> None:
     valid = {"app/main.py": {3}}
     issues = [_Issue(file_path="./app/main.py", line=3)]
-    inline, leftover = map_issues_to_comments(issues, valid)
-    assert len(inline) == 1
-    assert inline[0]["path"] == "app/main.py"
+    comments, leftover = map_issues_to_comments(issues, valid)
+    assert len(comments) == 1
+    assert comments[0]["path"] == "app/main.py"
+    assert comments[0]["line"] == 3
 
 
 def test_map_basename_fallback_when_unique() -> None:
     valid = {"src/app/main.py": {4}}
     issues = [_Issue(file_path="main.py", line=4)]
-    inline, _ = map_issues_to_comments(issues, valid)
-    assert inline[0]["path"] == "src/app/main.py"
+    comments, _ = map_issues_to_comments(issues, valid)
+    assert comments[0]["path"] == "src/app/main.py"
 
 
-def test_map_unknown_file_goes_to_body() -> None:
+def test_map_unknown_file_goes_to_leftover() -> None:
+    # The file is not in the diff at all, so it can't be a review comment (line- or
+    # file-level): it falls back to a standalone conversation comment.
     valid = {"app/main.py": {2}}
     issues = [_Issue(file_path="other.py", line=2)]
-    inline, leftover = map_issues_to_comments(issues, valid)
-    assert inline == []
+    comments, leftover = map_issues_to_comments(issues, valid)
+    assert comments == []
     assert leftover == issues
+
+
+def test_map_no_file_goes_to_leftover() -> None:
+    # A finding naming no file can't anchor to the review at all.
+    valid = {"app/main.py": {2}}
+    issues = [_Issue(file_path="", line=2)]
+    comments, leftover = map_issues_to_comments(issues, valid)
+    assert comments == []
+    assert leftover == issues
+
+
+def test_map_mixed_findings_split_three_ways() -> None:
+    # One in-diff line, one off-diff line on a changed file, one unknown file:
+    # inline + file-level review comments, plus a single leftover.
+    valid = {"app/main.py": {2, 5}}
+    in_diff = _Issue(file_path="app/main.py", line=5, description="anchored")
+    off_diff = _Issue(file_path="app/main.py", line=99, description="file-level")
+    unknown = _Issue(file_path="gone.py", line=2, description="leftover")
+    comments, leftover = map_issues_to_comments([in_diff, off_diff, unknown], valid)
+    assert leftover == [unknown]
+    assert {
+        "path": "app/main.py",
+        "line": 5,
+        "side": "RIGHT",
+        "body": format_comment_body(in_diff),
+    } in comments
+    assert {
+        "path": "app/main.py",
+        "subject_type": "file",
+        "body": format_comment_body(off_diff),
+    } in comments
+    assert len(comments) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +257,13 @@ def test_inline_comment_to_timeline_body_drops_nonpositive_line() -> None:
     # `path:0`; it falls back to just the path.
     comment = {"path": "a.py", "line": 0, "body": "**[HIGH] logic** — boom"}
     assert inline_comment_to_timeline_body(comment) == "`a.py` — **[HIGH] logic** — boom"
+
+
+def test_inline_comment_to_timeline_body_file_level_has_path_only() -> None:
+    # A dropped file-level comment carries no `line`; it re-posts with a bare
+    # `path` location prefix.
+    comment = {"path": "a.py", "subject_type": "file", "body": "**[LOW] logic** — boom"}
+    assert inline_comment_to_timeline_body(comment) == "`a.py` — **[LOW] logic** — boom"
 
 
 # ---------------------------------------------------------------------------
