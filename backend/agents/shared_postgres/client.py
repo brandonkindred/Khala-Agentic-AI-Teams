@@ -326,10 +326,24 @@ _PROBE_SEM_LOCK = threading.Lock()
 # The platform's real probe surfaces are a small fixed set of static labels. Bound the
 # registry so a (mis)caller passing a DYNAMIC label can't grow it without limit (a slow
 # memory leak) or defeat the cap (a fresh full budget per unique label → unbounded threads).
-# Past this many distinct keys, further labels share one overflow semaphore: memory stays
-# bounded and the cap still bites (it degrades to coupling those callers, which is safe).
-_PROBE_SEM_MAX_KEYS = 32
-_PROBE_SEM_OVERFLOW_KEY = "__overflow__"
+# Past ``POSTGRES_PROBE_MAX_KEYS`` distinct labels, further labels share one DEDICATED
+# overflow semaphore (a module-level object, NOT an entry in ``_PROBE_SEMS`` — so no caller
+# label can collide with it): memory stays bounded and the cap still bites.
+_PROBE_OVERFLOW_SEM: Optional[threading.Semaphore] = None
+
+
+def _make_probe_semaphore() -> threading.Semaphore:
+    """Create a fresh probe-concurrency semaphore sized by ``POSTGRES_PROBE_MAX_WORKERS``."""
+    return threading.Semaphore(parse_int("POSTGRES_PROBE_MAX_WORKERS", 4, minimum=1))
+
+
+def _probe_max_keys() -> int:
+    """Max distinct per-label probe semaphores before labels collapse onto overflow.
+
+    Preconditions: none.
+    Postconditions: returns ``POSTGRES_PROBE_MAX_KEYS`` (default 32, floor 1). Never raises.
+    """
+    return parse_int("POSTGRES_PROBE_MAX_KEYS", 32, minimum=1)
 
 
 class _ProbeWorkerError(Exception):
@@ -350,25 +364,30 @@ def _probe_semaphore(key: str) -> threading.Semaphore:
         is read ONCE when the key's semaphore is first created and fixed thereafter — a
         ``Semaphore`` cannot be resized, so unlike the per-call env knobs (connect/statement
         timeout) a runtime change to ``POSTGRES_PROBE_MAX_WORKERS`` takes effect only in a
-        fresh process. The number of distinct keys is bounded by ``_PROBE_SEM_MAX_KEYS``;
-        beyond it, keys collapse onto a shared overflow semaphore so a dynamic-label caller
-        can neither leak memory nor escape the cap. Never raises.
+        fresh process. Distinct keys are bounded by ``POSTGRES_PROBE_MAX_KEYS``; beyond it,
+        further labels share one dedicated overflow semaphore so a dynamic-label caller can
+        neither leak memory nor escape the cap. Two trade-offs of that backstop, both
+        confined to the misuse regime (the platform's real surfaces are a small fixed set
+        well under the ceiling): (1) overflow callers share one budget, so they lose the
+        per-surface isolation static callers keep; (2) an uncached (e.g. per-request
+        dynamic) label can't hit the lock-free fast path, so each such call takes
+        ``_PROBE_SEM_LOCK``. Never raises.
     """
     sem = _PROBE_SEMS.get(key)
     if sem is not None:
         return sem
+    global _PROBE_OVERFLOW_SEM
     with _PROBE_SEM_LOCK:
         sem = _PROBE_SEMS.get(key)
         if sem is not None:
             return sem
-        if len(_PROBE_SEMS) >= _PROBE_SEM_MAX_KEYS:
-            # Registry full → don't mint a new per-key budget; fall back to the shared
-            # overflow slot (created on first use like any other key).
-            key = _PROBE_SEM_OVERFLOW_KEY
-            sem = _PROBE_SEMS.get(key)
-            if sem is not None:
-                return sem
-        sem = threading.Semaphore(parse_int("POSTGRES_PROBE_MAX_WORKERS", 4, minimum=1))
+        if len(_PROBE_SEMS) >= _probe_max_keys():
+            # Registry full → don't mint a new per-key budget; share the dedicated overflow
+            # semaphore. It lives outside _PROBE_SEMS, so no caller label can collide with it.
+            if _PROBE_OVERFLOW_SEM is None:
+                _PROBE_OVERFLOW_SEM = _make_probe_semaphore()
+            return _PROBE_OVERFLOW_SEM
+        sem = _make_probe_semaphore()
         _PROBE_SEMS[key] = sem
         return sem
 

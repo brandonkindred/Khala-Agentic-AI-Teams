@@ -310,6 +310,17 @@ immediately instead of spawning more threads. **Read once** when each surface's 
 created (a semaphore can't be resized), so unlike the timeout knobs this takes effect only on a fresh
 process — not mid-run.
 
+### POSTGRES_PROBE_MAX_KEYS
+Caps how many *distinct* per-surface `bounded_probe` budgets (see `POSTGRES_PROBE_MAX_WORKERS`) the
+process keeps. Default `32`, floor `1`. The platform's real probe surfaces are a small fixed set of
+static labels, so this is a guard against a (mis)caller deriving a probe label from request data:
+without it, each unique label would grow an internal registry without bound and mint a fresh full
+worker budget, defeating the cap. Past this many distinct labels, further labels share one dedicated
+**overflow** budget. Two consequences, both confined to that misuse regime: overflow callers lose the
+"per surface" isolation `POSTGRES_PROBE_MAX_WORKERS` otherwise gives (a stall on one overflow surface
+can starve another), and an uncached/dynamic label no longer hits the lock-free fast path. Raise this
+only if you genuinely run more than 32 distinct *static* probe labels.
+
 ### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
 Per-worker memory watchdog used by every `team_service` microservice
 (`shared_observability.process_health`). A daemon thread samples the container's

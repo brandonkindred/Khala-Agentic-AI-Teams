@@ -876,17 +876,24 @@ def test_bounded_probe_caps_concurrent_workers(monkeypatch):
 def test_probe_semaphore_bounds_distinct_keys(monkeypatch):
     # A flood of DISTINCT labels must not grow the registry without bound or hand each label
     # its own fresh budget (which would defeat the cap); past the ceiling they collapse onto
-    # one shared overflow semaphore.
+    # one dedicated overflow semaphore that lives OUTSIDE _PROBE_SEMS (no label can collide).
     monkeypatch.setattr(client_mod, "_PROBE_SEMS", {})
-    monkeypatch.setattr(client_mod, "_PROBE_SEM_MAX_KEYS", 3)
+    monkeypatch.setattr(client_mod, "_PROBE_OVERFLOW_SEM", None)
+    monkeypatch.setenv("POSTGRES_PROBE_MAX_KEYS", "3")
     sems = [client_mod._probe_semaphore(f"label-{i}") for i in range(10)]
-    # At most MAX_KEYS distinct per-key entries + the single overflow entry.
-    assert len(client_mod._PROBE_SEMS) <= 3 + 1
-    # Every label past the ceiling shares the one overflow semaphore object.
+    # Exactly MAX_KEYS distinct per-key entries; overflow is not stored in the dict.
+    assert len(client_mod._PROBE_SEMS) == 3
+    # Every label past the ceiling shares the one dedicated overflow semaphore object.
     assert sems[3] is sems[9]
-    assert sems[9] is client_mod._PROBE_SEMS[client_mod._PROBE_SEM_OVERFLOW_KEY]
+    assert sems[9] is client_mod._PROBE_OVERFLOW_SEM
     # Labels within the ceiling still get their own.
     assert sems[0] is not sems[1]
+    # A label literally named "__overflow__" gets its OWN per-key slot (no sentinel clash).
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {})
+    monkeypatch.setattr(client_mod, "_PROBE_OVERFLOW_SEM", None)
+    own = client_mod._probe_semaphore("__overflow__")
+    assert client_mod._PROBE_SEMS["__overflow__"] is own
+    assert client_mod._PROBE_OVERFLOW_SEM is None  # not minted; nothing overflowed
 
 
 def test_bounded_probe_cap_is_per_label(monkeypatch):
