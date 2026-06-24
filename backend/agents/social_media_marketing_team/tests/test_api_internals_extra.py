@@ -48,82 +48,52 @@ def fake_bank(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 
 
-def test_lifespan_full_path_no_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Lifespan startup + shutdown should call register_team_schemas, start
-    scheduler, then stop + close_pool on teardown."""
-    calls: list[str] = []
+def test_app_lifespan_registers_schema_runs_scheduler_and_closes_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The factory-built app lifespan registers the team schema and drives the
+    trend-scheduler start/stop hooks, then closes the pool on teardown.
 
-    monkeypatch.setattr(api_main, "register_team_schemas", lambda *a, **k: calls.append("register"))
-    monkeypatch.setattr(api_main, "start_scheduler", lambda: calls.append("start"))
-    monkeypatch.setattr(api_main, "stop_scheduler", lambda: calls.append("stop"))
-    monkeypatch.setattr(api_main, "close_pool", lambda: calls.append("close"))
-
+    (Schema-registration and close_pool error handling is covered centrally in
+    ``shared_app/tests/test_factory.py``.)
+    """
     import asyncio
 
-    async def _drive():
-        async with api_main._lifespan(app):
+    import shared_postgres
+    from social_media_marketing_team.api import trend_scheduler
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        shared_postgres, "register_team_schemas", lambda *a, **k: calls.append("register")
+    )
+    monkeypatch.setattr(shared_postgres, "close_pool", lambda: calls.append("close"))
+
+    class _DummyScheduler:
+        running = True
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def add_job(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            calls.append("start")
+
+        def shutdown(self, *a: Any, **k: Any) -> None:
+            calls.append("stop")
+
+    # start_scheduler/stop_scheduler are bound into the app at construction;
+    # stub the scheduler at its source so the hooks run without a real thread.
+    monkeypatch.setattr(trend_scheduler, "BackgroundScheduler", _DummyScheduler)
+
+    async def _drive() -> None:
+        async with app.router.lifespan_context(app):
             calls.append("yield")
 
     asyncio.run(_drive())
+    # Full ordering: register -> start -> yield -> stop -> close.
     assert calls == ["register", "start", "yield", "stop", "close"]
-
-
-def test_lifespan_schema_registration_error_is_logged(
-    monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
-    """Schema registration failure should be logged but not raised."""
-
-    def _boom(*a, **k):
-        raise RuntimeError("pg down")
-
-    monkeypatch.setattr(api_main, "register_team_schemas", _boom)
-    monkeypatch.setattr(api_main, "start_scheduler", lambda: None)
-    monkeypatch.setattr(api_main, "stop_scheduler", lambda: None)
-    monkeypatch.setattr(api_main, "close_pool", lambda: None)
-
-    import asyncio
-
-    with caplog.at_level("ERROR"):
-
-        async def _drive():
-            async with api_main._lifespan(app):
-                pass
-
-        asyncio.run(_drive())
-
-    assert any(
-        "social marketing postgres schema registration failed" in r.message
-        for r in caplog.records
-    )
-
-
-def test_lifespan_close_pool_error_is_logged(
-    monkeypatch: pytest.MonkeyPatch, caplog
-) -> None:
-    """close_pool failures should be logged at WARNING during shutdown."""
-    monkeypatch.setattr(api_main, "register_team_schemas", lambda *a, **k: None)
-    monkeypatch.setattr(api_main, "start_scheduler", lambda: None)
-    monkeypatch.setattr(api_main, "stop_scheduler", lambda: None)
-
-    def _bad_close():
-        raise RuntimeError("pool dead")
-
-    monkeypatch.setattr(api_main, "close_pool", _bad_close)
-
-    import asyncio
-
-    with caplog.at_level("WARNING"):
-
-        async def _drive():
-            async with api_main._lifespan(app):
-                pass
-
-        asyncio.run(_drive())
-
-    assert any(
-        "social marketing shared_postgres close_pool failed" in r.message
-        for r in caplog.records
-    )
 
 
 # ---------------------------------------------------------------------------

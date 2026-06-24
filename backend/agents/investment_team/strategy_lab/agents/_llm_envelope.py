@@ -60,6 +60,7 @@ from llm_service.interface import (
     LLMSemanticExhaustionError,
     LLMTemporaryError,
 )
+from shared_env_config import env_int
 
 from ..exceptions import StrategyLabLLMError
 
@@ -102,21 +103,6 @@ def _env_float(name: str, default: float) -> float:
         return default
     try:
         return float(raw)
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    """Read ``name`` as an int; garbage / empty falls back to ``default``.
-
-    Preconditions: ``name`` is an env var name.
-    Postconditions: returns an int — never raises.
-    """
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return int(raw)
     except ValueError:
         return default
 
@@ -175,7 +161,7 @@ def _resolve_config(
     (``max_attempts >= 1``, timeouts/budget ``> 0``). Never raises.
     """
     if max_attempts is None:
-        retries = _env_int("STRATEGY_LAB_LLM_MAX_RETRIES", _env_int("LLM_MAX_RETRIES", 2))
+        retries = env_int("STRATEGY_LAB_LLM_MAX_RETRIES", env_int("LLM_MAX_RETRIES", 2))
         attempts = retries + 1
     else:
         attempts = max_attempts

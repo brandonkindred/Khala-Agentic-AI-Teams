@@ -12,7 +12,6 @@ import sys
 import tempfile
 import threading
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -28,7 +27,7 @@ import json as json_module  # noqa: E402
 from blog_medium_stats_agent.agent import BlogMediumStatsAgent  # noqa: E402
 from blog_medium_stats_agent.models import MediumStatsReport, MediumStatsRunConfig  # noqa: E402
 from blog_research_agent.models import ResearchBriefInput  # noqa: E402
-from fastapi import FastAPI, HTTPException, Query  # noqa: E402
+from fastapi import HTTPException, Query  # noqa: E402
 from fastapi.responses import Response, StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 from shared.brand_spec import brand_spec_prompt_configured  # noqa: E402
@@ -45,12 +44,13 @@ from shared.errors import BloggingError, PlanningError  # noqa: E402
 from shared.medium_integration_access import medium_stats_integration_eligible  # noqa: E402
 from shared.medium_stats_api import MediumStatsRequest  # noqa: E402
 
+from blogging.postgres import SCHEMA as BLOGGING_POSTGRES_SCHEMA  # noqa: E402
 from job_service_client import (  # noqa: E402
     RESTARTABLE_STATUSES,
     RESUMABLE_STATUSES,
     validate_job_for_action,
 )
-from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
+from shared_app import create_team_app  # noqa: E402
 
 try:
     from shared.artifacts import ARTIFACT_NAMES, ARTIFACT_PRODUCER, read_artifact, write_artifact
@@ -188,37 +188,20 @@ def _run_blogging_service_shutdown() -> (
         logger.warning("Temporal worker shutdown failed", exc_info=True)
 
 
-@asynccontextmanager
-async def _blogging_lifespan(
-    app: FastAPI,
-):  # pragma: no cover - lifespan context manager wired into uvicorn; meaningful exercise needs the full app stack with Postgres/Temporal available. Body is entirely defensive try/except around schema registration and pool close.
-    # Register Postgres schema (no-op when POSTGRES_HOST is unset).
-    try:
-        from blogging.postgres import SCHEMA as BLOGGING_POSTGRES_SCHEMA
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(BLOGGING_POSTGRES_SCHEMA)
-    except Exception:
-        logger.exception("blogging postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("blogging shared_postgres close_pool failed", exc_info=True)
-    _run_blogging_service_shutdown()
-
-
-init_otel(service_name="blogging-team", team_key="blogging")
-
-app = FastAPI(
+# Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
+# The Postgres schema registers on startup (no-op when POSTGRES_HOST is unset);
+# the on_shutdown hook runs the blogging service teardown (stale-monitor stop,
+# job-service interrupt notification, Temporal worker shutdown) before the pool
+# is closed.
+app = create_team_app(
+    service_name="blogging-team",
+    team_key="blogging",
     title="Blog Research & Review API",
     description="Blog pipeline: planning, drafting, and quality gates. Supports sync and async execution with job polling and SSE.",
     version="0.3.0",
-    lifespan=_blogging_lifespan,
+    postgres_schema=BLOGGING_POSTGRES_SCHEMA,
+    on_shutdown=_run_blogging_service_shutdown,
 )
-instrument_fastapi_app(app, team_key="blogging")
 
 
 class AudienceDetails(BaseModel):

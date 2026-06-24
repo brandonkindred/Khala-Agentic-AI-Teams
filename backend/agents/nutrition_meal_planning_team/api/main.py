@@ -5,14 +5,14 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from contextlib import asynccontextmanager
 from typing import List, Optional
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from shared_observability import init_otel, instrument_fastapi_app
+from nutrition_meal_planning_team.postgres import SCHEMA as NUTRITION_POSTGRES_SCHEMA
+from shared_app import create_team_app
 
 from ..models import (
     BiometricHistoryResponse,
@@ -56,35 +56,14 @@ from ..shared.job_store import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="nutrition-meal-planning-team", team_key="nutrition_meal_planning")
-
-
-@asynccontextmanager
-async def _nutrition_lifespan(app: FastAPI):
-    # Register Postgres schema (no-op when POSTGRES_HOST is unset).
-    try:
-        from nutrition_meal_planning_team.postgres import SCHEMA as NUTRITION_POSTGRES_SCHEMA
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(NUTRITION_POSTGRES_SCHEMA)
-    except Exception:
-        logger.exception("nutrition_meal_planning postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("nutrition_meal_planning shared_postgres close_pool failed", exc_info=True)
-
-
-app = FastAPI(
+app = create_team_app(
+    service_name="nutrition-meal-planning-team",
+    team_key="nutrition_meal_planning",
     title="Nutrition & Meal Planning API",
     description="Personal nutrition and meal planning with learning from feedback",
     version="0.1.0",
-    lifespan=_nutrition_lifespan,
+    postgres_schema=NUTRITION_POSTGRES_SCHEMA,
 )
-instrument_fastapi_app(app, team_key="nutrition_meal_planning")
 
 app.add_middleware(
     CORSMiddleware,

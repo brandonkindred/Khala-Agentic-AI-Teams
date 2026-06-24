@@ -10,7 +10,7 @@ import threading
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -31,13 +31,13 @@ from deepthought.shared.job_store import (
     list_jobs,
     update_job,
 )
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="deepthought-team", team_key="deepthought")
-
-app = FastAPI(
+app = create_team_app(
+    service_name="deepthought-team",
+    team_key="deepthought",
     title="Deepthought API",
     description=(
         "Recursive self-organising multi-agent system that dynamically creates "
@@ -45,7 +45,6 @@ app = FastAPI(
     ),
     version="2.0.0",
 )
-instrument_fastapi_app(app, team_key="deepthought")
 
 app.add_middleware(
     CORSMiddleware,

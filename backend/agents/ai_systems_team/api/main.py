@@ -8,12 +8,12 @@ import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
-from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
+from shared_app import create_team_app  # noqa: E402
 
 from ..models import (
     AgentBlueprint,
@@ -46,14 +46,13 @@ from ..shared.job_store import (
     reset_job as store_reset_job,
 )
 
-init_otel(service_name="ai-systems-team", team_key="ai_systems")
-
-app = FastAPI(
+app = create_team_app(
+    service_name="ai-systems-team",
+    team_key="ai_systems",
     title="AI Systems API",
     description="API for generating AI agent system blueprints from specifications",
     version="1.0.0",
 )
-instrument_fastapi_app(app, team_key="ai_systems")
 
 app.add_middleware(
     CORSMiddleware,
@@ -317,8 +316,12 @@ def resume_build_job(job_id: str) -> AISystemJobResponse:
         if is_temporal_enabled():
             # Temporal re-runs the activity; resume_blueprint is passed via job store
             update_job(job_id, resume_blueprint=stored_bp)
-            start_build_workflow(job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir"))
-            return AISystemJobResponse(job_id=job_id, status="running", message="Job resumed (Temporal).")
+            start_build_workflow(
+                job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
+            )
+            return AISystemJobResponse(
+                job_id=job_id, status="running", message="Job resumed (Temporal)."
+            )
     except ImportError:
         pass
 
@@ -330,7 +333,9 @@ def resume_build_job(job_id: str) -> AISystemJobResponse:
     )
     thread.start()
 
-    return AISystemJobResponse(job_id=job_id, status="running", message="Job resumed. Skipping completed phases.")
+    return AISystemJobResponse(
+        job_id=job_id, status="running", message="Job resumed. Skipping completed phases."
+    )
 
 
 @app.post(
@@ -359,8 +364,12 @@ def restart_build_job(job_id: str) -> AISystemJobResponse:
         from ai_systems_team.temporal.start_workflow import start_build_workflow
 
         if is_temporal_enabled():
-            start_build_workflow(job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir"))
-            return AISystemJobResponse(job_id=job_id, status="running", message="Job restarted (Temporal).")
+            start_build_workflow(
+                job_id, project_name, spec_path, data.get("constraints", {}), data.get("output_dir")
+            )
+            return AISystemJobResponse(
+                job_id=job_id, status="running", message="Job restarted (Temporal)."
+            )
     except ImportError:
         pass
 
@@ -371,7 +380,9 @@ def restart_build_job(job_id: str) -> AISystemJobResponse:
     )
     thread.start()
 
-    return AISystemJobResponse(job_id=job_id, status="running", message="Job restarted from scratch.")
+    return AISystemJobResponse(
+        job_id=job_id, status="running", message="Job restarted from scratch."
+    )
 
 
 @app.get(

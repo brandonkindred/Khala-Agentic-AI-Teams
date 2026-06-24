@@ -5,14 +5,16 @@ src = ["agents"]
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "F",   # pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "W",   # pycodestyle warnings
-    "UP",  # pyupgrade
-    "B",   # flake8-bugbear
-    "SIM", # flake8-simplify
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "W",      # pycodestyle warnings
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "C901",   # mccabe cyclomatic complexity (threshold below)
+    "PLR0915", # pylint too-many-statements (threshold below)
 ]
 ignore = [
     "E501",  # line-length handled by formatter
@@ -25,9 +27,23 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["shared", "backend_agent", "frontend_team", "devops_agent", "qa_agent"]
 
+# Complexity gating (C901 / PLR0915). High-water-mark being ratcheted down over
+# time toward the ruff defaults (10 / 50). NOTE: this pyproject governs
+# unified_api/, blogging_service/, and team_service/ only — everything under
+# agents/ resolves agents/.ruff.toml, which carries the same gate (kept in sync)
+# plus the grandfathered agents/ debt list.
+[tool.ruff.lint.mccabe]
+max-complexity = 40
+
+[tool.ruff.lint.pylint]
+max-statements = 130
+
 [tool.ruff.lint.per-file-ignores]
 "agents/**/tests/**" = ["N", "B", "E402"]
-"agents/**/agent_implementations/**" = ["E", "F"]
+# Example/scaffold agent code: exempt from style (E), but keep pyflakes (F) — incl.
+# F821/F822 undefined-name — enforced. (Effective enforcement for agents/ lives in
+# agents/.ruff.toml, which only exempts complexity here; this entry is kept in sync.)
+"agents/**/agent_implementations/**" = ["E"]
 "agents/**/api/main.py" = ["E402"]
 "agents/**/api/*.py" = ["E402"]
 "agents/blogging/blog_research_agent/agent.py" = ["E402"]

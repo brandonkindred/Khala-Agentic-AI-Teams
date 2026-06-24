@@ -25,6 +25,7 @@ fixtures. Targets:
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List
 
 import pytest
@@ -221,7 +222,9 @@ def test_build_strategy_from_ideation_round_trip() -> None:
         "hypothesis": "h",
         "signal_definition": "s",
         "timeframe": "1h",
-        "entry_rules": [{"kind": "entry", "side": "long", "when": {"lhs": "bar.close", "op": ">", "rhs": 100.0}}],
+        "entry_rules": [
+            {"kind": "entry", "side": "long", "when": {"lhs": "bar.close", "op": ">", "rhs": 100.0}}
+        ],
         "exit_rules": [{"kind": "stop_loss", "pct": 0.05}],
         "sizing": {"kind": "fixed_fraction", "fraction": 0.1},
         "risk_limits": {"max_position_pct": 5},
@@ -266,27 +269,38 @@ def test_build_strategy_from_ideation_discards_non_dict_rules() -> None:
 
 
 class _FakeJobClient:
-    """Minimal in-memory ``JobServiceClient`` for _PersistentDict tests."""
+    """Minimal in-memory ``JobServiceClient`` for _PersistentDict tests.
+
+    Thread-safe: the purge/delete helpers under test now issue ``delete_job``
+    calls concurrently across a thread pool, so all mutations of ``_jobs`` are
+    guarded by a lock to keep the in-memory store consistent under that fan-out.
+    """
 
     def __init__(self, team: str = "x", base_url: str | None = None) -> None:
         self.team = team
         self._jobs: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
 
     def get_job(self, job_id: str):
-        return dict(self._jobs[job_id]) if job_id in self._jobs else None
+        with self._lock:
+            return dict(self._jobs[job_id]) if job_id in self._jobs else None
 
     def create_job(self, job_id: str, *, status: str = "stored", **fields):
-        self._jobs[job_id] = {"job_id": job_id, "status": status, **fields}
+        with self._lock:
+            self._jobs[job_id] = {"job_id": job_id, "status": status, **fields}
 
     def update_job(self, job_id: str, **fields):
-        if job_id in self._jobs:
-            self._jobs[job_id].update(fields)
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id].update(fields)
 
     def delete_job(self, job_id: str) -> bool:
-        return self._jobs.pop(job_id, None) is not None
+        with self._lock:
+            return self._jobs.pop(job_id, None) is not None
 
     def list_jobs(self, *, statuses=None):
-        return [dict(j) for j in self._jobs.values()]
+        with self._lock:
+            return [dict(j) for j in self._jobs.values()]
 
 
 def test_persistent_dict_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -418,7 +432,9 @@ def test_run_backtest_background_completes(monkeypatch: pytest.MonkeyPatch, api_
         signal_definition="s",
         timeframe="1d",
     )
-    config = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
 
     api_main._run_backtest_background("job-1", strategy, config, "tester", [])
     # Final state update is to COMPLETED.
@@ -444,10 +460,16 @@ def test_run_backtest_background_handles_http_exception(
     monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_http)
 
     strategy = StrategySpec(
-        strategy_id="s", authored_by="x", asset_class="equities", hypothesis="h",
-        signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
     )
-    config = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
     api_main._run_backtest_background("job-2", strategy, config, "tester", None)
     assert state.get("status") == "failed"
     assert state.get("error") == "bad strategy"
@@ -469,10 +491,16 @@ def test_run_backtest_background_handles_generic_exception(
     monkeypatch.setattr(api_main, "_run_real_data_backtest", _raises_generic)
 
     strategy = StrategySpec(
-        strategy_id="s", authored_by="x", asset_class="equities", hypothesis="h",
-        signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
     )
-    config = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
     api_main._run_backtest_background("job-3", strategy, config, "tester", None)
     assert state.get("status") == "failed"
     assert "network down" in (state.get("error") or "")
@@ -494,10 +522,16 @@ def test_run_backtest_background_early_cancellation(
     monkeypatch.setattr(api_main, "_run_real_data_backtest", _should_not_run)
 
     strategy = StrategySpec(
-        strategy_id="s", authored_by="x", asset_class="equities", hypothesis="h",
-        signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
     )
-    config = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
+    config = BacktestConfig(
+        start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+    )
     api_main._run_backtest_background("job-4", strategy, config, "tester", None)
     # No update calls — early return.
     assert state == {}
@@ -567,6 +601,78 @@ def test_purge_strategy_lab_job_storage_filters_by_id_prefix(
     }
 
 
+def test_delete_paper_sessions_for_lab_record_many_jobs_concurrent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrency preserves counts: every matching session is counted exactly once."""
+    import job_service_client as jsc_mod
+
+    fake = _FakeJobClient(team="investment_paper_trading_sessions")
+    matching = 50
+    for i in range(matching):
+        fake.create_job(f"pt-match-{i}", data={"lab_record_id": "lab-1"})
+    for i in range(20):
+        fake.create_job(f"pt-other-{i}", data={"lab_record_id": "lab-other"})
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", lambda team=None: fake)
+
+    from investment_team.api.main import _delete_paper_sessions_for_lab_record
+
+    deleted = _delete_paper_sessions_for_lab_record("lab-1")
+    assert deleted == matching
+    # Only the matching jobs were removed; the others survive.
+    remaining = {j["job_id"] for j in fake.list_jobs()}
+    assert remaining == {f"pt-other-{i}" for i in range(20)}
+
+
+def test_purge_strategy_lab_job_storage_many_jobs_concurrent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent fan-out across all four teams returns exact per-team counts."""
+    import job_service_client as jsc_mod
+
+    clients_by_team: Dict[str, _FakeJobClient] = {}
+
+    def _factory(team: str = "x"):
+        if team not in clients_by_team:
+            clients_by_team[team] = _FakeJobClient(team=team)
+        return clients_by_team[team]
+
+    monkeypatch.setattr(jsc_mod, "JobServiceClient", _factory)
+
+    lab = _factory("investment_strategy_lab_records")
+    for i in range(30):
+        lab.create_job(f"lab-{i}")
+
+    strat = _factory("investment_strategies")
+    for i in range(25):
+        strat.create_job(f"strat-lab-{i}")
+    for i in range(10):
+        strat.create_job(f"strat-keep-{i}")
+
+    bt = _factory("investment_backtests")
+    for i in range(15):
+        bt.create_job(f"bt-lab-{i}")
+    for i in range(7):
+        bt.create_job(f"bt-keep-{i}")
+
+    paper = _factory("investment_paper_trading_sessions")
+    for i in range(40):
+        paper.create_job(f"pt-{i}")
+
+    from investment_team.api.main import _purge_strategy_lab_job_storage
+
+    counts = _purge_strategy_lab_job_storage()
+    assert counts == {
+        "deleted_lab_records": 30,
+        "deleted_lab_strategies": 25,
+        "deleted_lab_backtests": 15,
+        "deleted_paper_trading_sessions": 40,
+    }
+    # Non-lab strategies/backtests are untouched.
+    assert {j["job_id"] for j in strat.list_jobs()} == {f"strat-keep-{i}" for i in range(10)}
+    assert {j["job_id"] for j in bt.list_jobs()} == {f"bt-keep-{i}" for i in range(7)}
+
+
 def test_clear_strategy_lab_storage_route(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """The DELETE /strategy-lab/storage route forwards purge counts."""
     from investment_team.api import main as api_main
@@ -607,22 +713,44 @@ def test_delete_strategy_lab_record_success(monkeypatch: pytest.MonkeyPatch, api
 
     cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
     strat = StrategySpec(
-        strategy_id="strat-lab-X", authored_by="x", asset_class="equities",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="strat-lab-X",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
     )
     result = BacktestResult(
-        total_return_pct=10.0, annualized_return_pct=20.0, volatility_pct=10.0,
-        sharpe_ratio=1.0, max_drawdown_pct=5.0, win_rate_pct=60.0, profit_factor=2.0,
-        calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     bt = BacktestRecord(
-        backtest_id="bt-lab-X", strategy_id="strat-lab-X", strategy=strat, config=cfg,
-        submitted_by="x", submitted_at="2024-01-01T00:00:00Z", completed_at="2024-01-01T01:00:00Z",
-        result=result, trades=[],
+        backtest_id="bt-lab-X",
+        strategy_id="strat-lab-X",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
     )
     record = StrategyLabRecord(
-        lab_record_id="lab-X", strategy=strat, backtest=bt, is_winning=True,
-        strategy_rationale="r", analysis_narrative="n", created_at="2024-01-01T01:00:00Z",
+        lab_record_id="lab-X",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
     )
     api_main._strategy_lab_records["lab-X"] = record
     api_main._strategies["strat-lab-X"] = strat
@@ -659,22 +787,39 @@ def test_recover_orphaned_paper_trading_sessions_marks_running_as_failed(
     )
 
     strategy = StrategySpec(
-        strategy_id="s", authored_by="x", asset_class="equities", hypothesis="h",
-        signal_definition="s", timeframe="1d",
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
     )
     session_active = PaperTradingSession(
-        session_id="pt-active", lab_record_id="lab-1", strategy=strategy,
-        status=PaperTradingStatus.RUNNING, initial_capital=100_000.0,
-        current_capital=100_000.0, symbols_traded=["X"], data_source="yahoo",
-        data_period_start="2024-01-01", data_period_end="2024-06-01",
+        session_id="pt-active",
+        lab_record_id="lab-1",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=["X"],
+        data_source="yahoo",
+        data_period_start="2024-01-01",
+        data_period_end="2024-06-01",
         started_at="2024-06-01T00:00:00Z",
     )
     session_done = PaperTradingSession(
-        session_id="pt-done", lab_record_id="lab-1", strategy=strategy,
-        status=PaperTradingStatus.COMPLETED, initial_capital=100_000.0,
-        current_capital=100_000.0, symbols_traded=["X"], data_source="yahoo",
-        data_period_start="2024-01-01", data_period_end="2024-06-01",
-        started_at="2024-06-01T00:00:00Z", completed_at="2024-06-01T01:00:00Z",
+        session_id="pt-done",
+        lab_record_id="lab-1",
+        strategy=strategy,
+        status=PaperTradingStatus.COMPLETED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=["X"],
+        data_source="yahoo",
+        data_period_start="2024-01-01",
+        data_period_end="2024-06-01",
+        started_at="2024-06-01T00:00:00Z",
+        completed_at="2024-06-01T01:00:00Z",
     )
     api_main._paper_trading_sessions["pt-active"] = session_active
     api_main._paper_trading_sessions["pt-done"] = session_done
@@ -752,25 +897,47 @@ def _winning_record(strategy_code: str | None = "def x(): pass"):
     )
 
     strat = StrategySpec(
-        strategy_id="strat-w", authored_by="x", asset_class="equities",
-        hypothesis="h", signal_definition="s", timeframe="1d",
+        strategy_id="strat-w",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
         strategy_code=strategy_code,
     )
     cfg = BacktestConfig(start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0)
     result = BacktestResult(
-        total_return_pct=10.0, annualized_return_pct=20.0, volatility_pct=10.0,
-        sharpe_ratio=1.0, max_drawdown_pct=5.0, win_rate_pct=60.0, profit_factor=2.0,
-        calmar_ratio=0.0, deflated_sharpe=0.0, sortino_ratio=0.0,
+        total_return_pct=10.0,
+        annualized_return_pct=20.0,
+        volatility_pct=10.0,
+        sharpe_ratio=1.0,
+        max_drawdown_pct=5.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
     )
     bt = BacktestRecord(
-        backtest_id="bt-w", strategy_id="strat-w", strategy=strat, config=cfg,
-        submitted_by="x", submitted_at="2024-01-01T00:00:00Z",
-        completed_at="2024-01-01T01:00:00Z", result=result, trades=[],
+        backtest_id="bt-w",
+        strategy_id="strat-w",
+        strategy=strat,
+        config=cfg,
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=result,
+        trades=[],
     )
     return StrategyLabRecord(
-        lab_record_id="lab-w", strategy=strat, backtest=bt, is_winning=True,
-        strategy_rationale="r", analysis_narrative="n",
-        created_at="2024-01-01T01:00:00Z", strategy_code=strategy_code,
+        lab_record_id="lab-w",
+        strategy=strat,
+        backtest=bt,
+        is_winning=True,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at="2024-01-01T01:00:00Z",
+        strategy_code=strategy_code,
     )
 
 
