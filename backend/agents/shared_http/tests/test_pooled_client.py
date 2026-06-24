@@ -75,10 +75,13 @@ def test_pooled_client_applies_limits_and_timeout():
     assert isinstance(client, httpx.Client)
     assert client.timeout.read == 12.0
     # The public surface we can always assert: the limits object the pool is
-    # built from carries the values we expect.
+    # built from carries the configured caps. ``keepalive_expiry`` is only
+    # checked for being a positive expiry (recycling enabled) — its exact value
+    # depends on import-time ``HTTP_KEEPALIVE_EXPIRY_S`` and is covered by the
+    # ``_keepalive_expiry_seconds`` tests, so pinning it here would be flaky.
     assert DEFAULT_LIMITS.max_connections == 50
     assert DEFAULT_LIMITS.max_keepalive_connections == 20
-    assert DEFAULT_LIMITS.keepalive_expiry == _DEFAULT_KEEPALIVE_EXPIRY_S
+    assert DEFAULT_LIMITS.keepalive_expiry > 0
     # Stronger check: confirm DEFAULT_LIMITS is actually wired into the live
     # pool. httpx exposes no public accessor for this, so it requires reaching
     # into httpcore internals (``_transport._pool``). Guarded so a future httpx
