@@ -71,14 +71,17 @@ def env_bool(name: str, default: bool = False) -> bool:
         raise ValueError("name must be a non-empty environment variable name")
     if not isinstance(default, bool):
         raise ValueError("default must be a bool")
-    raw = (os.environ.get(name) or "").strip().lower()
+    raw_env = os.environ.get(name)
+    raw = (raw_env or "").strip().lower()
     if raw in _TRUE:
         return True
     if raw in _FALSE:
         return False
-    if raw:
-        # Set but unrecognized — surface the likely typo (mirrors env_int/env_float).
-        logger.warning("Unrecognized bool for %s=%r; using default %s", name, raw, default)
+    if raw_env is not None:
+        # Set but unrecognized (including an empty/whitespace value) — surface the
+        # likely misconfiguration, mirroring env_int/env_float, which warn on any
+        # set-but-unparseable value (empty string included). Unset stays silent.
+        logger.warning("Unrecognized bool for %s=%r; using default %s", name, raw_env, default)
     return default
 
 

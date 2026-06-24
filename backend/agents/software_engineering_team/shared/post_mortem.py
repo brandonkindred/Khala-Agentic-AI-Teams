@@ -324,8 +324,15 @@ def write_post_mortem(
     # see next sprint. Best-effort and a no-op without Postgres.
     try:
         from software_engineering_team.shared.post_mortem_ingest import learning_from_failure
-
-        learning_from_failure(agent_name, task_description, error)
-    except Exception:
-        logger.debug("post-mortem learning ingestion failed", exc_info=True)
+    except ImportError:
+        # The ingest module ships in this package; failing to import it means a
+        # broken deployment (not an expected runtime condition), so surface it.
+        logger.warning("post_mortem_ingest unavailable; learnings not ingested", exc_info=True)
+    else:
+        # The ingest call itself is best-effort (e.g. a Postgres hiccup) and must
+        # never break post-mortem writing — keep it at DEBUG.
+        try:
+            learning_from_failure(agent_name, task_description, error)
+        except Exception:
+            logger.debug("post-mortem learning ingestion failed", exc_info=True)
     return path

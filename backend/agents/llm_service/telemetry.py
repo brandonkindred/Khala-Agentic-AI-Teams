@@ -209,6 +209,11 @@ def record_llm_call(
     over the token counts when not supplied; ``outcome`` defaults to a coarse
     bucket derived from ``status``. Returns the created record for
     testing/inspection.
+
+    Negative ``prompt_tokens``/``completion_tokens`` are clamped to ``0`` for the
+    cost estimate (telemetry recording must never raise into the LLM call path,
+    and ``estimate_cost_usd`` rejects negatives); the raw counts are still stored
+    on the record as given.
     """
     prompt_preview = None
     response_preview = None
@@ -293,6 +298,11 @@ def _ensure_otel_instruments() -> None:
     with _otel_init_lock:
         if _otel_initialized:
             return
+        # Set the flag before creating instruments so this init runs exactly once:
+        # if the OTel SDK is unavailable, instrument creation fails and the
+        # instruments stay None — but we deliberately do NOT retry on every
+        # subsequent LLM call (that would re-enter this lock + re-attempt creation
+        # on the hot path). A failed init is treated as "OTel off for this process".
         _otel_initialized = True
         try:
             from shared_observability import get_meter, get_tracer

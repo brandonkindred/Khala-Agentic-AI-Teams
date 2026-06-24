@@ -47,6 +47,17 @@ def test_env_bool_logs_on_set_but_unrecognized(monkeypatch, caplog) -> None:
     assert any("Unrecognized bool" in r.message for r in caplog.records)
 
 
+def test_env_bool_warns_on_set_but_empty(monkeypatch, caplog) -> None:
+    # A set-but-empty value warns too (consistent with env_int/env_float), unlike
+    # an unset var which stays silent.
+    import logging
+
+    monkeypatch.setenv(_KNOB, "")
+    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+        assert env_bool(_KNOB, default=True) is True
+    assert any("Unrecognized bool" in r.message for r in caplog.records)
+
+
 def test_env_bool_rejects_non_bool_default() -> None:
     with pytest.raises(ValueError, match="default must be a bool"):
         env_bool(_KNOB, default="yes")  # type: ignore[arg-type]

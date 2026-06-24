@@ -137,9 +137,16 @@ _registered = False
 _register_lock = threading.Lock()
 
 
+# Exact SE team aliases (not a ``startswith`` prefix, so an unrelated team that
+# merely shares the prefix is never captured) — mirrors cost_tracker._cost_observer.
+# Both ids occur: attribution sets ``software_engineering`` while the job store's
+# JobServiceClient is constructed with ``software_engineering_team``.
+_SE_TEAMS = frozenset({"software_engineering", "software_engineering_team"})
+
+
 def _trace_observer(record: Any) -> None:
     team = getattr(record, "team", "") or ""
-    if not getattr(record, "job_id", "") or not team.startswith("software_engineering"):
+    if not getattr(record, "job_id", "") or team not in _SE_TEAMS:
         return
     write_trace(record)
 

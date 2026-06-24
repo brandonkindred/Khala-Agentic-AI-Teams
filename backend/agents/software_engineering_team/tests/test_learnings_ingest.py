@@ -203,12 +203,12 @@ def test_relevant_learnings_block_formats(monkeypatch) -> None:
         "retrieve_learnings",
         lambda *a, **k: [
             Learning(
-                "security rejection",
-                "hardcoded secret",
-                "use env var",
-                "gate_rejection",
-                "security",
-                3,
+                pattern="security rejection",
+                trigger="hardcoded secret",
+                counter_measure="use env var",
+                source="gate_rejection",
+                category="security",
+                occurrences=3,
             )
         ],
     )
