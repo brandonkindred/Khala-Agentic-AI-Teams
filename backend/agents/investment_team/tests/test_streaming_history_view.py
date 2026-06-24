@@ -151,6 +151,28 @@ def test_batched_appends_then_catch_up() -> None:
     assert view._buffers[ref.sig_id]["synced"] == 20
 
 
+def test_contiguous_multi_bar_catch_up_matches_fresh_view() -> None:
+    """A query after several appends (a gap still within max_bars) catches the
+    buffer up across multiple bars via the growing-prefix path and stays aligned
+    with a fresh view — exercises the contiguous multi-bar branch of _sync_buffer."""
+    ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
+    view = StreamingHistoryView(max_bars=10)
+    for i in range(5):
+        view.append(_bar(i))
+    view.indicator(ref, 4)  # register + sync at 5 bars
+    assert view._buffers[ref.sig_id]["synced"] == 5
+    # Three more appends with no intervening query (still within max_bars=10).
+    for i in range(5, 8):
+        view.append(_bar(i))
+    assert view._buffers[ref.sig_id]["synced"] == 5  # buffer is behind by 3 bars
+    # The next query catches up bars 5,6,7 in one pass; every index aligns.
+    bars = [_bar(j) for j in range(8)]
+    for idx in range(8):
+        assert view.indicator(ref, idx) == _fresh_view_value(bars, ref, idx), f"idx={idx}"
+    assert len(view._buffers[ref.sig_id]["buf"]) == 8
+    assert view._buffers[ref.sig_id]["synced"] == 8
+
+
 def test_lazy_first_registration_mid_stream_backfills() -> None:
     """A ref first queried after many bars have streamed backfills its buffer
     so historical indices (i-1, etc.) are addressable and aligned."""

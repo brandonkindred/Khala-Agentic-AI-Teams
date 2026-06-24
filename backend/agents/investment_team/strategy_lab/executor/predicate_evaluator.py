@@ -525,25 +525,25 @@ class StreamingHistoryView:
         if synced < base:
             # The buffer fell behind by more than the window — the bars between
             # ``synced`` and ``base`` were evicted and can no longer be computed
-            # or addressed. Rebuild over the currently-addressable deque by
-            # forward-walking the registry (cold-start, then single-step
-            # expand), which the registry detects from the bar fingerprints.
-            # Feed a growing prefix list (append-only, same bar objects) rather
-            # than slicing ``bars_list[:k]`` each step, so the walk is O(length)
-            # in list-building (the slices would total O(length^2)) plus the
-            # registry's O(window) per step.
+            # or addressed. Rebuild over the whole currently-addressable deque.
             buf.clear()
-            prefix: list[BarRecord] = []
-            for bar in bars_list:
-                prefix.append(bar)
-                buf.append(_registry_indicator(reg, ref, prefix))
+            start = 0
         else:
-            # Contiguous catch-up: feed the bars appended since ``synced`` one at
-            # a time so the registry sees each expand/slide transition (O(1)/bar
-            # for MACD, O(window) for the windowed indicators). The bounded buf
-            # evicts in lockstep with the bounded deque.
-            for abs_idx in range(synced, ac):
-                k = abs_idx - base + 1
-                prefix = bars_list if k == length else bars_list[:k]
+            # Contiguous catch-up: only the bars appended since ``synced`` are
+            # unfilled; they begin at index ``start`` in ``bars_list``.
+            start = synced - base
+        if start == length - 1:
+            # Common engine case: exactly one new bar. Pass ``bars_list`` directly
+            # so the registry sees the expand/slide step with no slice or copy.
+            buf.append(_registry_indicator(reg, ref, bars_list))
+        else:
+            # Cold rebuild (start == 0) or a multi-bar gap. Grow a prefix list
+            # (append-only, same bar objects so the registry still detects each
+            # expand/slide step) rather than slicing ``bars_list[:k]`` per step —
+            # the slices would total O(length^2); this is O(length) in
+            # list-building plus the registry's O(window) per step.
+            prefix = bars_list[:start]
+            for idx in range(start, length):
+                prefix.append(bars_list[idx])
                 buf.append(_registry_indicator(reg, ref, prefix))
         st["synced"] = ac
