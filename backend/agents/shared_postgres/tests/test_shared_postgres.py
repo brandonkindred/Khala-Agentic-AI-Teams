@@ -465,6 +465,38 @@ def test_check_connection_false_when_pool_errors(monkeypatch):
     assert client_mod.check_connection() is False
 
 
+def test_probe_cursor_sets_transaction_local_statement_timeout():
+    # The shared probe helper must bound every query on the yielded cursor by issuing
+    # SET LOCAL statement_timeout (scoped to a transaction) BEFORE yielding.
+    executed = []
+    cur = MagicMock()
+    cur.__enter__ = lambda self=cur: cur
+    cur.__exit__ = lambda *a: False
+    cur.execute.side_effect = lambda sql, *a: executed.append(sql)
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    with client_mod.probe_cursor(conn, timeout_s=0.5) as c:
+        c.execute("SELECT 1")
+    assert conn.transaction.called  # scoped to a transaction so the bound never leaks
+    assert executed[0] == "SET LOCAL statement_timeout = 500"  # 0.5s → 500ms, set first
+    assert executed[1] == "SELECT 1"
+
+
+def test_probe_cursor_clamps_sub_millisecond_budget():
+    # A sub-millisecond budget clamps up to a 1ms statement_timeout (documented precondition
+    # edge), never 0 (which Postgres reads as "disabled").
+    executed = []
+    cur = MagicMock()
+    cur.__enter__ = lambda self=cur: cur
+    cur.__exit__ = lambda *a: False
+    cur.execute.side_effect = lambda sql, *a: executed.append(sql)
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    with client_mod.probe_cursor(conn, timeout_s=0.0005):
+        pass
+    assert executed[0] == "SET LOCAL statement_timeout = 1"
+
+
 # ---------------------------------------------------------------------------
 # connect_timeout / statement_timeout / dsn escaping (via make_conninfo) / budget
 # ---------------------------------------------------------------------------
@@ -839,6 +871,22 @@ def test_bounded_probe_caps_concurrent_workers(monkeypatch):
     assert elapsed < 0.5  # did not wait on the (full) budget; degraded at once
     # The cap must short-circuit BEFORE spawning a worker, not spawn-then-degrade.
     assert len(_bounded_probe_threads()) == before
+
+
+def test_probe_semaphore_bounds_distinct_keys(monkeypatch):
+    # A flood of DISTINCT labels must not grow the registry without bound or hand each label
+    # its own fresh budget (which would defeat the cap); past the ceiling they collapse onto
+    # one shared overflow semaphore.
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {})
+    monkeypatch.setattr(client_mod, "_PROBE_SEM_MAX_KEYS", 3)
+    sems = [client_mod._probe_semaphore(f"label-{i}") for i in range(10)]
+    # At most MAX_KEYS distinct per-key entries + the single overflow entry.
+    assert len(client_mod._PROBE_SEMS) <= 3 + 1
+    # Every label past the ceiling shares the one overflow semaphore object.
+    assert sems[3] is sems[9]
+    assert sems[9] is client_mod._PROBE_SEMS[client_mod._PROBE_SEM_OVERFLOW_KEY]
+    # Labels within the ceiling still get their own.
+    assert sems[0] is not sems[1]
 
 
 def test_bounded_probe_cap_is_per_label(monkeypatch):

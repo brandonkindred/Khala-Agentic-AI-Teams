@@ -726,13 +726,20 @@ async def _verify_in_process_schema_present(team_key: str) -> bool:
 
     def _check() -> bool:
         from shared_postgres import client as _pg_client
-        from shared_postgres import is_postgres_enabled
+        from shared_postgres import is_postgres_enabled, probe_cursor
 
         if not is_postgres_enabled():
             return False
         try:
             pool = _pg_client._get_or_create_pool()
-            with pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn, conn.cursor() as cur:
+            # Bound the query itself (not just slot acquisition) via the shared probe
+            # helper's transaction-local statement_timeout, so a post-connect mid-query
+            # stall releases this pooled connection within the budget — same guarantee as
+            # check_connection, instead of an unbounded SELECT on the shared pool.
+            with (
+                pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn,
+                probe_cursor(conn, timeout_s=_PROBE_DB_TIMEOUT_S) as cur,
+            ):
                 # `to_regclass` returns NULL for missing tables — fast,
                 # one round-trip, and it doesn't lock anything.
                 placeholders = ", ".join(["to_regclass(%s) IS NOT NULL"] * len(expected))

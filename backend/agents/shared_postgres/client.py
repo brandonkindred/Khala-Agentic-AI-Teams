@@ -204,6 +204,37 @@ def get_conn(database: Optional[str] = None) -> Generator:
         yield conn
 
 
+@contextmanager
+def probe_cursor(conn, *, timeout_s: float) -> Generator:
+    """Yield a cursor on ``conn`` whose every statement is bounded by ``timeout_s``.
+
+    The single home for the "bound a probe query so a post-connect mid-query stall can't
+    pin the pooled connection" pattern. The shared pool deliberately sets no
+    ``statement_timeout`` (it would cap legitimate long-running team queries), so each
+    *probe* must scope its own bound — every probe path (``check_connection`` and the
+    unified-API ``/health`` table-presence check) routes through here so the bound can't
+    drift or be forgotten.
+
+    Preconditions: ``conn`` is a live psycopg connection; ``timeout_s`` is a positive,
+        real budget (a sub-millisecond value is clamped up to a 1ms ``statement_timeout``).
+    Postconditions: opens a transaction on ``conn``, issues ``SET LOCAL statement_timeout``
+        (transaction-scoped, so it is rolled back with the probe transaction and never
+        leaks onto the next user of a pooled connection), and yields a cursor. Every query
+        run on that cursor is cancelled server-side after ``timeout_s``. Note this bounds
+        the *query*, not socket teardown: if the TCP path itself wedges (no server response
+        at all), ``statement_timeout`` cannot fire and the closing ``ROLLBACK`` can still
+        block — that residual case is backstopped by :func:`bounded_probe`'s per-surface
+        worker cap, not by this bound.
+    """
+    stmt_timeout_ms = max(1, int(timeout_s * 1000))
+    # ``stmt_timeout_ms`` is a locally-derived int (never caller text), so inlining it is
+    # injection-safe; ``SET LOCAL`` is the conventional, single-statement form (no result
+    # set to drain, unlike ``SELECT set_config(...)``).
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(f"SET LOCAL statement_timeout = {stmt_timeout_ms}")
+        yield cur
+
+
 def check_connection(database: Optional[str] = None, *, timeout_s: float = 1.5) -> bool:
     """Return True iff Postgres is enabled and answers ``SELECT 1`` quickly.
 
@@ -212,18 +243,18 @@ def check_connection(database: Optional[str] = None, *, timeout_s: float = 1.5) 
     apart: not-configured (``is_postgres_enabled()`` false), configured-but-unreachable
     (``is_postgres_enabled()`` true, this false), and healthy (both true).
 
-    Preconditions: none.
+    Preconditions: ``timeout_s`` is a positive, real budget (see :func:`probe_cursor`).
     Postconditions: returns ``False`` immediately when Postgres is disabled; otherwise
         acquires a pooled connection (waiting at most ``timeout_s`` for a free slot,
         bounded on the TCP connect by ``POSTGRES_CONNECT_TIMEOUT_S``), runs ``SELECT 1``
-        under a transaction-local ``statement_timeout`` of ``timeout_s`` so a server that
-        accepts the connection then stalls mid-query cannot pin the pooled connection past
-        the budget, and returns whether the result is ``(1,)``. Swallows every error
-        (disabled, psycopg missing, host down, pool exhausted, connect/query timeout) and
-        returns ``False`` — never raises. The ``statement_timeout`` is ``SET LOCAL`` (via
-        ``set_config(..., is_local=true)``) so it scopes to the probe's transaction and
-        never leaks onto the next user of the pooled connection. Read-only with no side
-        effects beyond opening/reusing the shared pool.
+        via :func:`probe_cursor` (transaction-local ``statement_timeout`` of ``timeout_s``)
+        so a server that accepts the connection then stalls mid-query cannot pin the pooled
+        connection past the budget, and returns whether the result is ``(1,)``. Swallows
+        every error (disabled, psycopg missing, host down, pool exhausted, connect/query
+        timeout) and returns ``False`` — never raises. A fully wedged TCP socket (no server
+        response) is not covered by ``statement_timeout``; that residual is bounded by the
+        caller's :func:`bounded_probe` worker cap. Read-only with no side effects beyond
+        opening/reusing the shared pool.
     """
     if not is_postgres_enabled():
         return False
@@ -233,20 +264,13 @@ def check_connection(database: Optional[str] = None, *, timeout_s: float = 1.5) 
         # exposes no timeout knob. Mirrors the bounded probe in the unified API
         # health loop, which now delegates here.
         pool = _get_or_create_pool(database)
-        stmt_timeout_ms = max(1, int(timeout_s * 1000))
-        with pool.connection(timeout=timeout_s) as conn:
-            # Bound the query itself, not just slot acquisition: a post-connect stall on
-            # ``SELECT 1`` is otherwise unbounded (the shared pool sets no statement_timeout
-            # for team queries), so it would hold this pooled connection until the socket
-            # dies. ``set_config(..., is_local=true)`` == ``SET LOCAL`` — transaction-scoped,
-            # so it is rolled back with the probe transaction and never leaks.
-            with conn.transaction(), conn.cursor() as cur:
-                cur.execute(
-                    "SELECT set_config('statement_timeout', %s, true)", (str(stmt_timeout_ms),)
-                )
-                cur.execute("SELECT 1")
-                row = cur.fetchone()
-                return row is not None and row[0] == 1
+        with (
+            pool.connection(timeout=timeout_s) as conn,
+            probe_cursor(conn, timeout_s=timeout_s) as cur,
+        ):
+            cur.execute("SELECT 1")
+            row = cur.fetchone()
+            return row is not None and row[0] == 1
     except Exception:  # noqa: BLE001 - a probe must never raise; any failure is "unreachable"
         return False
 
@@ -299,6 +323,13 @@ _T = TypeVar("_T")
 # healthy surface (e.g. the LLM Provider page SELECT 1) needs.
 _PROBE_SEMS: dict[str, threading.Semaphore] = {}
 _PROBE_SEM_LOCK = threading.Lock()
+# The platform's real probe surfaces are a small fixed set of static labels. Bound the
+# registry so a (mis)caller passing a DYNAMIC label can't grow it without limit (a slow
+# memory leak) or defeat the cap (a fresh full budget per unique label → unbounded threads).
+# Past this many distinct keys, further labels share one overflow semaphore: memory stays
+# bounded and the cap still bites (it degrades to coupling those callers, which is safe).
+_PROBE_SEM_MAX_KEYS = 32
+_PROBE_SEM_OVERFLOW_KEY = "__overflow__"
 
 
 class _ProbeWorkerError(Exception):
@@ -319,16 +350,27 @@ def _probe_semaphore(key: str) -> threading.Semaphore:
         is read ONCE when the key's semaphore is first created and fixed thereafter — a
         ``Semaphore`` cannot be resized, so unlike the per-call env knobs (connect/statement
         timeout) a runtime change to ``POSTGRES_PROBE_MAX_WORKERS`` takes effect only in a
-        fresh process. Never raises.
+        fresh process. The number of distinct keys is bounded by ``_PROBE_SEM_MAX_KEYS``;
+        beyond it, keys collapse onto a shared overflow semaphore so a dynamic-label caller
+        can neither leak memory nor escape the cap. Never raises.
     """
     sem = _PROBE_SEMS.get(key)
-    if sem is None:
-        with _PROBE_SEM_LOCK:
+    if sem is not None:
+        return sem
+    with _PROBE_SEM_LOCK:
+        sem = _PROBE_SEMS.get(key)
+        if sem is not None:
+            return sem
+        if len(_PROBE_SEMS) >= _PROBE_SEM_MAX_KEYS:
+            # Registry full → don't mint a new per-key budget; fall back to the shared
+            # overflow slot (created on first use like any other key).
+            key = _PROBE_SEM_OVERFLOW_KEY
             sem = _PROBE_SEMS.get(key)
-            if sem is None:
-                sem = threading.Semaphore(parse_int("POSTGRES_PROBE_MAX_WORKERS", 4, minimum=1))
-                _PROBE_SEMS[key] = sem
-    return sem
+            if sem is not None:
+                return sem
+        sem = threading.Semaphore(parse_int("POSTGRES_PROBE_MAX_WORKERS", 4, minimum=1))
+        _PROBE_SEMS[key] = sem
+        return sem
 
 
 def _drain_future(fut: asyncio.Future) -> None:

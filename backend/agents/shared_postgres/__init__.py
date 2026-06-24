@@ -30,6 +30,7 @@ from shared_postgres.client import (
     dsn,
     get_conn,
     is_postgres_enabled,
+    probe_cursor,
     resolve_storage_status,
     statement_timeout_ms,
 )
@@ -96,6 +97,7 @@ __all__ = [
     "get_secrets",
     "is_postgres_enabled",
     "load_or_create_key",
+    "probe_cursor",
     "register_all_team_schemas",
     "register_team_schemas",
     "resolve_storage_status",
