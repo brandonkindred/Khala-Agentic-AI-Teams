@@ -7,6 +7,7 @@ test runs the whole gate end-to-end against a multi-rule spec.
 
 from __future__ import annotations
 
+import re
 from typing import List
 
 from investment_team.models import (
@@ -253,13 +254,17 @@ def test_scaled_take_profit_alone_is_informational_with_firings() -> None:
         exit_rules=[_ladder()], trades=[_trade()], diagnostics=diag, config=_config()
     )
     assert [r for r in results if not r.passed] == []
-    # The per-rung telemetry names BOTH rungs and their fired counts, so the format
-    # (not just the presence of the word "per-rung") is pinned.
+    # The per-rung telemetry names BOTH rungs with their level params and fired
+    # counts. Assert the meaningful DATA (rung index → pct → qty_fraction → fired
+    # count, in that order) rather than the exact punctuation/spacing of the
+    # human-readable line — the message is presentation, not a machine-parsed
+    # contract, so a future format tweak (e.g. "L0: @0.05 / 0.5 = 1") should not
+    # break this. ``\D*`` spans whatever separators the format uses between fields.
     info = next(
         r for r in results if "ScaledTakeProfitRule" in r.details and "per-rung" in r.details
     )
-    assert "L0(@0.05, 0.5)=1" in info.details
-    assert "L1(@0.1, 0.3)=1" in info.details
+    assert re.search(r"L0\D*0\.05\D*0\.5\D*1", info.details)  # rung 0: +5%, 50%, fired once
+    assert re.search(r"L1\D*0\.1\D*0\.3\D*1", info.details)  # rung 1: +10%, 30%, fired once
 
 
 def test_scaled_take_profit_alone_warns_when_no_rung_fired() -> None:
