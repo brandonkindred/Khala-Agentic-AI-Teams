@@ -558,7 +558,42 @@ class IndicatorRegistry:
 
     # ----- ADX -----------------------------------------------------------
 
+    @staticmethod
+    def _adx_dm_tr(cur: Any, prev: Any) -> Tuple[float, float, float]:
+        """Directional-movement / true-range triple for one consecutive bar pair.
+
+        Pre: ``cur`` is the bar immediately following ``prev`` in the series.
+        Post: returns ``(plus_dm, minus_dm, tr)`` for the pair — identical to
+        the legacy per-bar loop body, so summing these reproduces the legacy
+        ADX bit-for-bit.
+        """
+        cur_high = float(cur.high)
+        cur_low = float(cur.low)
+        up = cur_high - float(prev.high)
+        down = float(prev.low) - cur_low
+        plus_dm = up if (up > down and up > 0) else 0.0
+        minus_dm = down if (down > up and down > 0) else 0.0
+        prev_close = float(prev.close)
+        tr = max(cur_high - cur_low, abs(cur_high - prev_close), abs(cur_low - prev_close))
+        return plus_dm, minus_dm, tr
+
     def adx(self, bars: Sequence[Any], period: int = 14) -> Optional[float]:
+        """Average directional index (un-smoothed single-DI form) at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= 2*period + 1``.
+        Post: the ADX scalar computed from the trailing ``period`` directional-
+        movement / true-range triples.
+
+        The value depends only on the last ``period`` ``(plus_dm, minus_dm, tr)``
+        triples, so the registry keeps them in a bounded :class:`deque` and
+        advances by a single triple per appended bar — O(period) per call,
+        independent of how many bars have been seen. The legacy form rebuilt
+        every triple from bar 1 (``O(N_bars)`` per call, ``O(N_bars^2)`` per
+        backtest); it was the one indicator that still rescanned the full
+        history, breaking the registry's "cost independent of history length"
+        invariant. Summing the bounded deque oldest-to-newest reproduces the
+        legacy ``sum(trs[-period:])`` bit-for-bit, so the value is unchanged.
+        """
         if not bars or len(bars) < 2 * period + 1:
             return None
         key = ("adx", period)
@@ -566,32 +601,29 @@ class IndicatorRegistry:
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
-        plus_dms: list[float] = []
-        minus_dms: list[float] = []
-        trs: list[float] = []
-        for i in range(1, len(bars)):
-            up = float(bars[i].high) - float(bars[i - 1].high)
-            down = float(bars[i - 1].low) - float(bars[i].low)
-            plus_dm = up if (up > down and up > 0) else 0.0
-            minus_dm = down if (down > up and down > 0) else 0.0
-            prev_close = float(bars[i - 1].close)
-            tr = max(
-                float(bars[i].high) - float(bars[i].low),
-                abs(float(bars[i].high) - prev_close),
-                abs(float(bars[i].low) - prev_close),
-            )
-            plus_dms.append(plus_dm)
-            minus_dms.append(minus_dm)
-            trs.append(tr)
-        tr_sum = sum(trs[-period:])
+        dms: Optional[Deque[Tuple[float, float, float]]] = None
+        if state is not None and "dms" in state:
+            kind = self._advance_kind(state, bars, fp)
+            if kind in ("expand", "slide"):
+                # One new bar at the tail: append its triple. The bounded deque
+                # evicts the oldest, so it always holds exactly the trailing
+                # ``period`` triples (== ``trs[-period:]`` in the legacy form).
+                dms = state["dms"]
+                dms.append(self._adx_dm_tr(bars[-1], bars[-2]))
+        if dms is None:
+            # Cold-start / replay / multi-bar jump: rebuild the trailing window.
+            dms = deque(maxlen=period)
+            for i in range(len(bars) - period, len(bars)):
+                dms.append(self._adx_dm_tr(bars[i], bars[i - 1]))
+        tr_sum = sum(t[2] for t in dms)
         if tr_sum == 0:
             value = 0.0
         else:
-            plus_di = 100.0 * sum(plus_dms[-period:]) / tr_sum
-            minus_di = 100.0 * sum(minus_dms[-period:]) / tr_sum
+            plus_di = 100.0 * sum(t[0] for t in dms) / tr_sum
+            minus_di = 100.0 * sum(t[1] for t in dms) / tr_sum
             denom = plus_di + minus_di
             value = 0.0 if denom == 0 else 100.0 * abs(plus_di - minus_di) / denom
-        self._state[key] = {"fp": fp, "value": value}
+        self._state[key] = {"fp": fp, "value": value, "dms": dms}
         return value
 
     # ----- Bollinger -----------------------------------------------------

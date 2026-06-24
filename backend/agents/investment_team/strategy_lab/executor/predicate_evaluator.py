@@ -15,11 +15,11 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Literal, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, Literal, Optional, Protocol, Sequence, Tuple
 
 import pandas as pd
 
-from ..executor import indicators as ind
+from ..indicators.streaming import IndicatorRegistry
 from ..spec_dsl import (
     EntryRule,
     IndicatorRef,
@@ -222,113 +222,68 @@ def evaluate_signal_exit_rules(
 
 
 # ---------------------------------------------------------------------------
-# Indicator computation (shared by both HistoryView implementations)
+# Indicator computation (alignment audit) — registry-backed full-frame series
 # ---------------------------------------------------------------------------
 
 
-def select_source_series(df: pd.DataFrame, source: str) -> pd.Series:
-    """Return the input series the indicator should read from."""
-    if source == "hl2":
-        return (df["high"] + df["low"]) / 2.0
-    if source == "ohlc4":
-        return (df["open"] + df["high"] + df["low"] + df["close"]) / 4.0
-    return df[source]
+class _FrameBar:
+    """Bar adapter over one OHLCV frame row, for the registry walk below."""
 
+    __slots__ = ("open", "high", "low", "close", "volume")
 
-def _series_sma(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.sma(select_source_series(df, ref.source), int(ref.param("period")))
-
-
-def _series_ema(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.ema(select_source_series(df, ref.source), int(ref.param("period")))
-
-
-def _series_rsi(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.rsi(select_source_series(df, ref.source), int(ref.param("period")))
-
-
-def _series_macd(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    series = select_source_series(df, ref.source)
-    macd_line, signal_line, hist = ind.macd(
-        series,
-        fast=int(ref.param("fast")),
-        slow=int(ref.param("slow")),
-        signal=int(ref.param("signal")),
-    )
-    output = ref.param("output")
-    if output == "signal":
-        return signal_line
-    if output == "histogram":
-        return hist
-    return macd_line
-
-
-def _series_bollinger(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    series = select_source_series(df, ref.source)
-    upper, middle, lower = ind.bollinger_bands(
-        series,
-        period=int(ref.param("period")),
-        num_std=float(ref.param("num_std")),
-    )
-    band = ref.param("band")
-    if band == "upper":
-        return upper
-    if band == "lower":
-        return lower
-    return middle
-
-
-def _series_atr(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.atr(df["high"], df["low"], df["close"], period=int(ref.param("period")))
-
-
-def _series_adx(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.adx(df["high"], df["low"], df["close"], period=int(ref.param("period")))
-
-
-def _series_stochastic(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    pct_k, pct_d = ind.stochastic(
-        df["high"],
-        df["low"],
-        df["close"],
-        k_period=int(ref.param("k_period")),
-        d_period=int(ref.param("d_period")),
-    )
-    return pct_d if ref.param("output") == "d" else pct_k
-
-
-def _series_vwap(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.vwap(df["high"], df["low"], df["close"], df["volume"])
-
-
-# Module-level O(1) dispatch table — one entry per DSL ``IndicatorName``.
-# Replaces a linear if/elif chain so indicator lookup is constant-time on
-# the predicate-evaluation hot path.
-_INDICATOR_SERIES_DISPATCH: Dict[str, Callable[[IndicatorRef, pd.DataFrame], pd.Series]] = {
-    "sma": _series_sma,
-    "ema": _series_ema,
-    "rsi": _series_rsi,
-    "macd": _series_macd,
-    "bollinger": _series_bollinger,
-    "atr": _series_atr,
-    "adx": _series_adx,
-    "stochastic": _series_stochastic,
-    "vwap": _series_vwap,
-}
+    def __init__(self, open: float, high: float, low: float, close: float, volume: float) -> None:
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
 
 
 def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    """Compute the full indicator series for ``ref`` on ``df``.
+    """Full indicator series for ``ref`` on ``df`` via the streaming registry.
 
-    Pre: ``df`` has the standard OHLCV columns; ``ref.name`` is a known
-    DSL indicator name.
-    Post: returns a ``pd.Series`` aligned with ``df``'s index.
-    NaN during warmup is pandas' natural behaviour.
+    Pre: ``df`` has the standard OHLCV columns; ``ref.name`` is a known DSL
+    indicator name.
+    Post: returns a ``pd.Series`` aligned with ``df``'s index whose element ``i``
+    is the registry's trailing value over ``df[: i + 1]`` — byte-identical to
+    the engine's per-bar value (``StreamingHistoryView``), so the alignment
+    audit re-evaluates predicates with the same math the engine ran. ``NaN``
+    during warm-up (the registry returns ``None``).
+
+    Forward-walks one fresh ``IndicatorRegistry`` over the frame, feeding it the
+    growing prefix so it advances by a single recurrence step per row. This is a
+    post-hoc, per-(ref, symbol) cached pass — not the engine hot path — so the
+    walk's cost (O(window) per row; cumulative for VWAP) is acceptable.
     """
-    builder = _INDICATOR_SERIES_DISPATCH.get(ref.name)
-    if builder is None:
-        raise ValueError(f"unknown indicator name: {ref.name!r}")
-    return builder(ref, df)
+    n = len(df)
+    if n == 0:
+        return pd.Series([], dtype=float, index=df.index)
+
+    def _col(name: str):
+        return df[name].to_numpy() if name in df.columns else None
+
+    opens, highs, lows = _col("open"), _col("high"), _col("low")
+    closes, volumes = _col("close"), _col("volume")
+
+    def _at(arr, idx: int) -> float:
+        return float(arr[idx]) if arr is not None else 0.0
+
+    reg = IndicatorRegistry()
+    bars: list[_FrameBar] = []
+    out: list[float] = []
+    for idx in range(n):
+        bars.append(
+            _FrameBar(
+                _at(opens, idx),
+                _at(highs, idx),
+                _at(lows, idx),
+                _at(closes, idx),
+                _at(volumes, idx),
+            )
+        )
+        value = _registry_indicator(reg, ref, bars)
+        out.append(math.nan if value is None else value)
+    return pd.Series(out, index=df.index, dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -399,63 +354,125 @@ class BarRecord:
     low: float
     close: float
     volume: float
+    # Per-symbol views carry ``symbol=None`` (a single bar stream), which the
+    # registry's MACD symbol-slotted cache key handles as one slot. Populated
+    # by the engine so the registry's multi-stream precondition holds explicitly
+    # if a view is ever shared across symbols.
+    symbol: Optional[str] = None
+
+
+# Map each DSL ``IndicatorName`` to the registry method + the params it reads
+# from the ``IndicatorRef``. Mirrors ``_INDICATOR_SERIES_DISPATCH`` but routes
+# the engine's per-bar reads through the streaming ``IndicatorRegistry`` (O(1)
+# amortised recurrences) instead of a full pandas ``pd.Series`` recompute.
+def _registry_indicator(
+    reg: IndicatorRegistry, ref: IndicatorRef, bars: Sequence[Any]
+) -> Optional[float]:
+    """Trailing-bar value of ``ref`` over ``bars`` via the streaming registry.
+
+    Pre: ``ref.name`` is a known DSL indicator; ``ref.params`` has its
+    defaults filled (guaranteed by ``IndicatorRef`` validation). ``bars`` is a
+    list-like the registry can slice/index (``bars[-period:]``, ``bars[i]``).
+    Post: the indicator's scalar value at ``bars[-1]``, or ``None`` during
+    warm-up — byte-identical to a fresh ``IndicatorRegistry`` over the same
+    ``bars`` (so engine and sandbox ``ctx.indicator`` agree).
+    """
+    name = ref.name
+    if name == "sma":
+        return reg.sma(bars, period=int(ref.param("period")), source=ref.source)
+    if name == "ema":
+        return reg.ema(bars, period=int(ref.param("period")), source=ref.source)
+    if name == "rsi":
+        return reg.rsi(bars, period=int(ref.param("period")), source=ref.source)
+    if name == "macd":
+        return reg.macd(
+            bars,
+            fast=int(ref.param("fast")),
+            slow=int(ref.param("slow")),
+            signal=int(ref.param("signal")),
+            source=ref.source,
+            select=str(ref.param("output")),
+        )
+    if name == "bollinger":
+        return reg.bollinger_bands(
+            bars,
+            period=int(ref.param("period")),
+            num_std=float(ref.param("num_std")),
+            source=ref.source,
+            select=str(ref.param("band")),
+        )
+    if name == "atr":
+        return reg.atr(bars, period=int(ref.param("period")))
+    if name == "adx":
+        return reg.adx(bars, period=int(ref.param("period")))
+    if name == "stochastic":
+        return reg.stochastic(
+            bars,
+            k_period=int(ref.param("k_period")),
+            d_period=int(ref.param("d_period")),
+            select=str(ref.param("output")),
+        )
+    if name == "vwap":
+        return reg.vwap(bars)
+    raise ValueError(f"unknown indicator name: {name!r}")
 
 
 class StreamingHistoryView:
-    """``HistoryView`` backed by a bounded deque of bars.
+    """``HistoryView`` backed by a bounded deque of bars + a streaming registry.
 
-    Designed for the engine's per-bar loop. Bars are appended
-    incrementally; indicator values are computed lazily against the full
-    deque on first access.
+    Designed for the engine's per-bar loop. Each appended bar advances a
+    retained :class:`IndicatorRegistry` by a single recurrence step, and the
+    resulting scalar is appended to a per-``ref.sig_id`` buffer aligned 1:1 with
+    the bounded bars deque. Indexed reads — ``indicator(ref, i)`` is called with
+    an explicit bar index ``i``, and ``cross_above`` / ``cross_below`` read both
+    ``i`` and ``i - 1`` — are served straight from that buffer, so no indicator
+    is ever recomputed over the full window.
 
-    **Cache scope is same-bar dedupe only.** When multiple predicates on
-    the same bar reference the same ``IndicatorRef``, the cached
-    ``pd.Series`` is reused; when a new bar is appended the cache is
-    invalidated and the next access rebuilds the DataFrame and re-runs
-    every cached indicator over the full deque. The view does NOT
-    deliver bar-to-bar streaming for non-MACD indicators.
+    This replaces the previous design, which rebuilt the entire pandas
+    DataFrame from the deque and recomputed every indicator's full ``pd.Series``
+    (``rolling`` / ``ewm``) on every appended bar — ``O(window × num_indicators)``
+    pandas work per bar. The registry recurrences are O(1) amortised (MACD) or
+    O(window) (the windowed indicators), independent of how many bars have
+    streamed through.
 
-    The real blocker for bar-to-bar streaming is the consumer API:
-    :meth:`indicator` is called with an explicit bar index ``i`` (used by
-    ``cross_above`` / ``cross_below`` to read ``i`` and ``i - 1``), so a
-    cached value must be addressable at any index — not just the
-    trailing bar. The indicator routines in
-    :mod:`strategy_lab.executor.indicators` return full ``pd.Series``
-    objects (``rolling`` / ``ewm``), not per-bar scalars; the
-    :class:`IndicatorRegistry` is per-bar-scalar shaped and would need a
-    per-ref scalar array to back the indexed read. That refactor is
-    deferred — the honest contract today is same-bar dedupe of the
-    pandas materialisation, and the docstring says so.
+    Invariants:
+    * ``len(self._scalar_buffers[sig_id]) == len(self._bars)`` for every
+      registered ref once synced — buffer index ``i`` holds the indicator value
+      at ``self._bars[i]``. Both are ``deque(maxlen=max_bars)`` and one value is
+      pushed per appended bar, so they roll over in lockstep.
+    * Warm-up returns ``None`` (the registry returns ``None`` until it has
+      enough history), preserving the previous NaN→``None`` boundary semantics.
 
-    Cache invalidation is driven by a monotonic per-instance counter
-    bumped on every :meth:`append`. CPython recycles object ids after
-    garbage collection — a bounded deque rolling over can place a fresh
-    ``BarRecord`` at an address recently freed by the evicted oldest
-    bar, so an id-based key would silently match a stale entry under
-    batched-append patterns. The counter is never recycled.
+    Cache identity is driven by a monotonic per-instance ``_append_counter``
+    bumped on every :meth:`append`. It anchors both the lazy ``list(deque)``
+    snapshot (rebuilt once per bar, shared across all refs queried that bar) and
+    each buffer's ``synced`` watermark, so a ref first queried mid-stream
+    backfills correctly and a sparsely-queried ref catches up without a stale
+    read. The counter is never recycled within a process.
 
     The deque is bounded to ``max_bars`` (default 500, matching the
-    ``StrategyContext._ingest_bar`` retention ceiling).
+    ``StrategyContext._ingest_bar`` retention ceiling — engine and sandbox must
+    compute MACD/VWAP over the same trailing window for the conformance gate).
     """
 
     def __init__(self, max_bars: int = 500) -> None:
         self._bars: deque[BarRecord] = deque(maxlen=max_bars)
-        # Monotonic append counter; bumped on every append(). The cached
-        # DataFrame is keyed by the counter snapshot taken when it was
-        # last built. Never recycled within a single process, so
-        # id-reuse on the deque cannot produce a false cache hit.
-        # NB: the counter is **instance-lifetime only**. Any future
-        # serialisation/warm-restart of this view must atomically
-        # restore (or reset) BOTH ``_append_counter`` and
-        # ``_cache_counter`` alongside ``_df`` / ``_indicator_cache`` —
-        # otherwise the cache identity invariant breaks silently.
+        self._max_bars = max_bars
         self._append_counter: int = 0
-        self._cache_counter: Optional[int] = None
-        self._df: Optional[pd.DataFrame] = None
-        self._indicator_cache: Dict[str, pd.Series] = {}
+        # Lazy ``list(self._bars)`` snapshot — the registry needs a sliceable,
+        # randomly-indexable sequence (a deque supports neither). Rebuilt once
+        # per bar (keyed by the counter) and shared across every ref query on
+        # that bar; bounded by ``max_bars`` so this is O(max_bars), not O(bars
+        # seen), and carries none of pandas' per-call overhead.
+        self._bars_list: list[BarRecord] = []
+        self._bars_list_counter: Optional[int] = None
+        # One registry for the view's lifetime; per-``sig_id`` scalar buffers.
+        self._registry = IndicatorRegistry()
+        # sig_id -> {"buf": deque[Optional[float]], "synced": int}
+        self._buffers: Dict[str, Dict[str, Any]] = {}
 
     def append(self, bar: BarRecord) -> None:
-        """Append a bar; the indicator cache invalidates lazily on next access."""
+        """Append a bar; buffers advance lazily on the next :meth:`indicator`."""
         self._bars.append(bar)
         self._append_counter += 1
 
@@ -469,36 +486,64 @@ class StreamingHistoryView:
     def indicator(self, ref: IndicatorRef, i: int) -> Optional[float]:
         if not self._bars:
             return None
-        df = self._ensure_df()
-        key = ref.sig_id
-        series = self._indicator_cache.get(key)
-        if series is None:
-            series = compute_indicator_series(ref, df)
-            self._indicator_cache[key] = series
-        if i >= len(series):
+        bars_list = self._ensure_bars_list()
+        st = self._buffers.get(ref.sig_id)
+        if st is None:
+            st = {"buf": deque(maxlen=self._max_bars), "synced": 0}
+            self._buffers[ref.sig_id] = st
+        self._sync_buffer(ref, st, bars_list)
+        buf = st["buf"]
+        if i < 0 or i >= len(buf):
             return None
-        value = series.iloc[i]
-        if value is None or (isinstance(value, float) and math.isnan(value)):
-            return None
-        return float(value)
+        return buf[i]
 
-    def _ensure_df(self) -> pd.DataFrame:
-        if self._df is not None and self._cache_counter == self._append_counter:
-            return self._df
-        # Bars advanced since last sync (any append, including rollover)
-        # — invalidate both the DataFrame and every cached indicator
-        # series in one pass.
-        rows = [
-            {
-                "open": b.open,
-                "high": b.high,
-                "low": b.low,
-                "close": b.close,
-                "volume": b.volume,
-            }
-            for b in self._bars
-        ]
-        self._df = pd.DataFrame(rows)
-        self._indicator_cache.clear()
-        self._cache_counter = self._append_counter
-        return self._df
+    def _ensure_bars_list(self) -> list[BarRecord]:
+        """Return ``list(self._bars)``, cached until the next append."""
+        if self._bars_list_counter == self._append_counter:
+            return self._bars_list
+        self._bars_list = list(self._bars)
+        self._bars_list_counter = self._append_counter
+        return self._bars_list
+
+    def _sync_buffer(
+        self, ref: IndicatorRef, st: Dict[str, Any], bars_list: list[BarRecord]
+    ) -> None:
+        """Advance ``st['buf']`` so it holds one value per current bar.
+
+        Pre: ``bars_list`` is the current ``list(self._bars)`` snapshot.
+        Post: ``len(st['buf']) == len(bars_list)`` and ``buf[i]`` is the
+        indicator value at ``bars_list[i]``; ``st['synced'] == _append_counter``.
+        """
+        ac = self._append_counter
+        synced = st["synced"]
+        if synced == ac:
+            return  # already current (same-bar repeat query)
+        buf = st["buf"]
+        length = len(bars_list)
+        base = ac - length  # absolute append-index of bars_list[0]
+        reg = self._registry
+        if synced < base:
+            # The buffer fell behind by more than the window — the bars between
+            # ``synced`` and ``base`` were evicted and can no longer be computed
+            # or addressed. Rebuild over the whole currently-addressable deque.
+            buf.clear()
+            start = 0
+        else:
+            # Contiguous catch-up: only the bars appended since ``synced`` are
+            # unfilled; they begin at index ``start`` in ``bars_list``.
+            start = synced - base
+        if start == length - 1:
+            # Common engine case: exactly one new bar. Pass ``bars_list`` directly
+            # so the registry sees the expand/slide step with no slice or copy.
+            buf.append(_registry_indicator(reg, ref, bars_list))
+        else:
+            # Cold rebuild (start == 0) or a multi-bar gap. Grow a prefix list
+            # (append-only, same bar objects so the registry still detects each
+            # expand/slide step) rather than slicing ``bars_list[:k]`` per step —
+            # the slices would total O(length^2); this is O(length) in
+            # list-building plus the registry's O(window) per step.
+            prefix = bars_list[:start]
+            for idx in range(start, length):
+                prefix.append(bars_list[idx])
+                buf.append(_registry_indicator(reg, ref, prefix))
+        st["synced"] = ac
