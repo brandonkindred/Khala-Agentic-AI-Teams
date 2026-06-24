@@ -96,8 +96,16 @@ def test_expectancy_forecast_sanitizes_non_finite_projected_return() -> None:
 
 def test_wire_and_model_forecast_fields_match() -> None:
     """Guard against drift: the wire mirror and the persisted model must expose
-    the same field names (their values diverge only by the model's validators)."""
-    assert set(_ExpectancyForecastWire.model_fields) == set(ExpectancyForecast.model_fields)
+    the same field names, annotations, and defaults (only the model adds the
+    clamping validators). A type change on one side — e.g. float→int — would
+    desync the generated JSON schema, so types and defaults are checked too."""
+    wire_fields = _ExpectancyForecastWire.model_fields
+    model_fields = ExpectancyForecast.model_fields
+    assert set(wire_fields) == set(model_fields)
+    for name, model_field in model_fields.items():
+        wire_field = wire_fields[name]
+        assert wire_field.annotation == model_field.annotation, name
+        assert wire_field.default == model_field.default, name
 
 
 # ---------------------------------------------------------------------------
