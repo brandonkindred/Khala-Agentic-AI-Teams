@@ -25,8 +25,20 @@ export class AgentStudioShellComponent {
   /** The forward-only stage list rendered by the stepper. */
   readonly stages = STUDIO_STAGES;
 
-  /** Descriptor of the stage currently shown (drives the placeholder). */
-  readonly activeStageDef = computed(() => this.stages[this.state.activeStage()]);
+  /**
+   * Descriptor of the stage currently shown (drives the placeholder).
+   * Defensive: `activeStage()` is range-guarded by the state service, so this
+   * is always in range — but fail loud rather than hand the template an
+   * `undefined` stage if that invariant is ever broken.
+   */
+  readonly activeStageDef = computed(() => {
+    const idx = this.state.activeStage();
+    if (idx < 0 || idx >= this.stages.length) {
+      /* v8 ignore next -- defensive: activeStage is range-guarded by AgentStudioStateService, so this is unreachable */
+      throw new RangeError(`activeStageDef: active stage index ${idx} is out of range`);
+    }
+    return this.stages[idx];
+  });
 
   /**
    * Temporary scaffold control: advance to the next stage. Real stages will

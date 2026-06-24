@@ -77,8 +77,18 @@ describe('AgentStudioShellComponent', () => {
   it('passes the active stage and live handoff into the placeholder', () => {
     component.state.setRegistryAgentId('reg-1');
     fixture.detectChanges();
-    const map = new Map(component.state.handoff() ? Object.entries(component.state.handoff()) : []);
+    const map = new Map(Object.entries(component.state.handoff()));
     expect(map.get('registryAgentId')).toBe('reg-1');
     expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeTruthy();
+  });
+
+  it('marks only the active step with aria-current="step"', () => {
+    const steps = fixture.nativeElement.querySelectorAll('.studio__step');
+    expect(steps[0].getAttribute('aria-current')).toBe('step');
+    expect(steps[1].getAttribute('aria-current')).toBeNull();
+    component.onContinue();
+    fixture.detectChanges();
+    expect(steps[0].getAttribute('aria-current')).toBeNull();
+    expect(steps[1].getAttribute('aria-current')).toBe('step');
   });
 });

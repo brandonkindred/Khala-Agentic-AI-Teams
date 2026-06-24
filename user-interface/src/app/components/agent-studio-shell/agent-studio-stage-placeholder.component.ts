@@ -26,7 +26,12 @@ export class AgentStudioStagePlaceholderComponent {
   /** Live handoff state, shown as a small read-out. */
   readonly handoff = input.required<AgentStudioHandoffState>();
 
-  /** Handoff entries as `[label, value]` pairs for the template. */
+  /**
+   * Handoff entries as `[label, value]` pairs for the template. The keys are
+   * listed explicitly here so this debug read-out stays a deliberate, ordered
+   * view; the real stages won't render a raw handoff dump, so dynamic
+   * derivation from the model isn't warranted for this throwaway placeholder.
+   */
   readonly entries = computed<readonly (readonly [string, string])[]>(() => {
     const h = this.handoff();
     return [

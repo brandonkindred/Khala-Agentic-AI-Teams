@@ -30,7 +30,11 @@ export class AgentStudioStateService {
 
   /** Currently displayed stage index (0-based). */
   readonly activeStage = this._activeStage.asReadonly();
-  /** Furthest stage reached this session (drives done/todo styling). */
+  /**
+   * Furthest stage reached this session. Tracked now for the real per-stage
+   * gates and draft-resume logic in later increments; not yet consumed by the
+   * scaffold UI.
+   */
   readonly maxReachedStage = this._maxReachedStage.asReadonly();
   /** Whether the journey can advance past the current stage. */
   readonly canAdvance = computed(() => this._activeStage() < STAGE_COUNT - 1);
