@@ -105,10 +105,14 @@ describe('MetricsTabComponent', () => {
     const fixture = build();
     const c = fixture.componentInstance;
     expect(c.formatDuration(null)).toBe('—');
+    expect(c.formatDuration(undefined)).toBe('—');
+    expect(c.formatDuration(-30)).toBe('—'); // negative is treated as no sample
     expect(c.formatDuration(30)).toBe('30 s');
     expect(c.formatDuration(120)).toBe('2.0 min');
     expect(c.formatDuration(7200)).toBe('2.0 h');
     expect(c.formatDuration(172800)).toBe('2.0 d');
+    // Boundary: just under an hour rounds up consistently to the higher unit.
+    expect(c.formatDuration(3599.9)).toBe('1.0 h');
   });
 
   it('formats percent and usd', () => {

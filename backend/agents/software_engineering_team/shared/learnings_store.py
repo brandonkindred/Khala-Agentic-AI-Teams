@@ -19,7 +19,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from shared_postgres import pg_cursor
 from software_engineering_team.shared.env_config import env_float
@@ -61,8 +61,14 @@ def _or_tsquery_terms(query_text: str, *, limit: int = 40) -> str:
     Relevance retrieval wants OR semantics (any shared term contributes), not
     the AND semantics of ``plainto_tsquery`` — a long spec rarely shares *every*
     word with a short learning. Words are lowercased, de-duplicated, filtered to
-    length >= 3, sanitized to alphanumerics (safe for ``to_tsquery``), and joined
-    with ``|``.
+    length >= 3, sanitized to alphanumerics, and joined with ``|``.
+
+    The alphanumeric class deliberately drops separators (``-``/``_``): a raw
+    ``-`` is a syntax error inside ``to_tsquery`` and an ``_`` yields a
+    multi-lexeme token (also a syntax error), either of which would make the whole
+    query raise and silently return nothing. Splitting a compound like
+    ``counter_measure`` into ``counter | measure`` is also closer to how the
+    stored ``to_tsvector`` tokenizes the corpus, so it matches *more*, not less.
 
     Postconditions: returns ``""`` when no usable term remains.
     """
@@ -155,7 +161,7 @@ def retrieve_learnings(
             # for the ORDER BY ``ts_rank`` — because each positional ``%s``
             # placeholder consumes its own argument; the appends below are ordered
             # to match the placeholders in the SQL.
-            params: list = [tsquery]  # 1) WHERE search_tsv @@ to_tsquery(...)
+            params: list[Any] = [tsquery]  # 1) WHERE search_tsv @@ to_tsquery(...)
             where = "search_tsv @@ to_tsquery('english', %s)"
             if category:
                 where += " AND category = %s"

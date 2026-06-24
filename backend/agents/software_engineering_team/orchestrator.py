@@ -2604,8 +2604,10 @@ def _emit_coding_team_metrics(job_id: str) -> None:
 
     Preconditions: ``job_id`` is a non-empty string.
     Postconditions: best-effort — never raises; emits nothing when the job or its
-        snapshot is unavailable or Postgres is disabled. Idempotent per job (a
-        resumed/re-run job does not re-emit and double-count). Always flushes job cost.
+        snapshot is unavailable or Postgres is disabled. Idempotent per
+        ``(job, task)``: a resumed/re-run job emits only the events it has not
+        already recorded, so newly-merged tasks are captured without re-counting
+        the ones a prior run logged. Always flushes job cost.
     """
     if not job_id:
         # Empty job_id is a caller contract violation; surfaced as a no-op rather
@@ -2613,14 +2615,12 @@ def _emit_coding_team_metrics(job_id: str) -> None:
         # (querying with a blank key would otherwise read the wrong job or None).
         return
     try:
-        # Idempotency: this helper emits a job's whole lifecycle batch at once.
-        # task_created is emitted first, for every task, and ONLY by this helper —
-        # so its presence means the batch already ran. Guarding on it (rather than
-        # the terminal merge_to_main) is robust to a prior run that recorded task
-        # events but crashed before merge_to_main, while not tripping on unrelated
-        # events (e.g. crash_detected) the job may carry from other code paths.
-        if se_events.job_has_events(job_id, se_events.TASK_CREATED):
-            return
+        # Per-task idempotency: emit only the lifecycle events not already recorded
+        # for this job. Guarding the whole batch on a single event's existence would
+        # drop a resumed run's newly-merged tasks (and the job's merge_to_main), so
+        # we fetch the (event_type, task_id) pairs already written and skip just
+        # those — capturing new merges without double-counting prior ones.
+        emitted = se_events.emitted_event_keys(job_id)
         job = get_job(job_id) or {}
         snapshot = job.get("task_graph_snapshot") or []
         created_ts = _parse_iso(job.get("created_at"))
@@ -2631,23 +2631,36 @@ def _emit_coding_team_metrics(job_id: str) -> None:
                 continue
             tid = t.get("id") or ""
             status = (t.get("status") or "").lower()
-            se_events.record_event(
-                se_events.TASK_CREATED, job_id=job_id, task_id=tid, phase="design", ts=created_ts
-            )
-            if status == "merged" and not t.get("resolved_without_changes"):
-                merged_ts = _parse_iso(t.get("merged_at"))
-                detail = {"created_ts": created_iso} if created_iso else None
+            if (se_events.TASK_CREATED, tid) not in emitted:
                 se_events.record_event(
-                    se_events.TASK_MERGED,
+                    se_events.TASK_CREATED,
                     job_id=job_id,
                     task_id=tid,
-                    phase="execution",
-                    ts=merged_ts,
-                    detail=detail,
+                    phase="design",
+                    ts=created_ts,
                 )
+            if status == "merged" and not t.get("resolved_without_changes"):
+                merged_ts = _parse_iso(t.get("merged_at"))
+                if (se_events.TASK_MERGED, tid) not in emitted:
+                    detail = {"created_ts": created_iso} if created_iso else None
+                    se_events.record_event(
+                        se_events.TASK_MERGED,
+                        job_id=job_id,
+                        task_id=tid,
+                        phase="execution",
+                        ts=merged_ts,
+                        detail=detail,
+                    )
                 # A merged task that needed >= 1 revision is a change that initially
                 # failed a quality gate — the DORA change-failure signal.
-                if int(t.get("revision_count") or 0) > 0:
+                if (
+                    int(t.get("revision_count") or 0) > 0
+                    and (
+                        se_events.GATE_REENTRY,
+                        tid,
+                    )
+                    not in emitted
+                ):
                     se_events.record_event(
                         se_events.GATE_REENTRY,
                         job_id=job_id,
@@ -2655,7 +2668,14 @@ def _emit_coding_team_metrics(job_id: str) -> None:
                         phase="execution",
                         ts=merged_ts,
                     )
-        if job_status in ("completed", "completed_with_failures"):
+        if (
+            job_status in ("completed", "completed_with_failures")
+            and (
+                se_events.MERGE_TO_MAIN,
+                "",
+            )
+            not in emitted
+        ):
             se_events.record_event(se_events.MERGE_TO_MAIN, job_id=job_id, phase="integration")
     except Exception:
         logger.debug("failed to emit coding-team DORA metrics for %s", job_id, exc_info=True)

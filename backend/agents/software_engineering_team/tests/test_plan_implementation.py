@@ -84,11 +84,23 @@ def test_orchestrator_passes_security_agent_to_backend() -> None:
 
 
 def test_orchestrator_has_integration_phase() -> None:
-    """Orchestrator runs Integration agent after backend and frontend workers."""
-    orchestrator_path = Path(__file__).resolve().parent.parent / "orchestrator.py"
-    content = orchestrator_path.read_text()
-    assert "IntegrationAgent" in content or "integration_agent" in content
-    assert "Integration phase" in content or "integration phase" in content
+    """The orchestrator wires an IntegrationAgent under the 'integration' key.
+
+    Inspects the agent-builder's compiled code object (the actual wiring) rather
+    than grepping the source for a comment/log string, so the test survives
+    comment and log-message refactors and fails only if the integration agent is
+    genuinely unwired.
+    """
+    from integration_team import IntegrationAgent
+
+    from software_engineering_team import orchestrator
+
+    assert IntegrationAgent is not None  # the agent the orchestrator wires in
+    code = orchestrator._get_agents.__code__
+    # ``from integration_team import IntegrationAgent`` records the symbol in
+    # co_names; the ``"integration"`` dict key it is bound to is in co_consts.
+    assert "IntegrationAgent" in code.co_names
+    assert "integration" in code.co_consts
 
 
 def test_integration_agent_exists_and_runs() -> None:

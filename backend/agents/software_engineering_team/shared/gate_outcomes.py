@@ -40,6 +40,19 @@ def is_rejected(result: Any) -> Optional[bool]:
 
 
 def _first_issue(result: Any) -> Optional[Any]:
+    """Return the finding that best explains a rejection, or ``None``.
+
+    Gate-shape assumption (best-effort): an item is treated as an acceptance
+    *criterion* iff it exposes a boolean ``satisfied`` attribute — the shape used
+    by ``AcceptanceVerifierOutput.per_criterion`` today. Items without it are
+    treated as plain findings (code review / QA / security). A future gate that
+    signals pass/fail via a *different* attribute (e.g. ``passed``) would be read
+    as a plain finding, so its first entry could be surfaced even if it passed;
+    add such an attribute to this contract before relying on it.
+
+    Postconditions: prefers the first *failing* criterion; else the first plain
+        finding; else ``None`` — never labels a passing criterion as the rejection.
+    """
     for attr in _ISSUE_LIST_ATTRS:
         items = getattr(result, attr, None)
         if not items:

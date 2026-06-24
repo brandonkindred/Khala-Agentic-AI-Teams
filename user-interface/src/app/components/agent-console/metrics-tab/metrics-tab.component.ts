@@ -106,16 +106,17 @@ export class MetricsTabComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Human-readable duration from seconds; `—` when no samples (null). */
+  /** Human-readable duration from seconds; `—` when no samples (null) or negative. */
   formatDuration(seconds: number | null | undefined): string {
-    if (seconds === null || seconds === undefined) return '—';
-    // Round first so the threshold and the displayed value agree (59.9 s reads as
-    // "1.0 min", not "60 s").
+    if (seconds === null || seconds === undefined || seconds < 0) return '—';
+    // Round first, then test every threshold against the rounded value so the
+    // boundary and the displayed value always agree (59.9 s reads as "1.0 min",
+    // and 3599.9 s reads as "1.0 h", not "60.0 min").
     const whole = Math.round(seconds);
     if (whole < 60) return `${whole} s`;
-    if (seconds < 3600) return `${(seconds / 60).toFixed(1)} min`;
-    if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} h`;
-    return `${(seconds / 86400).toFixed(1)} d`;
+    if (whole < 3600) return `${(whole / 60).toFixed(1)} min`;
+    if (whole < 86400) return `${(whole / 3600).toFixed(1)} h`;
+    return `${(whole / 86400).toFixed(1)} d`;
   }
 
   /** Format a 0..1 rate as a percentage string. */

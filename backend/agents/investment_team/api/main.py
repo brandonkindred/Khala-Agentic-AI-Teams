@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -1608,9 +1609,9 @@ def _strategy_lab_worker(
             # "no constraint" handling (which keys off ``None``) is uniform.
             exclude_asset_classes = excluded_for_allowed(request.allowed_asset_classes) or None
 
-        def _compute_signal_brief() -> (
-            tuple[Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]]
-        ):
+        def _compute_signal_brief() -> tuple[
+            Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]
+        ]:
             """Build the per-batch signal brief over all currently-persisted prior records.
 
             Called at the start of every batch so that batch N+1 sees results from
@@ -2592,6 +2593,13 @@ class DeleteStrategyLabRecordResponse(BaseModel):
 # the job service — keep both widths in mind when tuning either.
 _PURGE_MAX_WORKERS = 16
 
+# Overall wall-clock ceiling for a full purge fan-out. Each underlying HTTP call
+# is already bounded by the job-service client's per-request timeout + finite
+# retries, but a pathological straggler must never wedge the endpoint, so the
+# collection below stops waiting past this deadline and abandons any unfinished
+# unit (counting it as 0 deleted) rather than blocking a server thread.
+_PURGE_TIMEOUT_S = 120.0
+
 
 def _delete_jobs_concurrently(
     client: Any,
@@ -2707,7 +2715,10 @@ def _purge_strategy_lab_job_storage() -> dict[str, int]:
         return _delete_jobs_concurrently(client, ids)
 
     units: dict[str, concurrent.futures.Future[int]] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    # NB: not a `with` block — the context manager's exit calls shutdown(wait=True),
+    # which would re-introduce the very unbounded join the deadline below avoids.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    try:
         units["deleted_lab_records"] = pool.submit(_purge_all, "investment_strategy_lab_records")
         units["deleted_lab_strategies"] = pool.submit(
             _purge_prefixed, "investment_strategies", "strat-lab-"
@@ -2719,7 +2730,29 @@ def _purge_strategy_lab_job_storage() -> dict[str, int]:
             _purge_all, "investment_paper_trading_sessions"
         )
 
-    return {key: future.result() for key, future in units.items()}
+        # Collect against a single shared deadline so the whole fan-out is bounded
+        # (per-unit timeouts would let each unit reset the clock). A unit that
+        # overruns is counted as 0 deleted; a unit that *raises* still propagates
+        # (preserving the prior error contract).
+        deadline = time.monotonic() + _PURGE_TIMEOUT_S
+        results: dict[str, int] = {}
+        for key, future in units.items():
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                results[key] = future.result(timeout=remaining)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "purge unit %s did not finish within %.0fs; counted as 0 deleted",
+                    key,
+                    _PURGE_TIMEOUT_S,
+                )
+                results[key] = 0
+        return results
+    finally:
+        # Never block on a straggler: in-flight HTTP deletes are themselves bounded
+        # by the client's per-request timeout, so abandoning the worker thread leaks
+        # nothing unbounded. cancel_futures drops any unit that hasn't started.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 @app.delete(

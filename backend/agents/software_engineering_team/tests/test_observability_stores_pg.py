@@ -109,6 +109,50 @@ def test_emit_coding_team_metrics_populates_dora(_schema, monkeypatch) -> None:
     assert m.lead_time_seconds_median == pytest.approx(1800, abs=60)
 
 
+def test_emit_coding_team_metrics_resumed_job_captures_new_merges(_schema, monkeypatch) -> None:
+    """A resumed run records newly-merged tasks without re-counting prior ones.
+
+    Regression: the idempotency guard used to skip the whole batch when *any*
+    event existed for the job, so a resume with new merges recorded nothing. The
+    guard is now per ``(job, task)``: the first run's events are not duplicated and
+    the second run's new merge (plus the now-completed ``merge_to_main``) is added.
+    """
+    from software_engineering_team import orchestrator
+    from software_engineering_team.metrics.dora import compute_dora
+
+    created = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    merged = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
+
+    # First run: only t1 merged, job still running (no merge_to_main yet).
+    first = {
+        "created_at": created.isoformat(),
+        "status": "running",
+        "task_graph_snapshot": [
+            {"id": "t1", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 0},
+        ],
+    }
+    monkeypatch.setattr(orchestrator, "get_job", lambda jid: first)
+    monkeypatch.setattr(orchestrator.cost_tracker, "flush", lambda jid: None)
+    orchestrator._emit_coding_team_metrics("job-rt")
+
+    # Resume: t2 now merged (and needed a revision); job completed.
+    second = {
+        "created_at": created.isoformat(),
+        "status": "completed",
+        "task_graph_snapshot": [
+            {"id": "t1", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 0},
+            {"id": "t2", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 1},
+        ],
+    }
+    monkeypatch.setattr(orchestrator, "get_job", lambda jid: second)
+    orchestrator._emit_coding_team_metrics("job-rt")
+
+    m = compute_dora(30.0)
+    assert m.merged_count == 2  # t1 (run 1) + t2 (run 2), t1 not double-counted
+    assert m.deployment_count == 1  # merge_to_main emitted once, on the completing run
+    assert m.gate_reentry_count == 1  # only t2 needed a revision
+
+
 def test_se_events_helpers(_schema) -> None:
     """Se events helpers."""
     from software_engineering_team.shared import se_events

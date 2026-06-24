@@ -155,6 +155,34 @@ def job_has_events(job_id: str, event_type: str = "") -> bool:
         return False
 
 
+def emitted_event_keys(job_id: str) -> set[tuple[str, str]]:
+    """Return the ``(event_type, task_id)`` pairs already recorded for ``job_id``.
+
+    Enables *per-task* idempotency: a resumed/re-run job can emit only the
+    lifecycle events it has not already recorded, so newly-merged tasks are
+    captured without re-counting the ones a prior run already logged. ``task_id``
+    is normalized to ``""`` for job-level events (e.g. ``merge_to_main``).
+
+    Postconditions: empty set when Postgres is disabled, ``job_id`` is empty, or
+        on error; never raises.
+    """
+    if not job_id:
+        return set()
+    try:
+        with pg_cursor() as cur:
+            if cur is None:
+                return set()
+            cur.execute(
+                "SELECT DISTINCT event_type, task_id FROM se_events WHERE job_id = %s",
+                (job_id,),
+            )
+            rows = cur.fetchall()
+        return {(r[0], r[1] or "") for r in rows}
+    except Exception:
+        logger.debug("failed to read emitted event keys for job %s", job_id, exc_info=True)
+        return set()
+
+
 def unresolved_crashed_task_ids(job_id: str) -> set[str]:
     """Return task ids for ``job_id`` with more CRASH_DETECTED than CRASH_RESOLVED.
 
@@ -219,6 +247,7 @@ __all__ = [
     "record_event",
     "fetch_events_since",
     "job_has_events",
+    "emitted_event_keys",
     "unresolved_crashed_task_ids",
     "prune_events",
 ]
