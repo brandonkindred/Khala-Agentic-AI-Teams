@@ -17,6 +17,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
 
+from pydantic import ValidationError
+
 from ..execution.benchmarks import benchmark_for_strategy, build_60_40_equity
 from ..execution.metrics import (
     bootstrap_sharpe_ci,
@@ -38,6 +40,7 @@ from ..models import (
     BacktestRecord,
     BacktestResult,
     DataProvenance,
+    ExpectancyForecast,
     GateEvent,
     StrategyLabRecord,
     StrategySpec,
@@ -146,6 +149,117 @@ def _coerce_requires_custom_code(raw: Any) -> bool:
         if s in {"false", "no", "off", "0", "f", "n", ""}:
             return False
     return False
+
+
+def _coerce_expectancy_forecast(raw: Any) -> Optional[ExpectancyForecast]:
+    """Coerce an LLM-emitted ``expectancy_forecast`` blob to ``ExpectancyForecast``.
+
+    Pre:  ``raw`` is any value from an untrusted JSON source — typically a
+          dict of the forecast fields, ``None`` when the designer omitted it,
+          or an already-built ``ExpectancyForecast``.
+    Post: returns an ``ExpectancyForecast`` (with values clamped by the model's
+          validators) when ``raw`` is a usable dict / instance; returns
+          ``None`` for a missing or unusable forecast.
+    Invariant: never raises. The forecast is advisory and never gated, so a
+          malformed blob degrades to ``None`` rather than aborting the cycle
+          with a ValidationError.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, ExpectancyForecast):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            return ExpectancyForecast(**raw)
+        except (ValidationError, TypeError) as exc:
+            logger.warning("DesignAgent emitted unusable expectancy_forecast (%s); dropping.", exc)
+            return None
+    return None
+
+
+def build_spec_from_dict(strategy_dict: Dict[str, Any], *, strategy_id: str) -> "StrategySpec":
+    """Construct a ``StrategySpec`` from a design-agent JSON payload.
+
+    Pre: ``strategy_dict`` is the JSON dict returned by
+    :meth:`DesignAgent.run` or :meth:`DesignAgent.revise` — already
+    validated to carry structured-DSL rule shapes; ``strategy_id`` is
+    stable across the design loop so revisions of the same lineage
+    share an id.
+    Post: returns a freshly constructed ``StrategySpec`` carrying the
+    supplied ``strategy_id``. The caller is responsible for any
+    subsequent mutation (compile, fee defaults).
+
+    Accepted ``asset_class`` aliases (equity/equities/stock/etf/etfs, fx,
+    commodity/metal/energy, cryptocurrency/cryptocurrencies) are
+    canonicalized before construction so a clean mapping never trips the
+    strict ``StrategySpec`` validator.
+
+    A *genuinely unsupported* class the strict normalizer rejects (e.g.
+    ``bonds``) is NOT silently coerced to ``stocks`` — doing so would run
+    the original (bonds) hypothesis against the stock universe and stock
+    gates and record it as a valid stock backtest. Instead this raises
+    :class:`SpecImplementabilityError`, which ``run_cycle`` catches to
+    re-enter the design phase with the defect as evidence (bounded by
+    ``MAX_DESIGN_REENTRIES``); on exhaustion the cycle short-circuits with
+    ``status="failed: spec_unimplementable"`` rather than a misleading
+    record. This keeps the cycle alive (no unhandled ``ValidationError``
+    crash) while refusing to mislabel the experiment.
+
+    This is a free function (no orchestrator state) so it can be unit-tested
+    directly; ``StrategyLabOrchestrator._build_spec_from_dict`` is a thin
+    wrapper over it.
+
+    Raises:
+        SpecImplementabilityError: the payload names an unsupported
+            ``asset_class`` that no alias maps to a tradeable class.
+    """
+    raw_asset_class = strategy_dict.get("asset_class", "stocks")
+    asset_class = normalize_asset_class(raw_asset_class)
+    unsupported_class = False
+    try:
+        normalize_asset_class_strict(raw_asset_class)
+    except ValueError:
+        unsupported_class = True
+
+    spec = StrategySpec(
+        strategy_id=strategy_id,
+        authored_by="strategy_lab_v2",
+        asset_class=asset_class,
+        hypothesis=strategy_dict.get("hypothesis", ""),
+        signal_definition=strategy_dict.get("signal_definition", ""),
+        timeframe=strategy_dict.get("timeframe") or "1d",
+        entry_rules=strategy_dict.get("entry_rules", []),
+        exit_rules=strategy_dict.get("exit_rules", []),
+        sizing=strategy_dict.get("sizing", DEFAULT_SIZING_PAYLOAD),
+        target_symbols=strategy_dict.get("target_symbols", []),
+        risk_limits=strategy_dict.get("risk_limits", {}),
+        speculative=strategy_dict.get("speculative", False),
+        requires_custom_code=_coerce_requires_custom_code(
+            strategy_dict.get("requires_custom_code")
+        ),
+        expectancy_forecast=_coerce_expectancy_forecast(strategy_dict.get("expectancy_forecast")),
+        strategy_code=None,
+    )
+    if unsupported_class:
+        # ``spec`` (coerced to ``stocks``) is passed as ``last_spec`` only so
+        # the short-circuit record is well-formed; the cycle will redesign
+        # rather than backtest it. The evidence names the rejected class so
+        # the re-entry directive steers the LLM to a supported one.
+        logger.warning(
+            "DesignAgent emitted unsupported asset_class %r; routing to "
+            "redesign instead of coercing to %r and backtesting as stocks.",
+            raw_asset_class,
+            asset_class,
+        )
+        raise SpecImplementabilityError(
+            f"Unsupported asset_class {raw_asset_class!r}: not a tradeable "
+            "class and not a known alias. Re-author the strategy for one of "
+            "stocks/crypto/forex/futures/commodities.",
+            failure_phase="design",
+            last_spec=spec,
+            last_code="",
+        )
+    return spec
 
 
 # Refinement output is code-only post-#543. Anything else the LLM emits is
@@ -1403,83 +1517,13 @@ class StrategyLabOrchestrator:
     def _build_spec_from_dict(
         self, strategy_dict: Dict[str, Any], *, strategy_id: str
     ) -> StrategySpec:
-        """Construct a ``StrategySpec`` from a design-agent JSON payload.
+        """Thin instance wrapper over :func:`build_spec_from_dict`.
 
-        Pre: ``strategy_dict`` is the JSON dict returned by
-        :meth:`DesignAgent.run` or :meth:`DesignAgent.revise` — already
-        validated to carry structured-DSL rule shapes; ``strategy_id`` is
-        stable across the design loop so revisions of the same lineage
-        share an id.
-        Post: returns a freshly constructed ``StrategySpec`` carrying the
-        supplied ``strategy_id``. The caller is responsible for any
-        subsequent mutation (compile, fee defaults).
-
-        Accepted ``asset_class`` aliases (equity/equities/stock/etf/etfs, fx,
-        commodity/metal/energy, cryptocurrency/cryptocurrencies) are
-        canonicalized before construction so a clean mapping never trips the
-        strict ``StrategySpec`` validator.
-
-        A *genuinely unsupported* class the strict normalizer rejects (e.g.
-        ``bonds``) is NOT silently coerced to ``stocks`` — doing so would run
-        the original (bonds) hypothesis against the stock universe and stock
-        gates and record it as a valid stock backtest. Instead this raises
-        :class:`SpecImplementabilityError`, which ``run_cycle`` catches to
-        re-enter the design phase with the defect as evidence (bounded by
-        ``MAX_DESIGN_REENTRIES``); on exhaustion the cycle short-circuits with
-        ``status="failed: spec_unimplementable"`` rather than a misleading
-        record. This keeps the cycle alive (no unhandled ``ValidationError``
-        crash) while refusing to mislabel the experiment.
-
-        Raises:
-            SpecImplementabilityError: the payload names an unsupported
-                ``asset_class`` that no alias maps to a tradeable class.
+        Retained so the orchestrator's existing call sites keep their method
+        form; the construction logic lives in the module-level function so it
+        can be unit-tested without instantiating the orchestrator.
         """
-        raw_asset_class = strategy_dict.get("asset_class", "stocks")
-        asset_class = normalize_asset_class(raw_asset_class)
-        unsupported_class = False
-        try:
-            normalize_asset_class_strict(raw_asset_class)
-        except ValueError:
-            unsupported_class = True
-
-        spec = StrategySpec(
-            strategy_id=strategy_id,
-            authored_by="strategy_lab_v2",
-            asset_class=asset_class,
-            hypothesis=strategy_dict.get("hypothesis", ""),
-            signal_definition=strategy_dict.get("signal_definition", ""),
-            timeframe=strategy_dict.get("timeframe") or "1d",
-            entry_rules=strategy_dict.get("entry_rules", []),
-            exit_rules=strategy_dict.get("exit_rules", []),
-            sizing=strategy_dict.get("sizing", DEFAULT_SIZING_PAYLOAD),
-            target_symbols=strategy_dict.get("target_symbols", []),
-            risk_limits=strategy_dict.get("risk_limits", {}),
-            speculative=strategy_dict.get("speculative", False),
-            requires_custom_code=_coerce_requires_custom_code(
-                strategy_dict.get("requires_custom_code")
-            ),
-            strategy_code=None,
-        )
-        if unsupported_class:
-            # ``spec`` (coerced to ``stocks``) is passed as ``last_spec`` only so
-            # the short-circuit record is well-formed; the cycle will redesign
-            # rather than backtest it. The evidence names the rejected class so
-            # the re-entry directive steers the LLM to a supported one.
-            logger.warning(
-                "DesignAgent emitted unsupported asset_class %r; routing to "
-                "redesign instead of coercing to %r and backtesting as stocks.",
-                raw_asset_class,
-                asset_class,
-            )
-            raise SpecImplementabilityError(
-                f"Unsupported asset_class {raw_asset_class!r}: not a tradeable "
-                "class and not a known alias. Re-author the strategy for one of "
-                "stocks/crypto/forex/futures/commodities.",
-                failure_phase="design",
-                last_spec=spec,
-                last_code="",
-            )
-        return spec
+        return build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
 
     def _run_pre_synthesis_phase(
         self,

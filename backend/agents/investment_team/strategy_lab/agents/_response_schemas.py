@@ -41,14 +41,32 @@ from ..spec_dsl import EntryRule, ExitRule, SizingRule
 # ---------------------------------------------------------------------------
 
 
+class _ExpectancyForecastWire(BaseModel):
+    """Wire shape of the designer's pre-commit expectancy forecast.
+
+    Mirrors ``models.ExpectancyForecast`` (the persisted form, which adds
+    clamping validators). Kept local here so the schema module stays decoupled
+    from the heavier models module — same rationale as ``risk_limits`` below.
+    Keep the field set in sync with ``models.ExpectancyForecast`` and the
+    ``expectancy_forecast`` block documented in ``_DESIGN_USER_TEMPLATE`` /
+    ``design_system.md``.
+    """
+
+    forecast_win_rate: float = 0.0
+    reward_risk: float = 0.0
+    trades_per_year: float = 0.0
+    projected_annual_return_pct: float = 0.0
+    consistency_note: str = ""
+
+
 class _DesignSpecWire(BaseModel):
     """Shape emitted by :class:`DesignAgent` (``run`` / ``revise``).
 
     Mirrors ``design_system.md`` + ``_DESIGN_USER_TEMPLATE``: the structured
-    spec plus the ``rationale`` the designer returns alongside it. Excludes
-    fields the orchestrator owns (``strategy_id``, ``audit``,
-    ``requires_custom_code`` …) and the ``strategy_code`` key the designer is
-    explicitly told not to emit.
+    spec plus the ``rationale`` and ``expectancy_forecast`` the designer
+    returns alongside it. Excludes fields the orchestrator owns
+    (``strategy_id``, ``audit``, ``requires_custom_code`` …) and the
+    ``strategy_code`` key the designer is explicitly told not to emit.
     """
 
     asset_class: str
@@ -66,6 +84,10 @@ class _DesignSpecWire(BaseModel):
     risk_limits: Dict[str, Any] = Field(default_factory=dict)
     speculative: bool = False
     rationale: str = ""
+    # Advisory expectancy forecast (win rate / reward:risk / trades-per-year /
+    # projected return). Optional — the designer is asked for it but it is
+    # never gated, so the wire shape tolerates its absence.
+    expectancy_forecast: Optional[_ExpectancyForecastWire] = None
 
 
 class _CritiqueIssueWire(BaseModel):
