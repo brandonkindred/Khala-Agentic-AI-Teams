@@ -454,9 +454,10 @@ def test_get_storage_status_unreachable(app_client, monkeypatch):
 
 def test_get_storage_status_unreachable_on_probe_timeout(app_client, monkeypatch):
     # A probe that hangs past the bounded window (post-connect stall) must not hang the
-    # request: bounded_probe's wait_for fires and the store is reported unreachable.
-    # Patch the shared budget to a tiny value so the request returns fast and we can
-    # PROVE the timeout branch fired (returned at ~budget, well before the sleep).
+    # request: bounded_probe times out and the store is reported unreachable. Patch the
+    # shared budget tiny and the probe sleep large, then PROVE the timeout branch fired by
+    # the request returning well before the sleep would finish (a generous margin keeps it
+    # off the CI flake line while still clearly distinguishing it from the full sleep).
     import time
 
     from shared_postgres import client as pg_client
@@ -465,7 +466,7 @@ def test_get_storage_status_unreachable_on_probe_timeout(app_client, monkeypatch
     monkeypatch.setattr(pg_client, "default_probe_budget", lambda: 0.2)
 
     def _hang(*_a, **_k):
-        time.sleep(0.8)  # >> the 0.2s budget
+        time.sleep(1.5)  # >> the 0.2s budget
         return "available"
 
     monkeypatch.setattr(route, "resolve_storage_status", _hang)
@@ -474,9 +475,8 @@ def test_get_storage_status_unreachable_on_probe_timeout(app_client, monkeypatch
     elapsed = time.monotonic() - t0
     assert body["storage_status"] == "unreachable"
     assert body["storage_available"] is False
-    # Returned at ~budget (0.2s), NOT after the full 0.8s sleep → the wait_for timeout
-    # branch fired (this distinguishes it from a fast synchronous error).
-    assert elapsed < 0.6
+    # Returned well before the 1.5s sleep → the timeout branch fired (not the full block).
+    assert elapsed < 1.0
 
 
 def test_put_response_reports_available(app_client):

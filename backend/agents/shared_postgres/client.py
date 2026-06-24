@@ -261,16 +261,55 @@ def default_probe_budget() -> float:
 
     Preconditions: none.
     Postconditions: returns ``connect_timeout + statement_timeout + 1.0`` seconds — large
-        enough that a worker bounded by the TCP connect (``connect_timeout``) and the
-        query (``statement_timeout``) finishes (releasing any lock it holds) BEFORE the
-        caller's ``asyncio.wait_for`` abandons it, and that a within-bounds slow read is
-        not falsely reported unreachable. When ``statement_timeout`` is disabled (0) the
-        query is unbounded, so this is a best-effort cap, not a guarantee. Never raises.
+        enough that, on the CREDENTIAL-STORE path (where ``statement_timeout`` bounds the
+        query), a worker finishes (releasing its lock) before the caller's
+        :func:`bounded_probe` abandons it, and that a within-bounds slow read is not falsely
+        reported unreachable. On the shared-pool ``SELECT 1`` path (no ``statement_timeout``)
+        or when ``statement_timeout`` is disabled (0), the query is unbounded and this is a
+        best-effort cap, not a guarantee — :func:`bounded_probe` caps the worker count for
+        that case. Never raises.
     """
     return float(_connect_timeout()) + statement_timeout_ms() / 1000.0 + 1.0
 
 
 _T = TypeVar("_T")
+
+# Concurrency cap on in-flight bounded_probe worker threads. A probe normally completes
+# in milliseconds and releases its slot immediately; the cap only bites when that many
+# workers are already STUCK (a Postgres that accepts the connection then stalls mid-query,
+# which connect_timeout doesn't cover and the shared-pool SELECT 1 has no statement_timeout
+# for). Capping bounds the abandoned-thread / held-connection count under a sustained
+# stall instead of spawning one unbounded daemon thread per request.
+_PROBE_SEM: Optional[threading.Semaphore] = None
+_PROBE_SEM_LOCK = threading.Lock()
+
+
+def _probe_semaphore() -> threading.Semaphore:
+    """Return the lazily-sized probe-concurrency semaphore.
+
+    Preconditions: none.
+    Postconditions: returns a process-wide ``Semaphore`` whose count is
+        ``POSTGRES_PROBE_MAX_WORKERS`` (default 4, floor 1), created once. Never raises.
+    """
+    global _PROBE_SEM
+    if _PROBE_SEM is None:
+        with _PROBE_SEM_LOCK:
+            if _PROBE_SEM is None:
+                _PROBE_SEM = threading.Semaphore(
+                    parse_int("POSTGRES_PROBE_MAX_WORKERS", 4, minimum=1)
+                )
+    return _PROBE_SEM
+
+
+def _drain_future(fut: asyncio.Future) -> None:
+    """Consume a settled future's outcome so the loop doesn't log it as unhandled.
+
+    Preconditions: none.
+    Postconditions: retrieves ``fut``'s exception (marking it handled) when it carries one;
+        a normal result or a cancellation is left as-is. Never raises.
+    """
+    if not fut.cancelled():
+        fut.exception()
 
 
 async def bounded_probe(
@@ -283,25 +322,37 @@ async def bounded_probe(
     """Run blocking ``fn`` off the event loop, bounded so a stalled DB can't hang the request.
 
     The single home for the "offload a blocking probe, time it out, log + degrade on
-    failure" pattern shared by the LLM Provider page and the GitHub config panel, so the
-    timeout math and the log-on-degrade policy can't drift between callers.
+    failure" pattern shared by the LLM Provider page and the GitHub config panel.
 
     Preconditions: ``fn`` is a no-arg blocking callable; ``on_failure`` is a no-arg
         callable returning the degraded result (same type as ``fn``).
-    Postconditions: returns ``fn()``'s result; on timeout or ANY exception, logs the
-        cause (so a non-connectivity bug isn't silently masked) and returns
-        ``on_failure()``. ``budget`` defaults to :func:`default_probe_budget`. The call
-        returns within ``budget`` seconds of wall-clock even if ``fn`` is still blocking.
-        ``fn`` runs in a DETACHED daemon thread (not the loop executor) and resolves a
-        ``asyncio.shield``-ed future, so on timeout nothing the event loop or ASGI server
-        tracks stays pending — ``asyncio.wait_for(asyncio.to_thread(...))`` does NOT bound
-        wall-clock (an executor future can't be cancelled, so it blocks until the thread
-        finishes). The detached thread is abandoned (the accepted residual; its own
-        ``statement_timeout`` releases any lock it holds before the budget elapses).
-        Never raises.
+    Postconditions: returns ``fn()``'s result; on timeout or any ``Exception`` from ``fn``
+        (a non-``Exception`` ``BaseException`` kills the worker thread instead of being
+        relayed), logs the cause and returns ``on_failure()``. ``budget`` defaults to
+        :func:`default_probe_budget`. The call ALWAYS returns within ``budget`` seconds of
+        wall-clock even if ``fn`` keeps blocking: ``fn`` runs in a detached daemon thread
+        (NOT the loop executor — ``asyncio.wait_for(asyncio.to_thread(...))`` does not bound
+        wall-clock, since an executor future can't be cancelled) and resolves an
+        ``asyncio.shield``-ed future via a loop-closed-safe callback. Concurrent workers are
+        capped at ``POSTGRES_PROBE_MAX_WORKERS``; once that many are stuck, further calls
+        degrade immediately rather than spawn more threads, so a sustained stall can't grow
+        threads / held connections without bound. A timed-out worker is abandoned: it
+        releases its DB connection / lock only when ``fn`` finally returns — bounded by
+        ``statement_timeout`` on the credential-store path, but NOT on the shared-pool
+        ``SELECT 1`` path (only ``connect_timeout`` bounds that), which is exactly why the
+        worker count is capped. Never raises.
     """
     if budget is None:
         budget = default_probe_budget()
+    sem = _probe_semaphore()
+    if not sem.acquire(blocking=False):
+        # That many probes are already stuck → the store is evidently not answering. Don't
+        # pile on another thread; degrade now.
+        logger.warning(
+            "%s skipped: probe concurrency cap reached; returning degraded result", label
+        )
+        return on_failure()
+
     loop = asyncio.get_running_loop()
     result: asyncio.Future = loop.create_future()
 
@@ -313,13 +364,24 @@ async def bounded_probe(
         else:
             result.set_result(value)
 
+    def _safe_settle(value: Optional[_T], error: Optional[BaseException]) -> None:
+        # The loop may already be closed (timed-out request torn down, or process shutdown)
+        # by the time a stuck worker finishes; call_soon_threadsafe raises RuntimeError then.
+        try:
+            loop.call_soon_threadsafe(_settle, value, error)
+        except RuntimeError:
+            pass
+
     def _runner() -> None:
         try:
-            value = fn()
-        except BaseException as e:  # noqa: BLE001 - relayed to the awaiter via the future
-            loop.call_soon_threadsafe(_settle, None, e)
-        else:
-            loop.call_soon_threadsafe(_settle, value, None)
+            try:
+                value = fn()
+            except Exception as e:  # noqa: BLE001 - relayed to the awaiter; degrades the request
+                _safe_settle(None, e)
+            else:
+                _safe_settle(value, None)
+        finally:
+            sem.release()
 
     threading.Thread(target=_runner, name="bounded_probe", daemon=True).start()
     try:
@@ -327,12 +389,12 @@ async def bounded_probe(
         # will later resolve (which would raise InvalidStateError in that thread).
         return await asyncio.wait_for(asyncio.shield(result), timeout=budget)
     except asyncio.TimeoutError:
-        # Retrieve the eventual result/exception so the loop doesn't log it as unhandled,
-        # but do NOT await it — the thread is abandoned.
-        result.add_done_callback(lambda f: f.cancelled() or f.exception())
+        # Drain the eventual result/exception so the loop doesn't log it as unhandled, but
+        # do NOT await it — the worker is abandoned (capped, so this can't grow unbounded).
+        result.add_done_callback(_drain_future)
         logger.warning("%s timed out after %.1fs; returning degraded result", label, budget)
         return on_failure()
-    except Exception:  # noqa: BLE001 - any failure from fn → logged, degraded result
+    except Exception:  # noqa: BLE001 - any relayed failure from fn → logged, degraded result
         logger.exception("%s failed; returning degraded result", label)
         return on_failure()
 

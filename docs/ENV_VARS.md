@@ -296,6 +296,16 @@ post-connect stall can then pin `_LOCK` indefinitely, reintroducing the cascade 
 Scoped to the credential store only — it is deliberately **not** applied to the shared pool, which
 would cap legitimate long-running team queries.
 
+### POSTGRES_PROBE_MAX_WORKERS
+Caps the number of concurrent `shared_postgres.bounded_probe` worker threads — the bounded offload
+behind the LLM Provider page and GitHub config-status reads. Default `4`, floor `1`. A probe normally
+completes in milliseconds and frees its slot immediately; the cap only bites when that many workers
+are already *stuck* (a Postgres that accepts the connection then stalls mid-query, which
+`connect_timeout` doesn't cover and the shared-pool `SELECT 1` has no `statement_timeout` for). Once
+the cap is reached, further config-status requests degrade to "unreachable" immediately instead of
+spawning more threads, so a sustained stall can't grow abandoned threads / held connections without
+bound.
+
 ### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
 Per-worker memory watchdog used by every `team_service` microservice
 (`shared_observability.process_health`). A daemon thread samples the container's

@@ -254,7 +254,7 @@ def test_get_github_degrades_on_probe_timeout(mock_cfg, mock_meta, monkeypatch):
     from shared_postgres import client as pg_client
 
     monkeypatch.setattr(pg_client, "default_probe_budget", lambda: 0.2)
-    mock_cfg.side_effect = lambda: time.sleep(0.8) or {**dict(_GH_STATUS_CFG), "store_reachable": True}
+    mock_cfg.side_effect = lambda: time.sleep(1.5) or {**dict(_GH_STATUS_CFG), "store_reachable": True}
     t0 = time.monotonic()
     resp = client.get(_GITHUB_CFG_ENDPOINT)
     elapsed = time.monotonic() - t0
@@ -262,8 +262,8 @@ def test_get_github_degrades_on_probe_timeout(mock_cfg, mock_meta, monkeypatch):
     assert resp.status_code == 200
     assert body["credential_store_unreachable"] is True
     assert (body["owner"], body["repo"]) == ("acme", "widget")  # settings preserved
-    # Returned at ~budget (0.2s), NOT after the 0.8s sleep → the wait_for timeout fired.
-    assert elapsed < 0.6
+    # Returned well before the 1.5s sleep → the timeout branch fired (not the full block).
+    assert elapsed < 1.0
 
 
 # ---------------------------------------------------------------------------

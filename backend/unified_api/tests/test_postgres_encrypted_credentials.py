@@ -59,7 +59,7 @@ def test_dsn_delegates_to_shared_keyword_builder(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("POSTGRES_PORT", "5433")
     mod = _reload(monkeypatch, postgres_host="myhost")
     dsn = mod._dsn()
-    # Keyword/value libpq form (NOT a postgresql:// URI), so every field is _kv-escaped.
+    # Keyword/value libpq form (NOT a postgresql:// URI), every field escaped by make_conninfo.
     assert "postgresql://" not in dsn
     assert "host=myhost" in dsn
     assert "user=myuser" in dsn

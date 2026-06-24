@@ -774,3 +774,73 @@ def test_getattr_raises_on_unknown():
 
     with pytest.raises(AttributeError, match="no attribute"):
         _ = shared_postgres.not_a_real_thing  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# bounded_probe: bounds wall-clock, caps workers, never raises
+# ---------------------------------------------------------------------------
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def test_bounded_probe_returns_fn_result():
+    assert _run(client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "F", budget=0.5)) == "ok"
+
+
+def test_bounded_probe_times_out_within_budget():
+    import time
+
+    t0 = time.monotonic()
+    result = _run(
+        client_mod.bounded_probe(
+            lambda: (time.sleep(1.5), "ok")[1], on_failure=lambda: "F", budget=0.2
+        )
+    )
+    elapsed = time.monotonic() - t0
+    assert result == "F"
+    # Returned at ~budget, NOT after the 1.5s block (proves the timeout actually bounds).
+    assert elapsed < 1.0
+
+
+def test_bounded_probe_degrades_on_fn_exception():
+    def boom():
+        raise RuntimeError("read failed")
+
+    assert _run(client_mod.bounded_probe(boom, on_failure=lambda: "F", budget=0.5)) == "F"
+
+
+def test_bounded_probe_caps_concurrent_workers(monkeypatch):
+    # Exhaust the semaphore (simulating that-many stuck probes); the next call must degrade
+    # immediately instead of spawning another thread — even with a generous budget.
+    import time
+
+    monkeypatch.setattr(client_mod, "_PROBE_SEM", __import__("threading").Semaphore(1))
+    client_mod._PROBE_SEM.acquire()  # the one slot is now "stuck"
+    t0 = time.monotonic()
+    result = _run(client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "CAP", budget=5.0))
+    elapsed = time.monotonic() - t0
+    assert result == "CAP"
+    assert elapsed < 0.5  # did not wait on the (full) budget; degraded at once
+
+
+def test_bounded_probe_survives_closed_loop_settle():
+    # A worker that finishes AFTER the loop is gone must not crash: _safe_settle swallows
+    # the "Event loop is closed" RuntimeError. Run a timed-out probe, then let the worker
+    # finish after asyncio.run() has torn the loop down.
+    import time
+
+    done = []
+
+    def _slow():
+        time.sleep(0.3)
+        done.append(True)
+        return "late"
+
+    assert _run(client_mod.bounded_probe(_slow, on_failure=lambda: "F", budget=0.05)) == "F"
+    # Let the abandoned worker fire its call_soon_threadsafe against the now-closed loop.
+    time.sleep(0.5)
+    assert done == [True]  # the worker ran to completion without an uncaught crash
