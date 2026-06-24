@@ -123,7 +123,7 @@ ctx.submit_order(
 )
 ```
 
-- **Exits are engine-owned**: the engine enforces every stop-loss / take-profit / signal-exit in `spec.exit_rules` for the side(s) it applies to and stamps `engine_exit:<kind>`. Do NOT submit a closing order (opposite `side`, `qty == position.qty`) for a side the engine covers — a manual close fills first, strips that attribution, and fails the trade-alignment gate. Submit a close yourself **only** for a position side no exit rule covers (e.g. a short position when the spec's only stop is a long-side `trailing_high`); otherwise `on_bar` submits entries only.
+- **Exits are engine-owned**: the engine enforces every stop-loss / take-profit / scaled-take-profit / signal-exit in `spec.exit_rules` for the side(s) it applies to and stamps `engine_exit:<kind>`. Do NOT submit a closing order (opposite `side`, `qty == position.qty`) for a side the engine covers — a manual close fills first, strips that attribution, and fails the trade-alignment gate. This includes laddered `scaled_take_profit` exits: the engine itself emits the partial scale-out at each rung — never author your own partial close to mimic one. Submit a close yourself **only** for a position side no exit rule covers (e.g. a short position when the spec's only stop is a long-side `trailing_high`); otherwise `on_bar` submits entries only.
 - **Sizing**: compute `qty` yourself from `ctx.equity * pct / bar.close`. The engine's risk gates can still reject an oversize entry.
 
 ## Reading indicators — use `ctx.indicator(...)`
@@ -181,8 +181,10 @@ Do NOT use: `exec()`, `eval()`, `compile()`, `__import__()`, `open()`, `setattr(
 ## Exits are engine-owned
 
 The engine enforces every exit in `spec.exit_rules` — stop-loss,
-take-profit, and signal-exit — for the position side(s) each rule
-applies to, and stamps `engine_exit:<kind>` on the close. Do NOT author
+take-profit, scaled (laddered) take-profit, and signal-exit — for the
+position side(s) each rule applies to, and stamps `engine_exit:<kind>`
+on the close (a `scaled_take_profit` rung emits an engine-owned PARTIAL
+close that leaves the remainder open). Do NOT author
 a position-closing order for a side the engine covers: a manual close
 fills ahead of the engine, strips that attribution, and fails the
 trade-alignment gate. The one exception is a position side that **no**

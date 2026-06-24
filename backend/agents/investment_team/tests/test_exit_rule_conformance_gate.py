@@ -7,6 +7,7 @@ test runs the whole gate end-to-end against a multi-rule spec.
 
 from __future__ import annotations
 
+import re
 from typing import List
 
 from investment_team.models import (
@@ -20,6 +21,7 @@ from investment_team.strategy_lab.quality_gates.exit_rule_conformance import (
 from investment_team.strategy_lab.spec_dsl import (
     IndicatorRef,
     Predicate,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -225,6 +227,121 @@ def test_take_profit_with_other_rules_is_informational() -> None:
     )
     fails = [r for r in results if not r.passed]
     assert fails == []
+
+
+# ---------------------------------------------------------------------------
+# ScaledTakeProfitRule
+# ---------------------------------------------------------------------------
+
+
+def _ladder() -> ScaledTakeProfitRule:
+    """A two-rung ladder: 50% at +5%, 30% at +10%."""
+    return ScaledTakeProfitRule(
+        levels=[{"pct": 0.05, "qty_fraction": 0.5}, {"pct": 0.10, "qty_fraction": 0.3}]
+    )
+
+
+def test_scaled_take_profit_alone_is_informational_with_firings() -> None:
+    """Rungs fired → informational per-rung telemetry naming each fired rung key,
+    never a failure."""
+    gate = ExitRuleConformanceGate()
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"scaled_take_profit": 2},
+        exit_rule_firings_by_symbol={"AAA": {"scaled_take_profit": 2}},
+        scaled_take_profit_level_firings={"0:0": 1, "0:1": 1},
+    )
+    results = gate.check(
+        exit_rules=[_ladder()], trades=[_trade()], diagnostics=diag, config=_config()
+    )
+    assert [r for r in results if not r.passed] == []
+    # The per-rung telemetry names BOTH rungs with their level params and fired
+    # counts. Assert the meaningful DATA (rung index → pct → qty_fraction → fired
+    # count, in that order) rather than the exact punctuation/spacing of the
+    # human-readable line — the message is presentation, not a machine-parsed
+    # contract, so a future format tweak (e.g. "L0: @0.05 / 0.5 = 1") should not
+    # break this. ``\D*`` spans whatever separators the format uses between fields.
+    info = next(
+        r for r in results if "ScaledTakeProfitRule" in r.details and "per-rung" in r.details
+    )
+    assert re.search(r"L0\D*0\.05\D*0\.5\D*1", info.details)  # rung 0: +5%, 50%, fired once
+    assert re.search(r"L1\D*0\.1\D*0\.3\D*1", info.details)  # rung 1: +10%, 30%, fired once
+
+
+def test_scaled_take_profit_alone_warns_when_no_rung_fired() -> None:
+    """The ladder is the only exit and trades exist, yet no rung ever fired → warning
+    (the rung targets may be unreachable on the strategy's universe)."""
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[_ladder()],
+        trades=[_trade(return_pct=1.0)],
+        diagnostics=_diagnostics(),  # no firings at all
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "warning"
+
+
+def test_scaled_take_profit_no_warn_when_a_sibling_ladder_fired() -> None:
+    """Multiple ladders with NO other exit kind: as long as SOME rung fired
+    strategy-wide, a sibling ladder whose own rungs never fired does NOT warn. The
+    warning keys off whole-strategy rung firings, not this ladder's count — with
+    several ladders one can carry the exits while another's higher rungs legitimately
+    never reach their target, so a per-ladder zero is a false alarm."""
+    gate = ExitRuleConformanceGate()
+    # Two ladders (rule_index 0 and 1); only rule 0's first rung fired, rule 1 none.
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"scaled_take_profit": 1},
+        exit_rule_firings_by_symbol={"AAA": {"scaled_take_profit": 1}},
+        scaled_take_profit_level_firings={"0:0": 1},
+    )
+    results = gate.check(
+        exit_rules=[_ladder(), _ladder()],
+        trades=[_trade(return_pct=1.0)],
+        diagnostics=diag,
+        config=_config(),
+    )
+    # No warning: a rung fired strategy-wide, so neither ladder is flagged.
+    assert [r for r in results if not r.passed] == []
+    # Both ladders still report their per-rung telemetry informationally.
+    assert any("ScaledTakeProfitRule[0]" in r.details for r in results)
+    assert any("ScaledTakeProfitRule[1]" in r.details for r in results)
+
+
+def test_scaled_take_profit_warns_when_no_ladder_rung_fires_strategy_wide() -> None:
+    """Multiple ladders with NO other exit kind and NOT A SINGLE rung firing across
+    the whole strategy: every ladder warns — the position relies entirely on rungs
+    reaching their targets and none did, so the targets may be unreachable."""
+    gate = ExitRuleConformanceGate()
+    # Two ladders, zero rung firings anywhere.
+    diag = BacktestExecutionDiagnostics(scaled_take_profit_level_firings={})
+    results = gate.check(
+        exit_rules=[_ladder(), _ladder()],
+        trades=[_trade(return_pct=1.0)],
+        diagnostics=diag,
+        config=_config(),
+    )
+    warnings = [r for r in results if not r.passed and r.severity == "warning"]
+    # Both ladders warn — the whole-strategy signal that no rung target was reached.
+    assert len(warnings) == 2
+    assert {"ScaledTakeProfitRule[0]", "ScaledTakeProfitRule[1]"} == {
+        w.details.split(" ")[0] for w in warnings
+    }
+
+
+def test_scaled_take_profit_with_other_rules_is_informational() -> None:
+    """A co-existing stop can close trades before any rung reaches its target, so
+    zero rung firings alongside another (non-ladder) exit is acceptable
+    (informational only, flagged as co-existing)."""
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05), _ladder()],
+        trades=[_trade(return_pct=-1.0)],
+        diagnostics=_diagnostics(stop_loss=1),
+        config=_config(),
+    )
+    assert [r for r in results if not r.passed] == []
+    assert any("co-exists with other exit rules" in r.details for r in results)
 
 
 # ---------------------------------------------------------------------------

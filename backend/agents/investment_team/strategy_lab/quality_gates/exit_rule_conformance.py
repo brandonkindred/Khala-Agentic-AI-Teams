@@ -45,10 +45,12 @@ from ...models import (
     BacktestConfig,
     BacktestExecutionDiagnostics,
     TradeRecord,
+    scaled_level_key,
 )
 from ...trading_service.service import ENGINE_EXIT_REASON_PREFIX
 from ..spec_dsl import (
     ExitRule,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -113,6 +115,16 @@ class ExitRuleConformanceGate(GateResultsMixin):
             take_profits = [r for r in exit_rules if isinstance(r, TakeProfitRule)]
             for rule in take_profits:
                 results.append(self._check_take_profit(rule, trades, exit_rules, firings))
+
+            # ---- ScaledTakeProfitRule (sanity + per-rung telemetry) ----
+            level_firings = diagnostics.scaled_take_profit_level_firings or {}
+            scaled_take_profits = [
+                (idx, r) for idx, r in enumerate(exit_rules) if isinstance(r, ScaledTakeProfitRule)
+            ]
+            for idx, rule in scaled_take_profits:
+                results.append(
+                    self._check_scaled_take_profit(idx, rule, trades, exit_rules, level_firings)
+                )
 
             # ---- SignalExitRule — engine-enforced via _EngineExitDispatcher ----
             signal_exits = [r for r in exit_rules if isinstance(r, SignalExitRule)]
@@ -346,4 +358,66 @@ class ExitRuleConformanceGate(GateResultsMixin):
             f"TakeProfitRule(pct={rule.pct}) is the only exit rule but the engine "
             f"recorded zero take_profit firings across {len(trades)} trade(s) — "
             "the threshold may be unreachable on the strategy's universe."
+        )
+
+    def _check_scaled_take_profit(
+        self,
+        rule_index: int,
+        rule: ScaledTakeProfitRule,
+        trades: Sequence[TradeRecord],
+        all_rules: Sequence[ExitRule],
+        level_firings: Mapping[str, int],
+    ) -> QualityGateResult:
+        """Sanity + per-rung telemetry for a laddered take-profit.
+
+        Like :meth:`_check_take_profit`, a scaled take-profit is hard to assert on
+        post-hoc: each rung fires when ``bar.high >= entry*(1+pct)`` (long) but the
+        partial close fills next bar, and co-existing exits (a stop) can close the
+        position before later rungs reach their target. So this is informational —
+        it reports how many times each rung scaled out — and only WARNs the lonely
+        case (every exit rule is a scaled ladder, trades exist, yet NO rung of ANY
+        ladder fired across the whole strategy).
+
+        Preconditions: ``rule`` is a ``ScaledTakeProfitRule`` at ``rule_index`` in
+        ``all_rules``; ``level_firings`` is keyed ``"<rule_index>:<level_index>"``
+        across EVERY ladder in the strategy (not just this one).
+        Postconditions: returns an info result with per-rung counts, or a warning
+        when the strategy has no non-ladder exit (every rule in ``all_rules`` is a
+        ``ScaledTakeProfitRule``), a non-empty trade ledger exists, and not a single
+        rung of any ladder fired strategy-wide.
+        """
+        per_rung = {
+            level_idx: level_firings.get(scaled_level_key(rule_index, level_idx), 0)
+            for level_idx in range(len(rule.levels))
+        }
+        total_firings = sum(per_rung.values())
+        rung_details = ", ".join(
+            f"L{level_idx}(@{rule.levels[level_idx].pct}, "
+            f"{rule.levels[level_idx].qty_fraction})={count}"
+            for level_idx, count in sorted(per_rung.items())
+        )
+        # WARN only when EVERY exit rule is a scaled ladder AND not a single rung of
+        # ANY ladder fired strategy-wide — the position then relies entirely on
+        # rungs reaching their targets, and none did. The condition is whole-strategy
+        # (``sum(level_firings.values())``), NOT this ladder's ``total_firings``:
+        # with multiple ladders, one ladder can carry the exits while another's
+        # higher rungs legitimately never reach their target, so a per-ladder zero
+        # is a false alarm. With any non-ladder exit (stop / take-profit / signal)
+        # present, zero rung firings is acceptable (that exit may close trades
+        # first), so this stays informational. The per-rung counts below stay
+        # informational in every non-warning case.
+        only_scaled = all(isinstance(r, ScaledTakeProfitRule) for r in all_rules)
+        strategy_rung_firings = sum(level_firings.values())
+        if strategy_rung_firings >= 1 or not trades or not only_scaled:
+            coexist = "" if only_scaled else " (co-exists with other exit rules)"
+            return self._info(
+                f"ScaledTakeProfitRule[{rule_index}] — {total_firings} rung "
+                f"firing(s) across {len(trades)} trade(s){coexist}; "
+                f"per-rung: {rung_details}."
+            )
+        return self._warning(
+            f"ScaledTakeProfitRule[{rule_index}] recorded zero rung firings across "
+            f"{len(trades)} trade(s); the strategy's only exits are scaled ladders "
+            "and no ladder rung fired strategy-wide, so the rung targets may be "
+            "unreachable on the strategy's universe."
         )

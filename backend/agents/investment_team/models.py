@@ -391,9 +391,7 @@ class StrategySpec(BaseModel):
         Postconditions: returns ``self`` when at most one exit rule is a
         limit-style stop; raises ``ValueError`` otherwise.
         """
-        limit_stops = sum(
-            1 for r in self.exit_rules if getattr(r, "style", "market") == "limit"
-        )
+        limit_stops = sum(1 for r in self.exit_rules if getattr(r, "style", "market") == "limit")
         if limit_stops > 1:
             raise ValueError(
                 f"at most one limit-style stop-loss (style='limit') is allowed "
@@ -642,6 +640,23 @@ class OpenPositionDiagnostic(BaseModel):
     entry_timestamp: str
 
 
+def scaled_level_key(rule_index: int, level_index: int) -> str:
+    """Diagnostics key for one scaled-take-profit rung.
+
+    Single source of the ``scaled_take_profit_level_firings`` key format, shared by
+    the emitter (``_record_emission``) and the conformance gate so the two never
+    drift. Preconditions: both indices are non-negative — enforced with an explicit
+    raise (not ``assert``) so the diagnostics-key contract holds even under
+    ``python -O``. Postconditions: returns ``"<rule_index>:<level_index>"`` (e.g.
+    ``"0:1"``).
+    """
+    if rule_index < 0 or level_index < 0:
+        raise ValueError(
+            f"scaled_level_key indices must be non-negative: ({rule_index}, {level_index})"
+        )
+    return f"{rule_index}:{level_index}"
+
+
 class BacktestExecutionDiagnostics(BaseModel):
     """Structured execution-path diagnostics for sparse or zero-trade backtests."""
 
@@ -683,6 +698,13 @@ class BacktestExecutionDiagnostics(BaseModel):
     # exact-match conformance + alignment gates are unaffected, while analysis and
     # operability surfaces gain per-basis visibility.
     exit_rule_firings_by_basis: Dict[str, int] = Field(default_factory=dict)
+    # Per-rung firing counts for laddered ``ScaledTakeProfitRule`` exits, keyed by
+    # ``"<rule_index>:<level_index>"`` (e.g. ``"0:0"`` / ``"0:1"``). Each rung
+    # scales out at most once per position, so these distinguish which targets a
+    # ladder actually realised. Additive metadata: the ``scaled_take_profit``
+    # aggregate stays in ``exit_rule_firings`` and the close ``reason`` is
+    # byte-stable, so the exact-match conformance + alignment gates are unaffected.
+    scaled_take_profit_level_firings: Dict[str, int] = Field(default_factory=dict)
     # Fill-based counterpart of ``exit_rule_firings`` — counts engine-SUBMITTED
     # exit orders that actually FILLED (closed a position), keyed by rule kind,
     # with a per-symbol breakdown below. Counted off ``engine_exit_filled``
