@@ -253,6 +253,24 @@ _strategy_lab_records: _PersistentDict = _PersistentDict("strategy_lab_records")
 _paper_trading_sessions: _PersistentDict = _PersistentDict("paper_trading_sessions")
 _advisor_sessions: _PersistentDict = _PersistentDict("advisor_sessions")
 
+
+def _snapshot_prior_records(*, reverse: bool = False) -> list[StrategyLabRecord]:
+    """Locked read of the strategy-lab store, parsed and sorted by created_at.
+
+    Preconditions:
+        None — safe to call against an empty store.
+    Postconditions:
+        Returns a freshly parsed list of StrategyLabRecord, sorted by
+        ``created_at`` ascending (oldest-first) by default, or descending
+        (newest-first) when ``reverse=True``. Never returns None.
+    """
+    with _lock:
+        raw = list(_strategy_lab_records.values())
+    records = [StrategyLabRecord.parse_persisted(r) for r in raw]
+    records.sort(key=lambda r: r.created_at, reverse=reverse)
+    return records
+
+
 _advisor_agent = FinancialAdvisorAgent()
 _policy_guardian = PolicyGuardianAgent()
 _orchestrator = InvestmentTeamOrchestrator()
@@ -1415,10 +1433,7 @@ def _run_one_strategy_lab_cycle(
     # all cycles in a wave observe the same pre-wave snapshot; reading it once up
     # front is equivalent (and strictly more deterministic).
     if prior_records is None:
-        with _lock:
-            raw_prior = list(_strategy_lab_records.values())
-        prior_records = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
-        prior_records.sort(key=lambda r: r.created_at)
+        prior_records = _snapshot_prior_records()
 
     record = orchestrator.run_cycle(
         prior_records=prior_records,
@@ -1634,10 +1649,7 @@ def _strategy_lab_worker(
                         degraded_reason=str(exc),
                         sources_used=[],
                     )
-                with _lock:
-                    raw_prior = list(_strategy_lab_records.values())
-                prior_for_brief = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
-                prior_for_brief.sort(key=lambda r: r.created_at)
+                prior_for_brief = _snapshot_prior_records()
 
                 expert = SignalIntelligenceExpert()
                 t0 = datetime.now(tz=timezone.utc)
@@ -1777,10 +1789,7 @@ def _strategy_lab_worker(
                 # persists only at its end (after every sibling has already read at
                 # its start), so all cycles in a wave see the same pre-wave snapshot;
                 # reading it once here is equivalent and strictly more deterministic.
-                with _lock:
-                    _raw_prior = list(_strategy_lab_records.values())
-                wave_prior_records = [StrategyLabRecord.parse_persisted(r) for r in _raw_prior]
-                wave_prior_records.sort(key=lambda r: r.created_at)
+                wave_prior_records = _snapshot_prior_records()
                 # Issue #269 — retain each cycle's orchestrator so the wave
                 # can merge its post-run ``convergence_tracker`` back into
                 # ``primary_tracker`` below. Keyed by 0-based cycle index
@@ -2115,11 +2124,7 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
     Return all strategy lab records, sorted newest-first.
     Filter by winning/losing with ?winning=true or ?winning=false.
     """
-    with _lock:
-        raw = list(_strategy_lab_records.values())
-
-    items = [StrategyLabRecord.parse_persisted(r) for r in raw]
-    items.sort(key=lambda r: r.created_at, reverse=True)
+    items = _snapshot_prior_records(reverse=True)
 
     winning_count = sum(1 for r in items if r.is_winning)
     losing_count = len(items) - winning_count
