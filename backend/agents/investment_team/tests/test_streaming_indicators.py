@@ -1383,10 +1383,10 @@ def test_bollinger_bands_streaming_matches_cold_start() -> None:
     """Driving bar-by-bar (warm path) must yield the same value as a fresh
     cold-start registry on the same slice.
 
-    The running sum-of-squares formula ``sum_sq/period - mean²`` and the
-    two-pass ``Σ(v-mean)²/period`` differ in low FP bits, so this test
-    uses a tolerance rather than exact equality — it pins the mathematical
-    equivalence without being sensitive to floating-point rounding order.
+    Both paths use the same running sum-of-squares formula
+    ``sum_sq/period - mean²``; this test confirms that retaining state
+    across bar advances produces bit-identical results compared to
+    discarding and recomputing state from scratch each time.
     """
     bars = _series(80, seed=95)
     reg_streaming = IndicatorRegistry()
@@ -1395,10 +1395,13 @@ def test_bollinger_bands_streaming_matches_cold_start() -> None:
         sub = bars[:n]
         streaming_mid = reg_streaming.bollinger_bands(sub, period=period, select="middle")
         streaming_up = reg_streaming.bollinger_bands(sub, period=period, select="upper")
+        streaming_lo = reg_streaming.bollinger_bands(sub, period=period, select="lower")
         cold_mid = IndicatorRegistry().bollinger_bands(sub, period=period, select="middle")
         cold_up = IndicatorRegistry().bollinger_bands(sub, period=period, select="upper")
+        cold_lo = IndicatorRegistry().bollinger_bands(sub, period=period, select="lower")
         assert streaming_mid == pytest.approx(cold_mid, rel=1e-12), f"n={n} middle diverged"
         assert streaming_up == pytest.approx(cold_up, rel=1e-12), f"n={n} upper diverged"
+        assert streaming_lo == pytest.approx(cold_lo, rel=1e-12), f"n={n} lower diverged"
 
 
 def test_bollinger_bands_sliding_window_matches_cold_start() -> None:

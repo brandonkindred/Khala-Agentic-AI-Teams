@@ -639,6 +639,9 @@ class IndicatorRegistry:
         """Bollinger Bands at ``bars[-1]``.
 
         Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
+        Pre: callers advancing one bar at a time get O(1) warm updates;
+        multi-bar jumps are safe — ``_advance_kind`` returns ``"none"`` and
+        the state is rebuilt from scratch rather than corrupted.
         Post: the (middle, upper, lower) triple for the trailing ``period``
         bars; the requested ``select`` band is returned as a scalar.
 
@@ -647,10 +650,9 @@ class IndicatorRegistry:
         with a running sum and running sum-of-squares. On each single-bar
         advance the evicted value is subtracted and the new value is added in
         O(1) time. Population variance is computed as
-        ``sum_sq / period − mean²`` — this running-sum formula differs from
-        the two-pass ``Σ(v−mean)² / period`` in low FP bits; the synthesis
-        compiler's ``bollinger_bands`` template uses the same formula to keep
-        the two in lockstep.
+        ``sum_sq / period − mean²``; the synthesis compiler's
+        ``bollinger_bands`` template uses the same formula to keep the two in
+        lockstep.
 
         Postcondition (numerical): ``max(0.0, var)`` guards against tiny
         negative FP residuals from the ``sum_sq/period − mean²`` identity
@@ -721,6 +723,9 @@ class IndicatorRegistry:
         Pre: ``k_period >= 1``; ``d_period >= 1``. Returns ``None`` until
         ``len(bars) >= k_period`` (``select='k'``) or
         ``len(bars) >= k_period + d_period - 1`` (``select='d'``).
+        Pre: callers advancing one bar at a time get O(k_period+d_period)
+        warm updates; multi-bar jumps are safe — ``_advance_kind`` returns
+        ``"none"`` and state is rebuilt from scratch rather than corrupted.
         Post: the %K or %D scalar for the trailing window.
 
         Two bounded :class:`deque` objects maintain state across calls:
