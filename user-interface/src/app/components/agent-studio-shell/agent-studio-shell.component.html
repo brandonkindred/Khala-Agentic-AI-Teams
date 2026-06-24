@@ -1,0 +1,48 @@
+<div class="studio">
+  <header class="studio__stepper" role="list" aria-label="Agent Studio stages">
+    @for (stage of stages; track stage.key; let i = $index) {
+      <div
+        class="studio__step"
+        role="listitem"
+        [class.is-active]="state.stageStatus(i) === 'active'"
+        [class.is-done]="state.stageStatus(i) === 'done'"
+        [attr.aria-current]="state.stageStatus(i) === 'active' ? 'step' : null"
+      >
+        <span class="studio__step-num">
+          @if (state.stageStatus(i) === 'done') {
+            <mat-icon aria-hidden="true">check</mat-icon>
+          } @else {
+            {{ i + 1 }}
+          }
+        </span>
+        <span class="studio__step-label">{{ stage.label }}</span>
+      </div>
+      @if (i < stages.length - 1) {
+        <span class="studio__step-conn" aria-hidden="true"></span>
+      }
+    }
+  </header>
+
+  <main class="studio__stage">
+    <app-agent-studio-stage-placeholder
+      [title]="activeStageDef().label"
+      [blurb]="activeStageDef().blurb"
+      [icon]="activeStageDef().icon"
+      [handoff]="state.handoff()"
+    />
+  </main>
+
+  <footer class="studio__footer">
+    <span class="studio__progress">Stage {{ state.activeStage() + 1 }} of {{ stages.length }}</span>
+    <button
+      mat-flat-button
+      type="button"
+      class="studio__continue"
+      [disabled]="!state.canAdvance()"
+      (click)="onContinue()"
+    >
+      Continue
+      <mat-icon aria-hidden="true">arrow_forward</mat-icon>
+    </button>
+  </footer>
+</div>
