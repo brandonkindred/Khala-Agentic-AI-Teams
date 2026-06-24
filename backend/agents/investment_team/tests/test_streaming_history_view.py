@@ -1,11 +1,12 @@
-"""Tests for the ``StreamingHistoryView`` cache behaviour.
+"""Tests for the ``StreamingHistoryView`` streaming-registry backing.
 
-The view's contract is **same-bar dedupe**: within one bar, multiple
-predicates that reference the same ``IndicatorRef`` share the cached
-``pd.Series``. Once a new bar is appended the cache invalidates and the
-next access rebuilds the DataFrame and any cached indicator series.
-Invalidation is driven by a monotonic per-instance append counter so
-CPython id-reuse on the bounded deque cannot produce a false cache hit.
+The view advances a retained ``IndicatorRegistry`` one step per appended bar
+and stores each indicator's trailing value in a per-``sig_id`` buffer aligned
+1:1 with the bounded bars deque, so ``indicator(ref, i)`` — including the
+``i``/``i-1`` reads ``cross_above``/``cross_below`` need — is a buffer lookup
+with no full-window recompute. These tests pin the alignment, rollover, lazy
+backfill / catch-up, and warm-up behaviours, using a fresh view seeded with the
+same bar tail as the bit-exact reference.
 """
 
 from __future__ import annotations
@@ -31,9 +32,8 @@ def _bar(i: int) -> BarRecord:
 def _fresh_view_value(bars: list[BarRecord], ref: IndicatorRef, i: int) -> float | None:
     """Build a fresh view seeded with ``bars`` and read ``indicator(ref, i)``.
 
-    Used as the bit-exact reference for cache-consistency checks: any
-    stale-cache regression produces a value that differs from the
-    fresh-view computation on the same input.
+    Any stale-buffer or mis-alignment regression produces a value that differs
+    from this fresh-view computation on the same input tail.
     """
     fresh = StreamingHistoryView(max_bars=max(len(bars), 1))
     for b in bars:
@@ -41,26 +41,26 @@ def _fresh_view_value(bars: list[BarRecord], ref: IndicatorRef, i: int) -> float
     return fresh.indicator(ref, i)
 
 
-def test_same_bar_returns_cached_series() -> None:
-    """Within one bar, repeat calls reuse the cached DataFrame + indicator
-    series object — the whole point of the view."""
+def test_same_bar_repeat_query_is_idempotent() -> None:
+    """Within one bar, a repeat query for the same ref neither re-syncs nor
+    grows the buffer — the same-bar dedupe contract."""
     view = StreamingHistoryView(max_bars=50)
     for i in range(20):
         view.append(_bar(i))
     ref = IndicatorRef(name="ema", params={"period": 5}, source="close")
-    view.indicator(ref, 19)
-    cached_series = view._indicator_cache[ref.sig_id]
-    cached_df = view._df
-    # No append → caches reused as-is.
-    same = view.indicator(ref, 19)
-    assert view._indicator_cache[ref.sig_id] is cached_series
-    assert view._df is cached_df
-    assert same is not None
+    first = view.indicator(ref, 19)
+    st = view._buffers[ref.sig_id]
+    assert st["synced"] == view._append_counter == 20
+    buf_len = len(st["buf"])
+    second = view.indicator(ref, 19)
+    assert second == first
+    assert st["synced"] == 20
+    assert len(st["buf"]) == buf_len
 
 
-def test_append_invalidates_cache_on_next_access() -> None:
-    """An append marks the cache stale; the next ``indicator()`` call
-    rebuilds and returns a value reflecting the new bar."""
+def test_append_advances_buffer_on_next_access() -> None:
+    """An append leaves the buffer behind; the next access advances it and
+    returns a value reflecting the new bar."""
     view = StreamingHistoryView(max_bars=50)
     for i in range(20):
         view.append(_bar(i))
@@ -70,36 +70,47 @@ def test_append_invalidates_cache_on_next_access() -> None:
     view.append(_bar(20))
     v2 = view.indicator(ref, 20)
     assert v2 is not None
-    assert len(view._df) == 21
+    assert len(view._buffers[ref.sig_id]["buf"]) == 21
     assert v2 != v1  # SMA window slid forward by one bar
 
 
-def test_rollover_rebuilds_cache_against_live_deque() -> None:
-    """Appending past max_bars drops the oldest bar; the next access must
-    return values aligned with the new (rotated) deque, not the stale
-    pre-rollover prefix."""
+def test_buffer_aligned_with_rotated_deque_after_rollover() -> None:
+    """Appending past max_bars drops the oldest bar; the buffer rolls in
+    lockstep so ``buf[i]`` still tracks ``bars[i]`` in the rotated deque."""
     view = StreamingHistoryView(max_bars=10)
     for i in range(10):
         view.append(_bar(i))
     ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
     pre = view.indicator(ref, 9)
     assert pre is not None
-    # Rollover: deque pops bar 0, appends bar 10.
-    view.append(_bar(10))
+    view.append(_bar(10))  # deque pops bar 0, appends bar 10 (a slide)
     val = view.indicator(ref, 9)
     assert val is not None
-    assert len(view._df) == 10
-    # The cache was rebuilt against the new deque tail: SMA over bars
-    # [8, 9, 10] differs from the pre-rollover SMA over [7, 8, 9].
+    assert len(view._buffers[ref.sig_id]["buf"]) == 10
+    # buf[9] now tracks SMA over bars [8, 9, 10], not the pre-rollover [7, 8, 9].
     assert val != pre
+    assert val == _fresh_view_value([_bar(j) for j in range(1, 11)], ref, 9)
+
+
+def test_cross_reads_trailing_and_previous_bar() -> None:
+    """Both the i and i-1 reads cross_above/cross_below need are addressable
+    from the buffer and agree with a fresh view."""
+    view = StreamingHistoryView(max_bars=50)
+    for i in range(20):
+        view.append(_bar(i))
+    ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
+    trailing = view.indicator(ref, 19)
+    prev = view.indicator(ref, 18)
+    assert trailing is not None and prev is not None
+    bars = [_bar(j) for j in range(20)]
+    assert prev == _fresh_view_value(bars, ref, 18)
+    assert trailing == _fresh_view_value(bars, ref, 19)
 
 
 def test_repeated_appends_match_fresh_view_value() -> None:
-    """After every append, the cached indicator value must equal the
-    value a freshly-constructed view (seeded with the same bar tail)
-    returns. AND the append counter must advance one step per append
-    (defends against an off-by-one in the counter bump that the
-    monotone-close inequality check would otherwise miss)."""
+    """After every append, the live trailing value must equal a fresh view
+    seeded with the same trailing window, AND the counter advances one per
+    append (defends an off-by-one in the bump)."""
     ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
     view = StreamingHistoryView(max_bars=5)
     for i in range(5):
@@ -112,73 +123,85 @@ def test_repeated_appends_match_fresh_view_value() -> None:
             f"counter bumped by {view._append_counter - before}, not 1"
         )
         live = view.indicator(ref, 4)
-        # The view holds the trailing 5 bars (deque maxlen=5), so the
-        # fresh-reference must be seeded with the same tail.
+        # The view holds the trailing 5 bars (deque maxlen=5).
         expected = _fresh_view_value([_bar(j) for j in range(i - 4, i + 1)], ref, 4)
         assert live == expected, f"i={i} live={live!r} expected={expected!r}"
 
 
-def test_batched_appends_do_not_yield_stale_cache_under_id_reuse() -> None:
-    """The cache key is keyed on a monotonic append counter, not on
-    ``id(self._bars[-1])`` — CPython recycles freed dataclass slots, so
-    a sequence of appends without intervening ``indicator()`` calls
-    could otherwise place a fresh BarRecord at an address recently
-    freed by the evicted oldest bar and produce a false cache hit.
-
-    Asserts BOTH the public observable (live value matches fresh view)
-    AND the internal counter invariant: the cache_counter must lag the
-    append_counter after batched appends, then catch up on the next
-    indicator() call. Pins the counter mechanism directly so the test
-    fails loudly under any revert to the id-based key, regardless of
-    whether CPython id-reuse happens to fire on the run.
-    """
+def test_batched_appends_then_catch_up() -> None:
+    """Appends with no intervening ``indicator()`` leave the buffer's synced
+    watermark behind; the next query rebuilds against the live (rolled-over)
+    deque rather than reading a stale value."""
     ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
     view = StreamingHistoryView(max_bars=5)
     for i in range(5):
         view.append(_bar(i))
-    # Seed the cache.
-    view.indicator(ref, 4)
-    assert view._cache_counter == view._append_counter == 5
-
-    # Batched appends with NO intervening indicator() calls.
+    view.indicator(ref, 4)  # seed the buffer
+    assert view._buffers[ref.sig_id]["synced"] == view._append_counter == 5
+    # Batched appends with NO intervening indicator() calls (drops bars 0..14).
     for i in range(5, 20):
         view.append(_bar(i))
-    # The cache_counter must lag the append_counter by exactly the
-    # number of unflushed appends — pins counter-based invalidation
-    # independent of CPython id-reuse semantics.
     assert view._append_counter == 20
-    assert view._cache_counter == 5, (
-        "cache_counter must NOT have advanced silently — the public "
-        "API never accessed the cache during the batched appends."
+    assert view._buffers[ref.sig_id]["synced"] == 5, (
+        "synced must NOT advance silently — indicator() was never called"
     )
-
-    # Now query indicator() — the counter mismatch must trigger a
-    # rebuild against the live deque.
     live = view.indicator(ref, 4)
     expected = _fresh_view_value([_bar(j) for j in range(15, 20)], ref, 4)
-    assert live == expected, f"batched-append stale cache: live={live!r} expected={expected!r}"
-    # After indicator(), cache_counter catches up.
-    assert view._cache_counter == view._append_counter == 20
+    assert live == expected, f"stale batched-append buffer: live={live!r} expected={expected!r}"
+    assert view._buffers[ref.sig_id]["synced"] == 20
+
+
+def test_lazy_first_registration_mid_stream_backfills() -> None:
+    """A ref first queried after many bars have streamed backfills its buffer
+    so historical indices (i-1, etc.) are addressable and aligned."""
+    view = StreamingHistoryView(max_bars=50)
+    for i in range(30):
+        view.append(_bar(i))
+    ref = IndicatorRef(name="sma", params={"period": 5}, source="close")
+    v_last = view.indicator(ref, 29)  # first ever query for this ref
+    v_prev = view.indicator(ref, 28)
+    assert len(view._buffers[ref.sig_id]["buf"]) == 30
+    bars = [_bar(j) for j in range(30)]
+    assert v_last == _fresh_view_value(bars, ref, 29)
+    assert v_prev == _fresh_view_value(bars, ref, 28)
 
 
 def test_indicator_returns_none_on_empty_view() -> None:
-    """``indicator()`` must defend its precondition: an empty view
-    returns ``None`` instead of raising KeyError from pandas when the
-    DataFrame has no OHLCV columns."""
+    """An empty view returns ``None`` instead of indexing an empty buffer."""
     view = StreamingHistoryView()
     ref = IndicatorRef(name="sma", params={"period": 5}, source="close")
     assert view.indicator(ref, 0) is None
 
 
-def test_multi_indicator_share_dataframe() -> None:
+def test_warmup_returns_none_until_enough_history() -> None:
+    view = StreamingHistoryView(max_bars=50)
+    ref = IndicatorRef(name="sma", params={"period": 5}, source="close")
+    for i in range(4):
+        view.append(_bar(i))
+    assert view.indicator(ref, 3) is None  # < period
+    view.append(_bar(4))
+    assert view.indicator(ref, 4) is not None  # period reached
+
+
+def test_out_of_range_index_returns_none() -> None:
+    view = StreamingHistoryView(max_bars=50)
+    for i in range(10):
+        view.append(_bar(i))
+    ref = IndicatorRef(name="sma", params={"period": 3}, source="close")
+    assert view.indicator(ref, 10) is None  # i >= len(buf)
+    assert view.indicator(ref, -1) is None
+
+
+def test_independent_buffers_per_indicator() -> None:
     view = StreamingHistoryView(max_bars=30)
     for i in range(20):
         view.append(_bar(i))
     sma_ref = IndicatorRef(name="sma", params={"period": 5}, source="close")
     ema_ref = IndicatorRef(name="ema", params={"period": 5}, source="close")
-    view.indicator(sma_ref, 19)
-    view.indicator(ema_ref, 19)
-    # Both indicators computed against the same shared DataFrame.
-    assert len(view._df) == 20
-    assert sma_ref.sig_id in view._indicator_cache
-    assert ema_ref.sig_id in view._indicator_cache
+    assert view.indicator(sma_ref, 19) is not None
+    assert view.indicator(ema_ref, 19) is not None
+    assert sma_ref.sig_id in view._buffers
+    assert ema_ref.sig_id in view._buffers
+    assert view._buffers[sma_ref.sig_id]["buf"] is not view._buffers[ema_ref.sig_id]["buf"]
+    # One shared bars_list snapshot served both refs on the same bar.
+    assert view._bars_list_counter == view._append_counter == 20
