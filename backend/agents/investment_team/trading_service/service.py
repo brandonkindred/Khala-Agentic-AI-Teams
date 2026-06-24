@@ -112,10 +112,16 @@ def _engine_exit_kind(reason: str) -> str:
     (which ``signal_exit`` closes carry) so the result is the diagnostics key
     (``stop_loss`` / ``take_profit`` / ``scaled_take_profit`` / ``signal_exit``).
 
-    Preconditions: ``reason`` starts with ``ENGINE_EXIT_REASON_PREFIX``.
+    Preconditions: ``reason`` starts with ``ENGINE_EXIT_REASON_PREFIX`` (enforced
+    with an explicit raise so a non-engine reason fails loudly rather than being
+    silently mis-sliced into a bogus kind).
     Postconditions: returns the ``rule_kind`` substring — prefix removed and any
     ``[...]`` index suffix dropped.
     """
+    if not reason.startswith(ENGINE_EXIT_REASON_PREFIX):
+        raise ValueError(
+            f"_engine_exit_kind requires an {ENGINE_EXIT_REASON_PREFIX!r}-prefixed reason, got {reason!r}"
+        )
     kind = reason[len(ENGINE_EXIT_REASON_PREFIX) :]
     bracket = kind.find("[")
     return kind[:bracket] if bracket != -1 else kind
@@ -979,13 +985,16 @@ class _EngineExitDispatcher:
             if not reason.startswith(ENGINE_EXIT_REASON_PREFIX):
                 continue
             if po_req.order_type == OrderType.MARKET:
-                if track_continuation and po_req.engine_scaled_partial:
+                if po_req.engine_scaled_partial:
                     # In-flight PARTIAL scale-out: a scaled rung's market is still
                     # pending (e.g. a participation-capped rung requeued across
                     # bars), identified by the structural ``engine_scaled_partial``
-                    # flag the emitter set (no reason-string parsing). Do NOT stand
-                    # the bar down — that would also block a stop / take-profit /
-                    # signal exit from closing the runner the partial leaves open.
+                    # flag the emitter set (no reason-string parsing). The flag is
+                    # set only by ``_build_close_order`` on scaled rungs, so it is
+                    # self-sufficient — no ``track_continuation`` guard needed (a
+                    # spec without a ladder can never produce this order). Do NOT
+                    # stand the bar down — that would also block a stop / take-profit
+                    # / signal exit from closing the runner the partial leaves open.
                     # Just flag it so ``maybe_emit`` defers the NEXT rung
                     # (``exclude_scaled``), preserving the one-rung-at-a-time
                     # ordering without starving the runner's protective exits.

@@ -774,6 +774,11 @@ def test_engine_exit_kind_strips_prefix_and_index_suffix() -> None:
     assert _engine_exit_kind("engine_exit:stop_loss") == "stop_loss"
     assert _engine_exit_kind("engine_exit:signal_exit[2]") == "signal_exit"
     assert _engine_exit_kind("engine_exit:take_profit") == "take_profit"
+    # Precondition is enforced: a non-engine reason fails loudly rather than being
+    # silently mis-sliced into a bogus kind.
+    for bad in ("", "stop_loss", "strategy_close"):
+        with pytest.raises(ValueError, match="engine_exit:"):
+            _engine_exit_kind(bad)
 
 
 def _submit_competing_short(order_book: OrderBook) -> PendingOrder:
