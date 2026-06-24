@@ -537,9 +537,12 @@ class GitHubClient:
 
         Preconditions:
             - ``event`` is one of ``COMMENT``/``REQUEST_CHANGES``/``APPROVE``.
-            - Each entry in ``comments`` is ``{"path", "line", "side", "body"}`` and
-              its ``line`` falls on a line present in the diff for ``commit_id`` —
-              GitHub rejects the *entire* review (422) if any comment line is invalid.
+            - Each entry in ``comments`` is either a line-anchored
+              ``{"path", "line", "side", "body"}`` whose ``line`` falls on a line
+              present in the diff for ``commit_id``, or a file-level
+              ``{"path", "subject_type": "file", "body"}`` whose ``path`` is a file
+              the PR changes. GitHub rejects the *entire* review (422) if any
+              comment's line is invalid or its path is not in the diff.
         Postconditions:
             - Returns the created review payload (carries ``id`` and ``html_url``).
               Raises ``GitHubAPIError`` on any non-2xx response.
