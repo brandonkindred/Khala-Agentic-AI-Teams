@@ -421,6 +421,45 @@ def test_get_conn_rolls_back_on_error(monkeypatch):
     fake.conn.commit.assert_not_called()
 
 
+def test_pg_cursor_yields_none_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    from shared_postgres import pg_cursor
+
+    with pg_cursor() as cur:
+        assert cur is None  # disabled → no connection opened
+
+
+def test_pg_cursor_yields_cursor_and_commits_when_enabled(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres import pg_cursor
+
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
+
+    with pg_cursor() as cur:
+        assert cur is not None  # live cursor from the pooled connection
+
+    # Clean exit of the with-block commits and returns the connection to the pool.
+    fake.conn.commit.assert_called_once()
+    fake.conn.rollback.assert_not_called()
+
+
+def test_pg_cursor_rolls_back_on_error(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres import pg_cursor
+
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with pg_cursor() as cur:
+            assert cur is not None
+            raise RuntimeError("boom")
+
+    fake.conn.rollback.assert_called_once()
+    fake.conn.commit.assert_not_called()
+
+
 def test_close_pool_is_idempotent():
     client_mod._pools.clear()
     close_pool()

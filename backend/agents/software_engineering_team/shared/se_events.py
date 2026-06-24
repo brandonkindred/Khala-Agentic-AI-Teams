@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from software_engineering_team.shared.pg import postgres_available
+from shared_postgres import pg_cursor
 
 logger = logging.getLogger(__name__)
 
@@ -74,17 +74,17 @@ def record_event(
     """
     if not event_type:
         raise ValueError("event_type must be a non-empty string")
-    if not postgres_available():
-        return False
-    # Normalize to an aware UTC timestamp: a naive datetime would be read by
-    # Postgres in the session TimeZone, silently shifting DORA windows.
-    when = ts or _utc_now()
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
     try:
-        from shared_postgres import Json, get_conn
+        with pg_cursor() as cur:
+            if cur is None:
+                return False
+            from shared_postgres import Json
 
-        with get_conn() as conn, conn.cursor() as cur:
+            # Normalize to an aware UTC timestamp: a naive datetime would be read
+            # by Postgres in the session TimeZone, silently shifting DORA windows.
+            when = ts or _utc_now()
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
             cur.execute(
                 "INSERT INTO se_events (ts, job_id, task_id, event_type, phase, gate, detail) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -110,18 +110,17 @@ def fetch_events_since(cutoff: datetime) -> list[dict[str, Any]]:
     """
     if cutoff.tzinfo is None:
         raise ValueError("cutoff must be a timezone-aware datetime")
-    if not postgres_available():
-        return []
     try:
-        from shared_postgres import dict_row, get_conn
-
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        with pg_cursor(dict_rows=True) as cur:
+            if cur is None:
+                return []
             cur.execute(
                 "SELECT ts, job_id, task_id, event_type, phase, gate, detail "
                 "FROM se_events WHERE ts >= %s ORDER BY ts",
                 (cutoff,),
             )
-            return list(cur.fetchall())
+            rows = list(cur.fetchall())
+        return rows
     except Exception:
         logger.debug("failed to fetch se_events since %s", cutoff, exc_info=True)
         return []
@@ -138,20 +137,19 @@ def job_has_events(job_id: str, event_type: str = "") -> bool:
     """
     if not job_id:
         return False
-    if not postgres_available():
-        return False
     try:
-        from shared_postgres import get_conn
-
-        sql = "SELECT 1 FROM se_events WHERE job_id = %s"
-        params: list[Any] = [job_id]
-        if event_type:
-            sql += " AND event_type = %s"
-            params.append(event_type)
-        sql += " LIMIT 1"
-        with get_conn() as conn, conn.cursor() as cur:
+        with pg_cursor() as cur:
+            if cur is None:
+                return False
+            sql = "SELECT 1 FROM se_events WHERE job_id = %s"
+            params: list[Any] = [job_id]
+            if event_type:
+                sql += " AND event_type = %s"
+                params.append(event_type)
+            sql += " LIMIT 1"
             cur.execute(sql, tuple(params))
-            return cur.fetchone() is not None
+            found = cur.fetchone() is not None
+        return found
     except Exception:
         logger.debug("failed to check se_events for job %s", job_id, exc_info=True)
         return False
@@ -168,12 +166,10 @@ def unresolved_crashed_task_ids(job_id: str) -> set[str]:
     """
     if not job_id:
         return set()
-    if not postgres_available():
-        return set()
     try:
-        from shared_postgres import dict_row, get_conn
-
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        with pg_cursor(dict_rows=True) as cur:
+            if cur is None:
+                return set()
             cur.execute(
                 "SELECT task_id, "
                 "  SUM((event_type = %s)::int) AS detected, "
@@ -182,11 +178,12 @@ def unresolved_crashed_task_ids(job_id: str) -> set[str]:
                 "GROUP BY task_id",
                 (CRASH_DETECTED, CRASH_RESOLVED, job_id, CRASH_DETECTED, CRASH_RESOLVED),
             )
-            return {
-                r["task_id"]
-                for r in cur.fetchall()
-                if r["task_id"] and int(r["detected"] or 0) > int(r["resolved"] or 0)
-            }
+            rows = cur.fetchall()
+        return {
+            r["task_id"]
+            for r in rows
+            if r["task_id"] and int(r["detected"] or 0) > int(r["resolved"] or 0)
+        }
     except Exception:
         logger.debug("failed to read unresolved crashes for job %s", job_id, exc_info=True)
         return set()
@@ -196,15 +193,14 @@ def prune_events(retention_days: float) -> int:
     """Delete events older than ``retention_days``; returns rows removed (0 if disabled)."""
     if retention_days <= 0:
         return 0
-    if not postgres_available():
-        return 0
-    cutoff = _utc_now() - timedelta(days=retention_days)
     try:
-        from shared_postgres import get_conn
-
-        with get_conn() as conn, conn.cursor() as cur:
+        with pg_cursor() as cur:
+            if cur is None:
+                return 0
+            cutoff = _utc_now() - timedelta(days=retention_days)
             cur.execute("DELETE FROM se_events WHERE ts < %s", (cutoff,))
-            return cur.rowcount or 0
+            removed = cur.rowcount or 0
+        return removed
     except Exception:
         logger.debug("failed to prune se_events", exc_info=True)
         return 0

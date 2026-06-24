@@ -54,6 +54,27 @@ def test_naive_timestamp_is_rejected() -> None:
         compute_from_events([naive], 30.0)
 
 
+def test_mixed_naive_and_aware_timestamps_rejected() -> None:
+    """Mixed naive + aware timestamps raise ValueError (validated before the sort).
+
+    Validating up front means a naive ts never reaches ``sorted()``, which would
+    otherwise raise a confusing ``TypeError`` from comparing a naive to an aware
+    datetime. The documented contract is a ValueError regardless of event order.
+    """
+    aware = _ev(se_events.MERGE_TO_MAIN, offset_s=0)
+    naive = {
+        "ts": datetime(2026, 1, 2),  # no tzinfo
+        "event_type": se_events.MERGE_TO_MAIN,
+        "job_id": "",
+        "task_id": "",
+    }
+    with pytest.raises(ValueError, match="timezone-aware"):
+        compute_from_events([aware, naive], 30.0)
+    # Order-independent: the naive event first must raise the same ValueError.
+    with pytest.raises(ValueError, match="timezone-aware"):
+        compute_from_events([naive, aware], 30.0)
+
+
 def test_deployment_frequency() -> None:
     """Deployment frequency is merge count divided by the window in days."""
     events = [_ev(se_events.MERGE_TO_MAIN, offset_s=i) for i in range(6)]

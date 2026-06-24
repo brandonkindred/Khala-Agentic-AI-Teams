@@ -15,8 +15,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from shared_postgres import pg_cursor
 from software_engineering_team.shared.env_config import env_bool, env_float
-from software_engineering_team.shared.pg import postgres_available
 
 logger = logging.getLogger(__name__)
 
@@ -42,17 +42,16 @@ def write_trace(record: Any) -> bool:
     """
     if not _trace_enabled():
         return False
-    if not postgres_available():
-        return False
     try:
-        from shared_postgres import get_conn
-
-        # Use the record's own timestamp; fall back to *now* (not the 1970 epoch)
-        # for a missing/invalid value so the row stays inside cost-query windows.
-        raw_ts = getattr(record, "timestamp", None)
-        epoch = raw_ts if isinstance(raw_ts, (int, float)) and raw_ts > 0 else time.time()
-        ts = datetime.fromtimestamp(epoch, tz=timezone.utc)
-        with get_conn() as conn, conn.cursor() as cur:
+        with pg_cursor() as cur:
+            if cur is None:
+                return False
+            # Use the record's own timestamp; fall back to *now* (not the 1970
+            # epoch) for a missing/invalid value so the row stays inside
+            # cost-query windows.
+            raw_ts = getattr(record, "timestamp", None)
+            epoch = raw_ts if isinstance(raw_ts, (int, float)) and raw_ts > 0 else time.time()
+            ts = datetime.fromtimestamp(epoch, tz=timezone.utc)
             cur.execute(
                 "INSERT INTO se_agent_traces (ts, team, agent_key, job_id, task_id, phase, model, "
                 "input_tokens, output_tokens, total_tokens, cost_usd, latency_ms, status, outcome, "
@@ -96,12 +95,10 @@ def fetch_cost_since(cutoff: datetime) -> dict[str, Any]:
     if cutoff.tzinfo is None:
         raise ValueError("cutoff must be a timezone-aware datetime")
     empty: dict[str, Any] = {"total_cost_usd": 0.0, "by_job": {}}
-    if not postgres_available():
-        return empty
     try:
-        from shared_postgres import dict_row, get_conn
-
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        with pg_cursor(dict_rows=True) as cur:
+            if cur is None:
+                return empty
             cur.execute(
                 "SELECT job_id, SUM(cost_usd) AS cost FROM se_agent_traces "
                 "WHERE ts >= %s AND job_id <> '' GROUP BY job_id",
@@ -119,15 +116,14 @@ def prune_traces(retention_days: float | None = None) -> int:
     days = _retention_days() if retention_days is None else retention_days
     if days <= 0:
         return 0
-    if not postgres_available():
-        return 0
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
     try:
-        from shared_postgres import get_conn
-
-        with get_conn() as conn, conn.cursor() as cur:
+        with pg_cursor() as cur:
+            if cur is None:
+                return 0
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
             cur.execute("DELETE FROM se_agent_traces WHERE ts < %s", (cutoff,))
-            return cur.rowcount or 0
+            removed = cur.rowcount or 0
+        return removed
     except Exception:
         logger.debug("failed to prune se_agent_traces", exc_info=True)
         return 0

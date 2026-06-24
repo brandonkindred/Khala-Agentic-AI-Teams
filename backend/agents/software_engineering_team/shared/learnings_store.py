@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from shared_postgres import pg_cursor
 from software_engineering_team.shared.env_config import env_float
-from software_engineering_team.shared.pg import postgres_available
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +96,12 @@ def upsert_learning(
     """
     if not pattern or not pattern.strip():
         raise ValueError("pattern must be a non-empty string")
-    if not postgres_available():
-        return False
-    fp = fingerprint(pattern, trigger, category)
-    now = datetime.now(tz=timezone.utc)
     try:
-        from shared_postgres import get_conn
-
-        with get_conn() as conn, conn.cursor() as cur:
+        with pg_cursor() as cur:
+            if cur is None:
+                return False
+            fp = fingerprint(pattern, trigger, category)
+            now = datetime.now(tz=timezone.utc)
             cur.execute(
                 "INSERT INTO se_learnings "
                 "(fingerprint, pattern, trigger, counter_measure, source, category, "
@@ -149,22 +147,21 @@ def retrieve_learnings(
     tsquery = _or_tsquery_terms(query_text[:8000])
     if not tsquery:
         return []
-    if not postgres_available():
-        return []
-    # ``tsquery`` is bound twice — once for the WHERE ``@@`` match and once for the
-    # ORDER BY ``ts_rank`` — because each positional ``%s`` placeholder consumes its
-    # own argument; the appends below are ordered to match the placeholders in the SQL.
-    params: list = [tsquery]  # 1) WHERE search_tsv @@ to_tsquery(...)
-    where = "search_tsv @@ to_tsquery('english', %s)"
-    if category:
-        where += " AND category = %s"
-        params.append(category)  # 2) optional category filter
-    params.append(tsquery)  # 3) ts_rank(...) in ORDER BY
-    params.append(top_n)  # 4) LIMIT
     try:
-        from shared_postgres import dict_row, get_conn
-
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        with pg_cursor(dict_rows=True) as cur:
+            if cur is None:
+                return []
+            # ``tsquery`` is bound twice — once for the WHERE ``@@`` match and once
+            # for the ORDER BY ``ts_rank`` — because each positional ``%s``
+            # placeholder consumes its own argument; the appends below are ordered
+            # to match the placeholders in the SQL.
+            params: list = [tsquery]  # 1) WHERE search_tsv @@ to_tsquery(...)
+            where = "search_tsv @@ to_tsquery('english', %s)"
+            if category:
+                where += " AND category = %s"
+                params.append(category)  # 2) optional category filter
+            params.append(tsquery)  # 3) ts_rank(...) in ORDER BY
+            params.append(top_n)  # 4) LIMIT
             cur.execute(
                 "SELECT pattern, trigger, counter_measure, source, category, occurrences "
                 "FROM se_learnings "
@@ -174,17 +171,18 @@ def retrieve_learnings(
                 "LIMIT %s",
                 tuple(params),
             )
-            return [
-                Learning(
-                    pattern=r["pattern"],
-                    trigger=r["trigger"],
-                    counter_measure=r["counter_measure"],
-                    source=r["source"],
-                    category=r["category"],
-                    occurrences=int(r["occurrences"] or 1),
-                )
-                for r in cur.fetchall()
-            ]
+            rows = cur.fetchall()
+        return [
+            Learning(
+                pattern=r["pattern"],
+                trigger=r["trigger"],
+                counter_measure=r["counter_measure"],
+                source=r["source"],
+                category=r["category"],
+                occurrences=int(r["occurrences"] or 1),
+            )
+            for r in rows
+        ]
     except Exception:
         logger.debug("failed to retrieve learnings", exc_info=True)
         return []
@@ -192,15 +190,14 @@ def retrieve_learnings(
 
 def count_learnings() -> int:
     """Return the number of stored learnings (0 when Postgres disabled)."""
-    if not postgres_available():
-        return 0
     try:
-        from shared_postgres import get_conn
-
-        with get_conn() as conn, conn.cursor() as cur:
+        with pg_cursor() as cur:
+            if cur is None:
+                return 0
             cur.execute("SELECT COUNT(*) FROM se_learnings")
             row = cur.fetchone()
-            return int(row[0]) if row else 0
+            count = int(row[0]) if row else 0
+        return count
     except Exception:
         logger.debug("failed to count learnings", exc_info=True)
         return 0
@@ -211,15 +208,14 @@ def prune_learnings(retention_days: float | None = None) -> int:
     days = _retention_days() if retention_days is None else retention_days
     if days <= 0:
         return 0
-    if not postgres_available():
-        return 0
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
     try:
-        from shared_postgres import get_conn
-
-        with get_conn() as conn, conn.cursor() as cur:
+        with pg_cursor() as cur:
+            if cur is None:
+                return 0
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
             cur.execute("DELETE FROM se_learnings WHERE last_seen < %s", (cutoff,))
-            return cur.rowcount or 0
+            removed = cur.rowcount or 0
+        return removed
     except Exception:
         logger.debug("failed to prune learnings", exc_info=True)
         return 0

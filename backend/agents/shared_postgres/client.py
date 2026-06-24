@@ -27,7 +27,7 @@ import os
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Optional
+from typing import Any, Optional
 
 from shared_env import parse_int
 
@@ -143,6 +143,45 @@ def get_conn(database: Optional[str] = None) -> Generator:
     # connection to the pool.
     with pool.connection() as conn:
         yield conn
+
+
+@contextmanager
+def pg_cursor(
+    *, dict_rows: bool = False, database: Optional[str] = None
+) -> Generator[Optional[Any], None, None]:
+    """Yield a cursor for a short transaction, or ``None`` when Postgres is off.
+
+    Centralizes the ``is_postgres_enabled()`` guard plus the
+    ``get_conn() -> conn.cursor()`` acquisition that every team's store otherwise
+    repeats. Yields ``None`` (rather than raising) when Postgres is unconfigured,
+    so a caller degrades to its no-op / empty result; operational errors raised
+    while opening the connection or inside the ``with`` block propagate to the
+    caller, which logs them and returns its own empty value — keeping each
+    store's best-effort contract and its specific debug message.
+
+    Preconditions:
+        - Used as a context manager: ``with pg_cursor() as cur:``; the caller
+          checks ``cur is None`` before using it.
+    Postconditions:
+        - When Postgres is disabled, yields ``None`` and opens no connection.
+        - Otherwise yields a live cursor inside a :func:`get_conn` transaction (a
+          ``dict_row`` row factory when ``dict_rows=True``); the cursor and
+          connection are closed / returned to the pool on exit, committing on a
+          clean exit (including an early ``return`` from the ``with`` block) and
+          rolling back if an exception propagates.
+    """
+    if not is_postgres_enabled():
+        yield None
+        return
+    with get_conn(database) as conn:
+        if dict_rows:
+            from psycopg.rows import dict_row
+
+            with conn.cursor(row_factory=dict_row) as cur:
+                yield cur
+        else:
+            with conn.cursor() as cur:
+                yield cur
 
 
 def close_pool(database: Optional[str] = None) -> None:

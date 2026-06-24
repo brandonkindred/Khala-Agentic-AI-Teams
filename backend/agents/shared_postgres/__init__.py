@@ -25,7 +25,7 @@ from shared_postgres.aggregate import (
     merge_jsonb_returning,
     merge_jsonb_via_cursor,
 )
-from shared_postgres.client import close_pool, get_conn, is_postgres_enabled
+from shared_postgres.client import close_pool, get_conn, is_postgres_enabled, pg_cursor
 from shared_postgres.metrics import timed_query
 from shared_postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
 from shared_postgres.runner import ensure_team_schema, register_team_schemas
@@ -86,6 +86,7 @@ __all__ = [
     "load_or_create_key",
     "merge_jsonb_returning",
     "merge_jsonb_via_cursor",
+    "pg_cursor",
     "register_all_team_schemas",
     "register_team_schemas",
     "set_secret",
