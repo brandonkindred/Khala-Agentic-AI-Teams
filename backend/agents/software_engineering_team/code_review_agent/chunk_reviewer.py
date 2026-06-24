@@ -34,7 +34,7 @@ from typing import List, Optional
 
 from strands import Agent
 
-from llm_service import LLMClient, get_strands_model
+from llm_service import LLMClient
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_existing_codebase_chars,
@@ -42,6 +42,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_spec_excerpt_chars,
 )
 
+from .model_resolution import resolve_code_review_model
 from .models import ChunkReviewInput, ChunkReviewOutput
 from .prompts import CODE_REVIEW_PROMPT
 
@@ -182,11 +183,7 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     )
 
     prompt = "\n".join(context_parts)
-    # Use the injected LLM client as model when available (it implements Model);
-    # fall back to get_strands_model for production.
-    from strands.models.model import Model as _StrandsModel
-
-    _model = llm if isinstance(llm, _StrandsModel) else get_strands_model("code_review")
+    _model = resolve_code_review_model(llm)
     agent = Agent(model=_model, system_prompt=CODE_REVIEW_PROMPT)
     result = agent(prompt)
     raw = str(result).strip()
