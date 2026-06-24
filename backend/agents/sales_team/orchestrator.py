@@ -626,19 +626,35 @@ class SalesPodOrchestrator:
         qualified_prospects: List[Prospect],
         qualified: List[QualificationScore],
     ) -> List[DiscoveryPlan]:
+        """Run the discovery stage for all qualified prospects in parallel.
+
+        Preconditions:
+            - Every Prospect in ``qualified_prospects`` has a non-empty ``id``
+              (guaranteed by ``_ensure_prospect_ids`` called before this stage).
+            - ``qualified`` is a list of ``QualificationScore`` objects, typically a
+              subset of all scored prospects from the qualification stage; entries
+              without an ``id`` are silently excluded from the lookup dict.
+
+        Postconditions:
+            - Returns a list whose length is ≤ ``len(qualified_prospects)``; any
+              prospect for which ``discovery.prepare`` raises is excluded.
+            - Each returned ``DiscoveryPlan.prospect.id`` matches the
+              corresponding input prospect's ``id``.
+            - If a prospect has no matching ``QualificationScore`` in ``qualified``,
+              an empty JSON object (``"{}"``) is passed to ``discovery.prepare``,
+              which is expected to handle this gracefully.
+        """
         ctx.update("discovery", 65)
         logger.info(
             "Sales pod [%s]: discovery stage for %d prospects",
             ctx.job_id,
             len(qualified_prospects),
         )
+        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect and q.prospect.id}
 
         def _one(p: Prospect) -> Optional[DiscoveryPlan]:
-            qual_json = "{}"
-            for q in qualified:
-                if q.prospect.company_name == p.company_name:
-                    qual_json = q.model_dump_json(indent=2)
-                    break
+            q = qual_by_prospect_id.get(p.id)
+            qual_json = q.model_dump_json(indent=2) if q else "{}"
             try:
                 body = self.discovery.prepare(
                     p.model_dump_json(indent=2),
@@ -670,7 +686,7 @@ class SalesPodOrchestrator:
             len(qualified_prospects),
         )
         annual_cost = _DEFAULT_ANNUAL_COST
-        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect.id}
+        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect and q.prospect.id}
         if not dossier_map:
             dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
 
@@ -703,15 +719,33 @@ class SalesPodOrchestrator:
         qualified_prospects: List[Prospect],
         proposals: List[SalesProposal],
     ) -> List[ClosingStrategy]:
+        """Run the negotiation/closing stage for all qualified prospects in parallel.
+
+        Preconditions:
+            - Every Prospect in ``qualified_prospects`` has a non-empty ``id``
+              (guaranteed by ``_ensure_prospect_ids`` called before this stage).
+            - ``proposals`` is a list of ``SalesProposal`` objects; entries without
+              an ``id`` on their embedded prospect are silently excluded from the
+              lookup dict.
+
+        Postconditions:
+            - Returns a list whose length is ≤ ``len(qualified_prospects)``; any
+              prospect for which ``closer.develop_strategy`` raises is excluded.
+            - Each returned ``ClosingStrategy.prospect.id`` matches the
+              corresponding input prospect's ``id``.
+            - If a prospect has no matching ``SalesProposal`` in ``proposals``,
+              an empty JSON object (``"{}"``) is passed to ``closer.develop_strategy``,
+              which is expected to handle this gracefully.
+        """
         ctx.update("negotiation", 90)
         logger.info("Sales pod [%s]: closing strategy stage", ctx.job_id)
+        proposal_by_prospect_id = {
+            prop.prospect.id: prop for prop in proposals if prop.prospect and prop.prospect.id
+        }
 
         def _one(p: Prospect) -> Optional[ClosingStrategy]:
-            prop_json = "{}"
-            for prop in proposals:
-                if prop.prospect.company_name == p.company_name:
-                    prop_json = prop.model_dump_json(indent=2)
-                    break
+            prop = proposal_by_prospect_id.get(p.id)
+            prop_json = prop.model_dump_json(indent=2) if prop else "{}"
             try:
                 body = self.closer.develop_strategy(
                     p.model_dump_json(indent=2),
