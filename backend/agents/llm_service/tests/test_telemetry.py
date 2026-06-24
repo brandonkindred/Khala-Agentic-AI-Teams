@@ -81,3 +81,121 @@ def test_otel_emission_noop_without_tracer(monkeypatch) -> None:
     monkeypatch.setattr(telemetry, "_otel_tracer", None)
     rec = record_llm_call(team="t", agent_key="a", model="m", objective="x", request_id="y")
     assert rec.objective == "x"
+
+
+def test_record_carries_task_phase_cost_outcome() -> None:
+    rec = record_llm_call(
+        team="software_engineering",
+        agent_key="backend",
+        model="deepseek-v4-pro:cloud",
+        prompt_tokens=1000,
+        completion_tokens=1000,
+        job_id="job-1",
+        task_id="task-7",
+        phase="execution",
+    )
+    assert rec.task_id == "task-7"
+    assert rec.phase == "execution"
+    assert rec.cost_usd > 0  # auto-estimated from pricing for a known model
+    assert rec.outcome == "success"
+    d = rec.to_dict()
+    assert d["task_id"] == "task-7"
+    assert d["phase"] == "execution"
+    assert d["cost_usd"] == rec.cost_usd
+    assert d["outcome"] == "success"
+
+
+def test_cost_defaults_to_estimate_but_can_be_overridden() -> None:
+    rec = record_llm_call(
+        team="t", agent_key="a", model="deepseek-v4-pro:cloud", prompt_tokens=1000, cost_usd=0.5
+    )
+    assert rec.cost_usd == 0.5
+
+
+def test_outcome_defaults_to_status() -> None:
+    rec = record_llm_call(team="t", agent_key="a", model="m", status="rate_limited")
+    assert rec.outcome == "rate_limited"
+
+
+def test_invalid_caller_cost_is_sanitized() -> None:
+    # Negative / non-finite caller-supplied cost must not poison the record.
+    assert record_llm_call(team="t", agent_key="a", model="m", cost_usd=-5.0).cost_usd == 0.0
+    assert (
+        record_llm_call(team="t", agent_key="a", model="m", cost_usd=float("inf")).cost_usd == 0.0
+    )
+    assert (
+        record_llm_call(team="t", agent_key="a", model="m", cost_usd=float("nan")).cost_usd == 0.0
+    )
+
+
+def test_otel_span_includes_cost_and_phase(monkeypatch) -> None:
+    captured: dict = {}
+
+    class _FakeSpan:
+        def set_status(self, *a, **k) -> None:  # pragma: no cover - not exercised here
+            pass
+
+        def end(self) -> None:
+            pass
+
+    class _FakeTracer:
+        def start_span(self, name, attributes=None):
+            captured["attributes"] = attributes or {}
+            return _FakeSpan()
+
+    monkeypatch.setattr(telemetry, "_otel_initialized", True)
+    monkeypatch.setattr(telemetry, "_otel_tracer", _FakeTracer())
+    monkeypatch.setattr(telemetry, "_otel_llm_calls", None)
+    monkeypatch.setattr(telemetry, "_otel_llm_tokens", None)
+    monkeypatch.setattr(telemetry, "_otel_llm_latency", None)
+    monkeypatch.setattr(telemetry, "_otel_llm_cost", None)
+
+    record_llm_call(
+        team="software_engineering",
+        agent_key="backend",
+        model="deepseek-v4-pro:cloud",
+        prompt_tokens=1000,
+        completion_tokens=1000,
+        job_id="job-1",
+        task_id="task-7",
+        phase="execution",
+    )
+    attrs = captured["attributes"]
+    assert attrs["cost.usd"] > 0
+    assert attrs["task.id"] == "task-7"
+    assert attrs["phase"] == "execution"
+    assert attrs["job.id"] == "job-1"
+    assert attrs["agent.name"] == "backend"
+    assert attrs["llm.input_tokens"] == 1000
+    assert attrs["llm.output_tokens"] == 1000
+    assert attrs["outcome"] == "success"
+
+
+def test_observers_notified_and_unregister(monkeypatch) -> None:
+    seen: list = []
+
+    def observer(rec) -> None:
+        seen.append(rec)
+
+    telemetry.register_call_observer(observer)
+    # Idempotent re-registration.
+    telemetry.register_call_observer(observer)
+    try:
+        record_llm_call(team="t", agent_key="a", model="m")
+        assert len(seen) == 1
+    finally:
+        telemetry.unregister_call_observer(observer)
+    record_llm_call(team="t", agent_key="a", model="m")
+    assert len(seen) == 1  # no new notifications after unregister
+
+
+def test_observer_exception_is_swallowed() -> None:
+    def boom(rec) -> None:
+        raise RuntimeError("observer blew up")
+
+    telemetry.register_call_observer(boom)
+    try:
+        rec = record_llm_call(team="t", agent_key="a", model="m")
+        assert rec is not None  # call still succeeds despite the failing observer
+    finally:
+        telemetry.unregister_call_observer(boom)

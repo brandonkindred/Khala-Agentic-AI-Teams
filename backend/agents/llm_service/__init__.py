@@ -41,9 +41,16 @@ from .interface import (
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
+from .pricing import estimate_cost_usd
 from .strands_provider import _clear_strands_model_cache_for_testing, get_strands_model
 from .structured import complete_validated
-from .telemetry import get_recent_calls, get_usage_summary, record_llm_call
+from .telemetry import (
+    get_recent_calls,
+    get_usage_summary,
+    record_llm_call,
+    register_call_observer,
+    unregister_call_observer,
+)
 from .tool_loop import complete_json_with_tool_loop
 from .util import (
     call_llm_with_retries,
@@ -123,6 +130,9 @@ __all__ = [
     "ClaudeLLMClient",
     "DummyLLMClient",
     "record_llm_call",
+    "register_call_observer",
+    "unregister_call_observer",
+    "estimate_cost_usd",
     "get_recent_calls",
     "get_usage_summary",
 ]

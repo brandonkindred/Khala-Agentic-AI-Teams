@@ -7,12 +7,10 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import HTTPException, Response
 
 from job_service_client import (
     JOB_STATUS_COMPLETED,
@@ -25,8 +23,7 @@ from job_service_client import (
     start_stale_job_monitor,
     validate_job_for_action,
 )
-from shared_observability import init_otel, instrument_fastapi_app
-from shared_postgres import close_pool, register_team_schemas
+from shared_app import create_team_app
 from social_media_marketing_team.adapters.branding import (
     BrandContext,
     BrandIncompleteError,
@@ -65,29 +62,15 @@ from .trend_scheduler import get_latest_digest, run_trend_job, start_scheduler, 
 # ---------------------------------------------------------------------------
 
 
-@asynccontextmanager
-async def _lifespan(_application: FastAPI) -> AsyncIterator[None]:
-    try:
-        register_team_schemas(SCHEMA)
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "social marketing postgres schema registration failed"
-        )
-    start_scheduler()
-    yield
-    stop_scheduler()
-    try:
-        close_pool()
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "social marketing shared_postgres close_pool failed", exc_info=True
-        )
-
-
-init_otel(service_name="social-media-marketing-team", team_key="social_marketing")
-
-app = FastAPI(title="Social Media Marketing Team API", version="1.0.0", lifespan=_lifespan)
-instrument_fastapi_app(app, team_key="social_marketing")
+app = create_team_app(
+    service_name="social-media-marketing-team",
+    team_key="social_marketing",
+    title="Social Media Marketing Team API",
+    version="1.0.0",
+    postgres_schema=SCHEMA,
+    on_startup=start_scheduler,
+    on_shutdown=stop_scheduler,
+)
 
 logger = logging.getLogger(__name__)
 try:

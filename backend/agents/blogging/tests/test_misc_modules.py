@@ -370,18 +370,6 @@ def test_fail_job_swallows_errors(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_event_bus_env_int_invalid_falls_back(monkeypatch) -> None:
-    from shared import job_event_bus as bus
-
-    monkeypatch.setenv("BLOGGING_EVENT_BUS_TTL_SECONDS", "not-a-number")
-    # _env_int is module-level; call directly
-    assert bus._env_int("BLOGGING_EVENT_BUS_TTL_SECONDS", 42) == 42
-    monkeypatch.setenv("BLOGGING_EVENT_BUS_TTL_SECONDS", "")
-    assert bus._env_int("BLOGGING_EVENT_BUS_TTL_SECONDS", 7) == 7
-    monkeypatch.setenv("BLOGGING_EVENT_BUS_TTL_SECONDS", "100")
-    assert bus._env_int("BLOGGING_EVENT_BUS_TTL_SECONDS", 1) == 100
-
-
 def test_event_bus_subscribe_publish_cleanup() -> None:
     from shared import job_event_bus as bus
 

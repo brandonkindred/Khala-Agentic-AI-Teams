@@ -24,11 +24,12 @@ SECURITY_ERROR_DETAIL = (
 )
 
 
-# In-process operator routers that are not teams in TEAM_CONFIGS but must still be
-# content-scanned by the gateway. Kept here, not in TEAM_CONFIGS, so cognition does
-# not leak into team discovery / counts / proxy registration (it has no agents, no
-# /run, and no proxy upstream).
-_EXTRA_SCANNED_PREFIXES: frozenset[str] = frozenset({"/api/cognition"})
+# In-process operator routers / aliases that are not teams in TEAM_CONFIGS but must
+# still be content-scanned by the gateway. Kept here, not in TEAM_CONFIGS, so they do
+# not leak into team discovery / counts / proxy registration. ``/api/se`` is the
+# Software Engineering metrics alias (forwards to /api/software-engineering); scanning
+# it keeps its security posture identical to the proxied path it mirrors.
+_EXTRA_SCANNED_PREFIXES: frozenset[str] = frozenset({"/api/cognition", "/api/se"})
 
 # Computed once at import: TEAM_CONFIGS is static after startup, so there is no need
 # to rebuild this set on every request through _is_team_path (called per request).

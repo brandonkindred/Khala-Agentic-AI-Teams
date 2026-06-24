@@ -35,6 +35,8 @@ TEAM_POSTGRES_MODULES: dict[str, str] = {
     "blogging": "blogging.postgres",
     "nutrition_meal_planning": "nutrition_meal_planning_team.postgres",
     "product_delivery": "product_delivery.postgres",
+    # Software Engineering observability & learning layer: traces, events, learnings.
+    "software_engineering": "software_engineering_team.postgres",
     # Agent Cognition Core — memory, rules, and the invoke idempotency ledger.
     "agent_cognition": "agent_cognition.postgres",
     # Issue #376 — investment team's first Postgres table: snapshot index
