@@ -26,8 +26,6 @@ from code_review_agent.false_positive_filter import (
     _build_tools,
     _code_fence_for,
     _coerce_verdict,
-    _find_heuristic_function_at_line,
-    _find_python_function_at_line,
     _parse_verdicts,
     filter_false_positives,
 )
