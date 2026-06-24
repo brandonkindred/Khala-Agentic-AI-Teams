@@ -583,6 +583,15 @@ if TEAM_CONFIGS["product_delivery"].enabled:
     app.include_router(product_delivery_router)
     register_pd_exception_handlers(app)
 
+# Honor the in-process team's `enabled` flag and gate the import (same
+# rationale as product_delivery above): disabling agent_studio in config
+# must make /api/agent-studio/* stop answering and must not let an
+# import-time failure take down the unified API.
+if TEAM_CONFIGS["agent_studio"].enabled:
+    from unified_api.routes.agent_studio import router as agent_studio_router
+
+    app.include_router(agent_studio_router)
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
