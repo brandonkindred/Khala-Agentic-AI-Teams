@@ -164,6 +164,46 @@ def test_real_client_reraises_remote_protocol_error_after_retries(monkeypatch: p
     assert calls["n"] == 4  # max_retries (3) + 1 initial attempt
 
 
+def test_post_not_retried_on_remote_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``RemoteProtocolError`` on a non-idempotent POST (the request may already
+    have reached the server) must NOT be retried — replaying it could duplicate
+    the operation. The error propagates after a single attempt."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        assert request.method == "POST"
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    with pytest.raises(httpx.RemoteProtocolError):
+        client.create_job("j1")
+    assert calls["n"] == 1  # non-idempotent POST is not retried
+
+
+def test_post_retried_on_connect_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ConnectError`` means the connection was never established, so the request
+    provably never reached the server — safe to retry even for a non-idempotent
+    POST."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200, json={})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    client.create_job("j1")  # succeeds after one retry on a fresh connection
+    assert calls["n"] == 2
+
+
 def test_real_client_mark_all_active_jobs_failed_hits_bulk_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

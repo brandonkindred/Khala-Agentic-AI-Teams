@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
-
 import httpx
 import pytest
 
 import shared_http
 from shared_http import (
     _DEFAULT_KEEPALIVE_EXPIRY_S,
+    _MIN_KEEPALIVE_EXPIRY_S,
     DEFAULT_LIMITS,
     _keepalive_expiry_seconds,
     close_pool,
@@ -59,19 +58,16 @@ def test_default_limits_bound_concurrency():
 
 
 def test_default_limits_recycle_idle_keepalive_sockets():
-    """``DEFAULT_LIMITS`` must enable idle-socket recycling so the client drops
-    a socket before an upstream closes it — avoiding ``RemoteProtocolError`` on
-    reuse of a server-closed connection.
+    """``DEFAULT_LIMITS`` must enable idle-socket recycling (a positive expiry) so
+    the client drops a socket before an upstream closes it — avoiding
+    ``RemoteProtocolError`` on reuse of a server-closed connection.
 
-    ``DEFAULT_LIMITS`` is built once at import from ``_keepalive_expiry_seconds()``,
-    so an ``HTTP_KEEPALIVE_EXPIRY_S`` set in the test environment would legitimately
-    change the value. Assert a positive expiry unconditionally, and pin the 15.0
-    literal only when the env var is not overriding it. The env-parsing itself is
-    covered directly by the ``_keepalive_expiry_seconds`` tests below."""
+    Only the *behaviour* (recycling is enabled) is asserted here. ``DEFAULT_LIMITS``
+    is built once at import from ``_keepalive_expiry_seconds()``, so pinning the exact
+    value would couple this to import-time env state; the default value and env
+    parsing are covered directly by the ``_keepalive_expiry_seconds`` tests below."""
     assert DEFAULT_LIMITS.keepalive_expiry is not None
     assert DEFAULT_LIMITS.keepalive_expiry > 0
-    if "HTTP_KEEPALIVE_EXPIRY_S" not in os.environ:
-        assert DEFAULT_LIMITS.keepalive_expiry == _DEFAULT_KEEPALIVE_EXPIRY_S == 15.0
 
 
 def test_pooled_client_applies_limits_and_timeout():
@@ -105,6 +101,19 @@ def test_keepalive_expiry_falls_back_on_invalid_env(monkeypatch, bad):
     rather than producing an unusable pool config."""
     monkeypatch.setenv("HTTP_KEEPALIVE_EXPIRY_S", bad)
     assert _keepalive_expiry_seconds() == _DEFAULT_KEEPALIVE_EXPIRY_S
+
+
+def test_keepalive_expiry_clamps_below_floor(monkeypatch):
+    """A positive value below the 1.0s floor is clamped up (not discarded) — an
+    extremely short expiry would recycle sockets almost immediately, defeating
+    the pool."""
+    monkeypatch.setenv("HTTP_KEEPALIVE_EXPIRY_S", "1e-10")
+    assert _keepalive_expiry_seconds() == _MIN_KEEPALIVE_EXPIRY_S == 1.0
+
+
+def test_keepalive_expiry_at_floor_is_kept(monkeypatch):
+    monkeypatch.setenv("HTTP_KEEPALIVE_EXPIRY_S", "1.0")
+    assert _keepalive_expiry_seconds() == _MIN_KEEPALIVE_EXPIRY_S
 
 
 def test_replaces_externally_closed_client():

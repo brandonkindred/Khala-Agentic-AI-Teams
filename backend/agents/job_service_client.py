@@ -42,6 +42,22 @@ _MISSING_URL_MSG = (
     "or run via pytest which provisions one in-process."
 )
 
+# Retry policy for transient transport errors is idempotency-aware — see
+# JobServiceClient._request. HTTP methods whose replay cannot duplicate an effect.
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
+# Transport errors where the request provably never reached the server (no
+# connection was established / acquired from the pool), so a retry can never
+# duplicate work — safe for ANY method.
+_RETRY_ANY_METHOD_ERRORS = (httpx.ConnectError, httpx.PoolTimeout)
+# Transport errors where the request may already have been sent before the
+# failure (the server closed a stale keep-alive connection, or timed out
+# mid-exchange), so they are retried ONLY for idempotent methods.
+_RETRY_IDEMPOTENT_ONLY_ERRORS = (
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+)
+
 
 def _default_base_url() -> str:
     return os.environ.get("JOB_SERVICE_URL", "")
@@ -129,7 +145,7 @@ class JobServiceClient:
         max_retries: int = 3,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Execute an HTTP request with retry on transient errors.
+        """Execute an HTTP request with idempotency-aware retry on transient errors.
 
         Preconditions:
             - ``timeout`` is a positive, finite number of seconds (passed
@@ -138,15 +154,28 @@ class JobServiceClient:
         Postconditions:
             - Returns a successful ``httpx.Response`` (2xx) or raises the last
               transient error / HTTP status error after exhausting retries.
-            - Transient errors retried with backoff: ``ConnectError``,
-              ``ReadTimeout``, ``WriteTimeout``, ``PoolTimeout``, and
-              ``RemoteProtocolError`` (a stale pooled keep-alive connection the
-              server closed without sending a response — retrying lands the
-              request on a fresh socket). ``HTTPStatusError`` is never retried.
+            - Retry is idempotency-aware so a retry can never duplicate a
+              non-idempotent operation:
+                * ``ConnectError`` / ``PoolTimeout`` — the request provably never
+                  reached the server (no connection was established / acquired),
+                  so they are retried for ANY method.
+                * ``ReadTimeout`` / ``WriteTimeout`` / ``RemoteProtocolError`` —
+                  the request may already have been sent (e.g. a stale keep-alive
+                  connection the server closed, or a timeout mid-exchange), so
+                  they are retried ONLY for idempotent methods
+                  (GET/HEAD/OPTIONS/PUT/DELETE). For non-idempotent methods (e.g.
+                  POST) they propagate immediately — replaying could duplicate
+                  the operation, and the caller must decide how to recover.
+                * ``HTTPStatusError`` is never retried.
         """
         delays = [0.5, 1.0, 2.0]
         last_exc: Exception | None = None
         total_attempts = max_retries + 1
+        idempotent = method.upper() in _IDEMPOTENT_METHODS
+
+        def _backoff(attempt: int) -> None:
+            time.sleep(delays[min(attempt, len(delays) - 1)])
+
         for attempt in range(total_attempts):
             try:
                 # Reuse a process-wide pooled client (keep-alive connections)
@@ -155,21 +184,21 @@ class JobServiceClient:
                 resp = client.request(method, url, **kwargs)
                 resp.raise_for_status()
                 return resp
-            except (
-                httpx.ConnectError,
-                httpx.ReadTimeout,
-                httpx.WriteTimeout,
-                httpx.PoolTimeout,
-                # A pooled keep-alive connection can be closed by the server (or
-                # an intermediary) while idle; reusing it yields "server
-                # disconnected without sending a response". No response bytes
-                # were received, so the request was not processed — safe to retry.
-                httpx.RemoteProtocolError,
-            ) as exc:
+            except _RETRY_ANY_METHOD_ERRORS as exc:
+                # Connection never established/acquired -> request not sent ->
+                # always safe to retry, regardless of method idempotency.
                 last_exc = exc
                 if attempt < max_retries:
-                    delay = delays[min(attempt, len(delays) - 1)]
-                    time.sleep(delay)
+                    _backoff(attempt)
+                    continue
+                raise
+            except _RETRY_IDEMPOTENT_ONLY_ERRORS as exc:
+                # The request may already have reached the server; replaying a
+                # non-idempotent method could duplicate the operation, so only
+                # idempotent methods are retried.
+                last_exc = exc
+                if idempotent and attempt < max_retries:
+                    _backoff(attempt)
                     continue
                 raise
             except httpx.HTTPStatusError:
