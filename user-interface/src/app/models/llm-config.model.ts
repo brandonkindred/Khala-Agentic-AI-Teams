@@ -25,6 +25,16 @@ export interface LlmConfigResponse {
   ollama_model_suggestions: string[];
 }
 
+/** Response shape for GET `/api/llm-config/ollama-models`. */
+export interface OllamaModelsResponse {
+  /** Available model ids — live from `/api/tags`, or the curated fallback. */
+  models: string[];
+  /** Effective Ollama base URL the list was fetched from. */
+  base_url: string;
+  /** 'live' when fetched from the endpoint, 'fallback' for the curated list. */
+  source: 'live' | 'fallback';
+}
+
 /** Request body for PUT `/api/llm-config`. Empty fields leave stored values untouched. */
 export interface LlmConfigUpdate {
   provider: LlmProvider;

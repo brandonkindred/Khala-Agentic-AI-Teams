@@ -23,10 +23,10 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 from strands import Agent
-from strands.models.model import Model as _StrandsModel
 
-from llm_service import LLMClient, get_strands_model
+from llm_service import LLMClient
 
+from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import REVIEW_SYNTHESIS_PROMPT
 
@@ -166,7 +166,7 @@ def synthesize_review_findings(
         framing = _build_framing(input_data, approved)
         prompt = f"{framing}\n\n{digest}"
 
-        _model = llm if isinstance(llm, _StrandsModel) else get_strands_model("code_review")
+        _model = resolve_code_review_model(llm)
         agent = Agent(model=_model, system_prompt=REVIEW_SYNTHESIS_PROMPT)
         result = agent(prompt)
         data = json.loads(str(result).strip())

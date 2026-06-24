@@ -4,7 +4,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
 import { LlmConfigDashboardComponent } from './llm-config-dashboard.component';
-import type { LlmConfigResponse } from '../../models/llm-config.model';
+import type { LlmConfigResponse, OllamaModelsResponse } from '../../models/llm-config.model';
 
 const BASE_CONFIG: LlmConfigResponse = {
   provider: 'ollama',
@@ -20,17 +20,25 @@ const BASE_CONFIG: LlmConfigResponse = {
   ollama_model_suggestions: ['llama3.1'],
 };
 
+const FALLBACK_MODELS: OllamaModelsResponse = {
+  models: ['llama3.1'],
+  base_url: 'https://ollama.com',
+  source: 'fallback',
+};
+
 describe('LlmConfigDashboardComponent', () => {
   let component: LlmConfigDashboardComponent;
   let fixture: ComponentFixture<LlmConfigDashboardComponent>;
   let apiSpy: {
     getConfig: ReturnType<typeof vi.fn>;
     updateConfig: ReturnType<typeof vi.fn>;
+    getOllamaModels: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
-    apiSpy = { getConfig: vi.fn(), updateConfig: vi.fn() };
+    apiSpy = { getConfig: vi.fn(), updateConfig: vi.fn(), getOllamaModels: vi.fn() };
     apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG }));
+    apiSpy.getOllamaModels.mockReturnValue(of({ ...FALLBACK_MODELS }));
 
     await TestBed.configureTestingModule({
       imports: [LlmConfigDashboardComponent, NoopAnimationsModule],
@@ -207,5 +215,79 @@ describe('LlmConfigDashboardComponent', () => {
     apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG, ollama_base_url: 'my-ollama.internal:11434' }));
     component.loadConfig();
     expect(component.ollamaMode).toBe('local');
+  });
+
+  it('does not fetch live models for keyless Ollama Cloud, shows a hint instead', () => {
+    // BASE_CONFIG is Ollama + Cloud + no key configured.
+    expect(apiSpy.getOllamaModels).not.toHaveBeenCalled();
+    expect(component.modelNote).toContain('Save your Ollama Cloud API key');
+  });
+
+  it('fetches and populates live models for Local Ollama on load', () => {
+    apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG, ollama_base_url: 'http://localhost:11434' }));
+    apiSpy.getOllamaModels.mockReturnValue(
+      of({ models: ['llama3.2', 'mistral'], base_url: 'http://localhost:11434', source: 'live' }),
+    );
+    component.loadConfig();
+    expect(apiSpy.getOllamaModels).toHaveBeenCalled();
+    expect(component.ollamaModelSuggestions).toEqual(['llama3.2', 'mistral']);
+    expect(component.modelNote).toBeNull();
+    expect(component.ollamaModelsLoading).toBe(false);
+  });
+
+  it('fetches live models for Cloud once a key is configured', () => {
+    apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG, ollama_api_key_configured: true }));
+    apiSpy.getOllamaModels.mockReturnValue(
+      of({ models: ['cloud-a', 'cloud-b'], base_url: 'https://ollama.com', source: 'live' }),
+    );
+    component.loadConfig();
+    expect(apiSpy.getOllamaModels).toHaveBeenCalled();
+    expect(component.ollamaModelSuggestions).toEqual(['cloud-a', 'cloud-b']);
+  });
+
+  it('keeps curated suggestions and notes when the fetch falls back', () => {
+    apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG, ollama_base_url: 'http://localhost:11434' }));
+    apiSpy.getOllamaModels.mockReturnValue(of({ ...FALLBACK_MODELS, source: 'fallback' }));
+    component.loadConfig();
+    expect(component.ollamaModelSuggestions).toEqual(['llama3.1']); // unchanged curated list
+    expect(component.modelNote).toContain('default suggestions');
+  });
+
+  it('keeps suggestions and notes softly (no error banner) when the fetch errors', () => {
+    apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG, ollama_base_url: 'http://localhost:11434' }));
+    apiSpy.getOllamaModels.mockReturnValue(throwError(() => ({ error: { detail: 'down' } })));
+    component.loadConfig();
+    expect(component.modelNote).toContain("Couldn't load Ollama models");
+    expect(component.error).toBeNull(); // soft note, not the blocking banner
+    expect(component.ollamaModelsLoading).toBe(false);
+  });
+
+  it('fetches live models when switching to Local mode', () => {
+    apiSpy.getOllamaModels.mockClear();
+    component.onOllamaModeChange('local');
+    expect(apiSpy.getOllamaModels).toHaveBeenCalled();
+  });
+
+  it('clears the Ollama note when switching to Claude', () => {
+    expect(component.modelNote).toContain('Save your Ollama Cloud API key'); // keyless cloud hint
+    apiSpy.getOllamaModels.mockClear();
+    component.onProviderChange('claude');
+    expect(component.modelNote).toBeNull();
+    expect(apiSpy.getOllamaModels).not.toHaveBeenCalled();
+  });
+
+  it('refetches live models after a successful save', () => {
+    apiSpy.updateConfig.mockReturnValue(of({ ...BASE_CONFIG, ollama_base_url: 'http://localhost:11434' }));
+    apiSpy.getOllamaModels.mockClear();
+    apiSpy.getOllamaModels.mockReturnValue(
+      of({ models: ['saved-model'], base_url: 'http://localhost:11434', source: 'live' }),
+    );
+    component.provider = 'ollama';
+    component.onOllamaModeChange('local');
+    component.model = 'llama3.1';
+    component.save();
+    // applyConfig runs in the save success handler and refreshes the model list.
+    expect(apiSpy.getOllamaModels).toHaveBeenCalled();
+    expect(component.ollamaModelSuggestions).toEqual(['saved-model']);
   });
 });
