@@ -209,12 +209,15 @@ def _thinking_downgrade_enabled() -> bool:
     return llm_config.env_flag_enabled(llm_config.ENV_LLM_THINKING_DOWNGRADE_RETRY)
 
 
-def _ollama_tags_auth_headers() -> dict[str, str]:
-    """Return the Authorization header for an Ollama /api/tags request.
+def _ollama_bearer_auth_headers() -> dict[str, str]:
+    """Return the Authorization Bearer header for an Ollama Cloud request.
 
-    Mirrors ``OllamaLLMClient._ollama_auth_headers``: resolves the Ollama Cloud
-    key via :func:`llm_config.resolve_ollama_api_key` (runtime config set through
-    the settings UI, falling back to ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY``).
+    Single source of truth for Ollama auth, shared by the module-level
+    ``list_ollama_models`` (/api/tags) and ``OllamaLLMClient._ollama_auth_headers``
+    (the /api/show and /v1/chat/completions paths), so the listing and chat paths
+    can never authenticate differently. Resolves the Ollama Cloud key via
+    :func:`llm_config.resolve_ollama_api_key` (runtime config set through the
+    settings UI, falling back to ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY``).
 
     Preconditions: none.
     Postconditions: returns ``{"Authorization": "Bearer <key>"}`` when a key is
@@ -244,7 +247,7 @@ def list_ollama_models(timeout: float = 15.0) -> list[str]:
     base_url = llm_config.resolve_base_url()
     url = f"{base_url.rstrip('/')}/api/tags"
     try:
-        headers = _ollama_tags_auth_headers()
+        headers = _ollama_bearer_auth_headers()
         with httpx.Client(timeout=timeout) as client:
             resp = client.get(url, headers=headers)
         if resp.status_code != 200:
@@ -486,15 +489,14 @@ class OllamaLLMClient(LLMClient):
     def _ollama_auth_headers(self) -> dict[str, str]:
         """Return Authorization Bearer header for Ollama Cloud.
 
-        Resolves the key via :func:`llm_config.resolve_ollama_api_key` so a key set
-        through the settings UI (runtime config) takes effect, falling back to the
-        ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY`` env vars. Empty -> no header
-        (local Ollama needs none).
+        Thin wrapper over the module-level :func:`_ollama_bearer_auth_headers` so the
+        chat path and the /api/tags listing path share one auth implementation and
+        cannot drift. Resolves the key via :func:`llm_config.resolve_ollama_api_key`
+        so a key set through the settings UI (runtime config) takes effect, falling
+        back to the ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY`` env vars. Empty -> no
+        header (local Ollama needs none).
         """
-        key = llm_config.resolve_ollama_api_key()
-        if not key:
-            return {}
-        return {"Authorization": f"Bearer {key}"}
+        return _ollama_bearer_auth_headers()
 
     def _fetch_model_num_ctx(self) -> int:
         """Resolve the model's num_ctx from the known-model table, env, or Ollama /api/show.
