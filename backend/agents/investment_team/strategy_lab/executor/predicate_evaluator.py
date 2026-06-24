@@ -15,11 +15,10 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Literal, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, Literal, Optional, Protocol, Sequence, Tuple
 
 import pandas as pd
 
-from ..executor import indicators as ind
 from ..indicators.streaming import IndicatorRegistry
 from ..spec_dsl import (
     EntryRule,
@@ -223,113 +222,68 @@ def evaluate_signal_exit_rules(
 
 
 # ---------------------------------------------------------------------------
-# Indicator computation (shared by both HistoryView implementations)
+# Indicator computation (alignment audit) — registry-backed full-frame series
 # ---------------------------------------------------------------------------
 
 
-def select_source_series(df: pd.DataFrame, source: str) -> pd.Series:
-    """Return the input series the indicator should read from."""
-    if source == "hl2":
-        return (df["high"] + df["low"]) / 2.0
-    if source == "ohlc4":
-        return (df["open"] + df["high"] + df["low"] + df["close"]) / 4.0
-    return df[source]
+class _FrameBar:
+    """Bar adapter over one OHLCV frame row, for the registry walk below."""
 
+    __slots__ = ("open", "high", "low", "close", "volume")
 
-def _series_sma(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.sma(select_source_series(df, ref.source), int(ref.param("period")))
-
-
-def _series_ema(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.ema(select_source_series(df, ref.source), int(ref.param("period")))
-
-
-def _series_rsi(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.rsi(select_source_series(df, ref.source), int(ref.param("period")))
-
-
-def _series_macd(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    series = select_source_series(df, ref.source)
-    macd_line, signal_line, hist = ind.macd(
-        series,
-        fast=int(ref.param("fast")),
-        slow=int(ref.param("slow")),
-        signal=int(ref.param("signal")),
-    )
-    output = ref.param("output")
-    if output == "signal":
-        return signal_line
-    if output == "histogram":
-        return hist
-    return macd_line
-
-
-def _series_bollinger(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    series = select_source_series(df, ref.source)
-    upper, middle, lower = ind.bollinger_bands(
-        series,
-        period=int(ref.param("period")),
-        num_std=float(ref.param("num_std")),
-    )
-    band = ref.param("band")
-    if band == "upper":
-        return upper
-    if band == "lower":
-        return lower
-    return middle
-
-
-def _series_atr(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.atr(df["high"], df["low"], df["close"], period=int(ref.param("period")))
-
-
-def _series_adx(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.adx(df["high"], df["low"], df["close"], period=int(ref.param("period")))
-
-
-def _series_stochastic(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    pct_k, pct_d = ind.stochastic(
-        df["high"],
-        df["low"],
-        df["close"],
-        k_period=int(ref.param("k_period")),
-        d_period=int(ref.param("d_period")),
-    )
-    return pct_d if ref.param("output") == "d" else pct_k
-
-
-def _series_vwap(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    return ind.vwap(df["high"], df["low"], df["close"], df["volume"])
-
-
-# Module-level O(1) dispatch table — one entry per DSL ``IndicatorName``.
-# Replaces a linear if/elif chain so indicator lookup is constant-time on
-# the predicate-evaluation hot path.
-_INDICATOR_SERIES_DISPATCH: Dict[str, Callable[[IndicatorRef, pd.DataFrame], pd.Series]] = {
-    "sma": _series_sma,
-    "ema": _series_ema,
-    "rsi": _series_rsi,
-    "macd": _series_macd,
-    "bollinger": _series_bollinger,
-    "atr": _series_atr,
-    "adx": _series_adx,
-    "stochastic": _series_stochastic,
-    "vwap": _series_vwap,
-}
+    def __init__(self, open: float, high: float, low: float, close: float, volume: float) -> None:
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
 
 
 def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    """Compute the full indicator series for ``ref`` on ``df``.
+    """Full indicator series for ``ref`` on ``df`` via the streaming registry.
 
-    Pre: ``df`` has the standard OHLCV columns; ``ref.name`` is a known
-    DSL indicator name.
-    Post: returns a ``pd.Series`` aligned with ``df``'s index.
-    NaN during warmup is pandas' natural behaviour.
+    Pre: ``df`` has the standard OHLCV columns; ``ref.name`` is a known DSL
+    indicator name.
+    Post: returns a ``pd.Series`` aligned with ``df``'s index whose element ``i``
+    is the registry's trailing value over ``df[: i + 1]`` — byte-identical to
+    the engine's per-bar value (``StreamingHistoryView``), so the alignment
+    audit re-evaluates predicates with the same math the engine ran. ``NaN``
+    during warm-up (the registry returns ``None``).
+
+    Forward-walks one fresh ``IndicatorRegistry`` over the frame, feeding it the
+    growing prefix so it advances by a single recurrence step per row. This is a
+    post-hoc, per-(ref, symbol) cached pass — not the engine hot path — so the
+    walk's cost (O(window) per row; cumulative for VWAP) is acceptable.
     """
-    builder = _INDICATOR_SERIES_DISPATCH.get(ref.name)
-    if builder is None:
-        raise ValueError(f"unknown indicator name: {ref.name!r}")
-    return builder(ref, df)
+    n = len(df)
+    if n == 0:
+        return pd.Series([], dtype=float, index=df.index)
+
+    def _col(name: str):
+        return df[name].to_numpy() if name in df.columns else None
+
+    opens, highs, lows = _col("open"), _col("high"), _col("low")
+    closes, volumes = _col("close"), _col("volume")
+
+    def _at(arr, idx: int) -> float:
+        return float(arr[idx]) if arr is not None else 0.0
+
+    reg = IndicatorRegistry()
+    bars: list[_FrameBar] = []
+    out: list[float] = []
+    for idx in range(n):
+        bars.append(
+            _FrameBar(
+                _at(opens, idx),
+                _at(highs, idx),
+                _at(lows, idx),
+                _at(closes, idx),
+                _at(volumes, idx),
+            )
+        )
+        value = _registry_indicator(reg, ref, bars)
+        out.append(math.nan if value is None else value)
+    return pd.Series(out, index=df.index, dtype=float)
 
 
 # ---------------------------------------------------------------------------
