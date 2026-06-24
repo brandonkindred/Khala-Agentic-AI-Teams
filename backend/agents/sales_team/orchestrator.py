@@ -631,14 +631,18 @@ class SalesPodOrchestrator:
         Preconditions:
             - Every Prospect in ``qualified_prospects`` has a non-empty ``id``
               (guaranteed by ``_ensure_prospect_ids`` called before this stage).
-            - ``qualified`` is a subset of scored prospects; entries without an
-              ``id`` are silently excluded from the lookup dict.
+            - ``qualified`` is a list of ``QualificationScore`` objects, typically a
+              subset of all scored prospects from the qualification stage; entries
+              without an ``id`` are silently excluded from the lookup dict.
 
         Postconditions:
             - Returns a list whose length is ≤ ``len(qualified_prospects)``; any
               prospect for which ``discovery.prepare`` raises is excluded.
             - Each returned ``DiscoveryPlan.prospect.id`` matches the
               corresponding input prospect's ``id``.
+            - If a prospect has no matching ``QualificationScore`` in ``qualified``,
+              an empty JSON object (``"{}"``) is passed to ``discovery.prepare``,
+              which is expected to handle this gracefully.
         """
         ctx.update("discovery", 65)
         logger.info(
@@ -720,14 +724,18 @@ class SalesPodOrchestrator:
         Preconditions:
             - Every Prospect in ``qualified_prospects`` has a non-empty ``id``
               (guaranteed by ``_ensure_prospect_ids`` called before this stage).
-            - ``proposals`` entries without an ``id`` on their embedded prospect
-              are silently excluded from the lookup dict.
+            - ``proposals`` is a list of ``SalesProposal`` objects; entries without
+              an ``id`` on their embedded prospect are silently excluded from the
+              lookup dict.
 
         Postconditions:
             - Returns a list whose length is ≤ ``len(qualified_prospects)``; any
               prospect for which ``closer.develop_strategy`` raises is excluded.
             - Each returned ``ClosingStrategy.prospect.id`` matches the
               corresponding input prospect's ``id``.
+            - If a prospect has no matching ``SalesProposal`` in ``proposals``,
+              an empty JSON object (``"{}"``) is passed to ``closer.develop_strategy``,
+              which is expected to handle this gracefully.
         """
         ctx.update("negotiation", 90)
         logger.info("Sales pod [%s]: closing strategy stage", ctx.job_id)
