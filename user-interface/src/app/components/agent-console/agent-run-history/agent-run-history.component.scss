@@ -14,7 +14,7 @@
       font-size: 0.85rem;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: var(--mat-sys-on-surface-variant, #555);
+      color: var(--kh-text-muted);
     }
   }
 
@@ -22,7 +22,7 @@
   &__empty,
   &__error {
     margin: 12px 0 0;
-    color: var(--mat-sys-on-surface-variant, #555);
+    color: var(--kh-text-muted);
     font-size: 0.9rem;
   }
 
@@ -95,12 +95,12 @@
   }
 
   &__when {
-    color: var(--mat-sys-on-surface-variant, #555);
+    color: var(--kh-text-muted);
   }
 
   &__duration {
     font-variant-numeric: tabular-nums;
-    color: var(--mat-sys-on-surface-variant, #555);
+    color: var(--kh-text-muted);
   }
 
   &__author {
@@ -118,7 +118,7 @@
 
   &__trace {
     font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
-    color: var(--mat-sys-on-surface-variant, #666);
+    color: var(--kh-text-muted);
     font-size: 0.75rem;
   }
 

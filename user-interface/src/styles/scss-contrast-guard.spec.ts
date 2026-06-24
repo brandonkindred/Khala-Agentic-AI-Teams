@@ -55,6 +55,18 @@ const LOW_CONTRAST_TEXT = new RegExp(
   'i',
 );
 const NON_TOKEN_GRAY_TEXT = new RegExp(String.raw`(?<![-\w])color:\s*(?:${NON_TOKEN_GRAY_HEX})`, 'i');
+// Matches color: var(…) where the fallback value is a low-contrast gray hex
+// (i.e. the same set as LOW_CONTRAST_HEX, but inside the second argument of var()).
+const LOW_CONTRAST_FALLBACK = new RegExp(
+  String.raw`(?<![-\w])color:\s*var\([^,)]+,\s*(?:${LOW_CONTRAST_HEX})\s*\)`,
+  'i',
+);
+// Matches color: var(…) where the fallback value is a non-token gray hex
+// (i.e. the same set as NON_TOKEN_GRAY_HEX, but inside the second argument of var()).
+const NON_TOKEN_GRAY_FALLBACK = new RegExp(
+  String.raw`(?<![-\w])color:\s*var\([^,)]+,\s*(?:${NON_TOKEN_GRAY_HEX})\s*\)`,
+  'i',
+);
 
 // Selector segment that targets a focus state — matches `:focus` and
 // `:focus-visible` but not `:focus-within`.
@@ -171,6 +183,12 @@ function findOffenses(source: string): string[] {
   }
   for (const m of clean.matchAll(new RegExp(NON_TOKEN_GRAY_TEXT.source, 'gi'))) {
     offenses.push({ line: lineAt(clean, m.index), message: 'hardcoded gray text color bypasses the --kh-text-* tokens — use a --kh-text-* token' });
+  }
+  for (const m of clean.matchAll(new RegExp(LOW_CONTRAST_FALLBACK.source, 'gi'))) {
+    offenses.push({ line: lineAt(clean, m.index), message: 'low-contrast fallback in var() — use a --kh-text-* token with no fallback' });
+  }
+  for (const m of clean.matchAll(new RegExp(NON_TOKEN_GRAY_FALLBACK.source, 'gi'))) {
+    offenses.push({ line: lineAt(clean, m.index), message: 'non-token gray fallback in var() — use a --kh-text-* token with no fallback' });
   }
 
   for (const body of focusBlockBodies(clean)) {
@@ -340,5 +358,24 @@ describe('findOffenses detector', () => {
     // The `{` lives in a string, so the brace scanner must not open a block.
     expect(findOffenses('.x:focus-visible { content: "{"; outline: none; }')).toHaveLength(1);
     expect(findOffenses('.x { content: "{"; color: var(--kh-text-primary); }')).toHaveLength(0);
+  });
+
+  it('flags a var() with a low-contrast gray fallback', () => {
+    const r1 = findOffenses('.x { color: var(--mat-sys-on-surface-variant, #555); }');
+    expect(r1).toHaveLength(1);
+    expect(r1[0]).toMatch(/low-contrast fallback/);
+    const r2 = findOffenses('.x { color: var(--kh-text-muted, #71717a); }');
+    expect(r2).toHaveLength(1);
+    expect(r2[0]).toMatch(/low-contrast fallback/);
+  });
+
+  it('flags a var() with a non-token gray fallback', () => {
+    const r = findOffenses('.x { color: var(--something, #aaa); }');
+    expect(r).toHaveLength(1);
+    expect(r[0]).toMatch(/non-token gray fallback/);
+  });
+
+  it('does not flag a var() with a kh token and no fallback', () => {
+    expect(findOffenses('.x { color: var(--kh-text-muted); }')).toHaveLength(0);
   });
 });
