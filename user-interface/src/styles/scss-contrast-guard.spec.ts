@@ -55,10 +55,14 @@ const LOW_CONTRAST_TEXT = new RegExp(
   'i',
 );
 const NON_TOKEN_GRAY_TEXT = new RegExp(String.raw`(?<![-\w])color:\s*(?:${NON_TOKEN_GRAY_HEX})`, 'i');
+// Matches color: var(…) where the fallback value is a low-contrast gray hex
+// (i.e. the same set as LOW_CONTRAST_HEX, but inside the second argument of var()).
 const LOW_CONTRAST_FALLBACK = new RegExp(
   String.raw`(?<![-\w])color:\s*var\([^,)]+,\s*(?:${LOW_CONTRAST_HEX})\s*\)`,
   'i',
 );
+// Matches color: var(…) where the fallback value is a non-token gray hex
+// (i.e. the same set as NON_TOKEN_GRAY_HEX, but inside the second argument of var()).
 const NON_TOKEN_GRAY_FALLBACK = new RegExp(
   String.raw`(?<![-\w])color:\s*var\([^,)]+,\s*(?:${NON_TOKEN_GRAY_HEX})\s*\)`,
   'i',
