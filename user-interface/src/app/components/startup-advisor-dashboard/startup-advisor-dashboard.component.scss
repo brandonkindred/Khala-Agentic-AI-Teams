@@ -368,7 +368,7 @@
   padding: 6px 10px;
   font-size: 0.88rem;
 
-  &:focus {
+  &:focus-visible {
     border-color: var(--kh-info);
   }
 }
