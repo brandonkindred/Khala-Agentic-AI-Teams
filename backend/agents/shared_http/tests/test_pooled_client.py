@@ -74,15 +74,23 @@ def test_pooled_client_applies_limits_and_timeout():
     client = get_pooled_client(12.0)
     assert isinstance(client, httpx.Client)
     assert client.timeout.read == 12.0
-    # Reaching into httpx/httpcore internals (``_transport._pool``) is the only
-    # way to confirm DEFAULT_LIMITS is actually wired into the constructed
-    # client's live pool — httpx exposes no public accessor for it. This couples
-    # the test to httpcore internals: if a future httpx renames these private
-    # attributes, update them here (the asserted behaviour is still correct).
-    pool = client._transport._pool  # noqa: SLF001 — assert pooling config
-    assert pool._max_connections == DEFAULT_LIMITS.max_connections
-    assert pool._max_keepalive_connections == DEFAULT_LIMITS.max_keepalive_connections
-    assert pool._keepalive_expiry == DEFAULT_LIMITS.keepalive_expiry
+    # The public surface we can always assert: the limits object the pool is
+    # built from carries the values we expect.
+    assert DEFAULT_LIMITS.max_connections == 50
+    assert DEFAULT_LIMITS.max_keepalive_connections == 20
+    assert DEFAULT_LIMITS.keepalive_expiry == _DEFAULT_KEEPALIVE_EXPIRY_S
+    # Stronger check: confirm DEFAULT_LIMITS is actually wired into the live
+    # pool. httpx exposes no public accessor for this, so it requires reaching
+    # into httpcore internals (``_transport._pool``). Guarded so a future httpx
+    # that renames these private attributes degrades to the public assertions
+    # above rather than hard-failing on an internals change.
+    pool = getattr(getattr(client, "_transport", None), "_pool", None)  # noqa: SLF001
+    if pool is not None and hasattr(pool, "_max_connections"):
+        assert pool._max_connections == DEFAULT_LIMITS.max_connections  # noqa: SLF001
+        assert pool._max_keepalive_connections == DEFAULT_LIMITS.max_keepalive_connections  # noqa: SLF001
+        assert pool._keepalive_expiry == DEFAULT_LIMITS.keepalive_expiry  # noqa: SLF001
+    else:  # pragma: no cover - only taken if a future httpx renames pool internals
+        pytest.skip("httpx pool internals unavailable; public limits asserted above")
 
 
 def test_keepalive_expiry_defaults_when_env_unset(monkeypatch):
