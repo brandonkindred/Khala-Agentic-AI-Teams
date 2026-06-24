@@ -50,8 +50,8 @@ def test_postgres_credentials_enabled_true_when_host_set(monkeypatch: pytest.Mon
 # ---------------------------------------------------------------------------
 
 
-def test_dsn_builds_correct_url(monkeypatch: pytest.MonkeyPatch):
-    """_dsn() assembles a postgresql:// URL from environment variables."""
+def test_dsn_delegates_to_shared_keyword_builder(monkeypatch: pytest.MonkeyPatch):
+    """_dsn() reuses the shared keyword-form builder (one DSN builder, no drift)."""
     monkeypatch.setenv("POSTGRES_HOST", "myhost")
     monkeypatch.setenv("POSTGRES_USER", "myuser")
     monkeypatch.setenv("POSTGRES_PASSWORD", "mypassword")
@@ -59,11 +59,12 @@ def test_dsn_builds_correct_url(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("POSTGRES_PORT", "5433")
     mod = _reload(monkeypatch, postgres_host="myhost")
     dsn = mod._dsn()
-    assert "postgresql://" in dsn
-    assert "myhost" in dsn
-    assert "myuser" in dsn
-    assert "mydb" in dsn
-    assert "5433" in dsn
+    # Keyword/value libpq form (NOT a postgresql:// URI), every field escaped by make_conninfo.
+    assert "postgresql://" not in dsn
+    assert "host=myhost" in dsn
+    assert "user=myuser" in dsn
+    assert "dbname=mydb" in dsn
+    assert "port=5433" in dsn
 
 
 def test_dsn_uses_defaults_for_optional_vars(monkeypatch: pytest.MonkeyPatch):
@@ -76,19 +77,47 @@ def test_dsn_uses_defaults_for_optional_vars(monkeypatch: pytest.MonkeyPatch):
     mod = _reload(monkeypatch, postgres_host="host")
     dsn = mod._dsn()
     # Defaults: user=postgres, db=postgres, port=5432
-    assert "postgres" in dsn
-    assert "5432" in dsn
+    assert "user=postgres" in dsn
+    assert "port=5432" in dsn
 
 
-def test_dsn_url_encodes_special_chars_in_password(monkeypatch: pytest.MonkeyPatch):
-    """_dsn() percent-encodes special characters in the password."""
+def test_dsn_escapes_special_password_and_user(monkeypatch: pytest.MonkeyPatch):
+    """A password with a space AND a user with '@' (e.g. an Azure-style role) must both
+    be safely escaped — the round-2 URI form left the user raw, which split the userinfo
+    at the '@' and connected to the wrong host."""
     monkeypatch.setenv("POSTGRES_HOST", "host")
-    monkeypatch.setenv("POSTGRES_PASSWORD", "p@ss:word!")
+    monkeypatch.setenv("POSTGRES_USER", "svc@prod")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "my pass")
     mod = _reload(monkeypatch, postgres_host="host")
     dsn = mod._dsn()
-    # Raw password must not appear; @ must be encoded
-    assert "p@ss:word!" not in dsn
-    assert "p%40ss" in dsn  # @ -> %40
+    # Space-bearing password is single-quoted; the '@'-user is kept intact (keyword form
+    # has no userinfo to mis-split), not truncated.
+    assert "password='my pass'" in dsn
+    assert "user=svc@prod" in dsn
+
+
+def test_dsn_bounds_connect_timeout(monkeypatch: pytest.MonkeyPatch):
+    """The credential-store DSN carries connect_timeout (from the shared helper) so a
+    PAT read can't hang on a down host before any reachability probe runs."""
+    monkeypatch.setenv("POSTGRES_HOST", "host")
+    monkeypatch.delenv("POSTGRES_CONNECT_TIMEOUT_S", raising=False)
+    mod = _reload(monkeypatch, postgres_host="host")
+    assert "connect_timeout=3" in mod._dsn()
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "9")
+    assert "connect_timeout=9" in mod._dsn()
+
+
+def test_statement_timeout_options(monkeypatch: pytest.MonkeyPatch):
+    """Credential connects carry a statement_timeout so a post-connect stall can't pin
+    _LOCK; 0 disables it."""
+    monkeypatch.setenv("POSTGRES_HOST", "host")
+    monkeypatch.delenv("POSTGRES_STATEMENT_TIMEOUT_MS", raising=False)
+    mod = _reload(monkeypatch, postgres_host="host")
+    assert mod._statement_timeout_options() == "-c statement_timeout=5000"
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "1500")
+    assert mod._statement_timeout_options() == "-c statement_timeout=1500"
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "0")
+    assert mod._statement_timeout_options() == ""
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +192,108 @@ def test_pg_set_credential_raises_runtime_error_when_psycopg_missing(
     mod._psycopg_import_failed = True  # simulate missing psycopg
     with pytest.raises(RuntimeError, match="psycopg is not installed"):
         mod.pg_set_credential("svc", "key", "value")
+
+
+# ---------------------------------------------------------------------------
+# pg_get_credential_status: (value, store_reachable) from a single read
+# ---------------------------------------------------------------------------
+
+
+def _fake_conn(row):
+    """A psycopg.connect(...) stand-in usable as ``with ... as conn, conn.cursor() as cur``."""
+    cur = MagicMock()
+    cur.fetchone.return_value = row
+    cur.__enter__ = lambda s=cur: cur
+    cur.__exit__ = lambda *a: False
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    conn.__enter__ = lambda s=conn: conn
+    conn.__exit__ = lambda *a: False
+    return conn
+
+
+def test_status_disabled_is_absent_but_reachable(monkeypatch: pytest.MonkeyPatch):
+    # Disabled store is a configuration state ("absent"), not an outage.
+    mod = _reload(monkeypatch, postgres_host="")
+    assert mod.pg_get_credential_status("svc", "key") == ("", True)
+
+
+def test_status_connection_error_is_unreachable(monkeypatch: pytest.MonkeyPatch):
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(psycopg, "connect", _boom)
+    assert mod.pg_get_credential_status("svc", "key") == ("", False)
+
+
+def test_status_missing_row_is_absent_reachable(monkeypatch: pytest.MonkeyPatch):
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _fake_conn(None))
+    assert mod.pg_get_credential_status("svc", "key") == ("", True)
+
+
+def test_status_present_row_returns_decrypted_value(monkeypatch: pytest.MonkeyPatch):
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    conn = _fake_conn(("ciphertext",))
+    cur = conn.cursor.return_value
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: conn)
+    fernet = MagicMock()
+    fernet.decrypt.return_value = b"plain-secret"
+    monkeypatch.setattr(mod, "get_integration_fernet", lambda: fernet)
+    assert mod.pg_get_credential_status("svc", "key") == ("plain-secret", True)
+    # The single read must actually issue the SELECT bound to (service, key), and the
+    # fetched ciphertext must be what gets decrypted (guards against a refactor that
+    # drops the query or reads the wrong column/params).
+    sql, params = cur.execute.call_args.args
+    assert "SELECT ciphertext FROM encrypted_integration_credentials" in sql
+    assert params == ("svc", "key")
+    fernet.decrypt.assert_called_once_with(b"ciphertext")
+    # pg_get_credential is a thin wrapper over the same single read.
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _fake_conn(("ciphertext",)))
+    assert mod.pg_get_credential("svc", "key") == "plain-secret"
+
+
+def test_status_undecryptable_row_is_absent_reachable(monkeypatch: pytest.MonkeyPatch):
+    # A row that won't decrypt (e.g. rotated key) is store-reachable but unusable →
+    # treated as absent (a 400 path for callers), not an outage.
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _fake_conn(("bad",)))
+    fernet = MagicMock()
+    fernet.decrypt.side_effect = ValueError("invalid token")
+    monkeypatch.setattr(mod, "get_integration_fernet", lambda: fernet)
+    assert mod.pg_get_credential_status("svc", "key") == ("", True)
+
+
+def test_status_passes_statement_timeout_options_to_connect(monkeypatch: pytest.MonkeyPatch):
+    # The connect must carry the statement_timeout options (default) so a post-connect
+    # stall is bounded; and the disabled path (ms=0) must still connect with options=''.
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    seen = {}
+
+    def _capture(*_a, **k):
+        seen["options"] = k.get("options")
+        return _fake_conn(None)
+
+    monkeypatch.setattr(psycopg, "connect", _capture)
+
+    monkeypatch.delenv("POSTGRES_STATEMENT_TIMEOUT_MS", raising=False)
+    mod.pg_get_credential_status("svc", "key")
+    assert seen["options"] == "-c statement_timeout=5000"
+
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "0")
+    mod.pg_get_credential_status("svc", "key")
+    assert seen["options"] == ""  # disabled → empty options, connect still works
 
 
 def test_pg_delete_credential_noop_when_disabled(monkeypatch: pytest.MonkeyPatch):

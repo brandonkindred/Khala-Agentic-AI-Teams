@@ -41,6 +41,7 @@ from coding_team.clone_workspace import (
     clone_lock_path,
 )
 from coding_team.github_source.client import _pr_detail_from_payload
+from shared_postgres import bounded_probe
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,
@@ -48,7 +49,7 @@ from unified_api.google_browser_login_credentials import (
     google_browser_login_storage_available,
     set_google_browser_login_credentials,
 )
-from unified_api.integration_credentials import get_credential
+from unified_api.integration_credentials import get_credential_status
 from unified_api.integrations_store import (
     clear_github_config,
     clear_medium_google_oauth_identity,
@@ -57,6 +58,7 @@ from unified_api.integrations_store import (
     generate_medium_google_oauth_state,
     generate_oauth_state,
     get_github_config,
+    get_github_config_meta,
     get_integrations_list,
     get_medium_config,
     get_slack_config,
@@ -933,6 +935,15 @@ class GitHubConfigResponse(BaseModel):
     owner: str
     repo: str
     default_label: str
+    credential_store_unreachable: bool = Field(
+        default=False,
+        description=(
+            "True when Postgres (the PAT store) is configured but unreachable, so "
+            "token_configured may read False only because the store is down — not "
+            "because no token was saved. Lets the UI warn instead of showing "
+            "'not connected'."
+        ),
+    )
 
 
 class GitHubConfigUpdate(BaseModel):
@@ -1018,20 +1029,83 @@ class CodeReviewRunItem(BaseModel):
     completed_at: str | None = None
 
 
-def _build_github_config_response(cfg: dict[str, Any]) -> GitHubConfigResponse:
+def _build_github_config_response(
+    cfg: dict[str, Any], *, credential_store_unreachable: bool = False
+) -> GitHubConfigResponse:
     return GitHubConfigResponse(
         enabled=cfg["enabled"],
         token_configured=cfg["token_configured"],
         owner=cfg["owner"],
         repo=cfg["repo"],
         default_label=cfg["default_label"],
+        credential_store_unreachable=credential_store_unreachable,
+    )
+
+
+def _degraded_github_config_response() -> GitHubConfigResponse:
+    """Best-effort GitHub config when the credential store is unreachable.
+
+    Preconditions: none.
+    Postconditions: returns the JSON-only settings (owner/repo/enabled/default_label,
+        read via ``get_github_config_meta`` — NO Postgres) with ``token_configured=False``
+        and ``credential_store_unreachable=True``. Only the credential-derived fields are
+        unknown during a store outage; the saved settings are not, so the panel shows the
+        configured repo plus the unreachable warning instead of blanking everything (which
+        would conflate "store down" with "nothing configured"). Never raises — a failure
+        reading even the JSON falls back to empty settings.
+    """
+    try:
+        meta = get_github_config_meta()
+    except Exception:  # noqa: BLE001 - even the JSON read failed; degrade to empty settings
+        logger.exception("GitHub settings read failed during degraded fallback")
+        meta = {"enabled": False, "owner": "", "repo": "", "default_label": ""}
+    return GitHubConfigResponse(
+        enabled=bool(meta.get("enabled", False)),
+        token_configured=False,
+        owner=str(meta.get("owner", "")),
+        repo=str(meta.get("repo", "")),
+        default_label=str(meta.get("default_label", "")),
+        credential_store_unreachable=True,
+    )
+
+
+async def _github_config_response() -> GitHubConfigResponse:
+    """Read the GitHub config off the event loop and report store reachability.
+
+    Preconditions: none.
+    Postconditions: returns the current config. ``credential_store_unreachable`` is
+        derived from the SAME single credential read that backs ``token_configured``
+        (``get_github_config`` -> ``get_credential_status``), so the panel and the
+        run/review routes can never disagree about reachability — no separate probe.
+        The read runs via the shared :func:`shared_postgres.bounded_probe`, whose budget
+        (``connect_timeout + statement_timeout + 1s``) is large enough that the
+        statement_timeout-bounded worker finishes — releasing the credential-store
+        ``_LOCK`` — before the outer guard fires, and that a within-bounds slow read isn't
+        falsely flagged. On timeout/error it logs and returns
+        :func:`_degraded_github_config_response`, which PRESERVES the JSON-only settings
+        (owner/repo) rather than blanking them. Never raises.
+    """
+
+    def _build() -> GitHubConfigResponse:
+        cfg = get_github_config()
+        # store_reachable is False only on a connection/query error; disabled Postgres
+        # reports reachable=True ("absent", not an outage), matching the panel intent.
+        return _build_github_config_response(
+            cfg,
+            credential_store_unreachable=not cfg.get("store_reachable", True),
+        )
+
+    return await bounded_probe(
+        _build,
+        on_failure=_degraded_github_config_response,
+        label="GitHub config read",
     )
 
 
 @router.get("/github", response_model=GitHubConfigResponse)
 async def get_github() -> GitHubConfigResponse:
     """Return GitHub integration config status."""
-    return _build_github_config_response(get_github_config())
+    return await _github_config_response()
 
 
 @router.put("/github", response_model=GitHubConfigResponse)
@@ -1045,14 +1119,14 @@ async def update_github(body: GitHubConfigUpdate) -> GitHubConfigResponse:
         default_label=body.default_label,
         repo_path=body.repo_path,
     )
-    return _build_github_config_response(get_github_config())
+    return await _github_config_response()
 
 
 @router.delete("/github", response_model=GitHubConfigResponse)
 async def delete_github() -> GitHubConfigResponse:
     """Disconnect GitHub integration (removes PAT and resets config)."""
     clear_github_config()
-    return _build_github_config_response(get_github_config())
+    return await _github_config_response()
 
 
 async def _iter_github_pages(
@@ -1195,15 +1269,35 @@ def _resolve_github_target() -> tuple[dict[str, Any], str, str, str]:
         - The GitHub integration is enabled with a stored PAT and a configured
           owner/repo.
     Postconditions:
-        - Returns the config dict plus the resolved token/owner/repo. Each missing
-          prerequisite raises ``HTTPException(400)``. Shared by the issue- and
-          PR-listing routes so their validation cannot drift.
+        - Returns the config dict plus the resolved token/owner/repo. A missing
+          prerequisite raises ``HTTPException(400)``; an empty token while the
+          Postgres credential store is unreachable raises ``HTTPException(503)``
+          instead, so a transient DB outage is never reported as "PAT not
+          configured". The 400-vs-503 decision comes from a SINGLE credential read
+          (:func:`get_credential_status` reports value + reachability together), so
+          there is no second probe and no TOCTOU window between the read and the
+          probe. Blocking I/O — async callers offload via ``asyncio.to_thread``.
+          Shared by every GitHub route so their validation cannot drift.
     """
-    cfg = get_github_config()
+    # JSON-only settings (no credential read), so the only DB round-trip on this path is
+    # the single get_credential_status below — which yields BOTH the token value and the
+    # 503-vs-400 reachability signal.
+    cfg = get_github_config_meta()
     if not cfg["enabled"]:
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
-    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
+    token, store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")
     if not token:
+        # An empty token can mean two very different things, and the same read tells
+        # us which: a down credential store (503, transient) vs a genuinely missing
+        # PAT (400, operator action required). No separate probe → no race.
+        if not store_reachable:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Cannot reach the GitHub credential store (Postgres); the integration "
+                    "is temporarily unavailable. Restore the database connection and retry."
+                ),
+            )
         raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
     owner = cfg["owner"]
     repo = cfg["repo"]
@@ -1278,7 +1372,7 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
           issue and never fails the list. This adds roughly one extra request wave per
           ``GITHUB_DEPENDENCY_CONCURRENCY`` issues to the response latency.
     """
-    cfg, token, owner, repo = _resolve_github_target()
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
     use_label = label or cfg["default_label"]
@@ -1353,7 +1447,7 @@ async def list_github_pulls() -> list[GitHubPullRequestItem]:
           ``_GITHUB_MAX_PR_PAGES`` pages of 100 items. Hitting that bound logs a
           warning and returns the PRs gathered so far rather than failing.
     """
-    _cfg, token, owner, repo = _resolve_github_target()
+    _cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
     headers = _github_api_headers(token)
@@ -1437,13 +1531,7 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
     # value that could traverse out of the workspace (a real GitHub owner/repo
     # never contains these).
     for label, value in (("owner", cfg["owner"]), ("repo", cfg["repo"])):
-        if (
-            "/" in value
-            or "\\" in value
-            or "\x00" in value
-            or value in ("..", ".")
-            or value.strip() != value
-        ):
+        if "/" in value or "\\" in value or "\x00" in value or value in ("..", ".") or value.strip() != value:
             raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
 
     # Enforce the documented precondition: a non-positive issue_number would yield
@@ -1452,9 +1540,7 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
     if issue_number is not None and issue_number < 1:
         raise HTTPException(status_code=400, detail=f"issue_number must be positive: {issue_number!r}")
 
-    issue_segment = (
-        PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number) if issue_number is not None else None
-    )
+    issue_segment = PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number) if issue_number is not None else None
 
     # Auto-derived paths are resolved to absolute so they are stable regardless
     # of the process working directory at clone vs. cleanup time, and so the
@@ -1532,9 +1618,7 @@ def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
     return got_owner.casefold() == owner.casefold() and got_repo.casefold() == repo.casefold()
 
 
-def _ensure_repo_clone(
-    repo_path: str, owner: str, repo: str, token: str, *, platform_owned: bool = True
-) -> str | None:
+def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, platform_owned: bool = True) -> str | None:
     """Clone or fetch the repository.
 
     Auth is passed via ``GIT_CONFIG_*`` environment variables so the token
@@ -1662,16 +1746,9 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
           header, drops the response, and the UI can only report an opaque
           "0 Unknown Error" — useless for diagnosis.
     """
-    cfg = get_github_config()
-    if not cfg["enabled"]:
-        raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
-    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
-    if not token:
-        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
-    owner = cfg["owner"]
-    repo = cfg["repo"]
-    if not owner or not repo:
-        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+    # Centralized validation (enabled + PAT + owner/repo), which also maps an
+    # unreachable credential store to a 503 rather than a misleading "not configured".
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     # Validate the downstream is configured before the (slow) clone, so a
     # misconfiguration fails fast instead of after a multi-second checkout.
@@ -1769,16 +1846,9 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
           job. Every failure path raises ``HTTPException`` with an explanatory detail;
           no ``httpx`` error escapes as an unhandled exception.
     """
-    cfg = get_github_config()
-    if not cfg["enabled"]:
-        raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
-    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
-    if not token:
-        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
-    owner = cfg["owner"]
-    repo = cfg["repo"]
-    if not owner or not repo:
-        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+    # Centralized validation (enabled + PAT + owner/repo), which also maps an
+    # unreachable credential store to a 503 rather than a misleading "not configured".
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
     if not coding_team_url:
@@ -1855,7 +1925,7 @@ async def list_github_reviews(
           ``pr_number``), newest-first. Every failure path raises
           ``HTTPException``; no ``httpx`` error escapes unhandled.
     """
-    _cfg, _token, owner, repo = _resolve_github_target()
+    _cfg, _token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
     if not coding_team_url:
