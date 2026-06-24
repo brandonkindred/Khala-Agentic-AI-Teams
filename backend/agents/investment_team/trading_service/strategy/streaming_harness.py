@@ -145,6 +145,19 @@ class StreamingHarness:
         )
         indicators_impl_src = os.path.join(executor_dir, "indicators.py")
         scalar_api_src = os.path.join(executor_dir, "strategy_indicators.py")
+        # The scalar API and ctx.indicator() route their math through the
+        # streaming IndicatorRegistry (the engine's authoritative indicator
+        # math), so the registry module must be importable in the flat sandbox.
+        # ``streaming.py`` is stdlib-only, so it copies in unmodified and the
+        # scalar wrapper imports it as ``_streaming_indicators`` in this layout.
+        registry_src = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "strategy_lab",
+            "indicators",
+            "streaming.py",
+        )
+        if os.path.exists(registry_src):
+            shutil.copy2(registry_src, os.path.join(tmp, "_streaming_indicators.py"))
         if os.path.exists(indicators_impl_src) and os.path.exists(scalar_api_src):
             shutil.copy2(indicators_impl_src, os.path.join(tmp, "_indicators_impl.py"))
             shutil.copy2(scalar_api_src, os.path.join(tmp, "indicators.py"))

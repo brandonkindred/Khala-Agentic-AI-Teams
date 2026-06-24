@@ -3103,6 +3103,7 @@ class TradingService:
                 low=cur_bar.low,
                 close=cur_bar.close,
                 volume=getattr(cur_bar, "volume", 0.0),
+                symbol=sym,
             )
         )
 
