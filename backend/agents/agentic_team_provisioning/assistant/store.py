@@ -23,6 +23,7 @@ from agentic_team_provisioning.models import (
 )
 from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
+from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,9 @@ class AgenticTeamStore:
                 "VALUES (%s, %s, %s, %s, %s)",
                 (team_id, name, description, now, now),
             )
+        # Best-effort: link the team to the default profile. record_association_safe
+        # never raises, so a link failure can't break team creation.
+        record_association_safe(ArtifactType.AGENTIC_TEAM, "agentic_team_provisioning", team_id, label=name)
         return AgenticTeam(
             team_id=team_id,
             name=name,

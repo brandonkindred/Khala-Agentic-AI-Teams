@@ -62,6 +62,7 @@ from unified_api.integration_credentials import (
 
 logger = logging.getLogger(__name__)
 
+
 _DEFAULT_CACHE_DIR = ".agent_cache"
 _BROWSER_SESSION_ROOT_ENV = "INTEGRATIONS_BROWSER_SESSION_ROOT"
 _DEFAULT_BROWSER_SESSIONS_SUBDIR = "integrations/browser_sessions"

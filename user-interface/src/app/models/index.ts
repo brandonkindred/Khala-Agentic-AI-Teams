@@ -27,3 +27,6 @@ export * from './persona-testing.model';
 export * from './road-trip-planning.model';
 export * from './product-delivery.model';
 export * from './job-status.model';
+// Note: user-profile.model is intentionally not re-exported here — it defines a
+// `UserProfile` that would clash with personal-assistant.model. Import it directly
+// from './user-profile.model'.

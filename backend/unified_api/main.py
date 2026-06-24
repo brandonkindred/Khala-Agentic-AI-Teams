@@ -311,6 +311,14 @@ async def lifespan(app: FastAPI):
         logger.exception("agent_console postgres schema registration failed")
 
     try:
+        from shared_postgres import register_team_schemas
+        from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
+
+        register_team_schemas(USER_PROFILE_SCHEMA)
+    except Exception:
+        logger.exception("user_profile postgres schema registration failed")
+
+    try:
         from agent_cognition.postgres import SCHEMA as AGENT_COGNITION_SCHEMA
         from shared_postgres import register_team_schemas
 
@@ -543,6 +551,7 @@ from unified_api.routes.llm_config import router as llm_config_router
 from unified_api.routes.llm_tools import router as llm_tools_router
 from unified_api.routes.llm_usage import router as llm_usage_router
 from unified_api.routes.sandboxes import router as sandboxes_router
+from unified_api.routes.user_profile import router as user_profile_router
 
 app.include_router(integrations_router)
 app.include_router(llm_config_router)
@@ -554,6 +563,11 @@ app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
 app.include_router(cognition_router)
+# Honor the user_profile team's `enabled` flag (it has a TEAM_CONFIGS entry),
+# matching the product_delivery gate below: disabling the team must make
+# /api/user-profile/* stop answering, not just disappear from /teams.
+if TEAM_CONFIGS["user_profile"].enabled:
+    app.include_router(user_profile_router)
 # Honor the in-process team's `enabled` flag: an operator that disables
 # the team via TEAM_CONFIGS expects /api/product-delivery/* to stop
 # answering, not just disappear from /teams. Gate the *import* too —

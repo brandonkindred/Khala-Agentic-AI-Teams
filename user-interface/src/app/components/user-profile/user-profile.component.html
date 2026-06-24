@@ -1,0 +1,127 @@
+<app-dashboard-shell
+  title="User Profile"
+  subtitle="Review your profile and the work linked to it across teams"
+  icon="account_circle"
+>
+  @if (loading) {
+    <div class="up-loading" role="status" aria-live="polite">
+      <mat-spinner diameter="36" />
+      <span>Loading your profile…</span>
+    </div>
+  } @else {
+    @if (error) {
+      <div class="up-banner up-error" role="alert">{{ error }}</div>
+    }
+    @if (success) {
+      <div class="up-banner up-success" role="status">{{ success }}</div>
+    }
+
+    <!-- Editable profile -->
+    <mat-card class="up-card">
+      <mat-card-header>
+        <mat-card-title>Profile details</mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        <form [formGroup]="form" (ngSubmit)="save()" class="up-form">
+          <mat-form-field appearance="outline">
+            <mat-label>Display name</mat-label>
+            <input matInput formControlName="display_name" autocomplete="name" />
+          </mat-form-field>
+
+          <mat-form-field appearance="outline">
+            <mat-label>Email</mat-label>
+            <input matInput formControlName="email" type="email" autocomplete="email" />
+            @if (form.controls.email.touched && form.controls.email.errors?.['email']) {
+              <mat-error>Enter a valid email address.</mat-error>
+            }
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="up-bio">
+            <mat-label>Bio</mat-label>
+            <textarea matInput formControlName="bio" rows="3"></textarea>
+          </mat-form-field>
+
+          <div class="up-actions">
+            <button mat-flat-button color="primary" type="submit" [disabled]="saving">
+              <mat-icon>save</mat-icon>
+              {{ saving ? 'Saving…' : 'Save profile' }}
+            </button>
+          </div>
+        </form>
+      </mat-card-content>
+    </mat-card>
+
+    <!-- Linked artifacts -->
+    <mat-card class="up-card">
+      <mat-card-header class="up-card-header">
+        <mat-card-title>Linked work ({{ totalAssociations }})</mat-card-title>
+        <button
+          mat-icon-button
+          type="button"
+          class="up-refresh"
+          (click)="load()"
+          [disabled]="loading"
+          aria-label="Refresh linked work"
+        >
+          <mat-icon>refresh</mat-icon>
+        </button>
+      </mat-card-header>
+      <mat-card-content>
+        @if (totalAssociations === 0) {
+          <p class="up-empty">
+            Nothing linked yet. Create a brand, blog post, project, or agentic team and it will
+            appear here.
+          </p>
+        } @else {
+          @for (group of groups; track group.type) {
+            <section class="up-group">
+              <h3 class="up-group-title">
+                <mat-icon aria-hidden="true">{{ group.icon }}</mat-icon>
+                {{ group.label }} ({{ group.items.length }})
+              </h3>
+              <ul class="up-list">
+                @for (item of group.items; track item.id) {
+                  <li class="up-list-item">
+                    <span class="up-item-label">{{ item.label || item.artifact_id }}</span>
+                    <span class="up-item-meta">{{ item.team }} · {{ item.role }}</span>
+                  </li>
+                }
+              </ul>
+            </section>
+          }
+        }
+      </mat-card-content>
+    </mat-card>
+
+    <!-- Integrations -->
+    <mat-card class="up-card">
+      <mat-card-header>
+        <mat-card-title>Integrations</mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        @if (integrations.length === 0) {
+          <p class="up-empty">No integrations reported.</p>
+        } @else {
+          <ul class="up-list">
+            @for (integration of integrations; track integration.id) {
+              <li class="up-list-item">
+                <span class="up-item-label">{{ integration.type }}</span>
+                <span
+                  class="up-pill"
+                  [class.up-pill-on]="integration.enabled"
+                  [class.up-pill-off]="!integration.enabled"
+                >
+                  {{ integration.enabled ? 'Connected' : 'Disabled' }}
+                </span>
+                @if (integration.channel) {
+                  <span class="up-item-meta">{{ integration.channel }}</span>
+                }
+              </li>
+            }
+          </ul>
+        }
+        <a routerLink="/integrations" class="up-link">Manage integrations</a>
+      </mat-card-content>
+    </mat-card>
+  }
+</app-dashboard-shell>
