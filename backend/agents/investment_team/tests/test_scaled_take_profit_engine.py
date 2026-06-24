@@ -604,6 +604,127 @@ def test_deferred_scale_out_still_lets_a_same_bar_stop_fire() -> None:
     assert tracker["AAA"].scaled_cursor.mapping == {}
 
 
+def _submit_inflight_scaled_partial(order_book: OrderBook) -> PendingOrder:
+    """Submit a prior scaled rung's market scale-out (a PARTIAL close, closing-side
+    SHORT, carrying the scaled-take-profit engine reason) still resting on the book —
+    e.g. a participation-capped rung requeued across bars. This is the in-flight
+    state the gate must recognise as a partial (defer the next rung) rather than a
+    full close (stand the whole bar down)."""
+    return order_book.submit(
+        OrderRequest(
+            client_order_id="e1",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=50.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            reason=f"{ENGINE_EXIT_REASON_PREFIX}scaled_take_profit",
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+        ),
+        submitted_at="2024-01-09",
+        submitted_equity=1_000_000.0,
+    )
+
+
+def test_inflight_partial_scale_out_does_not_block_runner_stop() -> None:
+    """A prior rung's PARTIAL scale-out still in flight must NOT stand the whole bar
+    down: a stop protecting the runner (listed after the ladder) still has to fire
+    this bar. Regression — the in-flight-engine-MARKET standdown previously suppressed
+    every exit, leaving the runner unprotected until the partial cleared."""
+    disp = _dispatcher(exit_rules=[_ladder(), StopLossRule(pct=0.03)])
+    tracker = _tracker(OrderSide.LONG)
+    tracker["AAA"].scaled_cursor.advance(0, 0)  # rung 0 already fired → cursor at 1
+    # The runner: 50 of the original 100 remains after rung 0 scaled out half.
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=50.0, entry_price=100.0)
+    portfolio.positions["AAA"].original_qty = 100.0
+    order_book = OrderBook()
+    _submit_inflight_scaled_partial(order_book)  # rung 0's scale-out still pending
+    result = TradingServiceResult()
+    # Bar both reaches rung 1 (+10%, high>=110) AND breaches the 3% stop (low<=97).
+    bar = _bar(high=111.0, low=96.0, close=98.0)
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    # The stop fired a full close on the runner even though a partial was in flight;
+    # the NEXT rung stayed deferred (cursor unchanged at 1), preserving the
+    # one-rung-at-a-time ordering the standdown used to give.
+    assert len(pending) == 1
+    assert "stop_loss" in pending[0].reason
+    assert pending[0].qty == 50.0  # full close of the 50-share runner
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1}  # rung 1 NOT fired
+
+
+def test_inflight_partial_scale_out_defers_next_rung_without_a_full_exit() -> None:
+    """With only the ladder (no stop), an in-flight partial scale-out simply defers
+    the next rung: nothing new emits and the cursor does not advance, so each rung
+    still completes before the next fires."""
+    disp = _dispatcher(exit_rules=[_ladder()])
+    tracker = _tracker(OrderSide.LONG)
+    tracker["AAA"].scaled_cursor.advance(0, 0)  # rung 0 fired
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=50.0, entry_price=100.0)
+    portfolio.positions["AAA"].original_qty = 100.0
+    order_book = OrderBook()
+    _submit_inflight_scaled_partial(order_book)
+    result = TradingServiceResult()
+    bar = _bar(high=111.0, low=100.0, close=110.0)  # rung 1's +10% target reached
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert pending == []  # rung 1 deferred until the in-flight partial clears
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1}
+
+
+def test_inflight_full_close_still_stands_the_bar_down() -> None:
+    """The fix is scoped to scaled PARTIALs: an in-flight FULL close (a stop's market,
+    not a scaled-rung reason) must still stand the whole bar down so the engine does
+    not stack a redundant guaranteed close while the rule keeps re-triggering."""
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.03), _ladder()])
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    order_book = OrderBook()
+    order_book.submit(
+        OrderRequest(
+            client_order_id="e1",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=100.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",  # a FULL close, in flight
+        ),
+        submitted_at="2024-01-09",
+        submitted_equity=1_000_000.0,
+    )
+    result = TradingServiceResult()
+    bar = _bar(high=111.0, low=96.0, close=98.0)  # would re-trigger both stop and rung
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert pending == []  # stood down — no redundant second close emitted
+    assert tracker["AAA"].scaled_cursor.mapping == {}
+
+
 def _submit_competing_short(order_book: OrderBook) -> PendingOrder:
     """An unbound, opposite-side (SHORT) strategy LIMIT exit resting on the book for
     AAA — the kind of order the full-close cleanups must bind so it can't survive the

@@ -552,16 +552,6 @@ def is_entry_anchored_exit(rule: Any) -> bool:
     return isinstance(rule, (StopLossRule, TakeProfitRule, ScaledTakeProfitRule))
 
 
-def has_full_position_exit(exit_rules: Sequence[Any]) -> bool:
-    """Whether ``exit_rules`` contains a rule that closes the FULL position.
-
-    Preconditions: ``exit_rules`` is a sequence of ``ExitRule`` members.
-    Postconditions: ``True`` iff at least one rule satisfies
-    :func:`is_full_position_exit`.
-    """
-    return any(is_full_position_exit(r) for r in exit_rules)
-
-
 def stop_caps_side(basis: str, side: str) -> bool:
     """Whether a ``StopLossRule`` ``basis`` can cap loss for an entry ``side``.
 

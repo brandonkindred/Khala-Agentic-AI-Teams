@@ -111,6 +111,41 @@ class ExitIntent:
     qty_fraction: float = 1.0
     level_index: Optional[int] = None
 
+    def __post_init__(self) -> None:
+        """Enforce the intent's structural contract at construction.
+
+        These are invariants every producer (``_intent_for_rule``) already
+        upholds; validating here turns a future producer bug into an immediate,
+        local failure instead of a silently mis-sized or mis-routed close.
+
+        Preconditions (on the constructor arguments):
+          * ``style`` is ``"market"`` or ``"limit"``.
+          * ``0 < qty_fraction <= 1.0`` — a close covers a positive fraction of
+            the original entry qty, at most the whole position.
+          * A scaled rung (``level_index is not None``) is ALWAYS a market
+            scale-out (``style == "market"``): the dispatcher's scale-out path
+            has no resting/requeue lifecycle for a limit rung, and a
+            ``level_index >= 0`` rung index is well-formed.
+        Postconditions: raises ``ValueError`` if any precondition is violated;
+        otherwise the instance is a structurally valid intent.
+        """
+        if self.style not in ("market", "limit"):
+            raise ValueError(f"ExitIntent.style must be 'market' or 'limit', got {self.style!r}")
+        if not (0.0 < self.qty_fraction <= 1.0):
+            raise ValueError(
+                f"ExitIntent.qty_fraction must be in (0, 1], got {self.qty_fraction!r}"
+            )
+        if self.level_index is not None:
+            if self.level_index < 0:
+                raise ValueError(
+                    f"ExitIntent.level_index must be non-negative, got {self.level_index!r}"
+                )
+            if self.style != "market":
+                raise ValueError(
+                    "a scaled-take-profit rung must be a market scale-out "
+                    f"(style='market'), got style={self.style!r}"
+                )
+
     @property
     def is_scaled_rung(self) -> bool:
         """Whether this intent is a scaled-take-profit LADDER RUNG.
@@ -259,6 +294,20 @@ def evaluate_exit_rules_for_position(
     rung; limit-style intents omitted when ``exclude_limit_style`` and scaled rungs
     omitted when ``exclude_scaled``.
     """
+    if first_only:
+        # Hot path: the per-bar dispatcher wants only the spec-priority winner, so
+        # delegate to the allocation-free scan and wrap its single result (or none).
+        intent = first_exit_intent_for_position(
+            rules,
+            symbol,
+            position,
+            bar,
+            view=view,
+            cursor_map=cursor_map,
+            exclude_limit_style=exclude_limit_style,
+            exclude_scaled=exclude_scaled,
+        )
+        return [intent] if intent is not None else []
     intents: list[ExitIntent] = []
     for idx, rule in enumerate(rules):
         intent = _intent_for_rule(rule, symbol, idx, position, bar, view, cursor_map)
@@ -269,9 +318,48 @@ def evaluate_exit_rules_for_position(
         if exclude_scaled and intent.is_scaled_rung:
             continue
         intents.append(intent)
-        if first_only:
-            break
     return intents
+
+
+def first_exit_intent_for_position(
+    rules: Sequence[ExitRule],
+    symbol: str,
+    position: PositionState,
+    bar: BarSnapshot,
+    *,
+    view: Optional[HistoryView] = None,
+    cursor_map: Mapping[int, int] = _EMPTY_CURSOR,
+    exclude_limit_style: bool = False,
+    exclude_scaled: bool = False,
+) -> Optional[ExitIntent]:
+    """The highest-priority triggered ``ExitIntent`` for ONE position, or ``None``.
+
+    The allocation-free ``first_only`` core of
+    :func:`evaluate_exit_rules_for_position`. The per-bar dispatcher evaluates one
+    open position per symbol per bar and acts on a single intent, so this walks the
+    rules in spec order and returns the first that fires and survives the
+    ``exclude_limit_style`` / ``exclude_scaled`` filters — without building the
+    throwaway one-element list the list-returning variant would allocate on every
+    bar of every open position.
+
+    Preconditions: as :func:`evaluate_exit_rules_for_position` — ``position.qty >
+    0``; ``bar`` exposes ``high``/``low``/``close``; ``cursor_map`` maps a ladder
+    ``rule_index`` to its next un-fired rung.
+    Postconditions: returns the spec-priority winning intent — a limit-style intent
+    skipped when ``exclude_limit_style``, a scaled rung skipped when
+    ``exclude_scaled`` — or ``None`` when no rule fires (or the only triggers are
+    excluded). Allocates no result list.
+    """
+    for idx, rule in enumerate(rules):
+        intent = _intent_for_rule(rule, symbol, idx, position, bar, view, cursor_map)
+        if intent is None:
+            continue
+        if exclude_limit_style and intent.style == "limit":
+            continue
+        if exclude_scaled and intent.is_scaled_rung:
+            continue
+        return intent
+    return None
 
 
 def _intent_for_rule(
