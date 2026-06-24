@@ -1496,6 +1496,7 @@ def test_discovery_and_negotiation_match_by_id_not_company_name(stub_orch, sampl
 
     plans = stub_orch._run_discovery(ctx, [p1, p2], [qual_p1, qual_p2])
     assert len(plans) == 2
+    assert {plan.prospect.id for plan in plans} == {p1.id, p2.id}
 
     # Each prospect must have received its OWN qual JSON — no cross-contamination.
     assert "alice-specific-notes" in discovery_received["prs_shared_1"]
@@ -1536,6 +1537,7 @@ def test_discovery_and_negotiation_match_by_id_not_company_name(stub_orch, sampl
 
     strategies = stub_orch._run_negotiation(ctx, [p1, p2], [prop_p1, prop_p2])
     assert len(strategies) == 2
+    assert {strategy.prospect.id for strategy in strategies} == {p1.id, p2.id}
 
     # Each prospect must have received its OWN proposal JSON — no cross-contamination.
     assert "alice-proposal-summary" in negotiation_received["prs_shared_1"]

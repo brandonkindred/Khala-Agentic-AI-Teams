@@ -646,7 +646,7 @@ class SalesPodOrchestrator:
             ctx.job_id,
             len(qualified_prospects),
         )
-        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect.id}
+        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect and q.prospect.id}
 
         def _one(p: Prospect) -> Optional[DiscoveryPlan]:
             q = qual_by_prospect_id.get(p.id)
@@ -682,7 +682,7 @@ class SalesPodOrchestrator:
             len(qualified_prospects),
         )
         annual_cost = _DEFAULT_ANNUAL_COST
-        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect.id}
+        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect and q.prospect.id}
         if not dossier_map:
             dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
 
@@ -731,7 +731,9 @@ class SalesPodOrchestrator:
         """
         ctx.update("negotiation", 90)
         logger.info("Sales pod [%s]: closing strategy stage", ctx.job_id)
-        proposal_by_prospect_id = {prop.prospect.id: prop for prop in proposals if prop.prospect.id}
+        proposal_by_prospect_id = {
+            prop.prospect.id: prop for prop in proposals if prop.prospect and prop.prospect.id
+        }
 
         def _one(p: Prospect) -> Optional[ClosingStrategy]:
             prop = proposal_by_prospect_id.get(p.id)
