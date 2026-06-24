@@ -165,6 +165,40 @@ def test_on_startup_failure_still_closes_pool(monkeypatch) -> None:
     assert closed == [True]  # pool closed despite the startup failure
 
 
+def test_on_shutdown_failure_still_closes_pool(monkeypatch) -> None:
+    # A raising on_shutdown must NOT skip close_pool: the pool is always closed
+    # on shutdown, and the hook's failure is swallowed (logged), not propagated.
+    import shared_postgres
+
+    closed = []
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: None)
+    monkeypatch.setattr(shared_postgres, "close_pool", lambda: closed.append(True))
+
+    def on_shutdown() -> None:
+        raise RuntimeError("shutdown boom")
+
+    app = create_team_app(
+        service_name="svc",
+        team_key="tk",
+        title="T",
+        postgres_schema=object(),
+        on_shutdown=on_shutdown,
+    )
+    # The raising shutdown hook is swallowed, so exiting the context does not raise.
+    with TestClient(app):
+        pass
+    assert closed == [True]  # pool closed despite the shutdown-hook failure
+
+
+def test_create_team_app_rejects_lifespan_in_fastapi_kwargs() -> None:
+    # lifespan is set by the factory and is not a named param, so a caller-passed
+    # one lands in **fastapi_kwargs and would silently collide inside FastAPI;
+    # reject it up front with a clear ValueError. (title/version are named params,
+    # so Python raises TypeError on a duplicate before this check is even reached.)
+    with pytest.raises(ValueError, match="lifespan"):
+        create_team_app(service_name="svc", team_key="tk", title="T", lifespan=lambda _app: None)
+
+
 @pytest.mark.anyio
 async def test_maybe_call_handles_none_sync_and_async() -> None:
     ran = []

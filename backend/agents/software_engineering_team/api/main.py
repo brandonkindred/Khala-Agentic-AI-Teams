@@ -2168,6 +2168,22 @@ class AutoAnswerResponse(BaseModel):
     )
 
 
+def _real_question_options(question_data: Dict[str, Any]) -> list[dict]:
+    """Return a question's selectable options, excluding the synthetic ``other`` placeholder.
+
+    ``_convert_to_pending_questions`` inserts an ``{"id": "other"}`` entry when a
+    question has no structured options; callers checking whether *real* options
+    exist must skip it.
+
+    Preconditions: ``question_data`` is a dict (its ``options`` may be absent/None).
+    Postconditions: returns a list (possibly empty) of option dicts whose lowercased
+        ``id`` is not ``"other"``; never raises on a missing/None ``options`` value.
+    """
+    return [
+        o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"
+    ]
+
+
 @app.post(
     "/run-team/{job_id}/auto-answer/{question_id}",
     response_model=AutoAnswerResponse,
@@ -2199,11 +2215,7 @@ def auto_answer_run_team_question(
             detail=f"Question {question_id} not found in pending questions.",
         )
 
-    # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
-    # _convert_to_pending_questions inserts it when a question has no structured options.
-    real_options = [
-        o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"
-    ]
+    real_options = _real_question_options(question_data)
     if not real_options:
         raise HTTPException(
             status_code=422,
@@ -2712,11 +2724,7 @@ def auto_answer_product_analysis_question(
             detail=f"Question {question_id} not found in pending questions.",
         )
 
-    # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
-    # _convert_to_pending_questions inserts it when a question has no structured options.
-    real_options = [
-        o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"
-    ]
+    real_options = _real_question_options(question_data)
     if not real_options:
         raise HTTPException(
             status_code=422,

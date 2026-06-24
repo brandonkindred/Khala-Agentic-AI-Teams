@@ -64,11 +64,13 @@ def create_team_app(
     Preconditions:
         - ``service_name``/``team_key``/``title``/``version`` are non-empty strings.
         - ``postgres_schema`` (when given) is a ``shared_postgres.TeamSchema``.
-        - ``fastapi_kwargs`` must not contain ``title``/``version``/``lifespan``
-          (set explicitly here); duplicating them raises ``TypeError``.
+        - ``fastapi_kwargs`` must not contain ``lifespan`` (set explicitly here);
+          passing it raises ``ValueError``. ``title``/``version`` are named
+          parameters, so duplicating them raises ``TypeError`` from Python itself.
         - ``on_startup`` runs after schema registration; ``on_shutdown`` runs
           before the pool is closed. Teardown (``on_shutdown`` + pool close) runs
-          even if ``on_startup`` raises, so a startup failure never leaks the pool.
+          even if ``on_startup`` **or** ``on_shutdown`` raises, so neither a
+          startup nor a shutdown failure ever leaks the pool.
     Postconditions:
         - :func:`init_otel` has been called and the returned app is OTel-
           instrumented; ``excluded_urls`` (when given) is forwarded to the
@@ -93,6 +95,16 @@ def create_team_app(
         if not isinstance(_value, str) or not _value:
             raise ValueError(f"{_name} must be a non-empty string")
 
+    # ``lifespan`` is set explicitly below and is NOT a named parameter of this
+    # function, so a caller-supplied one would land in ``fastapi_kwargs`` and
+    # collide with ours inside ``FastAPI(...)``. Reject it up front with a clear
+    # message. (``title``/``version`` are named parameters, so Python already
+    # raises ``TypeError`` on a duplicate — they can never reach ``fastapi_kwargs``.)
+    if "lifespan" in fastapi_kwargs:
+        raise ValueError(
+            "lifespan must not be passed in fastapi_kwargs; it is set by create_team_app"
+        )
+
     init_otel(service_name=service_name, team_key=team_key)
 
     @asynccontextmanager
@@ -111,7 +123,13 @@ def create_team_app(
             await _maybe_call(on_startup)
             yield
         finally:
-            await _maybe_call(on_shutdown)
+            # Guard on_shutdown so a raising hook cannot skip close_pool below —
+            # otherwise a shutdown-hook failure would leak the process-wide pool,
+            # breaking the "pool is always closed on shutdown" invariant.
+            try:
+                await _maybe_call(on_shutdown)
+            except Exception:
+                logger.exception("%s on_shutdown hook failed", team_key)
             if postgres_schema is not None:
                 try:
                     from shared_postgres import close_pool
