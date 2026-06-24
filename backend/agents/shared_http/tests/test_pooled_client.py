@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import httpx
 import pytest
 
@@ -57,17 +59,30 @@ def test_default_limits_bound_concurrency():
 
 
 def test_default_limits_recycle_idle_keepalive_sockets():
-    """Idle keep-alive sockets must expire (default 15s) so the client drops
-    them before an upstream closes them — avoiding ``RemoteProtocolError`` on
-    reuse of a server-closed connection."""
-    assert DEFAULT_LIMITS.keepalive_expiry == _DEFAULT_KEEPALIVE_EXPIRY_S == 15.0
+    """``DEFAULT_LIMITS`` must enable idle-socket recycling so the client drops
+    a socket before an upstream closes it — avoiding ``RemoteProtocolError`` on
+    reuse of a server-closed connection.
+
+    ``DEFAULT_LIMITS`` is built once at import from ``_keepalive_expiry_seconds()``,
+    so an ``HTTP_KEEPALIVE_EXPIRY_S`` set in the test environment would legitimately
+    change the value. Assert a positive expiry unconditionally, and pin the 15.0
+    literal only when the env var is not overriding it. The env-parsing itself is
+    covered directly by the ``_keepalive_expiry_seconds`` tests below."""
+    assert DEFAULT_LIMITS.keepalive_expiry is not None
+    assert DEFAULT_LIMITS.keepalive_expiry > 0
+    if "HTTP_KEEPALIVE_EXPIRY_S" not in os.environ:
+        assert DEFAULT_LIMITS.keepalive_expiry == _DEFAULT_KEEPALIVE_EXPIRY_S == 15.0
 
 
 def test_pooled_client_applies_limits_and_timeout():
     client = get_pooled_client(12.0)
     assert isinstance(client, httpx.Client)
     assert client.timeout.read == 12.0
-    # Limits are applied to the underlying connection pool.
+    # Reaching into httpx/httpcore internals (``_transport._pool``) is the only
+    # way to confirm DEFAULT_LIMITS is actually wired into the constructed
+    # client's live pool — httpx exposes no public accessor for it. This couples
+    # the test to httpcore internals: if a future httpx renames these private
+    # attributes, update them here (the asserted behaviour is still correct).
     pool = client._transport._pool  # noqa: SLF001 — assert pooling config
     assert pool._max_connections == DEFAULT_LIMITS.max_connections
     assert pool._max_keepalive_connections == DEFAULT_LIMITS.max_keepalive_connections
