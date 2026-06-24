@@ -113,6 +113,32 @@ def test_get_credential_delegates_to_pg_when_enabled(tmp_path: Path, monkeypatch
     assert mod.get_credential("slack", "client_id") == "pg:slack/client_id"
 
 
+def test_get_credential_status_absent_when_postgres_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Disabled store → ("", True): "absent", not an outage (callers gate "configured"
+    # separately), and the pg_* path is never reached.
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    mod = _reload(tmp_path, monkeypatch)
+
+    import unified_api.postgres_encrypted_credentials as pg_mod
+
+    calls = []
+    monkeypatch.setattr(pg_mod, "pg_get_credential_status", lambda *a, **k: calls.append(a) or ("x", False))
+
+    assert mod.get_credential_status("svc", "key") == ("", True)
+    assert calls == []
+
+
+def test_get_credential_status_delegates_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("POSTGRES_HOST", "localhost")
+    mod = _reload(tmp_path, monkeypatch)
+
+    import unified_api.postgres_encrypted_credentials as pg_mod
+
+    monkeypatch.setattr(pg_mod, "pg_get_credential_status", lambda svc, key: (f"tok:{svc}/{key}", False))
+
+    assert mod.get_credential_status("github", "personal_access_token") == ("tok:github/personal_access_token", False)
+
+
 def test_set_credential_delegates_to_pg_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("POSTGRES_HOST", "localhost")
     mod = _reload(tmp_path, monkeypatch)

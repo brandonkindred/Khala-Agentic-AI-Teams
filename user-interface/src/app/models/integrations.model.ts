@@ -97,6 +97,12 @@ export interface GitHubConfigResponse {
   owner: string;
   repo: string;
   default_label: string;
+  /**
+   * True when Postgres (the PAT store) is configured but unreachable, so
+   * `token_configured` may read false only because the store is down. Lets the
+   * UI warn instead of showing a bare "not connected".
+   */
+  credential_store_unreachable?: boolean;
 }
 
 /** Request body for PUT /api/integrations/github. */
