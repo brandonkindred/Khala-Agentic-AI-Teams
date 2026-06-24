@@ -19,13 +19,18 @@ export interface StudioStage {
   icon: string;
   /** One-line description of what the stage does. */
   blurb: string;
+  /**
+   * Label for this stage's forward action (the spec's stage-specific guided
+   * affordances). Absent on the final stage, which has no forward step.
+   */
+  forwardLabel?: string;
 }
 
 /** The forward-only stage order. Index `i` is stage number `i + 1`. */
 export const STUDIO_STAGES: readonly StudioStage[] = [
-  { key: 'build', label: 'Build Agent', icon: 'build_circle', blurb: 'Author a new agent — or refine a copy of an existing one.' },
-  { key: 'test', label: 'Test Agent', icon: 'play_circle', blurb: 'Run the agent in its sandbox and compare runs.' },
-  { key: 'compose', label: 'Compose Team', icon: 'groups', blurb: 'Assemble a team and design its process.' },
+  { key: 'build', label: 'Build Agent', icon: 'build_circle', blurb: 'Author a new agent — or refine a copy of an existing one.', forwardLabel: 'Test this agent →' },
+  { key: 'test', label: 'Test Agent', icon: 'play_circle', blurb: 'Run the agent in its sandbox and compare runs.', forwardLabel: 'Add to team →' },
+  { key: 'compose', label: 'Compose Team', icon: 'groups', blurb: 'Assemble a team and design its process.', forwardLabel: 'Test this team →' },
   { key: 'personas', label: 'Test Team w/ Personas', icon: 'science', blurb: 'Drive the team manually or with autonomous personas.' },
 ] as const;
 

@@ -58,6 +58,12 @@ describe('AgentStudioStateService', () => {
     expect(service.activeStage()).toBe(0);
   });
 
+  it('stageStatus enforces its index precondition rather than returning todo', () => {
+    expect(() => service.stageStatus(-1)).toThrow(RangeError);
+    expect(() => service.stageStatus(4)).toThrow(RangeError);
+    expect(() => service.stageStatus(2.5)).toThrow(RangeError);
+  });
+
   it('advance steps forward and is a no-op at the last stage', () => {
     service.advance();
     expect(service.activeStage()).toBe(1);

@@ -5,6 +5,30 @@
   padding: var(--kh-space-6);
   min-height: 100%;
 
+  // ── Header: title + Save/Load draft controls (spec §3.5) ───────────────────
+  &__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--kh-space-4);
+  }
+
+  &__title {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--kh-text-primary);
+  }
+
+  &__draft-actions {
+    display: flex;
+    gap: var(--kh-space-2);
+  }
+
+  &__draft-btn {
+    font-size: 0.8125rem;
+  }
+
   // ── Forward-only stepper header ────────────────────────────────────────────
   &__stepper {
     display: flex;

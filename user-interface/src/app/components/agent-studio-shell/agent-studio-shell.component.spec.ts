@@ -31,7 +31,28 @@ describe('AgentStudioShellComponent', () => {
     expect(steps[1].classList.contains('is-active')).toBe(false);
   });
 
-  it('onContinue advances the active stage and marks prior steps done', () => {
+  it('renders the disabled Save/Load draft header placeholders (spec §3.5)', () => {
+    const draftButtons = fixture.nativeElement.querySelectorAll('.studio__draft-btn');
+    expect(draftButtons.length).toBe(2);
+    const labels = Array.from(draftButtons).map((b) => (b as HTMLElement).textContent?.trim());
+    expect(labels[0]).toContain('Save draft');
+    expect(labels[1]).toContain('Load draft');
+    expect((draftButtons[0] as HTMLButtonElement).disabled).toBe(true);
+    expect((draftButtons[1] as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('stepper indicators are not buttons — there is no backward navigation', () => {
+    const steps = fixture.nativeElement.querySelectorAll('.studio__step');
+    for (const step of Array.from(steps)) {
+      expect((step as HTMLElement).tagName).toBe('DIV');
+    }
+    // No clickable control exists inside the stepper region.
+    expect(fixture.nativeElement.querySelector('.studio__stepper button')).toBeNull();
+  });
+
+  it('onContinue advances and shows the stage-specific forward label', () => {
+    let button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__continue');
+    expect(button.textContent?.trim()).toBe('Test this agent →');
     component.onContinue();
     fixture.detectChanges();
     expect(component.state.activeStage()).toBe(1);
@@ -39,15 +60,16 @@ describe('AgentStudioShellComponent', () => {
     const steps = fixture.nativeElement.querySelectorAll('.studio__step');
     expect(steps[0].classList.contains('is-done')).toBe(true);
     expect(steps[1].classList.contains('is-active')).toBe(true);
+    button = fixture.nativeElement.querySelector('.studio__continue');
+    expect(button.textContent?.trim()).toBe('Add to team →');
   });
 
-  it('disables Continue once the final stage is reached', () => {
+  it('hides the forward button on the final stage and advance is a no-op', () => {
     component.state.navigateToStage(3);
     fixture.detectChanges();
     expect(component.activeStageDef().key).toBe('personas');
-    const button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__continue');
-    expect(button.disabled).toBe(true);
-    // A further advance is a no-op.
+    expect(component.state.canAdvance()).toBe(false);
+    expect(fixture.nativeElement.querySelector('.studio__continue')).toBeNull();
     component.onContinue();
     expect(component.state.activeStage()).toBe(3);
   });

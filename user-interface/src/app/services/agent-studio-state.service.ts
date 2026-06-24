@@ -47,11 +47,13 @@ export class AgentStudioStateService {
   /**
    * Progress status of stage `index` for the stepper header.
    *
-   * Preconditions: `index` ∈ [0, STAGE_COUNT − 1].
+   * Preconditions: `index` is an integer ∈ [0, STAGE_COUNT − 1]; a violation is
+   *   a caller bug and is rejected (never returns a misleading 'todo').
    * Postconditions: 'active' for the current stage, 'done' for earlier stages,
    *   'todo' otherwise.
    */
   stageStatus(index: number): StudioStageStatus {
+    this.assertStageIndex(index, 'stageStatus');
     const active = this._activeStage();
     if (index === active) return 'active';
     return index < active ? 'done' : 'todo';
@@ -67,12 +69,23 @@ export class AgentStudioStateService {
    *   `maxReachedStage() === max(previous, index)`.
    */
   navigateToStage(index: number): void {
-    if (!Number.isInteger(index) || index < 0 || index >= STAGE_COUNT) {
-      throw new RangeError(`navigateToStage: index ${index} out of range [0, ${STAGE_COUNT - 1}]`);
-    }
+    this.assertStageIndex(index, 'navigateToStage');
     this._activeStage.set(index);
     if (index > this._maxReachedStage()) {
       this._maxReachedStage.set(index);
+    }
+  }
+
+  /**
+   * Shared precondition guard for stage-index parameters.
+   *
+   * Preconditions: none.
+   * Postconditions: returns normally iff `index` is an integer in
+   *   [0, STAGE_COUNT − 1]; otherwise throws `RangeError`.
+   */
+  private assertStageIndex(index: number, method: string): void {
+    if (!Number.isInteger(index) || index < 0 || index >= STAGE_COUNT) {
+      throw new RangeError(`${method}: index ${index} out of range [0, ${STAGE_COUNT - 1}]`);
     }
   }
 
