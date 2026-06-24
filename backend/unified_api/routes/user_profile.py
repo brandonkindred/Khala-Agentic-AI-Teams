@@ -95,7 +95,7 @@ def update_profile(update: UserProfileUpdate) -> UserProfile:
 def read_associations(
     artifact_type: Annotated[
         ArtifactType | None,
-        Query(description="Optional filter: brand, blog_post, project, agentic_team, integration."),
+        Query(description="Optional filter: brand, blog_post, project, agentic_team."),
     ] = None,
 ) -> list[Association]:
     """List artifacts linked to the current profile, newest first."""

@@ -159,11 +159,15 @@ describe('UserProfileComponent', () => {
   it('should save valid profile edits', async () => {
     await setup();
     component.form.patchValue({ display_name: 'New Name' });
+    component.form.markAsDirty(); // simulate a user edit dirtying the form
+    expect(component.form.dirty).toBe(true);
     component.save();
     expect(apiSpy.updateProfile).toHaveBeenCalledWith(
       expect.objectContaining({ display_name: 'New Name' }),
     );
     expect(component.success).toBe('Profile saved.');
+    // The form matches the persisted state after a successful save.
+    expect(component.form.pristine).toBe(true);
   });
 
   it('should not save when the email is invalid', async () => {
@@ -198,6 +202,16 @@ describe('UserProfileComponent', () => {
     await setup();
     expect(component.error).toBeTruthy();
     expect(component.groups).toEqual([]);
+  });
+
+  it('should treat a non-array integrations field as malformed', async () => {
+    // The guard checks integrations too — a non-array must be rejected, not iterated.
+    apiSpy.getOverview.mockReturnValue(
+      of({ profile: PROFILE, associations: [], integrations: {} }),
+    );
+    await setup();
+    expect(component.error).toBeTruthy();
+    expect(component.integrations).toEqual([]);
   });
 
   it('should not start a second save while one is already in flight', async () => {

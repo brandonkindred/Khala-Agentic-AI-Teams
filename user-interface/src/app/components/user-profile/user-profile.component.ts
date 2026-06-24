@@ -167,6 +167,9 @@ export class UserProfileComponent implements OnInit {
         next: () => {
           this.saving = false;
           this.success = 'Profile saved.';
+          // The form now matches the persisted state — clear the dirty flag so an
+          // unsaved-changes guard doesn't prompt after a successful save.
+          this.form.markAsPristine();
         },
         error: () => {
           this.saving = false;
