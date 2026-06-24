@@ -166,6 +166,12 @@ export const routes: Routes = [
         data: { breadcrumb: 'Integrations', title: 'Integrations' },
       },
       {
+        path: 'user-profile',
+        loadComponent: () =>
+          import('./components/user-profile/user-profile.component').then((m) => m.UserProfileComponent),
+        data: { breadcrumb: 'User Profile', title: 'User Profile' },
+      },
+      {
         path: 'llm-config',
         loadComponent: () =>
           import('./components/llm-config-dashboard/llm-config-dashboard.component').then(

@@ -183,11 +183,11 @@ def test_clear_slack_oauth_preserves_credentials(tmp_path: Path, monkeypatch: py
 
 
 def test_get_integrations_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """get_integrations_list returns Slack and Medium entries without sensitive credentials."""
+    """get_integrations_list returns Slack, Medium, and GitHub entries without sensitive credentials."""
     store, _ = _reload_modules(tmp_path, monkeypatch)
     store.set_slack_config(True, "https://hooks.slack.com/services/T/B/X", channel_display_name="#eng")
     items = store.get_integrations_list()
-    assert len(items) == 2
+    assert len(items) == 3
     slack = next(i for i in items if i["id"] == "slack")
     assert slack["type"] == "slack"
     assert slack["enabled"] is True
@@ -198,6 +198,9 @@ def test_get_integrations_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     medium = next(i for i in items if i["id"] == "medium")
     assert medium["type"] == "medium"
     assert medium["enabled"] is False
+    github = next(i for i in items if i["id"] == "github")
+    assert github["type"] == "github"
+    assert github["enabled"] is False
 
 
 def test_get_slack_config_invalid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,3 +251,4 @@ def test_clear_medium_session_storage_removes_disk_file(tmp_path: Path, monkeypa
     assert not session_path.exists()
     cfg = store.get_medium_config()
     assert cfg["session_configured"] is False
+
