@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
+from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 
 from .models import (
@@ -258,9 +259,16 @@ class FrontendDevelopmentAgent:
             status_text=f"Plan created with {total_microtasks} microtask(s)",
         )
 
-        feature_branch_name: Optional[str] = None
+        feature_branch_name = str(task.feature_branch_name or "").strip() or None
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
-        if git_agent is not None and hasattr(git_agent, "create_feature_branch"):
+        if feature_branch_name:
+            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
+            if not ok:
+                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
+                logger.error("[%s] %s", task_id, result.failure_reason)
+                return result
+            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
+        elif git_agent is not None and hasattr(git_agent, "create_feature_branch"):
             try:
                 ok, branch_name = git_agent.create_feature_branch(
                     repo_path, task_id, task.title or ""

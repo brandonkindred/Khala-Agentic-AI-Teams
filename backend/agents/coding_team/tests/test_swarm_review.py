@@ -755,6 +755,77 @@ def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None
     assert orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
 
 
+@pytest.mark.parametrize("stack_name", ["default", "Senior Software Engineer"])
+def test_v2_team_kind_accepts_legacy_default_stack_names(stack_name: str) -> None:
+    """Legacy generic stack names now route to backend v2 after removing the Senior SWE worker."""
+    assert orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+
+
+def test_legacy_default_stack_spec_is_repaired_to_backend_v2() -> None:
+    """Persisted pre-v2 fallback stacks are replaced with the backend v2 team."""
+    stacks = orch_mod._ensure_target_team_stack_specs(
+        [{"name": "default", "tools_services": ["legacy"]}],
+        [],
+    )
+
+    assert stacks == [
+        {
+            "name": "backend_v2",
+            "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
+        }
+    ]
+
+
+def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, monkeypatch):
+    """Old persisted jobs with a default stack still resume after the legacy worker removal."""
+
+    class ExplodingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            raise AssertionError("planning must not run on resume")
+
+    captured_specs: List[str] = []
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            self.aborted = False
+
+        def run(self, **kw):
+            pass
+
+    def _build_worker(agent_id, spec, llm_getter):
+        captured_specs.append(spec.name)
+        return StubWorker(agent_id)
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", ExplodingTL)
+    monkeypatch.setattr(orch_mod, "_build_implementation_worker", _build_worker)
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    snapshot = {
+        "task_graph_snapshot": [
+            {"id": "t1", "title": "T1", "status": "to_do", "dependencies": []},
+        ],
+        "stack_specs": [{"name": "default", "tools_services": ["legacy"]}],
+    }
+    updates: List[Dict[str, Any]] = []
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: snapshot,
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert captured_specs == ["backend_v2"]
+    assert any(update.get("stack_specs") == [orch_mod._BACKEND_V2_STACK_SPEC] for update in updates)
+
+
 def test_target_team_alias_adds_missing_backend_v2_stack_spec() -> None:
     """Backend-owned aliases repair an incomplete stack roster before worker creation."""
     graph = TaskGraphService(job_id="j1")

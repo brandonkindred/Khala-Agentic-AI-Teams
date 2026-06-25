@@ -374,6 +374,16 @@ _BACKEND_TEAM_ALIASES = {
     "service",
     "services",
 }
+_LEGACY_BACKEND_STACK_ALIASES = {
+    "default",
+    "senior_software_engineer",
+    "senior_software_engineer_legacy",
+    "software_engineer",
+}
+_BACKEND_V2_STACK_SPEC = {
+    "name": "backend_v2",
+    "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
+}
 
 # Full file-selection sets for repo-context scanning, built once from the shared repo_utils
 # constants + the extras above and cached (the import lives below to keep the SE dependency
@@ -392,6 +402,11 @@ def _team_key(value: Optional[str]) -> str:
     if text in _BACKEND_TEAM_ALIASES:
         return "backend_v2"
     return text
+
+
+def _legacy_stack_key(value: Optional[str]) -> str:
+    """Normalize legacy stack labels that predate frontend/backend v2 routing."""
+    return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def _stack_tools_text(spec: StackSpec) -> str:
@@ -413,6 +428,8 @@ def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
     if canonical_key == "frontend_v2":
         return "frontend"
     if canonical_key == "backend_v2":
+        return "backend"
+    if _legacy_stack_key(spec.name) in _LEGACY_BACKEND_STACK_ALIASES:
         return "backend"
     if any(h in text for h in _FRONTEND_HINTS):
         return "frontend"
@@ -475,7 +492,15 @@ def _ensure_target_team_stack_specs(
     tasks: List[Task],
 ) -> List[Dict[str, Any]]:
     """Ensure targeted frontend/backend tasks have matching v2 team workers in the roster."""
-    stacks = list(stacks_raw) if isinstance(stacks_raw, list) else []
+    stacks = []
+    for entry in list(stacks_raw) if isinstance(stacks_raw, list) else []:
+        if not isinstance(entry, dict):
+            stacks.append(entry)
+            continue
+        if _legacy_stack_key(entry.get("name")) in _LEGACY_BACKEND_STACK_ALIASES:
+            stacks.append(dict(_BACKEND_V2_STACK_SPEC))
+        else:
+            stacks.append(entry)
     present = {_v2_team_kind_for_stack(_stack_spec_from_raw(entry)) for entry in stacks}
     target_keys = {_team_key(task.target_team) for task in tasks if task.target_team}
 
@@ -487,12 +512,7 @@ def _ensure_target_team_stack_specs(
             }
         )
     if "backend_v2" in target_keys and "backend" not in present:
-        stacks.append(
-            {
-                "name": "backend_v2",
-                "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
-            }
-        )
+        stacks.append(dict(_BACKEND_V2_STACK_SPEC))
     return stacks
 
 

@@ -678,6 +678,101 @@ class TestBackendCodeV2TeamLead:
         assert "no files" in result.failure_reason.lower() or result.failure_reason != ""
 
 
+class TestBackendDevelopmentAgentBranchReuse:
+    def test_existing_feature_branch_is_reused_without_recreation(self, tmp_path, monkeypatch):
+        """Revision workflows keep the reviewed branch instead of recreating it from development."""
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.models import (
+            DeliverResult,
+            DocumentationPhaseResult,
+            ExecutionResult,
+            PlanningResult,
+        )
+
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+
+        (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
+        (tmp_path / "tests").mkdir()
+
+        captured: dict[str, str] = {}
+
+        class _GitAgent:
+            def __init__(self) -> None:
+                self.create_called = False
+
+            def create_feature_branch(self, *_args, **_kwargs):
+                self.create_called = True
+                raise AssertionError("existing review branch must not be recreated")
+
+            def commit_current_changes(self, *_args, **_kwargs):
+                return True, "committed"
+
+        git_agent = _GitAgent()
+
+        def _checkout_branch(_repo_path, branch):
+            captured["checkout"] = branch
+            return True, "checked out"
+
+        def _run_execution_with_review_gates(**_kwargs):
+            return ExecutionResult(
+                files={"app.py": "print('ok')\n"},
+                microtasks=[Microtask(id="mt-1", status=MicrotaskStatus.COMPLETED)],
+                summary="implemented",
+            )
+
+        def _run_deliver(**kwargs):
+            captured["deliver_branch"] = kwargs["feature_branch_name"]
+            return DeliverResult(
+                branch_name=kwargs["feature_branch_name"],
+                branch_ready=True,
+                summary="ready",
+            )
+
+        from backend_code_v2_team.phases import documentation as doc_phase
+
+        monkeypatch.setattr(orch, "checkout_branch", _checkout_branch)
+        monkeypatch.setattr(
+            orch,
+            "_build_tool_agents",
+            lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent},
+        )
+        monkeypatch.setattr(
+            orch,
+            "run_planning",
+            lambda **_kwargs: PlanningResult(
+                microtasks=[Microtask(id="mt-1")], summary="planned"
+            ),
+        )
+        monkeypatch.setattr(orch, "run_execution_with_review_gates", _run_execution_with_review_gates)
+        monkeypatch.setattr(
+            doc_phase,
+            "run_documentation_phase",
+            lambda **_kwargs: DocumentationPhaseResult(summary="docs"),
+        )
+        monkeypatch.setattr(orch, "run_deliver", _run_deliver)
+
+        task = Task(
+            id="api",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            title="API",
+            description="Build API",
+            feature_branch_name="feature/review-api",
+        )
+
+        result = orch.BackendDevelopmentAgent(MagicMock()).run_workflow(
+            repo_path=tmp_path,
+            task=task,
+            merge_to_development=False,
+        )
+
+        assert result.success is True
+        assert git_agent.create_called is False
+        assert captured["checkout"] == "feature/review-api"
+        assert captured["deliver_branch"] == "feature/review-api"
+
+
 # ---------------------------------------------------------------------------
 # Documentation self-review: team wiring around the shared helper
 # (deep loop behavior is covered in test_shared_review_utils.py)
