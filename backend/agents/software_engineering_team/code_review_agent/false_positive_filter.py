@@ -69,6 +69,10 @@ _MANIFEST_LIMIT = 300
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
 
+# Column-0 token prefixes that should NOT be counted as construct start lines
+# by the heuristic fallback used for non-Python files.
+_HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*")
+
 # Cap on the task-description and each acceptance-criterion text inlined into the
 # verification prompt. The file body already has its own ``max_inline_chars``
 # bound; this keeps an unbounded task/criteria field from dominating the prompt
@@ -336,8 +340,25 @@ def _find_python_function_at_line(content: str, line_number: int, path: str) -> 
         )
 
     # Smallest span → innermost enclosing construct.
-    _, start_line, end_line, name, kind = min(candidates)
-    return f"Line {line_number} is inside {kind} '{name}' ({path} lines {start_line}–{end_line})."
+    _, func_start, func_end, name, kind = min(candidates)
+
+    class_label = ""
+    if kind == "function":
+        # Find the innermost class that fully contains this function's range;
+        # its presence means the function is a method.
+        enclosing_classes = [
+            (span, cname)
+            for span, cstart, cend, cname, ckind in candidates
+            if ckind == "class" and cstart <= func_start and cend >= func_end
+        ]
+        if enclosing_classes:
+            _, class_name = min(enclosing_classes)
+            class_label = f" in class '{class_name}'"
+
+    return (
+        f"Line {line_number} is inside {kind} '{name}'{class_label} "
+        f"({path} lines {func_start}–{func_end})."
+    )
 
 
 def _find_heuristic_function_at_line(content: str, line_number: int, path: str) -> str:
@@ -359,7 +380,6 @@ def _find_heuristic_function_at_line(content: str, line_number: int, path: str) 
         - Returns a "no construct found" message (never raises) when no
           column-0 declaration precedes ``line_number``.
     """
-    _SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*")
     best_start: Optional[int] = None
     for i, line in enumerate(content.splitlines(), start=1):
         if i > line_number:
@@ -368,7 +388,7 @@ def _find_heuristic_function_at_line(content: str, line_number: int, path: str) 
             continue
         if line[0].isspace():
             continue
-        if line.startswith(_SKIP):
+        if line.startswith(_HEURISTIC_SKIP):
             continue
         best_start = i
 

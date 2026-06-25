@@ -268,7 +268,7 @@ def test_find_function_at_line_python_nested() -> None:
 
 
 def test_find_function_at_line_python_class_method() -> None:
-    """Tool returns the method name when the line is inside a class method."""
+    """Tool returns both the method name and its enclosing class name."""
     code = (
         "class Foo:\n"            # line 1
         "    def bar(self):\n"   # line 2
@@ -278,6 +278,7 @@ def test_find_function_at_line_python_class_method() -> None:
     _, _, _, find_function_at_line = _build_tools(idx)
     result = find_function_at_line("models.py", 3)
     assert "bar" in result
+    assert "Foo" in result
 
 
 def test_find_function_at_line_python_module_level() -> None:
@@ -305,6 +306,47 @@ def test_find_function_at_line_unknown_path() -> None:
     _, _, _, find_function_at_line = _build_tools(idx)
     result = find_function_at_line("does/not/exist.py", 5)
     assert result.startswith("Error")
+
+
+def test_find_function_at_line_python_syntax_error() -> None:
+    """Tool returns a parse-error message for a Python file with invalid syntax."""
+    code = "def foo(:\n    pass\n"  # SyntaxError: missing closing paren
+    idx = CodebaseIndex(files={"broken.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("broken.py", 2)
+    assert "Could not parse" in result
+
+
+def test_find_function_at_line_python_async_def() -> None:
+    """Tool correctly identifies an async function as the enclosing construct."""
+    code = "async def fetch():\n    return await something()\n"
+    idx = CodebaseIndex(files={"service.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("service.py", 2)
+    assert "fetch" in result
+
+
+def test_find_function_at_line_python_decorated() -> None:
+    """Tool reports the decorator start line as the construct start."""
+    code = (
+        "@decorator\n"       # line 1
+        "def greet():\n"     # line 2
+        "    return 'hi'\n"  # line 3
+    )
+    idx = CodebaseIndex(files={"views.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("views.py", 3)
+    assert "greet" in result
+    assert "lines 1" in result  # decorator line is the reported start
+
+
+def test_find_function_at_line_non_python_no_construct() -> None:
+    """Tool returns 'Could not identify' when no column-0 declaration precedes the target line."""
+    code = "  const x = 1;\n  return x;\n"  # every line is indented
+    idx = CodebaseIndex(files={"snippet.ts": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("snippet.ts", 1)
+    assert "Could not identify" in result
 
 
 # --------------------------------------------------------------------------- verdict parsing
