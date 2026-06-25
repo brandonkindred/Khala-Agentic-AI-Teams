@@ -158,7 +158,9 @@ class V2TeamWorker:
             or f"feature/{task.id}"
         )
         branch_ready = bool(getattr(deliver, "branch_ready", False))
-        success = bool(getattr(result, "success", False) or branch_ready)
+        missing_success = object()
+        result_success = getattr(result, "success", missing_success)
+        success = branch_ready if result_success is missing_success else bool(result_success)
         if not success:
             reason = str(getattr(result, "failure_reason", "") or "v2 workflow did not complete")
             return {

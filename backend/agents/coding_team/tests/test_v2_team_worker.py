@@ -87,3 +87,58 @@ def test_v2_worker_failure_reports_task_local_failure(tmp_path) -> None:
     assert out["status"] == "failed"
     assert out["feature_branch"] == "feature/api"
     assert out["error"] == "pre-flight failed"
+
+
+def test_v2_worker_preserves_failed_result_even_when_branch_ready(tmp_path) -> None:
+    class _PartialLead:
+        def run_workflow(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                success=False,
+                summary="Implemented with unresolved microtask review failures.",
+                failure_reason="1 microtask failed review",
+                deliver_result=SimpleNamespace(
+                    branch_name="feature/api",
+                    branch_ready=True,
+                    commit_messages=["feat(api): partial work"],
+                ),
+            )
+
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=_PartialLead(),
+    )
+
+    out = worker.run_implement(Task(id="api", title="API", description="Build API"), tmp_path)
+
+    assert out["status"] == "failed"
+    assert out["feature_branch"] == "feature/api"
+    assert out["changes_summary"] == "Implemented with unresolved microtask review failures."
+    assert out["commands_run"] == ["feat(api): partial work"]
+    assert out["error"] == "1 microtask failed review"
+
+
+def test_v2_worker_uses_branch_ready_as_legacy_success_fallback(tmp_path) -> None:
+    class _LegacyLead:
+        def run_workflow(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                summary="Implemented API changes.",
+                deliver_result=SimpleNamespace(
+                    branch_name="feature/api",
+                    branch_ready=True,
+                    commit_messages=["feat(api): add endpoint"],
+                ),
+            )
+
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=_LegacyLead(),
+    )
+
+    out = worker.run_implement(Task(id="api", title="API", description="Build API"), tmp_path)
+
+    assert out["status"] == "in_review"
+    assert out["feature_branch"] == "feature/api"

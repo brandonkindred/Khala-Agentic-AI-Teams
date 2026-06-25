@@ -353,6 +353,27 @@ _BACKEND_HINTS = {
     "server",
     "spring",
 }
+_BACKEND_TEAM_ALIASES = {
+    "api",
+    "apis",
+    "backend_api",
+    "ci",
+    "ci_cd",
+    "cicd",
+    "database",
+    "databases",
+    "data",
+    "db",
+    "devops",
+    "infra",
+    "infrastructure",
+    "node",
+    "platform",
+    "server",
+    "servers",
+    "service",
+    "services",
+}
 
 # Full file-selection sets for repo-context scanning, built once from the shared repo_utils
 # constants + the extras above and cached (the import lives below to keep the SE dependency
@@ -367,6 +388,8 @@ def _team_key(value: Optional[str]) -> str:
     if "frontend" in text:
         return "frontend_v2"
     if "backend" in text:
+        return "backend_v2"
+    if text in _BACKEND_TEAM_ALIASES:
         return "backend_v2"
     return text
 

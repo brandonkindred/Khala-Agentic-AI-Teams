@@ -717,6 +717,37 @@ def test_assignment_respects_target_team_and_falls_back_to_matching_v2_worker(tm
     assert graph.get_task_for_agent("backend_v2") is None
 
 
+def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
+    """Backend-owned target aliases such as devops route to the backend v2 worker."""
+
+    class AssignDevOpsTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "backend_v2", "task_id": "deploy"}]}
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, AssignDevOpsTL(approved=True), workers)
+    graph.add_task("deploy", title="Deploy service", target_team="devops")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    task = graph.get_task("deploy")
+    assert task.assigned_agent_id == "backend_v2"
+    assert graph.get_task_for_agent("frontend_v2") is None
+
+
+def test_target_team_alias_adds_missing_backend_v2_stack_spec() -> None:
+    """Backend-owned aliases repair an incomplete stack roster before worker creation."""
+    graph = TaskGraphService(job_id="j1")
+    graph.add_task("deploy", title="Deploy service", target_team="infrastructure")
+
+    stacks = orch_mod._ensure_target_team_stack_specs([], graph.get_tasks())
+
+    assert {
+        "name": "backend_v2",
+        "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
+    } in stacks
+
+
 def test_target_team_adds_missing_v2_stack_specs() -> None:
     """Targeted v2 tasks repair an incomplete stack roster before worker creation."""
     graph = TaskGraphService(job_id="j1")
