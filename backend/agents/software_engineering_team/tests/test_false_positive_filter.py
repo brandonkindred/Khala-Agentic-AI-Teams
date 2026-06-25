@@ -27,6 +27,7 @@ from code_review_agent.false_positive_filter import (
     _code_fence_for,
     _coerce_verdict,
     _parse_verdicts,
+    _strip_numbered_prefixes,
     filter_false_positives,
 )
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
@@ -216,14 +217,15 @@ def test_search_rejects_nonpositive_max() -> None:
 
 
 def test_build_tools_delegate_to_index() -> None:
-    """``_build_tools`` returns read_file/list_files/search_codebase tools that delegate to the index."""
+    """``_build_tools`` returns all four tools that delegate to the index."""
     idx = CodebaseIndex(files={"app/main.py": "def foo(): pass\n"}, existing_codebase="old")
-    read_file, list_files, search_codebase = _build_tools(idx)
-    assert {read_file.tool_name, list_files.tool_name, search_codebase.tool_name} == {
-        "read_file",
-        "list_files",
-        "search_codebase",
-    }
+    read_file, list_files, search_codebase, find_function_at_line = _build_tools(idx)
+    assert {
+        read_file.tool_name,
+        list_files.tool_name,
+        search_codebase.tool_name,
+        find_function_at_line.tool_name,
+    } == {"read_file", "list_files", "search_codebase", "find_function_at_line"}
     assert read_file("app/main.py") == "def foo(): pass\n"
     listed = list_files()
     assert "app/main.py" in listed and CodebaseIndex.EXISTING_CODEBASE_PATH in listed
@@ -233,8 +235,233 @@ def test_build_tools_delegate_to_index() -> None:
 
 def test_list_files_tool_handles_empty_index() -> None:
     """The list_files tool returns a placeholder string for an empty index."""
-    _, list_files, _ = _build_tools(CodebaseIndex(files={}))
+    _, list_files, _, _ = _build_tools(CodebaseIndex(files={}))
     assert list_files() == "(no files available)"
+
+
+# --------------------------------------------------------------------------- find_function_at_line
+
+
+def test_find_function_at_line_python_top_level() -> None:
+    """Tool returns the enclosing top-level function for a Python file."""
+    code = "def alpha():\n    x = 1\n    return x\n\ndef beta():\n    pass\n"
+    idx = CodebaseIndex(files={"app/main.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("app/main.py", 2)
+    assert "alpha" in result
+    assert "beta" not in result
+
+
+def test_find_function_at_line_python_nested() -> None:
+    """Tool returns the innermost (nested) function, not the outer one."""
+    code = (
+        "def outer():\n"         # line 1
+        "    x = 1\n"            # line 2
+        "    def inner():\n"     # line 3
+        "        return x\n"     # line 4
+        "\n"                      # line 5
+    )
+    idx = CodebaseIndex(files={"svc.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("svc.py", 4)
+    assert "inner" in result
+    assert "outer" not in result
+
+
+def test_find_function_at_line_python_class_method() -> None:
+    """Tool returns both the method name and its enclosing class name."""
+    code = (
+        "class Foo:\n"            # line 1
+        "    def bar(self):\n"   # line 2
+        "        return 42\n"    # line 3
+    )
+    idx = CodebaseIndex(files={"models.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("models.py", 3)
+    assert "bar" in result
+    assert "Foo" in result
+
+
+def test_find_function_at_line_python_module_level() -> None:
+    """Tool reports 'module level' when the line is not inside any construct."""
+    code = "X = 1\nY = 2\n"
+    idx = CodebaseIndex(files={"config.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("config.py", 1)
+    assert "module level" in result
+
+
+def test_find_function_at_line_non_python_heuristic() -> None:
+    """Tool falls back to the column-0 heuristic for non-Python files."""
+    code = "function doWork() {\n  const x = 1;\n  return x;\n}\n"
+    idx = CodebaseIndex(files={"app.ts": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("app.ts", 2)
+    # Heuristic returns the start line of the enclosing construct.
+    assert "starting at line 1" in result
+
+
+def test_find_function_at_line_unknown_path() -> None:
+    """Tool returns an error string for a path not in the index."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("does/not/exist.py", 5)
+    assert result.startswith("Error")
+
+
+def test_find_function_at_line_python_syntax_error() -> None:
+    """Tool returns a parse-error message for a Python file with invalid syntax."""
+    code = "def foo(:\n    pass\n"  # SyntaxError: missing closing paren
+    idx = CodebaseIndex(files={"broken.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("broken.py", 2)
+    assert "Could not parse" in result
+
+
+def test_find_function_at_line_python_async_def() -> None:
+    """Tool correctly identifies an async function as the enclosing construct."""
+    code = "async def fetch():\n    return await something()\n"
+    idx = CodebaseIndex(files={"service.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("service.py", 2)
+    assert "fetch" in result
+
+
+def test_find_function_at_line_python_decorated() -> None:
+    """Tool reports the decorator start line as the construct start."""
+    code = (
+        "@decorator\n"       # line 1
+        "def greet():\n"     # line 2
+        "    return 'hi'\n"  # line 3
+    )
+    idx = CodebaseIndex(files={"views.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("views.py", 3)
+    assert "greet" in result
+    assert "lines 1" in result  # decorator line is the reported start
+
+
+def test_find_function_at_line_non_python_no_construct() -> None:
+    """Tool returns 'Could not identify' when no column-0 declaration precedes the target line."""
+    code = "  const x = 1;\n  return x;\n"  # every line is indented
+    idx = CodebaseIndex(files={"snippet.ts": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("snippet.ts", 1)
+    assert "Could not identify" in result
+
+
+# --------------------------------------------------------------------------- pre-numbered content
+
+
+def test_strip_numbered_prefixes_plain_content_unchanged() -> None:
+    """Plain content (no ``N: `` prefixes) is returned unchanged with no remap."""
+    content = "function foo() {\n  return 1;\n}\n"
+    stripped, physical, mapper = _strip_numbered_prefixes(content, line_number=2)
+    assert stripped == content
+    assert physical == 2
+    assert mapper is None
+
+
+def test_strip_numbered_prefixes_detects_and_strips() -> None:
+    """Pre-numbered hunk content is stripped and the target remapped to a physical index."""
+    # Simulate render_annotated_hunks output: original lines 4240-4242.
+    content = "4240: const a = 1;\n4241: const b = 2;\n4242: return a + b;\n"
+    stripped, physical, mapper = _strip_numbered_prefixes(content, line_number=4242)
+    assert "4242:" not in stripped
+    assert stripped == "const a = 1;\nconst b = 2;\nreturn a + b;"
+    # Target original line 4242 maps to physical line 3.
+    assert physical == 3
+    assert mapper is not None
+    assert mapper(3) == 4242  # physical 3 → original 4242
+    assert mapper(1) == 4240  # physical 1 → original 4240
+
+
+def test_strip_numbered_prefixes_fallback_to_last_before() -> None:
+    """When the exact target line is absent (e.g., a removed line), use the last line before it."""
+    # Only lines 100 and 102 are present; line 101 was a removed line not in the hunk.
+    content = "100: const x = 1;\n102: const y = 2;\n"
+    stripped, physical, mapper = _strip_numbered_prefixes(content, line_number=101)
+    # physical index should be 1 (original line 100, last before 101).
+    assert physical == 1
+    assert mapper(1) == 100
+
+
+def test_strip_numbered_prefixes_empty_content() -> None:
+    """Empty content returns unchanged with no remap."""
+    stripped, physical, mapper = _strip_numbered_prefixes("", line_number=1)
+    assert stripped == ""
+    assert physical == 1
+    assert mapper is None
+
+
+def test_find_function_at_line_pre_numbered_python() -> None:
+    """Tool strips N: prefixes and reports original line numbers in the enclosing range."""
+    # Simulate a hunk starting at original line 100. The def is at original line 101.
+    content = "100: x = setup()\n101: def process(data):\n102:     return data * 2\n"
+    idx = CodebaseIndex(files={"worker.py": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    # Ask for original line 102, which is inside 'process'.
+    result = find_function_at_line("worker.py", 102)
+    assert "process" in result
+    # The reported range must use original line numbers (101–102), not physical (2–3).
+    assert "101" in result
+    assert "102" in result
+    assert "lines 2" not in result  # physical line 2 must NOT appear as a range bound
+
+
+def test_find_function_at_line_pre_numbered_non_python() -> None:
+    """Tool strips N: prefixes and reports the original line numbers for non-Python files."""
+    # Simulate a TypeScript hunk at original lines 4240-4243.
+    content = (
+        "4240: export class DataService {\n"
+        "4241:   private data: string;\n"
+        "4242:   process() {\n"
+        "4243:     return this.data;\n"
+    )
+    idx = CodebaseIndex(files={"service.ts": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    # Ask for original line 4243.
+    result = find_function_at_line("service.ts", 4243)
+    # Should report the original line number, not the physical line 1.
+    assert "4240" in result
+    # Should NOT report a physical line like "1" as the start.
+    assert "starting at line 1" not in result
+
+
+def test_find_function_at_line_pre_numbered_large_line_number() -> None:
+    """A large original line number (as from a real PR diff) does not confuse the heuristic."""
+    # The bug: with line_number=4242 and a 3-line file (physical lines 1-3),
+    # ``i > line_number`` never fired and every column-0 line looked like a start.
+    content = (
+        "4240: const a = 1;\n"
+        "4241: const b = 2;\n"
+        "4242: function getResult() { return a + b; }\n"
+    )
+    idx = CodebaseIndex(files={"util.js": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("util.js", 4242)
+    # Must report original line 4242 (the function line), not physical line 3.
+    assert "4242" in result
+    # Must not claim a line like "3" as the start (that would be a pre-fix bug).
+    assert "starting at line 3" not in result
+
+
+def test_find_function_at_line_hunk_separator_not_treated_as_construct() -> None:
+    """The ``...`` hunk separator from multi-hunk diffs is not counted as a construct start."""
+    # Simulate two hunks separated by "...". The first hunk has indented-only lines;
+    # the separator "..." is column-0. Without the fix it would be the best_start.
+    content = (
+        "10:   const a = 1;\n"
+        "...\n"               # separator emitted by render_annotated_hunks
+        "50: function doWork() {\n"
+        "51:   return a;\n"
+    )
+    idx = CodebaseIndex(files={"util.js": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("util.js", 51)
+    # The construct start must be the "doWork" line (original 50), not the separator.
+    assert "50" in result
+    assert "..." not in result  # separator must not appear in the output as a construct
 
 
 # --------------------------------------------------------------------------- verdict parsing

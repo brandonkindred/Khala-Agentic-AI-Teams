@@ -10,8 +10,8 @@ X" can be wrong because the defining/using/test code lives in a part of the file
 This module re-checks each genuine reviewer finding against the *whole*
 submission before it reaches the developer. The verification agent is given read
 access to every file under review via tools (``read_file``, ``list_files``,
-``search_codebase``), so it can pull up exactly the code needed to confirm or
-refute a finding rather than guessing from a single chunk.
+``search_codebase``, ``find_function_at_line``), so it can pull up exactly the
+code needed to confirm or refute a finding rather than guessing from a single chunk.
 
 Two invariants hold:
 
@@ -33,12 +33,15 @@ Two invariants hold:
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import os
+import re
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
@@ -66,6 +69,16 @@ _MANIFEST_LIMIT = 300
 # Cap on substring matches returned by ``search_codebase`` so a common token
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
+
+# Column-0 token prefixes that should NOT be counted as construct start lines
+# by the heuristic fallback used for non-Python files.
+_HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
+
+# The ``render_annotated_hunks`` path (coding-team PR review) prefixes each
+# hunk line with its original file line number: ``4242: const x = 1;``.  This
+# pattern detects and strips those prefixes so the function-finder helpers
+# receive plain code and a physical (1-based) line index.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
 
 # Cap on the task-description and each acceptance-criterion text inlined into the
 # verification prompt. The file body already has its own ``max_inline_chars``
@@ -285,14 +298,216 @@ class CodebaseIndex:
         return results
 
 
+def _strip_numbered_prefixes(
+    content: str, line_number: int
+) -> Tuple[str, int, Optional[Callable[[int], int]]]:
+    """Strip ``N: `` line-number prefixes from pre-numbered hunk content.
+
+    The coding-team PR-review path calls ``render_annotated_hunks`` which
+    prepends each line with its new-file line number: ``4242: const x = 1;``.
+    This content reaches the verifier's ``CodebaseIndex`` verbatim, so the
+    function-finder helpers must strip those prefixes before scanning.
+
+    Preconditions:
+        - ``content`` is a string (may be empty).
+        - ``line_number`` >= 1.
+
+    Postconditions:
+        - If the first non-blank line does NOT match ``r'^\\d+: '``, the
+          content is not pre-numbered; returns ``(content, line_number, None)``
+          unchanged — no remap is needed.
+        - Otherwise returns ``(stripped_content, physical_index, line_mapper)``
+          where:
+          - ``stripped_content`` is the content with all ``N: `` prefixes
+            removed (non-numbered lines, e.g. ``...`` hunk separators, are
+            kept as-is).
+          - ``physical_index`` is the 1-based line index in
+            ``stripped_content`` whose original prefix equals ``line_number``.
+            When no line matches exactly (the target line was a removed ``-``
+            line absent from the hunk), the last line with prefix <
+            ``line_number`` is used; falls back to 1 when nothing precedes.
+          - ``line_mapper(physical)`` maps a physical line index back to its
+            original file line number (or to ``physical`` if the line had no
+            numbered prefix, e.g. a separator).
+        - Never raises.
+    """
+    lines = content.splitlines()
+    if not lines:
+        return content, line_number, None
+
+    first_nonblank = next((ln for ln in lines if ln.strip()), "")
+    if not _LINE_NUMBER_PREFIX_RE.match(first_nonblank):
+        return content, line_number, None
+
+    stripped: List[str] = []
+    phys_to_orig: Dict[int, int] = {}
+    physical_index = 1
+    exact_match = False
+    last_before: Optional[int] = None
+
+    for i, line in enumerate(lines, start=1):
+        m = _LINE_NUMBER_PREFIX_RE.match(line)
+        if m:
+            orig = int(m.group(1))
+            phys_to_orig[i] = orig
+            stripped.append(line[m.end():])
+            if orig == line_number and not exact_match:
+                physical_index = i
+                exact_match = True
+            elif orig < line_number:
+                last_before = i
+        else:
+            stripped.append(line)
+
+    if not exact_match and last_before is not None:
+        physical_index = last_before
+
+    def _lookup(phys: int) -> int:
+        return phys_to_orig.get(phys, phys)
+
+    return "\n".join(stripped), physical_index, _lookup
+
+
+def _find_python_function_at_line(
+    content: str,
+    line_number: int,
+    path: str,
+    display_line: Optional[int] = None,
+    line_mapper: Optional[Callable[[int], int]] = None,
+) -> str:
+    """Find the innermost function/method/class containing ``line_number`` via AST.
+
+    Preconditions:
+        - ``content`` is a non-empty string.
+        - ``line_number`` >= 1.
+        - ``path`` is a non-empty string used only for display.
+
+    Postconditions:
+        - Returns a human-readable description of the innermost enclosing
+          ``FunctionDef``, ``AsyncFunctionDef``, or ``ClassDef`` node that
+          brackets ``line_number`` (start and end line inclusive; the start
+          is the earliest decorator line when decorators are present).
+        - Returns a "module level" message when no enclosing construct is found.
+        - Returns a parse-error message and never raises on ``SyntaxError`` or
+          any other ``ast.parse`` failure so the caller can fall back gracefully.
+        - Requires Python 3.8+ for ``ast.AST.end_lineno``; nodes without
+          ``end_lineno`` are skipped (not possible on the project's Python 3.10
+          target, but handled defensively via ``getattr``).
+    """
+    try:
+        tree = ast.parse(content)
+    except Exception as exc:
+        return (
+            f"Could not parse {path} as Python ({type(exc).__name__}: {exc}); "
+            "use read_file to inspect the full file manually."
+        )
+
+    candidates = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        end_line = getattr(node, "end_lineno", None)
+        if end_line is None:
+            continue
+        start_line = node.lineno
+        for dec in node.decorator_list:
+            start_line = min(start_line, dec.lineno)
+        if start_line <= line_number <= end_line:
+            kind = "class" if isinstance(node, ast.ClassDef) else "function"
+            candidates.append((end_line - start_line, start_line, end_line, node.name, kind))
+
+    shown = display_line if display_line is not None else line_number
+
+    if not candidates:
+        return (
+            f"Line {shown} of {path} is at module level "
+            "(no enclosing function, method, or class found)."
+        )
+
+    # Smallest span → innermost enclosing construct.
+    _, func_start, func_end, name, kind = min(candidates)
+
+    class_label = ""
+    if kind == "function":
+        # Find the innermost class that fully contains this function's range;
+        # its presence means the function is a method.
+        enclosing_classes = [
+            (span, cname)
+            for span, cstart, cend, cname, ckind in candidates
+            if ckind == "class" and cstart <= func_start and cend >= func_end
+        ]
+        if enclosing_classes:
+            _, class_name = min(enclosing_classes)
+            class_label = f" in class '{class_name}'"
+
+    display_start = line_mapper(func_start) if line_mapper is not None else func_start
+    display_end = line_mapper(func_end) if line_mapper is not None else func_end
+    return (
+        f"Line {shown} is inside {kind} '{name}'{class_label} "
+        f"({path} lines {display_start}–{display_end})."
+    )
+
+
+def _find_heuristic_function_at_line(
+    content: str,
+    line_number: int,
+    path: str,
+    display_line: Optional[int] = None,
+    line_mapper: Optional[Callable[[int], int]] = None,
+) -> str:
+    """Guess the enclosing construct for ``line_number`` using column-0 heuristics.
+
+    Scans from the first line up to ``line_number`` and returns the start line of
+    the last column-0 declaration found — the same heuristic used by
+    ``code_boundaries._heuristic_break_lines`` for chunk splitting. Useful for
+    TypeScript, JavaScript, Go, and other non-Python languages.
+
+    Preconditions:
+        - ``content`` is a non-empty string.
+        - ``line_number`` >= 1.
+        - ``path`` is a non-empty string used only for display.
+
+    Postconditions:
+        - Returns the best-guess start line and advises using ``read_file`` for
+          the precise construct name.
+        - Returns a "no construct found" message (never raises) when no
+          column-0 declaration precedes ``line_number``.
+    """
+    shown = display_line if display_line is not None else line_number
+    best_start: Optional[int] = None
+    for i, line in enumerate(content.splitlines(), start=1):
+        if i > line_number:
+            break
+        if not line or not line.strip():
+            continue
+        if line[0].isspace():
+            continue
+        if line.startswith(_HEURISTIC_SKIP):
+            continue
+        best_start = i
+
+    if best_start is None:
+        return (
+            f"Could not identify an enclosing construct for line {shown} of {path} "
+            "(no column-0 declaration found before that line). "
+            "Use read_file to inspect the full file."
+        )
+    display_start = line_mapper(best_start) if line_mapper is not None else best_start
+    return (
+        f"Line {shown} of {path} appears to be inside the construct "
+        f"starting at line {display_start}. "
+        "Use read_file to see the full construct name and body."
+    )
+
+
 def _build_tools(index: CodebaseIndex) -> list:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
-        - Returns three tools (``read_file``, ``list_files``, ``search_codebase``)
-          that delegate to ``index``; each returns a string and never raises, so
-          a bad model-supplied argument becomes a tool message rather than an
-          error that aborts the agent loop.
+        - Returns four tools (``read_file``, ``list_files``, ``search_codebase``,
+          ``find_function_at_line``) that delegate to ``index``; each returns a
+          string and never raises, so a bad model-supplied argument becomes a
+          tool message rather than an error that aborts the agent loop.
     """
 
     @tool
@@ -342,7 +557,44 @@ def _build_tools(index: CodebaseIndex) -> list:
             return f"No matches for {query!r}."
         return "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
 
-    return [read_file, list_files, search_codebase]
+    @tool
+    def find_function_at_line(path: str, line_number: int) -> str:
+        """Identify which function, method, or class contains a specific line number.
+
+        Use this when a finding cites a line number and you need to know its
+        enclosing construct — instead of reading the file in incremental sections
+        or expanding a search range one step at a time.
+
+        Args:
+            path: The file path to inspect (same paths accepted by read_file).
+            line_number: The 1-based line number to locate.
+
+        Returns:
+            The name and line range of the innermost enclosing function, method,
+            or class (Python files), or the start line of the best-guess enclosing
+            construct (all other languages). Returns an error string if the path
+            is not readable; never raises.
+        """
+        content = index.read_file(path)
+        if content.startswith("Error:"):
+            return content
+        resolved = index.resolve_path(path)
+        display_path = resolved if resolved and resolved != index.EXISTING_CODEBASE_PATH else path
+        # Strip ``N: `` line-number prefixes that the PR-review path injects via
+        # ``render_annotated_hunks``; remap to the physical line index so the
+        # helper functions operate on plain code, then restore original numbers
+        # in the output via ``display_line`` / ``line_mapper``.
+        stripped, physical, mapper = _strip_numbered_prefixes(content, line_number)
+        _, ext = os.path.splitext(display_path)
+        if ext.lower() in (".py", ".pyi"):
+            return _find_python_function_at_line(
+                stripped, physical, display_path, display_line=line_number, line_mapper=mapper
+            )
+        return _find_heuristic_function_at_line(
+            stripped, physical, display_path, display_line=line_number, line_mapper=mapper
+        )
+
+    return [read_file, list_files, search_codebase, find_function_at_line]
 
 
 @dataclass
