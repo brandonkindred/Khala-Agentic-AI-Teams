@@ -636,6 +636,28 @@ class IndicatorRegistry:
         source: str = "close",
         select: str = "middle",
     ) -> Optional[float]:
+        """Bollinger Bands at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
+        Pre: callers advancing one bar at a time get O(1) warm updates;
+        multi-bar jumps are safe — ``_advance_kind`` returns ``"none"`` and
+        the state is rebuilt from scratch rather than corrupted.
+        Post: the (middle, upper, lower) triple for the trailing ``period``
+        bars; the requested ``select`` band is returned as a scalar.
+
+        The bands depend only on the last ``period`` source values, so the
+        registry maintains a bounded :class:`deque` of those values together
+        with a running sum and running sum-of-squares. On each single-bar
+        advance the evicted value is subtracted and the new value is added in
+        O(1) time. Population variance is computed as
+        ``sum_sq / period − mean²``; the synthesis compiler's
+        ``bollinger_bands`` template uses the same formula to keep the two in
+        lockstep.
+
+        Postcondition (numerical): ``max(0.0, var)`` guards against tiny
+        negative FP residuals from the ``sum_sq/period − mean²`` identity
+        when all window values are nearly equal.
+        """
         if not bars or len(bars) < period:
             return None
         key = ("bollinger_bands", period, num_std, source)
@@ -644,12 +666,40 @@ class IndicatorRegistry:
         if state is not None and self._is_same_bar(state, fp):
             triple = state["value"]
         else:
-            vals = [_source_value(b, source) for b in bars[-period:]]
-            mean = sum(vals) / period
-            var = sum((v - mean) ** 2 for v in vals) / period
+            vals: Optional[Deque[float]] = None
+            s = 0.0
+            sq = 0.0
+            if state is not None and "vals" in state:
+                kind = self._advance_kind(state, bars, fp)
+                if kind in ("expand", "slide"):
+                    vals = state["vals"]
+                    s = state["s"]
+                    sq = state["sq"]
+                    # The deque is always at full capacity (period values)
+                    # once the cold-start gate passes. The outgoing element
+                    # (vals[0]) must be removed from the running totals
+                    # before the deque evicts it on append.
+                    outgoing = vals[0]
+                    s -= outgoing
+                    sq -= outgoing * outgoing
+                    new_v = _source_value(bars[-1], source)
+                    vals.append(new_v)
+                    s += new_v
+                    sq += new_v * new_v
+            if vals is None:
+                vals = deque(maxlen=period)
+                s = 0.0
+                sq = 0.0
+                for b in bars[-period:]:
+                    v = _source_value(b, source)
+                    vals.append(v)
+                    s += v
+                    sq += v * v
+            mean = s / period
+            var = max(0.0, sq / period - mean * mean)
             std = math.sqrt(var) if var > 0 else 0.0
             triple = (mean, mean + num_std * std, mean - num_std * std)
-            self._state[key] = {"fp": fp, "value": triple}
+            self._state[key] = {"fp": fp, "value": triple, "vals": vals, "s": s, "sq": sq}
         middle, upper, lower = triple
         if select == "middle":
             return middle
@@ -668,6 +718,31 @@ class IndicatorRegistry:
         d_period: int = 3,
         select: str = "k",
     ) -> Optional[float]:
+        """Stochastic oscillator ``(%K | %D)`` at ``bars[-1]``.
+
+        Pre: ``k_period >= 1``; ``d_period >= 1``. Returns ``None`` until
+        ``len(bars) >= k_period`` (``select='k'``) or
+        ``len(bars) >= k_period + d_period - 1`` (``select='d'``).
+        Pre: callers advancing one bar at a time get O(k_period+d_period)
+        warm updates; multi-bar jumps are safe — ``_advance_kind`` returns
+        ``"none"`` and state is rebuilt from scratch rather than corrupted.
+        Post: the %K or %D scalar for the trailing window.
+
+        Two bounded :class:`deque` objects maintain state across calls:
+
+        * ``bars_dq`` (maxlen=``k_period``) — ``(high, low, close)`` triples
+          for the trailing ``k_period`` bars. %K is computed from this in
+          O(k_period) per call (bounded constant).
+        * ``k_dq`` (maxlen=``d_period``) — the last ``d_period`` %K values.
+          %D = ``mean(k_dq)`` in O(d_period).
+
+        The previous implementation called the inner ``_k_at`` helper
+        ``d_period`` times on every bar, each time slicing the full growing
+        ``bars`` list — O(d_period × k_period) per bar, but critically the
+        ``range(k_period, len(bars) + 1)`` loop in the compiler template was
+        O(len(bars)) and grew unboundedly. Both are now O(k_period + d_period)
+        bounded constant regardless of how many bars have been seen.
+        """
         if not bars or len(bars) < k_period:
             return None
         key = ("stochastic", k_period, d_period)
@@ -681,21 +756,57 @@ class IndicatorRegistry:
                 return cached[1]
             return None
 
-        def _k_at(end: int) -> float:
-            window = bars[end - k_period : end]
-            lowest = min(float(b.low) for b in window)
-            highest = max(float(b.high) for b in window)
-            rng = highest - lowest
-            if rng == 0:
-                return 50.0
-            return 100.0 * (float(bars[end - 1].close) - lowest) / rng
+        # Attempt warm-path advance.
+        warm = False
+        bars_dq: Deque[Tuple[float, float, float]]
+        k_dq: Deque[float]
+        if state is not None and "bars_dq" in state:
+            kind = self._advance_kind(state, bars, fp)
+            if kind in ("expand", "slide"):
+                warm = True
+                bars_dq = state["bars_dq"]
+                k_dq = state["k_dq"]
+                b = bars[-1]
+                bars_dq.append((float(b.high), float(b.low), float(b.close)))
 
-        k_val = _k_at(len(bars))
+        if not warm:
+            # Cold-start: rebuild the k_period bar window and up to d_period
+            # %K history values from the minimal required suffix of bars.
+            # Iterating only bars[-(k_period + d_period - 1):] keeps the
+            # cold-start cost at O(k_period × d_period), not O(len(bars)).
+            bars_dq = deque(maxlen=k_period)
+            k_dq = deque(maxlen=d_period)
+            # We want k_dq to contain the last d_period %K values (all but the
+            # current bar). The first position with a full k_period window is
+            # at index (k_period - 1) within the suffix we iterate below.
+            suffix_start = max(0, len(bars) - k_period - d_period + 1)
+            for i in range(suffix_start, len(bars) - 1):
+                bt = bars[i]
+                bars_dq.append((float(bt.high), float(bt.low), float(bt.close)))
+                if len(bars_dq) == k_period:
+                    lowest = min(t[1] for t in bars_dq)
+                    highest = max(t[0] for t in bars_dq)
+                    rng = highest - lowest
+                    k = 50.0 if rng == 0 else 100.0 * (bars_dq[-1][2] - lowest) / rng
+                    k_dq.append(k)
+            # Add the current bar (bars[-1]) to bars_dq.
+            b = bars[-1]
+            bars_dq.append((float(b.high), float(b.low), float(b.close)))
+
+        # Compute %K for the current trailing window (bars_dq[-1] == bars[-1]).
+        lowest = min(t[1] for t in bars_dq)
+        highest = max(t[0] for t in bars_dq)
+        rng = highest - lowest
+        k_val = 50.0 if rng == 0 else 100.0 * (bars_dq[-1][2] - lowest) / rng
+
+        # Append the current %K to the %D history deque.
+        k_dq.append(k_val)
+
         d_val: Optional[float] = None
-        if len(bars) >= k_period + d_period - 1:
-            k_window = [_k_at(end) for end in range(len(bars) - d_period + 1, len(bars) + 1)]
-            d_val = sum(k_window) / d_period
-        self._state[key] = {"fp": fp, "value": (k_val, d_val)}
+        if len(k_dq) == d_period:
+            d_val = sum(k_dq) / d_period
+
+        self._state[key] = {"fp": fp, "value": (k_val, d_val), "bars_dq": bars_dq, "k_dq": k_dq}
         if select == "k":
             return k_val
         if select == "d":

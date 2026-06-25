@@ -20,6 +20,20 @@ template module today. Parity is enforced by ``tests/test_streaming_indicators.p
 (compiled-output parity vs. fresh cold-compute on the same slice).
 Drift between the three implementations IS possible; any change to the
 recurrence must land in all three sites in lockstep.
+
+**Bollinger Bands lockstep** — the registry's incremental
+``bollinger_bands`` uses the running sum-of-squares variance formula
+``sum_sq / period − mean²`` (single-pass, O(1) per bar after warm-up).
+The synthesis compiler's inlined ``bollinger_bands`` template uses the
+same formula so the two agree in FP bits. Any change to the variance
+formula must be applied to BOTH sites together.
+
+**Stochastic lockstep** — the registry's ``stochastic`` maintains two
+bounded deques (``bars_dq`` / ``k_dq``); the synthesis compiler's
+inlined ``stochastic`` template was fixed in lockstep to iterate only
+the last ``d_period`` positions for %D (was O(len(history)), now
+O(d_period × k_period) bounded). Any change to the %K / %D recurrence
+must land in both sites together.
 """
 
 from __future__ import annotations

@@ -1379,6 +1379,87 @@ def test_bollinger_bands_round_trip_through_select() -> None:
     assert upper - middle == pytest.approx(middle - lower, rel=0, abs=1e-12)
 
 
+def test_bollinger_bands_streaming_matches_cold_start() -> None:
+    """Driving bar-by-bar (warm path) must yield the same value as a fresh
+    cold-start registry on the same slice.
+
+    Both paths use the same running sum-of-squares formula
+    ``sum_sq/period - mean²``; this test confirms that retaining state
+    across bar advances produces bit-identical results compared to
+    discarding and recomputing state from scratch each time.
+    """
+    bars = _series(80, seed=95)
+    reg_streaming = IndicatorRegistry()
+    period = 20
+    for n in range(period, len(bars) + 1):
+        sub = bars[:n]
+        streaming_mid = reg_streaming.bollinger_bands(sub, period=period, select="middle")
+        streaming_up = reg_streaming.bollinger_bands(sub, period=period, select="upper")
+        streaming_lo = reg_streaming.bollinger_bands(sub, period=period, select="lower")
+        cold_mid = IndicatorRegistry().bollinger_bands(sub, period=period, select="middle")
+        cold_up = IndicatorRegistry().bollinger_bands(sub, period=period, select="upper")
+        cold_lo = IndicatorRegistry().bollinger_bands(sub, period=period, select="lower")
+        assert streaming_mid == pytest.approx(cold_mid, rel=1e-12), f"n={n} middle diverged"
+        assert streaming_up == pytest.approx(cold_up, rel=1e-12), f"n={n} upper diverged"
+        assert streaming_lo == pytest.approx(cold_lo, rel=1e-12), f"n={n} lower diverged"
+
+
+def test_bollinger_bands_sliding_window_matches_cold_start() -> None:
+    """A registry driven with a fixed-length sliding window must agree with
+    a fresh cold-compute on each slide — the bounded deque trims correctly."""
+    bars = _series(120, seed=96)
+    window_size = 40
+    reg = IndicatorRegistry()
+    for offset in range(0, len(bars) - window_size + 1):
+        sliding = bars[offset : offset + window_size]
+        streaming = reg.bollinger_bands(sliding, period=20, select="upper")
+        cold = IndicatorRegistry().bollinger_bands(sliding, period=20, select="upper")
+        assert streaming == pytest.approx(cold, rel=1e-12), f"offset={offset} upper diverged"
+
+
+def test_bollinger_bands_streaming_keeps_window_bounded() -> None:
+    """The cached deque must stay bounded at ``period`` after many bars so
+    per-call cost never drifts back to O(N_bars)."""
+    bars = _series(300, seed=97)
+    reg = IndicatorRegistry()
+    period = 20
+    for n in range(period, len(bars) + 1):
+        reg.bollinger_bands(bars[:n], period=period, select="middle")
+    cached = reg._state[("bollinger_bands", period, 2.0, "close")]
+    assert len(cached["vals"]) == period
+
+
+def test_bollinger_bands_replay_falls_back_to_cold_start() -> None:
+    """Feeding a shorter history forces a cold-start fallback — the running
+    sums must be rebuilt rather than carried forward from the longer window."""
+    bars = _series(60, seed=98)
+    reg = IndicatorRegistry()
+    for n in range(20, 61):
+        reg.bollinger_bands(bars[:n], period=20, select="middle")
+    replay = reg.bollinger_bands(bars[:25], period=20, select="middle")
+    fresh = IndicatorRegistry().bollinger_bands(bars[:25], period=20, select="middle")
+    assert replay == pytest.approx(fresh, rel=1e-12)
+
+
+def _legacy_stochastic_k(bars: List[_Bar], k_period: int) -> float:
+    """Cold reference for %K at bars[-1]."""
+    window = bars[-k_period:]
+    lowest = min(b.low for b in window)
+    highest = max(b.high for b in window)
+    rng = highest - lowest
+    if rng == 0:
+        return 50.0
+    return 100.0 * (bars[-1].close - lowest) / rng
+
+
+def _legacy_stochastic_d(bars: List[_Bar], k_period: int, d_period: int) -> float | None:
+    """Cold reference for %D at bars[-1]."""
+    if len(bars) < k_period + d_period - 1:
+        return None
+    k_vals = [_legacy_stochastic_k(bars[: end + 1], k_period) for end in range(len(bars) - d_period, len(bars))]
+    return sum(k_vals) / d_period
+
+
 def test_stochastic_returns_k_and_d() -> None:
     bars = _series(30, seed=14)
     reg = IndicatorRegistry()
@@ -1388,6 +1469,69 @@ def test_stochastic_returns_k_and_d() -> None:
     assert d is not None
     assert 0.0 <= k <= 100.0
     assert 0.0 <= d <= 100.0
+
+
+def test_stochastic_streaming_matches_cold_start() -> None:
+    """Driving bar-by-bar must yield the same %K and %D as a fresh cold-start
+    registry on the same slice."""
+    bars = _series(80, seed=99)
+    reg = IndicatorRegistry()
+    k_period, d_period = 14, 3
+    for n in range(k_period, len(bars) + 1):
+        sub = bars[:n]
+        stream_k = reg.stochastic(sub, k_period=k_period, d_period=d_period, select="k")
+        stream_d = reg.stochastic(sub, k_period=k_period, d_period=d_period, select="d")
+        ref_k = _legacy_stochastic_k(sub, k_period)
+        ref_d = _legacy_stochastic_d(sub, k_period, d_period)
+        assert stream_k == pytest.approx(ref_k, rel=0, abs=1e-12), f"n={n} %K diverged"
+        if ref_d is None:
+            assert stream_d is None, f"n={n} expected %D=None"
+        else:
+            assert stream_d == pytest.approx(ref_d, rel=0, abs=1e-12), f"n={n} %D diverged"
+
+
+def test_stochastic_sliding_window_matches_cold_start() -> None:
+    """A registry driven with a fixed-length sliding window must agree with
+    a fresh cold-compute on each slide."""
+    bars = _series(120, seed=100)
+    window_size = 40
+    reg = IndicatorRegistry()
+    k_period, d_period = 14, 3
+    for offset in range(0, len(bars) - window_size + 1):
+        sliding = bars[offset : offset + window_size]
+        stream_k = reg.stochastic(sliding, k_period=k_period, d_period=d_period, select="k")
+        stream_d = reg.stochastic(sliding, k_period=k_period, d_period=d_period, select="d")
+        ref_k = _legacy_stochastic_k(sliding, k_period)
+        ref_d = _legacy_stochastic_d(sliding, k_period, d_period)
+        assert stream_k == pytest.approx(ref_k, rel=0, abs=1e-12), f"offset={offset} %K diverged"
+        assert stream_d == pytest.approx(ref_d, rel=0, abs=1e-12), f"offset={offset} %D diverged"
+
+
+def test_stochastic_streaming_keeps_windows_bounded() -> None:
+    """Both deques must stay bounded after many bars so cost never drifts
+    back to O(N_bars)."""
+    bars = _series(300, seed=101)
+    reg = IndicatorRegistry()
+    k_period, d_period = 14, 3
+    for n in range(k_period, len(bars) + 1):
+        reg.stochastic(bars[:n], k_period=k_period, d_period=d_period, select="d")
+    cached = reg._state[("stochastic", k_period, d_period)]
+    assert len(cached["bars_dq"]) == k_period
+    assert len(cached["k_dq"]) == d_period
+
+
+def test_stochastic_replay_falls_back_to_cold_start() -> None:
+    """Feeding a shorter history forces a cold-start that rebuilds both deques."""
+    bars = _series(80, seed=102)
+    reg = IndicatorRegistry()
+    for n in range(16, 81):
+        reg.stochastic(bars[:n], k_period=14, d_period=3, select="d")
+    replay_k = reg.stochastic(bars[:20], k_period=14, d_period=3, select="k")
+    replay_d = reg.stochastic(bars[:20], k_period=14, d_period=3, select="d")
+    fresh_k = IndicatorRegistry().stochastic(bars[:20], k_period=14, d_period=3, select="k")
+    fresh_d = IndicatorRegistry().stochastic(bars[:20], k_period=14, d_period=3, select="d")
+    assert replay_k == pytest.approx(fresh_k, rel=0, abs=1e-12)
+    assert replay_d == pytest.approx(fresh_d, rel=0, abs=1e-12)
 
 
 def test_vwap_matches_cumulative_typical_price() -> None:
