@@ -470,7 +470,7 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 2
         assert job["review_summary"]["comment_findings"] == 0
 
-    def test_finding_on_file_absent_from_diff_posts_loose_comment(self, review_app) -> None:
+    def test_leftover_finding_anchored_as_file_level_review_comment(self, review_app) -> None:
         # A finding whose file is not in the PR diff is re-anchored as a file-level
         # inline review comment on the first changed file ("a.py"), rather than
         # posted as a standalone conversation comment.
@@ -542,7 +542,7 @@ class TestReviewEndpoint:
         assert len(gh.reviews[-1]["comments"]) == 2
         assert gh.comments == []
 
-    def test_dropped_inline_findings_reposted_as_comments(self, review_app) -> None:
+    def test_dropped_inline_findings_reanchored_as_file_level(self, review_app) -> None:
         # When every attempt that carries comments 422s, the review degrades to a
         # body-only COMMENT. The dropped findings are then re-anchored as file-level
         # inline review comments in a follow-up review — no standalone comments.
@@ -563,7 +563,7 @@ class TestReviewEndpoint:
         assert len(file_comments) >= 1
         assert job["review_summary"]["comment_findings"] == 0
 
-    def test_multiple_dropped_inline_findings_each_reposted(self, review_app) -> None:
+    def test_multiple_dropped_inline_findings_each_reanchored_as_file_level(self, review_app) -> None:
         # Several inline findings dropped by the body-only fallback are each
         # re-anchored as file-level inline review comments (never posted standalone).
         review_app["github"]["agent_output"] = _FakeOutput(
@@ -654,6 +654,59 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
+
+    def test_reanchor_follow_up_422_falls_back_to_standalone(self, review_app) -> None:
+        # Last-resort path: body-only review succeeds but the re-anchor follow-up
+        # also fails with a GitHubAPIError.  In that extreme case the dropped
+        # findings are posted as standalone top-level comments so they are not
+        # silently lost.
+        #
+        # Sequence:
+        #   attempt 1 — REQUEST_CHANGES + comments  → 422  (review_fail_times=2)
+        #   attempt 2 — COMMENT + comments          → 422
+        #   attempt 3 — body-only COMMENT           → succeeds (comments dropped)
+        #   re-anchor _submit_review call            → GitHubAPIError (patched)
+        #   last resort → _safe_comment for each dropped finding (standalone)
+        gh = review_app["github"]["client"]
+        gh.review_fail_times = 2  # first two comment-carrying attempts 422; body-only wins
+
+        # Patch _submit_review in api_main so the re-anchor follow-up call raises,
+        # triggering the last-resort standalone path.
+        api_main = review_app["api"]
+        original_submit = api_main._submit_review
+        call_count = {"n": 0}
+
+        def _submit_failing_on_second_call(*args: Any, **kwargs: Any) -> list:
+            call_count["n"] += 1
+            if call_count["n"] >= 2:
+                # This is the re-anchor follow-up call — make it fail.
+                raise GitHubAPIError(422, "re-anchor also failed")
+            return original_submit(*args, **kwargs)
+
+        import unittest.mock as _mock
+        with _mock.patch.object(api_main, "_submit_review", side_effect=_submit_failing_on_second_call):
+            # Use a HIGH finding so event=REQUEST_CHANGES, giving 3 distinct
+            # _submit_review attempts (REQUEST_CHANGES+inline, COMMENT+inline,
+            # body-only). review_fail_times=2 makes the first two fail, body-only
+            # succeeds and returns the dropped comments for re-anchoring.
+            review_app["github"]["agent_output"] = _FakeOutput(
+                issues=[_FakeReviewIssue("high", line=2, description="dropped finding")]
+            )
+            resp = review_app["client"].post("/review-pr", json=_review_body())
+
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+
+        # The re-anchor attempt also failed, so the finding falls through to
+        # add_issue_comment as the absolute last resort.
+        assert len(gh.comments) >= 1, (
+            f"Expected at least one standalone fallback comment, got gh.comments={gh.comments}"
+        )
+        # Confirm the fallback comment body contains the finding text.
+        assert any("dropped finding" in body for _n, body in gh.comments), (
+            f"Fallback comment missing finding text: gh.comments={gh.comments}"
+        )
 
     def test_all_changed_files_are_reviewed_without_cap(self, review_app) -> None:
         gh = review_app["github"]["client"]
@@ -795,7 +848,23 @@ class TestReviewPersistence:
 
 
 class TestBugConditionExploration:
-    """Exploration tests that FAIL on unfixed code and PASS after the fix.
+    """Exploration tests written BEFORE the fix as part of the bugfix workflow (Task 1).
+
+    These tests encode the CORRECT / EXPECTED behavior post-fix, but were originally
+    written to FAIL against the unfixed code — that failure acted as proof the bug
+    existed.  They now pass and serve as regression guards for the specific bug
+    conditions identified during exploration (file-not-in-diff leftovers and 422-dropped
+    comments reposted as standalone).
+
+    Why keep these alongside TestReviewEndpoint?
+    - TestReviewEndpoint tests are the canonical integration suite.  They cover the same
+      scenarios but were updated (task 3.4) as part of the fix landing.
+    - TestBugConditionExploration tests preserve the exact assertions written against the
+      unfixed code, including the counterexample documentation, so future readers can see
+      precisely what the bug looked like and what condition each test was designed to catch.
+    - If a regression reintroduces standalone posting for any of these specific inputs,
+      both suites will catch it; the exploration tests' error messages include
+      "BUG CONFIRMED" to make the failure immediately recognisable.
 
     Counterexamples captured on unfixed code (Task 1 documentation):
       - test_leftover_finding_not_posted_as_standalone_comment:
