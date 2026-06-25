@@ -68,6 +68,23 @@ def _changes_summary(
     return "\n\n".join(parts)
 
 
+def _validate_task_interface(task: Any) -> None:
+    """Validate the task shape required by the v2 team adapter."""
+    required = (
+        "id",
+        "title",
+        "description",
+        "dependencies",
+        "acceptance_criteria",
+        "revision_feedback",
+    )
+    missing = [name for name in required if not hasattr(task, name)]
+    if missing:
+        raise ValueError(f"coding-team task is missing required field(s): {', '.join(missing)}")
+    if not str(getattr(task, "id", "") or "").strip():
+        raise ValueError("coding-team task is missing a non-empty id")
+
+
 class V2TeamWorker:
     """Coding-team worker facade for backend_code_v2_team/frontend_code_v2_team."""
 
@@ -93,6 +110,7 @@ class V2TeamWorker:
         return "frontend_v2" if self.team_kind == "frontend" else "backend_v2"
 
     def _to_se_task(self, task: Any) -> SETask:
+        _validate_task_interface(task)
         description = _augment_description(task, self._team_label)
         requirements = description
         if task.acceptance_criteria:
@@ -127,7 +145,20 @@ class V2TeamWorker:
         """Execute the task via the v2 team and return a coding-team handoff result."""
         del repo_context  # v2 teams read repository context themselves.
         path = Path(repo_path).resolve()
-        se_task = self._to_se_task(task)
+        task_id = str(getattr(task, "id", "") or "unknown-task")
+        try:
+            se_task = self._to_se_task(task)
+        except ValueError as exc:
+            logger.warning("%s worker received malformed task %s: %s", self._team_label, task_id, exc)
+            return {
+                "status": "failed",
+                "feature_branch": getattr(task, "feature_branch", None) or f"feature/{task_id}",
+                "changes_summary": "",
+                "files_to_create_or_edit": [],
+                "commands_run": [],
+                "open_questions": [],
+                "error": str(exc),
+            }
         try:
             result = self.team_lead.run_workflow(
                 repo_path=path,
@@ -139,10 +170,10 @@ class V2TeamWorker:
             # merge_to_development flag yet. Real in-repo v2 teams support it.
             result = self.team_lead.run_workflow(repo_path=path, task=se_task)
         except Exception as exc:  # noqa: BLE001 - worker failure is task-local
-            logger.warning("%s worker failed for task %s: %s", self._team_label, task.id, exc)
+            logger.exception("%s worker failed for task %s", self._team_label, task_id)
             return {
                 "status": "failed",
-                "feature_branch": getattr(task, "feature_branch", None) or f"feature/{task.id}",
+                "feature_branch": getattr(task, "feature_branch", None) or f"feature/{task_id}",
                 "changes_summary": "",
                 "files_to_create_or_edit": [],
                 "commands_run": [],

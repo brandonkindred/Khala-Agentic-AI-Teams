@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 
 def _task(**overrides):
@@ -23,6 +23,14 @@ def _task(**overrides):
     )
     base.update(overrides)
     return Task(**base)
+
+
+def _patch_autospec(monkeypatch, module, name: str, *, return_value=None, side_effect=None):
+    mock = create_autospec(getattr(module, name), return_value=return_value)
+    if side_effect is not None:
+        mock.side_effect = side_effect
+    monkeypatch.setattr(module, name, mock)
+    return mock
 
 
 # ===========================================================================
@@ -263,6 +271,8 @@ def test_fe_deliver_git_agent_success(tmp_path: Path) -> None:
 
     class _GitAgent:
         def deliver(self, inp):
+            assert inp.feature_branch_name == "feature/x"
+            assert inp.task_id == "t1"
             return SimpleNamespace(success=True, summary="merged", files={})
 
     result = run_deliver(
@@ -338,13 +348,13 @@ def test_fe_deliver_git_agent_failure_falls_through_to_inline(tmp_path: Path, mo
         def deliver(self, inp):
             raise RuntimeError("git fail")
 
-    # Stub the inline git helpers so we don't touch a real repo
-    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (True, "feature/x"))
-    monkeypatch.setattr(deliver, "write_agent_output", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(deliver, "merge_branch", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(deliver, "delete_branch", lambda *a, **kw: True)
-    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: True)
-    monkeypatch.setattr(deliver, "abort_merge", lambda *a, **kw: True)
+    # Stub the inline git helpers so we don't touch a real repo.
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x"))
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "merge_branch", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "delete_branch", return_value=True)
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "abort_merge", return_value=True)
 
     result = deliver.run_deliver(
         task_id="t1",
@@ -359,8 +369,8 @@ def test_fe_deliver_git_agent_failure_falls_through_to_inline(tmp_path: Path, mo
 def test_fe_deliver_inline_create_branch_fails(tmp_path: Path, monkeypatch) -> None:
     from software_engineering_team.frontend_code_v2_team.phases import deliver
 
-    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (False, "no perms"))
-    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: True)
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(False, "no perms"))
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
     result = deliver.run_deliver(
         task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary=""
@@ -372,9 +382,9 @@ def test_fe_deliver_inline_create_branch_fails(tmp_path: Path, monkeypatch) -> N
 def test_fe_deliver_inline_write_fails(tmp_path: Path, monkeypatch) -> None:
     from software_engineering_team.frontend_code_v2_team.phases import deliver
 
-    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (True, "feature/x"))
-    monkeypatch.setattr(deliver, "write_agent_output", lambda *a, **kw: (False, "write err"))
-    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: True)
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x"))
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(False, "write err"))
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
     result = deliver.run_deliver(
         task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary=""
@@ -386,11 +396,11 @@ def test_fe_deliver_inline_write_fails(tmp_path: Path, monkeypatch) -> None:
 def test_fe_deliver_inline_merge_fails(tmp_path: Path, monkeypatch) -> None:
     from software_engineering_team.frontend_code_v2_team.phases import deliver
 
-    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (True, "feature/x"))
-    monkeypatch.setattr(deliver, "write_agent_output", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(deliver, "merge_branch", lambda *a, **kw: (False, "conflict"))
-    monkeypatch.setattr(deliver, "abort_merge", lambda *a, **kw: True)
-    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: True)
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x"))
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "merge_branch", return_value=(False, "conflict"))
+    _patch_autospec(monkeypatch, deliver, "abort_merge", return_value=True)
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
     result = deliver.run_deliver(
         task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary=""
@@ -402,11 +412,11 @@ def test_fe_deliver_inline_merge_fails(tmp_path: Path, monkeypatch) -> None:
 def test_fe_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     from software_engineering_team.frontend_code_v2_team.phases import deliver
 
-    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (True, "feature/x"))
-    monkeypatch.setattr(deliver, "write_agent_output", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(deliver, "merge_branch", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(deliver, "delete_branch", lambda *a, **kw: True)
-    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: True)
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x"))
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "merge_branch", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "delete_branch", return_value=True)
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
     result = deliver.run_deliver(
         task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary="impl"
@@ -418,17 +428,14 @@ def test_fe_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
     """merge_to_development=False prepares a branch for external Tech Lead review."""
     from software_engineering_team.frontend_code_v2_team.phases import deliver
 
-    calls = {"merge": 0, "delete": 0}
-    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (True, "feature/x"))
-    monkeypatch.setattr(deliver, "write_agent_output", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(deliver, "commit_working_tree", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(
-        deliver, "merge_branch", lambda *a, **kw: (calls.__setitem__("merge", 1), (True, ""))[1]
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x"))
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(True, ""))
+    commit_mock = _patch_autospec(
+        monkeypatch, deliver, "commit_working_tree", return_value=(True, "")
     )
-    monkeypatch.setattr(
-        deliver, "delete_branch", lambda *a, **kw: calls.__setitem__("delete", 1)
-    )
-    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: (True, ""))
+    merge_mock = _patch_autospec(monkeypatch, deliver, "merge_branch", return_value=(True, ""))
+    delete_mock = _patch_autospec(monkeypatch, deliver, "delete_branch", return_value=True)
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
     result = deliver.run_deliver(
         task_id="t1",
@@ -441,18 +448,119 @@ def test_fe_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
     assert result.branch_ready is True
     assert result.merged is False
     assert result.branch_name == "feature/x"
-    assert calls == {"merge": 0, "delete": 0}
+    assert result.commit_messages
+    assert commit_mock.call_args.args[1] == result.commit_messages[0]
+    merge_mock.assert_not_called()
+    delete_mock.assert_not_called()
+
+
+def test_fe_deliver_handoff_with_tool_agent_appends_files(tmp_path: Path, monkeypatch) -> None:
+    """Tool-agent output is included when handoff mode bypasses the Git agent."""
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.frontend_code_v2_team.phases import deliver
+
+    class _DocsAgent:
+        def __init__(self) -> None:
+            self.called = False
+
+        def deliver(self, inp):
+            self.called = True
+            return SimpleNamespace(files={"docs.md": "hi"}, success=True, summary="")
+
+    class _GitAgent:
+        def __init__(self) -> None:
+            self.called = False
+
+        def deliver(self, inp):
+            self.called = True
+            return SimpleNamespace(success=True, summary="merged", files={})
+
+    docs_agent = _DocsAgent()
+    git_agent = _GitAgent()
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x"))
+
+    def _write(repo_path, payload, subdir=""):
+        assert "docs.md" in payload.files
+        return True, ""
+
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", side_effect=_write)
+    _patch_autospec(monkeypatch, deliver, "commit_working_tree", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.ts": "x"},
+        summary="impl",
+        tool_agents={
+            ToolAgentKind.DOCUMENTATION: docs_agent,
+            ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent,
+        },
+        merge_to_development=False,
+    )
+
+    assert result.branch_ready is True
+    assert docs_agent.called is True
+    assert git_agent.called is False
+
+
+def test_fe_deliver_handoff_create_branch_fails(tmp_path: Path, monkeypatch) -> None:
+    from software_engineering_team.frontend_code_v2_team.phases import deliver
+
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(False, "no perms"))
+    checkout_mock = _patch_autospec(
+        monkeypatch, deliver, "checkout_branch", return_value=(True, "")
+    )
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.ts": "x"},
+        summary="impl",
+        merge_to_development=False,
+    )
+
+    assert result.branch_ready is False
+    assert "Feature branch creation failed" in result.summary
+    checkout_mock.assert_called_once()
+
+
+def test_fe_deliver_handoff_commit_fails_cleans_created_branch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from software_engineering_team.frontend_code_v2_team.phases import deliver
+
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x"))
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "commit_working_tree", return_value=(False, "commit err"))
+    checkout_mock = _patch_autospec(
+        monkeypatch, deliver, "checkout_branch", return_value=(True, "")
+    )
+    delete_mock = _patch_autospec(monkeypatch, deliver, "delete_branch", return_value=True)
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.ts": "x"},
+        summary="impl",
+        merge_to_development=False,
+    )
+
+    assert result.branch_ready is False
+    assert "Commit failed" in result.summary
+    checkout_mock.assert_called_once_with(tmp_path, deliver.DEVELOPMENT_BRANCH)
+    delete_mock.assert_called_once_with(tmp_path, "feature/x")
 
 
 def test_be_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     """Backend deliver is identical; exercise the inline branch."""
     from software_engineering_team.backend_code_v2_team.phases import deliver
 
-    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (True, "feature/x"))
-    monkeypatch.setattr(deliver, "write_agent_output", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(deliver, "merge_branch", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(deliver, "delete_branch", lambda *a, **kw: True)
-    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: True)
+    _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x"))
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "merge_branch", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "delete_branch", return_value=True)
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
     result = deliver.run_deliver(
         task_id="t1", repo_path=tmp_path, files={"a.py": "x"}, summary="impl"
@@ -464,17 +572,16 @@ def test_be_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
     """Backend deliver supports the same branch handoff mode."""
     from software_engineering_team.backend_code_v2_team.phases import deliver
 
-    calls = {"merge": 0, "delete": 0}
-    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (True, "feature/api"))
-    monkeypatch.setattr(deliver, "write_agent_output", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(deliver, "commit_working_tree", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(
-        deliver, "merge_branch", lambda *a, **kw: (calls.__setitem__("merge", 1), (True, ""))[1]
+    _patch_autospec(
+        monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/api")
     )
-    monkeypatch.setattr(
-        deliver, "delete_branch", lambda *a, **kw: calls.__setitem__("delete", 1)
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(True, ""))
+    commit_mock = _patch_autospec(
+        monkeypatch, deliver, "commit_working_tree", return_value=(True, "")
     )
-    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: (True, ""))
+    merge_mock = _patch_autospec(monkeypatch, deliver, "merge_branch", return_value=(True, ""))
+    delete_mock = _patch_autospec(monkeypatch, deliver, "delete_branch", return_value=True)
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
     result = deliver.run_deliver(
         task_id="t1",
@@ -487,4 +594,36 @@ def test_be_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
     assert result.branch_ready is True
     assert result.merged is False
     assert result.branch_name == "feature/api"
-    assert calls == {"merge": 0, "delete": 0}
+    assert result.commit_messages
+    assert commit_mock.call_args.args[1] == result.commit_messages[0]
+    merge_mock.assert_not_called()
+    delete_mock.assert_not_called()
+
+
+def test_be_deliver_handoff_write_fails_cleans_created_branch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failed handoff write restores development and deletes the fresh branch."""
+    from software_engineering_team.backend_code_v2_team.phases import deliver
+
+    _patch_autospec(
+        monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/api")
+    )
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(False, "write err"))
+    checkout_mock = _patch_autospec(
+        monkeypatch, deliver, "checkout_branch", return_value=(True, "")
+    )
+    delete_mock = _patch_autospec(monkeypatch, deliver, "delete_branch", return_value=True)
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.py": "x"},
+        summary="impl",
+        merge_to_development=False,
+    )
+
+    assert result.branch_ready is False
+    assert "Write failed" in result.summary
+    checkout_mock.assert_called_once_with(tmp_path, deliver.DEVELOPMENT_BRANCH)
+    delete_mock.assert_called_once_with(tmp_path, "feature/api")

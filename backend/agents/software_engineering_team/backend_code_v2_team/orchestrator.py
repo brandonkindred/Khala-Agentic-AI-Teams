@@ -145,6 +145,10 @@ class BackendDevelopmentAgent:
 
         Each microtask must pass full review (code quality, QA, security, build, lint)
         before the next microtask can begin.
+
+        merge_to_development defaults to True. When False, the deliver phase commits
+        a feature branch and leaves it ready for external Tech Lead review instead of
+        merging it into the development branch.
         """
         task_id = task.id
         start_time = time.monotonic()
@@ -495,6 +499,9 @@ class BackendCodeV2TeamLead:
     ) -> BackendCodeV2WorkflowResult:
         """
         Run Setup phase, then delegate to BackendDevelopmentAgent for the 5-phase cycle.
+
+        merge_to_development defaults to True. When False, delivery prepares a
+        feature branch for external review instead of merging it.
         """
         task_id = task.id
         result = BackendCodeV2WorkflowResult(task_id=task_id)

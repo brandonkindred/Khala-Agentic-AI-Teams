@@ -89,6 +89,30 @@ def test_v2_worker_failure_reports_task_local_failure(tmp_path) -> None:
     assert out["error"] == "pre-flight failed"
 
 
+def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
+    class _Lead:
+        def __init__(self) -> None:
+            self.called = False
+
+        def run_workflow(self, **_kwargs: Any) -> Any:
+            self.called = True
+            return SimpleNamespace(success=True)
+
+    lead = _Lead()
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=lead,
+    )
+
+    out = worker.run_implement(SimpleNamespace(id="bad-task", title="Bad"), tmp_path)
+
+    assert out["status"] == "failed"
+    assert "missing required field" in out["error"]
+    assert lead.called is False
+
+
 def test_v2_worker_preserves_failed_result_even_when_branch_ready(tmp_path) -> None:
     class _PartialLead:
         def run_workflow(self, **_kwargs: Any) -> Any:

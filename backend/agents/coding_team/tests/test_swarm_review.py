@@ -735,6 +735,13 @@ def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
     assert graph.get_task_for_agent("frontend_v2") is None
 
 
+def test_target_match_normalizes_raw_v2_agent_ids() -> None:
+    """Raw worker IDs with suffixes still compare by their canonical v2 team."""
+    assert orch_mod._target_matches_agent("frontend_v2", "frontend-v2-worker-2") is True
+    assert orch_mod._target_matches_agent("devops", "backend_v2_worker_1") is True
+    assert orch_mod._target_matches_agent("frontend_v2", "backend_v2_worker_1") is False
+
+
 def test_target_team_alias_adds_missing_backend_v2_stack_spec() -> None:
     """Backend-owned aliases repair an incomplete stack roster before worker creation."""
     graph = TaskGraphService(job_id="j1")

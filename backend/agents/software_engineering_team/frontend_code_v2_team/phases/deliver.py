@@ -36,6 +36,72 @@ class _FilesPayload:
         self.gitignore_entries: list[str] = []
 
 
+def _make_slug(task_id: str, task_title: str) -> str:
+    """Return the stable branch/commit scope slug for a delivery task."""
+    return re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
+
+
+def _cleanup_handoff_failure(repo_path: Path, branch_name: str, *, created_branch: bool) -> None:
+    """Return to development and remove a newly-created failed handoff branch."""
+    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+    if created_branch and branch_name:
+        delete_branch(repo_path, branch_name)
+
+
+def _prepare_handoff_branch(
+    *,
+    task_id: str,
+    repo_path: Path,
+    deliver_files: Dict[str, str],
+    summary: str,
+    task_title: str,
+    feature_branch_name: Optional[str],
+) -> DeliverResult:
+    """Commit a feature branch and leave it ready for external Tech Lead review."""
+    result = DeliverResult()
+    slug = _make_slug(task_id, task_title)
+    branch_name = feature_branch_name
+    created_branch = False
+    if branch_name:
+        ok, checkout_msg = checkout_branch(repo_path, branch_name)
+        if not ok:
+            result.summary = f"Feature branch checkout failed: {checkout_msg}"
+            logger.error("[%s] Deliver: %s", task_id, result.summary)
+            return result
+    else:
+        ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
+        if not ok:
+            result.summary = f"Feature branch creation failed: {branch_msg}"
+            logger.error("[%s] Deliver: %s", task_id, result.summary)
+            checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+            return result
+        branch_name = branch_msg or f"feature/{task_id}-{slug}"
+        created_branch = True
+
+    result.branch_name = branch_name or ""
+    commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=slug[:20], summary=summary[:72])
+    payload = _FilesPayload(deliver_files, summary, commit_msg)
+    write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
+    if not write_ok:
+        result.summary = f"Write failed: {write_msg}"
+        logger.error("[%s] Deliver: %s", task_id, result.summary)
+        _cleanup_handoff_failure(repo_path, result.branch_name, created_branch=created_branch)
+        return result
+
+    commit_ok, commit_msg_out = commit_working_tree(repo_path, commit_msg)
+    if not commit_ok:
+        result.summary = f"Commit failed: {commit_msg_out}"
+        logger.error("[%s] Deliver: %s", task_id, result.summary)
+        _cleanup_handoff_failure(repo_path, result.branch_name, created_branch=created_branch)
+        return result
+
+    result.commit_messages.append(commit_msg)
+    result.branch_ready = True
+    result.summary = f"Prepared {result.branch_name} for Tech Lead review."
+    logger.info("[%s] Deliver: %s", task_id, result.summary)
+    return result
+
+
 def run_deliver(
     *,
     task_id: str,
@@ -79,42 +145,14 @@ def run_deliver(
                 logger.warning("[%s] Tool agent %s deliver() failed: %s", task_id, kind.value, exc)
 
         if not merge_to_development:
-            slug = (
-                re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40]
-                or "task"
+            return _prepare_handoff_branch(
+                task_id=task_id,
+                repo_path=repo_path,
+                deliver_files=deliver_files,
+                summary=summary,
+                task_title=task_title,
+                feature_branch_name=feature_branch_name,
             )
-            branch_name = feature_branch_name
-            if branch_name:
-                ok, checkout_msg = checkout_branch(repo_path, branch_name)
-                if not ok:
-                    result.summary = f"Feature branch checkout failed: {checkout_msg}"
-                    logger.error("[%s] Deliver: %s", task_id, result.summary)
-                    return result
-            else:
-                ok, branch_msg = create_feature_branch(
-                    repo_path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}"
-                )
-                if not ok:
-                    result.summary = f"Feature branch creation failed: {branch_msg}"
-                    logger.error("[%s] Deliver: %s", task_id, result.summary)
-                    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-                    return result
-                branch_name = branch_msg or f"feature/{task_id}-{slug}"
-            result.branch_name = branch_name or ""
-            scope = slug[:20]
-            commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=scope, summary=summary[:72])
-            payload = _FilesPayload(deliver_files, summary, commit_msg)
-            write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
-            if not write_ok:
-                result.summary = f"Write failed: {write_msg}"
-                logger.error("[%s] Deliver: %s", task_id, result.summary)
-                return result
-            commit_working_tree(repo_path, "chore: finalize branch for tech lead review")
-            result.commit_messages.append(commit_msg)
-            result.branch_ready = True
-            result.summary = f"Prepared {result.branch_name} for Tech Lead review."
-            logger.info("[%s] Deliver: %s", task_id, result.summary)
-            return result
 
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
         if git_agent is not None and hasattr(git_agent, "deliver"):
@@ -147,39 +185,16 @@ def run_deliver(
         return result
 
     if not merge_to_development:
-        slug = re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
-        branch_name = feature_branch_name
-        if branch_name:
-            ok, checkout_msg = checkout_branch(repo_path, branch_name)
-            if not ok:
-                result.summary = f"Feature branch checkout failed: {checkout_msg}"
-                logger.error("[%s] Deliver: %s", task_id, result.summary)
-                return result
-        else:
-            ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
-            if not ok:
-                result.summary = f"Feature branch creation failed: {branch_msg}"
-                logger.error("[%s] Deliver: %s", task_id, result.summary)
-                checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-                return result
-            branch_name = branch_msg or f"feature/{task_id}-{slug}"
-        result.branch_name = branch_name or ""
-        scope = slug[:20]
-        commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=scope, summary=summary[:72])
-        payload = _FilesPayload(deliver_files, summary, commit_msg)
-        write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
-        if not write_ok:
-            result.summary = f"Write failed: {write_msg}"
-            logger.error("[%s] Deliver: %s", task_id, result.summary)
-            return result
-        commit_working_tree(repo_path, "chore: finalize branch for tech lead review")
-        result.commit_messages.append(commit_msg)
-        result.branch_ready = True
-        result.summary = f"Prepared {result.branch_name} for Tech Lead review."
-        logger.info("[%s] Deliver: %s", task_id, result.summary)
-        return result
+        return _prepare_handoff_branch(
+            task_id=task_id,
+            repo_path=repo_path,
+            deliver_files=deliver_files,
+            summary=summary,
+            task_title=task_title,
+            feature_branch_name=feature_branch_name,
+        )
 
-    slug = re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
+    slug = _make_slug(task_id, task_title)
     ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
     if not ok:
         result.summary = f"Feature branch creation failed: {branch_msg}"

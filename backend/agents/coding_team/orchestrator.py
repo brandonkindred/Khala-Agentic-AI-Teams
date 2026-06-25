@@ -431,8 +431,7 @@ def _target_matches_agent(target_team: Optional[str], agent_id: str) -> bool:
     target = _team_key(target_team)
     if not target:
         return True
-    key = (agent_id or "").strip().lower().replace("-", "_").replace(" ", "_")
-    return target == key
+    return target == _team_key(agent_id)
 
 
 def _worker_team_key(worker: Any) -> str:
