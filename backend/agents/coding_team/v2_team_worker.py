@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
 from typing import Any, Dict, List
@@ -85,6 +86,18 @@ def _validate_task_interface(task: Any) -> None:
         raise ValueError("coding-team task is missing a non-empty id")
 
 
+def _accepts_keyword(fn: Any, name: str) -> bool:
+    """Return whether a callable accepts a named keyword argument."""
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    return any(
+        param.kind == inspect.Parameter.VAR_KEYWORD or param_name == name
+        for param_name, param in signature.parameters.items()
+    )
+
+
 class V2TeamWorker:
     """Coding-team worker facade for backend_code_v2_team/frontend_code_v2_team."""
 
@@ -159,16 +172,11 @@ class V2TeamWorker:
                 "open_questions": [],
                 "error": str(exc),
             }
+        workflow_kwargs = {"repo_path": path, "task": se_task}
+        if _accepts_keyword(self.team_lead.run_workflow, "merge_to_development"):
+            workflow_kwargs["merge_to_development"] = False
         try:
-            result = self.team_lead.run_workflow(
-                repo_path=path,
-                task=se_task,
-                merge_to_development=False,
-            )
-        except TypeError:
-            # Defensive compatibility for any injected fake that has not adopted the
-            # merge_to_development flag yet. Real in-repo v2 teams support it.
-            result = self.team_lead.run_workflow(repo_path=path, task=se_task)
+            result = self.team_lead.run_workflow(**workflow_kwargs)
         except Exception as exc:  # noqa: BLE001 - worker failure is task-local
             logger.exception("%s worker failed for task %s", self._team_label, task_id)
             return {

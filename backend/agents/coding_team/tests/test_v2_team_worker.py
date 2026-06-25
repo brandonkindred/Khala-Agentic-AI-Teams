@@ -113,6 +113,62 @@ def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
     assert lead.called is False
 
 
+def test_v2_worker_supports_legacy_workflow_without_merge_keyword(tmp_path) -> None:
+    class _LegacyLead:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, Any]] = []
+
+        def run_workflow(self, repo_path, task) -> Any:
+            self.calls.append({"repo_path": repo_path, "task": task})
+            return SimpleNamespace(
+                success=True,
+                summary="Implemented API.",
+                deliver_result=SimpleNamespace(
+                    branch_name="feature/api",
+                    branch_ready=True,
+                    commit_messages=["feat(api): add endpoint"],
+                ),
+            )
+
+    lead = _LegacyLead()
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=lead,
+    )
+
+    out = worker.run_implement(Task(id="api", title="API", description="Build API"), tmp_path)
+
+    assert out["status"] == "in_review"
+    assert len(lead.calls) == 1
+
+
+def test_v2_worker_does_not_retry_internal_type_error_in_merge_mode(tmp_path) -> None:
+    class _TypeErrorLead:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, Any]] = []
+
+        def run_workflow(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            raise TypeError("internal workflow bug")
+
+    lead = _TypeErrorLead()
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=lead,
+    )
+
+    out = worker.run_implement(Task(id="api", title="API", description="Build API"), tmp_path)
+
+    assert out["status"] == "failed"
+    assert out["error"] == "internal workflow bug"
+    assert len(lead.calls) == 1
+    assert lead.calls[0]["merge_to_development"] is False
+
+
 def test_v2_worker_preserves_failed_result_even_when_branch_ready(tmp_path) -> None:
     class _PartialLead:
         def run_workflow(self, **_kwargs: Any) -> Any:

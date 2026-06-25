@@ -742,6 +742,13 @@ def test_target_match_normalizes_raw_v2_agent_ids() -> None:
     assert orch_mod._target_matches_agent("frontend_v2", "backend_v2_worker_1") is False
 
 
+def test_quality_gate_type_uses_v2_stack_inference_for_hint_stack_names() -> None:
+    """Hint-only stack names still map to canonical quality gate agent types."""
+    assert orch_mod._quality_gate_agent_type("Angular") == "frontend"
+    assert orch_mod._quality_gate_agent_type("Spring Boot") == "backend"
+    assert orch_mod._quality_gate_agent_type("Python") == "backend"
+
+
 def test_target_team_alias_adds_missing_backend_v2_stack_spec() -> None:
     """Backend-owned aliases repair an incomplete stack roster before worker creation."""
     graph = TaskGraphService(job_id="j1")

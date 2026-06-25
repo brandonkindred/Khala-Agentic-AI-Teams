@@ -423,6 +423,11 @@ def _quality_gate_agent_type(stack_name: Optional[str]) -> str:
         return "frontend"
     if key == "backend_v2":
         return "backend"
+    inferred = _v2_team_kind_for_stack(
+        StackSpec(name=(stack_name or "").strip(), tools_services=[])
+    )
+    if inferred in {"frontend", "backend"}:
+        return inferred
     return (stack_name or "backend").strip() or "backend"
 
 
