@@ -27,6 +27,7 @@ from code_review_agent.false_positive_filter import (
     _code_fence_for,
     _coerce_verdict,
     _parse_verdicts,
+    _strip_numbered_prefixes,
     filter_false_positives,
 )
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
@@ -347,6 +348,100 @@ def test_find_function_at_line_non_python_no_construct() -> None:
     _, _, _, find_function_at_line = _build_tools(idx)
     result = find_function_at_line("snippet.ts", 1)
     assert "Could not identify" in result
+
+
+# --------------------------------------------------------------------------- pre-numbered content
+
+
+def test_strip_numbered_prefixes_plain_content_unchanged() -> None:
+    """Plain content (no ``N: `` prefixes) is returned unchanged with no remap."""
+    content = "function foo() {\n  return 1;\n}\n"
+    stripped, physical, mapper = _strip_numbered_prefixes(content, line_number=2)
+    assert stripped == content
+    assert physical == 2
+    assert mapper is None
+
+
+def test_strip_numbered_prefixes_detects_and_strips() -> None:
+    """Pre-numbered hunk content is stripped and the target remapped to a physical index."""
+    # Simulate render_annotated_hunks output: original lines 4240-4242.
+    content = "4240: const a = 1;\n4241: const b = 2;\n4242: return a + b;\n"
+    stripped, physical, mapper = _strip_numbered_prefixes(content, line_number=4242)
+    assert "4242:" not in stripped
+    assert stripped == "const a = 1;\nconst b = 2;\nreturn a + b;"
+    # Target original line 4242 maps to physical line 3.
+    assert physical == 3
+    assert mapper is not None
+    assert mapper(3) == 4242  # physical 3 → original 4242
+    assert mapper(1) == 4240  # physical 1 → original 4240
+
+
+def test_strip_numbered_prefixes_fallback_to_last_before() -> None:
+    """When the exact target line is absent (e.g., a removed line), use the last line before it."""
+    # Only lines 100 and 102 are present; line 101 was a removed line not in the hunk.
+    content = "100: const x = 1;\n102: const y = 2;\n"
+    stripped, physical, mapper = _strip_numbered_prefixes(content, line_number=101)
+    # physical index should be 1 (original line 100, last before 101).
+    assert physical == 1
+    assert mapper(1) == 100
+
+
+def test_strip_numbered_prefixes_empty_content() -> None:
+    """Empty content returns unchanged with no remap."""
+    stripped, physical, mapper = _strip_numbered_prefixes("", line_number=1)
+    assert stripped == ""
+    assert physical == 1
+    assert mapper is None
+
+
+def test_find_function_at_line_pre_numbered_python() -> None:
+    """Tool strips N: prefixes and correctly identifies the Python function via AST."""
+    # Simulate a hunk starting at original line 100. The def is at original line 101.
+    content = "100: x = setup()\n101: def process(data):\n102:     return data * 2\n"
+    idx = CodebaseIndex(files={"worker.py": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    # Ask for original line 102, which is inside 'process'.
+    result = find_function_at_line("worker.py", 102)
+    assert "process" in result
+    # The reported line number should use original numbering, not physical index.
+    assert "102" in result
+
+
+def test_find_function_at_line_pre_numbered_non_python() -> None:
+    """Tool strips N: prefixes and reports the original line numbers for non-Python files."""
+    # Simulate a TypeScript hunk at original lines 4240-4243.
+    content = (
+        "4240: export class DataService {\n"
+        "4241:   private data: string;\n"
+        "4242:   process() {\n"
+        "4243:     return this.data;\n"
+    )
+    idx = CodebaseIndex(files={"service.ts": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    # Ask for original line 4243.
+    result = find_function_at_line("service.ts", 4243)
+    # Should report the original line number, not the physical line 1.
+    assert "4240" in result
+    # Should NOT report a physical line like "1" as the start.
+    assert "starting at line 1" not in result
+
+
+def test_find_function_at_line_pre_numbered_large_line_number() -> None:
+    """A large original line number (as from a real PR diff) does not confuse the heuristic."""
+    # The bug: with line_number=4242 and a 3-line file (physical lines 1-3),
+    # ``i > line_number`` never fired and every column-0 line looked like a start.
+    content = (
+        "4240: const a = 1;\n"
+        "4241: const b = 2;\n"
+        "4242: function getResult() { return a + b; }\n"
+    )
+    idx = CodebaseIndex(files={"util.js": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("util.js", 4242)
+    # Must report original line 4242 (the function line), not physical line 3.
+    assert "4242" in result
+    # Must not claim a line like "3" as the start (that would be a pre-fix bug).
+    assert "starting at line 3" not in result
 
 
 # --------------------------------------------------------------------------- verdict parsing
