@@ -12,8 +12,8 @@ from __future__ import annotations
 from strands.tools.registry import ToolRegistry
 from strands.types.tools import AgentTool
 
-from agent_repo_tools import REPO_INSPECT_TOOL_DEFINITIONS, build_repo_inspect_handlers
 from agent_llm_tools_service.strands_bridge import build_strands_tools
+from agent_repo_tools import REPO_INSPECT_TOOL_DEFINITIONS, build_repo_inspect_handlers
 
 _NAMES = sorted(d["function"]["name"] for d in REPO_INSPECT_TOOL_DEFINITIONS)
 

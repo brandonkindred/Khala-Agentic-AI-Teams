@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from coding_team import orchestrator as orch_mod
-from coding_team.models import CodingTeamPlanInput, StackSpec, Task, TaskStatus
+from coding_team.models import CodingTeamPlanInput, StackSpec, TaskStatus
 from coding_team.orchestrator import (
     CodingTeamSwarm,
     _format_decisions,
