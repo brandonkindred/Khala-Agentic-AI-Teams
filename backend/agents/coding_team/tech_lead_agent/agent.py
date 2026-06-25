@@ -153,7 +153,7 @@ class TechLeadAgent:
     def run_plan_to_task_graph(self, plan: CodingTeamPlanInput) -> Dict[str, Any]:
         """
         Given plan from Planning team, return { "tasks": [...], "stacks": [...], "open_questions": [...] }.
-        Orchestrator will add tasks to Task Graph and create Senior SWEs from stacks. A non-empty
+        Orchestrator will add tasks to Task Graph and create v2 implementation workers from stacks. A non-empty
         ``open_questions`` means the Tech Lead needs a product/design decision it must not make
         itself; the orchestrator pauses the job for the user rather than building tasks.
 
@@ -189,6 +189,13 @@ class TechLeadAgent:
                         "title": t.get("title", t["id"]),
                         "description": t.get("description", ""),
                         "dependencies": list(t.get("dependencies") or []),
+                        "target_team": str(
+                            t.get("target_team")
+                            or t.get("team")
+                            or t.get("stack")
+                            or t.get("assignee_stack")
+                            or ""
+                        ).strip(),
                     }
                 )
         stacks = []

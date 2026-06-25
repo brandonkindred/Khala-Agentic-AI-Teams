@@ -1,7 +1,7 @@
 """Unit tests for ``coding_team.agent_status``: the pure per-agent roster derivation.
 
 These call ``build_agent_statuses``/``derive_stack_roster`` directly (no TestClient) so each
-branch — engineer working/in_review/idle, the Tech Lead's planning/reviewing/idle, and the
+branch — worker working/in_review/idle, the Tech Lead's planning/reviewing/idle, and the
 single current_activity overlay onto the right card — is exercised in isolation. The fixture
 shapes (``stack_specs`` dicts and ``agent_task_map`` keyed by stack name) mirror what the
 orchestrator persists (see ``test_swarm_review.py``).
@@ -71,7 +71,7 @@ def test_derive_roster_avoids_cross_name_collisions():
     assert len(set(ids)) == len(ids)  # all unique — the key guarantee
 
 
-def test_duplicate_stack_names_yield_distinct_engineer_cards():
+def test_duplicate_stack_names_yield_distinct_worker_cards():
     # End-to-end: two same-named stacks each mapped to their own task render as two distinct cards.
     stacks = [{"name": "backend"}, {"name": "backend"}]
     amap = {"backend": "t1", "backend_2": "t2"}
@@ -152,14 +152,14 @@ def test_empty_stacks_tech_lead_idle_when_coding_and_no_review():
     assert entries[0].status == "idle"
 
 
-def test_one_engineer_per_stack_in_order():
+def test_one_worker_per_stack_in_order():
     entries = build_agent_statuses(
         [{"name": "frontend"}, {"name": "backend"}], {}, [], None, "coding"
     )
     assert [e.agent_id for e in entries] == [TECH_LEAD_AGENT_ID, "frontend", "backend"]
     eng = entries[1]
-    assert eng.role == "senior_engineer"
-    assert eng.display_name == "Senior Engineer — frontend"
+    assert eng.role == "implementation_worker"
+    assert eng.display_name == "Implementation Worker - frontend"
     assert eng.stack == "frontend"
 
 

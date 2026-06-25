@@ -138,6 +138,7 @@ class BackendDevelopmentAgent:
         problem_solver_agent: Any = None,
         job_updater: Optional[Callable[..., None]] = None,
         review_config: Optional[MicrotaskReviewConfig] = None,
+        merge_to_development: bool = True,
     ) -> BackendCodeV2WorkflowResult:
         """
         Execute the full 5-phase backend-code-v2 lifecycle with per-microtask review gates.
@@ -421,9 +422,11 @@ class BackendDevelopmentAgent:
                 tool_agents=tool_agents,
                 task_description=task.description or "",
                 feature_branch_name=feature_branch_name,
+                merge_to_development=merge_to_development,
             )
             result.deliver_result = deliver_result
-            result.success = deliver_result.merged and failed_count == 0
+            delivered = deliver_result.merged if merge_to_development else deliver_result.branch_ready
+            result.success = delivered and failed_count == 0
             result.summary = f"{exec_result.summary} {deliver_result.summary}"
             if failed_count > 0:
                 result.needs_followup = True
@@ -488,6 +491,7 @@ class BackendCodeV2TeamLead:
         problem_solver_agent: Any = None,
         job_updater: Optional[Callable[..., None]] = None,
         review_config: Optional[MicrotaskReviewConfig] = None,
+        merge_to_development: bool = True,
     ) -> BackendCodeV2WorkflowResult:
         """
         Run Setup phase, then delegate to BackendDevelopmentAgent for the 5-phase cycle.
@@ -573,6 +577,7 @@ class BackendCodeV2TeamLead:
             problem_solver_agent=problem_solver_agent,
             job_updater=job_updater,
             review_config=review_config,
+            merge_to_development=merge_to_development,
         )
         result.success = inner.success
         result.current_phase = inner.current_phase

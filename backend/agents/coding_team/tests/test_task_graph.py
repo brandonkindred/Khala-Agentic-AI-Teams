@@ -125,6 +125,18 @@ def test_snapshot_restore_roundtrip() -> None:
     assert tg2.get_task_for_agent("agent-a").id == "t1"
 
 
+def test_snapshot_restore_preserves_target_team() -> None:
+    """target_team survives persistence so resumed jobs keep v2-team routing."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="UI", target_team="frontend_v2")
+    snap = tg.snapshot()
+
+    tg2 = TaskGraphService(job_id="j1")
+    tg2.restore(snap)
+
+    assert tg2.get_task("t1").target_team == "frontend_v2"
+
+
 def test_persist_callback_called() -> None:
     """Persist callback is invoked after mutations."""
     calls = []

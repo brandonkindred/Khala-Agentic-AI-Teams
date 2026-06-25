@@ -1,5 +1,4 @@
-"""Tests for the coding-team human-in-the-loop decision gate: orchestrator entry gate, Tech-Lead
-clarify loop, Senior-SWE escalation, and the agent-level open_questions channels."""
+"""Tests for the coding-team human-in-the-loop decision gate."""
 
 from __future__ import annotations
 
@@ -568,80 +567,20 @@ def test_plan_to_task_graph_failure_includes_open_questions_key(monkeypatch):
     assert out["open_questions"] == []
 
 
-# --------------------------------------------------------------------------- Senior SWE channel
-
-
-def test_run_implement_needs_decision(tmp_path, monkeypatch):
-    from coding_team.senior_software_engineer_agent import agent as swe_mod
-
-    class FakeAgent:
-        def __init__(self, **kw):
-            pass
-
-        def __call__(self, prompt):
-            return (
-                '{"summary":"need info","files_to_create_or_edit":[],"commands_run":[],'
-                '"ready_for_review":true,"open_questions":[{"question_text":"Which default?"}]}'
-            )
-
-    monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
-    swe = swe_mod.SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
-    out = swe.run_implement(Task(id="t1", title="T", description="d"), tmp_path, repo_context="")
-    # needs_decision wins even though the model marked ready_for_review=true.
-    assert out["status"] == "needs_decision"
-    assert out["open_questions"][0]["question_text"] == "Which default?"
-
-
-def test_run_implement_no_questions_is_in_review(tmp_path, monkeypatch):
-    from coding_team.senior_software_engineer_agent import agent as swe_mod
-
-    class FakeAgent:
-        def __init__(self, **kw):
-            pass
-
-        def __call__(self, prompt):
-            return '{"summary":"ok","files_to_create_or_edit":[],"commands_run":[],"ready_for_review":true}'
-
-    monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
-    swe = swe_mod.SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
-    out = swe.run_implement(Task(id="t1", title="T", description="d"), tmp_path, repo_context="")
-    assert out["status"] == "in_review"
-    assert out["open_questions"] == []
-
-
-def test_run_implement_no_git_tools_path(tmp_path, monkeypatch):
-    from coding_team.senior_software_engineer_agent import agent as swe_mod
-
-    class FakeAgent:
-        def __init__(self, **kw):
-            pass
-
-        def __call__(self, prompt):
-            return (
-                '{"summary":"ok","files_to_create_or_edit":[{"path":"a.py","content":"x"}],'
-                '"commands_run":["pytest"],"ready_for_review":true}'
-            )
-
-    monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
-    swe = swe_mod.SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
-    out = swe.run_implement(
-        Task(id="t1", title="T", description="d"), tmp_path, use_git_tools=False
-    )
-    assert out["status"] == "in_review"
-    assert out["files_to_create_or_edit"][0]["path"] == "a.py"
-    assert out["commands_run"] == ["pytest"]
-
-
 # --------------------------------------------------------------------------- orchestrator end-to-end
 
 
 def _stub_agents(monkeypatch, tech_lead_cls, swarm_cls):
-    class SWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
+    class Worker:
+        def __init__(self, agent_id: str):
+            self.agent_id = agent_id
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", tech_lead_cls)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", SWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: Worker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", swarm_cls)
 
 
@@ -962,23 +901,6 @@ def test_orchestrator_returns_when_swarm_aborts(tmp_path, monkeypatch):
     # An aborted swarm must NOT be reported as completed.
     assert job.get("status") != "completed"
     assert job.get("phase") != "completed"
-
-
-def test_run_implement_llm_exception_returns_failed(tmp_path, monkeypatch):
-    from coding_team.senior_software_engineer_agent import agent as swe_mod
-
-    class BoomAgent:
-        def __init__(self, **kw):
-            pass
-
-        def __call__(self, prompt):
-            raise RuntimeError("llm down")
-
-    monkeypatch.setattr(swe_mod, "Agent", BoomAgent)
-    swe = swe_mod.SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
-    out = swe.run_implement(Task(id="t1", title="T", description="d"), tmp_path)
-    assert out["status"] == "failed"
-    assert "llm down" in out["error"]
 
 
 def test_escalate_decision_applies_answer_even_at_revision_cap(tmp_path, monkeypatch):

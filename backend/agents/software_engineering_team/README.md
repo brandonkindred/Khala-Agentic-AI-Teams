@@ -48,7 +48,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | **Discovery / Design (planning)** | planning_v3_team | Planning V3 workflow (intake → discovery → requirements → synthesis → document production); planning_v3_adapter maps handoff to ProductRequirements and project_overview for Tech Lead and Architecture |
 | **Design (post-planning)** | top-level | Architecture Expert, Tech Lead, planning consolidation |
 | **Setup** | top-level | Git Setup |
-| **Implementation** | **coding_team** (sub-team; `backend/agents/coding_team/`) | Tech Lead, stack-specialist Senior SWEs, Task Graph — **default SE execution path** after Planning V3 + adapter (replaces legacy Tech Lead task queues + backend/frontend v2 workers for new runs) |
+| **Implementation** | **coding_team** (sub-team; `backend/agents/coding_team/`) | Tech Lead, frontend_v2/backend_v2 workers, Task Graph — **default SE execution path** after Planning V3 + adapter |
 | **Implementation** | backend | Backend Expert (legacy path when not using coding_team) |
 | **Implementation** | frontend_team | UX Designer, UI Designer, Design System, Frontend Architect, Feature Agent, UX Engineer, Performance Engineer, Build/Release |
 | **Implementation** | ai_agent_development_team | Intake/Planning/Execution/Review/Problem-solving/Delivery phases for spec-to-agent-system workflows with dedicated tool agents |

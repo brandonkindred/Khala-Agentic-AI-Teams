@@ -22,7 +22,7 @@ class TaskStatus(str, Enum):
 
 
 class StackSpec(BaseModel):
-    """Defines one tech stack (e.g. frontend, backend). One Senior SWE per stack."""
+    """Defines one implementation team/stack, e.g. frontend_v2 or backend_v2."""
 
     tools_services: List[str] = Field(
         default_factory=list,
@@ -61,7 +61,15 @@ class Task(BaseModel):
     status: TaskStatus = Field(default=TaskStatus.TO_DO)
     assigned_agent_id: Optional[str] = Field(
         default=None,
-        description="Agent (Senior SWE) assigned to this task",
+        description="Implementation worker assigned to this task",
+    )
+    target_team: Optional[str] = Field(
+        default=None,
+        description=(
+            "Preferred implementation team/stack for this task, e.g. "
+            "'frontend_v2', 'backend_v2', or 'devops'. The Tech Lead sets this "
+            "during planning and assignment uses it as a routing hint."
+        ),
     )
     feature_branch: Optional[str] = Field(
         default=None,
@@ -86,7 +94,7 @@ class Task(BaseModel):
     )
     changes_summary: Optional[str] = Field(
         default=None,
-        description="Senior SWE's summary of the implemented changes, for Tech Lead review",
+        description="Implementation summary for Tech Lead review",
     )
     revision_count: int = Field(
         default=0,
@@ -120,13 +128,6 @@ class Task(BaseModel):
             "as 'already done' rather than real merged work."
         ),
     )
-
-
-class SeniorEngineerSpec(BaseModel):
-    """Spec for one Senior SWE agent: agent_id and the stack they specialize in."""
-
-    agent_id: str = Field(..., description="Unique agent id (e.g. stack name or uuid)")
-    stack_spec: StackSpec = Field(..., description="Tech stack this agent specializes in")
 
 
 # ---------------------------------------------------------------------------
@@ -218,22 +219,22 @@ class AgentStatusEntry(BaseModel):
 
     Derived (never persisted) from the job's stack specs, agent->task map, task-graph
     snapshot, and current_activity by ``coding_team.agent_status.build_agent_statuses``. One
-    entry per agent: the Tech Lead (coordinator) plus one Senior SWE per stack.
+    entry per agent: the Tech Lead (coordinator) plus one implementation worker per stack/team.
 
     Invariants:
-        - ``role`` is ``"tech_lead"`` or ``"senior_engineer"``.
-        - For an engineer, ``status`` is ``working``/``in_review``/``idle``; for the Tech
+        - ``role`` is ``"tech_lead"`` or ``"implementation_worker"``.
+        - For a worker, ``status`` is ``working``/``in_review``/``idle``; for the Tech
           Lead, ``planning``/``reviewing``/``idle``.
         - ``current_task_id``/``current_task_title`` are set only while the agent holds a live
           (non-terminal) task; the ``current_step``/``activity_detail``/``activity_fraction``
           fields only when this agent owns the single live ``current_activity``.
     """
 
-    agent_id: str = Field(..., description="Stable agent id (engineer stack name, or 'tech_lead')")
-    role: str = Field(..., description="'tech_lead' or 'senior_engineer'")
+    agent_id: str = Field(..., description="Stable agent id (worker stack/team name, or 'tech_lead')")
+    role: str = Field(..., description="'tech_lead' or 'implementation_worker'")
     display_name: str = Field(..., description="Human-readable label for the agent card")
     stack: Optional[str] = Field(
-        default=None, description="Stack name for engineers; None for the Tech Lead"
+        default=None, description="Stack/team name for implementation workers; None for the Tech Lead"
     )
     tools_services: List[str] = Field(
         default_factory=list,

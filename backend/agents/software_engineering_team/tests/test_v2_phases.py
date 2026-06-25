@@ -414,6 +414,36 @@ def test_fe_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     assert result.merged is True
 
 
+def test_fe_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -> None:
+    """merge_to_development=False prepares a branch for external Tech Lead review."""
+    from software_engineering_team.frontend_code_v2_team.phases import deliver
+
+    calls = {"merge": 0, "delete": 0}
+    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (True, "feature/x"))
+    monkeypatch.setattr(deliver, "write_agent_output", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr(deliver, "commit_working_tree", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr(
+        deliver, "merge_branch", lambda *a, **kw: (calls.__setitem__("merge", 1), (True, ""))[1]
+    )
+    monkeypatch.setattr(
+        deliver, "delete_branch", lambda *a, **kw: calls.__setitem__("delete", 1)
+    )
+    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: (True, ""))
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.ts": "x"},
+        summary="impl",
+        merge_to_development=False,
+    )
+
+    assert result.branch_ready is True
+    assert result.merged is False
+    assert result.branch_name == "feature/x"
+    assert calls == {"merge": 0, "delete": 0}
+
+
 def test_be_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     """Backend deliver is identical; exercise the inline branch."""
     from software_engineering_team.backend_code_v2_team.phases import deliver
@@ -428,3 +458,33 @@ def test_be_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
         task_id="t1", repo_path=tmp_path, files={"a.py": "x"}, summary="impl"
     )
     assert result.merged is True
+
+
+def test_be_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -> None:
+    """Backend deliver supports the same branch handoff mode."""
+    from software_engineering_team.backend_code_v2_team.phases import deliver
+
+    calls = {"merge": 0, "delete": 0}
+    monkeypatch.setattr(deliver, "create_feature_branch", lambda *a, **kw: (True, "feature/api"))
+    monkeypatch.setattr(deliver, "write_agent_output", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr(deliver, "commit_working_tree", lambda *a, **kw: (True, ""))
+    monkeypatch.setattr(
+        deliver, "merge_branch", lambda *a, **kw: (calls.__setitem__("merge", 1), (True, ""))[1]
+    )
+    monkeypatch.setattr(
+        deliver, "delete_branch", lambda *a, **kw: calls.__setitem__("delete", 1)
+    )
+    monkeypatch.setattr(deliver, "checkout_branch", lambda *a, **kw: (True, ""))
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.py": "x"},
+        summary="impl",
+        merge_to_development=False,
+    )
+
+    assert result.branch_ready is True
+    assert result.merged is False
+    assert result.branch_name == "feature/api"
+    assert calls == {"merge": 0, "delete": 0}

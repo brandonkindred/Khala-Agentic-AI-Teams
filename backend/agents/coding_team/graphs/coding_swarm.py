@@ -51,7 +51,7 @@ def build_coding_swarm(
     implementer = build_agent(
         name="implementer",
         system_prompt=(
-            "You are a Senior Software Engineer. Implement the assigned task:\n"
+            "You are a frontend_v2/backend_v2 implementation team worker. Implement the assigned task:\n"
             "1. Analyze the requirements and acceptance criteria\n"
             "2. Write clean, well-structured code following project conventions\n"
             "3. Include appropriate tests\n"

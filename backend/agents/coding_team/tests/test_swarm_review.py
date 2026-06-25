@@ -17,10 +17,6 @@ import pytest
 from coding_team import orchestrator as orch_mod
 from coding_team.models import CodingTeamPlanInput, StackSpec, Task, TaskStatus
 from coding_team.orchestrator import CodingTeamSwarm, run_coding_team_orchestrator
-from coding_team.senior_software_engineer_agent.agent import (
-    SeniorSWEAgent,
-    _render_revision_feedback,
-)
 from coding_team.task_graph import TaskGraphService
 
 GIT_UTILS = "software_engineering_team.shared.git_utils"
@@ -78,7 +74,7 @@ class StubTechLead:
 
 
 class StubWorker:
-    """Duck-typed Senior SWE that always reports a ready implementation."""
+    """Duck-typed implementation worker that always reports a ready implementation."""
 
     def __init__(self, agent_id: str) -> None:
         self.agent_id = agent_id
@@ -392,67 +388,6 @@ def test_persistent_implement_failure_fails_task(tmp_path, monkeypatch):
     assert len(worker.implement_calls) <= orch_mod.MAX_TASK_REVISIONS + 1  # bounded, not 50
 
 
-def test_revision_feedback_threaded_into_implement_prompt(tmp_path, monkeypatch):
-    """Reviewer reasons on the task reach the SWE's implement prompt so it revises, not restarts."""
-    from coding_team.senior_software_engineer_agent import agent as swe_mod
-
-    captured: Dict[str, str] = {}
-
-    class FakeAgent:
-        def __init__(self, **kw):
-            pass
-
-        def __call__(self, prompt):
-            captured["prompt"] = prompt
-            return (
-                '{"summary":"ok","files_to_create_or_edit":[],"commands_run":[],'
-                '"ready_for_review":true,"feature_branch":"feature/t1"}'
-            )
-
-    monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
-    swe = SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
-    task = Task(
-        id="t1",
-        title="T1",
-        description="do the thing",
-        revision_feedback=[
-            {
-                "source": "tech_lead",
-                "reason": "missing tests",
-                "requested_changes": ["add unit tests"],
-            }
-        ],
-    )
-
-    swe.run_implement(task, tmp_path, repo_context="ctx")
-
-    assert "REVISIONS REQUESTED" in captured["prompt"]
-    assert "missing tests" in captured["prompt"]
-    assert "add unit tests" in captured["prompt"]
-
-
-def test_render_revision_feedback_formats_entries():
-    out = _render_revision_feedback(
-        [
-            {"source": "tech_lead", "reason": "bad", "requested_changes": ["x", "y"]},
-            {"type": "build", "error": "boom"},
-        ]
-    )
-    assert "[tech_lead] bad" in out
-    assert "  - x" in out
-    assert "  - y" in out
-    assert "[build] boom" in out
-
-
-def test_render_revision_feedback_empty():
-    assert _render_revision_feedback([]) == ""
-
-
-def test_render_revision_feedback_non_dict_entry():
-    """Defensive: a non-dict feedback entry is rendered as a plain bullet, not dropped."""
-    assert "- just a string" in _render_revision_feedback(["just a string"])
-
-
 def test_approved_task_merges(tmp_path, monkeypatch):
     _patch_git(monkeypatch, merge=(True, "ok"))
     swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
@@ -586,10 +521,6 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
                 "stacks": [{"name": "backend", "tools_services": []}],
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -599,7 +530,11 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
             self.graph.update_task("t2", status=TaskStatus.FAILED)
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
     # No job service in unit tests — skip the persistence write.
 
@@ -764,6 +699,43 @@ def test_return_for_revision_unassigns_task(tmp_path, monkeypatch):
     assert graph.assign_task_to_agent("t1", "a1") is True
 
 
+def test_assignment_respects_target_team_and_falls_back_to_matching_v2_worker(tmp_path):
+    """A mismatched LLM assignment is ignored; target_team routes to the matching v2 worker."""
+
+    class MismatchingTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "backend_v2", "task_id": "ui"}]}
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, MismatchingTL(approved=True), workers)
+    graph.add_task("ui", title="Build UI", target_team="frontend_v2")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    task = graph.get_task("ui")
+    assert task.assigned_agent_id == "frontend_v2"
+    assert graph.get_task_for_agent("backend_v2") is None
+
+
+def test_target_team_adds_missing_v2_stack_specs() -> None:
+    """Targeted v2 tasks repair an incomplete stack roster before worker creation."""
+    graph = TaskGraphService(job_id="j1")
+    graph.add_task("ui", title="Build UI", target_team="frontend_v2")
+    graph.add_task("api", title="Build API", target_team="backend_v2")
+
+    stacks = orch_mod._ensure_target_team_stack_specs(
+        [{"name": "backend", "tools_services": []}],
+        graph.get_tasks(),
+    )
+
+    assert {
+        "name": "frontend_v2",
+        "tools_services": ["Angular", "TypeScript", "React", "CSS", "HTML"],
+    } in stacks
+    assert {"name": "backend", "tools_services": []} in stacks
+    assert [s.get("name") for s in stacks].count("backend_v2") == 0
+
+
 # ----------------------------------------------------- IN_REVIEW is not re-implemented
 
 
@@ -890,10 +862,6 @@ def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
         def run_plan_to_task_graph(self, plan_input):
             raise AssertionError("planning must not run on resume")
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
@@ -905,7 +873,11 @@ def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
             pass  # leave the restored state as-is so we can assert on it
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", ExplodingTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     snapshot = {
@@ -957,10 +929,6 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
                 "stacks": [{"name": "backend", "tools_services": ["pytest"]}],
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -969,7 +937,11 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
             self.graph.mark_branch_merged("t1")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     updates: List[Dict[str, Any]] = []
@@ -1037,10 +1009,6 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
                 "stacks": [{"name": "backend", "tools_services": []}],
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -1049,7 +1017,11 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
             self.graph.mark_branch_merged("t1")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     updates: List[Dict[str, Any]] = []
@@ -1345,10 +1317,6 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
                 "completion_evidence": "",
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -1359,7 +1327,11 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
             self.graph.mark_branch_merged("t1")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     updates: List[Dict[str, Any]] = []
@@ -1394,10 +1366,6 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
                 "completion_evidence": "",
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -1409,7 +1377,11 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
             self.graph.mark_branch_merged("t1")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     updates: List[Dict[str, Any]] = []
@@ -1527,39 +1499,6 @@ def test_build_review_evidence_no_diff():
     assert orch_mod._build_review_evidence("ONLY SUMMARY", "") == "ONLY SUMMARY"
 
 
-# ----------------------------------------------------- implement passes inputs in full
-
-
-def test_implement_passes_full_task_description_and_repo_context(tmp_path, monkeypatch):
-    """A large task description and repo context reach the implement prompt in full — the
-    engineer's inputs are never truncated."""
-    from coding_team.senior_software_engineer_agent import agent as swe_mod
-
-    captured: Dict[str, str] = {}
-
-    class FakeAgent:
-        def __init__(self, **kw):
-            pass
-
-        def __call__(self, prompt):
-            captured["prompt"] = prompt
-            return (
-                '{"summary":"ok","files_to_create_or_edit":[],"commands_run":[],'
-                '"ready_for_review":true,"feature_branch":"feature/t1"}'
-            )
-
-    monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
-    swe = SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
-    huge = "X" * 60000
-    big_ctx = "C" * 30000
-    task = Task(id="t1", title="T1", description=huge)
-
-    swe.run_implement(task, tmp_path, repo_context=big_ctx)
-
-    assert huge in captured["prompt"]  # full description embedded, uncut
-    assert big_ctx in captured["prompt"]  # full repo context embedded, uncut
-
-
 # ----------------------------------------------------- live progress reporting (code review)
 
 
@@ -1669,7 +1608,11 @@ def test_orchestrator_does_not_stamp_activity_and_terminal_clears(tmp_path, monk
             kw["update_fn"](status_text="working")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: _PlanningTechLead())
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
 
     run_coding_team_orchestrator(
@@ -1869,7 +1812,11 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
             kw["persist_fn"]()
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: _PlanningTechLead())
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _MergingSwarm)
 
     run_coding_team_orchestrator(
@@ -1914,7 +1861,11 @@ def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
             kw["persist_fn"]()
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: object())
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
 
     run_coding_team_orchestrator(

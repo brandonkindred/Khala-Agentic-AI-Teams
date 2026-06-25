@@ -49,6 +49,7 @@ class TaskGraphService:
         out_of_scope: str = "",
         priority: str = "medium",
         subtasks: Optional[List[Any]] = None,
+        target_team: Optional[str] = None,
     ) -> Task:
         """Add a task. Id must be unique."""
         if task_id in self._tasks:
@@ -63,6 +64,7 @@ class TaskGraphService:
             out_of_scope=out_of_scope,
             priority=priority,
             subtasks=subtasks or [],
+            target_team=target_team,
         )
         self._tasks[task_id] = task
         self._maybe_persist()
@@ -239,7 +241,7 @@ class TaskGraphService:
         return True
 
     def set_task_in_review(self, task_id: str) -> bool:
-        """Mark task as In Review (Senior SWE handed off feature branch)."""
+        """Mark task as In Review after an implementation worker hands off a feature branch."""
         task = self._tasks.get(task_id)
         if not task:
             return False
@@ -311,6 +313,7 @@ class TaskGraphService:
                     "dependencies": t.dependencies,
                     "status": t.status.value if isinstance(t.status, TS) else str(t.status),
                     "assigned_agent_id": t.assigned_agent_id,
+                    "target_team": t.target_team,
                     "feature_branch": t.feature_branch,
                     "merged_at": t.merged_at.isoformat() if t.merged_at else None,
                     "acceptance_criteria": t.acceptance_criteria,
@@ -364,6 +367,7 @@ class TaskGraphService:
                 dependencies=tdata.get("dependencies", []),
                 status=TaskStatus(tdata.get("status", "to_do")),
                 assigned_agent_id=tdata.get("assigned_agent_id"),
+                target_team=tdata.get("target_team"),
                 feature_branch=tdata.get("feature_branch"),
                 merged_at=datetime.fromisoformat(tdata["merged_at"].replace("Z", "+00:00"))
                 if tdata.get("merged_at")

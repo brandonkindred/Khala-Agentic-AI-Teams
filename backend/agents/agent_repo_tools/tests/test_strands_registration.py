@@ -3,7 +3,7 @@
 The Strands registry silently drops unrecognized tool specs, so a misbuilt definition
 would leave an agent running without the tool. These tests pin that the inspection
 definitions become registrable ``AgentTool``s carrying their schema verbatim, using the
-same bridge (``_build_strands_tools``) the Senior SWE agent uses. They live here — beside
+shared Strands bridge. They live here — beside
 the definitions they guard — so they run in this module's CI job.
 """
 
@@ -13,13 +13,13 @@ from strands.tools.registry import ToolRegistry
 from strands.types.tools import AgentTool
 
 from agent_repo_tools import REPO_INSPECT_TOOL_DEFINITIONS, build_repo_inspect_handlers
-from coding_team.senior_software_engineer_agent.agent import _build_strands_tools
+from agent_llm_tools_service.strands_bridge import build_strands_tools
 
 _NAMES = sorted(d["function"]["name"] for d in REPO_INSPECT_TOOL_DEFINITIONS)
 
 
 def test_repo_inspect_tools_register_with_strands_registry(tmp_path) -> None:
-    tools = _build_strands_tools(
+    tools = build_strands_tools(
         build_repo_inspect_handlers(tmp_path), REPO_INSPECT_TOOL_DEFINITIONS
     )
     assert len(tools) == len(REPO_INSPECT_TOOL_DEFINITIONS)
@@ -28,7 +28,7 @@ def test_repo_inspect_tools_register_with_strands_registry(tmp_path) -> None:
 
 
 def test_repo_inspect_tool_spec_carries_definition_schema_verbatim(tmp_path) -> None:
-    tools = _build_strands_tools(
+    tools = build_strands_tools(
         build_repo_inspect_handlers(tmp_path), REPO_INSPECT_TOOL_DEFINITIONS
     )
     by_name = {t.tool_name: t for t in tools}
