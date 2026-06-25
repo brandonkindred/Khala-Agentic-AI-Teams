@@ -826,6 +826,58 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
     assert any(update.get("stack_specs") == [orch_mod._BACKEND_V2_STACK_SPEC] for update in updates)
 
 
+def test_backend_v2_worker_uses_injected_llm_getter(monkeypatch):
+    """Backend v2 worker construction must honor the coding-team LLM injection path."""
+    from software_engineering_team import backend_code_v2_team
+
+    captured_keys: List[str] = []
+
+    class FakeBackendLead:
+        def __init__(self, llm):
+            self.llm = llm
+
+    monkeypatch.setattr(backend_code_v2_team, "BackendCodeV2TeamLead", FakeBackendLead)
+
+    def _llm_getter(key: str) -> str:
+        captured_keys.append(key)
+        return f"{key}-client"
+
+    worker = orch_mod._build_implementation_worker(
+        "backend_v2",
+        StackSpec(name="backend_v2", tools_services=["Python"]),
+        _llm_getter,
+    )
+
+    assert captured_keys == ["backend"]
+    assert worker.team_lead.llm == "backend-client"
+
+
+def test_frontend_v2_worker_uses_injected_llm_getter(monkeypatch):
+    """Frontend v2 worker construction must honor the coding-team LLM injection path."""
+    from software_engineering_team import frontend_code_v2_team
+
+    captured_keys: List[str] = []
+
+    class FakeFrontendLead:
+        def __init__(self, llm):
+            self.llm = llm
+
+    monkeypatch.setattr(frontend_code_v2_team, "FrontendCodeV2TeamLead", FakeFrontendLead)
+
+    def _llm_getter(key: str) -> str:
+        captured_keys.append(key)
+        return f"{key}-client"
+
+    worker = orch_mod._build_implementation_worker(
+        "frontend_v2",
+        StackSpec(name="frontend_v2", tools_services=["React"]),
+        _llm_getter,
+    )
+
+    assert captured_keys == ["frontend"]
+    assert worker.team_lead.llm == "frontend-client"
+
+
 def test_target_team_alias_adds_missing_backend_v2_stack_spec() -> None:
     """Backend-owned aliases repair an incomplete stack roster before worker creation."""
     graph = TaskGraphService(job_id="j1")

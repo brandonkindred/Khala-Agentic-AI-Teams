@@ -529,16 +529,15 @@ def _build_implementation_worker(
             "Only frontend_v2 and backend_v2 implementation teams are available."
         )
     from coding_team.v2_team_worker import V2TeamWorker
-    from llm_service.factory import get_client
 
     if kind == "frontend":
         from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
 
-        team_lead = FrontendCodeV2TeamLead(get_client("frontend"))
+        team_lead = FrontendCodeV2TeamLead(llm_getter("frontend"))
     else:
         from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
 
-        team_lead = BackendCodeV2TeamLead(get_client("backend"))
+        team_lead = BackendCodeV2TeamLead(llm_getter("backend"))
     return V2TeamWorker(
         agent_id=agent_id,
         stack_spec=spec,
