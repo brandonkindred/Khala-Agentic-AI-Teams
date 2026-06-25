@@ -5,15 +5,19 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
+from coding_team import v2_team_worker as worker_mod
 from coding_team.models import StackSpec, Task
 from coding_team.v2_team_worker import V2TeamWorker
 
 
 class _FakeV2Lead:
-    def __init__(self) -> None:
+    def __init__(self, order: List[str] | None = None) -> None:
         self.calls: List[Dict[str, Any]] = []
+        self.order = order
 
     def run_workflow(self, **kwargs: Any) -> Any:
+        if self.order is not None:
+            self.order.append("workflow")
         self.calls.append(kwargs)
         return SimpleNamespace(
             success=True,
@@ -27,9 +31,26 @@ class _FakeV2Lead:
         )
 
 
-def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path) -> None:
+def _patch_branch_handoff(monkeypatch, *, branch: str = "feature/api", order=None):
+    def _create_feature_branch(repo_path, base_branch, feature_name):
+        if order is not None:
+            order.append("create")
+        return True, branch
+
+    def _checkout_branch(repo_path, branch_name):
+        if order is not None:
+            order.append("checkout")
+        return True, f"Checked out {branch_name}"
+
+    monkeypatch.setattr(worker_mod, "create_feature_branch", _create_feature_branch)
+    monkeypatch.setattr(worker_mod, "checkout_branch", _checkout_branch)
+
+
+def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path, monkeypatch) -> None:
     """The v2 worker calls the team in no-merge mode and includes Tech Lead feedback."""
-    lead = _FakeV2Lead()
+    order: List[str] = []
+    _patch_branch_handoff(monkeypatch, branch="feature/ui-task", order=order)
+    lead = _FakeV2Lead(order)
     worker = V2TeamWorker(
         agent_id="frontend_v2",
         stack_spec=StackSpec(name="frontend_v2", tools_services=["Angular"]),
@@ -57,15 +78,19 @@ def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path) -> Non
     assert out["feature_branch"] == "feature/ui-task"
     assert "Feedback addressed" in out["changes_summary"]
     assert "Add aria-labels" in out["changes_summary"]
+    assert order == ["create", "workflow"]
     assert lead.calls[0]["merge_to_development"] is False
     se_task = lead.calls[0]["task"]
     assert se_task.assignee == "frontend_v2"
+    assert se_task.feature_branch_name == "feature/ui-task"
     assert "CODING TEAM TECH LEAD FEEDBACK" in se_task.description
     assert "Missing accessibility labels" in se_task.description
     assert "renders list" in se_task.requirements
 
 
-def test_v2_worker_failure_reports_task_local_failure(tmp_path) -> None:
+def test_v2_worker_failure_reports_task_local_failure(tmp_path, monkeypatch) -> None:
+    _patch_branch_handoff(monkeypatch)
+
     class _FailingLead:
         def run_workflow(self, **_kwargs: Any) -> Any:
             return SimpleNamespace(
@@ -87,6 +112,36 @@ def test_v2_worker_failure_reports_task_local_failure(tmp_path) -> None:
     assert out["status"] == "failed"
     assert out["feature_branch"] == "feature/api"
     assert out["error"] == "pre-flight failed"
+
+
+def test_v2_worker_reports_branch_preparation_failure_before_v2_handoff(
+    tmp_path, monkeypatch
+) -> None:
+    class _Lead:
+        def __init__(self) -> None:
+            self.called = False
+
+        def run_workflow(self, **_kwargs: Any) -> Any:
+            self.called = True
+            return SimpleNamespace(success=True)
+
+    def _fail_create_feature_branch(repo_path, base_branch, feature_name):
+        return False, "development branch missing"
+
+    lead = _Lead()
+    monkeypatch.setattr(worker_mod, "create_feature_branch", _fail_create_feature_branch)
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=lead,
+    )
+
+    out = worker.run_implement(Task(id="api", title="API", description="Build API"), tmp_path)
+
+    assert out["status"] == "failed"
+    assert "development branch missing" in out["error"]
+    assert lead.called is False
 
 
 def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
@@ -113,7 +168,9 @@ def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
     assert lead.called is False
 
 
-def test_v2_worker_supports_legacy_workflow_without_merge_keyword(tmp_path) -> None:
+def test_v2_worker_supports_legacy_workflow_without_merge_keyword(tmp_path, monkeypatch) -> None:
+    _patch_branch_handoff(monkeypatch)
+
     class _LegacyLead:
         def __init__(self) -> None:
             self.calls: List[Dict[str, Any]] = []
@@ -144,7 +201,9 @@ def test_v2_worker_supports_legacy_workflow_without_merge_keyword(tmp_path) -> N
     assert len(lead.calls) == 1
 
 
-def test_v2_worker_does_not_retry_internal_type_error_in_merge_mode(tmp_path) -> None:
+def test_v2_worker_does_not_retry_internal_type_error_in_merge_mode(tmp_path, monkeypatch) -> None:
+    _patch_branch_handoff(monkeypatch)
+
     class _TypeErrorLead:
         def __init__(self) -> None:
             self.calls: List[Dict[str, Any]] = []
@@ -169,7 +228,9 @@ def test_v2_worker_does_not_retry_internal_type_error_in_merge_mode(tmp_path) ->
     assert lead.calls[0]["merge_to_development"] is False
 
 
-def test_v2_worker_preserves_failed_result_even_when_branch_ready(tmp_path) -> None:
+def test_v2_worker_preserves_failed_result_even_when_branch_ready(tmp_path, monkeypatch) -> None:
+    _patch_branch_handoff(monkeypatch)
+
     class _PartialLead:
         def run_workflow(self, **_kwargs: Any) -> Any:
             return SimpleNamespace(
@@ -199,7 +260,9 @@ def test_v2_worker_preserves_failed_result_even_when_branch_ready(tmp_path) -> N
     assert out["error"] == "1 microtask failed review"
 
 
-def test_v2_worker_uses_branch_ready_as_legacy_success_fallback(tmp_path) -> None:
+def test_v2_worker_uses_branch_ready_as_legacy_success_fallback(tmp_path, monkeypatch) -> None:
+    _patch_branch_handoff(monkeypatch)
+
     class _LegacyLead:
         def run_workflow(self, **_kwargs: Any) -> Any:
             return SimpleNamespace(

@@ -409,6 +409,11 @@ def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
         return "frontend"
     if exactish & _BACKEND_V2_EXPLICIT:
         return "backend"
+    canonical_key = _team_key(spec.name)
+    if canonical_key == "frontend_v2":
+        return "frontend"
+    if canonical_key == "backend_v2":
+        return "backend"
     if any(h in text for h in _FRONTEND_HINTS):
         return "frontend"
     if any(h in text for h in _BACKEND_HINTS):

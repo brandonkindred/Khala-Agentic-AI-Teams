@@ -749,6 +749,12 @@ def test_quality_gate_type_uses_v2_stack_inference_for_hint_stack_names() -> Non
     assert orch_mod._quality_gate_agent_type("Python") == "backend"
 
 
+@pytest.mark.parametrize("stack_name", ["platform", "ci_cd", "services"])
+def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None:
+    """Backend-owned alias stack names build backend v2 workers instead of failing."""
+    assert orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+
+
 def test_target_team_alias_adds_missing_backend_v2_stack_spec() -> None:
     """Backend-owned aliases repair an incomplete stack roster before worker creation."""
     graph = TaskGraphService(job_id="j1")

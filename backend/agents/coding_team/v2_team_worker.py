@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
 from coding_team.models import StackSpec
+from software_engineering_team.shared.git_utils import (
+    DEVELOPMENT_BRANCH,
+    checkout_branch,
+    create_feature_branch,
+)
 from software_engineering_team.shared.models import Task as SETask
 from software_engineering_team.shared.models import TaskStatus as SETaskStatus
 from software_engineering_team.shared.models import TaskType
 
 logger = logging.getLogger(__name__)
+_BRANCH_SLUG_RE = re.compile(r"[^a-z0-9._-]+")
 
 
 def _feedback_lines(feedback: List[Dict[str, Any]]) -> List[str]:
@@ -98,6 +105,24 @@ def _accepts_keyword(fn: Any, name: str) -> bool:
     )
 
 
+def _task_feature_name(task: Any) -> str:
+    """Build a stable feature-branch suffix for a coding-team task."""
+    task_id = str(getattr(task, "id", "") or "task").strip() or "task"
+    title = str(getattr(task, "title", "") or "").strip()
+    source = f"{task_id}-{title}" if title and title != task_id else task_id
+    slug = _BRANCH_SLUG_RE.sub("-", source.lower()).strip("-._")
+    return slug or task_id
+
+
+def _prepare_feature_branch(path: Path, task: Any) -> tuple[bool, str]:
+    """Create or checkout the task branch before v2 execution can write files."""
+    existing_branch = str(getattr(task, "feature_branch", "") or "").strip()
+    if existing_branch:
+        ok, message = checkout_branch(path, existing_branch)
+        return (True, existing_branch) if ok else (False, message)
+    return create_feature_branch(path, DEVELOPMENT_BRANCH, _task_feature_name(task))
+
+
 class V2TeamWorker:
     """Coding-team worker facade for backend_code_v2_team/frontend_code_v2_team."""
 
@@ -122,7 +147,7 @@ class V2TeamWorker:
     def _team_label(self) -> str:
         return "frontend_v2" if self.team_kind == "frontend" else "backend_v2"
 
-    def _to_se_task(self, task: Any) -> SETask:
+    def _to_se_task(self, task: Any, feature_branch_name: str | None = None) -> SETask:
         _validate_task_interface(task)
         description = _augment_description(task, self._team_label)
         requirements = description
@@ -140,7 +165,7 @@ class V2TeamWorker:
             dependencies=list(task.dependencies or []),
             acceptance_criteria=list(task.acceptance_criteria or []),
             status=SETaskStatus.PENDING,
-            feature_branch_name=getattr(task, "feature_branch", None),
+            feature_branch_name=feature_branch_name or getattr(task, "feature_branch", None),
             metadata={
                 "coding_team_task_id": task.id,
                 "coding_team_agent_id": self.agent_id,
@@ -160,7 +185,7 @@ class V2TeamWorker:
         path = Path(repo_path).resolve()
         task_id = str(getattr(task, "id", "") or "unknown-task")
         try:
-            se_task = self._to_se_task(task)
+            _validate_task_interface(task)
         except ValueError as exc:
             logger.warning("%s worker received malformed task %s: %s", self._team_label, task_id, exc)
             return {
@@ -172,6 +197,24 @@ class V2TeamWorker:
                 "open_questions": [],
                 "error": str(exc),
             }
+        branch_ok, prepared_branch = _prepare_feature_branch(path, task)
+        if not branch_ok:
+            logger.warning(
+                "%s worker could not prepare branch for task %s: %s",
+                self._team_label,
+                task_id,
+                prepared_branch,
+            )
+            return {
+                "status": "failed",
+                "feature_branch": getattr(task, "feature_branch", None) or f"feature/{task_id}",
+                "changes_summary": "",
+                "files_to_create_or_edit": [],
+                "commands_run": [],
+                "open_questions": [],
+                "error": f"failed to prepare feature branch: {prepared_branch}",
+            }
+        se_task = self._to_se_task(task, feature_branch_name=prepared_branch)
         workflow_kwargs = {"repo_path": path, "task": se_task}
         if _accepts_keyword(self.team_lead.run_workflow, "merge_to_development"):
             workflow_kwargs["merge_to_development"] = False
@@ -181,7 +224,7 @@ class V2TeamWorker:
             logger.exception("%s worker failed for task %s", self._team_label, task_id)
             return {
                 "status": "failed",
-                "feature_branch": getattr(task, "feature_branch", None) or f"feature/{task_id}",
+                "feature_branch": prepared_branch,
                 "changes_summary": "",
                 "files_to_create_or_edit": [],
                 "commands_run": [],
