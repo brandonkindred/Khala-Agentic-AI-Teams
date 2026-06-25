@@ -395,7 +395,7 @@ def test_strip_numbered_prefixes_empty_content() -> None:
 
 
 def test_find_function_at_line_pre_numbered_python() -> None:
-    """Tool strips N: prefixes and correctly identifies the Python function via AST."""
+    """Tool strips N: prefixes and reports original line numbers in the enclosing range."""
     # Simulate a hunk starting at original line 100. The def is at original line 101.
     content = "100: x = setup()\n101: def process(data):\n102:     return data * 2\n"
     idx = CodebaseIndex(files={"worker.py": content})
@@ -403,8 +403,10 @@ def test_find_function_at_line_pre_numbered_python() -> None:
     # Ask for original line 102, which is inside 'process'.
     result = find_function_at_line("worker.py", 102)
     assert "process" in result
-    # The reported line number should use original numbering, not physical index.
+    # The reported range must use original line numbers (101–102), not physical (2–3).
+    assert "101" in result
     assert "102" in result
+    assert "lines 2" not in result  # physical line 2 must NOT appear as a range bound
 
 
 def test_find_function_at_line_pre_numbered_non_python() -> None:
@@ -442,6 +444,24 @@ def test_find_function_at_line_pre_numbered_large_line_number() -> None:
     assert "4242" in result
     # Must not claim a line like "3" as the start (that would be a pre-fix bug).
     assert "starting at line 3" not in result
+
+
+def test_find_function_at_line_hunk_separator_not_treated_as_construct() -> None:
+    """The ``...`` hunk separator from multi-hunk diffs is not counted as a construct start."""
+    # Simulate two hunks separated by "...". The first hunk has indented-only lines;
+    # the separator "..." is column-0. Without the fix it would be the best_start.
+    content = (
+        "10:   const a = 1;\n"
+        "...\n"               # separator emitted by render_annotated_hunks
+        "50: function doWork() {\n"
+        "51:   return a;\n"
+    )
+    idx = CodebaseIndex(files={"util.js": content})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("util.js", 51)
+    # The construct start must be the "doWork" line (original 50), not the separator.
+    assert "50" in result
+    assert "..." not in result  # separator must not appear in the output as a construct
 
 
 # --------------------------------------------------------------------------- verdict parsing

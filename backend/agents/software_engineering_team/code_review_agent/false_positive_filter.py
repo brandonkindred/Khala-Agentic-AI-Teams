@@ -72,7 +72,7 @@ _SEARCH_MATCH_LIMIT = 60
 
 # Column-0 token prefixes that should NOT be counted as construct start lines
 # by the heuristic fallback used for non-Python files.
-_HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*")
+_HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 
 # The ``render_annotated_hunks`` path (coding-team PR review) prefixes each
 # hunk line with its original file line number: ``4242: const x = 1;``.  This
@@ -373,6 +373,7 @@ def _find_python_function_at_line(
     line_number: int,
     path: str,
     display_line: Optional[int] = None,
+    line_mapper: Optional[Callable[[int], int]] = None,
 ) -> str:
     """Find the innermost function/method/class containing ``line_number`` via AST.
 
@@ -439,9 +440,11 @@ def _find_python_function_at_line(
             _, class_name = min(enclosing_classes)
             class_label = f" in class '{class_name}'"
 
+    display_start = line_mapper(func_start) if line_mapper is not None else func_start
+    display_end = line_mapper(func_end) if line_mapper is not None else func_end
     return (
         f"Line {shown} is inside {kind} '{name}'{class_label} "
-        f"({path} lines {func_start}–{func_end})."
+        f"({path} lines {display_start}–{display_end})."
     )
 
 
@@ -585,7 +588,7 @@ def _build_tools(index: CodebaseIndex) -> list:
         _, ext = os.path.splitext(display_path)
         if ext.lower() in (".py", ".pyi"):
             return _find_python_function_at_line(
-                stripped, physical, display_path, display_line=line_number
+                stripped, physical, display_path, display_line=line_number, line_mapper=mapper
             )
         return _find_heuristic_function_at_line(
             stripped, physical, display_path, display_line=line_number, line_mapper=mapper
