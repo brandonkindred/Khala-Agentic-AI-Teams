@@ -41,7 +41,6 @@ from coding_team.github_source import (  # noqa: E402
     anchor_to_first_file,
     build_review_body,
     choose_event,
-    format_issue_comment,
     inline_comment_to_timeline_body,
     is_ready,
     issue_to_plan_input,
