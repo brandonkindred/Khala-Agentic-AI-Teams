@@ -635,16 +635,16 @@ services:
     # a runaway worker is OOM-killed predictably (docker records OOMKilled=true)
     # instead of the host kernel picking a victim. This cgroup limit is also what
     # the team-service memory watchdog samples to warn before the kill. The
-    # top-level mem_limit/mem_reservation mirror the deploy.resources values so
-    # the cap is enforced under plain `docker compose up` (non-swarm) too — the
-    # same pairing the unified-api service uses.
+    # deploy.resources is read by swarm; mem_limit/mem_reservation enforce the
+    # same caps under plain `docker compose up`, matching the unified-api service.
     deploy:
       resources:
-        limits: { memory: 4G }
-        reservations: { memory: 2G }
-    mem_limit: 4g
-    mem_reservation: 2g
+        limits: { memory: 12G }
+        reservations: { memory: 8G }
+    mem_limit: 12g
+    mem_reservation: 8g
     healthcheck:
+      # backend/team_service/Dockerfile installs curl for this container probe.
       test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
       interval: 15s
       timeout: 5s

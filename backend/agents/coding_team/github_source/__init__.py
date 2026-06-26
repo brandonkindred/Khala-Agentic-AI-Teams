@@ -22,6 +22,7 @@ from .client import (
 from .dependency_resolver import ReadyCheckResult, is_ready, pick_ready_issue
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
+    anchor_to_first_file,
     build_review_body,
     choose_event,
     format_comment_body,
@@ -44,6 +45,7 @@ __all__ = [
     "ReadyCheckResult",
     "Repo",
     "SubIssue",
+    "anchor_to_first_file",
     "build_review_body",
     "choose_event",
     "format_comment_body",
