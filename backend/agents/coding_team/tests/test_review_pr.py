@@ -708,6 +708,41 @@ class TestReviewEndpoint:
             f"Fallback comment missing finding text: gh.comments={gh.comments}"
         )
 
+    def test_reanchor_follow_up_partial_drop_falls_back_to_standalone(self, review_app) -> None:
+        # Last-resort path: the re-anchor follow-up returns comments that still
+        # could not be posted without raising. Those findings must remain in the
+        # dropped set so the standalone fallback can preserve them.
+        gh = review_app["github"]["client"]
+        gh.review_fail_times = 2  # first two comment-carrying attempts 422; body-only wins
+
+        api_main = review_app["api"]
+        original_submit = api_main._submit_review
+        call_count = {"n": 0}
+
+        def _submit_dropping_reanchor_comments(*args: Any, **kwargs: Any) -> list:
+            call_count["n"] += 1
+            if call_count["n"] >= 2:
+                return list(args[7])
+            return original_submit(*args, **kwargs)
+
+        import unittest.mock as _mock
+
+        with _mock.patch.object(
+            api_main, "_submit_review", side_effect=_submit_dropping_reanchor_comments
+        ):
+            review_app["github"]["agent_output"] = _FakeOutput(
+                issues=[_FakeReviewIssue("high", line=2, description="partially dropped finding")]
+            )
+            resp = review_app["client"].post("/review-pr", json=_review_body())
+
+        assert resp.status_code == 200
+        assert call_count["n"] == 2
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert any("partially dropped finding" in body for _n, body in gh.comments), (
+            f"Fallback comment missing finding text: gh.comments={gh.comments}"
+        )
+
     def test_all_changed_files_are_reviewed_without_cap(self, review_app) -> None:
         gh = review_app["github"]["client"]
         # Many changed files: every reviewable one must be reviewed — there is
@@ -828,11 +863,10 @@ class TestReviewPersistence:
 
 
 # ---------------------------------------------------------------------------
-# BUG CONDITION EXPLORATION TESTS  (Task 1 — exploratory, EXPECTED TO FAIL on unfixed code)
+# BUG CONDITION REGRESSION TESTS
 #
-# These tests encode the CORRECT / EXPECTED behavior after the fix.
-# They intentionally FAIL against the unfixed code — the failure confirms the bug
-# exists.  Do not modify the production code or these tests until Task 3.
+# These tests started as exploratory red tests and now serve as regression
+# guards for the exact counterexamples that proved the original bug.
 #
 # Bug: findings whose file is NOT in the PR diff are posted via add_issue_comment
 # (standalone top-level PR conversation comment) instead of being bundled as

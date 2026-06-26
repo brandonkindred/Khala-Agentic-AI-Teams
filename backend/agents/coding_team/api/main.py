@@ -1500,7 +1500,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 anchor_to_first_file(issue, valid_by_path) for issue in leftovers
             ]
             comments = comments + [c for c in anchored_leftovers if c is not None]
-            leftovers = []  # none left to post standalone
+            leftovers = []  # all leftovers re-anchored as file-level inline comments
 
             body = build_review_body(
                 output.summary, output.spec_compliance_notes, issue_count=len(output.issues)
@@ -1511,24 +1511,49 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 client, owner, repo, pr_number, pr.head_sha, body, event, comments
             )
 
-            # When the body-only fallback dropped all inline comments, attempt a
+            # When the body-only fallback dropped inline comments, attempt a
             # follow-up review that re-anchors each dropped comment as a file-level
             # inline comment (subject_type="file") rather than posting them as
             # standalone top-level PR conversation comments.
             if dropped:
-                reanchored_clean = [
-                    {"path": c["path"], "subject_type": "file", "body": c["body"]}
-                    for c in dropped
-                ]
-                try:
-                    _submit_review(
-                        client, owner, repo, pr_number, pr.head_sha,
-                        "*(continued — additional findings)*", "COMMENT", reanchored_clean
-                    )
-                    dropped = []  # successfully re-posted as file-level inline comments
-                except GitHubAPIError:
-                    # Last resort: fall through to standalone posting (extremely rare)
-                    pass
+                reanchored_file_comments: list[dict[str, Any]] = []
+                original_by_reanchored: dict[tuple[str, str], list[dict[str, Any]]] = {}
+                skipped_reanchor: list[dict[str, Any]] = []
+                for comment in dropped:
+                    path = comment.get("path")
+                    body_text = comment.get("body")
+                    if path and body_text:
+                        reanchored = {
+                            "path": path,
+                            "subject_type": "file",
+                            "body": body_text,
+                        }
+                        reanchored_file_comments.append(reanchored)
+                        original_by_reanchored.setdefault((path, body_text), []).append(comment)
+                    else:
+                        skipped_reanchor.append(comment)
+
+                if reanchored_file_comments:
+                    try:
+                        still_dropped = _submit_review(
+                            client,
+                            owner,
+                            repo,
+                            pr_number,
+                            pr.head_sha,
+                            "*(continued — additional findings)*",
+                            "COMMENT",
+                            reanchored_file_comments,
+                        )
+                        dropped = list(skipped_reanchor)
+                        for comment in still_dropped:
+                            originals = original_by_reanchored.get(
+                                (comment.get("path", ""), comment.get("body", "") or "")
+                            )
+                            dropped.append(originals.pop(0) if originals else comment)
+                    except GitHubAPIError:
+                        # Last resort: fall through to standalone posting (extremely rare).
+                        pass
 
             # Only truly-unpostable dropped findings fall through to standalone comments.
             standalone_bodies = [inline_comment_to_timeline_body(c) for c in dropped]
@@ -1649,8 +1674,8 @@ def _submit_review(
     PR, or if any single inline comment lands off the diff. So: try the chosen
     event with inline comments; on failure retry as COMMENT keeping the comments
     (handles the self-PR case without losing inline feedback); on a further failure
-    retry as COMMENT with no inline comments (handles a stray bad line — the caller
-    re-posts the dropped findings as standalone comments).
+    retry as COMMENT with no inline comments (handles a stray bad line -- the caller
+    re-anchors dropped findings and only uses standalone comments as the last resort).
 
     Postconditions:
         - Exactly one review is submitted on success; raises ``GitHubAPIError`` only
