@@ -38,9 +38,9 @@ from coding_team.github_source import (  # noqa: E402
     GitHubClient,
     Issue,
     NotAnIssueError,
+    anchor_to_first_file,
     build_review_body,
     choose_event,
-    format_issue_comment,
     inline_comment_to_timeline_body,
     is_ready,
     issue_to_plan_input,
@@ -1489,6 +1489,19 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 pr_bridge.clear()
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
+
+            # Re-anchor leftover findings (file not in diff) as file-level inline
+            # comments on the first changed file in the diff, so they travel as
+            # review comments rather than standalone top-level PR conversation
+            # comments.  anchor_to_first_file returns None only when valid_by_path
+            # is empty — but we already exit early in that case, so the filter is
+            # just a safety net.
+            anchored_leftovers = [
+                anchor_to_first_file(issue, valid_by_path) for issue in leftovers
+            ]
+            comments = comments + [c for c in anchored_leftovers if c is not None]
+            leftovers = []  # all leftovers re-anchored as file-level inline comments
+
             body = build_review_body(
                 output.summary, output.spec_compliance_notes, issue_count=len(output.issues)
             )
@@ -1498,15 +1511,52 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 client, owner, repo, pr_number, pr.head_sha, body, event, comments
             )
 
-            # One comment per finding: post each leftover finding (its file is not
-            # in the diff, so it can't be a review comment) as its own conversation
-            # comment, plus any review comments the submission had to drop (rare 422
-            # body-only fallback) so no finding is lost and none is batched. These
-            # findings no longer live in the review body, so a failed post would
-            # drop the finding silently — count failures and fail the job instead
-            # of falsely reporting every finding as posted.
-            standalone_bodies = [format_issue_comment(issue) for issue in leftovers]
-            standalone_bodies += [inline_comment_to_timeline_body(c) for c in dropped]
+            # When the body-only fallback dropped inline comments, attempt a
+            # follow-up review that re-anchors each dropped comment as a file-level
+            # inline comment (subject_type="file") rather than posting them as
+            # standalone top-level PR conversation comments.
+            if dropped:
+                reanchored_file_comments: list[dict[str, Any]] = []
+                original_by_reanchored: dict[tuple[str, str], list[dict[str, Any]]] = {}
+                skipped_reanchor: list[dict[str, Any]] = []
+                for comment in dropped:
+                    path = comment.get("path")
+                    body_text = comment.get("body")
+                    if path and body_text:
+                        reanchored = {
+                            "path": path,
+                            "subject_type": "file",
+                            "body": body_text,
+                        }
+                        reanchored_file_comments.append(reanchored)
+                        original_by_reanchored.setdefault((path, body_text), []).append(comment)
+                    else:
+                        skipped_reanchor.append(comment)
+
+                if reanchored_file_comments:
+                    try:
+                        still_dropped = _submit_review(
+                            client,
+                            owner,
+                            repo,
+                            pr_number,
+                            pr.head_sha,
+                            "*(continued — additional findings)*",
+                            "COMMENT",
+                            reanchored_file_comments,
+                        )
+                        dropped = list(skipped_reanchor)
+                        for comment in still_dropped:
+                            originals = original_by_reanchored.get(
+                                (comment.get("path", ""), comment.get("body", "") or "")
+                            )
+                            dropped.append(originals.pop(0) if originals else comment)
+                    except GitHubAPIError:
+                        # Last resort: fall through to standalone posting (extremely rare).
+                        pass
+
+            # Only truly-unpostable dropped findings fall through to standalone comments.
+            standalone_bodies = [inline_comment_to_timeline_body(c) for c in dropped]
             comments_failed = sum(
                 0 if _safe_comment(client, owner, repo, pr_number, body) else 1
                 for body in standalone_bodies
@@ -1624,8 +1674,8 @@ def _submit_review(
     PR, or if any single inline comment lands off the diff. So: try the chosen
     event with inline comments; on failure retry as COMMENT keeping the comments
     (handles the self-PR case without losing inline feedback); on a further failure
-    retry as COMMENT with no inline comments (handles a stray bad line — the caller
-    re-posts the dropped findings as standalone comments).
+    retry as COMMENT with no inline comments (handles a stray bad line -- the caller
+    re-anchors dropped findings and only uses standalone comments as the last resort).
 
     Postconditions:
         - Exactly one review is submitted on success; raises ``GitHubAPIError`` only
