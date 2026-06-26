@@ -632,9 +632,13 @@ _HELPER_BODIES: dict[str, str] = {
         def bollinger_bands(self, history, period=20, num_std=2.0, source="close", select="middle"):
             if len(history) < period:
                 return None
-            vals = [self._src(b, source) for b in history[-period:]]
-            mean = sum(vals) / period
-            var = sum((v - mean) ** 2 for v in vals) / period
+            s = sq = 0.0
+            for b in history[-period:]:
+                v = self._src(b, source)
+                s += v
+                sq += v * v
+            mean = s / period
+            var = max(0.0, sq / period - mean * mean)
             std = math.sqrt(var) if var > 0 else 0.0
             if select == "middle":
                 return mean
@@ -710,8 +714,8 @@ _HELPER_BODIES: dict[str, str] = {
                 return k_val
             if len(history) < k_period + d_period - 1:
                 return None
-            k_vals = [_k_at(end) for end in range(k_period, len(history) + 1)]
-            return sum(k_vals[-d_period:]) / d_period
+            k_vals = [_k_at(end) for end in range(len(history) - d_period + 1, len(history) + 1)]
+            return sum(k_vals) / d_period
         """
     ),
     "vwap": textwrap.dedent(

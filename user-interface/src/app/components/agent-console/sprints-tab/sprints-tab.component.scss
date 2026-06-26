@@ -28,7 +28,7 @@
   }
 
   &__empty {
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     padding: 24px;
     text-align: center;
     line-height: 1.6;
@@ -114,7 +114,7 @@
     align-items: center;
     gap: 8px;
     font-size: 12px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 
   footer {

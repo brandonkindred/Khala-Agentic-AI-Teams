@@ -78,7 +78,7 @@
     gap: 2px;
 
     button {
-      color: var(--kh-text-muted, #71717a);
+      color: var(--kh-text-muted);
       &:hover, &.active {
         color: var(--kh-accent, #fbbf24);
       }
@@ -134,7 +134,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     white-space: nowrap;
   }
 
@@ -248,7 +248,7 @@
     font-size: 16px;
     width: 16px;
     height: 16px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     flex-shrink: 0;
   }
 
@@ -345,7 +345,7 @@
 
 .message-time {
   font-size: 0.6875rem;
-  color: var(--kh-text-muted, #71717a);
+  color: var(--kh-text-muted);
 }
 
 .tree-link {
@@ -448,14 +448,14 @@
     font-size: 48px;
     width: 48px;
     height: 48px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     opacity: 0.4;
     margin-bottom: 12px;
   }
 
   p {
     font-size: var(--kh-text-sm, 0.8125rem);
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     max-width: 280px;
   }
 }
@@ -509,7 +509,7 @@
 
   .node-detail {
     font-size: var(--kh-text-xs, 0.75rem);
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -589,7 +589,7 @@
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     flex-shrink: 0;
     margin-top: 1px;
   }
@@ -699,7 +699,7 @@
     padding-top: 8px;
     border-top: 1px solid var(--kh-border-subtle, rgba(255, 255, 255, 0.10));
     font-size: var(--kh-text-xs, 0.75rem);
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     font-style: italic;
 
     mat-icon {
@@ -743,7 +743,7 @@
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 
   &:hover {
@@ -809,7 +809,7 @@
     padding: 1px 6px;
     border-radius: var(--kh-radius-full, 9999px);
     background: var(--kh-glass, rgba(255, 255, 255, 0.06));
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 }
 
@@ -838,7 +838,7 @@
     border: none;
     cursor: pointer;
     font-size: var(--kh-text-sm, 0.8125rem);
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
     position: relative;
 
     mat-icon {

@@ -37,7 +37,7 @@
       font-size: 0.75rem;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: var(--mat-sys-on-surface-variant, #555);
+      color: var(--kh-text-muted);
     }
   }
 
@@ -76,7 +76,7 @@
       }
 
       .count {
-        color: var(--mat-sys-on-surface-variant, #666);
+        color: var(--kh-text-muted);
         font-variant-numeric: tabular-nums;
       }
     }
@@ -89,7 +89,7 @@
 
   &__empty {
     margin: 0;
-    color: var(--mat-sys-on-surface-variant, #666);
+    color: var(--kh-text-muted);
     font-size: 0.875rem;
   }
 
@@ -122,7 +122,7 @@
     justify-content: center;
     gap: 12px;
     padding: 48px 0;
-    color: var(--mat-sys-on-surface-variant, #555);
+    color: var(--kh-text-muted);
 
     mat-icon {
       font-size: 40px;
@@ -179,7 +179,7 @@
         font-size: 0.75rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--mat-sys-on-surface-variant, #555);
+        color: var(--kh-text-muted);
       }
     }
 
@@ -204,7 +204,7 @@
     font-size: 0.875rem;
 
     dt {
-      color: var(--mat-sys-on-surface-variant, #666);
+      color: var(--kh-text-muted);
     }
     dd {
       margin: 0;
@@ -214,7 +214,7 @@
 
   &__description {
     white-space: pre-wrap;
-    color: var(--mat-sys-on-surface-variant, #444);
+    color: var(--kh-text-muted);
   }
 
   &__anatomy pre {
@@ -248,7 +248,7 @@
     justify-content: space-between;
     gap: 8px;
     font-size: 0.75rem;
-    color: var(--mat-sys-on-surface-variant, #666);
+    color: var(--kh-text-muted);
   }
 
   &__team {
@@ -271,7 +271,7 @@
   &__flags {
     display: flex;
     gap: 8px;
-    color: var(--mat-sys-on-surface-variant, #666);
+    color: var(--kh-text-muted);
 
     mat-icon {
       font-size: 16px;

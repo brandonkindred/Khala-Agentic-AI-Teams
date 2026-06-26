@@ -53,7 +53,6 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from ..alignment_findings import AlignmentFinding, NearMissVerdict, Severity
-from ..executor import indicators as ind
 from ..executor.predicate_evaluator import (
     PandasHistoryView,
 )
@@ -70,7 +69,6 @@ from ..spec_dsl import (
     EntryRule,
     FixedFractionSizing,
     FixedNotionalSizing,
-    IndicatorRef,
     Predicate,
     SignalExitRule,
     StopLossRule,
@@ -285,78 +283,6 @@ def _bars_to_frame(bars: List[Any]) -> pd.DataFrame:
     if not df.empty:
         df = df.set_index("date")
     return df
-
-
-def _select_source_series(df: pd.DataFrame, source: str) -> pd.Series:
-    """Return the input series the indicator should read from."""
-    if source == "hl2":
-        return (df["high"] + df["low"]) / 2.0
-    if source == "ohlc4":
-        return (df["open"] + df["high"] + df["low"] + df["close"]) / 4.0
-    return df[source]
-
-
-def _evaluate_indicator(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
-    """Recompute an :class:`IndicatorRef` on the given OHLCV frame.
-
-    Pre: ``df`` has the columns the indicator needs and at least enough
-    rows for the indicator's warmup. Insufficient rows return a Series
-    full of ``NaN`` (pandas' natural rolling-window behaviour); the
-    caller treats NaN at the entry bar as "indicator not computable yet".
-    """
-    name = ref.name
-    if name == "sma":
-        series = _select_source_series(df, ref.source)
-        return ind.sma(series, int(ref.param("period")))
-    if name == "ema":
-        series = _select_source_series(df, ref.source)
-        return ind.ema(series, int(ref.param("period")))
-    if name == "rsi":
-        series = _select_source_series(df, ref.source)
-        return ind.rsi(series, int(ref.param("period")))
-    if name == "macd":
-        series = _select_source_series(df, ref.source)
-        macd_line, signal_line, hist = ind.macd(
-            series,
-            fast=int(ref.param("fast")),
-            slow=int(ref.param("slow")),
-            signal=int(ref.param("signal")),
-        )
-        output = ref.param("output")
-        if output == "signal":
-            return signal_line
-        if output == "histogram":
-            return hist
-        return macd_line
-    if name == "bollinger":
-        series = _select_source_series(df, ref.source)
-        upper, middle, lower = ind.bollinger_bands(
-            series,
-            period=int(ref.param("period")),
-            num_std=float(ref.param("num_std")),
-        )
-        band = ref.param("band")
-        if band == "upper":
-            return upper
-        if band == "lower":
-            return lower
-        return middle
-    if name == "atr":
-        return ind.atr(df["high"], df["low"], df["close"], period=int(ref.param("period")))
-    if name == "adx":
-        return ind.adx(df["high"], df["low"], df["close"], period=int(ref.param("period")))
-    if name == "stochastic":
-        pct_k, pct_d = ind.stochastic(
-            df["high"],
-            df["low"],
-            df["close"],
-            k_period=int(ref.param("k_period")),
-            d_period=int(ref.param("d_period")),
-        )
-        return pct_d if ref.param("output") == "d" else pct_k
-    if name == "vwap":
-        return ind.vwap(df["high"], df["low"], df["close"], df["volume"])
-    raise ValueError(f"unknown indicator name: {name!r}")
 
 
 def _compare(

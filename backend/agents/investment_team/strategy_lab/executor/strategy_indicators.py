@@ -10,17 +10,20 @@ This is the single source of truth shared by the two execution paths that run
 generated strategy code:
 
 * the streaming sandbox copies this module in as ``indicators.py`` (alongside
-  the Series-returning implementation as ``_indicators_impl.py``), and
+  the Series-returning implementation as ``_indicators_impl.py`` and the
+  registry as ``_streaming_indicators.py``), and
 * the predicate-conformance shadow gate imports it in-process,
 
-so a strategy sees one identical, scalar contract in both. The Series-returning
-``executor.indicators`` module stays the implementation used internally by the
-engine (predicate evaluator, rule probes) and is *not* exposed to strategy code
-directly.
+so a strategy sees one identical, scalar contract in both. Every helper — and
+the ``ctx.indicator(...)`` accessor below — routes through the streaming
+``IndicatorRegistry``, the same recurrences ``StreamingHistoryView`` runs per
+bar, so a value read here is byte-identical to the engine's trailing value for
+the same bars (no pandas/registry divergence).
 
-Module invariant: every public helper returns the most recent value of the
-corresponding ``executor.indicators`` Series (NaN/empty warm-up → ``0.0``);
-none of them returns a ``pd.Series``.
+Module invariant: every public helper returns the most recent registry value
+(warm-up → ``0.0``); the accessor returns ``None`` during warm-up so callers can
+distinguish "no value yet" from a genuine ``0.0``. None of them returns a
+``pd.Series``.
 """
 
 from __future__ import annotations
@@ -29,83 +32,171 @@ import math
 import numbers
 from typing import Optional, Sequence
 
-import numpy as np
-import pandas as pd
-
 try:  # in-package use (predicate-conformance gate, in-process tests)
     from . import indicators as _impl
 except ImportError:  # flat sandbox layout: harness copies the impl as _indicators_impl.py
     import _indicators_impl as _impl  # type: ignore[no-redef]
 
+# The streaming ``IndicatorRegistry`` is the engine's authoritative indicator
+# math (``StreamingHistoryView``). Routing the scalar helpers and the unified
+# accessor through it makes ``from indicators import sma`` and ``ctx.indicator``
+# return byte-identical values to the engine's per-bar reads. The flat sandbox
+# harness copies ``streaming.py`` alongside as ``_streaming_indicators.py``.
+try:  # in-package use
+    from ..indicators.streaming import IndicatorRegistry
+except ImportError:  # flat sandbox layout
+    from _streaming_indicators import IndicatorRegistry  # type: ignore[no-redef]
 
-def _last(series: pd.Series) -> float:
-    """Return the most recent finite value of ``series`` (warm-up → 0.0).
 
-    Preconditions:
-        ``series`` is a ``pd.Series`` (as returned by an ``executor.indicators``
-        helper).
-    Postconditions:
-        Returns a ``float``: the last element, or ``0.0`` when the series is
-        empty or its last value is ``None``/``NaN``.
+class _RegBar:
+    """Minimal bar exposing the OHLCV attributes the registry reads.
+
+    The registry computes against bar objects (``bar.close``/``bar.high``/…); we
+    project the caller's price sequence(s) onto these so the scalar API and the
+    accessor reuse the exact recurrence the engine view uses. ``timestamp`` /
+    ``symbol`` are intentionally absent — the registry reads them via
+    ``_safe_getattr`` (degrading to ``None``), and a single cold call per
+    invocation needs no same-bar fingerprint.
     """
-    if series.empty:
-        return 0.0
-    val = series.iloc[-1]
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return 0.0
-    return float(val)
+
+    __slots__ = ("open", "high", "low", "close", "volume")
+
+    def __init__(
+        self,
+        *,
+        open: float = 0.0,
+        high: float = 0.0,
+        low: float = 0.0,
+        close: float = 0.0,
+        volume: float = 0.0,
+    ) -> None:
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
+
+
+def _value_bars(values) -> list:
+    """Project a single source series onto close-only registry bars.
+
+    ``values`` is any shape ``_coerce_series`` accepts (``pd.Series``,
+    ``list[float]``, ``list[Bar]``, …); the projected scalar lands in ``close``
+    so a registry call with ``source="close"`` reads exactly that series.
+    """
+    return [_RegBar(close=float(v)) for v in _impl._coerce_series(values)]
+
+
+def _ohlc_bars(high, low, close, volume=None) -> list:
+    """Zip separate OHLC(V) sequences into registry bars (atr/adx/stochastic/vwap)."""
+    highs = [float(v) for v in _impl._coerce_series(high, "high")]
+    lows = [float(v) for v in _impl._coerce_series(low, "low")]
+    closes = [float(v) for v in _impl._coerce_series(close, "close")]
+    vols = (
+        [float(v) for v in _impl._coerce_series(volume, "volume")]
+        if volume is not None
+        else [0.0] * len(closes)
+    )
+    return [
+        _RegBar(high=h, low=lo, close=c, volume=vol)
+        for h, lo, c, vol in zip(highs, lows, closes, vols)
+    ]
+
+
+def _ohlc_bars_from_history(history) -> list:
+    """Build registry bars from a bar/number ``history`` for OHLC indicators.
+
+    Bar-like elements expose ``high``/``low``/``close``/``volume``; a plain
+    number is treated as ``high == low == close == volume == value`` (matching
+    the previous accessor, which fed the same numeric sequence to every OHLC
+    slot).
+    """
+    out: list = []
+    for b in history:
+        if isinstance(b, numbers.Real) and not isinstance(b, bool):
+            f = float(b)
+            out.append(_RegBar(open=f, high=f, low=f, close=f, volume=f))
+        else:
+            out.append(
+                _RegBar(
+                    open=float(getattr(b, "open", 0.0)),
+                    high=float(b.high),
+                    low=float(b.low),
+                    close=float(b.close),
+                    volume=float(getattr(b, "volume", 0.0)),
+                )
+            )
+    return out
+
+
+def _scalar(value: Optional[float]) -> float:
+    """Map the registry's warm-up ``None`` to the scalar contract's ``0.0``."""
+    return 0.0 if value is None else value
 
 
 def sma(data, period) -> float:
     """Latest Simple Moving Average value. See module contract."""
-    return _last(_impl.sma(data, int(period)))
+    return _scalar(IndicatorRegistry().sma(_value_bars(data), int(period), source="close"))
 
 
 def ema(data, period) -> float:
     """Latest Exponential Moving Average value. See module contract."""
-    return _last(_impl.ema(data, int(period)))
+    return _scalar(IndicatorRegistry().ema(_value_bars(data), int(period), source="close"))
 
 
 def rsi(data, period=14) -> float:
     """Latest Relative Strength Index value. See module contract."""
-    return _last(_impl.rsi(data, int(period)))
+    return _scalar(IndicatorRegistry().rsi(_value_bars(data), int(period), source="close"))
 
 
 def macd(data, fast=12, slow=26, signal=9) -> tuple[float, float, float]:
     """Latest (MACD line, signal line, histogram) values. See module contract."""
-    macd_line, signal_line, hist = _impl.macd(
-        data, fast=int(fast), slow=int(slow), signal=int(signal)
+    bars = _value_bars(data)
+    reg = IndicatorRegistry()
+    f, s, g = int(fast), int(slow), int(signal)
+    return (
+        _scalar(reg.macd(bars, fast=f, slow=s, signal=g, source="close", select="macd")),
+        _scalar(reg.macd(bars, fast=f, slow=s, signal=g, source="close", select="signal")),
+        _scalar(reg.macd(bars, fast=f, slow=s, signal=g, source="close", select="histogram")),
     )
-    return _last(macd_line), _last(signal_line), _last(hist)
 
 
 def bollinger_bands(data, period=20, num_std=2.0) -> tuple[float, float, float]:
     """Latest (upper, middle, lower) Bollinger Band values. See module contract."""
-    upper, middle, lower = _impl.bollinger_bands(data, period=int(period), num_std=float(num_std))
-    return _last(upper), _last(middle), _last(lower)
+    bars = _value_bars(data)
+    reg = IndicatorRegistry()
+    p, n = int(period), float(num_std)
+    return (
+        _scalar(reg.bollinger_bands(bars, period=p, num_std=n, source="close", select="upper")),
+        _scalar(reg.bollinger_bands(bars, period=p, num_std=n, source="close", select="middle")),
+        _scalar(reg.bollinger_bands(bars, period=p, num_std=n, source="close", select="lower")),
+    )
 
 
 def atr(high, low, close, period=14) -> float:
     """Latest Average True Range value. See module contract."""
-    return _last(_impl.atr(high, low, close, period=int(period)))
+    return _scalar(IndicatorRegistry().atr(_ohlc_bars(high, low, close), period=int(period)))
 
 
 def adx(high, low, close, period=14) -> float:
     """Latest Average Directional Index value. See module contract."""
-    return _last(_impl.adx(high, low, close, period=int(period)))
+    return _scalar(IndicatorRegistry().adx(_ohlc_bars(high, low, close), period=int(period)))
 
 
 def stochastic(high, low, close, k_period=14, d_period=3) -> tuple[float, float]:
     """Latest (%K, %D) Stochastic Oscillator values. See module contract."""
-    pct_k, pct_d = _impl.stochastic(
-        high, low, close, k_period=int(k_period), d_period=int(d_period)
+    bars = _ohlc_bars(high, low, close)
+    reg = IndicatorRegistry()
+    k, d = int(k_period), int(d_period)
+    return (
+        _scalar(reg.stochastic(bars, k_period=k, d_period=d, select="k")),
+        _scalar(reg.stochastic(bars, k_period=k, d_period=d, select="d")),
     )
-    return _last(pct_k), _last(pct_d)
 
 
 def vwap(high, low, close, volume) -> float:
     """Latest cumulative VWAP value. See module contract."""
-    return _last(_impl.vwap(high, low, close, volume))
+    return _scalar(IndicatorRegistry().vwap(_ohlc_bars(high, low, close, volume)))
 
 
 # ---------------------------------------------------------------------------
@@ -197,23 +288,6 @@ _INDICATOR_PARAM_VALIDATORS: dict[str, dict[str, "object"]] = {
 }
 
 
-def _last_or_none(series: pd.Series) -> Optional[float]:
-    """Latest finite value of ``series``, or ``None`` when warm-up/empty.
-
-    Preconditions:
-        ``series`` is a ``pd.Series`` (as returned by an ``_impl`` helper).
-    Postconditions:
-        Returns ``float`` of the last element, or ``None`` when the series is
-        empty or its last value is ``None``/``NaN`` — the warm-up signal.
-    """
-    if series is None or len(series) == 0:
-        return None
-    val = series.iloc[-1]
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return None
-    return float(val)
-
-
 def _source_values(history: Sequence, source: str) -> list:
     """Project ``history`` onto a single price series per ``source``.
 
@@ -252,9 +326,20 @@ def indicator_value(
 
     The single source of truth behind ``ctx.indicator(...)`` for both the
     streaming sandbox (``StrategyContext``) and the predicate-conformance
-    shadow (``_ShadowContext``). Routes through the same ``_impl`` Series
-    helpers the engine uses, so the returned value equals the engine's
-    per-bar value for the same bars.
+    shadow (``_ShadowContext``). Routes through the streaming
+    ``IndicatorRegistry`` — the same recurrences ``StreamingHistoryView`` runs
+    per bar — so the returned value is byte-identical to the engine's trailing
+    value for the same bars (a fresh registry's cold value equals the streamed
+    value; see ``tests/test_streaming_indicators.py``).
+
+    Cost note: this is a stateless accessor — it cold-starts a fresh registry
+    and projects ``history`` each call, so cost is O(len(history)) per call.
+    That matches the prior pandas accessor and is fine for ad-hoc and shadow
+    use, but it is NOT the engine's per-bar path: the engine reads indicators
+    through :class:`StreamingHistoryView`, which retains the registry and is
+    O(window) per bar. A ``StrategyContext`` that wants O(window) per-bar reads
+    from ``ctx.indicator`` should retain a registry/view rather than call this
+    repeatedly (a possible follow-up, out of scope here).
 
     Preconditions:
         ``name`` is a known DSL indicator (:data:`_VALID_INDICATORS`);
@@ -284,65 +369,60 @@ def indicator_value(
     if not history:
         return None
 
+    reg = IndicatorRegistry()
+
     if name in ("sma", "ema"):
         if "period" not in params:
             raise ValueError(f"indicator {name!r} requires a 'period' param")
-        data = _source_values(history, source)
-        fn = _impl.sma if name == "sma" else _impl.ema
-        return _last_or_none(fn(data, int(params["period"])))
+        bars = _value_bars(_source_values(history, source))
+        method = reg.sma if name == "sma" else reg.ema
+        return method(bars, period=int(params["period"]), source="close")
 
     if name == "rsi":
-        data = _source_values(history, source)
-        return _last_or_none(_impl.rsi(data, int(params.get("period", 14))))
+        bars = _value_bars(_source_values(history, source))
+        return reg.rsi(bars, period=int(params.get("period", 14)), source="close")
 
     if name == "macd":
-        data = _source_values(history, source)
-        macd_line, signal_line, hist = _impl.macd(
-            data,
+        bars = _value_bars(_source_values(history, source))
+        # Selector value already validated against the allowed set above.
+        return reg.macd(
+            bars,
             fast=int(params.get("fast", 12)),
             slow=int(params.get("slow", 26)),
             signal=int(params.get("signal", 9)),
+            source="close",
+            select=str(params.get("output", "macd")),
         )
-        # Selector value already validated against the allowed set above.
-        chosen = {"macd": macd_line, "signal": signal_line, "histogram": hist}
-        return _last_or_none(chosen[str(params.get("output", "macd"))])
 
     if name == "bollinger":
-        data = _source_values(history, source)
-        upper, middle, lower = _impl.bollinger_bands(
-            data,
+        bars = _value_bars(_source_values(history, source))
+        return reg.bollinger_bands(
+            bars,
             period=int(params.get("period", 20)),
             num_std=float(params.get("num_std", 2.0)),
+            source="close",
+            select=str(params.get("band", "middle")),
         )
-        chosen = {"upper": upper, "middle": middle, "lower": lower}
-        return _last_or_none(chosen[str(params.get("band", "middle"))])
 
     # OHLC-sourced indicators read their fields directly and forbid a `source`
-    # override (mirrors spec_dsl's allow_source=False for these names); each
-    # `_impl` arg slot extracts its own field from the bar sequence. Reject a
+    # override (mirrors spec_dsl's allow_source=False for these names). Reject a
     # non-default source rather than silently computing a different indicator
     # than the caller requested — otherwise check #1 would credit the read by
     # name and the strategy would run mis-sourced instead of being refined.
     if source != "close":
         raise ValueError(f"indicator {name!r} does not accept a 'source' override")
+    ohlc = _ohlc_bars_from_history(history)
     if name == "atr":
-        return _last_or_none(
-            _impl.atr(history, history, history, period=int(params.get("period", 14)))
-        )
+        return reg.atr(ohlc, period=int(params.get("period", 14)))
     if name == "adx":
-        return _last_or_none(
-            _impl.adx(history, history, history, period=int(params.get("period", 14)))
-        )
+        return reg.adx(ohlc, period=int(params.get("period", 14)))
     if name == "stochastic":
-        pct_k, pct_d = _impl.stochastic(
-            history,
-            history,
-            history,
+        return reg.stochastic(
+            ohlc,
             k_period=int(params.get("k_period", 14)),
             d_period=int(params.get("d_period", 3)),
+            select=str(params.get("output", "k")),
         )
-        chosen = {"k": pct_k, "d": pct_d}
-        return _last_or_none(chosen[str(params.get("output", "k"))])
 
     # name == "vwap" (only remaining valid name)
-    return _last_or_none(_impl.vwap(history, history, history, history))
+    return reg.vwap(ohlc)

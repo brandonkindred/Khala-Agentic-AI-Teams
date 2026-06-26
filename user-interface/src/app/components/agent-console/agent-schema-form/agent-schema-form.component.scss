@@ -9,7 +9,7 @@
     align-items: center;
     gap: 8px;
     margin: 0;
-    color: var(--mat-sys-on-surface-variant, #555);
+    color: var(--kh-text-muted);
     font-size: 0.9rem;
   }
 
@@ -27,13 +27,13 @@
 
   &__label {
     font-size: 0.8rem;
-    color: var(--mat-sys-on-surface-variant, #555);
+    color: var(--kh-text-muted);
   }
 
   &__hint {
     margin: 0;
     font-size: 0.75rem;
-    color: var(--mat-sys-on-surface-variant, #666);
+    color: var(--kh-text-muted);
   }
 
   &__badge {
@@ -47,7 +47,7 @@
     letter-spacing: 0.06em;
     border-radius: 999px;
     background: var(--mat-sys-surface-container, #eee);
-    color: var(--mat-sys-on-surface-variant, #555);
+    color: var(--kh-text-muted);
 
     mat-icon {
       font-size: 14px;

@@ -10,7 +10,7 @@
       font-size: 40px;
       width: 40px;
       height: 40px;
-      color: var(--mat-primary);
+      color: var(--kh-accent);
     }
   }
 }
@@ -22,7 +22,7 @@
     margin: 0 0 16px 0;
     font-size: 1.1rem;
     font-weight: 500;
-    color: var(--mat-primary);
+    color: var(--kh-accent);
   }
 }
 
@@ -74,8 +74,8 @@
 
 .goal-item {
   position: relative;
-  background: var(--mat-sys-surface-container, var(--kh-surface-2));
-  border: 1px solid var(--mat-sys-outline-variant, var(--kh-border));
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border);
   border-radius: 8px;
   padding: 16px;
   padding-right: 48px;
@@ -85,7 +85,7 @@
     position: absolute;
     top: 12px;
     right: 8px;
-    color: var(--mat-sys-error, var(--kh-error));
+    color: var(--kh-error);
   }
 }
 
@@ -101,13 +101,13 @@
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: var(--mat-sys-error-container, var(--kh-error-subtle));
-  color: var(--mat-sys-on-error-container, var(--kh-error));
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
   border-radius: 4px;
   margin-bottom: 16px;
 
   mat-icon {
-    color: var(--mat-sys-error, var(--kh-error));
+    color: var(--kh-error);
   }
 }
 

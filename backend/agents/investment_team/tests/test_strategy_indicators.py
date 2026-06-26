@@ -46,11 +46,15 @@ def _bars(n: int = 30) -> list[contract.Bar]:
 
 
 def test_single_output_helpers_return_last_scalar() -> None:
+    """The scalar helpers return the streaming registry's trailing value (the
+    engine's authoritative indicator math), not the legacy pandas Series value
+    — EMA/RSI use the windowed recurrences, which differ from pandas ewm."""
+    from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+
     bars = _bars(40)
-    closes = [b.close for b in bars]
-    assert si.sma(bars, 5) == pytest.approx(ind.sma(pd.Series(closes), 5).iloc[-1])
-    assert si.ema(bars, 5) == pytest.approx(ind.ema(pd.Series(closes), 5).iloc[-1])
-    assert si.rsi(bars, 14) == pytest.approx(ind.rsi(pd.Series(closes), 14).iloc[-1])
+    assert si.sma(bars, 5) == pytest.approx(IndicatorRegistry().sma(bars, 5))
+    assert si.ema(bars, 5) == pytest.approx(IndicatorRegistry().ema(bars, 5))
+    assert si.rsi(bars, 14) == pytest.approx(IndicatorRegistry().rsi(bars, 14))
     assert isinstance(si.sma(bars, 5), float)
 
 
@@ -104,16 +108,21 @@ def test_helpers_accept_list_float_and_deque() -> None:
 
 def test_module_loads_in_flat_sandbox_layout(tmp_path: Path) -> None:
     """Replicates what the streaming harness copies into the sandbox: the
-    Series impl as ``_indicators_impl.py`` and the scalar wrapper as
-    ``indicators.py``, with only the temp dir on ``sys.path``."""
+    Series impl as ``_indicators_impl.py``, the scalar wrapper as
+    ``indicators.py``, and the registry as ``_streaming_indicators.py``, with
+    only the temp dir on ``sys.path``."""
+    from investment_team.strategy_lab.indicators import streaming as _streaming_mod
+
     impl_src = Path(ind.__file__)
     scalar_src = Path(si.__file__)
+    registry_src = Path(_streaming_mod.__file__)
     shutil.copy2(impl_src, tmp_path / "_indicators_impl.py")
     shutil.copy2(scalar_src, tmp_path / "indicators.py")
+    shutil.copy2(registry_src, tmp_path / "_streaming_indicators.py")
 
     sys.path.insert(0, str(tmp_path))
     # Ensure a clean import of the sandbox copy, not the in-package module.
-    for name in ("indicators", "_indicators_impl"):
+    for name in ("indicators", "_indicators_impl", "_streaming_indicators"):
         sys.modules.pop(name, None)
     try:
         spec = importlib.util.spec_from_file_location("indicators", tmp_path / "indicators.py")
@@ -127,5 +136,5 @@ def test_module_loads_in_flat_sandbox_layout(tmp_path: Path) -> None:
         assert math.isfinite(sandbox_ind.ema(closes, 5))
     finally:
         sys.path.remove(str(tmp_path))
-        for name in ("indicators", "_indicators_impl"):
+        for name in ("indicators", "_indicators_impl", "_streaming_indicators"):
             sys.modules.pop(name, None)
