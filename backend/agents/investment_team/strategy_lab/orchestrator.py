@@ -2356,6 +2356,104 @@ class StrategyLabOrchestrator:
         assert align_round >= 0, "align_round must be non-negative"
         assert isinstance(market_data, dict) and market_data, "market_data must be non-empty"
 
+        # Step 1 — audit the current ledger and record the alignment gates.
+        report = self._audit_and_record_alignment(
+            spec=spec,
+            code=code,
+            trades=trades,
+            metrics=metrics,
+            market_data=market_data,
+            config=config,
+            align_round=align_round,
+            all_gate_results=all_gate_results,
+            alignment_attempts=alignment_attempts,
+            alignment_reports=alignment_reports,
+            emit=emit,
+        )
+
+        # Every early exit returns the pre-iteration state so the caller breaks
+        # the loop on the last known-good baseline.
+        def _terminate() -> _AlignmentRoundOutcome:
+            return _AlignmentRoundOutcome(
+                spec=spec, code=code, trades=trades, metrics=metrics, terminate=True
+            )
+
+        # Step 2 — already aligned / no proposed fix / out of rounds all stop.
+        if not self._alignment_proposal_eligible(
+            report=report, align_round=align_round, spec=spec, emit=emit
+        ):
+            return _terminate()
+
+        # Step 3 — apply the proposed fix, re-validate safety, re-execute.
+        proposed = self._validate_and_reexecute_alignment_proposal(
+            spec=spec,
+            report=report,
+            market_data=market_data,
+            config=config,
+            all_gate_results=all_gate_results,
+            align_round=align_round,
+            drift_collector=drift_collector,
+            emit=emit,
+        )
+        if proposed is None:
+            return _terminate()
+        proposed_spec, proposed_code, align_exec = proposed
+
+        # Step 4 — recompute metrics and re-run the anomaly gates on the fix.
+        evaluated = self._evaluate_alignment_proposal(
+            proposed_spec=proposed_spec,
+            align_exec=align_exec,
+            market_data=market_data,
+            config=config,
+            all_gate_results=all_gate_results,
+            align_round=align_round,
+            spec=spec,
+            emit=emit,
+        )
+        if evaluated is None:
+            return _terminate()
+        new_trades, new_metrics = evaluated
+
+        # Step 5 — commit the proposal as the new known-good baseline.
+        return self._commit_alignment_proposal(
+            spec=spec,
+            code=code,
+            proposed_spec=proposed_spec,
+            proposed_code=proposed_code,
+            new_trades=new_trades,
+            new_metrics=new_metrics,
+            change_summary=report.changes_made or "alignment fix",
+            alignment_attempts=alignment_attempts,
+            all_gate_results=all_gate_results,
+            align_round=align_round,
+            drift_collector=drift_collector,
+            emit=emit,
+        )
+
+    def _audit_and_record_alignment(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        trades: List[TradeRecord],
+        metrics: BacktestResult,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+        align_round: int,
+        all_gate_results: List[QualityGateResult],
+        alignment_attempts: List[str],
+        alignment_reports: List[TradeAlignmentReport],
+        emit: PhaseCallback,
+    ) -> TradeAlignmentReport:
+        """Audit the current trade ledger and record the alignment gates.
+
+        Pre: ``trades`` is the ledger to audit; ``alignment_reports`` and
+        ``all_gate_results`` are running lists.
+        Post: appends the fresh report to ``alignment_reports`` and the
+        per-rule + aggregate ``trade_alignment`` gate rows (stamped with
+        ``align_round``) to ``all_gate_results``, both in place; returns the
+        report for the caller's eligibility / proposal decisions.
+        """
         emit(
             "aligning",
             {
@@ -2403,15 +2501,29 @@ class StrategyLabOrchestrator:
                 refinement_round=align_round,
             )
         )
+        return report
 
-        def _terminate() -> _AlignmentRoundOutcome:
-            return _AlignmentRoundOutcome(
-                spec=spec, code=code, trades=trades, metrics=metrics, terminate=True
-            )
+    def _alignment_proposal_eligible(
+        self,
+        *,
+        report: TradeAlignmentReport,
+        align_round: int,
+        spec: StrategySpec,
+        emit: PhaseCallback,
+    ) -> bool:
+        """Decide whether the audited report yields a fix worth re-executing.
 
+        Pre: ``report`` is the freshly audited alignment report.
+        Post: returns ``True`` only when the trades are not yet aligned, a
+        ``proposed_code`` fix exists, and the round budget is not exhausted —
+        i.e. the caller should proceed to validate/re-execute the proposal.
+        Returns ``False`` on the three terminal cases (already aligned, no
+        proposed fix, max rounds reached), emitting the matching ``aligning``
+        sub-phase event for each. Pure aside from the emitted telemetry.
+        """
         if report.aligned:
             emit("aligning", {"sub_phase": "aligned", "alignment_round": align_round})
-            return _terminate()
+            return False
 
         emit(
             "aligning",
@@ -2451,7 +2563,7 @@ class StrategyLabOrchestrator:
                 "aligning",
                 {"sub_phase": "no_proposed_fix", "alignment_round": align_round},
             )
-            return _terminate()
+            return False
 
         if align_round >= MAX_ALIGNMENT_ROUNDS - 1:
             emit(
@@ -2463,8 +2575,36 @@ class StrategyLabOrchestrator:
                 MAX_ALIGNMENT_ROUNDS,
                 spec.strategy_id,
             )
-            return _terminate()
+            return False
 
+        return True
+
+    def _validate_and_reexecute_alignment_proposal(
+        self,
+        *,
+        spec: StrategySpec,
+        report: TradeAlignmentReport,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+        all_gate_results: List[QualityGateResult],
+        align_round: int,
+        drift_collector: Optional[_DriftCollector],
+        emit: PhaseCallback,
+    ) -> Optional[Tuple[StrategySpec, str, StrategyRunResult]]:
+        """Validate the proposed fix's safety and re-execute it.
+
+        Pre: ``report.proposed_code`` is non-empty (eligibility already
+        confirmed); ``all_gate_results`` is the running gate list.
+        Post: returns ``(proposed_spec, proposed_code, align_exec)`` when the
+        proposed code passes the safety gate and re-executes successfully.
+        Returns ``None`` to signal the caller should terminate the round when a
+        critical safety finding fires or the re-execution fails — recording the
+        ``alignment_``-prefixed safety gates / execution gate and emitting the
+        matching sub-phase. Records the safety gates on ``all_gate_results`` in
+        place.
+        Raises: ``SpecImplementabilityError`` (with ``drift_collector``
+        attached) when the proposed code cannot be applied to the spec.
+        """
         emit(
             "aligning",
             {
@@ -2479,7 +2619,6 @@ class StrategyLabOrchestrator:
         except SpecImplementabilityError as exc:
             exc.drift_collector = drift_collector
             raise
-        change_summary = report.changes_made or "alignment fix"
 
         # Re-validate code safety on the proposed code — alignment runs
         # after backtest, so the phase tag is verification.
@@ -2503,7 +2642,7 @@ class StrategyLabOrchestrator:
                 },
             )
             logger.warning("Alignment-proposed code failed safety gate for %s", spec.strategy_id)
-            return _terminate()
+            return None
 
         emit(
             "backtesting",
@@ -2536,8 +2675,33 @@ class StrategyLabOrchestrator:
                     "error_type": align_exec.error_type,
                 },
             )
-            return _terminate()
+            return None
 
+        return proposed_spec, proposed_code, align_exec
+
+    def _evaluate_alignment_proposal(
+        self,
+        *,
+        proposed_spec: StrategySpec,
+        align_exec: StrategyRunResult,
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+        all_gate_results: List[QualityGateResult],
+        align_round: int,
+        spec: StrategySpec,
+        emit: PhaseCallback,
+    ) -> Optional[Tuple[List[TradeRecord], BacktestResult]]:
+        """Recompute metrics for the re-executed fix and re-run anomaly gates.
+
+        Pre: ``align_exec`` is a successful re-execution of the proposed code;
+        ``proposed_spec`` carries that code (used for the coverage probe).
+        Post: returns ``(new_trades, new_metrics)`` — metrics carrying this
+        re-execution's diagnostics / coverage — when no critical anomaly fires.
+        Returns ``None`` to signal the caller should terminate when a critical
+        anomaly is detected, emitting ``anomaly_detected`` and logging the
+        diagnostics. Records the ``alignment_``-prefixed anomaly gates on
+        ``all_gate_results`` in place.
+        """
         new_trades = align_exec.trades
         new_metrics = compute_metrics(
             new_trades, config.initial_capital, config.start_date, config.end_date
@@ -2596,8 +2760,36 @@ class StrategyLabOrchestrator:
                     "Alignment fix introduced backtest anomaly for %s",
                     spec.strategy_id,
                 )
-            return _terminate()
+            return None
 
+        return new_trades, new_metrics
+
+    def _commit_alignment_proposal(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        proposed_spec: StrategySpec,
+        proposed_code: str,
+        new_trades: List[TradeRecord],
+        new_metrics: BacktestResult,
+        change_summary: str,
+        alignment_attempts: List[str],
+        all_gate_results: List[QualityGateResult],
+        align_round: int,
+        drift_collector: Optional[_DriftCollector],
+        emit: PhaseCallback,
+    ) -> _AlignmentRoundOutcome:
+        """Commit the validated proposal as the new known-good baseline.
+
+        Pre: the proposed fix passed safety, re-execution, and the anomaly
+        gates; ``alignment_attempts`` is the running change-log list.
+        Post: re-checks predicate conformance on the committed code (recording
+        the verdict gate), appends ``change_summary`` to ``alignment_attempts``,
+        records the code/spec drift, emits ``refined``, and returns a
+        non-terminating ``_AlignmentRoundOutcome`` carrying the proposal as the
+        new baseline plus its ``ran_on_non_conforming_code`` flag.
+        """
         # The committed proposal becomes the persisted backtest; re-check
         # predicate conformance on it so the non-conforming flag tracks the
         # committed code (the alignment path does not otherwise re-run the gate).
