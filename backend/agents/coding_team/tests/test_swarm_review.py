@@ -749,6 +749,24 @@ def test_quality_gate_type_uses_v2_stack_inference_for_hint_stack_names() -> Non
     assert orch_mod._quality_gate_agent_type("Python") == "backend"
 
 
+def test_v2_team_kind_matches_frontend_hint_tokens_without_substrings() -> None:
+    """Frontend hint aliases must match as tokens, not substrings inside unrelated words."""
+    assert orch_mod._v2_team_kind_for_stack(StackSpec(name="UI", tools_services=[])) == "frontend"
+    assert orch_mod._v2_team_kind_for_stack(StackSpec(name="build", tools_services=[])) == "backend"
+    assert (
+        orch_mod._v2_team_kind_for_stack(
+            StackSpec(name="documentation", tools_services=["guides"])
+        )
+        is None
+    )
+    assert (
+        orch_mod._v2_team_kind_for_stack(
+            StackSpec(name="release automation", tools_services=["CI build"])
+        )
+        == "backend"
+    )
+
+
 @pytest.mark.parametrize("stack_name", ["platform", "ci_cd", "services"])
 def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None:
     """Backend-owned alias stack names build backend v2 workers instead of failing."""

@@ -12,6 +12,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -338,8 +339,14 @@ _FRONTEND_HINTS = {
 }
 _BACKEND_HINTS = {
     "api",
+    "apis",
     "backend",
+    "build",
+    "ci",
+    "ci_cd",
+    "cicd",
     "database",
+    "databases",
     "devops",
     "django",
     "express",
@@ -351,6 +358,9 @@ _BACKEND_HINTS = {
     "postgres",
     "python",
     "server",
+    "servers",
+    "service",
+    "services",
     "spring",
 }
 _BACKEND_TEAM_ALIASES = {
@@ -409,9 +419,21 @@ def _legacy_stack_key(value: Optional[str]) -> str:
     return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
 
-def _stack_tools_text(spec: StackSpec) -> str:
-    """Return stack name + tools/services text for v2-team inference."""
-    return " ".join([str(spec.name or ""), *(str(t) for t in spec.tools_services or [])]).lower()
+def _stack_hint_tokens(spec: StackSpec) -> set[str]:
+    """Return normalized stack hint tokens without substring false positives."""
+    tokens: set[str] = set()
+    for raw_part in [spec.name, *(spec.tools_services or [])]:
+        part = str(raw_part or "").strip().lower()
+        if not part:
+            continue
+        normalized = re.sub(r"[^a-z0-9]+", "_", part).strip("_")
+        if normalized:
+            tokens.add(normalized)
+        for token in re.findall(r"[a-z0-9]+", part):
+            tokens.add(token)
+            if token.endswith("s") and len(token) > 3:
+                tokens.add(token[:-1])
+    return tokens
 
 
 def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
@@ -419,7 +441,7 @@ def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
     raw_name = (spec.name or "").strip().lower()
     normalized_name = raw_name.replace("_", " ").replace("-", " ")
     exactish = {raw_name, normalized_name}
-    text = _stack_tools_text(spec)
+    hint_tokens = _stack_hint_tokens(spec)
     if exactish & _FRONTEND_V2_EXPLICIT:
         return "frontend"
     if exactish & _BACKEND_V2_EXPLICIT:
@@ -431,9 +453,9 @@ def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
         return "backend"
     if _legacy_stack_key(spec.name) in _LEGACY_BACKEND_STACK_ALIASES:
         return "backend"
-    if any(h in text for h in _FRONTEND_HINTS):
+    if hint_tokens & _FRONTEND_HINTS:
         return "frontend"
-    if any(h in text for h in _BACKEND_HINTS):
+    if hint_tokens & _BACKEND_HINTS:
         return "backend"
     return None
 
