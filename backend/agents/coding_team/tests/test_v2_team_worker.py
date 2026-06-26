@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
@@ -33,6 +34,11 @@ class _FakeV2Lead:
 
 
 def _patch_branch_handoff(monkeypatch, *, branch: str = "feature/api", order=None):
+    def _ensure_development_ready(repo_path):
+        if order is not None:
+            order.append("ensure_development")
+        return True, "development ready"
+
     def _create_feature_branch(repo_path, base_branch, feature_name):
         if order is not None:
             order.append("create")
@@ -43,8 +49,35 @@ def _patch_branch_handoff(monkeypatch, *, branch: str = "feature/api", order=Non
             order.append("checkout")
         return True, f"Checked out {branch_name}"
 
+    monkeypatch.setattr(worker_mod, "_ensure_development_ready", _ensure_development_ready)
     monkeypatch.setattr(worker_mod, "create_feature_branch", _create_feature_branch)
     monkeypatch.setattr(worker_mod, "checkout_branch", _checkout_branch)
+
+
+def _init_main_repo(path) -> None:
+    subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"],
+        cwd=path,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"],
+        cwd=path,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"],
+        cwd=path,
+        capture_output=True,
+        check=True,
+    )
+    (path / "README.md").write_text("x")
+    subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, capture_output=True, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=path, capture_output=True, check=True)
 
 
 def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path, monkeypatch) -> None:
@@ -80,7 +113,7 @@ def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path, monkey
     assert out["files_to_create_or_edit"] == ["src/app.component.ts"]
     assert "Feedback addressed" in out["changes_summary"]
     assert "Add aria-labels" in out["changes_summary"]
-    assert order == ["create", "workflow"]
+    assert order == ["ensure_development", "create", "workflow"]
     assert lead.calls[0]["merge_to_development"] is False
     se_task = lead.calls[0]["task"]
     assert se_task.assignee == "frontend_v2"
@@ -133,6 +166,9 @@ def test_v2_worker_reports_branch_preparation_failure_before_v2_handoff(
         return False, "development branch missing"
 
     lead = _Lead()
+    monkeypatch.setattr(
+        worker_mod, "_ensure_development_ready", lambda repo_path: (True, "development ready")
+    )
     monkeypatch.setattr(worker_mod, "create_feature_branch", _fail_create_feature_branch)
     worker = V2TeamWorker(
         agent_id="backend_v2",
@@ -146,6 +182,96 @@ def test_v2_worker_reports_branch_preparation_failure_before_v2_handoff(
     assert out["status"] == "failed"
     assert "development branch missing" in out["error"]
     assert lead.called is False
+
+
+def test_v2_worker_prepares_development_before_branch_on_main_only_repo(tmp_path) -> None:
+    _init_main_repo(tmp_path)
+
+    class _Lead:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, Any]] = []
+
+        def run_workflow(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            branch = kwargs["task"].feature_branch_name
+            return SimpleNamespace(
+                success=True,
+                summary="Implemented API.",
+                deliver_result=SimpleNamespace(
+                    branch_name=branch,
+                    branch_ready=True,
+                    commit_messages=["feat(api): add endpoint"],
+                ),
+                failure_reason="",
+            )
+
+    lead = _Lead()
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=lead,
+    )
+
+    out = worker.run_implement(Task(id="api", title="Build API", description="Build API"), tmp_path)
+
+    assert out["status"] == "in_review"
+    assert out["feature_branch"].startswith("feature/api-build-api")
+    assert lead.calls[0]["task"].feature_branch_name == out["feature_branch"]
+    branches = subprocess.run(
+        ["git", "branch", "--list", "development"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    current = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert "development" in branches.stdout
+    assert current.stdout.strip() == out["feature_branch"]
+
+
+def test_v2_worker_initializes_empty_repo_before_task_branch(tmp_path) -> None:
+    class _Lead:
+        def __init__(self) -> None:
+            self.calls: List[Dict[str, Any]] = []
+
+        def run_workflow(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            branch = kwargs["task"].feature_branch_name
+            return SimpleNamespace(
+                success=True,
+                summary="Implemented API.",
+                deliver_result=SimpleNamespace(branch_name=branch, branch_ready=True),
+                failure_reason="",
+            )
+
+    lead = _Lead()
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=lead,
+    )
+
+    out = worker.run_implement(Task(id="api", title="Build API", description="Build API"), tmp_path)
+
+    assert out["status"] == "in_review"
+    assert (tmp_path / ".git").exists()
+    assert lead.calls[0]["task"].feature_branch_name == out["feature_branch"]
+    branches = subprocess.run(
+        ["git", "branch", "--list", "development"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert "development" in branches.stdout
 
 
 def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:

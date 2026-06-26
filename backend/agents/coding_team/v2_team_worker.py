@@ -14,6 +14,8 @@ from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
     create_feature_branch,
+    ensure_development_branch,
+    initialize_new_repo,
 )
 from software_engineering_team.shared.models import Task as SETask
 from software_engineering_team.shared.models import TaskStatus as SETaskStatus
@@ -156,7 +158,19 @@ def _prepare_feature_branch(path: Path, task: Any) -> tuple[bool, str]:
     if existing_branch:
         ok, message = checkout_branch(path, existing_branch)
         return (True, existing_branch) if ok else (False, message)
+    ready, message = _ensure_development_ready(path)
+    if not ready:
+        return False, message
     return create_feature_branch(path, DEVELOPMENT_BRANCH, _task_feature_name(task))
+
+
+def _ensure_development_ready(path: Path) -> tuple[bool, str]:
+    """Ensure git and development exist before creating a no-merge handoff branch."""
+    if not path.exists():
+        path.mkdir(parents=True, exist_ok=True)
+    if not (path / ".git").exists():
+        return initialize_new_repo(path)
+    return ensure_development_branch(path)
 
 
 class V2TeamWorker:
