@@ -827,7 +827,7 @@ def ensure_development_branch(repo_path: str | Path) -> Tuple[bool, str]:
     Ensure the development branch exists. Create it from main if it does not.
 
     Returns:
-        (created, message) - created=True if branch was created, message describes action.
+        (success, message) - success=True when development exists or was created and checked out.
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
@@ -842,7 +842,7 @@ def ensure_development_branch(repo_path: str | Path) -> Tuple[bool, str]:
         code, out = _run_git(path, ["git", "checkout", DEVELOPMENT_BRANCH])
         if code != 0:
             return False, f"Failed to checkout {DEVELOPMENT_BRANCH}: {out}"
-        return False, f"Checked out existing branch '{DEVELOPMENT_BRANCH}'"
+        return True, f"Checked out existing branch '{DEVELOPMENT_BRANCH}'"
 
     # Ensure we have main or master
     if MAIN_BRANCH not in branches and "master" not in branches:

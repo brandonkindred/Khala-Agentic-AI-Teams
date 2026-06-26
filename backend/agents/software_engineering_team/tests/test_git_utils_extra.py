@@ -67,8 +67,8 @@ def test_ensure_development_branch_non_git(tmp_path: Path):
 
 def test_ensure_development_branch_creates_from_main(init_git_repo: Path):
     """When dev branch doesn't exist, creates it from main."""
-    created, msg = ensure_development_branch(init_git_repo)
-    assert created is True
+    ok, msg = ensure_development_branch(init_git_repo)
+    assert ok is True
     assert "development" in msg
 
 
@@ -83,8 +83,8 @@ def test_ensure_development_branch_existing(init_git_repo: Path):
     subprocess.run(
         ["git", "checkout", "main"], cwd=init_git_repo, capture_output=True, check=False
     )
-    created, msg = ensure_development_branch(init_git_repo)
-    assert created is False
+    ok, msg = ensure_development_branch(init_git_repo)
+    assert ok is True
     assert "existing" in msg or "development" in msg
 
 

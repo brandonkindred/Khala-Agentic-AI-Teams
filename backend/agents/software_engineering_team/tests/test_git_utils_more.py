@@ -406,8 +406,7 @@ def test_ensure_development_branch_not_a_repo(tmp_path) -> None:
 
 
 def test_ensure_development_branch_already_exists(monkeypatch, _fake_git_repo) -> None:
-    """Existing development branch → returns (False, "Checked out existing...")
-    where the False indicates the branch was NOT newly created."""
+    """Existing development branch returns success after checkout."""
     from software_engineering_team.shared import git_utils
 
     def fake_git(path, cmd, timeout=30):
@@ -416,8 +415,8 @@ def test_ensure_development_branch_already_exists(monkeypatch, _fake_git_repo) -
         return 0, ""
 
     monkeypatch.setattr(git_utils, "_run_git", fake_git)
-    created, msg = git_utils.ensure_development_branch(_fake_git_repo)
-    assert created is False
+    ok, msg = git_utils.ensure_development_branch(_fake_git_repo)
+    assert ok is True
     assert "existing" in msg
 
 
