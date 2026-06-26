@@ -631,6 +631,51 @@ class _SynthesisLoopOutcome:
     ran_on_non_conforming_code: bool = False
 
 
+@dataclass
+class _SynthesisFetchResult:
+    """Return envelope for the synthesis loop's one-time market-data fetch.
+
+    Mirrors the four cached fields the loop carries forward
+    (``data`` / ``requested_symbols`` / ``fetched_symbols`` / ``provider_used``)
+    plus ``should_break``: ``True`` when no data came back or a critical
+    fetch-coverage failure fired, signalling the loop to short-circuit. The
+    symbol/provider fields are populated even when ``should_break`` is set so
+    the final ``_SynthesisLoopOutcome`` carries the fetch audit trail.
+    """
+
+    data: Optional[Dict[str, List[OHLCVBar]]]
+    requested_symbols: List[str]
+    fetched_symbols: List[str]
+    provider_used: Dict[str, str]
+    should_break: bool
+
+
+@dataclass
+class _SynthesisEvaluateResult:
+    """Return envelope for the synthesis loop's backtest-evaluation step.
+
+    ``action`` is one of:
+    - ``"success"`` — gates clean, the caller marks ``execution_succeeded`` and
+      breaks the loop;
+    - ``"continue"`` — a critical anomaly was recovered (refined/repaired) and
+      the caller continues to the next round;
+    - ``"exhausted"`` — recovery ran the round budget out, the caller marks
+      ``max_rounds_exhausted`` and breaks.
+
+    The remaining fields carry the (possibly recovery-mutated) round state back
+    to the loop so it can thread them into the final outcome.
+    """
+
+    action: str
+    spec: StrategySpec
+    code: str
+    trades: List[TradeRecord]
+    metrics: BacktestResult
+    exec_result: StrategyRunResult
+    ran_on_non_conforming_code: Optional[bool]
+    runtime_lookahead_violation: bool
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Pure helpers used by the orchestrator (and a few external callers).
 # ──────────────────────────────────────────────────────────────────────────
