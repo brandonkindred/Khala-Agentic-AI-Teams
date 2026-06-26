@@ -547,6 +547,28 @@ def _ensure_target_team_stack_specs(
     return stacks
 
 
+def _v2_text_mode_llm(llm: Any) -> Any:
+    """Return an LLM handle suitable for v2 phases that parse text templates."""
+    clone = getattr(llm, "clone", None)
+    if callable(clone):
+        try:
+            config_getter = getattr(llm, "get_config", None)
+            config = config_getter() if callable(config_getter) else {}
+            if isinstance(config, dict) and config.get("response_format") == "text":
+                return llm
+            return clone(response_format="text")
+        except Exception as exc:  # noqa: BLE001 - fall back to resolver for unusual test doubles
+            logger.warning("Could not clone v2 LLM into text mode: %s", exc)
+
+    from llm_service import LLMClient
+
+    if llm is None or isinstance(llm, LLMClient):
+        from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+
+        return resolve_text_mode_strands_model(llm)
+    return llm
+
+
 def _build_implementation_worker(
     agent_id: str,
     spec: StackSpec,
@@ -564,11 +586,11 @@ def _build_implementation_worker(
     if kind == "frontend":
         from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
 
-        team_lead = FrontendCodeV2TeamLead(llm_getter("frontend"))
+        team_lead = FrontendCodeV2TeamLead(_v2_text_mode_llm(llm_getter("frontend")))
     else:
         from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
 
-        team_lead = BackendCodeV2TeamLead(llm_getter("backend"))
+        team_lead = BackendCodeV2TeamLead(_v2_text_mode_llm(llm_getter("backend")))
     return V2TeamWorker(
         agent_id=agent_id,
         stack_spec=spec,

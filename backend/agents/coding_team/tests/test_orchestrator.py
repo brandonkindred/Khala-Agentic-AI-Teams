@@ -902,6 +902,41 @@ def test_backend_v2_worker_uses_injected_llm_getter(monkeypatch):
     assert worker.team_lead.llm == "backend-client"
 
 
+def test_v2_worker_clones_injected_strands_model_to_text_mode(monkeypatch):
+    """Cloneable JSON-mode Strands models are passed to v2 teams in text mode."""
+    from software_engineering_team import backend_code_v2_team
+
+    class _CloneableModel:
+        def __init__(self, response_format: str) -> None:
+            self.response_format = response_format
+            self.clones: List[str] = []
+
+        def get_config(self) -> Dict[str, str]:
+            return {"response_format": self.response_format}
+
+        def clone(self, **overrides):
+            response_format = overrides.get("response_format", self.response_format)
+            self.clones.append(response_format)
+            return _CloneableModel(response_format)
+
+    class FakeBackendLead:
+        def __init__(self, llm):
+            self.llm = llm
+
+    model = _CloneableModel("json")
+    monkeypatch.setattr(backend_code_v2_team, "BackendCodeV2TeamLead", FakeBackendLead)
+
+    worker = orch_mod._build_implementation_worker(
+        "backend_v2",
+        StackSpec(name="backend_v2", tools_services=["Python"]),
+        lambda key: model,
+    )
+
+    assert model.response_format == "json"
+    assert model.clones == ["text"]
+    assert worker.team_lead.llm.response_format == "text"
+
+
 def test_frontend_v2_worker_uses_injected_llm_getter(monkeypatch):
     """Frontend v2 worker construction must honor the coding-team LLM injection path."""
     from software_engineering_team import frontend_code_v2_team
