@@ -203,6 +203,20 @@ class BackendDevelopmentAgent:
             return result
         logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
 
+        feature_branch_name = str(task.feature_branch_name or "").strip() or None
+        if feature_branch_name:
+            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
+            if not ok:
+                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
+                logger.error("[%s] %s", task_id, result.failure_reason)
+                return result
+            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
+            _update_job(
+                current_phase="planning",
+                progress=4,
+                status_text=f"Branch {feature_branch_name} ready",
+            )
+
         existing_code = self._read_repo_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)
         tool_runners = self._build_tool_runners(tool_agents)
@@ -241,21 +255,10 @@ class BackendDevelopmentAgent:
         )
 
         # ── Create feature branch (Git agent) before first execution ───
-        feature_branch_name = str(task.feature_branch_name or "").strip() or None
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
-        if feature_branch_name:
-            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
-            if not ok:
-                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
-                logger.error("[%s] %s", task_id, result.failure_reason)
-                return result
-            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
-            _update_job(
-                current_phase="planning",
-                progress=14,
-                status_text=f"Branch {feature_branch_name} ready",
-            )
-        elif git_agent is not None and hasattr(git_agent, "create_feature_branch"):
+        if not feature_branch_name and git_agent is not None and hasattr(
+            git_agent, "create_feature_branch"
+        ):
             _update_job(
                 current_phase="planning", progress=12, status_text="Creating feature branch..."
             )

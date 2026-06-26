@@ -223,6 +223,15 @@ class FrontendDevelopmentAgent:
             return result
         logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
 
+        feature_branch_name = str(task.feature_branch_name or "").strip() or None
+        if feature_branch_name:
+            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
+            if not ok:
+                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
+                logger.error("[%s] %s", task_id, result.failure_reason)
+                return result
+            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
+
         existing_code = self._read_repo_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)
         tool_runners = self._build_tool_runners(tool_agents)
@@ -259,16 +268,10 @@ class FrontendDevelopmentAgent:
             status_text=f"Plan created with {total_microtasks} microtask(s)",
         )
 
-        feature_branch_name = str(task.feature_branch_name or "").strip() or None
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
-        if feature_branch_name:
-            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
-            if not ok:
-                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
-                logger.error("[%s] %s", task_id, result.failure_reason)
-                return result
-            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
-        elif git_agent is not None and hasattr(git_agent, "create_feature_branch"):
+        if not feature_branch_name and git_agent is not None and hasattr(
+            git_agent, "create_feature_branch"
+        ):
             try:
                 ok, branch_name = git_agent.create_feature_branch(
                     repo_path, task_id, task.title or ""

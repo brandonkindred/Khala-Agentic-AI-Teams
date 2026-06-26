@@ -695,6 +695,7 @@ class TestBackendDevelopmentAgentBranchReuse:
         (tmp_path / "tests").mkdir()
 
         captured: dict[str, str] = {}
+        events: list[str] = []
 
         class _GitAgent:
             def __init__(self) -> None:
@@ -710,8 +711,18 @@ class TestBackendDevelopmentAgentBranchReuse:
         git_agent = _GitAgent()
 
         def _checkout_branch(_repo_path, branch):
+            events.append("checkout")
             captured["checkout"] = branch
             return True, "checked out"
+
+        def _read_repo_code(_self, _repo_path):
+            events.append("read_repo")
+            return "existing branch code"
+
+        def _run_planning(**kwargs):
+            events.append("planning")
+            captured["existing_code"] = kwargs["existing_code"]
+            return PlanningResult(microtasks=[Microtask(id="mt-1")], summary="planned")
 
         def _run_execution_with_review_gates(**_kwargs):
             return ExecutionResult(
@@ -736,13 +747,8 @@ class TestBackendDevelopmentAgentBranchReuse:
             "_build_tool_agents",
             lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent},
         )
-        monkeypatch.setattr(
-            orch,
-            "run_planning",
-            lambda **_kwargs: PlanningResult(
-                microtasks=[Microtask(id="mt-1")], summary="planned"
-            ),
-        )
+        monkeypatch.setattr(orch.BackendDevelopmentAgent, "_read_repo_code", _read_repo_code)
+        monkeypatch.setattr(orch, "run_planning", _run_planning)
         monkeypatch.setattr(orch, "run_execution_with_review_gates", _run_execution_with_review_gates)
         monkeypatch.setattr(
             doc_phase,
@@ -770,6 +776,8 @@ class TestBackendDevelopmentAgentBranchReuse:
         assert result.success is True
         assert git_agent.create_called is False
         assert captured["checkout"] == "feature/review-api"
+        assert captured["existing_code"] == "existing branch code"
+        assert events.index("checkout") < events.index("read_repo") < events.index("planning")
         assert captured["deliver_branch"] == "feature/review-api"
 
 
