@@ -61,6 +61,10 @@ def _prepare_handoff_branch(
 ) -> DeliverResult:
     """Commit a feature branch and leave it ready for external Tech Lead review."""
     result = DeliverResult()
+    if not deliver_files:
+        result.summary = "No files to deliver."
+        return result
+    result.delivered_files = sorted(deliver_files)
     slug = _make_slug(task_id, task_title)
     branch_name = feature_branch_name
     created_branch = False
@@ -149,6 +153,9 @@ def run_deliver(
                 logger.warning("[%s] Tool agent %s deliver() failed: %s", task_id, kind.value, exc)
 
         if not merge_to_development:
+            if not deliver_files:
+                result.summary = "No files to deliver."
+                return result
             return _prepare_handoff_branch(
                 task_id=task_id,
                 repo_path=repo_path,
@@ -177,6 +184,7 @@ def run_deliver(
                 result.branch_name = feature_branch_name or ""
                 if out.success:
                     result.commit_messages.append(out.summary or "Merged to development")
+                    result.delivered_files = sorted(deliver_files)
                 logger.info("[%s] Deliver (Git agent): %s", task_id, result.summary)
                 return result
             except Exception as exc:
@@ -187,6 +195,7 @@ def run_deliver(
     if not deliver_files:
         result.summary = "No files to deliver."
         return result
+    result.delivered_files = sorted(deliver_files)
 
     if not merge_to_development:
         return _prepare_handoff_branch(

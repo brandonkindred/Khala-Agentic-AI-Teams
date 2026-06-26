@@ -405,6 +405,7 @@ _CONTEXT_EXCLUDE_DIRS: Optional[frozenset[str]] = None
 def _team_key(value: Optional[str]) -> str:
     """Normalize a stack/team label for routing comparisons."""
     text = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    # Heuristic: frontend takes precedence when a raw label contains multiple stack names.
     if "frontend" in text:
         return "frontend_v2"
     if "backend" in text:
@@ -1241,6 +1242,15 @@ class CodingTeamSwarm:
     def _find_free_agents(self) -> List[str]:
         return [aid for aid in self.agent_ids if self.graph.get_task_for_agent(aid) is None]
 
+    def _has_worker_for_target(self, target_team: Optional[str]) -> bool:
+        """Whether any worker in this swarm can ever satisfy the target team hint."""
+        if not target_team:
+            return True
+        return any(
+            _target_matches_agent(target_team, self.agent_team_keys.get(agent_id, agent_id))
+            for agent_id in self.agent_ids
+        )
+
     def _assign_tasks(self, ready: List[Task], free_agents: List[str]) -> None:
         """Coordinator decides which tasks go to which workers."""
         if not free_agents or not ready:
@@ -1299,6 +1309,24 @@ class CodingTeamSwarm:
                     used_agents.add(agent_id)
                     assigned_tasks.add(task.id)
                 break
+
+        for task in ready:
+            if task.id in assigned_tasks or not task.target_team:
+                continue
+            if self._has_worker_for_target(task.target_team):
+                continue
+            reason = (
+                f"No implementation worker is available for target_team "
+                f"{task.target_team!r}."
+            )
+            logger.warning("Failing task %s: %s", task.id, reason)
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.FAILED,
+                changes_summary=reason,
+                revision_feedback=list(task.revision_feedback or [])
+                + [{"source": "system", "reason": reason}],
+            )
 
     def _implement_and_verify(self, swe: Any, update_fn: Callable) -> None:
         """Worker implements its assigned task, then runs quality gate tools."""

@@ -221,6 +221,9 @@ class DeliverResult(BaseModel):
     )
     merged: bool = Field(default=False)
     commit_messages: List[str] = Field(default_factory=list)
+    delivered_files: List[str] = Field(
+        default_factory=list, description="Repo-relative file paths written during delivery"
+    )
     summary: str = Field(default="")
 
 

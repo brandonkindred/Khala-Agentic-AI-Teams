@@ -9,6 +9,7 @@ serialization round-trip, the branch_diff helper, and the final status line.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -733,6 +734,28 @@ def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
     task = graph.get_task("deploy")
     assert task.assigned_agent_id == "backend_v2"
     assert graph.get_task_for_agent("frontend_v2") is None
+
+
+def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
+    """A target_team that no worker can satisfy fails instead of waiting forever."""
+
+    class NoopTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": []}
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, NoopTL(approved=True), workers)
+    graph.add_task("unknown", title="Unknown target", target_team="unknown_team")
+
+    with caplog.at_level(logging.WARNING, logger=orch_mod.logger.name):
+        swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    task = graph.get_task("unknown")
+    assert task.status == TaskStatus.FAILED
+    assert task.assigned_agent_id is None
+    assert "No implementation worker is available" in task.changes_summary
+    assert task.revision_feedback[-1]["source"] == "system"
+    assert "unknown_team" in caplog.text
 
 
 def test_target_match_normalizes_raw_v2_agent_ids() -> None:

@@ -25,7 +25,8 @@ def _make_python_agent_tool(
     def tool_func(tool_use: ToolUse, **_invocation_state: Any) -> ToolResult:
         tool_use_id = tool_use.get("toolUseId", "")
         try:
-            out = handler(tool_use.get("input") or {})
+            tool_input = tool_use.get("input")
+            out = handler(tool_input if tool_input is not None else {})
         except Exception as exc:  # noqa: BLE001 - tool failures should reach the model
             return {
                 "toolUseId": tool_use_id,

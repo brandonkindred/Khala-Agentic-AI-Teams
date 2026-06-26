@@ -262,6 +262,7 @@ def test_fe_deliver_no_files_returns_empty_summary(tmp_path: Path) -> None:
 
     result = run_deliver(task_id="t1", repo_path=tmp_path, files={}, summary="")
     assert result.merged is False
+    assert result.delivered_files == []
     assert "No files to deliver" in result.summary
 
 
@@ -285,6 +286,7 @@ def test_fe_deliver_git_agent_success(tmp_path: Path) -> None:
         feature_branch_name="feature/x",
     )
     assert result.merged is True
+    assert result.delivered_files == ["a.ts"]
     assert result.commit_messages
 
 
@@ -313,6 +315,7 @@ def test_fe_deliver_other_tool_agent_appends_files(tmp_path: Path) -> None:
         },
     )
     assert result.merged is True
+    assert result.delivered_files == ["a.ts", "docs.md"]
 
 
 def test_fe_deliver_tool_agent_exception_isolated(tmp_path: Path, monkeypatch) -> None:
@@ -448,6 +451,7 @@ def test_fe_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
     assert result.branch_ready is True
     assert result.merged is False
     assert result.branch_name == "feature/x"
+    assert result.delivered_files == ["a.ts"]
     assert result.commit_messages
     assert commit_mock.call_args.args[1] == result.commit_messages[0]
     merge_mock.assert_not_called()
@@ -500,8 +504,38 @@ def test_fe_deliver_handoff_with_tool_agent_appends_files(tmp_path: Path, monkey
     )
 
     assert result.branch_ready is True
+    assert result.delivered_files == ["a.ts", "docs.md"]
     assert docs_agent.called is True
     assert git_agent.called is False
+
+
+def test_fe_deliver_handoff_with_tool_agents_no_files_skips_branch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.frontend_code_v2_team.phases import deliver
+
+    class _DocsAgent:
+        def deliver(self, inp):
+            return SimpleNamespace(files={}, success=True, summary="")
+
+    create_mock = _patch_autospec(
+        monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x")
+    )
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={},
+        summary="impl",
+        tool_agents={ToolAgentKind.DOCUMENTATION: _DocsAgent()},
+        merge_to_development=False,
+    )
+
+    assert result.branch_ready is False
+    assert result.delivered_files == []
+    assert "No files to deliver" in result.summary
+    create_mock.assert_not_called()
 
 
 def test_fe_deliver_handoff_create_branch_fails(tmp_path: Path, monkeypatch) -> None:
@@ -594,10 +628,40 @@ def test_be_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
     assert result.branch_ready is True
     assert result.merged is False
     assert result.branch_name == "feature/api"
+    assert result.delivered_files == ["a.py"]
     assert result.commit_messages
     assert commit_mock.call_args.args[1] == result.commit_messages[0]
     merge_mock.assert_not_called()
     delete_mock.assert_not_called()
+
+
+def test_be_deliver_handoff_with_tool_agents_no_files_skips_branch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.backend_code_v2_team.phases import deliver
+
+    class _DocsAgent:
+        def deliver(self, inp):
+            return SimpleNamespace(files={}, success=True, summary="")
+
+    create_mock = _patch_autospec(
+        monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/api")
+    )
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={},
+        summary="impl",
+        tool_agents={ToolAgentKind.DOCUMENTATION: _DocsAgent()},
+        merge_to_development=False,
+    )
+
+    assert result.branch_ready is False
+    assert result.delivered_files == []
+    assert "No files to deliver" in result.summary
+    create_mock.assert_not_called()
 
 
 def test_be_deliver_handoff_write_fails_cleans_created_branch(

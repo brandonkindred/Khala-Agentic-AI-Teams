@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import logging
 import re
@@ -20,6 +21,7 @@ from software_engineering_team.shared.models import TaskType
 
 logger = logging.getLogger(__name__)
 _BRANCH_SLUG_RE = re.compile(r"[^a-z0-9._-]+")
+_MAX_FEATURE_SLUG_LENGTH = 80
 
 
 def _feedback_lines(feedback: List[Dict[str, Any]]) -> List[str]:
@@ -91,6 +93,12 @@ def _validate_task_interface(task: Any) -> None:
         raise ValueError(f"coding-team task is missing required field(s): {', '.join(missing)}")
     if not str(getattr(task, "id", "") or "").strip():
         raise ValueError("coding-team task is missing a non-empty id")
+    list_fields = ("dependencies", "acceptance_criteria", "revision_feedback")
+    invalid = [name for name in list_fields if not isinstance(getattr(task, name), list)]
+    if invalid:
+        raise ValueError(
+            "coding-team task field(s) must be lists: " + ", ".join(sorted(invalid))
+        )
 
 
 def _accepts_keyword(fn: Any, name: str) -> bool:
@@ -111,7 +119,35 @@ def _task_feature_name(task: Any) -> str:
     title = str(getattr(task, "title", "") or "").strip()
     source = f"{task_id}-{title}" if title and title != task_id else task_id
     slug = _BRANCH_SLUG_RE.sub("-", source.lower()).strip("-._")
-    return slug or task_id
+    slug = slug or _BRANCH_SLUG_RE.sub("-", task_id.lower()).strip("-._") or "task"
+    if len(slug) <= _MAX_FEATURE_SLUG_LENGTH:
+        return slug
+    digest = hashlib.sha1(slug.encode("utf-8")).hexdigest()[:8]
+    prefix = slug[: _MAX_FEATURE_SLUG_LENGTH - len(digest) - 1].rstrip("-._") or "task"
+    return f"{prefix}-{digest}"
+
+
+def _requirements_for_task(task: Any) -> str:
+    """Build requirements without revision feedback, which belongs in description only."""
+    requirements = task.description or task.title or task.id
+    if task.acceptance_criteria:
+        requirements += "\n\nAcceptance criteria:\n" + "\n".join(
+            f"- {item}" for item in task.acceptance_criteria
+        )
+    return requirements
+
+
+def _workflow_file_list(result: Any, deliver: Any) -> List[str]:
+    """Return repo-relative paths the v2 workflow reports as delivered."""
+    delivered = getattr(deliver, "delivered_files", None)
+    if isinstance(delivered, (list, tuple, set)):
+        files = [str(path).strip() for path in delivered if str(path).strip()]
+        if files:
+            return sorted(dict.fromkeys(files))
+    final_files = getattr(result, "final_files", None)
+    if isinstance(final_files, dict):
+        return sorted(str(path) for path in final_files if str(path).strip())
+    return []
 
 
 def _prepare_feature_branch(path: Path, task: Any) -> tuple[bool, str]:
@@ -150,11 +186,7 @@ class V2TeamWorker:
     def _to_se_task(self, task: Any, feature_branch_name: str | None = None) -> SETask:
         _validate_task_interface(task)
         description = _augment_description(task, self._team_label)
-        requirements = description
-        if task.acceptance_criteria:
-            requirements += "\n\nAcceptance criteria:\n" + "\n".join(
-                f"- {item}" for item in task.acceptance_criteria
-            )
+        requirements = _requirements_for_task(task)
         return SETask(
             id=task.id,
             type=self._task_type,
@@ -239,6 +271,7 @@ class V2TeamWorker:
             or getattr(task, "feature_branch", None)
             or f"feature/{task.id}"
         )
+        files_changed = _workflow_file_list(result, deliver)
         branch_ready = bool(getattr(deliver, "branch_ready", False))
         missing_success = object()
         result_success = getattr(result, "success", missing_success)
@@ -249,7 +282,7 @@ class V2TeamWorker:
                 "status": "failed",
                 "feature_branch": branch,
                 "changes_summary": str(getattr(result, "summary", "") or ""),
-                "files_to_create_or_edit": [],
+                "files_to_create_or_edit": files_changed,
                 "commands_run": list(getattr(deliver, "commit_messages", []) or []),
                 "open_questions": [],
                 "error": reason,
@@ -263,7 +296,7 @@ class V2TeamWorker:
                 result_summary=str(getattr(result, "summary", "") or ""),
                 feedback=list(task.revision_feedback or []),
             ),
-            "files_to_create_or_edit": [],
+            "files_to_create_or_edit": files_changed,
             "commands_run": list(getattr(deliver, "commit_messages", []) or []),
             "open_questions": [],
             "error": None,

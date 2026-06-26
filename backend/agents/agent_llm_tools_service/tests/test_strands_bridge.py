@@ -93,6 +93,23 @@ def test_missing_input_defaults_to_empty_args() -> None:
     assert result["status"] == "success"
 
 
+def test_falsy_non_none_input_passes_through() -> None:
+    calls: dict[str, Any] = {}
+
+    def make(name: str) -> Callable[[Any], Any]:
+        def handler(args: Any) -> dict:
+            calls[name] = args
+            return {"args": args}
+
+        return handler
+
+    tools = build_strands_tools(_handlers(make), GIT_TOOL_DEFINITIONS)
+    status = next(t for t in tools if t.tool_name == "git_status")
+    result = _invoke(status, {"toolUseId": "tu-2b", "name": "git_status", "input": False})
+    assert calls == {"git_status": False}
+    assert result["status"] == "success"
+
+
 def test_string_handler_result_passes_through_unencoded() -> None:
     tools = build_strands_tools(
         _handlers(lambda name: lambda args: "plain text"), GIT_TOOL_DEFINITIONS

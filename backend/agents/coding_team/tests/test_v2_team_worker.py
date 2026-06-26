@@ -26,6 +26,7 @@ class _FakeV2Lead:
                 branch_name="feature/ui-task",
                 branch_ready=True,
                 commit_messages=["feat(ui): add task"],
+                delivered_files=["src/app.component.ts"],
             ),
             failure_reason="",
         )
@@ -76,6 +77,7 @@ def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path, monkey
 
     assert out["status"] == "in_review"
     assert out["feature_branch"] == "feature/ui-task"
+    assert out["files_to_create_or_edit"] == ["src/app.component.ts"]
     assert "Feedback addressed" in out["changes_summary"]
     assert "Add aria-labels" in out["changes_summary"]
     assert order == ["create", "workflow"]
@@ -85,6 +87,8 @@ def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path, monkey
     assert se_task.feature_branch_name == "feature/ui-task"
     assert "CODING TEAM TECH LEAD FEEDBACK" in se_task.description
     assert "Missing accessibility labels" in se_task.description
+    assert "CODING TEAM TECH LEAD FEEDBACK" not in se_task.requirements
+    assert "Missing accessibility labels" not in se_task.requirements
     assert "renders list" in se_task.requirements
 
 
@@ -166,6 +170,82 @@ def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
     assert out["status"] == "failed"
     assert "missing required field" in out["error"]
     assert lead.called is False
+
+
+def test_v2_worker_rejects_non_list_task_fields_before_v2_handoff(tmp_path) -> None:
+    class _Lead:
+        def __init__(self) -> None:
+            self.called = False
+
+        def run_workflow(self, **_kwargs: Any) -> Any:
+            self.called = True
+            return SimpleNamespace(success=True)
+
+    lead = _Lead()
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=lead,
+    )
+
+    out = worker.run_implement(
+        SimpleNamespace(
+            id="bad-task",
+            title="Bad",
+            description="Bad task",
+            dependencies="api",
+            acceptance_criteria=[],
+            revision_feedback=[],
+        ),
+        tmp_path,
+    )
+
+    assert out["status"] == "failed"
+    assert "must be lists" in out["error"]
+    assert "dependencies" in out["error"]
+    assert lead.called is False
+
+
+def test_task_feature_name_truncates_long_titles_with_hash() -> None:
+    task = Task(id="task-123", title="x" * 200, description="Build API")
+
+    name = worker_mod._task_feature_name(task)
+
+    assert len(name) <= worker_mod._MAX_FEATURE_SLUG_LENGTH
+    assert name.startswith("task-123-")
+    assert len(name.rsplit("-", 1)[-1]) == 8
+
+
+def test_v2_worker_uses_final_files_when_deliver_result_has_no_file_list(
+    tmp_path, monkeypatch
+) -> None:
+    _patch_branch_handoff(monkeypatch)
+
+    class _Lead:
+        def run_workflow(self, **_kwargs: Any) -> Any:
+            return SimpleNamespace(
+                success=True,
+                summary="Implemented API.",
+                final_files={"app.py": "print('ok')", "tests/test_app.py": "def test_ok(): pass"},
+                deliver_result=SimpleNamespace(
+                    branch_name="feature/api",
+                    branch_ready=True,
+                    commit_messages=["feat(api): add endpoint"],
+                ),
+            )
+
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=_Lead(),
+    )
+
+    out = worker.run_implement(Task(id="api", title="API", description="Build API"), tmp_path)
+
+    assert out["status"] == "in_review"
+    assert out["files_to_create_or_edit"] == ["app.py", "tests/test_app.py"]
 
 
 def test_v2_worker_supports_legacy_workflow_without_merge_keyword(tmp_path, monkeypatch) -> None:
