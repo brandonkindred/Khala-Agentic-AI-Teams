@@ -384,6 +384,21 @@ _BACKEND_TEAM_ALIASES = {
     "service",
     "services",
 }
+# Frontend-owned target_team/stack aliases. Mirrors _BACKEND_TEAM_ALIASES so common
+# UI/UX target labels a Tech Lead may emit (or copy from a "UI" stack name) canonicalize
+# to frontend_v2 rather than failing to match the available frontend worker. Compared by
+# exact normalized-token equality in _team_key, so unrelated words containing these as a
+# substring (e.g. "build", "guides") are unaffected.
+_FRONTEND_TEAM_ALIASES = {
+    "ui",
+    "ux",
+    "ui_ux",
+    "ux_ui",
+    "web",
+    "webapp",
+    "web_app",
+    "client",
+}
 _LEGACY_BACKEND_STACK_ALIASES = {
     "default",
     "senior_software_engineer",
@@ -418,6 +433,8 @@ def _team_key(value: Optional[str]) -> str:
         return "frontend_v2"
     if has_backend:
         return "backend_v2"
+    if text in _FRONTEND_TEAM_ALIASES:
+        return "frontend_v2"
     if text in _BACKEND_TEAM_ALIASES:
         return "backend_v2"
     return text

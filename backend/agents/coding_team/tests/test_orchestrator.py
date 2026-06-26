@@ -737,6 +737,36 @@ def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
     assert graph.get_task_for_agent("frontend_v2") is None
 
 
+def test_assignment_normalizes_frontend_owned_target_aliases(tmp_path):
+    """Frontend-owned target aliases such as ui/ux route to the frontend v2 worker."""
+
+    class AssignUiTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "frontend_v2", "task_id": "screen"}]}
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, AssignUiTL(approved=True), workers)
+    graph.add_task("screen", title="Build settings screen", target_team="ui")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    task = graph.get_task("screen")
+    assert task.assigned_agent_id == "frontend_v2"
+    assert graph.get_task_for_agent("backend_v2") is None
+
+
+def test_target_match_normalizes_frontend_owned_aliases() -> None:
+    """UI/UX target aliases canonicalize to the frontend v2 team for matching."""
+    assert orch_mod._team_key("ui") == "frontend_v2"
+    assert orch_mod._team_key("UX") == "frontend_v2"
+    assert orch_mod._team_key("Web App") == "frontend_v2"
+    assert orch_mod._target_matches_agent("ui", "frontend-v2-worker-2") is True
+    assert orch_mod._target_matches_agent("ux", "backend_v2_worker_1") is False
+    # Exact-token match only: unrelated words containing an alias substring are unaffected.
+    assert orch_mod._team_key("build") == "build"
+    assert orch_mod._team_key("guidelines") == "guidelines"
+
+
 def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
     """A target_team that no worker can satisfy fails instead of waiting forever."""
 
