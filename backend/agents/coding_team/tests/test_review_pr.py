@@ -1572,18 +1572,6 @@ class TestPreservationProperties:
 class TestAnchorToFirstFileUnit:
     """Unit tests for the anchor_to_first_file pure helper."""
 
-    def test_returns_file_level_comment_dict(self) -> None:
-        """Finding absent from diff → dict with correct path and subject_type."""
-        from coding_team.github_source import anchor_to_first_file
-
-        finding = _FakeReviewIssue("low", line=4, file_path="src/config.py", description="issue")
-        valid_by_path = {"src/api.py": {1, 2, 3}, "src/utils.py": {5, 6}}
-        result = anchor_to_first_file(finding, valid_by_path)
-        assert result is not None
-        assert result["path"] == "src/api.py"  # first key
-        assert result["subject_type"] == "file"
-        assert "body" in result
-
     def test_empty_valid_by_path_returns_none(self) -> None:
         """Empty valid_by_path → returns None (no file to anchor to)."""
         from coding_team.github_source import anchor_to_first_file

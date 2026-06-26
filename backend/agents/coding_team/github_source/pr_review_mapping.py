@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Protocol
 
 # GitHub inline review comments on side=RIGHT must target a line the diff adds
 # (`+`) or carries as context (` `). We accept both so the commentable set matches
@@ -46,6 +46,17 @@ _BLOCKING_SEVERITIES = {"critical", "high"}
 
 # Captures the new-file start line from a hunk header: ``@@ -a,b +c,d @@``.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+class ReviewFinding(Protocol):
+    """Duck-typed shape consumed by PR review comment mappers."""
+
+    severity: str
+    category: str
+    file_path: Optional[str]
+    description: str
+    suggestion: str
+    line: Optional[int]
 
 
 def parse_valid_lines(patch: str, *, added_only: bool = COMMENT_ON_ADDED_LINES_ONLY) -> set[int]:
@@ -294,7 +305,7 @@ def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int
 
 
 def anchor_to_first_file(
-    finding: Any, valid_by_path: dict[str, set[int]]
+    finding: ReviewFinding, valid_by_path: dict[str, set[int]]
 ) -> Optional[dict[str, Any]]:
     """Anchor a leftover finding to the first changed file as a file-level review comment.
 
