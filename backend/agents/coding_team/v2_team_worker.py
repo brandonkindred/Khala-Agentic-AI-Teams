@@ -27,7 +27,16 @@ _MAX_FEATURE_SLUG_LENGTH = 80
 
 
 def _feedback_lines(feedback: List[Dict[str, Any]]) -> List[str]:
-    """Render prior Tech Lead/team feedback as concise actionable lines."""
+    """Render prior Tech Lead/team feedback as concise actionable lines.
+
+    Args:
+        feedback: Feedback entries recorded by the coding-team Tech Lead or
+            implementation workers. Dict entries may include source/type,
+            reason/error/message, and requested_changes.
+
+    Returns:
+        Non-empty human-readable feedback lines suitable for v2 task context.
+    """
     lines: List[str] = []
     for entry in feedback or []:
         if not isinstance(entry, dict):
@@ -37,13 +46,25 @@ def _feedback_lines(feedback: List[Dict[str, Any]]) -> List[str]:
         reason = entry.get("reason") or entry.get("error") or entry.get("message") or ""
         if reason:
             lines.append(f"[{source}] {reason}")
-        for change in entry.get("requested_changes") or []:
-            lines.append(f"[{source}] {change}")
+        changes = entry.get("requested_changes") or []
+        if isinstance(changes, list):
+            for change in changes:
+                lines.append(f"[{source}] {change}")
+        elif changes:
+            lines.append(f"[{source}] {changes}")
     return [ln for ln in lines if ln.strip()]
 
 
 def _augment_description(task: Any, team_label: str) -> str:
-    """Add coding-team revision feedback to the v2 team's task input."""
+    """Add coding-team revision feedback to the v2 team's task input.
+
+    Args:
+        task: Coding-team task-like object with title, description, and revision_feedback.
+        team_label: Canonical recipient team label, such as ``backend_v2``.
+
+    Returns:
+        The task description augmented with explicit revision feedback when present.
+    """
     description = task.description or task.title or task.id
     feedback = _feedback_lines(list(task.revision_feedback or []))
     if not feedback:
@@ -65,7 +86,17 @@ def _changes_summary(
     result_summary: str,
     feedback: List[Dict[str, Any]],
 ) -> str:
-    """Build the review handoff summary expected by the coding-team Tech Lead."""
+    """Build the review handoff summary expected by the coding-team Tech Lead.
+
+    Args:
+        team_label: Canonical v2 team label that performed the work.
+        branch: Review branch returned to the coding-team Tech Lead.
+        result_summary: Summary produced by the v2 workflow.
+        feedback: Revision feedback the team was expected to address.
+
+    Returns:
+        A compact handoff summary for the coding-team review phase.
+    """
     parts = [
         f"{team_label} completed the assigned coding-team task.",
         f"Review branch: {branch}",
@@ -104,7 +135,15 @@ def _validate_task_interface(task: Any) -> None:
 
 
 def _accepts_keyword(fn: Any, name: str) -> bool:
-    """Return whether a callable accepts a named keyword argument."""
+    """Return whether a callable accepts a named keyword argument.
+
+    Args:
+        fn: Callable to inspect.
+        name: Keyword name to look for.
+
+    Returns:
+        True when the callable explicitly accepts the keyword or has ``**kwargs``.
+    """
     try:
         signature = inspect.signature(fn)
     except (TypeError, ValueError):
@@ -116,7 +155,14 @@ def _accepts_keyword(fn: Any, name: str) -> bool:
 
 
 def _task_feature_name(task: Any) -> str:
-    """Build a stable feature-branch suffix for a coding-team task."""
+    """Build a stable, bounded feature-branch suffix for a coding-team task.
+
+    Args:
+        task: Coding-team task-like object with an id and optional title.
+
+    Returns:
+        A git-branch-safe slug with a hash suffix when truncation is required.
+    """
     task_id = str(getattr(task, "id", "") or "task").strip() or "task"
     title = str(getattr(task, "title", "") or "").strip()
     source = f"{task_id}-{title}" if title and title != task_id else task_id
@@ -130,7 +176,15 @@ def _task_feature_name(task: Any) -> str:
 
 
 def _requirements_for_task(task: Any) -> str:
-    """Build requirements without revision feedback, which belongs in description only."""
+    """Build v2 task requirements without revision feedback.
+
+    Args:
+        task: Coding-team task-like object with description, title, id, and acceptance criteria.
+
+    Returns:
+        Explicit implementation requirements; revision feedback is intentionally
+        kept in the description so planning can distinguish context from requirements.
+    """
     requirements = task.description or task.title or task.id
     if task.acceptance_criteria:
         requirements += "\n\nAcceptance criteria:\n" + "\n".join(
@@ -140,7 +194,15 @@ def _requirements_for_task(task: Any) -> str:
 
 
 def _workflow_file_list(result: Any, deliver: Any) -> List[str]:
-    """Return repo-relative paths the v2 workflow reports as delivered."""
+    """Return repo-relative paths the v2 workflow reports as delivered.
+
+    Args:
+        result: Workflow result object, optionally exposing ``final_files``.
+        deliver: Deliver result object, optionally exposing ``delivered_files``.
+
+    Returns:
+        A sorted, de-duplicated list of repo-relative file paths.
+    """
     delivered = getattr(deliver, "delivered_files", None)
     if isinstance(delivered, (list, tuple, set)):
         files = [str(path).strip() for path in delivered if str(path).strip()]
@@ -153,7 +215,15 @@ def _workflow_file_list(result: Any, deliver: Any) -> List[str]:
 
 
 def _prepare_feature_branch(path: Path, task: Any) -> tuple[bool, str]:
-    """Create or checkout the task branch before v2 execution can write files."""
+    """Create or checkout the task branch before v2 execution can write files.
+
+    Args:
+        path: Repository path used by the v2 workflow.
+        task: Coding-team task-like object with an optional existing feature_branch.
+
+    Returns:
+        ``(True, branch_name)`` on success, otherwise ``(False, reason)``.
+    """
     existing_branch = str(getattr(task, "feature_branch", "") or "").strip()
     if existing_branch:
         ok, message = checkout_branch(path, existing_branch)
@@ -165,7 +235,15 @@ def _prepare_feature_branch(path: Path, task: Any) -> tuple[bool, str]:
 
 
 def _ensure_development_ready(path: Path) -> tuple[bool, str]:
-    """Ensure git and development exist before creating a no-merge handoff branch."""
+    """Ensure git and development exist before creating a no-merge handoff branch.
+
+    Args:
+        path: Repository path to initialize or normalize.
+
+    Returns:
+        ``(True, message)`` when the repository can branch from development,
+        otherwise ``(False, reason)``.
+    """
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
     if not (path / ".git").exists():
@@ -184,6 +262,7 @@ class V2TeamWorker:
         team_kind: str,
         team_lead: Any,
     ) -> None:
+        """Store the coding-team worker identity and delegated v2 team lead."""
         self.agent_id = agent_id
         self.stack_spec = stack_spec
         self.team_kind = team_kind
@@ -191,13 +270,24 @@ class V2TeamWorker:
 
     @property
     def _task_type(self) -> TaskType:
+        """Return the software-engineering task type represented by this worker."""
         return TaskType.FRONTEND if self.team_kind == "frontend" else TaskType.BACKEND
 
     @property
     def _team_label(self) -> str:
+        """Return the canonical coding-team target label for this v2 worker."""
         return "frontend_v2" if self.team_kind == "frontend" else "backend_v2"
 
     def _to_se_task(self, task: Any, feature_branch_name: str | None = None) -> SETask:
+        """Convert a coding-team task into the shared v2 software-engineering task model.
+
+        Args:
+            task: Valid coding-team task-like object.
+            feature_branch_name: Prepared branch to pass into the v2 workflow.
+
+        Returns:
+            A shared ``Task`` populated with v2 routing, branch, and metadata fields.
+        """
         _validate_task_interface(task)
         description = _augment_description(task, self._team_label)
         requirements = _requirements_for_task(task)
@@ -226,7 +316,19 @@ class V2TeamWorker:
         repo_path: str | Path,
         repo_context: str = "",
     ) -> Dict[str, Any]:
-        """Execute the task via the v2 team and return a coding-team handoff result."""
+        """Execute the task via the v2 team and return a coding-team handoff result.
+
+        Args:
+            task: Coding-team task-like object to implement.
+            repo_path: Repository root where the task should be implemented.
+            repo_context: Legacy coding-team context string. V2 workflows inspect
+                the repository directly, so this parameter is accepted for API
+                compatibility and intentionally ignored.
+
+        Returns:
+            A dict containing status, feature_branch, changes_summary,
+            files_to_create_or_edit, commands_run, open_questions, and error.
+        """
         del repo_context  # v2 teams read repository context themselves.
         path = Path(repo_path).resolve()
         task_id = str(getattr(task, "id", "") or "unknown-task")

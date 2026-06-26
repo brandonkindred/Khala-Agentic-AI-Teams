@@ -203,7 +203,7 @@ class BackendDevelopmentAgent:
             return result
         logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
 
-        feature_branch_name = str(task.feature_branch_name or "").strip() or None
+        feature_branch_name = (task.feature_branch_name or "").strip() or None
         if feature_branch_name:
             ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
             if not ok:
@@ -256,16 +256,15 @@ class BackendDevelopmentAgent:
 
         # ── Create feature branch (Git agent) before first execution ───
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
-        if not feature_branch_name and git_agent is not None and hasattr(
-            git_agent, "create_feature_branch"
-        ):
+        create_feature_branch_fn = (
+            getattr(git_agent, "create_feature_branch", None) if git_agent is not None else None
+        )
+        if not feature_branch_name and callable(create_feature_branch_fn):
             _update_job(
                 current_phase="planning", progress=12, status_text="Creating feature branch..."
             )
             try:
-                ok, branch_name = git_agent.create_feature_branch(
-                    repo_path, task_id, task.title or ""
-                )
+                ok, branch_name = create_feature_branch_fn(repo_path, task_id, task.title or "")
                 if ok and branch_name:
                     feature_branch_name = branch_name
                     logger.info("[%s] Created feature branch: %s", task_id, feature_branch_name)
@@ -478,8 +477,8 @@ class BackendDevelopmentAgent:
 
 class BackendCodeV2TeamLead:
     """
-    Backend Tech Lead Agent: runs Setup (git init, README, development branch)
-    then delegates the 5-phase cycle to BackendDevelopmentAgent.
+    Backend Tech Lead Agent: runs setup, verifies the repository, then executes
+    the BackendDevelopmentAgent 5-phase workflow.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
@@ -514,7 +513,7 @@ class BackendCodeV2TeamLead:
         merge_to_development: bool = True,
     ) -> BackendCodeV2WorkflowResult:
         """
-        Run Setup phase, then delegate to BackendDevelopmentAgent for the 5-phase cycle.
+        Run setup, verify lint/test readiness, then execute the backend 5-phase workflow.
 
         merge_to_development defaults to True. When False, delivery prepares a
         feature branch for external review instead of merging it.

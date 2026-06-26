@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, Callable
 
 from strands.tools.registry import ToolRegistry
@@ -130,7 +131,10 @@ def test_handler_exception_becomes_error_result() -> None:
     assert "boom" in result["content"][0]["text"]
 
 
-def test_skips_definitions_without_handlers() -> None:
+def test_skips_definitions_without_handlers(caplog) -> None:
     handlers = {"git_status": lambda args: {}}
-    tools = build_strands_tools(handlers, GIT_TOOL_DEFINITIONS)
+    with caplog.at_level(logging.DEBUG, logger="agent_llm_tools_service.strands_bridge"):
+        tools = build_strands_tools(handlers, GIT_TOOL_DEFINITIONS)
+
     assert [t.tool_name for t in tools] == ["git_status"]
+    assert "No handler for tool" in caplog.text

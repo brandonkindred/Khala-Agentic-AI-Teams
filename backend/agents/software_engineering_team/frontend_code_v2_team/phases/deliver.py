@@ -41,6 +41,16 @@ def _make_slug(task_id: str, task_title: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
 
 
+def _make_task_id_slug(task_id: str) -> str:
+    """Return a branch-safe task-id slug for feature branch names."""
+    return re.sub(r"[^a-z0-9-]+", "-", (task_id or "task").lower()).strip("-")[:20] or "task"
+
+
+def _make_branch_suffix(task_id: str, task_title: str) -> str:
+    """Return the branch suffix used by ``create_feature_branch``."""
+    return f"{_make_task_id_slug(task_id)}-{_make_slug(task_id, task_title)}"
+
+
 def _cleanup_handoff_failure(repo_path: Path, branch_name: str, *, created_branch: bool) -> None:
     """Return to development and remove a newly-created failed handoff branch."""
     checkout_branch(repo_path, DEVELOPMENT_BRANCH)
@@ -64,6 +74,7 @@ def _prepare_handoff_branch(
         return result
     result.delivered_files = sorted(deliver_files)
     slug = _make_slug(task_id, task_title)
+    branch_suffix = _make_branch_suffix(task_id, task_title)
     branch_name = feature_branch_name
     created_branch = False
     if branch_name:
@@ -73,13 +84,13 @@ def _prepare_handoff_branch(
             logger.error("[%s] Deliver: %s", task_id, result.summary)
             return result
     else:
-        ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
+        ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, branch_suffix)
         if not ok:
             result.summary = f"Feature branch creation failed: {branch_msg}"
             logger.error("[%s] Deliver: %s", task_id, result.summary)
             checkout_branch(repo_path, DEVELOPMENT_BRANCH)
             return result
-        branch_name = branch_msg or f"feature/{task_id}-{slug}"
+        branch_name = branch_msg or f"feature/{branch_suffix}"
         created_branch = True
 
     result.branch_name = branch_name or ""
@@ -148,10 +159,11 @@ def run_deliver(
             except Exception as exc:
                 logger.warning("[%s] Tool agent %s deliver() failed: %s", task_id, kind.value, exc)
 
+        if not deliver_files:
+            result.summary = "No files to deliver."
+            return result
+
         if not merge_to_development:
-            if not deliver_files:
-                result.summary = "No files to deliver."
-                return result
             return _prepare_handoff_branch(
                 task_id=task_id,
                 repo_path=repo_path,
@@ -204,13 +216,14 @@ def run_deliver(
         )
 
     slug = _make_slug(task_id, task_title)
-    ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
+    branch_suffix = _make_branch_suffix(task_id, task_title)
+    ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, branch_suffix)
     if not ok:
         result.summary = f"Feature branch creation failed: {branch_msg}"
         logger.error("[%s] Deliver: %s", task_id, result.summary)
         checkout_branch(repo_path, DEVELOPMENT_BRANCH)
         return result
-    result.branch_name = branch_msg or f"feature/{task_id}-{slug}"
+    result.branch_name = branch_msg or f"feature/{branch_suffix}"
 
     scope = slug[:20]
     commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=scope, summary=summary[:72])

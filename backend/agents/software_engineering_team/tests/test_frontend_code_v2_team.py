@@ -15,6 +15,9 @@ if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
 from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
+from software_engineering_team.tests.test_helpers import (  # noqa: E402
+    init_repo_with_existing_development,
+)
 
 
 class _TextStubClient(DummyLLMClient):
@@ -93,40 +96,10 @@ class TestModels:
 
 
 class TestSetupPhase:
-    @staticmethod
-    def _init_repo_with_existing_development(path: Path) -> None:
-        subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True)
-        subprocess.run(
-            ["git", "config", "user.email", "t@t.com"],
-            cwd=path,
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "T"],
-            cwd=path,
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "config", "commit.gpgsign", "false"],
-            cwd=path,
-            capture_output=True,
-            check=True,
-        )
-        (path / "README.md").write_text("x")
-        subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=path, capture_output=True, check=True)
-        subprocess.run(["git", "branch", "-M", "main"], cwd=path, capture_output=True, check=True)
-        subprocess.run(
-            ["git", "checkout", "-b", "development"], cwd=path, capture_output=True, check=True
-        )
-        subprocess.run(["git", "checkout", "main"], cwd=path, capture_output=True, check=True)
-
     def test_run_setup_on_existing_repo(self, tmp_path):
         from frontend_code_v2_team.phases.setup import run_setup
 
-        self._init_repo_with_existing_development(tmp_path)
+        init_repo_with_existing_development(tmp_path)
         result = run_setup(repo_path=tmp_path, task_title="My App")
         assert isinstance(result, SetupResult)
         assert result.summary is not None

@@ -4,7 +4,7 @@ These call ``build_agent_statuses``/``derive_stack_roster`` directly (no TestCli
 branch — worker working/in_review/idle, the Tech Lead's planning/reviewing/idle, and the
 single current_activity overlay onto the right card — is exercised in isolation. The fixture
 shapes (``stack_specs`` dicts and ``agent_task_map`` keyed by stack name) mirror what the
-orchestrator persists (see ``test_swarm_review.py``).
+orchestrator persists (see ``test_orchestrator.py``).
 """
 
 from __future__ import annotations

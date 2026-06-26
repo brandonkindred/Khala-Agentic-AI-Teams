@@ -405,10 +405,18 @@ _CONTEXT_EXCLUDE_DIRS: Optional[frozenset[str]] = None
 def _team_key(value: Optional[str]) -> str:
     """Normalize a stack/team label for routing comparisons."""
     text = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    has_frontend = "frontend" in text
+    has_backend = "backend" in text
+    if has_frontend and has_backend:
+        logger.warning(
+            "Ambiguous team label %r contains both frontend and backend; "
+            "using existing frontend_v2 precedence",
+            value,
+        )
     # Heuristic: frontend takes precedence when a raw label contains multiple stack names.
-    if "frontend" in text:
+    if has_frontend:
         return "frontend_v2"
-    if "backend" in text:
+    if has_backend:
         return "backend_v2"
     if text in _BACKEND_TEAM_ALIASES:
         return "backend_v2"

@@ -223,7 +223,7 @@ class FrontendDevelopmentAgent:
             return result
         logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
 
-        feature_branch_name = str(task.feature_branch_name or "").strip() or None
+        feature_branch_name = (task.feature_branch_name or "").strip() or None
         if feature_branch_name:
             ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
             if not ok:
@@ -269,13 +269,12 @@ class FrontendDevelopmentAgent:
         )
 
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
-        if not feature_branch_name and git_agent is not None and hasattr(
-            git_agent, "create_feature_branch"
-        ):
+        create_feature_branch_fn = (
+            getattr(git_agent, "create_feature_branch", None) if git_agent is not None else None
+        )
+        if not feature_branch_name and callable(create_feature_branch_fn):
             try:
-                ok, branch_name = git_agent.create_feature_branch(
-                    repo_path, task_id, task.title or ""
-                )
+                ok, branch_name = create_feature_branch_fn(repo_path, task_id, task.title or "")
                 if ok and branch_name:
                     feature_branch_name = branch_name
             except Exception as exc:
@@ -476,8 +475,8 @@ class FrontendDevelopmentAgent:
 
 class FrontendCodeV2TeamLead:
     """
-    Frontend Tech Lead Agent: runs Setup (git init, README, development branch)
-    then delegates the 5-phase cycle to FrontendDevelopmentAgent.
+    Frontend Tech Lead Agent: runs setup, verifies the repository, then executes
+    the FrontendDevelopmentAgent 5-phase workflow.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
@@ -500,7 +499,7 @@ class FrontendCodeV2TeamLead:
         review_config: Optional[MicrotaskReviewConfig] = None,
         merge_to_development: bool = True,
     ) -> FrontendCodeV2WorkflowResult:
-        """Run Setup, then delegate to FrontendDevelopmentAgent for the 5-phase cycle.
+        """Run setup, verify lint/test readiness, then execute the frontend 5-phase workflow.
 
         merge_to_development defaults to True. When False, delivery prepares a
         feature branch for external review instead of merging it.

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, List
 
 from strands.tools.tools import PythonAgentTool
 from strands.types.tools import ToolResult, ToolSpec, ToolUse
+
+logger = logging.getLogger(__name__)
 
 
 def _make_python_agent_tool(
@@ -61,4 +64,6 @@ def build_strands_tools(
                     func_info.get("parameters", {}),
                 )
             )
+        elif name:
+            logger.debug("No handler for tool %s, skipping", name)
     return tools

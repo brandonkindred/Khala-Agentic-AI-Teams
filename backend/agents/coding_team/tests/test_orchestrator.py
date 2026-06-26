@@ -1,4 +1,4 @@
-"""Tests for the coding-team swarm review/merge loop.
+"""Tests for the coding-team orchestrator and review/merge loop.
 
 Covers the Tech-Lead review deadlock fix: a rejected task is sent back to the SAME engineer
 for revision (IN_PROGRESS, assignment retained, reviewer reasons attached) rather than demoted
@@ -390,6 +390,7 @@ def test_persistent_implement_failure_fails_task(tmp_path, monkeypatch):
 
 
 def test_approved_task_merges(tmp_path, monkeypatch):
+    """Approved in-review tasks are merged and marked terminal."""
     _patch_git(monkeypatch, merge=(True, "ok"))
     swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
     graph.add_task("t1", title="T1")
@@ -763,6 +764,14 @@ def test_target_match_normalizes_raw_v2_agent_ids() -> None:
     assert orch_mod._target_matches_agent("frontend_v2", "frontend-v2-worker-2") is True
     assert orch_mod._target_matches_agent("devops", "backend_v2_worker_1") is True
     assert orch_mod._target_matches_agent("frontend_v2", "backend_v2_worker_1") is False
+
+
+def test_team_key_warns_on_ambiguous_frontend_backend_label(caplog) -> None:
+    """Ambiguous raw labels are visible in logs while preserving current precedence."""
+    with caplog.at_level(logging.WARNING, logger=orch_mod.logger.name):
+        assert orch_mod._team_key("frontend-backend") == "frontend_v2"
+
+    assert "contains both frontend and backend" in caplog.text
 
 
 def test_quality_gate_type_uses_v2_stack_inference_for_hint_stack_names() -> None:

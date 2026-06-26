@@ -126,6 +126,7 @@ def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path, monkey
 
 
 def test_v2_worker_failure_reports_task_local_failure(tmp_path, monkeypatch) -> None:
+    """Failed v2 workflow results stay local to the task handoff."""
     _patch_branch_handoff(monkeypatch)
 
     class _FailingLead:
@@ -154,6 +155,7 @@ def test_v2_worker_failure_reports_task_local_failure(tmp_path, monkeypatch) -> 
 def test_v2_worker_reports_branch_preparation_failure_before_v2_handoff(
     tmp_path, monkeypatch
 ) -> None:
+    """Branch preparation failures prevent v2 workflow execution."""
     class _Lead:
         def __init__(self) -> None:
             self.called = False
@@ -185,6 +187,7 @@ def test_v2_worker_reports_branch_preparation_failure_before_v2_handoff(
 
 
 def test_v2_worker_prepares_development_before_branch_on_main_only_repo(tmp_path) -> None:
+    """A main-only repo gets a development branch before handoff branch creation."""
     _init_main_repo(tmp_path)
 
     class _Lead:
@@ -237,6 +240,7 @@ def test_v2_worker_prepares_development_before_branch_on_main_only_repo(tmp_path
 
 
 def test_v2_worker_initializes_empty_repo_before_task_branch(tmp_path) -> None:
+    """An empty repo path is initialized before creating the task branch."""
     class _Lead:
         def __init__(self) -> None:
             self.calls: List[Dict[str, Any]] = []
@@ -275,6 +279,7 @@ def test_v2_worker_initializes_empty_repo_before_task_branch(tmp_path) -> None:
 
 
 def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
+    """Malformed task objects fail before branch or workflow side effects."""
     class _Lead:
         def __init__(self) -> None:
             self.called = False
@@ -299,6 +304,7 @@ def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
 
 
 def test_v2_worker_rejects_non_list_task_fields_before_v2_handoff(tmp_path) -> None:
+    """List-typed task fields are validated before v2 handoff."""
     class _Lead:
         def __init__(self) -> None:
             self.called = False
@@ -334,6 +340,7 @@ def test_v2_worker_rejects_non_list_task_fields_before_v2_handoff(tmp_path) -> N
 
 
 def test_task_feature_name_truncates_long_titles_with_hash() -> None:
+    """Long task titles produce bounded branch names with hash disambiguation."""
     task = Task(id="task-123", title="x" * 200, description="Build API")
 
     name = worker_mod._task_feature_name(task)
@@ -346,6 +353,7 @@ def test_task_feature_name_truncates_long_titles_with_hash() -> None:
 def test_v2_worker_uses_final_files_when_deliver_result_has_no_file_list(
     tmp_path, monkeypatch
 ) -> None:
+    """Workflow final_files backfill Tech Lead review file lists."""
     _patch_branch_handoff(monkeypatch)
 
     class _Lead:
@@ -375,6 +383,7 @@ def test_v2_worker_uses_final_files_when_deliver_result_has_no_file_list(
 
 
 def test_v2_worker_supports_legacy_workflow_without_merge_keyword(tmp_path, monkeypatch) -> None:
+    """Legacy workflow fakes without merge_to_development remain supported."""
     _patch_branch_handoff(monkeypatch)
 
     class _LegacyLead:
@@ -408,6 +417,7 @@ def test_v2_worker_supports_legacy_workflow_without_merge_keyword(tmp_path, monk
 
 
 def test_v2_worker_does_not_retry_internal_type_error_in_merge_mode(tmp_path, monkeypatch) -> None:
+    """Internal TypeError failures are not retried in default merge mode."""
     _patch_branch_handoff(monkeypatch)
 
     class _TypeErrorLead:
@@ -435,6 +445,7 @@ def test_v2_worker_does_not_retry_internal_type_error_in_merge_mode(tmp_path, mo
 
 
 def test_v2_worker_preserves_failed_result_even_when_branch_ready(tmp_path, monkeypatch) -> None:
+    """Explicit workflow failure stays failed even when a branch was prepared."""
     _patch_branch_handoff(monkeypatch)
 
     class _PartialLead:
@@ -467,6 +478,7 @@ def test_v2_worker_preserves_failed_result_even_when_branch_ready(tmp_path, monk
 
 
 def test_v2_worker_uses_branch_ready_as_legacy_success_fallback(tmp_path, monkeypatch) -> None:
+    """Older workflow results can still use branch_ready as the success signal."""
     _patch_branch_handoff(monkeypatch)
 
     class _LegacyLead:

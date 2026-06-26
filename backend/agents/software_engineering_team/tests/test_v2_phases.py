@@ -343,6 +343,48 @@ def test_fe_deliver_tool_agent_exception_isolated(tmp_path: Path, monkeypatch) -
     assert result.merged is True
 
 
+def test_fe_deliver_tool_agents_empty_files_skip_git_agent_merge(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Empty tool-agent delivery skips Git agent work in merge mode."""
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.frontend_code_v2_team.phases import deliver
+
+    class _DocsAgent:
+        def deliver(self, inp):
+            return SimpleNamespace(files={}, success=True, summary="")
+
+    class _GitAgent:
+        def __init__(self) -> None:
+            self.called = False
+
+        def deliver(self, inp):
+            self.called = True
+            return SimpleNamespace(success=True, summary="merged", files={})
+
+    git_agent = _GitAgent()
+    create_mock = _patch_autospec(
+        monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x")
+    )
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={},
+        summary="impl",
+        tool_agents={
+            ToolAgentKind.DOCUMENTATION: _DocsAgent(),
+            ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent,
+        },
+    )
+
+    assert result.merged is False
+    assert result.delivered_files == []
+    assert "No files to deliver" in result.summary
+    assert git_agent.called is False
+    create_mock.assert_not_called()
+
+
 def test_fe_deliver_git_agent_failure_falls_through_to_inline(tmp_path: Path, monkeypatch) -> None:
     from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.frontend_code_v2_team.phases import deliver
@@ -456,6 +498,30 @@ def test_fe_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
     assert commit_mock.call_args.args[1] == result.commit_messages[0]
     merge_mock.assert_not_called()
     delete_mock.assert_not_called()
+
+
+def test_fe_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypatch) -> None:
+    """Task IDs with invalid git characters are slugified before branch creation."""
+    from software_engineering_team.frontend_code_v2_team.phases import deliver
+
+    create_mock = _patch_autospec(
+        monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/safe")
+    )
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "commit_working_tree", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
+
+    result = deliver.run_deliver(
+        task_id="Task 1/Bad:ID",
+        repo_path=tmp_path,
+        files={"a.ts": "x"},
+        summary="impl",
+        task_title="Build UI",
+        merge_to_development=False,
+    )
+
+    assert result.branch_ready is True
+    assert create_mock.call_args.args[2] == "task-1-bad-id-build-ui"
 
 
 def test_fe_deliver_handoff_with_tool_agent_appends_files(tmp_path: Path, monkeypatch) -> None:
@@ -602,6 +668,30 @@ def test_be_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     assert result.merged is True
 
 
+def test_be_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypatch) -> None:
+    """Backend delivery uses the same branch-safe task-id slug as frontend."""
+    from software_engineering_team.backend_code_v2_team.phases import deliver
+
+    create_mock = _patch_autospec(
+        monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/api")
+    )
+    _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "merge_branch", return_value=(True, ""))
+    _patch_autospec(monkeypatch, deliver, "delete_branch", return_value=True)
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
+
+    result = deliver.run_deliver(
+        task_id="API Task/Bad:ID",
+        repo_path=tmp_path,
+        files={"a.py": "x"},
+        summary="impl",
+        task_title="Build API",
+    )
+
+    assert result.merged is True
+    assert create_mock.call_args.args[2] == "api-task-bad-id-build-api"
+
+
 def test_be_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -> None:
     """Backend deliver supports the same branch handoff mode."""
     from software_engineering_team.backend_code_v2_team.phases import deliver
@@ -661,6 +751,48 @@ def test_be_deliver_handoff_with_tool_agents_no_files_skips_branch(
     assert result.branch_ready is False
     assert result.delivered_files == []
     assert "No files to deliver" in result.summary
+    create_mock.assert_not_called()
+
+
+def test_be_deliver_tool_agents_empty_files_skip_git_agent_merge(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Backend merge mode does not call the Git agent when tool agents produce no files."""
+    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.backend_code_v2_team.phases import deliver
+
+    class _DocsAgent:
+        def deliver(self, inp):
+            return SimpleNamespace(files={}, success=True, summary="")
+
+    class _GitAgent:
+        def __init__(self) -> None:
+            self.called = False
+
+        def deliver(self, inp):
+            self.called = True
+            return SimpleNamespace(success=True, summary="merged", files={})
+
+    git_agent = _GitAgent()
+    create_mock = _patch_autospec(
+        monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/api")
+    )
+
+    result = deliver.run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={},
+        summary="impl",
+        tool_agents={
+            ToolAgentKind.DOCUMENTATION: _DocsAgent(),
+            ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent,
+        },
+    )
+
+    assert result.merged is False
+    assert result.delivered_files == []
+    assert "No files to deliver" in result.summary
+    assert git_agent.called is False
     create_mock.assert_not_called()
 
 
