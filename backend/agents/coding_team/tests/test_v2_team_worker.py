@@ -156,6 +156,7 @@ def test_v2_worker_reports_branch_preparation_failure_before_v2_handoff(
     tmp_path, monkeypatch
 ) -> None:
     """Branch preparation failures prevent v2 workflow execution."""
+
     class _Lead:
         def __init__(self) -> None:
             self.called = False
@@ -241,6 +242,7 @@ def test_v2_worker_prepares_development_before_branch_on_main_only_repo(tmp_path
 
 def test_v2_worker_initializes_empty_repo_before_task_branch(tmp_path) -> None:
     """An empty repo path is initialized before creating the task branch."""
+
     class _Lead:
         def __init__(self) -> None:
             self.calls: List[Dict[str, Any]] = []
@@ -280,6 +282,7 @@ def test_v2_worker_initializes_empty_repo_before_task_branch(tmp_path) -> None:
 
 def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
     """Malformed task objects fail before branch or workflow side effects."""
+
     class _Lead:
         def __init__(self) -> None:
             self.called = False
@@ -305,6 +308,7 @@ def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
 
 def test_v2_worker_rejects_non_list_task_fields_before_v2_handoff(tmp_path) -> None:
     """List-typed task fields are validated before v2 handoff."""
+
     class _Lead:
         def __init__(self) -> None:
             self.called = False
@@ -337,6 +341,34 @@ def test_v2_worker_rejects_non_list_task_fields_before_v2_handoff(tmp_path) -> N
     assert "must be lists" in out["error"]
     assert "dependencies" in out["error"]
     assert lead.called is False
+
+
+def test_accepts_keyword_detects_kwarg_and_varkwargs() -> None:
+    """Explicit keyword and **kwargs signatures are accepted; a missing one is not."""
+
+    def fn_explicit(merge_to_development=True):
+        return None
+
+    def fn_varkw(**kwargs):
+        return None
+
+    def fn_missing(x):
+        return None
+
+    assert worker_mod._accepts_keyword(fn_explicit, "merge_to_development") is True
+    assert worker_mod._accepts_keyword(fn_varkw, "merge_to_development") is True
+    assert worker_mod._accepts_keyword(fn_missing, "merge_to_development") is False
+
+
+def test_accepts_keyword_returns_false_when_signature_unintrospectable(monkeypatch) -> None:
+    """If inspect.signature raises (e.g. a C-extension callable), default to NOT accepted
+    rather than risking an unexpected-keyword TypeError at call time."""
+
+    def _raise(_fn):
+        raise ValueError("no signature available")
+
+    monkeypatch.setattr(worker_mod.inspect, "signature", _raise)
+    assert worker_mod._accepts_keyword(lambda **kw: None, "merge_to_development") is False
 
 
 def test_task_feature_name_truncates_long_titles_with_hash() -> None:

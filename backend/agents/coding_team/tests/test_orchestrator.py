@@ -771,7 +771,18 @@ def test_team_key_routes_framework_and_language_labels() -> None:
     """Concrete tech labels route to the owning v2 team instead of failing to match."""
     for label in ("React", "Angular", "AngularJS", "scss", "Next.js", "React.js", "Vue.js"):
         assert orch_mod._team_key(label) == "frontend_v2"
-    for label in ("Python", "Java", "FastAPI", "Spring Boot", "Postgres", "Node.js", "Express.js"):
+    for label in (
+        "Python",
+        "Java",
+        "FastAPI",
+        "Spring Boot",
+        "Postgres",
+        "Node.js",
+        "Express.js",
+        ".NET",
+        ".NET Core",
+        "ASP.NET",
+    ):
         assert orch_mod._team_key(label) == "backend_v2"
     # Ambiguous languages (used by frontend frameworks AND Node backends) must NOT be
     # forced onto a team — routing them would mis-send backend work to the frontend worker.
@@ -812,6 +823,31 @@ def test_assign_tasks_survives_assignment_error(tmp_path):
     swarm._assign_tasks(graph.get_tasks(), ["backend_v2"])
     assert graph.get_task("t1").assigned_agent_id is None
     assert graph.get_task("t1").status == TaskStatus.TO_DO
+
+
+def test_assign_tasks_continues_to_next_agent_after_error(tmp_path):
+    """When the first matching worker's assignment raises, a second free worker still gets it."""
+
+    class NoopTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": []}
+
+    workers = [StubWorker("backend_v2"), StubWorker("backend_v2_alt")]
+    swarm, graph = _make_swarm(tmp_path, NoopTL(approved=True), workers)
+    graph.add_task("t1", title="Build API", target_team="backend_v2")
+
+    real_assign = graph.assign_task_to_agent
+
+    def _flaky(task_id, agent_id):
+        if agent_id == "backend_v2":
+            raise RuntimeError("transient store error")
+        return real_assign(task_id, agent_id)
+
+    swarm.graph.assign_task_to_agent = _flaky  # type: ignore[method-assign]
+
+    # The guardrail loop skips the failing worker and places the task on the second one.
+    swarm._assign_tasks(graph.get_tasks(), ["backend_v2", "backend_v2_alt"])
+    assert graph.get_task("t1").assigned_agent_id == "backend_v2_alt"
 
 
 def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):

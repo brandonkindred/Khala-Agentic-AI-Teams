@@ -401,6 +401,13 @@ _BACKEND_TEAM_ALIASES = {
     "ruby",
     "php",
     "dotnet",
+    # .NET spellings: "_team_key" normalizes ".NET" -> "net" and ".NET Core" -> "net_core",
+    # so alias those normalized forms (not just "dotnet") or they fail to route.
+    "net",
+    "netcore",
+    "net_core",
+    "aspnet",
+    "asp_net",
     "django",
     "flask",
     "fastapi",
