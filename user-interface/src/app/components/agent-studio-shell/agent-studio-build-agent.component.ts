@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { A11yModule } from '@angular/cdk/a11y';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
@@ -17,12 +18,15 @@ import { AgentStudioStateService } from '../../services/agent-studio-state.servi
  * Provisioning is folded into this stage (spec §3, Stage 1): a "Provision an
  * agent" affordance opens the existing provisioning dashboard in a slide-out,
  * unchanged. The dashboard is self-contained, so it is only mounted while the
- * panel is open.
+ * panel is open. The slide-out is a proper modal: a CDK focus trap with
+ * auto-capture moves focus into the panel, keeps Tab cycling inside it, and
+ * restores focus to the trigger on close; Escape dismisses it.
  */
 @Component({
   selector: 'app-agent-studio-build-agent',
   standalone: true,
   imports: [
+    A11yModule,
     MatButtonModule,
     MatIconModule,
     AgentCatalogComponent,

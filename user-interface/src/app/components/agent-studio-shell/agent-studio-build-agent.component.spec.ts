@@ -86,4 +86,23 @@ describe('AgentStudioBuildAgentComponent', () => {
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(false);
   });
+
+  it('marks the provisioning panel as a focus-trapping modal', () => {
+    component.openProvision();
+    fixture.detectChanges();
+    const panel = fixture.nativeElement.querySelector('.studio-build__provision-panel');
+    expect(panel.getAttribute('aria-modal')).toBe('true');
+    expect(panel.getAttribute('role')).toBe('dialog');
+    // CDK focus trap directive is applied (keeps Tab inside the modal).
+    expect(panel.hasAttribute('cdkTrapFocus')).toBe(true);
+  });
+
+  it('closes the provisioning slide-out on Escape', () => {
+    component.openProvision();
+    fixture.detectChanges();
+    const panel = fixture.nativeElement.querySelector('.studio-build__provision-panel');
+    panel.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    fixture.detectChanges();
+    expect(component.provisionOpen()).toBe(false);
+  });
 });

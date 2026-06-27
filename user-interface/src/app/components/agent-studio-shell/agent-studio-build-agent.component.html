@@ -19,7 +19,15 @@
 
 @if (provisionOpen()) {
   <div class="studio-build__scrim" (click)="closeProvision()" aria-hidden="true"></div>
-  <aside class="studio-build__provision-panel" role="dialog" aria-label="Provision an agent">
+  <aside
+    class="studio-build__provision-panel"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Provision an agent"
+    cdkTrapFocus
+    [cdkTrapFocusAutoCapture]="true"
+    (keydown.escape)="closeProvision()"
+  >
     <header class="studio-build__provision-head">
       <h2>Provision an agent</h2>
       <button
