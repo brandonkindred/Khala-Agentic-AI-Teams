@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Dict, List
 from strands import Agent
 
 from llm_service import compact_text, get_client, get_strands_model
+from software_engineering_team.shared.env_config import env_int
 from software_engineering_team.shared.models import (
     Task,
     TaskStatus,
@@ -39,6 +40,15 @@ from .prompts import (
 logger = logging.getLogger(__name__)
 
 
+def _learnings_top_n() -> int:
+    """Number of past-sprint learnings to inject into the Design prompt.
+
+    Postconditions: returns an int in ``[0, 50]``; garbage env → default 5,
+        values out of range are clamped (0 disables injection).
+    """
+    return env_int("SE_LEARNINGS_TOPN", 5, 0, 50)
+
+
 def _agent_json(agent: Agent, prompt: str) -> dict:
     """Call a Strands Agent and parse the result as JSON."""
     result = agent(prompt)
@@ -56,6 +66,7 @@ class TechLeadAgent:
 
     def __init__(self, llm_client=None) -> None:
         from strands.models.model import Model as _StrandsModel
+
         if llm_client is not None and isinstance(llm_client, _StrandsModel):
             self._model = llm_client
         else:
@@ -475,7 +486,61 @@ class TechLeadAgent:
                 ]
             )
 
+        context_parts.extend(self._relevant_learnings_block(input_data))
+
         return "\n".join(context_parts)
+
+    @staticmethod
+    def _relevant_learnings_block(input_data: "TechLeadInput") -> List[str]:
+        """Return a prompt block of the top-N learnings relevant to this initiative.
+
+        Retrieves from the ``se_learnings`` store by full-text relevance to the
+        spec + architecture text already in scope at Design. Strictly additive:
+        returns an empty list when Postgres is disabled or nothing matches, so
+        the prompt is byte-identical to before when there are no learnings.
+
+        Stateless (does not touch instance state), hence ``@staticmethod``.
+
+        Preconditions: ``input_data`` carries the requirements/spec/architecture
+            text used to build the retrieval query.
+        Postconditions: returns ``[]`` or a non-empty list whose first element is
+            the section header; never raises (retrieval failures degrade to ``[]``).
+        """
+        top_n = _learnings_top_n()
+        if top_n < 1:
+            return []
+        try:
+            from software_engineering_team.shared.learnings_store import retrieve_learnings
+
+            reqs = input_data.requirements
+            arch_overview = input_data.architecture.overview if input_data.architecture else ""
+            query = "\n".join(
+                part
+                for part in (
+                    reqs.title if reqs else "",
+                    reqs.description if reqs else "",
+                    input_data.spec_content or "",
+                    arch_overview,
+                )
+                if part
+            )
+            learnings = retrieve_learnings(query, top_n=top_n)
+        except Exception:
+            logger.debug("learning retrieval failed; continuing without it", exc_info=True)
+            return []
+
+        if not learnings:
+            return []
+
+        lines = [
+            "",
+            "**RELEVANT LEARNINGS FROM PAST SPRINTS (apply these to avoid repeating prior failures):**",
+        ]
+        for item in learnings:
+            cm = f" | Counter-measure: {item.counter_measure}" if item.counter_measure else ""
+            trig = f" | Trigger: {item.trigger}" if item.trigger else ""
+            lines.append(f"- Pattern: {item.pattern}{trig}{cm}")
+        return lines
 
     def refine_task(
         self,

@@ -7,11 +7,11 @@ import logging
 import threading
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from shared_app import create_team_app
 from shared_graph import extract_node_text, invoke_graph_sync
-from shared_observability import init_otel, instrument_fastapi_app
 
 from ..graphs.trip_graph import build_trip_graph
 from ..models import PlanTripRequest, TripItinerary
@@ -28,9 +28,9 @@ from ..shared.job_store import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="road-trip-planning-team", team_key="road_trip_planning")
-
-app = FastAPI(
+app = create_team_app(
+    service_name="road-trip-planning-team",
+    team_key="road_trip_planning",
     title="Road Trip Planning API",
     description=(
         "Multi-agent road trip planner. Provide travelers, start location, required stops, "
@@ -38,7 +38,6 @@ app = FastAPI(
     ),
     version="0.1.0",
 )
-instrument_fastapi_app(app, team_key="road_trip_planning")
 
 app.add_middleware(
     CORSMiddleware,
@@ -130,7 +129,8 @@ def _translate_itinerary_keys(data: dict) -> dict:
         # Split flat activities list into morning/afternoon/evening
         flat_activities = day.pop("activities", None)
         if isinstance(flat_activities, list) and not (
-            day.get("morning_activities") or day.get("afternoon_activities")
+            day.get("morning_activities")
+            or day.get("afternoon_activities")
             or day.get("evening_activities")
         ):
             morning, afternoon, evening = [], [], []
@@ -152,9 +152,13 @@ def _translate_itinerary_keys(data: dict) -> dict:
         meals = day.get("meals")
         if isinstance(meals, list):
             day["meals"] = [
-                {"name": m.get("venue") or m.get("name", ""), "description": m.get("notes", ""),
-                 "activity_type": m.get("meal_type", "dining")}
-                if isinstance(m, dict) else m
+                {
+                    "name": m.get("venue") or m.get("name", ""),
+                    "description": m.get("notes", ""),
+                    "activity_type": m.get("meal_type", "dining"),
+                }
+                if isinstance(m, dict)
+                else m
                 for m in meals
             ]
 

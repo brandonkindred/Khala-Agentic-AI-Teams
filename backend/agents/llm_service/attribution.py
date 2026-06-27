@@ -41,12 +41,19 @@ class LLMAttribution:
     Invariants:
         - All fields are plain strings; an unset field is ``""`` (never ``None``),
           so log/telemetry formatting never has to guard for ``None``.
+
+    ``task_id`` and ``phase`` locate the call within the Software Engineering
+    pipeline (which task, and which of discovery/design/execution/integration)
+    so spans and per-job cost can be sliced finely. They default to ``""`` and
+    are simply inherited as empty by teams that don't set them.
     """
 
     agent_key: str = ""
     team: str = ""
     objective: str = ""
     job_id: str = ""
+    task_id: str = ""
+    phase: str = ""
 
 
 _EMPTY = LLMAttribution()
@@ -89,6 +96,8 @@ def llm_attribution(
     team: Optional[str] = None,
     objective: Optional[str] = None,
     job_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    phase: Optional[str] = None,
 ) -> Iterator[LLMAttribution]:
     """Bind LLM attribution for the duration of the ``with`` block.
 
@@ -101,6 +110,10 @@ def llm_attribution(
     Postconditions: inside the block, :func:`current_attribution` reflects the
         merged value; on exit (including via exception) the exact attribution
         that was active on entry is restored.
+
+    Yields:
+        The merged :class:`LLMAttribution` active for the block, so callers may
+        inspect the effective attribution (``with llm_attribution(...) as attr``).
     """
     base = _attribution.get()
     merged = replace(
@@ -109,6 +122,8 @@ def llm_attribution(
         team=base.team if team is None else team,
         objective=base.objective if objective is None else objective,
         job_id=base.job_id if job_id is None else job_id,
+        task_id=base.task_id if task_id is None else task_id,
+        phase=base.phase if phase is None else phase,
     )
     token = _attribution.set(merged)
     try:

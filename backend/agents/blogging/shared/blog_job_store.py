@@ -27,6 +27,7 @@ from shared_temporal.checkpoints import (  # noqa: F401
     submit_input,
     wait_for_input,
 )
+from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,29 @@ def create_blog_job(
         "events": [],
     }
     _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
+    # Best-effort: link the blog job to the default profile. record_association_safe
+    # never raises, so a link failure can't break job creation.
+    record_association_safe(
+        ArtifactType.BLOG_POST, "blogging", job_id, label=_brief_label(brief, job_id)
+    )
+
+
+def _brief_label(brief: str, fallback: str) -> str:
+    """First non-blank line of the brief (truncated), or ``fallback``.
+
+    Preconditions:
+        - ``fallback`` is a non-empty string (callers pass the job id).
+        - ``brief`` may be any string, empty, ``None``, or whitespace-only.
+    Postconditions:
+        - Returns the first line with visible content, stripped and truncated to
+          120 chars; or ``fallback`` when no such line exists.
+        - Never raises (robust to empty / blank-led briefs rather than indexing
+          ``splitlines()[0]``).
+    """
+    for line in (brief or "").splitlines():
+        if line.strip():
+            return line.strip()[:120]
+    return fallback
 
 
 def reset_blog_job(

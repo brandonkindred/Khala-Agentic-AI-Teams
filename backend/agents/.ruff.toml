@@ -2,8 +2,36 @@ target-version = "py310"
 line-length = 100
 
 [lint]
-select = ["E", "F", "I"]
+select = ["E", "F", "I", "C901", "PLR0915"]
 ignore = ["E501"]
+
+# Complexity gating. ruff resolves THIS config (not the repo-root pyproject.toml)
+# for everything under agents/, so the thresholds and grandfathered debt list
+# must live here to take effect under CI's `ruff check agents/`. High-water-mark
+# being ratcheted down toward the ruff defaults (10 / 50) as functions are
+# decomposed: statements 150 -> 130 (next stop 120 needs ~3 more decompositions);
+# complexity stays at 40 until the execution-pipeline functions are split.
+[lint.mccabe]
+max-complexity = 40
+
+[lint.pylint]
+max-statements = 130
+
+[lint.per-file-ignores]
+# Tests and example scripts are setup-heavy by nature — exempt from complexity.
+"**/tests/**" = ["C901", "PLR0915"]
+"**/agent_implementations/**" = ["C901", "PLR0915"]
+# Complexity debt: pre-existing functions above the thresholds above. Exempted
+# per-rule (paths are relative to agents/); refactor and remove to ratchet down.
+"software_engineering_team/frontend_team_deprecated/**" = ["C901", "PLR0915"]
+"software_engineering_team/orchestrator.py" = ["C901", "PLR0915"]
+"llm_service/clients/ollama.py" = ["C901", "PLR0915"]
+"software_engineering_team/backend_agent/agent.py" = ["C901", "PLR0915"]
+"team_assistant/api.py" = ["C901", "PLR0915"]
+"investment_team/api/main.py" = ["PLR0915"]
+"software_engineering_team/backend_code_v2_team/phases/execution.py" = ["PLR0915"]
+"software_engineering_team/frontend_code_v2_team/phases/execution.py" = ["PLR0915"]
+"software_engineering_team/product_requirements_analysis_agent/agent.py" = ["PLR0915"]
 
 [format]
 quote-style = "double"

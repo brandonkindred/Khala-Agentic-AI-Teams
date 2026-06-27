@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
@@ -247,6 +248,77 @@ class PortfolioProposal(BaseModel):
     audit: AuditContext = Field(default_factory=AuditContext)
 
 
+class ExpectancyForecast(BaseModel):
+    """The DesignAgent's pre-commit performance forecast for a strategy.
+
+    The dual-objective design contract requires the agent, before emitting a
+    spec, to forecast its win rate, reward:risk, trade frequency, and the
+    resulting projected annual return, and to show they are mutually
+    self-consistent (a 1% take-profit against a 5% stop must defend the ~84%
+    win rate it needs to clear costs). This record captures that forecast as
+    structured data so downstream consumers can read it without parsing prose.
+
+    The forecast is advisory — it is never gated on. A spec emitted without
+    one (or a persisted record predating this field) carries ``None`` for the
+    owning ``StrategySpec.expectancy_forecast`` and is still valid.
+
+    Preconditions:
+        - ``forecast_win_rate`` is a probability; *finite* values outside
+          ``[0, 1]`` are clamped to the nearest bound rather than rejected.
+        - ``reward_risk`` and ``trades_per_year`` are non-negative; negatives
+          are clamped to ``0.0``.
+        - Non-finite inputs (``NaN`` / ``±inf``) on any numeric field — which a
+          malformed LLM payload can produce — are sanitized to ``0.0`` so a slip
+          never propagates a ``NaN``/``inf`` into downstream consumers.
+    Postconditions:
+        - A pure data record with no side effects. After construction every
+          numeric field is finite: ``forecast_win_rate`` ∈ ``[0, 1]``,
+          ``reward_risk`` / ``trades_per_year`` ≥ ``0``, and
+          ``projected_annual_return_pct`` is a finite float (a negative
+          projected return is legitimate and preserved).
+    Invariants:
+        - Holds no references to engine or LLM state; safe to serialize into a
+          persisted ``StrategySpec``.
+    """
+
+    forecast_win_rate: float = 0.0
+    reward_risk: float = 0.0
+    trades_per_year: float = 0.0
+    projected_annual_return_pct: float = 0.0
+    consistency_note: str = ""
+
+    @field_validator("forecast_win_rate", mode="after")
+    @classmethod
+    def _clamp_win_rate(cls, v: float) -> float:
+        # A probability. The designer emits it as a fraction; a model slip
+        # (a negative, or 84 emitted for "84%") is clamped into [0, 1] rather
+        # than rejected, since the forecast is advisory and never gated.
+        # NaN/±inf (which `<`/`>` would silently pass through) collapse to 0.0.
+        if not math.isfinite(v):
+            return 0.0
+        if v < 0.0:
+            return 0.0
+        if v > 1.0:
+            return 1.0
+        return v
+
+    @field_validator("reward_risk", "trades_per_year", mode="after")
+    @classmethod
+    def _floor_non_negative(cls, v: float) -> float:
+        # Floor at 0.0. Non-finite (NaN/±inf) also collapses to 0.0 so a
+        # malformed forecast never carries a NaN/inf forward.
+        if not math.isfinite(v) or v <= 0.0:
+            return 0.0
+        return v
+
+    @field_validator("projected_annual_return_pct", mode="after")
+    @classmethod
+    def _sanitize_projected_return(cls, v: float) -> float:
+        # A negative projected return is a legitimate (if undesirable) forecast,
+        # so finite values pass through unchanged; only non-finite collapses.
+        return v if math.isfinite(v) else 0.0
+
+
 class StrategySpec(BaseModel):
     strategy_id: str
     authored_by: str
@@ -282,6 +354,11 @@ class StrategySpec(BaseModel):
     # expressible subset. Orthogonal to ``requires_redesign``.
     requires_custom_code: bool = False
     unparsed_rules: List[str] = Field(default_factory=list)
+    # The DesignAgent's pre-commit forecast of win rate, reward:risk, trade
+    # frequency, and projected annual return — the expectancy reasoning behind
+    # the spec. Advisory and never gated; ``None`` for specs (or legacy
+    # persisted records) authored without it.
+    expectancy_forecast: Optional[ExpectancyForecast] = None
     audit: AuditContext = Field(default_factory=AuditContext)
 
     @model_validator(mode="before")
@@ -391,9 +468,7 @@ class StrategySpec(BaseModel):
         Postconditions: returns ``self`` when at most one exit rule is a
         limit-style stop; raises ``ValueError`` otherwise.
         """
-        limit_stops = sum(
-            1 for r in self.exit_rules if getattr(r, "style", "market") == "limit"
-        )
+        limit_stops = sum(1 for r in self.exit_rules if getattr(r, "style", "market") == "limit")
         if limit_stops > 1:
             raise ValueError(
                 f"at most one limit-style stop-loss (style='limit') is allowed "
@@ -642,6 +717,23 @@ class OpenPositionDiagnostic(BaseModel):
     entry_timestamp: str
 
 
+def scaled_level_key(rule_index: int, level_index: int) -> str:
+    """Diagnostics key for one scaled-take-profit rung.
+
+    Single source of the ``scaled_take_profit_level_firings`` key format, shared by
+    the emitter (``_record_emission``) and the conformance gate so the two never
+    drift. Preconditions: both indices are non-negative — enforced with an explicit
+    raise (not ``assert``) so the diagnostics-key contract holds even under
+    ``python -O``. Postconditions: returns ``"<rule_index>:<level_index>"`` (e.g.
+    ``"0:1"``).
+    """
+    if rule_index < 0 or level_index < 0:
+        raise ValueError(
+            f"scaled_level_key indices must be non-negative: ({rule_index}, {level_index})"
+        )
+    return f"{rule_index}:{level_index}"
+
+
 class BacktestExecutionDiagnostics(BaseModel):
     """Structured execution-path diagnostics for sparse or zero-trade backtests."""
 
@@ -683,6 +775,13 @@ class BacktestExecutionDiagnostics(BaseModel):
     # exact-match conformance + alignment gates are unaffected, while analysis and
     # operability surfaces gain per-basis visibility.
     exit_rule_firings_by_basis: Dict[str, int] = Field(default_factory=dict)
+    # Per-rung firing counts for laddered ``ScaledTakeProfitRule`` exits, keyed by
+    # ``"<rule_index>:<level_index>"`` (e.g. ``"0:0"`` / ``"0:1"``). Each rung
+    # scales out at most once per position, so these distinguish which targets a
+    # ladder actually realised. Additive metadata: the ``scaled_take_profit``
+    # aggregate stays in ``exit_rule_firings`` and the close ``reason`` is
+    # byte-stable, so the exact-match conformance + alignment gates are unaffected.
+    scaled_take_profit_level_firings: Dict[str, int] = Field(default_factory=dict)
     # Fill-based counterpart of ``exit_rule_firings`` — counts engine-SUBMITTED
     # exit orders that actually FILLED (closed a position), keyed by rule kind,
     # with a per-symbol breakdown below. Counted off ``engine_exit_filled``

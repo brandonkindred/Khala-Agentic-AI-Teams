@@ -37,9 +37,43 @@ from pydantic import BaseModel, Field, field_validator
 from llm_service import clear_client_cache, runtime_config
 from llm_service import config as llm_config
 from llm_service.clients import list_ollama_models
-from shared_postgres import is_postgres_enabled, set_secrets
+from shared_postgres import (
+    StorageStatus,
+    bounded_probe,
+    connect_timeout,
+    is_postgres_enabled,
+    resolve_storage_status,
+    set_secrets,
+)
 
 logger = logging.getLogger(__name__)
+
+
+async def _probe_storage_status() -> StorageStatus:
+    """Resolve the runtime-store status off the event loop, bounded.
+
+    Preconditions: none.
+    Postconditions: returns the shared :func:`resolve_storage_status` classification
+        (``available`` / ``unconfigured`` / ``unreachable``). The blocking probe runs in
+        a worker thread via the shared :func:`shared_postgres.bounded_probe`, whose budget
+        (``connect_timeout + statement_timeout + 1s``) gives the inner ``SELECT 1`` real
+        headroom so a slow-but-alive store isn't falsely reported unreachable, and which
+        logs the cause on timeout/error rather than masking a non-connectivity bug as
+        "Postgres down". NOTE: this page probes the SHARED POOL (a ``SELECT 1``), a
+        different path than the GitHub panel (which reads the credential store); under
+        partial Postgres degradation the two surfaces can legitimately disagree, because
+        they check different stores. Never raises.
+    """
+    if not is_postgres_enabled():
+        return "unconfigured"
+    # The inner probe's own pool-acquire/connect bound is tied to connect_timeout; the
+    # shared bounded_probe budget adds statement_timeout headroom on top.
+    return await bounded_probe(
+        lambda: resolve_storage_status(timeout_s=connect_timeout()),
+        on_failure=lambda: "unreachable",
+        label="LLM provider storage probe",
+    )
+
 
 router = APIRouter(prefix="/api/llm-config", tags=["llm-config"])
 
@@ -116,7 +150,19 @@ class LlmConfigResponse(BaseModel):
     claude_api_key_configured: bool = Field(False, description="True when a Claude key is set (runtime or env).")
     ollama_api_key_configured: bool = Field(False, description="True when an Ollama Cloud key is set (runtime or env).")
     storage_available: bool = Field(
-        ..., description="False when POSTGRES_HOST is unset; PUT returns 503 and config is env-only."
+        ...,
+        description=(
+            "True only when the runtime store is configured AND reachable (i.e. a "
+            "write would succeed). False disables Save; see storage_status for why."
+        ),
+    )
+    storage_status: StorageStatus = Field(
+        ...,
+        description=(
+            "Why config can/can't be saved: 'available' (configured + reachable), "
+            "'unconfigured' (POSTGRES_HOST unset), or 'unreachable' (set but the DB "
+            "did not answer a probe)."
+        ),
     )
     provider_options: list[str]
     claude_model_options: list[str]
@@ -137,16 +183,19 @@ class OllamaModelsResponse(BaseModel):
     )
 
 
-def _build_response() -> LlmConfigResponse:
+def _build_response(storage_status: StorageStatus) -> LlmConfigResponse:
     """Assemble the current effective config for the UI (no secrets).
 
-    Preconditions: none.
+    Preconditions: ``storage_status`` is one of :data:`StorageStatus`, already
+        resolved by the caller (probing is blocking I/O the caller offloads).
     Postconditions: returns the effective provider, the active provider's resolved
         model (via the shared ``resolve_model_for_provider`` chokepoint, so the UI
         never disagrees with the model agents actually use), each provider's
         effective model (so the UI can restore the inactive one on a provider
         switch), the Ollama base URL, and ``*_configured`` booleans — API keys are
-        never included. Never raises.
+        never included. ``storage_available`` is True iff ``storage_status`` is
+        ``"available"`` (configured AND reachable), so Save is disabled whenever a
+        write would fail. Never raises.
     """
     provider = llm_config.resolve_provider()
     return LlmConfigResponse(
@@ -160,7 +209,8 @@ def _build_response() -> LlmConfigResponse:
         ollama_base_url=llm_config.resolve_base_url(),
         claude_api_key_configured=bool(llm_config.resolve_claude_api_key()),
         ollama_api_key_configured=bool(llm_config.resolve_ollama_api_key()),
-        storage_available=is_postgres_enabled(),
+        storage_available=storage_status == "available",
+        storage_status=storage_status,
         provider_options=list(_PROVIDER_OPTIONS),
         claude_model_options=list(llm_config.CLAUDE_MODEL_SUGGESTIONS),
         ollama_model_suggestions=list(_OLLAMA_MODEL_SUGGESTIONS),
@@ -194,7 +244,10 @@ async def get_llm_config() -> LlmConfigResponse:
             "expires.",
             exc_info=True,
         )
-    return _build_response()
+    # Probe connectivity off the event loop (and bounded), so a stalled DB can't
+    # hang the settings read.
+    storage_status = await _probe_storage_status()
+    return _build_response(storage_status)
 
 
 @router.get("/ollama-models", response_model=OllamaModelsResponse)
@@ -327,4 +380,7 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
     except Exception:  # noqa: BLE001 - never 500 after a successful persist
         logger.exception("Failed to clear caches after persisting LLM provider config")
     logger.info("LLM provider config updated: provider=%s", body.provider)
-    return _build_response()
+    # Report the real, freshly-probed status rather than assuming "available": the
+    # store could drop between the commit above and this response, and the next GET
+    # would then disagree with what this PUT claimed.
+    return _build_response(await _probe_storage_status())

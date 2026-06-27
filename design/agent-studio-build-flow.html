@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Studio — Stage 1 Build flow (hi-fi mockups)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --page:#F6F7FB; --white:#fff; --ink:#1A1D29; --mut:#5B6172; --mut2:#9AA0B0;
+    --bd:#E5E8F0; --pri:#6D5AE6; --priL:#EEEBFB; --green:#2BB673; --amber:#F6B73C;
+    --amberbg:#FEF3E2; --amberink:#9E760F; --chip:#F1F2F7;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Inter',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#E9EBF2;color:var(--ink);
+       padding:48px 24px 96px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1440px;margin:0 auto}
+  h1.page-title{font-size:22px;font-weight:700;margin:0 0 4px}
+  .page-sub{color:var(--mut);font-size:13px;margin-bottom:32px}
+  .screen-label{font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--mut2);
+                margin:40px 0 12px}
+  .frame{background:var(--page);border:1px solid var(--bd);border-radius:16px;overflow:hidden;
+         box-shadow:0 12px 40px rgba(26,29,41,.08)}
+  /* top bar */
+  .topbar{display:flex;align-items:center;justify-content:space-between;padding:14px 28px;background:var(--white);
+          border-bottom:1px solid var(--bd)}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px}
+  .brand .dot{width:22px;height:22px;border-radius:50%;background:var(--pri)}
+  .stepper{display:flex;align-items:center;gap:8px}
+  .step{display:flex;align-items:center;gap:8px;padding:7px 14px 7px 12px;border-radius:18px;background:var(--chip);
+        font-size:12px;font-weight:600;color:var(--mut)}
+  .step .num{width:20px;height:20px;border-radius:50%;background:var(--mut2);color:#fff;font-size:11px;font-weight:700;
+             display:flex;align-items:center;justify-content:center}
+  .step.active{background:var(--pri);color:#fff}
+  .step.active .num{background:#fff;color:var(--pri)}
+  .step .num.done{background:var(--green)}
+  .step .conn,.sconn{width:18px;height:2px;background:var(--bd)}
+  .actions{display:flex;align-items:center;gap:10px}
+  .btn{padding:9px 14px;border-radius:8px;font-size:12px;font-weight:600;border:1px solid var(--bd);background:#fff;
+       color:var(--ink);cursor:default;white-space:nowrap}
+  .btn.primary{background:var(--pri);color:#fff;border-color:var(--pri)}
+  .btn.disabled{background:var(--chip);color:var(--mut2);border-color:transparent}
+  /* sub stepper */
+  .substep{display:flex;align-items:center;justify-content:space-between;padding:10px 28px;background:var(--white);
+           border-bottom:1px solid var(--bd)}
+  .sbleft{display:flex;align-items:center;gap:10px;font-size:12px}
+  .sbleft .lbl{font-size:11px;font-weight:700;color:var(--mut2)}
+  .sstep{display:flex;align-items:center;gap:7px;font-weight:600;color:var(--mut2)}
+  .sstep .sd{width:14px;height:14px;border-radius:50%;background:var(--bd)}
+  .sstep.active{color:var(--ink)} .sstep.active .sd{background:var(--pri)}
+  .sstep.done{color:var(--ink)} .sstep.done .sd{background:var(--green)}
+  .sbright{font-size:11px;color:var(--mut2);font-weight:500}
+  /* body */
+  .body{padding:24px 28px}
+  .card{background:#fff;border:1px solid var(--bd);border-radius:14px;padding:16px 18px}
+  .muted{color:var(--mut)} .small{font-size:11px}
+  /* 1.1 */
+  .choices{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:16px 0 18px}
+  .choice{background:#fff;border:1px solid var(--bd);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:10px}
+  .choice.sel{border:2px solid var(--pri);padding:19px}
+  .choice .ic{width:40px;height:40px;border-radius:10px;background:var(--priL);color:var(--pri);font-size:18px;font-weight:700;
+              display:flex;align-items:center;justify-content:center}
+  .choice h3{font-size:15px;font-weight:700}
+  .choice p{font-size:12px;color:var(--mut);line-height:1.5}
+  .catfilters{display:flex;align-items:center;gap:10px;margin-bottom:14px;font-size:11px}
+  .pillbtn{padding:7px 10px;border-radius:8px;background:var(--page);border:1px solid var(--bd);color:var(--mut);font-weight:500}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px}
+  .acard{background:#fff;border:1px solid var(--bd);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:8px}
+  .acard.sel{border:2px solid var(--pri);padding:13px}
+  .acard .row{display:flex;align-items:center;gap:8px}
+  .acard .ic{width:28px;height:28px;border-radius:7px;background:var(--priL);color:var(--pri);font-weight:700;
+             display:flex;align-items:center;justify-content:center;font-size:12px}
+  .acard .nm{font-size:12.5px;font-weight:700}
+  .acard .ds{font-size:11px;color:var(--mut)}
+  .insp{display:flex;align-items:center;justify-content:space-between;background:var(--priL);border-radius:10px;padding:12px 14px}
+  .insp .l{display:flex;align-items:center;gap:8px}
+  .insp .nm{font-size:13px;font-weight:700}
+  .insp .meta{font-size:11px;color:var(--mut)}
+  /* 1.2 */
+  .grid2{display:grid;grid-template-columns:560px 1fr;gap:22px;align-items:stretch}
+  .assist{background:#fff;border:1px solid var(--bd);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+  .banner{display:flex;align-items:center;gap:8px;background:var(--priL);color:var(--pri);font-weight:600;font-size:12.5px;padding:12px 16px}
+  .conv{padding:16px;display:flex;flex-direction:column;gap:10px;flex:1}
+  .bub{border:1px solid var(--bd);background:var(--page);border-radius:12px;padding:10px 14px;font-size:12px;line-height:1.45;max-width:90%}
+  .bub.me{background:var(--pri);color:#fff;border-color:var(--pri);align-self:flex-end}
+  .chatin{display:flex;align-items:center;gap:8px;margin:0 16px 16px;padding:8px 8px 8px 14px;border:1px solid var(--bd);
+          border-radius:10px;background:var(--page);color:var(--mut2);font-size:12px}
+  .chatin .send{width:32px;height:32px;border-radius:8px;background:var(--pri);color:#fff;display:flex;align-items:center;
+                justify-content:center;margin-left:auto}
+  .defn{display:flex;flex-direction:column;gap:12px}
+  .defn .hd{display:flex;align-items:center;justify-content:space-between}
+  .defn .hd h3{font-size:13px;font-weight:700}
+  .tag.live{background:var(--priL);color:var(--pri);font-weight:600;font-size:11px;padding:5px 10px;border-radius:12px}
+  .fl{display:flex;flex-direction:column;gap:5px}
+  .fl label{font-size:11px;font-weight:600;color:var(--mut)}
+  .fl .inp{border:1px solid var(--bd);background:var(--page);border-radius:8px;padding:9px 12px;font-size:12px;font-weight:500}
+  .fl .inp.warn{border-color:var(--amber);color:var(--mut2);font-weight:400}
+  .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{background:var(--chip);color:var(--mut);font-size:11px;padding:5px 10px;border-radius:12px;font-weight:500}
+  .chip.add{background:#fff;color:var(--pri);font-weight:600}
+  .tools{display:flex;gap:14px;font-size:12px}
+  .tool{display:flex;align-items:center;gap:6px}
+  .cb{width:16px;height:16px;border-radius:4px;background:var(--pri);color:#fff;font-size:10px;font-weight:700;
+      display:flex;align-items:center;justify-content:center}
+  .cb.off{background:#fff;border:1px solid var(--bd)}
+  .io{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .readi{display:flex;align-items:center;gap:7px;background:var(--amberbg);color:var(--amberink);font-weight:600;
+         font-size:11.5px;padding:9px 12px;border-radius:8px}
+  .readi .rd{width:8px;height:8px;border-radius:50%;background:var(--amber)}
+  /* 1.3 */
+  .reviewhd{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .reviewhd .l{display:flex;align-items:center;gap:10px}
+  .reviewhd h2{font-size:20px;font-weight:700}
+  .reviewhd .v{font-size:14px;font-weight:600;color:var(--pri)}
+  .anatomy{background:#fff;border:1px solid var(--bd);border-radius:14px;overflow:hidden}
+  .arow{display:flex;align-items:center;gap:14px;padding:14px 18px;border-top:1px solid var(--bd)}
+  .arow:first-child{border-top:none}
+  .arow .lab{width:180px;font-size:12.5px;font-weight:700}
+  .arow .val{flex:1;font-size:12px;color:var(--mut)}
+  .arow .tg{background:var(--chip);color:var(--mut);font-size:11px;font-weight:600;padding:5px 10px;border-radius:12px}
+  .foot{display:flex;align-items:center;justify-content:space-between;margin-top:16px}
+  .foot .r{display:flex;align-items:center;gap:12px}
+  .saved{display:flex;align-items:center;gap:7px;color:var(--green);font-size:11.5px;font-weight:600}
+  .saved .sd{width:8px;height:8px;border-radius:50%;background:var(--green)}
+  .lock{display:flex;align-items:center;gap:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 class="page-title">Agent Studio — Stage 1 “Build an agent” flow</h1>
+  <div class="page-sub">High-fidelity mockups · 1.1 Start → 1.2 Define → 1.3 Configure · gated “Test this agent →”</div>
+
+  <!-- ============ 1.1 START ============ -->
+  <div class="screen-label">Stage 1.1 — Start</div>
+  <div class="frame">
+    <div class="topbar">
+      <div class="brand"><span class="dot"></span>Agent Studio</div>
+      <div class="stepper">
+        <div class="step active"><span class="num">1</span>Build</div><span class="conn"></span>
+        <div class="step"><span class="num">2</span>Test</div><span class="conn"></span>
+        <div class="step"><span class="num">3</span>Compose</div><span class="conn"></span>
+        <div class="step"><span class="num">4</span>Personas</div>
+      </div>
+      <div class="actions"><span class="btn">Save draft</span><span class="btn">Load draft ▾</span></div>
+    </div>
+    <div class="substep">
+      <div class="sbleft"><span class="lbl">Build:</span>
+        <span class="sstep active"><span class="sd"></span>Start</span><span class="sconn"></span>
+        <span class="sstep"><span class="sd"></span>Define</span><span class="sconn"></span>
+        <span class="sstep"><span class="sd"></span>Configure</span>
+      </div>
+      <div class="sbright">Step 1 of 3 — choose a path</div>
+    </div>
+    <div class="body">
+      <h1 class="page-title" style="font-size:20px">How do you want to start?</h1>
+      <div class="choices">
+        <div class="choice sel">
+          <div class="ic">✦</div><h3>Create from scratch</h3>
+          <p>Describe what you need and the build assistant drafts the agent with you — name, tools, inputs/outputs, prompts.</p>
+        </div>
+        <div class="choice">
+          <div class="ic">⎘</div><h3>Start from an existing agent</h3>
+          <p>Pick a registry agent below; we duplicate it into a new draft you refine. The original is never changed.</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="catfilters">
+          <strong style="font-size:12px">Browse to clone:</strong>
+          <span class="pillbtn">Team ▾</span><span class="pillbtn">Tag ▾</span>
+          <span class="pillbtn">⌕ Search agents…</span>
+        </div>
+        <div class="grid3">
+          <div class="acard sel"><div class="row"><span class="ic">◆</span><span class="nm">blogging.planner</span></div><div class="ds">Plans long-form outlines</div></div>
+          <div class="acard"><div class="row"><span class="ic">◆</span><span class="nm">market.researcher</span></div><div class="ds">Synthesizes market data</div></div>
+          <div class="acard"><div class="row"><span class="ic">◆</span><span class="nm">soc2.auditor</span></div><div class="ds">Checks SOC2 controls</div></div>
+        </div>
+        <div class="insp">
+          <div class="l"><span class="nm">blogging.planner</span><span class="meta">summary · tags · inputs/outputs · cognition tools</span></div>
+          <span class="btn primary">Duplicate &amp; refine →</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 1.2 DEFINE ============ -->
+  <div class="screen-label">Stage 1.2 — Define (build assistant)</div>
+  <div class="frame">
+    <div class="topbar">
+      <div class="brand"><span class="dot"></span>Agent Studio</div>
+      <div class="stepper">
+        <div class="step active"><span class="num">1</span>Build</div><span class="conn"></span>
+        <div class="step"><span class="num">2</span>Test</div><span class="conn"></span>
+        <div class="step"><span class="num">3</span>Compose</div><span class="conn"></span>
+        <div class="step"><span class="num">4</span>Personas</div>
+      </div>
+      <div class="actions"><span class="btn">Save draft</span><span class="btn">Load draft ▾</span></div>
+    </div>
+    <div class="substep">
+      <div class="sbleft"><span class="lbl">Build:</span>
+        <span class="sstep done"><span class="sd"></span>✓ Start</span><span class="sconn"></span>
+        <span class="sstep active"><span class="sd"></span>Define</span><span class="sconn"></span>
+        <span class="sstep"><span class="sd"></span>Configure</span>
+      </div>
+      <span class="btn disabled lock">Test this agent → <span>🔒</span></span>
+    </div>
+    <div class="body">
+      <div class="grid2">
+        <div class="assist">
+          <div class="banner">✦ Refining a copy of&nbsp;<strong>blogging.planner</strong></div>
+          <div class="conv">
+            <div class="bub me">Make it target B2B founders and add a word_count input.</div>
+            <div class="bub">Done — I updated the inputs (added <code>word_count</code>), tightened the system prompt for a B2B audience, and tagged it “b2b”. One required field is still empty: a short <strong>role</strong>.</div>
+          </div>
+          <div class="chatin">ask the assistant to change the agent…<span class="send">▶</span></div>
+        </div>
+        <div class="card defn">
+          <div class="hd"><h3>Agent definition</h3><span class="tag live">✦ live</span></div>
+          <div class="fl"><label>name</label><div class="inp">blogging.planner.v2</div></div>
+          <div class="fl"><label>role</label><div class="inp warn">add a one-line role…</div></div>
+          <div class="fl"><label>tags</label><div class="chips"><span class="chip">content</span><span class="chip">seo</span><span class="chip">b2b</span><span class="chip add">+ add</span></div></div>
+          <div class="fl"><label>tools</label>
+            <div class="tools">
+              <span class="tool"><span class="cb">✓</span>web.search</span>
+              <span class="tool"><span class="cb">✓</span>draft</span>
+              <span class="tool"><span class="cb off"></span>http.api</span>
+            </div>
+          </div>
+          <div class="io">
+            <div class="fl"><label>inputs</label><div class="inp">{ topic, audience, word_count }</div></div>
+            <div class="fl"><label>outputs</label><div class="inp">{ outline[], keywords[] }</div></div>
+          </div>
+          <div class="fl"><label>system prompt · guardrails ▾</label><div class="inp" style="color:var(--mut);font-weight:400">You are a planning agent for B2B founders…</div></div>
+          <div class="readi"><span class="rd"></span>Readiness: 1 required field missing — add a role to enable testing</div>
+          <div style="display:flex;justify-content:flex-end"><span class="btn">Continue to Configure →</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 1.3 CONFIGURE ============ -->
+  <div class="screen-label">Stage 1.3 — Configure &amp; Review</div>
+  <div class="frame">
+    <div class="topbar">
+      <div class="brand"><span class="dot"></span>Agent Studio</div>
+      <div class="stepper">
+        <div class="step active"><span class="num">1</span>Build</div><span class="conn"></span>
+        <div class="step"><span class="num">2</span>Test</div><span class="conn"></span>
+        <div class="step"><span class="num">3</span>Compose</div><span class="conn"></span>
+        <div class="step"><span class="num">4</span>Personas</div>
+      </div>
+      <div class="actions"><span class="btn">Save draft</span><span class="btn">Load draft ▾</span></div>
+    </div>
+    <div class="substep">
+      <div class="sbleft"><span class="lbl">Build:</span>
+        <span class="sstep done"><span class="sd"></span>✓ Start</span><span class="sconn"></span>
+        <span class="sstep done"><span class="sd"></span>✓ Define</span><span class="sconn"></span>
+        <span class="sstep active"><span class="sd"></span>Configure</span>
+      </div>
+      <span class="btn">◂ back to Define</span>
+    </div>
+    <div class="body">
+      <div class="reviewhd">
+        <div class="l"><h2>Review agent</h2><span class="v">blogging.planner.v2</span></div>
+        <span class="sbright">Anatomy per AGENT_ANATOMY.md</span>
+      </div>
+      <div class="anatomy">
+        <div class="arow"><span class="lab">Input / Output</span><span class="val">{ topic, audience, word_count } → { outline[], keywords[] }</span><span class="tg">✓ valid</span></div>
+        <div class="arow"><span class="lab">Tools</span><span class="val">web.search · draft</span><span class="tg">2 bound</span></div>
+        <div class="arow"><span class="lab">Memory</span><span class="val">retention 90d · knowledge-graph on</span><span class="tg">cognition</span></div>
+        <div class="arow"><span class="lab">Prompts</span><span class="val">system prompt set · user/assistant separated</span><span class="tg">✓</span></div>
+        <div class="arow"><span class="lab">Security guardrails</span><span class="val">default_guardrails (advisory + enforced)</span><span class="tg">seeded</span></div>
+        <div class="arow"><span class="lab">Subagents</span><span class="val">none</span><span class="tg">—</span></div>
+      </div>
+      <div class="foot">
+        <span class="btn">Provision ▾</span>
+        <div class="r">
+          <span class="saved"><span class="sd"></span>saved · registered to catalog</span>
+          <span class="btn">Save agent</span>
+          <span class="btn primary">Test this agent →</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

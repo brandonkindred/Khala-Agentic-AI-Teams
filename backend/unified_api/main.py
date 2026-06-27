@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -32,6 +32,7 @@ if str(_agents_dir) not in sys.path:
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+from shared_env_config import env_float
 from unified_api.config import TEAM_CONFIGS, get_enabled_teams
 
 logging.basicConfig(
@@ -310,6 +311,14 @@ async def lifespan(app: FastAPI):
         logger.exception("agent_console postgres schema registration failed")
 
     try:
+        from shared_postgres import register_team_schemas
+        from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
+
+        register_team_schemas(USER_PROFILE_SCHEMA)
+    except Exception:
+        logger.exception("user_profile postgres schema registration failed")
+
+    try:
         from agent_cognition.postgres import SCHEMA as AGENT_COGNITION_SCHEMA
         from shared_postgres import register_team_schemas
 
@@ -504,7 +513,14 @@ app.add_middleware(SecurityGatewayMiddleware)
 try:
     from shared_observability import instrument_fastapi_app
 
-    instrument_fastapi_app(app, team_key="unified_api")
+    # Anchored exclusions: this app hosts the /api/se/metrics business alias, whose
+    # path contains "metrics". Excluding only the exact scrape/health endpoints keeps
+    # the alias traced while still skipping the Prometheus /metrics endpoint.
+    instrument_fastapi_app(
+        app,
+        team_key="unified_api",
+        excluded_urls="^/health$,^/healthz$,^/ready$,^/metrics$",
+    )
 except Exception:
     logger.warning("OpenTelemetry FastAPI instrumentation unavailable", exc_info=True)
 
@@ -516,7 +532,8 @@ try:
     Instrumentator(
         should_group_status_codes=True,
         should_ignore_untemplated=True,
-        excluded_handlers=["/metrics", "/health"],
+        # Anchored so the /api/se/metrics alias is scraped while the scrape endpoint isn't.
+        excluded_handlers=["^/metrics$", "^/health$"],
     ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False, tags=["observability"])
 except Exception:
     logger.warning("prometheus instrumentator unavailable", exc_info=True)
@@ -534,6 +551,7 @@ from unified_api.routes.llm_config import router as llm_config_router
 from unified_api.routes.llm_tools import router as llm_tools_router
 from unified_api.routes.llm_usage import router as llm_usage_router
 from unified_api.routes.sandboxes import router as sandboxes_router
+from unified_api.routes.user_profile import router as user_profile_router
 
 app.include_router(integrations_router)
 app.include_router(llm_config_router)
@@ -545,6 +563,11 @@ app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
 app.include_router(cognition_router)
+# Honor the user_profile team's `enabled` flag (it has a TEAM_CONFIGS entry),
+# matching the product_delivery gate below: disabling the team must make
+# /api/user-profile/* stop answering, not just disappear from /teams.
+if TEAM_CONFIGS["user_profile"].enabled:
+    app.include_router(user_profile_router)
 # Honor the in-process team's `enabled` flag: an operator that disables
 # the team via TEAM_CONFIGS expects /api/product-delivery/* to stop
 # answering, not just disappear from /teams. Gate the *import* too —
@@ -651,24 +674,14 @@ async def _probe_postgres_live() -> bool:
     """
 
     def _ping() -> bool:
-        from shared_postgres import client as _pg_client
-        from shared_postgres import is_postgres_enabled
+        # Delegates to the shared, hard-bounded probe so there is one
+        # ``SELECT 1`` implementation across the platform (the LLM-config
+        # and GitHub-integration routes use the same helper). It returns
+        # False when Postgres is disabled, the host is unreachable, or the
+        # bounded acquisition times out — exactly this branch's contract.
+        from shared_postgres import check_connection
 
-        if not is_postgres_enabled():
-            return False
-        try:
-            # Bound the connection acquisition itself so the worker
-            # thread can't block longer than `_PROBE_DB_TIMEOUT_S`. We
-            # reach through `client._get_or_create_pool` (rather than
-            # `get_conn()`) because the public helper doesn't expose a
-            # timeout knob today and the probe must be hard-bounded.
-            pool = _pg_client._get_or_create_pool()
-            with pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn, conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                row = cur.fetchone()
-                return row is not None and row[0] == 1
-        except Exception:
-            return False
+        return check_connection(timeout_s=_PROBE_DB_TIMEOUT_S)
 
     loop = asyncio.get_running_loop()
     try:
@@ -736,13 +749,20 @@ async def _verify_in_process_schema_present(team_key: str) -> bool:
 
     def _check() -> bool:
         from shared_postgres import client as _pg_client
-        from shared_postgres import is_postgres_enabled
+        from shared_postgres import is_postgres_enabled, probe_cursor
 
         if not is_postgres_enabled():
             return False
         try:
             pool = _pg_client._get_or_create_pool()
-            with pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn, conn.cursor() as cur:
+            # Bound the query itself (not just slot acquisition) via the shared probe
+            # helper's transaction-local statement_timeout, so a post-connect mid-query
+            # stall releases this pooled connection within the budget — same guarantee as
+            # check_connection, instead of an unbounded SELECT on the shared pool.
+            with (
+                pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn,
+                probe_cursor(conn, timeout_s=_PROBE_DB_TIMEOUT_S) as cur,
+            ):
                 # `to_regclass` returns NULL for missing tables — fast,
                 # one round-trip, and it doesn't lock anything.
                 placeholders = ", ".join(["to_regclass(%s) IS NOT NULL"] * len(expected))
@@ -950,6 +970,51 @@ async def list_team_jobs(team: str, running_only: bool = False) -> dict[str, Any
         resp = await client.get(url)
         resp.raise_for_status()
         return resp.json()
+
+
+@app.get("/api/se/metrics", tags=["software", "observability"])
+async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
+    """Alias for the SE team's DORA metrics, proxied to its ``/dora`` route.
+
+    The SDLC review specified ``GET /api/se/metrics`` while the SE team itself
+    mounts under ``/api/software-engineering``; this thin alias satisfies that
+    contract by forwarding to the SE service's ``/dora`` route. This alias prefix
+    (``/api/se``) is registered in the security gateway's scanned prefixes so it
+    shares the proxied path's security posture.
+    """
+    env_var = TEAM_SERVICE_URL_ENVS.get("software_engineering")
+    base = (os.environ.get(env_var, "").strip() if env_var else "") or ""
+    if not base:
+        raise HTTPException(status_code=503, detail="software engineering service URL not configured")
+    # Operability knob parsed via the shared typed reader (missing/garbage → 15s);
+    # a non-positive value is then reset to the default, since a <=0 timeout would
+    # make httpx fail instantly.
+    timeout = env_float("SE_METRICS_ALIAS_TIMEOUT", 15.0)
+    if timeout <= 0:
+        timeout = 15.0
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{base.rstrip('/')}/dora", params={"window_days": window_days})
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        # Forward the upstream failure as a gateway error rather than a 500 with a
+        # leaked traceback.
+        logger.warning("SE metrics alias: upstream returned %s", exc.response.status_code)
+        raise HTTPException(
+            status_code=502,
+            detail=f"software engineering service returned {exc.response.status_code}",
+        ) from exc
+    except httpx.RequestError as exc:
+        logger.warning("SE metrics alias: upstream unreachable: %s", exc)
+        raise HTTPException(status_code=503, detail="software engineering service unreachable") from exc
+    except ValueError as exc:
+        # A 200 with a non-JSON body (e.g. an HTML error page) makes ``resp.json()``
+        # raise ``json.JSONDecodeError`` (a ``ValueError`` subclass); surface a 502
+        # rather than an unhandled 500 with a leaked traceback.
+        logger.warning("SE metrics alias: non-JSON body from upstream: %s", exc)
+        raise HTTPException(status_code=502, detail="invalid JSON from software engineering service") from exc
+    return data
 
 
 @app.delete("/api/jobs/{team}/{job_id}", tags=["jobs"])

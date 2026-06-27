@@ -157,6 +157,54 @@ must be ≤ `MAX_QUEUE_SIZE`.
 
 ---
 
+## Software Engineering Observability & Learning
+
+The SE team instruments its pipeline on top of the OpenTelemetry layer above.
+Every `llm_service` call emits a span carrying `agent.name`, `task.id`,
+`job.id`, `phase`, `llm.model`, `llm.input_tokens`, `llm.output_tokens`,
+`cost.usd`, and `outcome`, plus a `khala.llm.cost_usd` counter. Per-job cost is
+accumulated and written to the job-store entry (`cost_usd`). DORA metrics and
+cost are exposed at `GET /api/se/metrics` (alias of
+`/api/software-engineering/dora`) and rendered in the Agent Console
+"Metrics" tab. Post-mortems and quality-gate rejections are distilled into the
+`se_learnings` Postgres table and the top-N relevant ones are injected into the
+Tech Lead's Design prompt. All Postgres-backed pieces no-op when `POSTGRES_HOST`
+is unset; there is **no** per-job budget cap.
+
+### LLM_PRICE_&lt;model&gt;
+Per-model price override for token→USD cost estimation, formatted
+`<usd_per_1k_input>/<usd_per_1k_output>`. `<model>` is the model name uppercased
+with each run of non-alphanumerics collapsed to `_` (e.g.
+`LLM_PRICE_DEEPSEEK_V4_PRO_CLOUD=0.0003/0.0012`). A malformed value is ignored
+(falls back to the built-in table); an unknown, unpriced model costs `$0` rather
+than a guessed amount.
+
+### SE_COST_FLUSH_INTERVAL_S
+Minimum seconds between flushes of a job's running cost to the job store
+(default `2`; garbage → `2`, negatives clamped to `0` = flush every call). The
+in-process accumulator is the fast path; the job-store `cost_usd` is the durable
+figure.
+
+### SE_TRACE_TO_POSTGRES
+When truthy (`true`/`1`/`yes`; default off), each SE-attributed LLM call is also
+persisted as a row in `se_agent_traces` — the substrate the metrics endpoint
+reads for per-job and total spend, so cost metrics work even without an OTLP
+collector. No-op when Postgres is disabled.
+
+### SE_TRACE_RETENTION_DAYS
+Retention window for `se_agent_traces` rows used by `trace_store.prune_traces`
+(default `30`; garbage → `30`, negatives clamped to `0`).
+
+### SE_LEARNINGS_TOPN
+Number of past-sprint learnings injected into the Tech Lead's Design prompt
+(default `5`, clamped to `[0, 50]`; `0` disables injection; garbage → `5`).
+
+### SE_LEARNINGS_RETENTION_DAYS
+Retention window (by `last_seen`) for `se_learnings` rows used by
+`learnings_store.prune_learnings` (default `365`).
+
+---
+
 ## Process Health and Worker Sizing
 
 `shared_observability.process_health` arms each team worker with fault
@@ -280,10 +328,71 @@ Shared cache root for all teams (Docker: `/data/agents`); each team namespaces u
 ### UNIFIED_API_PORT / UNIFIED_API_HOST
 Bind address/port for the Unified API (default `0.0.0.0:8080`).
 
+### HTTP_KEEPALIVE_EXPIRY_S
+Seconds an idle keep-alive socket is kept in the shared outbound HTTP pool
+(`shared_http.get_pooled_client`, used by `JobServiceClient` and other hot paths) before it is
+recycled. Default `15.0`, floor `1.0` (a positive value below the floor is clamped up; non-numeric,
+non-finite, or non-positive values fall back to the default). Recommended range: a few seconds up to
+just under the idle-connection timeout of the upstream/proxy, so the client drops a socket before the
+far end closes it — reusing a server-closed connection otherwise raises
+`httpx.RemoteProtocolError` ("server disconnected without sending a response"). Read once at import
+when `shared_http.DEFAULT_LIMITS` is built, so a change takes effect only on a fresh process.
+
 ### POSTGRES_HOST (and POSTGRES_PORT / USER / PASSWORD / DB)
 Required for migrated teams (blogging, branding, team_assistant, startup_advisor,
 user_agent_founder, agentic_team_provisioning, unified_api credentials). Enables Postgres-backed
-stores via `shared_postgres`; no SQLite fallback.
+stores via `shared_postgres`; no SQLite fallback. Setting `POSTGRES_HOST` only marks Postgres
+*configured* — use `shared_postgres.check_connection()` for a real `SELECT 1` reachability probe
+(the LLM Provider page and GitHub integration use it to tell "configured but unreachable" apart
+from "not configured").
+
+### POSTGRES_CONNECT_TIMEOUT_S
+libpq `connect_timeout` (seconds) applied to **every** Postgres connection the platform opens —
+both the `shared_postgres` pool (used by `check_connection()` and the migrated-team stores) **and**
+the unified-API encrypted credential store (`postgres_encrypted_credentials`, the live read path for
+the GitHub / Slack / Medium PAT/secret lookups, which is a per-call connection outside the pool).
+Default `3`, floor `1`. Bounds how long a TCP connect to a down or unreachable host can hang —
+without it, opening the pool (`open=True`) or a credential read against an unreachable host blocks
+for the libpq default, defeating the bounded reachability probe. Note: it bounds only the TCP
+*connect* phase; a host that accepts the connection then stalls is bounded by `statement_timeout`
+(below) on the credential store, and at the request layer by the route's `asyncio.wait_for` guard.
+
+### POSTGRES_STATEMENT_TIMEOUT_MS
+`statement_timeout` (milliseconds) applied as a libpq `options` to the **unified-API credential
+store's** per-call connections (GitHub / Slack / Medium secret reads/writes). Default `5000`, floor
+`0`. Bounds the query phase that `connect_timeout` does not cover, so a Postgres that accepts the
+connection then stalls mid-query can't pin the credential store's `_LOCK` and cascade a stall across
+every credential consumer. The unified-API config-status routes also size their request-level
+`asyncio.wait_for` budgets off this value (`connect_timeout + statement_timeout + 1s`) so the bounded
+query finishes before the request gives up. **WARNING:** setting `0` disables the query bound — a
+post-connect stall can then pin `_LOCK` indefinitely, reintroducing the cascade this var prevents.
+Scoped to the credential store only — it is deliberately **not** applied to the shared pool, which
+would cap legitimate long-running team queries.
+
+### POSTGRES_PROBE_MAX_WORKERS
+Caps the number of concurrent `shared_postgres.bounded_probe` worker threads **per surface** — the
+bounded offload behind the LLM Provider page and the GitHub config-status reads each get their own
+budget of this size, so a stall on one can't starve the other. Default `4`, floor `1`. A probe
+normally completes in milliseconds and frees its slot immediately; the cap only bites when that many
+workers for a surface are already *stuck* (a Postgres that accepts the connection then stalls
+mid-query). The probe `SELECT 1` (via a transaction-local `statement_timeout`) and the credential
+read are both query-bounded, so a stuck worker normally releases its connection well before the cap
+matters; the cap is the backstop for paths left unbounded (e.g. `POSTGRES_STATEMENT_TIMEOUT_MS=0`).
+Once a surface's cap is reached, its further config-status requests degrade to "unreachable"
+immediately instead of spawning more threads. **Read once** when each surface's semaphore is first
+created (a semaphore can't be resized), so unlike the timeout knobs this takes effect only on a fresh
+process — not mid-run.
+
+### POSTGRES_PROBE_MAX_KEYS
+Caps how many *distinct* per-surface `bounded_probe` budgets (see `POSTGRES_PROBE_MAX_WORKERS`) the
+process keeps. Default `32`, floor `1`. The platform's real probe surfaces are a small fixed set of
+static labels, so this is a guard against a (mis)caller deriving a probe label from request data:
+without it, each unique label would grow an internal registry without bound and mint a fresh full
+worker budget, defeating the cap. Past this many distinct labels, further labels share one dedicated
+**overflow** budget. Two consequences, both confined to that misuse regime: overflow callers lose the
+"per surface" isolation `POSTGRES_PROBE_MAX_WORKERS` otherwise gives (a stall on one overflow surface
+can starve another), and an uncached/dynamic label no longer hits the lock-free fast path. Raise this
+only if you genuinely run more than 32 distinct *static* probe labels.
 
 ### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
 Per-worker memory watchdog used by every `team_service` microservice

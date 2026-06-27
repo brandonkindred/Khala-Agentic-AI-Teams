@@ -6,7 +6,14 @@ import httpx
 import pytest
 
 import shared_http
-from shared_http import DEFAULT_LIMITS, close_pool, get_pooled_client
+from shared_http import (
+    _DEFAULT_KEEPALIVE_EXPIRY_S,
+    _MIN_KEEPALIVE_EXPIRY_S,
+    DEFAULT_LIMITS,
+    _keepalive_expiry_seconds,
+    close_pool,
+    get_pooled_client,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -50,14 +57,74 @@ def test_default_limits_bound_concurrency():
     assert DEFAULT_LIMITS.max_keepalive_connections == 20
 
 
+def test_default_limits_recycle_idle_keepalive_sockets():
+    """``DEFAULT_LIMITS`` must enable idle-socket recycling (a positive expiry) so
+    the client drops a socket before an upstream closes it — avoiding
+    ``RemoteProtocolError`` on reuse of a server-closed connection.
+
+    Only the *behaviour* (recycling is enabled) is asserted here. ``DEFAULT_LIMITS``
+    is built once at import from ``_keepalive_expiry_seconds()``, so pinning the exact
+    value would couple this to import-time env state; the default value and env
+    parsing are covered directly by the ``_keepalive_expiry_seconds`` tests below."""
+    assert DEFAULT_LIMITS.keepalive_expiry is not None
+    assert DEFAULT_LIMITS.keepalive_expiry > 0
+
+
 def test_pooled_client_applies_limits_and_timeout():
     client = get_pooled_client(12.0)
     assert isinstance(client, httpx.Client)
     assert client.timeout.read == 12.0
-    # Limits are applied to the underlying connection pool.
-    pool = client._transport._pool  # noqa: SLF001 — assert pooling config
-    assert pool._max_connections == DEFAULT_LIMITS.max_connections
-    assert pool._max_keepalive_connections == DEFAULT_LIMITS.max_keepalive_connections
+    # The public surface we can always assert: the limits object the pool is
+    # built from carries the configured caps. ``keepalive_expiry`` is only
+    # checked for being a positive expiry (recycling enabled) — its exact value
+    # depends on import-time ``HTTP_KEEPALIVE_EXPIRY_S`` and is covered by the
+    # ``_keepalive_expiry_seconds`` tests, so pinning it here would be flaky.
+    assert DEFAULT_LIMITS.max_connections == 50
+    assert DEFAULT_LIMITS.max_keepalive_connections == 20
+    assert DEFAULT_LIMITS.keepalive_expiry > 0
+    # Stronger check: confirm DEFAULT_LIMITS is actually wired into the live
+    # pool. httpx exposes no public accessor for this, so it requires reaching
+    # into httpcore internals (``_transport._pool``). Guarded so a future httpx
+    # that renames these private attributes degrades to the public assertions
+    # above rather than hard-failing on an internals change.
+    pool = getattr(getattr(client, "_transport", None), "_pool", None)  # noqa: SLF001
+    if pool is not None and hasattr(pool, "_max_connections"):
+        assert pool._max_connections == DEFAULT_LIMITS.max_connections  # noqa: SLF001
+        assert pool._max_keepalive_connections == DEFAULT_LIMITS.max_keepalive_connections  # noqa: SLF001
+        assert pool._keepalive_expiry == DEFAULT_LIMITS.keepalive_expiry  # noqa: SLF001
+    else:  # pragma: no cover - only taken if a future httpx renames pool internals
+        pytest.skip("httpx pool internals unavailable; public limits asserted above")
+
+
+def test_keepalive_expiry_defaults_when_env_unset(monkeypatch):
+    monkeypatch.delenv("HTTP_KEEPALIVE_EXPIRY_S", raising=False)
+    assert _keepalive_expiry_seconds() == _DEFAULT_KEEPALIVE_EXPIRY_S
+
+
+def test_keepalive_expiry_honours_valid_env(monkeypatch):
+    monkeypatch.setenv("HTTP_KEEPALIVE_EXPIRY_S", "42.5")
+    assert _keepalive_expiry_seconds() == 42.5
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "12s", "nan", "inf", "0", "-5"])
+def test_keepalive_expiry_falls_back_on_invalid_env(monkeypatch, bad):
+    """Garbage, non-finite, and non-positive values fall back to the default
+    rather than producing an unusable pool config."""
+    monkeypatch.setenv("HTTP_KEEPALIVE_EXPIRY_S", bad)
+    assert _keepalive_expiry_seconds() == _DEFAULT_KEEPALIVE_EXPIRY_S
+
+
+def test_keepalive_expiry_clamps_below_floor(monkeypatch):
+    """A positive value below the 1.0s floor is clamped up (not discarded) — an
+    extremely short expiry would recycle sockets almost immediately, defeating
+    the pool."""
+    monkeypatch.setenv("HTTP_KEEPALIVE_EXPIRY_S", "1e-10")
+    assert _keepalive_expiry_seconds() == _MIN_KEEPALIVE_EXPIRY_S == 1.0
+
+
+def test_keepalive_expiry_at_floor_is_kept(monkeypatch):
+    monkeypatch.setenv("HTTP_KEEPALIVE_EXPIRY_S", "1.0")
+    assert _keepalive_expiry_seconds() == _MIN_KEEPALIVE_EXPIRY_S
 
 
 def test_replaces_externally_closed_client():

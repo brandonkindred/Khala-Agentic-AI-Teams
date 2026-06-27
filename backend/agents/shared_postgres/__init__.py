@@ -20,7 +20,26 @@ Typical usage in a team's ``api/main.py`` lifespan::
         close_pool()
 """
 
-from shared_postgres.client import close_pool, get_conn, is_postgres_enabled
+from shared_postgres.aggregate import (
+    build_merge_statement,
+    merge_jsonb_returning,
+    merge_jsonb_via_cursor,
+)
+from shared_postgres.client import (
+    StorageStatus,
+    bounded_probe,
+    check_connection,
+    close_pool,
+    connect_timeout,
+    default_probe_budget,
+    dsn,
+    get_conn,
+    is_postgres_enabled,
+    pg_cursor,
+    probe_cursor,
+    resolve_storage_status,
+    statement_timeout_ms,
+)
 from shared_postgres.metrics import timed_query
 from shared_postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
 from shared_postgres.runner import ensure_team_schema, register_team_schemas
@@ -67,10 +86,17 @@ def __getattr__(name: str):
 __all__ = [
     "TEAM_POSTGRES_MODULES",
     "Json",
+    "StorageStatus",
     "TeamSchema",
+    "bounded_probe",
+    "build_merge_statement",
+    "check_connection",
     "close_pool",
+    "connect_timeout",
+    "default_probe_budget",
     "delete_secret",
     "dict_row",
+    "dsn",
     "ensure_team_schema",
     "get_conn",
     "get_fernet",
@@ -78,9 +104,15 @@ __all__ = [
     "get_secrets",
     "is_postgres_enabled",
     "load_or_create_key",
+    "merge_jsonb_returning",
+    "merge_jsonb_via_cursor",
+    "pg_cursor",
+    "probe_cursor",
     "register_all_team_schemas",
     "register_team_schemas",
+    "resolve_storage_status",
     "set_secret",
     "set_secrets",
+    "statement_timeout_ms",
     "timed_query",
 ]

@@ -4,17 +4,24 @@ Pure, side-effect-free helpers used by the ``/review-pr`` flow:
 
 - ``parse_valid_lines`` — turn one file's unified diff into the set of new-file
   line numbers that can carry an inline comment on ``side="RIGHT"``.
-- ``map_issues_to_comments`` — route each review finding to either an inline
-  comment (its line is in the diff) or a standalone leftover (it is not).
-- ``format_comment_body`` — render one finding as an inline-comment body.
+- ``map_issues_to_comments`` — route each review finding to a line-anchored
+  inline comment (its line is in the diff), a file-level review comment (its file
+  changed but the cited line is not in the diff), or a standalone leftover (its
+  file is not in the diff at all).
+- ``format_comment_body`` — render one finding as a review-comment body.
+- ``anchor_to_first_file`` — produce a file-level inline review comment for a
+  leftover finding (file not in diff) anchored to the first changed file.
 - ``format_issue_comment`` / ``inline_comment_to_timeline_body`` — render one
   finding as its own standalone PR conversation (issue) comment.
 - ``build_review_body`` — render the summary-only review body.
 - ``choose_event`` — pick the GitHub review event from issue severity.
 
-Every finding gets exactly one comment: anchorable findings become inline review
-comments (one each), and the rest are posted as individual conversation comments
-by the caller — the review body never lists findings.
+Every finding gets exactly one comment, all attached to the single review where
+possible: a finding on a changed line becomes a line-anchored inline comment, a
+finding whose file changed but whose cited line is off-diff becomes a file-level
+review comment, and only a finding naming a file absent from the diff is left for
+the caller to post as a standalone conversation comment — the review body never
+lists findings.
 
 Kept free of any GitHub-client or LLM dependency so it is cheap to unit-test and
 reusable. Findings are duck-typed: any object exposing ``severity``, ``category``,
@@ -25,7 +32,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Protocol
 
 # GitHub inline review comments on side=RIGHT must target a line the diff adds
 # (`+`) or carries as context (` `). We accept both so the commentable set matches
@@ -39,6 +46,17 @@ _BLOCKING_SEVERITIES = {"critical", "high"}
 
 # Captures the new-file start line from a hunk header: ``@@ -a,b +c,d @@``.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+class ReviewFinding(Protocol):
+    """Duck-typed shape consumed by PR review comment mappers."""
+
+    severity: str
+    category: str
+    file_path: Optional[str]
+    description: str
+    suggestion: str
+    line: Optional[int]
 
 
 def parse_valid_lines(patch: str, *, added_only: bool = COMMENT_ON_ADDED_LINES_ONLY) -> set[int]:
@@ -141,23 +159,34 @@ def _normalize_path(file_path: str, valid_by_path: dict[str, set[int]]) -> Optio
 def map_issues_to_comments(
     issues: Iterable[Any], valid_by_path: dict[str, set[int]]
 ) -> tuple[list[dict[str, Any]], list[Any]]:
-    """Split findings into inline comments and standalone leftovers.
+    """Split findings into review comments and standalone leftovers.
+
+    A finding is routed to the single PR review wherever it can be: anchored to a
+    changed line when the cited line is in the diff, otherwise attached to the
+    file as a whole when the file changed (a fabricated line would be misleading
+    and GitHub would 422 it). Only a finding whose file is not in the diff at all
+    can't be a review comment, so it is left for the caller to post as a
+    standalone conversation comment.
 
     Postconditions:
-        - Returns ``(inline_comments, leftover_issues)``. A finding becomes an
-          inline comment iff it carries a ``line`` that resolves to a path in
-          ``valid_by_path`` and falls on a commentable line; every other finding
-          is returned as a leftover so the caller can post it as its own
-          standalone conversation comment (nothing is dropped). Each inline
-          comment is ``{"path", "line", "side": "RIGHT", "body"}``.
+        - Returns ``(review_comments, leftover_issues)``. ``review_comments``
+          contains one entry per finding whose file resolves to a path in
+          ``valid_by_path``: a line-anchored ``{"path", "line", "side": "RIGHT",
+          "body"}`` when ``line`` falls on a commentable line, otherwise a
+          file-level ``{"path", "subject_type": "file", "body"}``. Every other
+          finding (no resolvable file) is returned as a leftover so the caller
+          can post it as its own standalone conversation comment. Nothing is
+          dropped, and no comment carries more than one finding.
     """
-    inline: list[dict[str, Any]] = []
+    review_comments: list[dict[str, Any]] = []
     leftover: list[Any] = []
     for issue in issues:
         line = getattr(issue, "line", None)
         path = _normalize_path(getattr(issue, "file_path", "") or "", valid_by_path)
-        if line is not None and path is not None and int(line) in valid_by_path[path]:
-            inline.append(
+        if path is None:
+            leftover.append(issue)
+        elif line is not None and int(line) in valid_by_path[path]:
+            review_comments.append(
                 {
                     "path": path,
                     "line": int(line),
@@ -166,12 +195,21 @@ def map_issues_to_comments(
                 }
             )
         else:
-            leftover.append(issue)
-    return inline, leftover
+            review_comments.append(
+                {
+                    "path": path,
+                    "subject_type": "file",
+                    "body": format_comment_body(issue),
+                }
+            )
+    return review_comments, leftover
 
 
 def format_comment_body(issue: Any) -> str:
-    """Render one finding as an inline-comment body: what's wrong + the fix (prose).
+    """Render one finding as a review-comment body: what's wrong + the fix (prose).
+
+    Used for both line-anchored and file-level review comments — the body carries
+    no location, so the same rendering serves either anchor.
 
     Postconditions:
         - Returns ``**[SEVERITY] category** — description`` followed by a
@@ -221,16 +259,18 @@ def format_issue_comment(issue: Any) -> str:
 def inline_comment_to_timeline_body(comment: dict[str, Any]) -> str:
     """Render an inline-comment dict as a standalone conversation comment body.
 
-    Only used on the rare path where GitHub rejects the review's inline comments
-    and the submission degrades to a body-only review (see ``_submit_review``):
-    the dropped inline findings are re-posted as individual conversation comments
-    so no finding is lost.
+    Only used on the rare path where GitHub rejects the review's comments and the
+    submission degrades to a body-only review (see ``_submit_review``): the
+    dropped findings are re-posted as individual conversation comments so no
+    finding is lost.
 
     Preconditions:
         - ``comment`` is an entry produced by ``map_issues_to_comments`` — it
-          carries ``path``, ``line`` and an already-formatted ``body``.
+          carries ``path``, an already-formatted ``body``, and ``line`` only when
+          it is a line-anchored comment (file-level comments carry no ``line``).
     Postconditions:
-        - Returns the comment ``body`` prefixed with a `` `path:line` — `` location.
+        - Returns the comment ``body`` prefixed with a `` `path:line` — ``
+          location, or `` `path` — `` for a file-level comment (no ``line``).
     """
     prefix = _location_prefix(comment.get("path", "") or "", comment.get("line"))
     return f"{prefix}{comment.get('body', '') or ''}"
@@ -262,6 +302,39 @@ def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int
         noun = "finding" if issue_count == 1 else "findings"
         return f"Automated code review completed: {issue_count} {noun} reported."
     return "Automated code review completed. No blocking issues found."
+
+
+def anchor_to_first_file(
+    finding: ReviewFinding, valid_by_path: dict[str, set[int]]
+) -> Optional[dict[str, Any]]:
+    """Anchor a leftover finding to the first changed file as a file-level review comment.
+
+    Used when a finding's file path cannot be resolved to any path in the PR diff
+    (``_normalize_path`` returns ``None``), but at least one changed file exists that
+    can carry the comment as a file-level inline review entry.
+
+    Preconditions:
+        - ``finding`` is a code-review finding (duck-typed: any object with the
+          attributes expected by ``format_comment_body``).
+        - ``valid_by_path`` is the dict mapping each changed file's path to the set
+          of its commentable line numbers (may be empty).
+    Postconditions:
+        - Returns ``None`` when ``valid_by_path`` is empty (no changed file to anchor
+          to; the caller should handle this case — typically the no-files early-exit
+          path already prevents this from being reached).
+        - Otherwise returns ``{"path": <first key of valid_by_path>,
+          "subject_type": "file", "body": format_comment_body(finding)}``.
+          The ``subject_type="file"`` field is the GitHub Review Comments API
+          parameter that attaches the comment to the file rather than a specific line.
+    """
+    if not valid_by_path:
+        return None
+    fallback_path = next(iter(valid_by_path))
+    return {
+        "path": fallback_path,
+        "subject_type": "file",
+        "body": format_comment_body(finding),
+    }
 
 
 def choose_event(issues: Iterable[Any], author: str = "", reviewer: str = "") -> str:

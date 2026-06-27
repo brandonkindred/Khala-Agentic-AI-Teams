@@ -16,6 +16,7 @@ from job_service_client import (
     JOB_STATUS_RUNNING,
     JobServiceClient,
 )
+from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,9 @@ def create_job(
     }
     data.update(fields)
     _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **data)
+    # Best-effort: link the project to the default profile. record_association_safe
+    # never raises, so a link failure can't break job creation.
+    record_association_safe(ArtifactType.PROJECT, "planning_v3", job_id, label=repo_path or job_id)
 
 
 def get_job(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> Optional[Dict[str, Any]]:

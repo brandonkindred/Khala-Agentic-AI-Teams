@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import logging
 import os
 import threading
+import time
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -21,6 +22,7 @@ from investment_team.agents import (
     InvestmentCommitteeAgent,
     PolicyGuardianAgent,
 )
+from investment_team.market_data_cache.postgres import SCHEMA as MD_CACHE_SCHEMA
 from investment_team.market_lab_data import (
     FreeTierMarketDataProvider,
     MarketLabContext,
@@ -113,7 +115,7 @@ from investment_team.strategy_lab_context import (
     normalize_allowed_asset_classes,
 )
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -174,40 +176,17 @@ def _clamp_max_parallel(requested: int) -> int:
     return effective
 
 
-init_otel(service_name="investment-team", team_key="investment")
-
-
-@asynccontextmanager
-async def _investment_lifespan(app: FastAPI):
-    """Issue #376 — register the market-data cache snapshot index DDL.
-
-    No-op when ``POSTGRES_HOST`` is unset (the cache then uses an
-    in-process index, which is enough for unit tests but loses
-    cross-process reproducibility).
-    """
-    try:
-        from investment_team.market_data_cache.postgres import SCHEMA as MD_CACHE_SCHEMA
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(MD_CACHE_SCHEMA)
-    except Exception:
-        logger.exception("investment_market_data postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("investment shared_postgres close_pool failed", exc_info=True)
-
-
-app = FastAPI(
+# Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
+# The Postgres schema registers the market-data cache snapshot index DDL on
+# startup (no-op when POSTGRES_HOST is unset).
+app = create_team_app(
+    service_name="investment-team",
+    team_key="investment",
     title="Investment Team API",
     description="Investment profile management, portfolio proposals, strategy validation, and promotion gates.",
     version="1.0.0",
-    lifespan=_investment_lifespan,
+    postgres_schema=MD_CACHE_SCHEMA,
 )
-instrument_fastapi_app(app, team_key="investment")
 
 _workflow_state = WorkflowState()
 _lock = threading.Lock()
@@ -273,6 +252,24 @@ _backtests: _PersistentDict = _PersistentDict("backtests")
 _strategy_lab_records: _PersistentDict = _PersistentDict("strategy_lab_records")
 _paper_trading_sessions: _PersistentDict = _PersistentDict("paper_trading_sessions")
 _advisor_sessions: _PersistentDict = _PersistentDict("advisor_sessions")
+
+
+def _snapshot_prior_records(*, reverse: bool = False) -> list[StrategyLabRecord]:
+    """Locked read of the strategy-lab store, parsed and sorted by created_at.
+
+    Preconditions:
+        None — safe to call against an empty store.
+    Postconditions:
+        Returns a freshly parsed list of StrategyLabRecord, sorted by
+        ``created_at`` ascending (oldest-first) by default, or descending
+        (newest-first) when ``reverse=True``. Never returns None.
+    """
+    with _lock:
+        raw = list(_strategy_lab_records.values())
+    records = [StrategyLabRecord.parse_persisted(r) for r in raw]
+    records.sort(key=lambda r: r.created_at, reverse=reverse)
+    return records
+
 
 _advisor_agent = FinancialAdvisorAgent()
 _policy_guardian = PolicyGuardianAgent()
@@ -1436,10 +1433,7 @@ def _run_one_strategy_lab_cycle(
     # all cycles in a wave observe the same pre-wave snapshot; reading it once up
     # front is equivalent (and strictly more deterministic).
     if prior_records is None:
-        with _lock:
-            raw_prior = list(_strategy_lab_records.values())
-        prior_records = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
-        prior_records.sort(key=lambda r: r.created_at)
+        prior_records = _snapshot_prior_records()
 
     record = orchestrator.run_cycle(
         prior_records=prior_records,
@@ -1630,9 +1624,9 @@ def _strategy_lab_worker(
             # "no constraint" handling (which keys off ``None``) is uniform.
             exclude_asset_classes = excluded_for_allowed(request.allowed_asset_classes) or None
 
-        def _compute_signal_brief() -> (
-            tuple[Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]]
-        ):
+        def _compute_signal_brief() -> tuple[
+            Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]
+        ]:
             """Build the per-batch signal brief over all currently-persisted prior records.
 
             Called at the start of every batch so that batch N+1 sees results from
@@ -1655,10 +1649,7 @@ def _strategy_lab_worker(
                         degraded_reason=str(exc),
                         sources_used=[],
                     )
-                with _lock:
-                    raw_prior = list(_strategy_lab_records.values())
-                prior_for_brief = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
-                prior_for_brief.sort(key=lambda r: r.created_at)
+                prior_for_brief = _snapshot_prior_records()
 
                 expert = SignalIntelligenceExpert()
                 t0 = datetime.now(tz=timezone.utc)
@@ -1798,10 +1789,7 @@ def _strategy_lab_worker(
                 # persists only at its end (after every sibling has already read at
                 # its start), so all cycles in a wave see the same pre-wave snapshot;
                 # reading it once here is equivalent and strictly more deterministic.
-                with _lock:
-                    _raw_prior = list(_strategy_lab_records.values())
-                wave_prior_records = [StrategyLabRecord.parse_persisted(r) for r in _raw_prior]
-                wave_prior_records.sort(key=lambda r: r.created_at)
+                wave_prior_records = _snapshot_prior_records()
                 # Issue #269 — retain each cycle's orchestrator so the wave
                 # can merge its post-run ``convergence_tracker`` back into
                 # ``primary_tracker`` below. Keyed by 0-based cycle index
@@ -2136,11 +2124,7 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
     Return all strategy lab records, sorted newest-first.
     Filter by winning/losing with ?winning=true or ?winning=false.
     """
-    with _lock:
-        raw = list(_strategy_lab_records.values())
-
-    items = [StrategyLabRecord.parse_persisted(r) for r in raw]
-    items.sort(key=lambda r: r.created_at, reverse=True)
+    items = _snapshot_prior_records(reverse=True)
 
     winning_count = sum(1 for r in items if r.is_winning)
     losing_count = len(items) - winning_count
@@ -2606,12 +2590,81 @@ class DeleteStrategyLabRecordResponse(BaseModel):
     deleted_paper_trading_sessions: int = 0
 
 
+# Bounded thread-pool ceiling for the job-service fan-out helpers below. These
+# issue blocking sync HTTP calls, so threads (not asyncio) are the right tool;
+# the cap keeps a large server-side job list from spawning unbounded threads.
+# NB: _purge_strategy_lab_job_storage runs the four teams on an outer pool of 4,
+# so a full purge peaks at 4 x _PURGE_MAX_WORKERS = 64 transient threads against
+# the job service — keep both widths in mind when tuning either.
+_PURGE_MAX_WORKERS = 16
+
+# Overall wall-clock ceiling for a full purge fan-out. Each underlying HTTP call
+# is already bounded by the job-service client's per-request timeout + finite
+# retries, but a pathological straggler must never wedge the endpoint, so the
+# collection below stops waiting past this deadline and abandons any unfinished
+# unit (counting it as 0 deleted) rather than blocking a server thread.
+_PURGE_TIMEOUT_S = 120.0
+
+
+def _delete_jobs_concurrently(
+    client: Any,
+    job_ids: list[str],
+    *,
+    max_workers: int = _PURGE_MAX_WORKERS,
+) -> int:
+    """Delete the given job ids via ``client.delete_job`` concurrently.
+
+    Preconditions:
+        - ``client`` exposes a thread-safe ``delete_job(job_id: str) -> truthy``.
+        - ``job_ids`` contains the already-filtered ids to delete (no further
+          filtering happens here).
+
+    Postconditions:
+        - Returns the count of ids for which ``delete_job`` returned a truthy
+          value. The count equals the number of jobs successfully deleted and is
+          independent of completion order (each task contributes its own 0/1 and
+          the results are summed — no shared mutable counter).
+        - A per-item ``delete_job`` exception is logged and counted as not-deleted,
+          so a single failure never aborts the batch.
+        - When ``job_ids`` is empty, returns 0 without spawning any threads.
+    """
+    if not job_ids:
+        return 0
+
+    def _delete_one(jid: str) -> int:
+        # Isolate per-item failures: one job's delete raising (e.g. a transient
+        # network error) must not abort the remaining concurrent deletions.
+        try:
+            return 1 if client.delete_job(jid) else 0
+        except Exception:
+            logger.warning("delete_job failed for %s; counted as not deleted", jid, exc_info=True)
+            return 0
+
+    workers = min(max_workers, len(job_ids))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        return sum(pool.map(_delete_one, job_ids))
+
+
 def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
-    """Remove paper trading jobs whose payload references this lab record."""
+    """Remove paper trading jobs whose payload references this lab record.
+
+    Preconditions:
+        - ``lab_record_id`` is the lab record id to match against each job's
+          ``data["lab_record_id"]``.
+        - ``JobServiceClient`` for ``investment_paper_trading_sessions`` is
+          importable and thread-safe for concurrent ``delete_job`` calls.
+
+    Postconditions:
+        - Only jobs with a truthy ``job_id`` whose ``data`` is a dict and whose
+          ``data["lab_record_id"]`` equals ``lab_record_id`` are deleted.
+        - Returns the number of those jobs for which ``delete_job`` returned a
+          truthy value. The count equals the number of jobs successfully deleted
+          and is independent of the order in which the concurrent deletes finish.
+    """
     from job_service_client import JobServiceClient
 
     client = JobServiceClient(team="investment_paper_trading_sessions")
-    deleted = 0
+    matching_ids: list[str] = []
     for job in client.list_jobs() or []:
         jid = job.get("job_id")
         if not jid:
@@ -2621,50 +2674,90 @@ def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
             continue
         if payload.get("lab_record_id") != lab_record_id:
             continue
-        if client.delete_job(str(jid)):
-            deleted += 1
-    return deleted
+        matching_ids.append(str(jid))
+
+    return _delete_jobs_concurrently(client, matching_ids)
 
 
 def _purge_strategy_lab_job_storage() -> dict[str, int]:
-    """Delete strategy lab jobs plus all paper-trading session jobs for this team."""
+    """Delete strategy lab jobs plus all paper-trading session jobs for this team.
+
+    Preconditions:
+        - ``JobServiceClient`` is importable and each per-team client is
+          thread-safe for concurrent ``delete_job`` calls (the four teams are
+          processed in parallel, and the deletes within each team are too).
+
+    Postconditions:
+        - ``deleted_lab_records`` counts ``investment_strategy_lab_records`` jobs
+          with a truthy ``job_id`` that ``delete_job`` removed.
+        - ``deleted_lab_strategies`` counts ``investment_strategies`` jobs whose
+          id starts with ``strat-lab-`` that ``delete_job`` removed.
+        - ``deleted_lab_backtests`` counts ``investment_backtests`` jobs whose id
+          starts with ``bt-lab-`` that ``delete_job`` removed.
+        - ``deleted_paper_trading_sessions`` counts
+          ``investment_paper_trading_sessions`` jobs with a truthy ``job_id``
+          that ``delete_job`` removed.
+        - Each count equals the number of matching jobs successfully deleted and
+          is independent of the order in which the concurrent units/deletes
+          finish; the returned dict always has exactly these four keys.
+    """
     from job_service_client import JobServiceClient
 
-    deleted_lab_records = 0
-    deleted_lab_strategies = 0
-    deleted_lab_backtests = 0
-    deleted_paper_trading_sessions = 0
+    def _purge_all(team: str) -> int:
+        """Delete every truthy-id job for ``team`` (no id-prefix filter)."""
+        client = JobServiceClient(team=team)
+        ids = [str(jid) for job in (client.list_jobs() or []) if (jid := job.get("job_id"))]
+        return _delete_jobs_concurrently(client, ids)
 
-    lab_client = JobServiceClient(team="investment_strategy_lab_records")
-    for job in lab_client.list_jobs() or []:
-        jid = job.get("job_id")
-        if jid and lab_client.delete_job(str(jid)):
-            deleted_lab_records += 1
+    def _purge_prefixed(team: str, prefix: str) -> int:
+        """Delete jobs for ``team`` whose id starts with ``prefix``."""
+        client = JobServiceClient(team=team)
+        ids = [
+            jid
+            for job in (client.list_jobs() or [])
+            if (jid := str(job.get("job_id") or "")).startswith(prefix)
+        ]
+        return _delete_jobs_concurrently(client, ids)
 
-    strat_client = JobServiceClient(team="investment_strategies")
-    for job in strat_client.list_jobs() or []:
-        jid = str(job.get("job_id") or "")
-        if jid.startswith("strat-lab-") and strat_client.delete_job(jid):
-            deleted_lab_strategies += 1
+    units: dict[str, concurrent.futures.Future[int]] = {}
+    # NB: not a `with` block — the context manager's exit calls shutdown(wait=True),
+    # which would re-introduce the very unbounded join the deadline below avoids.
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+    try:
+        units["deleted_lab_records"] = pool.submit(_purge_all, "investment_strategy_lab_records")
+        units["deleted_lab_strategies"] = pool.submit(
+            _purge_prefixed, "investment_strategies", "strat-lab-"
+        )
+        units["deleted_lab_backtests"] = pool.submit(
+            _purge_prefixed, "investment_backtests", "bt-lab-"
+        )
+        units["deleted_paper_trading_sessions"] = pool.submit(
+            _purge_all, "investment_paper_trading_sessions"
+        )
 
-    bt_client = JobServiceClient(team="investment_backtests")
-    for job in bt_client.list_jobs() or []:
-        jid = str(job.get("job_id") or "")
-        if jid.startswith("bt-lab-") and bt_client.delete_job(jid):
-            deleted_lab_backtests += 1
-
-    paper_client = JobServiceClient(team="investment_paper_trading_sessions")
-    for job in paper_client.list_jobs() or []:
-        jid = job.get("job_id")
-        if jid and paper_client.delete_job(str(jid)):
-            deleted_paper_trading_sessions += 1
-
-    return {
-        "deleted_lab_records": deleted_lab_records,
-        "deleted_lab_strategies": deleted_lab_strategies,
-        "deleted_lab_backtests": deleted_lab_backtests,
-        "deleted_paper_trading_sessions": deleted_paper_trading_sessions,
-    }
+        # Collect against a single shared deadline so the whole fan-out is bounded
+        # (per-unit timeouts would let each unit reset the clock). A unit that
+        # overruns is counted as 0 deleted; a unit that *raises* still propagates
+        # (preserving the prior error contract).
+        deadline = time.monotonic() + _PURGE_TIMEOUT_S
+        results: dict[str, int] = {}
+        for key, future in units.items():
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                results[key] = future.result(timeout=remaining)
+            except concurrent.futures.TimeoutError:
+                logger.warning(
+                    "purge unit %s did not finish within %.0fs; counted as 0 deleted",
+                    key,
+                    _PURGE_TIMEOUT_S,
+                )
+                results[key] = 0
+        return results
+    finally:
+        # Never block on a straggler: in-flight HTTP deletes are themselves bounded
+        # by the client's per-request timeout, so abandoning the worker thread leaks
+        # nothing unbounded. cancel_futures drops any unit that hasn't started.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 @app.delete(

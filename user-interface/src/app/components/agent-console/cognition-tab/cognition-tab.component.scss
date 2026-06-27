@@ -157,7 +157,7 @@ mat-chip {
   &__time {
     font-family: var(--kh-mono-font, ui-monospace, monospace);
     font-size: 12px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 
   &__lead {
@@ -171,7 +171,7 @@ mat-chip {
 
   &__evidence {
     font-size: 12px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
 
     &.is-stale {
       color: var(--kh-accent, #fbbf24);
@@ -180,7 +180,7 @@ mat-chip {
 
   &__decision {
     font-size: 12px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 
   // A native <button> styled as an inline link.
@@ -218,14 +218,14 @@ mat-chip {
 
   &__relevance {
     font-size: 12px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 
   &__time {
     margin-left: auto;
     font-family: var(--kh-mono-font, ui-monospace, monospace);
     font-size: 12px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 
   &__content {
@@ -279,7 +279,7 @@ mat-chip {
 
   &__meta {
     font-size: 12px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 
   &__spacer {
@@ -293,6 +293,6 @@ mat-chip {
 
   &__why {
     font-size: 12px;
-    color: var(--kh-text-muted, #71717a);
+    color: var(--kh-text-muted);
   }
 }

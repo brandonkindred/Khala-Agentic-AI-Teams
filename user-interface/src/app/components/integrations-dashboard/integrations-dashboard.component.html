@@ -655,6 +655,12 @@
 
       @if (expanded === 'github') {
         <div class="integration-card__body">
+          @if (githubStoreUnreachable) {
+            <div class="status-banner status-banner--warn" role="alert">
+              <mat-icon aria-hidden="true">warning_amber</mat-icon>
+              <span>GitHub credential store (Postgres) is unreachable — the integration is temporarily unavailable. Restore the database connection to use it.</span>
+            </div>
+          }
           @if (githubError) {
             <div class="status-banner status-banner--error">
               <mat-icon aria-hidden="true">error_outline</mat-icon>

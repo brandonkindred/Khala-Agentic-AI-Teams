@@ -18,7 +18,7 @@
   &__left-summary {
     grid-column: 1 / -1;
     margin: 0 0 4px;
-    color: var(--mat-sys-on-surface-variant, #555);
+    color: var(--kh-text-muted);
   }
 
   &__side-toggle {
@@ -29,7 +29,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--mat-sys-on-surface-variant, #555);
+    color: var(--kh-text-muted);
   }
 
   &__error {
@@ -62,7 +62,7 @@
     align-items: center;
     gap: 10px;
     font-size: 0.85rem;
-    color: var(--mat-sys-on-surface-variant, #666);
+    color: var(--kh-text-muted);
   }
 
   &__label {
@@ -100,7 +100,7 @@
 
     .diff-header {
       display: block;
-      color: var(--mat-sys-on-surface-variant, #555);
+      color: var(--kh-text-muted);
     }
 
     .diff-ctx {

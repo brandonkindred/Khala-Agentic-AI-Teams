@@ -119,6 +119,14 @@ export const routes: Routes = [
         data: { breadcrumb: 'Accessibility Audit', title: 'Accessibility Audit' },
       },
       {
+        path: 'agent-studio',
+        loadComponent: () =>
+          import('./components/agent-studio-shell/agent-studio-shell.component').then(
+            (m) => m.AgentStudioShellComponent,
+          ),
+        data: { breadcrumb: 'Agent Studio', title: 'Agent Studio' },
+      },
+      {
         path: 'agent-console',
         loadComponent: () =>
           import('./components/agent-console/agent-console.component').then((m) => m.AgentConsoleComponent),
@@ -164,6 +172,12 @@ export const routes: Routes = [
             (m) => m.IntegrationsDashboardComponent,
           ),
         data: { breadcrumb: 'Integrations', title: 'Integrations' },
+      },
+      {
+        path: 'user-profile',
+        loadComponent: () =>
+          import('./components/user-profile/user-profile.component').then((m) => m.UserProfileComponent),
+        data: { breadcrumb: 'User Profile', title: 'User Profile' },
       },
       {
         path: 'llm-config',

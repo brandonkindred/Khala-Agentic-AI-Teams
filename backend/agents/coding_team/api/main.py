@@ -13,7 +13,6 @@ import subprocess
 import sys
 import threading
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -23,7 +22,7 @@ _agents_root = Path(__file__).resolve().parent.parent.parent
 if str(_agents_root) not in sys.path:
     sys.path.insert(0, str(_agents_root))
 
-from fastapi import FastAPI, HTTPException, Query  # noqa: E402
+from fastapi import HTTPException, Query  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from coding_team import hitl  # noqa: E402
@@ -39,9 +38,9 @@ from coding_team.github_source import (  # noqa: E402
     GitHubClient,
     Issue,
     NotAnIssueError,
+    anchor_to_first_file,
     build_review_body,
     choose_event,
-    format_issue_comment,
     inline_comment_to_timeline_body,
     is_ready,
     issue_to_plan_input,
@@ -65,13 +64,14 @@ from coding_team.job_store import (  # noqa: E402
 from coding_team.job_store import submit_answers as store_submit_answers  # noqa: E402
 from coding_team.models import AgentStatusEntry, CodingTeamPlanInput  # noqa: E402
 from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: E402
+from coding_team.postgres import SCHEMA as CODE_REVIEW_SCHEMA  # noqa: E402
 from coding_team.review_history_store import (  # noqa: E402
     list_reviews,
     record_review_start,
     update_review,
 )
 from coding_team.token_crypto import decrypt_token, encrypt_token  # noqa: E402
-from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
+from shared_app import create_team_app  # noqa: E402
 from software_engineering_team.shared.git_utils import (  # noqa: E402
     DEVELOPMENT_BRANCH,
     commit_working_tree,
@@ -81,36 +81,14 @@ from software_engineering_team.shared.git_utils import (  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="coding-team", team_key="coding_team")
-
-
-@asynccontextmanager
-async def _coding_team_lifespan(
-    app: FastAPI,
-):  # pragma: no cover - exercised only with a live Postgres pool
-    # Register the code-review-history schema (no-op when POSTGRES_HOST is unset).
-    try:
-        from coding_team.postgres import SCHEMA as CODE_REVIEW_SCHEMA
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(CODE_REVIEW_SCHEMA)
-    except Exception:
-        logger.exception("coding_team postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("coding_team shared_postgres close_pool failed", exc_info=True)
-
-
-app = FastAPI(
+app = create_team_app(
+    service_name="coding-team",
+    team_key="coding_team",
     title="Coding Team API",
     description="Tech Lead and Senior SWEs with Task Graph. POST /run to start a job; poll GET /status/{job_id}.",
-    lifespan=_coding_team_lifespan,
+    version="0.1.0",
+    postgres_schema=CODE_REVIEW_SCHEMA,
 )
-instrument_fastapi_app(app, team_key="coding_team")
 
 # Tracks the orchestrator thread per job so the answers endpoint can tell whether a blocked wait
 # loop will pick up answers automatically (thread alive) or the job needs an explicit /resume (the
@@ -1415,10 +1393,13 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           review submitted (REQUEST_CHANGES on critical/high findings from a PR the
           bot did not author, else COMMENT) whose body carries only the summary.
           Every finding produces exactly one comment and no comment lists more than
-          one finding: findings tied to a diff line become individual inline
-          comments; the rest are posted as individual conversation comments, so no
-          finding is dropped. Any failure marks the job ``failed`` and posts a
-          (token-scrubbed) PR comment — never raises.
+          one finding: a finding tied to a changed line becomes an individual
+          line-anchored inline comment; a finding whose file changed but whose
+          cited line is off-diff becomes an individual file-level review comment;
+          only a finding naming a file absent from the diff is posted as a
+          standalone conversation comment, so no finding is dropped. Any failure
+          marks the job ``failed`` and posts a (token-scrubbed) PR comment — never
+          raises.
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
@@ -1508,6 +1489,19 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 pr_bridge.clear()
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
+
+            # Re-anchor leftover findings (file not in diff) as file-level inline
+            # comments on the first changed file in the diff, so they travel as
+            # review comments rather than standalone top-level PR conversation
+            # comments.  anchor_to_first_file returns None only when valid_by_path
+            # is empty — but we already exit early in that case, so the filter is
+            # just a safety net.
+            anchored_leftovers = [
+                anchor_to_first_file(issue, valid_by_path) for issue in leftovers
+            ]
+            comments = comments + [c for c in anchored_leftovers if c is not None]
+            leftovers = []  # all leftovers re-anchored as file-level inline comments
+
             body = build_review_body(
                 output.summary, output.spec_compliance_notes, issue_count=len(output.issues)
             )
@@ -1517,24 +1511,69 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 client, owner, repo, pr_number, pr.head_sha, body, event, comments
             )
 
-            # One comment per finding: post each un-anchorable finding as its own
-            # conversation comment, plus any inline comments the review had to drop
-            # (rare 422 fallback) so no finding is lost and none is batched. These
-            # findings no longer live in the review body, so a failed post would
-            # drop the finding silently — count failures and fail the job instead
-            # of falsely reporting every finding as posted.
-            standalone_bodies = [format_issue_comment(issue) for issue in leftovers]
-            standalone_bodies += [inline_comment_to_timeline_body(c) for c in dropped]
+            # When the body-only fallback dropped inline comments, attempt a
+            # follow-up review that re-anchors each dropped comment as a file-level
+            # inline comment (subject_type="file") rather than posting them as
+            # standalone top-level PR conversation comments.
+            if dropped:
+                reanchored_file_comments: list[dict[str, Any]] = []
+                original_by_reanchored: dict[tuple[str, str], list[dict[str, Any]]] = {}
+                skipped_reanchor: list[dict[str, Any]] = []
+                for comment in dropped:
+                    path = comment.get("path")
+                    body_text = comment.get("body")
+                    if path and body_text:
+                        reanchored = {
+                            "path": path,
+                            "subject_type": "file",
+                            "body": body_text,
+                        }
+                        reanchored_file_comments.append(reanchored)
+                        original_by_reanchored.setdefault((path, body_text), []).append(comment)
+                    else:
+                        skipped_reanchor.append(comment)
+
+                if reanchored_file_comments:
+                    try:
+                        still_dropped = _submit_review(
+                            client,
+                            owner,
+                            repo,
+                            pr_number,
+                            pr.head_sha,
+                            "*(continued — additional findings)*",
+                            "COMMENT",
+                            reanchored_file_comments,
+                        )
+                        dropped = list(skipped_reanchor)
+                        for comment in still_dropped:
+                            originals = original_by_reanchored.get(
+                                (comment.get("path", ""), comment.get("body", "") or "")
+                            )
+                            dropped.append(originals.pop(0) if originals else comment)
+                    except GitHubAPIError:
+                        # Last resort: fall through to standalone posting (extremely rare).
+                        pass
+
+            # Only truly-unpostable dropped findings fall through to standalone comments.
+            standalone_bodies = [inline_comment_to_timeline_body(c) for c in dropped]
             comments_failed = sum(
                 0 if _safe_comment(client, owner, repo, pr_number, body) else 1
                 for body in standalone_bodies
             )
 
-            inline_count = len(comments) - len(dropped)
+            # `comments` carries both line-anchored and file-level review
+            # comments; count them by shape (file-level entries carry
+            # "subject_type"). `dropped` is non-empty only on the rare body-only
+            # fallback, where every review comment was dropped and re-posted.
+            posted = comments if not dropped else []
+            inline_count = sum(1 for c in posted if "line" in c)
+            file_comment_count = sum(1 for c in posted if "subject_type" in c)
             comment_findings = len(leftovers) + len(dropped)
             review_summary = {
                 "total_issues": len(output.issues),
                 "inline_comments": inline_count,
+                "file_comments": file_comment_count,
                 "comment_findings": comment_findings,
                 "comments_failed": comments_failed,
                 "event": event,
@@ -1578,7 +1617,8 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 return
             status_text = (
                 f"Review posted: {len(output.issues)} finding(s), "
-                f"{inline_count} inline, {comment_findings} comment(s), event={event}"
+                f"{inline_count} inline, {file_comment_count} file-level, "
+                f"{comment_findings} comment(s), event={event}"
             )
             update_job(
                 job_id,
@@ -1634,8 +1674,8 @@ def _submit_review(
     PR, or if any single inline comment lands off the diff. So: try the chosen
     event with inline comments; on failure retry as COMMENT keeping the comments
     (handles the self-PR case without losing inline feedback); on a further failure
-    retry as COMMENT with no inline comments (handles a stray bad line — the caller
-    re-posts the dropped findings as standalone comments).
+    retry as COMMENT with no inline comments (handles a stray bad line -- the caller
+    re-anchors dropped findings and only uses standalone comments as the last resort).
 
     Postconditions:
         - Exactly one review is submitted on success; raises ``GitHubAPIError`` only

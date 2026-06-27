@@ -18,6 +18,16 @@ canonical, host-side recurrence implementation. The compiler still emits
 inline templated bodies (the sandbox import whitelist forbids
 non-``contract`` / non-``math`` imports), but the templates are kept in
 lock-step with the registry by ``tests/test_streaming_indicators.py``.
+
+**Streaming caveat** — every wrapper below (``rsi``, ``atr``, ``adx``,
+etc.) constructs a *fresh* ``IndicatorRegistry()`` per call.  A fresh
+registry has no retained state, so each call always performs the cold-start
+path — O(period) per call.  The O(1) amortised warm path of the registry
+materialises only when a caller retains a single registry instance across
+successive bar updates (e.g. the per-view registry wired in via the
+``StreamingHistoryView`` integration).  These wrappers exist for stateless
+reference use (unit tests, alignment audit) and intentionally pay the cold
+cost every time.
 """
 
 from __future__ import annotations

@@ -1721,3 +1721,122 @@ def test_alignment_no_commit_preserves_flag(monkeypatch) -> None:
 
     assert outcome.ran_on_non_conforming_code is True
     assert conformance_calls == [], "no commit ⇒ conformance gate not re-run"
+
+
+# ---------------------------------------------------------------------------
+# Extracted helper unit tests — the round's inner steps in isolation
+# (the whole round is covered by the `_run_alignment_round` tests above).
+# ---------------------------------------------------------------------------
+
+
+def _aligned_report() -> TradeAlignmentReport:
+    return TradeAlignmentReport(
+        aligned=True,
+        rationale="aligned",
+        issues=[],
+        proposed_code=None,
+        predicted_aligned_after_fix=False,
+        changes_made="",
+    )
+
+
+def _no_fix_report() -> TradeAlignmentReport:
+    return TradeAlignmentReport(
+        aligned=False,
+        rationale="off-spec",
+        issues=[AlignmentIssue(rule_type="entry_rules", description="x", severity="critical")],
+        proposed_code=None,
+        predicted_aligned_after_fix=False,
+        changes_made="",
+    )
+
+
+def test_alignment_proposal_eligible_false_when_already_aligned() -> None:
+    """An aligned report stops the round and emits the ``aligned`` sub-phase."""
+    orch = StrategyLabOrchestrator()
+    events, emit = _collect_emit()
+
+    eligible = orch._alignment_proposal_eligible(
+        report=_aligned_report(), align_round=0, spec=_spec(), emit=emit
+    )
+
+    assert eligible is False
+    assert any(d.get("sub_phase") == "aligned" for _p, d in events)
+
+
+def test_alignment_proposal_eligible_false_when_no_proposed_fix() -> None:
+    """A not-aligned report with no proposed code stops after the
+    ``not_aligned`` + ``no_proposed_fix`` sub-phases."""
+    orch = StrategyLabOrchestrator()
+    events, emit = _collect_emit()
+
+    eligible = orch._alignment_proposal_eligible(
+        report=_no_fix_report(), align_round=0, spec=_spec(), emit=emit
+    )
+
+    assert eligible is False
+    sub_phases = [d.get("sub_phase") for _p, d in events]
+    assert "not_aligned" in sub_phases
+    assert "no_proposed_fix" in sub_phases
+
+
+def test_alignment_proposal_eligible_false_at_max_rounds() -> None:
+    """A fixable report on the final round is not eligible (budget exhausted)."""
+    orch = StrategyLabOrchestrator()
+    events, emit = _collect_emit()
+
+    eligible = orch._alignment_proposal_eligible(
+        report=_proposed_fix(),
+        align_round=MAX_ALIGNMENT_ROUNDS - 1,
+        spec=_spec(),
+        emit=emit,
+    )
+
+    assert eligible is False
+    assert any(d.get("sub_phase") == "max_rounds_reached" for _p, d in events)
+
+
+def test_alignment_proposal_eligible_true_when_fix_available() -> None:
+    """A not-aligned report with a proposed fix and budget remaining proceeds."""
+    orch = StrategyLabOrchestrator()
+    events, emit = _collect_emit()
+
+    eligible = orch._alignment_proposal_eligible(
+        report=_proposed_fix(), align_round=0, spec=_spec(), emit=emit
+    )
+
+    assert eligible is True
+    assert any(d.get("sub_phase") == "refining_code" for _p, d in events) is False
+    # ``refining_code`` is emitted by the validate helper, not the eligibility
+    # check — eligibility only emits ``not_aligned`` here.
+    assert any(d.get("sub_phase") == "not_aligned" for _p, d in events)
+
+
+def test_audit_and_record_alignment_appends_report_and_gates() -> None:
+    """The audit helper appends the report and the per-round ``trade_alignment``
+    aggregate gate (stamped with the round number) in place."""
+    orch, _align_stub, _checker_stub = _make_orchestrator(
+        check_results=[_aligned_check_result()],
+    )
+    reports: List[TradeAlignmentReport] = []
+    gates: List[QualityGateResult] = []
+    _events, emit = _collect_emit()
+
+    report = orch._audit_and_record_alignment(
+        spec=_spec(),
+        code="code-v0",
+        trades=_trade_records(),
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+        align_round=2,
+        all_gate_results=gates,
+        alignment_attempts=[],
+        alignment_reports=reports,
+        emit=emit,
+    )
+
+    assert reports == [report]
+    aggregate = [g for g in gates if g.gate_name == "trade_alignment"]
+    assert len(aggregate) == 1
+    assert aggregate[0].refinement_round == 2

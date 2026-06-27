@@ -27,7 +27,12 @@ from typing import List
 
 import pytest
 
+from investment_team.strategy_lab.executor.predicate_evaluator import (
+    BarRecord,
+    StreamingHistoryView,
+)
 from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+from investment_team.strategy_lab.spec_dsl import IndicatorRef
 
 pytestmark = pytest.mark.bench
 
@@ -169,4 +174,79 @@ def test_macd_streaming_hits_headline_speedup_target() -> None:
     assert ratio > 8.0, (
         f"MACD speedup too small: {ratio:.2f}x "
         f"(streaming={streaming_t * 1000:.1f}ms, cold={cold_t * 1000:.1f}ms)"
+    )
+
+
+_VIEW_REFS = [
+    IndicatorRef(name="ema", params={"period": 12}),
+    IndicatorRef(name="sma", params={"period": 20}),
+    IndicatorRef(name="rsi", params={"period": 14}),
+    IndicatorRef(name="atr", params={"period": 14}),
+    IndicatorRef(name="adx", params={"period": 14}),
+    IndicatorRef(name="bollinger", params={"period": 20, "band": "middle"}),
+    IndicatorRef(name="stochastic", params={"output": "k"}),
+    IndicatorRef(name="macd", params={"output": "signal"}),
+    IndicatorRef(name="macd", params={"output": "histogram"}),
+    IndicatorRef(name="vwap", params={}),
+]
+
+
+def _measure_view_window(total_bars: int, lo: int, hi: int, max_bars: int = 500) -> float:
+    """Drive a view over ``total_bars`` and time the per-bar reads in ``[lo, hi)``.
+
+    Each measured bar reads all ten indicators at the trailing bar AND ``i - 1``
+    (the ``cross_*`` shape), the realistic engine workload.
+    """
+    view = StreamingHistoryView(max_bars=max_bars)
+    rng = random.Random(23)
+    elapsed = 0.0
+    for i in range(total_bars):
+        close = 100.0 + rng.uniform(-3.0, 3.0) + i * 0.2
+        view.append(
+            BarRecord(
+                timestamp=f"d{i}",
+                open=close - 0.1,
+                high=close + 0.5,
+                low=close - 0.5,
+                close=close,
+                volume=1000.0,
+            )
+        )
+        trailing = view.length() - 1
+        measure = lo <= i < hi
+        t0 = time.perf_counter() if measure else 0.0
+        for ref in _VIEW_REFS:
+            view.indicator(ref, trailing)
+            if trailing > 0:
+                view.indicator(ref, trailing - 1)
+        if measure:
+            elapsed += time.perf_counter() - t0
+    return elapsed
+
+
+def test_streaming_view_per_bar_cost_is_flat_in_history() -> None:
+    """The engine's per-bar indicator cost must NOT grow with how many bars
+    have streamed through — the issue's "O(1) amortised, no full-deque recompute
+    per bar" criterion. Both measured windows are past the ``max_bars`` cap, so
+    the deque and every scalar buffer are at steady-state size; a regression to
+    a per-bar full-window recompute (or an unbounded buffer) would make the late
+    window materially slower than the early one.
+    """
+    window = 100
+    early = _measure_view_window(2200, 600, 600 + window)
+    late = _measure_view_window(2200, 2100, 2100 + window)
+    ratio = late / max(early, 1e-9)
+    if os.environ.get("BENCH_STREAMING_INDICATORS_VERBOSE"):
+        print(
+            f"\nStreamingHistoryView per-bar cost (10 indicators x i/i-1, 100 bars): "
+            f"early[600:700]={early * 1000:6.1f} ms   "
+            f"late[2100:2200]={late * 1000:6.1f} ms   "
+            f"late/early={ratio:5.2f}x"
+        )
+    # Flat within noise: late steady-state cost stays close to the early one.
+    # A per-bar O(history) regression would blow this well past 2x.
+    assert ratio < 2.0, (
+        f"per-bar cost grew with history: late/early={ratio:.2f}x "
+        f"(early={early * 1000:.1f}ms, late={late * 1000:.1f}ms) — "
+        "the engine view should be O(window), independent of bars seen"
     )

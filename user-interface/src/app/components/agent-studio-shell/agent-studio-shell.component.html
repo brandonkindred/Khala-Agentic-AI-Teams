@@ -1,0 +1,63 @@
+<div class="studio">
+  <!--
+    Save / Load draft controls (spec §3.5). Placeholders in this scaffold —
+    disabled until the drafts API + AgentStudioStateService persistence land in
+    a later increment.
+  -->
+  <header class="studio__header">
+    <h1 class="studio__title">Agent Studio</h1>
+    <div class="studio__draft-actions">
+      <button mat-stroked-button type="button" class="studio__draft-btn" disabled>Save draft</button>
+      <button mat-stroked-button type="button" class="studio__draft-btn" disabled>Load draft ▾</button>
+    </div>
+  </header>
+
+  <nav class="studio__stepper" role="list" aria-label="Agent Studio stages">
+    @for (stage of stages; track stage.key; let i = $index) {
+      <div
+        class="studio__step"
+        role="listitem"
+        [class.is-active]="state.stageStatus(i) === 'active'"
+        [class.is-done]="state.stageStatus(i) === 'done'"
+        [attr.aria-current]="state.stageStatus(i) === 'active' ? 'step' : null"
+      >
+        <span class="studio__step-num">
+          @if (state.stageStatus(i) === 'done') {
+            <mat-icon aria-hidden="true">check</mat-icon>
+          } @else {
+            {{ i + 1 }}
+          }
+        </span>
+        <span class="studio__step-label">{{ stage.label }}</span>
+      </div>
+      @if (i < stages.length - 1) {
+        <span class="studio__step-conn" aria-hidden="true"></span>
+      }
+    }
+  </nav>
+
+  <main class="studio__stage">
+    <app-agent-studio-stage-placeholder
+      [title]="activeStageDef().label"
+      [blurb]="activeStageDef().blurb"
+      [icon]="activeStageDef().icon"
+      [handoff]="state.handoff()"
+    />
+  </main>
+
+  <footer class="studio__footer">
+    <span class="studio__progress">Stage {{ state.activeStage() + 1 }} of {{ stages.length }}</span>
+    <!--
+      Each real stage will own its forward affordance; here the shell renders the
+      stage-specific label (spec's guided journey) only while a forward step
+      exists. `canAdvance()` is a scaffold placeholder ("not the last stage") —
+      the real per-stage gates (Stage 1: agent defined + saved; Stage 3: roster
+      fully staffed + process complete) land with each real stage.
+    -->
+    @if (state.canAdvance()) {
+      <button mat-flat-button type="button" class="studio__continue" (click)="onContinue()">
+        {{ activeStageDef().forwardLabel ?? 'Continue' }}
+      </button>
+    }
+  </footer>
+</div>

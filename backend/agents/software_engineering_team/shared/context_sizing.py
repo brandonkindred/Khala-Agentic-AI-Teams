@@ -11,7 +11,11 @@ chunk + prompt + response stays within the model context window.
 from __future__ import annotations
 
 from llm_service import LLMClient
-from shared_env import parse_int
+
+# Re-exported from the shared typed env-config helper so the int-knob parser
+# has a single implementation; exposed here under the name ``parse_env_int``,
+# which the code-review coordinator and tests import from this module.
+from software_engineering_team.shared.env_config import env_int as parse_env_int
 
 # Conservative chars per token for code/spec (used for token estimates from char counts)
 CHARS_PER_TOKEN = 3.5
@@ -28,25 +32,6 @@ CODE_REVIEW_ABS_CHUNK_CHARS = 80_000  # CODE_REVIEW_MAP_CHUNK_CHARS, floor 10_00
 CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS = 16_000  # CODE_REVIEW_SPEC_EXCERPT_CHARS, floor 1_000
 CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS = 4_000  # CODE_REVIEW_ARCH_OVERVIEW_CHARS, floor 500
 CODE_REVIEW_EXISTING_ABS_CHARS = 8_000  # CODE_REVIEW_EXISTING_CHARS, floor 500
-
-
-def parse_env_int(name: str, default: int, floor: int) -> int:
-    """Read an int tuning knob from the environment, defensively.
-
-    Thin wrapper over the canonical :func:`shared_env.parse_int` (floor == minimum),
-    named to match it; kept for the existing call sites in this module.
-
-    Preconditions:
-        - ``default`` >= ``floor`` (raises ``ValueError`` otherwise — explicit so
-          the check survives ``python -O``).
-
-    Postconditions:
-        - Returns ``default`` when the var is unset or unparseable; otherwise
-          the parsed value clamped to at least ``floor`` (never raises on the env value).
-    """
-    if default < floor:
-        raise ValueError(f"default ({default}) must be >= floor ({floor})")
-    return parse_int(name, default, minimum=floor)
 
 
 def compute_max_chunk_chars(

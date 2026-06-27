@@ -73,7 +73,9 @@ def test_run_blogging_service_shutdown_runs_with_helpers(monkeypatch) -> None:
     def shutdown_blogging_temporal_components(worker_shutdown_timeout=8.0):
         called["temporal"] = True
 
-    fake_temporal_module.shutdown_blogging_temporal_components = shutdown_blogging_temporal_components
+    fake_temporal_module.shutdown_blogging_temporal_components = (
+        shutdown_blogging_temporal_components
+    )
     monkeypatch.setitem(sys.modules, "blogging.temporal.worker", fake_temporal_module)
 
     _api_main._run_blogging_service_shutdown()
@@ -100,40 +102,48 @@ def test_run_blogging_service_shutdown_swallows_inner_errors(monkeypatch) -> Non
     def shutdown_blogging_temporal_components(worker_shutdown_timeout=8.0):
         raise RuntimeError("temporal-down")
 
-    fake_temporal_module.shutdown_blogging_temporal_components = shutdown_blogging_temporal_components
+    fake_temporal_module.shutdown_blogging_temporal_components = (
+        shutdown_blogging_temporal_components
+    )
     monkeypatch.setitem(sys.modules, "blogging.temporal.worker", fake_temporal_module)
 
     _api_main._run_blogging_service_shutdown()
 
 
-def test_blogging_lifespan_runs_in_event_loop(monkeypatch) -> None:
-    from fastapi import FastAPI
+def test_blogging_app_lifespan_runs_in_event_loop(monkeypatch) -> None:
+    """The factory-built ``app`` registers the Postgres schema on startup and runs
+    the real blogging shutdown hook (``_run_blogging_service_shutdown``) on teardown.
 
-    fake_postgres = type(sys)("blogging.postgres")
-    fake_postgres.SCHEMA = object()
-    monkeypatch.setitem(sys.modules, "blogging.postgres", fake_postgres)
-
+    The hook reference is bound into the app at ``create_team_app(...)`` time, so it
+    cannot be monkeypatched after the fact; instead we monkeypatch the first thing the
+    hook touches (``stop_blog_stale_monitor``) and assert it ran during teardown.
+    """
     fake_shared_postgres = type(sys)("shared_postgres")
-    fake_shared_postgres.register_team_schemas = lambda *_a, **_kw: None
+    registered: list = []
+    fake_shared_postgres.register_team_schemas = lambda s: registered.append(s)
     fake_shared_postgres.close_pool = lambda: None
     monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
 
-    monkeypatch.setattr(_api_main, "_run_blogging_service_shutdown", lambda: None)
+    from shared import blog_job_store
+
+    shutdown_ran = {"value": False}
+    monkeypatch.setattr(
+        blog_job_store, "stop_blog_stale_monitor", lambda: shutdown_ran.__setitem__("value", True)
+    )
+
+    app = _api_main.app
 
     async def _drive():
-        async with _api_main._blogging_lifespan(FastAPI()) as _:
+        async with app.router.lifespan_context(app):
             pass
 
-    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(_drive())
+    asyncio.run(_drive())
+    assert registered, "expected the blogging Postgres schema to be registered on startup"
+    assert shutdown_ran["value"] is True, "expected the blogging shutdown hook to run on teardown"
 
 
-def test_blogging_lifespan_swallows_schema_errors(monkeypatch) -> None:
-    from fastapi import FastAPI
-
-    fake_postgres = type(sys)("blogging.postgres")
-    fake_postgres.SCHEMA = object()
-    monkeypatch.setitem(sys.modules, "blogging.postgres", fake_postgres)
-
+def test_blogging_app_lifespan_swallows_schema_errors(monkeypatch) -> None:
+    """A failing schema registration or pool close must not break app startup/teardown."""
     fake_shared_postgres = type(sys)("shared_postgres")
 
     def boom_register(*a, **kw):
@@ -146,10 +156,14 @@ def test_blogging_lifespan_swallows_schema_errors(monkeypatch) -> None:
     fake_shared_postgres.close_pool = boom_close
     monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
 
-    monkeypatch.setattr(_api_main, "_run_blogging_service_shutdown", lambda: None)
+    # NB: the real _run_blogging_service_shutdown runs on teardown — create_team_app
+    # captured it as on_shutdown at construction time, so it cannot be monkeypatched
+    # here. It is defensive, so the lifespan completing without raising is what proves
+    # the schema register/close failures (boom_*) are swallowed.
+    app = _api_main.app
 
     async def _drive():
-        async with _api_main._blogging_lifespan(FastAPI()) as _:
+        async with app.router.lifespan_context(app):
             pass
 
-    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(_drive())
+    asyncio.run(_drive())

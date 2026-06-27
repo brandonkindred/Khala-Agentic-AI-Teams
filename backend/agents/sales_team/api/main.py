@@ -5,11 +5,10 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
 from job_service_client import (
@@ -48,36 +47,13 @@ from sales_team.outcome_store import (
     record_deal_outcome,
     record_stage_outcome,
 )
+from sales_team.postgres import SCHEMA as SALES_POSTGRES_SCHEMA
 from shared_agent_invoke import mount_invoke_shim
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 
-init_otel(service_name="sales-team", team_key="sales_team")
-
-
-@asynccontextmanager
-async def _sales_lifespan(_app: FastAPI):
-    """Register the sales_team Postgres schema at startup and close the pool at shutdown.
-
-    Both steps are best-effort — when ``POSTGRES_HOST`` is unset (e.g. in
-    isolated unit tests) ``shared_postgres`` is a no-op and we continue.
-    """
-    try:
-        from sales_team.postgres import SCHEMA as SALES_POSTGRES_SCHEMA
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(SALES_POSTGRES_SCHEMA)
-    except Exception:
-        logger.exception("sales_team postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("sales_team shared_postgres close_pool failed", exc_info=True)
-
-
-app = FastAPI(
+app = create_team_app(
+    service_name="sales-team",
+    team_key="sales_team",
     title="AI Sales Team API",
     version="1.0.0",
     description=(
@@ -86,9 +62,8 @@ app = FastAPI(
         "discovery, proposals, and closing — grounded in Gong Labs, Jeb Blount, "
         "HubSpot, Anthony Iannarino, Jill Konrath, Sales Hacker, Salesfolk, and Zig Ziglar."
     ),
-    lifespan=_sales_lifespan,
+    postgres_schema=SALES_POSTGRES_SCHEMA,
 )
-instrument_fastapi_app(app, team_key="sales_team")
 mount_invoke_shim(app)
 
 logger = logging.getLogger(__name__)

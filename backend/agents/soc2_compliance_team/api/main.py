@@ -9,25 +9,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from job_service_client import JobServiceClient, start_stale_job_monitor
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 from soc2_compliance_team.models import SOC2AuditResult
 from soc2_compliance_team.orchestrator import SOC2AuditOrchestrator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="soc2-compliance-team", team_key="soc2_compliance")
-
-app = FastAPI(
+app = create_team_app(
+    service_name="soc2-compliance-team",
+    team_key="soc2_compliance",
     title="SOC2 Compliance Audit Team API",
     description="Run a SOC2 compliance audit on a code repository. POST to start, GET status to poll.",
     version="1.0.0",
 )
-instrument_fastapi_app(app, team_key="soc2_compliance")
 
 _job_manager = JobServiceClient(team="soc2_compliance_team")
 _stale_monitor_stop = start_stale_job_monitor(

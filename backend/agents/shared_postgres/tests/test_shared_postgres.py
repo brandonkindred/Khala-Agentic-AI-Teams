@@ -330,7 +330,7 @@ def test_dsn_defaults(monkeypatch):
     monkeypatch.setenv("POSTGRES_USER", "u")
     monkeypatch.setenv("POSTGRES_PASSWORD", "p")
     monkeypatch.setenv("POSTGRES_DB", "d")
-    dsn = client_mod._dsn()
+    dsn = client_mod.dsn()
     assert "host=h" in dsn
     assert "port=1234" in dsn
     assert "dbname=d" in dsn
@@ -341,7 +341,7 @@ def test_dsn_defaults(monkeypatch):
 def test_dsn_database_override(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "h")
     monkeypatch.setenv("POSTGRES_DB", "default_db")
-    dsn = client_mod._dsn("other_db")
+    dsn = client_mod.dsn("other_db")
     assert "dbname=other_db" in dsn
 
 
@@ -368,6 +368,203 @@ def test_get_or_create_pool_raises_when_disabled(monkeypatch):
     monkeypatch.delenv("POSTGRES_HOST", raising=False)
     with pytest.raises(RuntimeError, match="POSTGRES_HOST is not set"):
         client_mod._get_or_create_pool()
+
+
+def test_dsn_includes_connect_timeout(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "h")
+    monkeypatch.delenv("POSTGRES_CONNECT_TIMEOUT_S", raising=False)
+    assert "connect_timeout=3" in client_mod.dsn()
+
+
+def test_connect_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "7")
+    assert client_mod._connect_timeout() == 7
+    assert "connect_timeout=7" in client_mod.dsn()
+
+
+def test_connect_timeout_floored_to_one(monkeypatch):
+    # A zero/negative override is clamped up so the pool can never be opened with an
+    # unbounded (0 = wait forever) connect timeout against a down host.
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "0")
+    assert client_mod._connect_timeout() == 1
+
+
+# ---------------------------------------------------------------------------
+# check_connection: real reachability probe (never raises)
+# ---------------------------------------------------------------------------
+
+
+class _ProbePool:
+    """Fake pool whose ``connection(timeout=...)`` yields a cursor returning ``row``.
+
+    ``raise_on_connection`` simulates a down host / exhausted pool (the acquisition
+    itself fails), which the probe must swallow and report as unreachable.
+    """
+
+    def __init__(self, row=(1,), raise_on_connection=False):
+        self._row = row
+        self._raise = raise_on_connection
+        self.timeout_seen = None
+
+    def connection(self, timeout=None):
+        self.timeout_seen = timeout
+        if self._raise:
+            raise RuntimeError("pool timeout / host down")
+        return _probe_conn_cm(self._row)
+
+
+@contextmanager
+def _probe_conn_cm(row):
+    cur = MagicMock()
+    cur.fetchone.return_value = row
+    cur.__enter__ = lambda self=cur: cur
+    cur.__exit__ = lambda *a: False
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    yield conn
+
+
+def test_check_connection_false_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    assert client_mod.check_connection() is False
+
+
+def test_check_connection_true_on_select_1(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    pool = _ProbePool(row=(1,))
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: pool)
+    assert client_mod.check_connection(timeout_s=0.5) is True
+    # The acquisition is bounded by the caller-supplied timeout.
+    assert pool.timeout_seen == 0.5
+
+
+def test_check_connection_false_on_unexpected_row(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    monkeypatch.setattr(
+        client_mod, "_get_or_create_pool", lambda database=None: _ProbePool(row=(0,))
+    )
+    assert client_mod.check_connection() is False
+
+
+def test_check_connection_false_on_none_row(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    monkeypatch.setattr(
+        client_mod, "_get_or_create_pool", lambda database=None: _ProbePool(row=None)
+    )
+    assert client_mod.check_connection() is False
+
+
+def test_check_connection_false_when_pool_errors(monkeypatch):
+    # A down host / exhausted pool surfaces as "unreachable", never as a raised error.
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    monkeypatch.setattr(
+        client_mod,
+        "_get_or_create_pool",
+        lambda database=None: _ProbePool(raise_on_connection=True),
+    )
+    assert client_mod.check_connection() is False
+
+
+def test_probe_cursor_sets_transaction_local_statement_timeout():
+    # The shared probe helper must bound every query on the yielded cursor by issuing
+    # SET LOCAL statement_timeout (scoped to a transaction) BEFORE yielding.
+    executed = []
+    cur = MagicMock()
+    cur.__enter__ = lambda self=cur: cur
+    cur.__exit__ = lambda *a: False
+    cur.execute.side_effect = lambda sql, *a: executed.append(sql)
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    with client_mod.probe_cursor(conn, timeout_s=0.5) as c:
+        c.execute("SELECT 1")
+    assert conn.transaction.called  # scoped to a transaction so the bound never leaks
+    assert executed[0] == "SET LOCAL statement_timeout = 500"  # 0.5s → 500ms, set first
+    assert executed[1] == "SELECT 1"
+
+
+def test_probe_cursor_clamps_sub_millisecond_budget():
+    # A sub-millisecond budget clamps up to a 1ms statement_timeout (documented precondition
+    # edge), never 0 (which Postgres reads as "disabled").
+    executed = []
+    cur = MagicMock()
+    cur.__enter__ = lambda self=cur: cur
+    cur.__exit__ = lambda *a: False
+    cur.execute.side_effect = lambda sql, *a: executed.append(sql)
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    with client_mod.probe_cursor(conn, timeout_s=0.0005):
+        pass
+    assert executed[0] == "SET LOCAL statement_timeout = 1"
+
+
+# ---------------------------------------------------------------------------
+# connect_timeout / statement_timeout / dsn escaping (via make_conninfo) / budget
+# ---------------------------------------------------------------------------
+
+
+def test_connect_timeout_public_matches_private(monkeypatch):
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "11")
+    assert client_mod.connect_timeout() == 11 == client_mod._connect_timeout()
+
+
+def test_statement_timeout_ms(monkeypatch):
+    monkeypatch.delenv("POSTGRES_STATEMENT_TIMEOUT_MS", raising=False)
+    assert client_mod.statement_timeout_ms() == 5000
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "1500")
+    assert client_mod.statement_timeout_ms() == 1500
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "0")
+    assert client_mod.statement_timeout_ms() == 0  # 0 disables, floor allows it
+
+
+def test_default_probe_budget(monkeypatch):
+    # connect_timeout + statement_timeout(s) + 1.0, so a statement_timeout-bounded
+    # worker finishes before the outer guard fires.
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "3")
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "5000")
+    assert client_mod.default_probe_budget() == 3 + 5.0 + 1.0
+
+
+def test_dsn_escapes_special_user_and_password_via_make_conninfo(monkeypatch):
+    # make_conninfo owns libpq's quoting: a '@'-bearing user (Azure-style) stays intact
+    # in keyword form, a space-bearing password is single-quoted, and connect_timeout
+    # is carried — no hand-rolled escaper to drift.
+    monkeypatch.setenv("POSTGRES_HOST", "h")
+    monkeypatch.setenv("POSTGRES_USER", "svc@prod")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "my pass")
+    dsn = client_mod.dsn()
+    assert "postgresql://" not in dsn  # keyword form
+    assert "user=svc@prod" in dsn
+    assert "password='my pass'" in dsn
+    assert "connect_timeout=" in dsn
+
+
+def test_dsn_handles_whitespace_and_empty_password(monkeypatch):
+    # A tab/newline (which libpq also treats as a token terminator) and an empty
+    # password are quoted by make_conninfo, not left bare.
+    monkeypatch.setenv("POSTGRES_HOST", "h")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "a\tb")
+    assert "password='a\tb'" in client_mod.dsn()
+    monkeypatch.setenv("POSTGRES_PASSWORD", "")
+    assert "password=''" in client_mod.dsn()
+
+
+def test_resolve_storage_status_unconfigured(monkeypatch):
+    monkeypatch.setattr(client_mod, "is_postgres_enabled", lambda: False)
+    # Must not probe when unconfigured.
+    monkeypatch.setattr(
+        client_mod,
+        "check_connection",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no probe")),
+    )
+    assert client_mod.resolve_storage_status() == "unconfigured"
+
+
+def test_resolve_storage_status_available_and_unreachable(monkeypatch):
+    monkeypatch.setattr(client_mod, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(client_mod, "check_connection", lambda *a, **k: True)
+    assert client_mod.resolve_storage_status() == "available"
+    monkeypatch.setattr(client_mod, "check_connection", lambda *a, **k: False)
+    assert client_mod.resolve_storage_status() == "unreachable"
 
 
 class _FakePool:
@@ -416,6 +613,45 @@ def test_get_conn_rolls_back_on_error(monkeypatch):
 
     with pytest.raises(RuntimeError), client_mod.get_conn():
         raise RuntimeError("boom")
+
+    fake.conn.rollback.assert_called_once()
+    fake.conn.commit.assert_not_called()
+
+
+def test_pg_cursor_yields_none_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    from shared_postgres import pg_cursor
+
+    with pg_cursor() as cur:
+        assert cur is None  # disabled → no connection opened
+
+
+def test_pg_cursor_yields_cursor_and_commits_when_enabled(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres import pg_cursor
+
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
+
+    with pg_cursor() as cur:
+        assert cur is not None  # live cursor from the pooled connection
+
+    # Clean exit of the with-block commits and returns the connection to the pool.
+    fake.conn.commit.assert_called_once()
+    fake.conn.rollback.assert_not_called()
+
+
+def test_pg_cursor_rolls_back_on_error(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres import pg_cursor
+
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with pg_cursor() as cur:
+            assert cur is not None
+            raise RuntimeError("boom")
 
     fake.conn.rollback.assert_called_once()
     fake.conn.commit.assert_not_called()
@@ -609,3 +845,211 @@ def test_getattr_raises_on_unknown():
 
     with pytest.raises(AttributeError, match="no attribute"):
         _ = shared_postgres.not_a_real_thing  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(not _psycopg_installed(), reason="psycopg not installed")
+def test_pg_cursor_dict_rows_requests_dict_row_factory(monkeypatch):
+    """pg_cursor(dict_rows=True) opens the cursor with psycopg's dict_row factory.
+
+    Placed after ``_psycopg_installed`` so the ``skipif`` resolves at import time;
+    covers the ``dict_rows`` branch (the import + ``row_factory`` cursor) that the
+    plain-cursor test does not reach.
+    """
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from psycopg.rows import dict_row
+
+    from shared_postgres import pg_cursor
+
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
+
+    with pg_cursor(dict_rows=True) as cur:
+        assert cur is not None
+
+    fake.conn.cursor.assert_called_once_with(row_factory=dict_row)
+    fake.conn.commit.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# bounded_probe: bounds wall-clock, caps workers, never raises
+# ---------------------------------------------------------------------------
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def test_bounded_probe_returns_fn_result():
+    assert _run(client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "F", budget=0.5)) == "ok"
+
+
+def test_bounded_probe_times_out_within_budget():
+    import time
+
+    t0 = time.monotonic()
+    result = _run(
+        client_mod.bounded_probe(
+            lambda: (time.sleep(1.5), "ok")[1], on_failure=lambda: "F", budget=0.2
+        )
+    )
+    elapsed = time.monotonic() - t0
+    assert result == "F"
+    # Returned at ~budget, NOT after the 1.5s block (proves the timeout actually bounds).
+    assert elapsed < 1.0
+
+
+def test_bounded_probe_degrades_on_fn_exception():
+    def boom():
+        raise RuntimeError("read failed")
+
+    assert _run(client_mod.bounded_probe(boom, on_failure=lambda: "F", budget=0.5)) == "F"
+
+
+def _bounded_probe_threads():
+    import threading
+
+    return [t for t in threading.enumerate() if t.name == "bounded_probe"]
+
+
+def test_bounded_probe_caps_concurrent_workers(monkeypatch):
+    # Exhaust the semaphore for a surface (simulating that-many stuck probes); the next call
+    # for that surface must degrade immediately WITHOUT spawning another thread — even with a
+    # generous budget.
+    import threading
+    import time
+
+    sem = threading.Semaphore(1)
+    sem.acquire()  # the one slot is now "stuck"
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {"capped": sem})
+    before = len(_bounded_probe_threads())
+    t0 = time.monotonic()
+    result = _run(
+        client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "CAP", budget=5.0, label="capped")
+    )
+    elapsed = time.monotonic() - t0
+    assert result == "CAP"
+    assert elapsed < 0.5  # did not wait on the (full) budget; degraded at once
+    # The cap must short-circuit BEFORE spawning a worker, not spawn-then-degrade.
+    assert len(_bounded_probe_threads()) == before
+
+
+def test_probe_semaphore_bounds_distinct_keys(monkeypatch):
+    # A flood of DISTINCT labels must not grow the registry without bound or hand each label
+    # its own fresh budget (which would defeat the cap); past the ceiling they collapse onto
+    # one dedicated overflow semaphore that lives OUTSIDE _PROBE_SEMS (no label can collide).
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {})
+    monkeypatch.setattr(client_mod, "_PROBE_OVERFLOW_SEM", None)
+    monkeypatch.setenv("POSTGRES_PROBE_MAX_KEYS", "3")
+    sems = [client_mod._probe_semaphore(f"label-{i}") for i in range(10)]
+    # Exactly MAX_KEYS distinct per-key entries; overflow is not stored in the dict.
+    assert len(client_mod._PROBE_SEMS) == 3
+    # Every label past the ceiling shares the one dedicated overflow semaphore object.
+    assert sems[3] is sems[9]
+    assert sems[9] is client_mod._PROBE_OVERFLOW_SEM
+    # Labels within the ceiling still get their own.
+    assert sems[0] is not sems[1]
+    # A label literally named "__overflow__" gets its OWN per-key slot (no sentinel clash).
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {})
+    monkeypatch.setattr(client_mod, "_PROBE_OVERFLOW_SEM", None)
+    own = client_mod._probe_semaphore("__overflow__")
+    assert client_mod._PROBE_SEMS["__overflow__"] is own
+    assert client_mod._PROBE_OVERFLOW_SEM is None  # not minted; nothing overflowed
+
+
+def test_bounded_probe_cap_is_per_label(monkeypatch):
+    # A stall on one surface must not starve the cap of an unrelated, healthy surface: the
+    # two labels get independent semaphores.
+    import threading
+
+    stuck = threading.Semaphore(1)
+    stuck.acquire()
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {"surface-a": stuck})
+    # "surface-a" is saturated → degrades; "surface-b" is untouched → its probe runs.
+    assert (
+        _run(client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "CAP", label="surface-a"))
+        == "CAP"
+    )
+    assert (
+        _run(client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "CAP", label="surface-b"))
+        == "ok"
+    )
+
+
+def test_bounded_probe_releases_slot_when_thread_start_fails(monkeypatch):
+    # If Thread.start() raises (resource exhaustion), the worker's finally never runs, so
+    # bounded_probe must release the slot itself and degrade — never leak the slot and never
+    # let the exception escape ("Never raises").
+    import threading
+
+    sem = threading.Semaphore(2)
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {"flaky": sem})
+
+    real_thread = threading.Thread
+
+    def _boom_thread(*a, **k):
+        t = real_thread(*a, **k)
+        t.start = lambda: (_ for _ in ()).throw(RuntimeError("can't start new thread"))
+        return t
+
+    monkeypatch.setattr(threading, "Thread", _boom_thread)
+    result = _run(
+        client_mod.bounded_probe(lambda: "ok", on_failure=lambda: "F", budget=0.5, label="flaky")
+    )
+    assert result == "F"  # degraded, did not raise
+    # Both slots are free again (the acquired one was released on the failed start).
+    assert sem.acquire(blocking=False) and sem.acquire(blocking=False)
+
+
+def test_bounded_probe_degrades_on_base_exception(monkeypatch):
+    # A non-Exception BaseException from fn must degrade the request (not hang the full
+    # budget) AND not escape the coroutine; the original is re-raised inside the worker
+    # thread (captured here via excepthook so it is asserted rather than leaked as a warning).
+    import threading
+    import time
+
+    monkeypatch.setattr(client_mod, "_PROBE_SEMS", {"be": threading.Semaphore(4)})
+    thread_errors = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_type))
+
+    def _boom():
+        raise SystemExit("fatal")
+
+    t0 = time.monotonic()
+    result = _run(client_mod.bounded_probe(_boom, on_failure=lambda: "F", budget=5.0, label="be"))
+    elapsed = time.monotonic() - t0
+    assert result == "F"
+    assert elapsed < 1.0  # relayed immediately, NOT after the 5s budget
+    # Give the worker a moment to re-raise, then confirm it terminated on the original type.
+    deadline = time.monotonic() + 2.0
+    while not thread_errors and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert thread_errors == [SystemExit]
+
+
+def test_bounded_probe_survives_closed_loop_settle(monkeypatch):
+    # A worker that finishes AFTER the loop is gone must not crash: _safe_settle swallows the
+    # "Event loop is closed" RuntimeError. Capture any uncaught worker-thread exception via
+    # threading.excepthook and assert there was none — `done == [True]` alone would pass even
+    # if the swallow were removed (daemon-thread exceptions don't fail the test).
+    import threading
+    import time
+
+    done = []
+    thread_errors = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_type))
+
+    def _slow():
+        time.sleep(0.3)
+        done.append(True)
+        return "late"
+
+    assert _run(client_mod.bounded_probe(_slow, on_failure=lambda: "F", budget=0.05)) == "F"
+    # Poll (generous ceiling) until the abandoned worker fires call_soon_threadsafe against
+    # the now-closed loop, instead of a fixed sleep that can flake on a slow CI runner.
+    deadline = time.monotonic() + 3.0
+    while not done and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert done == [True]  # the worker ran to completion
+    assert thread_errors == []  # _safe_settle swallowed the closed-loop RuntimeError

@@ -56,6 +56,28 @@ def test_create_brand_and_list(fake_pg: dict) -> None:
     assert store.get_brand(client.id, brand.id) == brand
 
 
+def test_create_brand_records_profile_association(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """create_brand links the new brand to the default user profile (best-effort)."""
+    import branding_team.store as store_mod
+    from user_profile import ArtifactType
+
+    calls: list = []
+    monkeypatch.setattr(store_mod, "record_association_safe", lambda *a, **k: calls.append((a, k)))
+
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    mission = BrandingMission(
+        company_name="Acme Inc",
+        company_description="A great company",
+        target_audience="everyone",
+    )
+    brand = store.create_brand(client.id, mission, name="Acme Brand")
+
+    assert calls == [((ArtifactType.BRAND, "branding", brand.id), {"label": brand.name})]
+
+
 def test_get_brand_wrong_client_returns_none(fake_pg: dict) -> None:
     store = BrandingStore()
     c1 = store.create_client("C1")

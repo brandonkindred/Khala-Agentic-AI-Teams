@@ -40,9 +40,8 @@ from ..spec_dsl import (
     EntryRule,
     IndicatorRef,
     SignalExitRule,
-    StopLossRule,
-    TakeProfitRule,
     VolatilityTargetSizing,
+    is_entry_anchored_exit,
 )
 
 
@@ -633,9 +632,13 @@ _HELPER_BODIES: dict[str, str] = {
         def bollinger_bands(self, history, period=20, num_std=2.0, source="close", select="middle"):
             if len(history) < period:
                 return None
-            vals = [self._src(b, source) for b in history[-period:]]
-            mean = sum(vals) / period
-            var = sum((v - mean) ** 2 for v in vals) / period
+            s = sq = 0.0
+            for b in history[-period:]:
+                v = self._src(b, source)
+                s += v
+                sq += v * v
+            mean = s / period
+            var = max(0.0, sq / period - mean * mean)
             std = math.sqrt(var) if var > 0 else 0.0
             if select == "middle":
                 return mean
@@ -711,8 +714,8 @@ _HELPER_BODIES: dict[str, str] = {
                 return k_val
             if len(history) < k_period + d_period - 1:
                 return None
-            k_vals = [_k_at(end) for end in range(k_period, len(history) + 1)]
-            return sum(k_vals[-d_period:]) / d_period
+            k_vals = [_k_at(end) for end in range(len(history) - d_period + 1, len(history) + 1)]
+            return sum(k_vals) / d_period
         """
     ),
     "vwap": textwrap.dedent(
@@ -864,10 +867,11 @@ def _emit_class(
         on_bar_lines.append(f"        {varname} = {call_expr}")
     on_bar_lines.append("        position = ctx.position(bar.symbol)")
 
-    # Conformance gate checks #5/#6 require ``position.entry_price``
-    # when stop-loss or take-profit rules exist.
-    has_engine_handled_exit = any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
-    if has_engine_handled_exit:
+    # The conformance gate's stop-loss / take-profit enforcement checks require
+    # the compiled class to reference ``position.entry_price`` whenever an
+    # entry-anchored exit (stop-loss / take-profit / scaled take-profit) exists.
+    has_entry_anchored_exit = any(is_entry_anchored_exit(r) for r in exit_rules)
+    if has_entry_anchored_exit:
         on_bar_lines.append(
             "        _entry_ref = position.entry_price if position is not None else None"
         )
