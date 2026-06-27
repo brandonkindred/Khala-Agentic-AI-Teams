@@ -366,10 +366,14 @@ class ExitRuleConformanceGate(GateResultsMixin):
         the watermark starts at ``entry_price`` and is extended with each bar's
         high/low AFTER that bar's rule evaluation, so a trailing rule never fires
         off a floor that moved up on the same bar's high (the executor's
-        intrabar-lookahead guard). A legitimate next-bar gap fill trips its
-        trigger on the bar immediately before the fill bar (no EARLIER breach), so
-        it produces no warning — that is what keeps gap fills from becoming false
-        positives.
+        intrabar-lookahead guard). The entry bar follows the engine's
+        ``just_opened`` guard via ``TradeRecord.entry_order_type``: a non-market
+        (limit / stop) entry is neither evaluated nor folded into the watermark on
+        its fill bar, because that bar shares OHLC with pre-entry price action; a
+        market entry is replayed from the entry bar. A legitimate next-bar gap
+        fill trips its trigger on the bar immediately before the fill bar (no
+        EARLIER breach), so it produces no warning — that is what keeps gap fills
+        from becoming false positives.
 
         Preconditions: ``rule.basis`` is ``trailing_high`` or ``trailing_low``;
         ``market_data`` maps symbol -> bars in ascending date order.
@@ -379,7 +383,7 @@ class ExitRuleConformanceGate(GateResultsMixin):
         result summarizing how many trades/symbols were replayed and how many were
         skipped (a trade whose symbol or entry/exit date is absent from the bar
         series cannot be replayed). Severity is capped at ``warning`` by contract:
-        the ledger cannot reveal entry order type or scale-in re-basing, so the
+        the ledger cannot reveal scale-in re-basing of the entry price, so the
         reconstructed watermark is an approximation and must not veto a run.
         """
         # Pair the rule with the side it governs: ``trailing_high`` ratchets a
@@ -409,9 +413,19 @@ class ExitRuleConformanceGate(GateResultsMixin):
             symbols_seen.add(t.symbol)
             hi = t.entry_price
             lo = t.entry_price
+            # Entry-bar handling mirrors the engine's ``just_opened`` guard. A
+            # non-market entry (limit / stop) fills mid-bar and shares OHLC with
+            # pre-entry price action, so ``TradingService`` skips BOTH rule
+            # evaluation and watermark extension on that bar; including the entry
+            # bar's high/low would let a pre-entry spike ratchet the trailing
+            # floor and surface a leak the engine could never have fired. Market
+            # entries are evaluated/extended from the entry bar (the watermark is
+            # not consulted for them anyway). Either way evaluation begins against
+            # the ``entry_price`` watermark.
+            start_i = entry_i if t.entry_order_type == "market" else entry_i + 1
             # Decision bars are those strictly before the fill bar (``exit_i``):
             # a trigger on bar ``i`` lets the engine fill on bar ``i + 1``.
-            for i in range(entry_i, exit_i):
+            for i in range(start_i, exit_i):
                 bar = bars[i]
                 position = PositionState(
                     symbol=t.symbol,

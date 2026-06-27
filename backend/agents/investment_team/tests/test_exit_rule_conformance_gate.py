@@ -117,6 +117,7 @@ def _trailing_trade(
     trade_num: int = 1,
     return_pct: float = -10.0,
     exit_reason: str | None = None,
+    entry_order_type: str = "market",
 ) -> TradeRecord:
     """A TradeRecord with caller-controlled entry/exit dates, for replay tests."""
     return TradeRecord(
@@ -136,6 +137,7 @@ def _trailing_trade(
         outcome="loss" if return_pct < 0 else "win",
         cumulative_pnl=0.0,
         exit_reason=exit_reason,
+        entry_order_type=entry_order_type,
     )
 
 
@@ -418,6 +420,74 @@ def test_trailing_replay_detects_short_leak_via_trailing_low() -> None:
     assert len(fails) == 1
     assert fails[0].severity == "warning"
     assert "2024-01-04" in fails[0].details
+
+
+def _pre_entry_spike_bars() -> dict[str, list[OHLCVBar]]:
+    """Long entry at 100 whose ENTRY bar prints a pre-entry high of 120. Folding
+    that spike into the watermark ratchets the trailing floor (pct=0.05) to 114,
+    which the next bar's low of 99 breaches — a leak that only exists if the
+    entry bar is (wrongly) consumed. After the entry bar, price is flat near 100.
+    """
+    return {
+        "AAA": [
+            _bar("2024-01-02", high=120.0, low=100.0),  # entry bar w/ pre-entry spike
+            _bar("2024-01-03", high=101.0, low=99.0),
+            _bar("2024-01-04", high=101.0, low=99.0),
+            _bar("2024-01-05", high=100.0, low=98.0),  # fill bar
+        ]
+    }
+
+
+def test_trailing_replay_skips_non_market_entry_bar() -> None:
+    """A non-market (limit/stop) entry shares its fill bar with pre-entry price
+    action, so — like the engine's ``just_opened`` guard — the replay must NOT
+    evaluate or fold in the entry bar. Without the guard the d0 high of 120 would
+    ratchet the floor and report a false leak; with it, no warning.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[
+            _trailing_trade(
+                entry_date="2024-01-02",
+                exit_date="2024-01-05",
+                entry_order_type="limit",
+            )
+        ],
+        diagnostics=_diagnostics(),
+        config=_replay_config(),
+        market_data=_pre_entry_spike_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == [], [r.details for r in results]
+    replay = [r for r in results if "trailing replay" in r.details]
+    assert replay and replay[0].severity == "info"
+
+
+def test_trailing_replay_market_entry_consumes_entry_bar() -> None:
+    """Contrast to the non-market case: a MARKET entry IS evaluated/extended from
+    the entry bar (matching the engine), so the d0 high of 120 ratchets the floor
+    and d1's low of 99 is a genuine breach. The position closing on d5 instead of
+    d4 is a real leak → warning at the d1 bar.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[
+            _trailing_trade(
+                entry_date="2024-01-02",
+                exit_date="2024-01-05",
+                entry_order_type="market",
+            )
+        ],
+        diagnostics=_diagnostics(),
+        config=_replay_config(),
+        market_data=_pre_entry_spike_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "warning"
+    assert "2024-01-03" in fails[0].details
 
 
 # ---------------------------------------------------------------------------
