@@ -769,10 +769,14 @@ def test_target_match_normalizes_frontend_owned_aliases() -> None:
 
 def test_team_key_routes_framework_and_language_labels() -> None:
     """Concrete tech labels route to the owning v2 team instead of failing to match."""
-    for label in ("React", "Angular", "TypeScript", "scss", "Next.js", "React.js", "Vue.js"):
+    for label in ("React", "Angular", "scss", "Next.js", "React.js", "Vue.js"):
         assert orch_mod._team_key(label) == "frontend_v2"
     for label in ("Python", "Java", "FastAPI", "Spring Boot", "Postgres", "Node.js", "Express.js"):
         assert orch_mod._team_key(label) == "backend_v2"
+    # Ambiguous languages (used by frontend frameworks AND Node backends) must NOT be
+    # forced onto a team — routing them would mis-send backend work to the frontend worker.
+    for label in ("TypeScript", "JavaScript"):
+        assert orch_mod._team_key(label) not in ("frontend_v2", "backend_v2")
     # A capable worker now matches these labels rather than the task being dropped.
     assert orch_mod._target_matches_agent("react", "frontend_v2") is True
     assert orch_mod._target_matches_agent("python", "backend_v2") is True

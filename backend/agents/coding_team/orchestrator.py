@@ -436,8 +436,6 @@ _FRONTEND_TEAM_ALIASES = {
     "vuejs",
     "vue_js",
     "svelte",
-    "typescript",
-    "javascript",
     "html",
     "css",
     "scss",
@@ -445,6 +443,10 @@ _FRONTEND_TEAM_ALIASES = {
     "tailwind",
     "nextjs",
     "next_js",
+    # NOTE: bare "typescript"/"javascript" are intentionally NOT aliased here. They are
+    # ambiguous — this team's backend_v2 stack includes Node.js — so a "TypeScript"/
+    # "JavaScript" target_team must not be hard-routed to frontend. The Tech Lead should
+    # emit the canonical frontend_v2/backend_v2 (or a specific framework) for those.
 }
 _LEGACY_BACKEND_STACK_ALIASES = {
     "default",
