@@ -583,6 +583,20 @@ if TEAM_CONFIGS["product_delivery"].enabled:
     app.include_router(product_delivery_router)
     register_pd_exception_handlers(app)
 
+# Honor the in-process team's `enabled` flag and gate the import (same
+# rationale as product_delivery above): disabling agent_studio in config
+# must make /api/agent-studio/* stop answering. The import is also wrapped
+# so an import-time failure (missing transitive dep, broken module) logs
+# and skips mounting agent_studio rather than taking down the whole
+# unified API at startup.
+if TEAM_CONFIGS["agent_studio"].enabled:
+    try:
+        from unified_api.routes.agent_studio import router as agent_studio_router
+    except Exception:  # pragma: no cover - defensive import-failure guard
+        logger.warning("Failed to import agent_studio routes; skipping mount", exc_info=True)
+    else:
+        app.include_router(agent_studio_router)
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
