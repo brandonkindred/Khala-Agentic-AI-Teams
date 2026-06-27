@@ -345,7 +345,8 @@ def test_task_feature_name_truncates_long_titles_with_hash() -> None:
 
     name = worker_mod._task_feature_name(task)
 
-    assert len(name) <= worker_mod._MAX_FEATURE_SLUG_LENGTH
+    # Bounded by the shared branch_utils slug caps (task-id 20 + title 40 + 8-char hash).
+    assert len(name) <= 70
     assert name.startswith("task-123-")
     assert len(name.rsplit("-", 1)[-1]) == 8
 

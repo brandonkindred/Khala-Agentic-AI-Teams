@@ -30,10 +30,22 @@ def _make_python_agent_tool(
         try:
             tool_input = tool_use.get("input")
             out = handler(tool_input if tool_input is not None else {})
-            # Serialize inside the try: a non-JSON-serializable handler return must surface
-            # as an error ToolResult the model can see, not an exception that aborts the
-            # stream. default=str keeps best-effort output for stringifiable values.
-            text = out if isinstance(out, str) else json.dumps(out, default=str)
+            # Serialize inside the try so any failure surfaces as an error ToolResult the
+            # model can see, not an exception that aborts the stream. Try strict JSON first;
+            # only fall back to default=str for non-serializable values, and warn so operators
+            # can spot tools returning objects whose repr is useless to the model.
+            if isinstance(out, str):
+                text = out
+            else:
+                try:
+                    text = json.dumps(out)
+                except TypeError as exc:
+                    logger.warning(
+                        "Tool %s returned non-JSON-serializable output (%s); coercing with str()",
+                        name,
+                        exc,
+                    )
+                    text = json.dumps(out, default=str)
         except Exception as exc:  # noqa: BLE001 - tool failures should reach the model
             return {
                 "toolUseId": tool_use_id,

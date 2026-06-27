@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, List
 
 from coding_team.models import StackSpec
+from software_engineering_team.shared import branch_utils
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
@@ -22,10 +21,6 @@ from software_engineering_team.shared.models import TaskStatus as SETaskStatus
 from software_engineering_team.shared.models import TaskType
 
 logger = logging.getLogger(__name__)
-# Excludes '.' deliberately: git rejects refs containing '..', ending in '.' or
-# '.lock', so a dot-bearing task title must not survive into a branch name.
-_BRANCH_SLUG_RE = re.compile(r"[^a-z0-9_-]+")
-_MAX_FEATURE_SLUG_LENGTH = 80
 
 
 def _feedback_lines(feedback: List[Dict[str, Any]]) -> List[str]:
@@ -160,29 +155,23 @@ def _accepts_keyword(fn: Any, name: str) -> bool:
 
 
 def _task_feature_name(task: Any) -> str:
-    """Build a stable, bounded feature-branch suffix for a coding-team task.
+    """Build a stable, bounded, git-safe feature-branch suffix for a coding-team task.
+
+    Delegates to the shared :func:`branch_utils.make_branch_suffix` so the coding-team
+    worker and the software-engineering v2 deliver phases use a single slug
+    implementation and produce identical branch names — the suffix ends in a stable
+    hash of the raw task id, so two ids that slug identically after punctuation collapse
+    (e.g. ``api.v1`` vs ``api-v1``) never collide and retries of the same task reuse it.
 
     Args:
         task: Coding-team task-like object with an id and optional title.
 
     Returns:
         A git-branch-safe slug ending in a stable task-id hash.
-
-    The hash is appended unconditionally (not only on truncation): the slug regex
-    collapses punctuation, so two distinct task ids that differ only by punctuation
-    (e.g. ``api.v1`` and ``api-v1``) would otherwise produce the same branch name —
-    and ``create_feature_branch`` deletes-and-recreates an existing branch on
-    collision, discarding the other task's unmerged handoff branch. The digest is
-    derived from the raw task id, so retries of the same task reuse the same branch.
     """
     task_id = str(getattr(task, "id", "") or "task").strip() or "task"
     title = str(getattr(task, "title", "") or "").strip()
-    source = f"{task_id}-{title}" if title and title != task_id else task_id
-    slug = _BRANCH_SLUG_RE.sub("-", source.lower()).strip("-_")
-    slug = slug or _BRANCH_SLUG_RE.sub("-", task_id.lower()).strip("-_") or "task"
-    digest = hashlib.sha1(task_id.encode("utf-8")).hexdigest()[:8]
-    prefix = slug[: _MAX_FEATURE_SLUG_LENGTH - len(digest) - 1].rstrip("-_") or "task"
-    return f"{prefix}-{digest}"
+    return branch_utils.make_branch_suffix(task_id, title)
 
 
 def _requirements_for_task(task: Any) -> str:

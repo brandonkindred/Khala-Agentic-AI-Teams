@@ -383,9 +383,10 @@ _BACKEND_TEAM_ALIASES = {
     "servers",
     "service",
     "services",
-    # Concrete backend languages/frameworks a Tech Lead may name as the target_team
-    # instead of the canonical "backend_v2". Only unambiguous tech tokens (never generic
-    # words like "build") so exact-match routing does not over-claim.
+    # The entries above are legacy generic aliases (e.g. "service", "data") kept for
+    # backward compatibility. The entries below are concrete backend languages/frameworks
+    # a Tech Lead may name as the target_team instead of the canonical "backend_v2"; new
+    # additions should stay unambiguous tech tokens (never generic words like "build").
     "python",
     "java",
     "nodejs",
@@ -411,8 +412,8 @@ _BACKEND_TEAM_ALIASES = {
 # Frontend-owned target_team/stack aliases. Mirrors _BACKEND_TEAM_ALIASES so common
 # UI/UX target labels a Tech Lead may emit (or copy from a "UI" stack name) canonicalize
 # to frontend_v2 rather than failing to match the available frontend worker. Compared by
-# exact normalized-token equality in _team_key, so unrelated words containing these as a
-# substring (e.g. "build", "guides") are unaffected.
+# exact normalized-label equality in _team_key (``text in _FRONTEND_TEAM_ALIASES``), so
+# unrelated words containing these as a substring (e.g. "build", "guides") are unaffected.
 _FRONTEND_TEAM_ALIASES = {
     "ui",
     "ux",
@@ -422,8 +423,10 @@ _FRONTEND_TEAM_ALIASES = {
     "webapp",
     "web_app",
     "client",
-    # Concrete frontend languages/frameworks a Tech Lead may name as the target_team
-    # instead of the canonical "frontend_v2". Unambiguous tech tokens only.
+    # The entries above are legacy generic aliases (e.g. "client", "webapp") kept for
+    # backward compatibility. The entries below are concrete frontend languages/frameworks
+    # a Tech Lead may name as the target_team instead of the canonical "frontend_v2"; new
+    # additions should stay unambiguous tech tokens only.
     "angular",
     "angular_js",
     "react",

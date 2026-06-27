@@ -71,7 +71,14 @@ def _prepare_handoff_branch(
             logger.error("[%s] Deliver: %s", task_id, result.summary)
             # Restore development so the shared workspace is not left on an arbitrary
             # branch for the next task (symmetric with the create/write/commit failures).
-            checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+            restore_ok, restore_msg = checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+            if not restore_ok:
+                logger.error(
+                    "[%s] Deliver: failed to restore %s after checkout failure: %s",
+                    task_id,
+                    DEVELOPMENT_BRANCH,
+                    restore_msg,
+                )
             return result
     else:
         ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, branch_suffix)

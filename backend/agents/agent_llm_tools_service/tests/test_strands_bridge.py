@@ -131,6 +131,24 @@ def test_handler_exception_becomes_error_result() -> None:
     assert "boom" in result["content"][0]["text"]
 
 
+def test_non_serializable_output_warns_and_coerces(caplog) -> None:
+    """Non-JSON-serializable handler output is coerced with str() and warned, not crashed."""
+
+    class _Unserializable:
+        def __repr__(self) -> str:
+            return "<Unserializable>"
+
+    tools = build_strands_tools(
+        _handlers(lambda name: lambda args: {"obj": _Unserializable()}), GIT_TOOL_DEFINITIONS
+    )
+    with caplog.at_level(logging.WARNING, logger="agent_llm_tools_service.strands_bridge"):
+        result = _invoke(tools[0], {"toolUseId": "tu-10", "name": tools[0].tool_name, "input": {}})
+    # Still a success result (no stream-aborting crash), best-effort string coercion applied.
+    assert result["status"] == "success"
+    assert "<Unserializable>" in result["content"][0]["text"]
+    assert "non-JSON-serializable output" in caplog.text
+
+
 def test_skips_definitions_without_handlers(caplog) -> None:
     handlers = {"git_status": lambda args: {}}
     with caplog.at_level(logging.DEBUG, logger="agent_llm_tools_service.strands_bridge"):
