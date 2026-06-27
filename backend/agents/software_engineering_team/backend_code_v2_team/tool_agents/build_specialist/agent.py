@@ -9,7 +9,9 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
-from strands import Agent
+from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
+
+from software_engineering_team.shared.tool_agent_base import relevant_code_for_issue
 
 from ...models import (
     ReviewIssue,
@@ -19,11 +21,8 @@ from ...models import (
     ToolAgentPhaseOutput,
 )
 from ...output_templates import parse_problem_solving_single_issue_template
-from ...prompts import (
-    JAVA_CONVENTIONS,
-    PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT,
-    PYTHON_CONVENTIONS,
-)
+from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
+from ..base import BackendReviewToolAgent
 
 logger = logging.getLogger(__name__)
 
@@ -32,24 +31,7 @@ MAX_RELEVANT_CODE_CHARS = 8_000
 
 def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) -> str:
     """Return code context for a single issue: prefer issue's file, else first files."""
-    if issue.file_path and issue.file_path in current_files:
-        content = current_files[issue.file_path]
-        if len(content) <= MAX_RELEVANT_CODE_CHARS:
-            return f"--- {issue.file_path} ---\n{content}"
-        return f"--- {issue.file_path} ---\n{content[:MAX_RELEVANT_CODE_CHARS]}\n... [truncated]"
-    parts: List[str] = []
-    total = 0
-    for path, content in list(current_files.items())[:10]:
-        chunk = f"--- {path} ---\n{content}\n"
-        if total + len(chunk) > MAX_RELEVANT_CODE_CHARS:
-            remaining = MAX_RELEVANT_CODE_CHARS - total
-            if remaining > 200:
-                chunk = f"--- {path} ---\n{content[:remaining]}\n... [truncated]"
-                parts.append(chunk)
-            break
-        parts.append(chunk)
-        total += len(chunk)
-    return "\n".join(parts) if parts else "(no code)"
+    return relevant_code_for_issue(issue, current_files, MAX_RELEVANT_CODE_CHARS)
 
 
 def _run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
@@ -138,33 +120,30 @@ def _run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     return issues
 
 
-class BuildSpecialistAdapterAgent:
-    """Identifies all build/test issues in review and fixes them one at a time in problem_solve."""
+class BuildSpecialistAdapterAgent(BackendReviewToolAgent):
+    """Identifies all build/test issues in review and fixes them one at a time in problem_solve.
 
-    def __init__(self, llm=None) -> None:
-        from software_engineering_team.shared.strands_model import resolve_strands_model
+    ``execute``/``review``/``deliver`` are bespoke for the backend build flow;
+    ``problem_solve`` (with python/java conventions) is inherited.
+    """
 
-        # v2 tool agents consume template-parsed output (parse_review_template /
-        # parse_files_and_summary_template / parse_problem_solving_single_issue_template);
-        # the mixed-mode ones (accessibility / performance / ux_usability) have
-        # JSON paths with defensive fence-stripping fallbacks that work in text mode.
-        self._model = resolve_strands_model(llm, response_format="text")
-        self.llm = llm  # kept for backward compat checks
-
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
+    name = "Build Specialist"
+    empty_label = "build issues"
+    issue_source = "build_specialist"
+    problem_solve_sources = ("build", "build_specialist", "tool_build_specialist")
+    problem_solving_prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
+    max_relevant_code_chars = MAX_RELEVANT_CODE_CHARS
+    default_severity = "critical"
+    default_recommendation = "Fix the build error."
+    plan_recommendations = ["Ensure build configuration and dependencies are in scope."]
+    plan_summary = "Build Specialist planning."
+    _parse_single_issue = staticmethod(parse_problem_solving_single_issue_template)
 
     def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
         logger.info("Build Specialist: microtask %s (execute stub)", inp.microtask.id)
         return ToolAgentOutput(
             summary="Build Specialist execute — no changes applied.",
             recommendations=["Integrate with build verifier or build-fix flow for full support."],
-        )
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(
-            recommendations=["Ensure build configuration and dependencies are in scope."],
-            summary="Build Specialist planning.",
         )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
@@ -180,51 +159,6 @@ class BuildSpecialistAdapterAgent:
         return ToolAgentPhaseOutput(
             issues=issues,
             summary=f"Build Specialist review: {len(issues)} build/test issue(s) found.",
-        )
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Fix build-related issues one at a time. Only fixes issues with source build or build_specialist."""
-        if not self._model:
-            return ToolAgentPhaseOutput(summary="Build Specialist problem_solve skipped (no LLM).")
-        build_issues = [
-            i
-            for i in inp.review_issues
-            if (i.source or "").strip() in ("build", "build_specialist", "tool_build_specialist")
-        ]
-        if not build_issues:
-            return ToolAgentPhaseOutput(summary="No build issues to fix.")
-        lang = (inp.language or "python").strip().lower()
-        language_conventions = JAVA_CONVENTIONS if lang == "java" else PYTHON_CONVENTIONS
-        merged = dict(inp.current_files)
-        fixed_count = 0
-        for issue in build_issues:
-            relevant_code = _relevant_code_for_issue(issue, merged)
-            prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT.format(
-                language_conventions=language_conventions,
-                source=issue.source or "build_specialist",
-                severity=issue.severity or "critical",
-                description=issue.description or "",
-                file_path=issue.file_path or "N/A",
-                recommendation=issue.recommendation or "Fix the build error.",
-                current_code=relevant_code,
-            )
-            try:
-                raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
-            except Exception as e:
-                logger.warning(
-                    "Build Specialist fix for issue %s failed: %s",
-                    (issue.description or "")[:50],
-                    e,
-                )
-                continue
-            parsed = parse_problem_solving_single_issue_template(raw)
-            fixed_files = parsed.get("files") or {}
-            if fixed_files:
-                merged.update(fixed_files)
-                fixed_count += 1
-        return ToolAgentPhaseOutput(
-            files=merged,
-            summary=f"Build Specialist: fixed {fixed_count} of {len(build_issues)} issue(s) (one at a time).",
         )
 
     def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
