@@ -490,6 +490,28 @@ def test_trailing_replay_market_entry_consumes_entry_bar() -> None:
     assert "2024-01-03" in fails[0].details
 
 
+def test_trailing_replay_none_entry_order_type_defaults_to_market() -> None:
+    """A missing ``entry_order_type`` (``None`` on a legacy/partial record) is
+    treated as a market entry — the leak-detection-safe default — so the entry
+    bar is evaluated and a real leak is still surfaced rather than masked.
+    """
+    trade = _trailing_trade(entry_date="2024-01-02", exit_date="2024-01-05")
+    # Force the field absent (pydantic v2 models are mutable by default).
+    trade.entry_order_type = None  # type: ignore[assignment]
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[trade],
+        diagnostics=_diagnostics(),
+        config=_replay_config(),
+        market_data=_pre_entry_spike_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "warning"
+    assert "2024-01-03" in fails[0].details
+
+
 # ---------------------------------------------------------------------------
 # TakeProfitRule
 # ---------------------------------------------------------------------------

@@ -386,6 +386,13 @@ class ExitRuleConformanceGate(GateResultsMixin):
         the ledger cannot reveal scale-in re-basing of the entry price, so the
         reconstructed watermark is an approximation and must not veto a run.
         """
+        # Precondition (DbC): this path is reached only for a trailing basis.
+        # Asserting it makes the side derivation below provably exhaustive — a
+        # future/unexpected basis fails loudly here instead of silently mapping
+        # to "short".
+        assert rule.basis in ("trailing_high", "trailing_low"), (
+            f"trailing replay called with non-trailing basis {rule.basis!r}"
+        )
         # Pair the rule with the side it governs: ``trailing_high`` ratchets a
         # long's floor up off the running high; ``trailing_low`` ratchets a
         # short's cap down off the running low. ``stop_loss_triggers`` already
@@ -429,8 +436,12 @@ class ExitRuleConformanceGate(GateResultsMixin):
             # floor and surface a leak the engine could never have fired. Market
             # entries are evaluated/extended from the entry bar (the watermark is
             # not consulted for them anyway). Either way evaluation begins against
-            # the ``entry_price`` watermark.
-            start_i = entry_i if t.entry_order_type == "market" else entry_i + 1
+            # the ``entry_price`` watermark. A missing ``entry_order_type``
+            # (``None`` on a legacy/partial record) defaults to ``"market"`` —
+            # the leak-detection-safe choice: it evaluates the entry bar rather
+            # than skipping it, so an absent field can't hide a real leak.
+            order_type = t.entry_order_type or "market"
+            start_i = entry_i if order_type == "market" else entry_i + 1
             # Decision bars are those strictly before the fill bar (``exit_i``):
             # a trigger on bar ``i`` lets the engine fill on bar ``i + 1``.
             for i in range(start_i, exit_i):
