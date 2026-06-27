@@ -7,9 +7,12 @@ Kept deliberately small so it is trivially swappable for a Postgres-backed store
 later without touching the service or routes.
 
 The store is **bounded**: it retains at most ``max_conversations`` records and
-evicts the oldest (FIFO) on overflow, so an unbounded stream of
-``POST /conversations`` calls cannot grow process memory without limit. Eviction
-is the in-memory analogue of the TTL the durable store will carry.
+evicts the **least-recently-used** on overflow (any access — get / append /
+set_definition — refreshes recency via ``OrderedDict.move_to_end``), so an
+unbounded stream of ``POST /conversations`` calls cannot grow process memory
+without limit, and a conversation that's still in active use is not evicted out
+from under a mid-turn request. Eviction is the in-memory analogue of the TTL the
+durable store will carry.
 
 The store is **thread-safe**: every mutating/reading method holds a
 ``threading.Lock``, so it is safe to share one instance across the FastAPI
@@ -85,8 +88,8 @@ class AgentStudioConversationStore:
 
         Postconditions:
             * ``get(returned_id)`` is a fresh record with no messages.
-            * At most ``max_conversations`` records remain; on overflow the oldest
-              record is evicted and no longer resolves via :meth:`get`.
+            * At most ``max_conversations`` records remain; on overflow the
+              **least-recently-used** record is evicted (see eviction note).
         """
         conversation_id = str(uuid.uuid4())
         with self._lock:
@@ -97,24 +100,36 @@ class AgentStudioConversationStore:
                 definition=definition,
             )
             while len(self._records) > self._max:
-                self._records.popitem(last=False)
+                self._records.popitem(last=False)  # front == least-recently-used
         return conversation_id
 
     def get(self, conversation_id: str) -> ConversationRecord | None:
         """Return a snapshot of the record, or ``None`` if the id is unknown.
 
+        Accessing a conversation marks it **most-recently-used** so the LRU cap
+        never evicts a conversation that's still in active use (e.g. mid-turn,
+        awaiting an LLM response).
+
         Postconditions:
-            * The returned record is a **copy** with its own ``messages`` list, so
-              callers never hold a reference to internal mutable state past the
-              lock — mutating it can't race with concurrent ``append_message`` /
-              ``set_definition``. Mutations must go through the store's methods.
+            * The returned record is an **independent copy** — its own ``messages``
+              list and a deep-copied ``definition`` — so callers never hold a
+              reference to internal mutable state past the lock; mutating it can't
+              race with concurrent ``append_message`` / ``set_definition``.
+              Mutations must go through the store's methods.
         """
         with self._lock:
             record = self._records.get(conversation_id)
-            return replace(record, messages=list(record.messages)) if record is not None else None
+            if record is None:
+                return None
+            self._records.move_to_end(conversation_id)
+            return replace(
+                record,
+                messages=list(record.messages),
+                definition=record.definition.model_copy(deep=True),
+            )
 
     def append_message(self, conversation_id: str, role: str, content: str) -> None:
-        """Append one message.
+        """Append one message (marks the conversation most-recently-used).
 
         Preconditions:
             * ``conversation_id`` exists.
@@ -127,9 +142,10 @@ class AgentStudioConversationStore:
             if record is None:
                 raise LookupError(f"Unknown conversation: {conversation_id}")
             record.messages.append(ConversationMessage(role=role, content=content))
+            self._records.move_to_end(conversation_id)
 
     def set_definition(self, conversation_id: str, definition: AgentDefinition) -> None:
-        """Replace the in-progress definition for a conversation.
+        """Replace the in-progress definition (marks the conversation most-recently-used).
 
         Postconditions:
             * Raises :class:`LookupError` if the id is unknown (see
@@ -140,3 +156,4 @@ class AgentStudioConversationStore:
             if record is None:
                 raise LookupError(f"Unknown conversation: {conversation_id}")
             record.definition = definition
+            self._records.move_to_end(conversation_id)

@@ -62,3 +62,9 @@ def test_save_agent_request_to_definition_drops_server_owned_fields() -> None:
     assert definition.cloned_from is None
     assert "mode" not in SaveAgentRequest.model_fields
     assert "cloned_from" not in SaveAgentRequest.model_fields
+
+
+def test_start_conversation_request_rejects_invalid_mode() -> None:
+    # mode is Literal["new", "refine"]; arbitrary strings must be rejected.
+    with pytest.raises(ValidationError):
+        StartConversationRequest(mode="bogus")

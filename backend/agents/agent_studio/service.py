@@ -64,6 +64,9 @@ class AgentStudioService:
         Preconditions:
             * ``mode == "refine"`` requires ``source_agent_id`` to name a
               registered agent.
+            * ``mode == "new"`` must **not** carry a ``source_agent_id`` (a new
+              build has no source; passing one is a client error, not silently
+              ignored).
         Postconditions:
             * Returns the initial conversation state. In ``refine`` mode the
               definition is pre-seeded from a clone of the source manifest.
@@ -76,6 +79,8 @@ class AgentStudioService:
                 raise LookupError(f"Unknown source agent: {source_agent_id}")
             definition = clone_from_manifest(manifest)
         else:
+            if source_agent_id:
+                raise ValueError("source_agent_id must not be provided when mode == 'new'")
             definition = AgentDefinition(mode="new")
 
         conversation_id = self._store.create(mode, source_agent_id, definition)
@@ -96,6 +101,16 @@ class AgentStudioService:
         return self._handle_message(conversation_id, message)
 
     def _handle_message(self, conversation_id: str, message: str) -> ConversationStateResponse:
+        """Run one assistant turn: read state, call the LLM, persist user + reply.
+
+        Concurrency note: the store locks each individual op, but this whole turn
+        (read history+definition → LLM → append → set_definition) is **not**
+        serialized, so two concurrent sends on the *same* conversation can
+        interleave (last write wins). Per-conversation turn serialization (and the
+        cross-worker case) is a deferred follow-up that lands with the durable
+        store. For Stage 1 the frontend should prevent concurrent sends on one
+        conversation.
+        """
         record = self._store.get(conversation_id)
         if record is None:  # callers validate first; defensive guard
             raise RuntimeError("Conversation record unexpectedly missing")  # pragma: no cover

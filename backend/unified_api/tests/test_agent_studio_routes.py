@@ -81,6 +81,19 @@ def test_start_refine_requires_source_is_400(client: TestClient) -> None:
     assert resp.status_code == 400
 
 
+def test_start_new_with_source_is_400(client: TestClient) -> None:
+    resp = client.post(
+        "/api/agent-studio/conversations",
+        json={"mode": "new", "source_agent_id": "blogging.planner"},
+    )
+    assert resp.status_code == 400
+
+
+def test_start_invalid_mode_is_422(client: TestClient) -> None:
+    resp = client.post("/api/agent-studio/conversations", json={"mode": "bogus"})
+    assert resp.status_code == 422
+
+
 def test_start_refine_unknown_source_is_404(client: TestClient) -> None:
     resp = client.post(
         "/api/agent-studio/conversations",

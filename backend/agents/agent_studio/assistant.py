@@ -268,5 +268,8 @@ class AgentDesignerAgent:
                 f"{role}: {_neutralize(content)}" for role, content in conversation_history
             )
             parts.append(f"<history>\n{turns}\n</history>")
-        parts.append(f"<user_message>\n{_neutralize(user_message)}\n</user_message>")
+        # A message consisting only of delimiter tags neutralizes to empty; send a
+        # placeholder rather than an empty <user_message> block to the model.
+        safe_message = _neutralize(user_message).strip() or "[empty message]"
+        parts.append(f"<user_message>\n{safe_message}\n</user_message>")
         return "\n\n".join(parts)

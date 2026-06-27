@@ -75,6 +75,27 @@ def test_get_returns_snapshot_not_internal_record() -> None:
     assert len(store.get(cid).messages) == 1
 
 
+def test_get_snapshot_definition_is_independent() -> None:
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition(name="orig"))
+    snap = store.get(cid)
+    snap.definition.name = "mutated"  # deep-copied → must not affect the store
+    assert store.get(cid).definition.name == "orig"
+
+
+def test_lru_eviction_keeps_recently_used() -> None:
+    # Touching a conversation marks it most-recently-used, so the cap evicts the
+    # least-recently-used rather than a still-active conversation.
+    store = AgentStudioConversationStore(max_conversations=2)
+    a = store.create("new", None, AgentDefinition())
+    b = store.create("new", None, AgentDefinition())
+    store.get(a)  # a becomes most-recently-used
+    c = store.create("new", None, AgentDefinition())
+    assert store.get(b) is None  # b was least-recently-used → evicted
+    assert store.get(a) is not None
+    assert store.get(c) is not None
+
+
 def test_default_max_conversations_from_env(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_STUDIO_MAX_CONVERSATIONS", "7")
     assert _default_max_conversations() == 7

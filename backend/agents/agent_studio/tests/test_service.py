@@ -73,6 +73,13 @@ def test_start_refine_without_source_raises_value_error() -> None:
         svc.start_conversation("refine", None, None)
 
 
+def test_start_new_with_source_raises_value_error() -> None:
+    # A new build has no source; passing one is a client error, not ignored.
+    svc, _ = _service()
+    with pytest.raises(ValueError):
+        svc.start_conversation("new", "some.agent", None)
+
+
 def test_start_refine_unknown_source_raises_lookup_error() -> None:
     svc, _ = _service()
     with pytest.raises(LookupError):
@@ -114,7 +121,9 @@ def test_send_message_assistant_failure_leaves_no_partial_message() -> None:
             raise RuntimeError("llm down")
 
     store = AgentStudioConversationStore()
-    svc = AgentStudioService(assistant=_BoomAssistant(), store=store, registry_getter=FakeRegistry)
+    svc = AgentStudioService(
+        assistant=_BoomAssistant(), store=store, registry_getter=lambda: FakeRegistry()
+    )
     started = svc.start_conversation("new", None, None)  # greeting only
     cid = started.conversation_id
     before = len(store.get(cid).messages)
