@@ -39,11 +39,14 @@
   }
 
   // ── Provisioning slide-out ─────────────────────────────────────────────────
+  // The modal must sit above everything that can be visible behind it — notably
+  // the catalog's own detail drawer (z-index: 50) which stays mounted in this
+  // stage, plus app chrome (z-index: 1000). Use a modal-layer value above both.
   &__scrim {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.4);
-    z-index: 20;
+    z-index: 1100;
   }
 
   &__provision-panel {
@@ -51,7 +54,7 @@
     top: 0;
     right: 0;
     bottom: 0;
-    z-index: 21;
+    z-index: 1101; // one above the scrim; both above the catalog drawer + chrome
     width: min(560px, 92vw);
     display: flex;
     flex-direction: column;
