@@ -4,7 +4,7 @@ Run the software engineering team pipeline.
 Flow:
 1. Architecture Expert designs system from product requirements
 2. Tech Lead breaks down work and assigns tasks
-3. Specialists (DevOps, Security, Backend, Frontend, QA) execute tasks in order
+3. Specialists (DevOps, Security, Backend, QA) execute tasks in order
 4. Each specialist uses the architecture when implementing or validating
 
 Usage:
@@ -23,7 +23,6 @@ from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from backend_agent import BackendExpertAgent, BackendInput
 from backend_agent.agent import _read_openapi_spec_from_repo
 from devops_agent import DevOpsExpertAgent, DevOpsInput
-from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
 from qa_agent import QAExpertAgent, QAInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 from tech_lead_agent import TechLeadAgent, TechLeadInput
@@ -98,7 +97,6 @@ def main() -> None:
         "devops": DevOpsExpertAgent(get_client("devops")),
         "security": CybersecurityExpertAgent(get_client("security")),
         "backend": BackendExpertAgent(get_client("backend")),
-        "frontend": FrontendExpertAgent(get_client("frontend")),
         "qa": QAExpertAgent(get_client("qa")),
     }
 
@@ -147,20 +145,6 @@ def main() -> None:
             artifacts["backend_code"] = result.code or ""
             if result.files:
                 artifacts["backend_files"] = result.files
-
-        elif task.assignee == "frontend":
-            result = agent.run(
-                FrontendInput(
-                    task_description=task.description,
-                    requirements=task.requirements,
-                    user_story=getattr(task, "user_story", "") or "",
-                    architecture=architecture,
-                )
-            )
-            logger.info("Frontend: %s", result.summary[:150] if result.summary else "Done")
-            artifacts["frontend_code"] = result.code or ""
-            if result.files:
-                artifacts["frontend_files"] = result.files
 
         elif task.assignee == "security":
             code_to_review = "\n\n---BACKEND---\n\n" + artifacts.get("backend_code", "")
