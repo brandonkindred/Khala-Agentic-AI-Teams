@@ -769,7 +769,7 @@ def test_target_match_normalizes_frontend_owned_aliases() -> None:
 
 def test_team_key_routes_framework_and_language_labels() -> None:
     """Concrete tech labels route to the owning v2 team instead of failing to match."""
-    for label in ("React", "Angular", "scss", "Next.js", "React.js", "Vue.js"):
+    for label in ("React", "Angular", "AngularJS", "scss", "Next.js", "React.js", "Vue.js"):
         assert orch_mod._team_key(label) == "frontend_v2"
     for label in ("Python", "Java", "FastAPI", "Spring Boot", "Postgres", "Node.js", "Express.js"):
         assert orch_mod._team_key(label) == "backend_v2"
@@ -782,6 +782,36 @@ def test_team_key_routes_framework_and_language_labels() -> None:
     assert orch_mod._target_matches_agent("python", "backend_v2") is True
     # Generic, non-tech words still pass through unmapped.
     assert orch_mod._team_key("build") == "build"
+
+
+def test_team_key_accepts_compact_v2_labels() -> None:
+    """Separator-less v2 labels still route, without matching unrelated substrings."""
+    assert orch_mod._team_key("frontendv2") == "frontend_v2"
+    assert orch_mod._team_key("BackendV2") == "backend_v2"
+    # Exact-match only: a word merely containing the alias as a substring is unaffected.
+    assert orch_mod._team_key("myfrontend") == "myfrontend"
+
+
+def test_assign_tasks_survives_assignment_error(tmp_path):
+    """A transient assign_task_to_agent error is logged and skipped, not propagated."""
+
+    class OneAssignTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "backend_v2", "task_id": "t1"}]}
+
+    workers = [StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, OneAssignTL(approved=True), workers)
+    graph.add_task("t1", title="Build API", target_team="backend_v2")
+
+    def _boom(task_id, agent_id):
+        raise RuntimeError("transient store error")
+
+    swarm.graph.assign_task_to_agent = _boom  # type: ignore[method-assign]
+
+    # Must not raise; the task simply stays unassigned for this round.
+    swarm._assign_tasks(graph.get_tasks(), ["backend_v2"])
+    assert graph.get_task("t1").assigned_agent_id is None
+    assert graph.get_task("t1").status == TaskStatus.TO_DO
 
 
 def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):

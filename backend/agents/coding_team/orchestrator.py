@@ -364,6 +364,11 @@ _BACKEND_HINTS = {
     "spring",
 }
 _BACKEND_TEAM_ALIASES = {
+    # Compact separator-less form of the canonical team name. The token-exact frontend/
+    # backend check below only matches when "backend" is its own token (so "backendv2"
+    # collapses to a single token); this alias preserves the old substring behavior for
+    # the v2 label without re-introducing matches on unrelated words like "mybackend".
+    "backendv2",
     "api",
     "apis",
     "backend_api",
@@ -415,6 +420,8 @@ _BACKEND_TEAM_ALIASES = {
 # exact normalized-label equality in _team_key (``text in _FRONTEND_TEAM_ALIASES``), so
 # unrelated words containing these as a substring (e.g. "build", "guides") are unaffected.
 _FRONTEND_TEAM_ALIASES = {
+    # Compact separator-less form of the canonical team name (see _BACKEND_TEAM_ALIASES).
+    "frontendv2",
     "ui",
     "ux",
     "ui_ux",
@@ -428,6 +435,7 @@ _FRONTEND_TEAM_ALIASES = {
     # a Tech Lead may name as the target_team instead of the canonical "frontend_v2"; new
     # additions should stay unambiguous tech tokens only.
     "angular",
+    "angularjs",
     "angular_js",
     "react",
     "reactjs",
@@ -644,7 +652,11 @@ def _v2_text_mode_llm(llm: Any) -> Any:
             # genuine text-mode wrapper; otherwise fall through to a fresh default text model.
             # Either way, never return the original non-text handle.
             logger.warning("Could not clone v2 LLM into text mode: %s", exc)
-            underlying_client = getattr(llm, "_client", None)
+            # Prefer a public ``client`` accessor if the model exposes one; fall back to the
+            # ``_client`` attribute LLMClientModel currently stores it under. This couples to a
+            # private name by necessity (no public accessor today) — guarded with getattr so a
+            # future rename degrades to the default text model rather than raising.
+            underlying_client = getattr(llm, "client", None) or getattr(llm, "_client", None)
             return resolve_text_mode_strands_model(underlying_client)
 
     if llm is None or isinstance(llm, LLMClient):
@@ -1366,6 +1378,15 @@ class CodingTeamSwarm:
             for agent_id in self.agent_ids
         )
 
+    def _try_assign(self, task_id: str, agent_id: str) -> bool:
+        """Assign a task to an agent, swallowing transient errors so one bad assignment
+        cannot abort the whole assignment round. Returns True only on a real placement."""
+        try:
+            return bool(self.graph.assign_task_to_agent(task_id, agent_id))
+        except Exception as exc:  # noqa: BLE001 - keep assigning the remaining ready tasks
+            logger.warning("Failed to assign task %s to agent %s: %s", task_id, agent_id, exc)
+            return False
+
     def _assign_tasks(self, ready: List[Task], free_agents: List[str]) -> None:
         """Coordinator decides which tasks go to which workers."""
         if not free_agents or not ready:
@@ -1403,7 +1424,7 @@ class CodingTeamSwarm:
                     agent_id,
                 )
                 continue
-            if self.graph.assign_task_to_agent(task.id, agent_id):
+            if self._try_assign(task.id, agent_id):
                 used_agents.add(agent_id)
                 assigned_tasks.add(task.id)
 
@@ -1420,10 +1441,10 @@ class CodingTeamSwarm:
                     task.target_team, self.agent_team_keys.get(agent_id, agent_id)
                 ):
                     continue
-                # Only stop once the task is actually placed. If assign_task_to_agent fails
-                # (e.g. the agent's prior task isn't merged yet), keep trying the remaining
-                # matching free workers instead of leaving the task idle for the round.
-                if self.graph.assign_task_to_agent(task.id, agent_id):
+                # Only stop once the task is actually placed. If assignment fails (e.g. the
+                # agent's prior task isn't merged yet, or a transient error), keep trying the
+                # remaining matching free workers instead of leaving the task idle for the round.
+                if self._try_assign(task.id, agent_id):
                     used_agents.add(agent_id)
                     assigned_tasks.add(task.id)
                     break

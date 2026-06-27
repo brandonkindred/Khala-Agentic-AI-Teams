@@ -58,5 +58,7 @@ def make_branch_suffix(task_id: str, task_title: str) -> str:
     The hash is deterministic per task id, so retries of the same task reuse it.
     """
     base = f"{make_task_id_slug(task_id)}-{make_slug(task_id, task_title)}"
-    digest = hashlib.sha1((task_id or "task").encode("utf-8")).hexdigest()[:_BRANCH_HASH_LENGTH]
+    # sha256 (not sha1) purely to avoid security-scanner false positives — this digest is a
+    # branch-name disambiguator, never a security primitive.
+    digest = hashlib.sha256((task_id or "task").encode("utf-8")).hexdigest()[:_BRANCH_HASH_LENGTH]
     return f"{base}-{digest}"

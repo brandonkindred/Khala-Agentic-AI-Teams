@@ -46,6 +46,8 @@ def _make_python_agent_tool(
                         exc,
                     )
                     text = json.dumps(out, default=str)
+                    # Log the coerced payload so operators can diagnose what the tool returned.
+                    logger.debug("Tool %s coerced output: %s", name, text)
         except Exception as exc:  # noqa: BLE001 - tool failures should reach the model
             return {
                 "toolUseId": tool_use_id,
