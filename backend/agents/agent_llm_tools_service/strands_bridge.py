@@ -37,9 +37,13 @@ def _make_python_agent_tool(
             if isinstance(out, str):
                 text = out
             else:
+                # Catch TypeError (non-serializable type) and ValueError (e.g. out-of-range
+                # floats) so both trigger best-effort coercion. A genuine circular reference
+                # still raises from the default=str retry and falls through to the outer
+                # except as an error ToolResult — there is no useful string for a cycle.
                 try:
                     text = json.dumps(out)
-                except TypeError as exc:
+                except (TypeError, ValueError) as exc:
                     logger.warning(
                         "Tool %s returned non-JSON-serializable output (%s); coercing with str()",
                         name,

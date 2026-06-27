@@ -6,6 +6,7 @@ import paths differ. Tests target both.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, create_autospec
@@ -125,6 +126,7 @@ def test_fe_documentation_phase_fixes_issues(tmp_path: Path) -> None:
         if state["i"] == 0:
             state["i"] += 1
             from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+
             return SimpleNamespace(issues=[ReviewIssue(description="fix-readme")])
         return SimpleNamespace(issues=[])
 
@@ -184,6 +186,7 @@ def test_fe_documentation_phase_problem_solve_exception(tmp_path) -> None:
         raise RuntimeError("ps broke")
 
     from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
+
     fake_doc = SimpleNamespace(
         review=lambda inp: SimpleNamespace(issues=[ReviewIssue(description="i1")]),
         problem_solve=boom,
@@ -209,6 +212,7 @@ def test_fe_documentation_phase_problem_solve_no_files(tmp_path) -> None:
     from software_engineering_team.frontend_code_v2_team.phases.documentation import (
         run_documentation_phase,
     )
+
     fake_doc = SimpleNamespace(
         review=lambda inp: SimpleNamespace(issues=[ReviewIssue(description="i1")]),
         problem_solve=lambda inp: SimpleNamespace(files={}),
@@ -417,9 +421,7 @@ def test_fe_deliver_inline_create_branch_fails(tmp_path: Path, monkeypatch) -> N
     _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(False, "no perms"))
     _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
-    result = deliver.run_deliver(
-        task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary=""
-    )
+    result = deliver.run_deliver(task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary="")
     assert result.merged is False
     assert "Feature branch creation failed" in result.summary
 
@@ -431,9 +433,7 @@ def test_fe_deliver_inline_write_fails(tmp_path: Path, monkeypatch) -> None:
     _patch_autospec(monkeypatch, deliver, "write_agent_output", return_value=(False, "write err"))
     _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
-    result = deliver.run_deliver(
-        task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary=""
-    )
+    result = deliver.run_deliver(task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary="")
     assert result.merged is False
     assert "Write failed" in result.summary
 
@@ -447,9 +447,7 @@ def test_fe_deliver_inline_merge_fails(tmp_path: Path, monkeypatch) -> None:
     _patch_autospec(monkeypatch, deliver, "abort_merge", return_value=True)
     _patch_autospec(monkeypatch, deliver, "checkout_branch", return_value=(True, ""))
 
-    result = deliver.run_deliver(
-        task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary=""
-    )
+    result = deliver.run_deliver(task_id="t1", repo_path=tmp_path, files={"a.ts": "x"}, summary="")
     assert result.merged is False
     assert "Merge failed" in result.summary
 
@@ -628,9 +626,7 @@ def test_fe_deliver_handoff_create_branch_fails(tmp_path: Path, monkeypatch) -> 
     checkout_mock.assert_called_once()
 
 
-def test_fe_deliver_handoff_commit_fails_cleans_created_branch(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fe_deliver_handoff_commit_fails_cleans_created_branch(tmp_path: Path, monkeypatch) -> None:
     from software_engineering_team.frontend_code_v2_team.phases import deliver
 
     _patch_autospec(monkeypatch, deliver, "create_feature_branch", return_value=(True, "feature/x"))
@@ -653,6 +649,64 @@ def test_fe_deliver_handoff_commit_fails_cleans_created_branch(
     assert "Commit failed" in result.summary
     checkout_mock.assert_called_once_with(tmp_path, deliver.DEVELOPMENT_BRANCH)
     delete_mock.assert_called_once_with(tmp_path, "feature/x")
+
+
+def _assert_restores_development_on_existing_branch_checkout_failure(
+    deliver, tmp_path, monkeypatch, caplog
+) -> None:
+    """Shared assertion for both v2 deliver phases: a failed checkout of a supplied
+    feature branch reports the error AND restores the development branch."""
+    seen: list[str] = []
+
+    def _checkout(repo_path, branch):
+        seen.append(branch)
+        if branch == "feature/existing":
+            return False, "checkout boom"
+        return False, "restore boom"  # restore also fails → must be logged
+
+    _patch_autospec(monkeypatch, deliver, "checkout_branch", side_effect=_checkout)
+    write_mock = _patch_autospec(
+        monkeypatch, deliver, "write_agent_output", return_value=(True, "")
+    )
+
+    with caplog.at_level(logging.ERROR):
+        result = deliver.run_deliver(
+            task_id="t1",
+            repo_path=tmp_path,
+            files={"a.py": "x"},
+            summary="impl",
+            feature_branch_name="feature/existing",
+            merge_to_development=False,
+        )
+
+    assert result.branch_ready is False
+    assert "Feature branch checkout failed" in result.summary
+    # Feature branch checked out first, development restored after the failure.
+    assert seen == ["feature/existing", deliver.DEVELOPMENT_BRANCH]
+    # No files written when the branch could not be checked out.
+    write_mock.assert_not_called()
+    # The failed restoration is surfaced, not swallowed.
+    assert "failed to restore" in caplog.text
+
+
+def test_be_deliver_handoff_restores_development_on_checkout_failure(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    from software_engineering_team.backend_code_v2_team.phases import deliver
+
+    _assert_restores_development_on_existing_branch_checkout_failure(
+        deliver, tmp_path, monkeypatch, caplog
+    )
+
+
+def test_fe_deliver_handoff_restores_development_on_checkout_failure(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    from software_engineering_team.frontend_code_v2_team.phases import deliver
+
+    _assert_restores_development_on_existing_branch_checkout_failure(
+        deliver, tmp_path, monkeypatch, caplog
+    )
 
 
 def test_be_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
@@ -802,9 +856,7 @@ def test_be_deliver_tool_agents_empty_files_skip_git_agent_merge(
     create_mock.assert_not_called()
 
 
-def test_be_deliver_handoff_write_fails_cleans_created_branch(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_be_deliver_handoff_write_fails_cleans_created_branch(tmp_path: Path, monkeypatch) -> None:
     """A failed handoff write restores development and deletes the fresh branch."""
     from software_engineering_team.backend_code_v2_team.phases import deliver
 
