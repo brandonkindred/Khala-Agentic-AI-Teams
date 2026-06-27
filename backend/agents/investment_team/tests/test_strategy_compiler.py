@@ -1455,7 +1455,7 @@ def test_safety_gate_rejects_long_only_entry_with_short_only_trailing_stop() -> 
     """Long entries with only a ``trailing_low`` stop have no triggerable exit.
 
     ``StopLossRule(basis="trailing_low")`` fires only on shorts (per
-    ``_stop_loss_triggers``); a long position would stay open forever
+    ``stop_loss_triggers``); a long position would stay open forever
     if it were the only exit rule.
     """
     long_entry = EntryRule(
