@@ -574,6 +574,61 @@ class _DesignLoopOutcome:
 
 
 @dataclass
+class _DesignPhaseResult:
+    """Return envelope for ``_run_design_attempt``'s design + review phase.
+
+    ``record`` is a short-circuit ``StrategyLabRecord`` (typed ``Any`` to avoid
+    an import cycle) when the design loop did not reach readiness — the caller
+    returns it immediately. Otherwise ``record`` is ``None`` and the
+    ``spec`` / ``rationale`` / ``design_context`` carry the converged design
+    forward into code synthesis.
+    """
+
+    record: Optional[Any]
+    spec: Optional[StrategySpec] = None
+    rationale: str = ""
+    design_context: Optional[_DesignPersistContext] = None
+
+
+@dataclass
+class _CodeSynthesisPhaseResult:
+    """Return envelope for ``_run_design_attempt``'s initial code-synthesis.
+
+    ``record`` is a short-circuit ``StrategyLabRecord`` (typed ``Any``) when the
+    custom-code synthesis agent failed; the caller returns it. Otherwise it is
+    ``None`` and ``code`` / ``original_spec`` / ``original_code`` / ``config``
+    carry the synthesized code, the pre-refinement snapshot, and the
+    fee-adjusted config into the refinement loop.
+    """
+
+    record: Optional[Any]
+    code: str = ""
+    original_spec: Optional[StrategySpec] = None
+    original_code: str = ""
+    config: Optional[BacktestConfig] = None
+
+
+@dataclass
+class _RefinementAlignmentResult:
+    """Return envelope for ``_run_design_attempt``'s refinement + alignment.
+
+    ``record`` is a short-circuit ``StrategyLabRecord`` (typed ``Any``) when the
+    pre-synthesis spec gate failed critically; the caller returns it. Otherwise
+    it is ``None`` and the two existing outcome bundles carry every downstream
+    field: the post-alignment ``spec`` / ``code`` / ``trades`` / ``metrics`` and
+    ``ran_on_non_conforming_code`` / ``alignment_rounds`` / ``trades_aligned`` /
+    ``alignment_reports`` live on ``alignment``; the fetched ``market_data`` /
+    symbol audit / ``execution_succeeded`` / ``max_rounds_exhausted`` /
+    ``open_position_entry_reasons`` / ``runtime_lookahead_violation`` live on
+    ``synthesis``.
+    """
+
+    record: Optional[Any]
+    synthesis: Optional[_SynthesisLoopOutcome] = None
+    alignment: Optional[_AlignmentLoopOutcome] = None
+
+
+@dataclass
 class _SynthesisLoopOutcome:
     """Bundle of state mutated by ``_run_synthesis_loop``.
 

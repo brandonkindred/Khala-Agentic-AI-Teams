@@ -3906,6 +3906,166 @@ class StrategyLabOrchestrator:
             drift_collector = _DriftCollector()
 
         # ── Phase 1: DESIGN + REVIEW LOOP ──────────────────────────────
+        design_phase = self._orchestrate_design_and_review(
+            prior_records=prior_records,
+            signal_brief=signal_brief,
+            directives=directives,
+            exclude_asset_classes=exclude_asset_classes,
+            config=config,
+            all_gate_results=all_gate_results,
+            emit=emit,
+            design_attempt=design_attempt,
+            phase_back_count=phase_back_count,
+            drift_collector=drift_collector,
+        )
+        if design_phase.record is not None:
+            return design_phase.record
+        spec = design_phase.spec
+        rationale = design_phase.rationale
+        design_context = design_phase.design_context
+
+        # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
+        code_synthesis = self._synthesize_initial_code(
+            spec=spec,
+            config=config,
+            rationale=rationale,
+            all_gate_results=all_gate_results,
+            design_attempt=design_attempt,
+            phase_back_count=phase_back_count,
+            drift_collector=drift_collector,
+            design_context=design_context,
+            emit=emit,
+        )
+        if code_synthesis.record is not None:
+            return code_synthesis.record
+        code = code_synthesis.code
+        original_spec = code_synthesis.original_spec
+        original_code = code_synthesis.original_code
+        config = code_synthesis.config
+
+        # ── Phases 1b–2.5: PRE-SYNTHESIS GATE → REFINEMENT → ALIGNMENT ─
+        refine_align = self._orchestrate_refinement_and_alignment(
+            spec=spec,
+            code=code,
+            config=config,
+            original_spec=original_spec,
+            original_code=original_code,
+            rationale=rationale,
+            all_gate_results=all_gate_results,
+            refinement_attempts=refinement_attempts,
+            zero_trade_attempts=zero_trade_attempts,
+            emit=emit,
+            design_attempt=design_attempt,
+            phase_back_count=phase_back_count,
+            drift_collector=drift_collector,
+            design_context=design_context,
+        )
+        if refine_align.record is not None:
+            return refine_align.record
+        synthesis = refine_align.synthesis
+        alignment_outcome = refine_align.alignment
+        spec = alignment_outcome.spec
+        code = alignment_outcome.code
+        trades = alignment_outcome.trades
+        metrics = alignment_outcome.metrics
+        market_data = synthesis.market_data
+        requested_symbols = synthesis.requested_symbols
+        fetched_symbols = synthesis.fetched_symbols
+        provider_used = synthesis.provider_used
+        execution_succeeded = synthesis.execution_succeeded
+        max_rounds_exhausted = synthesis.max_rounds_exhausted
+        open_position_entry_reasons = synthesis.open_position_entry_reasons
+        ran_on_non_conforming_code = alignment_outcome.ran_on_non_conforming_code
+        alignment_rounds = alignment_outcome.alignment_rounds
+        trades_aligned = alignment_outcome.trades_aligned
+        alignment_reports = alignment_outcome.alignment_reports
+
+        # ── Phases 2.6–3: TRIAL COUNTING → VERIFICATION → ANALYSIS ─────
+        metrics, is_winning, narrative = self._orchestrate_verification_and_analysis(
+            spec=spec,
+            trades=trades,
+            metrics=metrics,
+            market_data=market_data,
+            config=config,
+            execution_succeeded=execution_succeeded,
+            trades_aligned=trades_aligned,
+            alignment_reports=alignment_reports,
+            all_gate_results=all_gate_results,
+            runtime_lookahead_violation=synthesis.runtime_lookahead_violation,
+            open_position_entry_reasons=open_position_entry_reasons,
+            refinement_attempts=refinement_attempts,
+            rationale=rationale,
+            emit=emit,
+        )
+
+        # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
+        # Terminal transition out of the last named phase. ``to_phase``
+        # is ``None``; ``spec_hash``/``code_hash`` must match the values
+        # emitted on the previous two boundaries within this design
+        # attempt — the integration test in
+        # ``test_strategy_lab_phase_transitions.py`` asserts this.
+        _emit_phase_transition(
+            emit,
+            from_phase=Phase.BACKTEST_AND_VERIFICATION,
+            to_phase=None,
+            spec=spec,
+            code=code,
+            attempt=design_attempt,
+        )
+
+        # ── Phase 4: RECORD ───────────────────────────────────────────
+        return self._extract_findings_and_assemble_record(
+            spec=spec,
+            code=code,
+            config=config,
+            metrics=metrics,
+            trades=trades,
+            narrative=narrative,
+            original_spec=original_spec,
+            original_code=original_code,
+            rationale=rationale,
+            requested_symbols=requested_symbols,
+            fetched_symbols=fetched_symbols,
+            provider_used=provider_used,
+            max_rounds_exhausted=max_rounds_exhausted,
+            execution_succeeded=execution_succeeded,
+            is_winning=is_winning,
+            trades_aligned=trades_aligned,
+            refinement_attempts=refinement_attempts,
+            alignment_rounds=alignment_rounds,
+            all_gate_results=all_gate_results,
+            ran_on_non_conforming_code=ran_on_non_conforming_code,
+            design_context=design_context,
+            alignment_reports=alignment_reports,
+            phase_back_count=phase_back_count,
+            drift_collector=drift_collector,
+            emit=emit,
+        )
+
+    def _orchestrate_design_and_review(
+        self,
+        *,
+        prior_records: List[StrategyLabRecord],
+        signal_brief: Optional[SignalIntelligenceBriefV1],
+        directives: List[str],
+        exclude_asset_classes: Optional[List[str]],
+        config: BacktestConfig,
+        all_gate_results: List[QualityGateResult],
+        emit: PhaseCallback,
+        design_attempt: int,
+        phase_back_count: int,
+        drift_collector: _DriftCollector,
+    ) -> _DesignPhaseResult:
+        """Run the bounded design + review loop and gate entry to synthesis.
+
+        Pre: ``all_gate_results`` is the running gate list for this attempt.
+        Post: returns a ``_DesignPhaseResult``. When the loop did not reach
+        readiness (round-cap / stall / LLM-budget), ``record`` carries the
+        short-circuit ``StrategyLabRecord`` and the caller returns it. On
+        readiness, ``record`` is ``None``, the DESIGN_REVIEW → CODE_SYNTHESIS
+        boundary event is emitted, and the converged ``spec`` / ``rationale`` /
+        ``design_context`` are returned for code synthesis.
+        """
         design_outcome = self._run_design_loop(
             prior_records=prior_records,
             signal_brief=signal_brief,
@@ -3962,21 +4122,23 @@ class StrategyLabOrchestrator:
                     f"round(s); last critique: {last_rationale}"
                 )
             emit("designing", {"sub_phase": "aborted", "reason": abort_reason})
-            return self._build_short_circuit_record(
-                spec=spec,
-                config=config,
-                code="",
-                original_spec=spec,
-                original_code="",
-                rationale=rationale,
-                all_gate_results=all_gate_results,
-                refinement_attempts=[],
-                short_circuit_status=short_circuit_status,
-                short_circuit_reason=abort_reason,
-                emit=emit,
-                design_context=design_context,
-                phase_back_count=phase_back_count,
-                drift_collector=drift_collector,
+            return _DesignPhaseResult(
+                record=self._build_short_circuit_record(
+                    spec=spec,
+                    config=config,
+                    code="",
+                    original_spec=spec,
+                    original_code="",
+                    rationale=rationale,
+                    all_gate_results=all_gate_results,
+                    refinement_attempts=[],
+                    short_circuit_status=short_circuit_status,
+                    short_circuit_reason=abort_reason,
+                    emit=emit,
+                    design_context=design_context,
+                    phase_back_count=phase_back_count,
+                    drift_collector=drift_collector,
+                )
             )
 
         # ═══ Phase 2 → 3 transition: DESIGN_REVIEW → CODE_SYNTHESIS ═══
@@ -3999,8 +4161,37 @@ class StrategyLabOrchestrator:
             code="",
             attempt=design_attempt,
         )
+        return _DesignPhaseResult(
+            record=None, spec=spec, rationale=rationale, design_context=design_context
+        )
 
-        # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
+    def _synthesize_initial_code(
+        self,
+        *,
+        spec: StrategySpec,
+        config: BacktestConfig,
+        rationale: str,
+        all_gate_results: List[QualityGateResult],
+        design_attempt: int,
+        phase_back_count: int,
+        drift_collector: _DriftCollector,
+        design_context: _DesignPersistContext,
+        emit: PhaseCallback,
+    ) -> _CodeSynthesisPhaseResult:
+        """Synthesize the initial strategy code for a converged spec.
+
+        Pre: the design loop reached readiness; ``spec`` is the converged
+        candidate.
+        Post: returns a ``_CodeSynthesisPhaseResult``. Deterministic compilation
+        is tried first (falling back to ``requires_custom_code`` on
+        ``CompilerError``); the custom-code path delegates to the synthesis
+        agent and, on ``CodeSynthesisError``, returns a short-circuit ``record``
+        for the caller to return. On success ``record`` is ``None``, the code
+        drift is recorded, ``spec.strategy_code`` is set, the pre-refinement
+        ``original_spec`` / ``original_code`` snapshot is taken, generic fee
+        defaults are overridden per asset class, and the ``synthesized`` event
+        is emitted.
+        """
         # Deterministic compile by default; the LLM-driven synthesis
         # agent is reserved for specs that genuinely cannot be compiled
         # (``requires_custom_code=True`` or ``CompilerError``).
@@ -4025,21 +4216,23 @@ class StrategyLabOrchestrator:
             except CodeSynthesisError as exc:
                 abort_reason = f"Code synthesis failed after design converged: {exc}"
                 emit("designing", {"sub_phase": "aborted", "reason": abort_reason})
-                return self._build_short_circuit_record(
-                    spec=spec,
-                    config=config,
-                    code="",
-                    original_spec=spec,
-                    original_code="",
-                    rationale=rationale,
-                    all_gate_results=all_gate_results,
-                    refinement_attempts=[],
-                    short_circuit_status="failed: code_synthesis",
-                    short_circuit_reason=abort_reason,
-                    emit=emit,
-                    design_context=design_context,
-                    phase_back_count=phase_back_count,
-                    drift_collector=drift_collector,
+                return _CodeSynthesisPhaseResult(
+                    record=self._build_short_circuit_record(
+                        spec=spec,
+                        config=config,
+                        code="",
+                        original_spec=spec,
+                        original_code="",
+                        rationale=rationale,
+                        all_gate_results=all_gate_results,
+                        refinement_attempts=[],
+                        short_circuit_status="failed: code_synthesis",
+                        short_circuit_reason=abort_reason,
+                        emit=emit,
+                        design_context=design_context,
+                        phase_back_count=phase_back_count,
+                        drift_collector=drift_collector,
+                    )
                 )
 
         drift_collector.record_code_change(
@@ -4074,7 +4267,46 @@ class StrategyLabOrchestrator:
                 },
             },
         )
+        return _CodeSynthesisPhaseResult(
+            record=None,
+            code=code,
+            original_spec=original_spec,
+            original_code=original_code,
+            config=config,
+        )
 
+    def _orchestrate_refinement_and_alignment(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        config: BacktestConfig,
+        original_spec: StrategySpec,
+        original_code: str,
+        rationale: str,
+        all_gate_results: List[QualityGateResult],
+        refinement_attempts: List[str],
+        zero_trade_attempts: List[str],
+        emit: PhaseCallback,
+        design_attempt: int,
+        phase_back_count: int,
+        drift_collector: _DriftCollector,
+        design_context: _DesignPersistContext,
+    ) -> _RefinementAlignmentResult:
+        """Run pre-synthesis gating, the refinement loop, and trade alignment.
+
+        Pre: ``code`` is the freshly synthesized strategy code; the running
+        lists (``all_gate_results`` / ``refinement_attempts`` /
+        ``zero_trade_attempts``) are mutated in place by the sub-loops.
+        Post: returns a ``_RefinementAlignmentResult``. A critical pre-synthesis
+        spec failure short-circuits via ``record`` (caller returns it).
+        Otherwise ``record`` is ``None`` and the returned ``synthesis`` /
+        ``alignment`` bundles carry every downstream field. Emits the
+        CODE_SYNTHESIS → BACKTEST_AND_VERIFICATION boundary and the
+        backtest-cache telemetry.
+        Raises: ``SpecImplementabilityError`` (from the refinement loop) with
+        this attempt's ``design_context`` attached when the raiser left it unset.
+        """
         # ── Phase 1b: PRE-SYNTHESIS SPEC GATING (#547 item 1) ─────────
         # Validate the ideation-time spec ONCE before entering the
         # refinement loop. Refinement is code-only post-#547 item 2, so
@@ -4109,7 +4341,7 @@ class StrategyLabOrchestrator:
             design_context=design_context,
         )
         if pre_synthesis is not None:
-            return pre_synthesis
+            return _RefinementAlignmentResult(record=pre_synthesis)
 
         # ── Phase 2: CODE REFINEMENT LOOP ─────────────────────────────
         # ``_run_synthesis_loop`` iterates up to ``MAX_CODE_REFINEMENT_ROUNDS``
@@ -4140,17 +4372,14 @@ class StrategyLabOrchestrator:
             if exc.design_context is None:
                 exc.design_context = design_context
             raise
+        # Synthesis fields needed locally for the phase boundary + alignment
+        # call; the caller reads the remaining fields off the returned bundle.
         spec = synthesis.spec
         code = synthesis.code
         trades = synthesis.trades
         metrics = synthesis.metrics
         market_data = synthesis.market_data
-        requested_symbols = synthesis.requested_symbols
-        fetched_symbols = synthesis.fetched_symbols
-        provider_used = synthesis.provider_used
         execution_succeeded = synthesis.execution_succeeded
-        max_rounds_exhausted = synthesis.max_rounds_exhausted
-        open_position_entry_reasons = synthesis.open_position_entry_reasons
 
         # ═══ Phase 3 → 4 transition: CODE_SYNTHESIS → ═════════════════
         # ═══                         BACKTEST_AND_VERIFICATION ════════
@@ -4185,23 +4414,12 @@ class StrategyLabOrchestrator:
             ran_on_non_conforming_code=synthesis.ran_on_non_conforming_code,
             drift_collector=drift_collector,
         )
-        spec = alignment_outcome.spec
-        code = alignment_outcome.code
-        trades = alignment_outcome.trades
-        metrics = alignment_outcome.metrics
-        # Tracks the code that produced the persisted trades — re-derived by the
-        # alignment loop whenever it committed new code.
-        ran_on_non_conforming_code = alignment_outcome.ran_on_non_conforming_code
-        alignment_rounds = alignment_outcome.alignment_rounds
-        trades_aligned = alignment_outcome.trades_aligned
-        alignment_rejection_reason = alignment_outcome.rejection_reason
-        if alignment_rejection_reason:
+        if alignment_outcome.rejection_reason:
             logger.info(
                 "Alignment loop for %s ended with rejection_reason=%s",
-                spec.strategy_id,
-                alignment_rejection_reason,
+                alignment_outcome.spec.strategy_id,
+                alignment_outcome.rejection_reason,
             )
-        alignment_reports = alignment_outcome.alignment_reports
 
         # Backtest-cache effectiveness for this attempt — emitted so the
         # synthesis/alignment re-execution savings are observable post hoc.
@@ -4217,11 +4435,42 @@ class StrategyLabOrchestrator:
             )
             logger.info(
                 "backtest_cache for %s: hits=%d misses=%d",
-                spec.strategy_id,
+                alignment_outcome.spec.strategy_id,
                 _bt_cache.hits,
                 _bt_cache.misses,
             )
 
+        return _RefinementAlignmentResult(
+            record=None, synthesis=synthesis, alignment=alignment_outcome
+        )
+
+    def _orchestrate_verification_and_analysis(
+        self,
+        *,
+        spec: StrategySpec,
+        trades: List[TradeRecord],
+        metrics: BacktestResult,
+        market_data: Optional[Dict[str, List[OHLCVBar]]],
+        config: BacktestConfig,
+        execution_succeeded: bool,
+        trades_aligned: bool,
+        alignment_reports: List[TradeAlignmentReport],
+        all_gate_results: List[QualityGateResult],
+        runtime_lookahead_violation: bool,
+        open_position_entry_reasons: List[str],
+        refinement_attempts: List[str],
+        rationale: str,
+        emit: PhaseCallback,
+    ) -> Tuple[BacktestResult, bool, str]:
+        """Count the trial, run verification, and generate the analysis.
+
+        Pre: the refinement + alignment loops have settled the run state.
+        Post: returns ``(metrics, is_winning, narrative)``. Increments the
+        convergence trial counter (one per refinement round, plus the first),
+        runs ``_run_verification_phase`` (which mutates ``metrics`` /
+        ``all_gate_results`` and resolves ``is_winning``), and produces the
+        analysis narrative off the conformance-resolved alignment report.
+        """
         # ── Phase 2.6: TRIAL COUNTING (issue #247) ────────────────────
         # Every refinement round on the same window contributes to the
         # multiple-testing burden the Deflated Sharpe Ratio corrects for.
@@ -4240,7 +4489,7 @@ class StrategyLabOrchestrator:
             trades_aligned=trades_aligned,
             alignment_reports=alignment_reports,
             all_gate_results=all_gate_results,
-            runtime_lookahead_violation=synthesis.runtime_lookahead_violation,
+            runtime_lookahead_violation=runtime_lookahead_violation,
             emit=emit,
             open_position_entry_reasons=open_position_entry_reasons,
         )
@@ -4271,22 +4520,45 @@ class StrategyLabOrchestrator:
             alignment_report=latest_alignment_report,
             emit=emit,
         )
+        return metrics, is_winning, narrative
 
-        # ═══ Phase 4 → exit: BACKTEST_AND_VERIFICATION → ∅ ════════════
-        # Terminal transition out of the last named phase. ``to_phase``
-        # is ``None``; ``spec_hash``/``code_hash`` must match the values
-        # emitted on the previous two boundaries within this design
-        # attempt — the integration test in
-        # ``test_strategy_lab_phase_transitions.py`` asserts this.
-        _emit_phase_transition(
-            emit,
-            from_phase=Phase.BACKTEST_AND_VERIFICATION,
-            to_phase=None,
-            spec=spec,
-            code=code,
-            attempt=design_attempt,
-        )
+    def _extract_findings_and_assemble_record(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        config: BacktestConfig,
+        metrics: BacktestResult,
+        trades: List[TradeRecord],
+        narrative: str,
+        original_spec: StrategySpec,
+        original_code: str,
+        rationale: str,
+        requested_symbols: List[str],
+        fetched_symbols: List[str],
+        provider_used: Dict[str, str],
+        max_rounds_exhausted: bool,
+        execution_succeeded: bool,
+        is_winning: bool,
+        trades_aligned: bool,
+        refinement_attempts: List[str],
+        alignment_rounds: int,
+        all_gate_results: List[QualityGateResult],
+        ran_on_non_conforming_code: bool,
+        design_context: _DesignPersistContext,
+        alignment_reports: List[TradeAlignmentReport],
+        phase_back_count: int,
+        drift_collector: _DriftCollector,
+        emit: PhaseCallback,
+    ) -> StrategyLabRecord:
+        """Extract the final alignment findings and assemble the record.
 
+        Pre: all phases have completed; ``alignment_reports`` holds one report
+        per alignment iteration (empty when the loop never ran).
+        Post: returns the persisted ``StrategyLabRecord`` built by
+        ``_assemble_record``, carrying the last report's per-rule findings (or
+        an empty list) and ``refinement_rounds = len(refinement_attempts)``.
+        """
         # Final-iteration per-rule findings from the deterministic
         # alignment gate. The orchestrator's loop produces one report
         # per iteration; the last one carries the ledger as it stood
@@ -4297,7 +4569,6 @@ class StrategyLabOrchestrator:
             list(alignment_reports[-1].alignment_findings) if alignment_reports else []
         )
 
-        # ── Phase 4: RECORD ───────────────────────────────────────────
         return self._assemble_record(
             spec=spec,
             code=code,
@@ -5046,9 +5317,11 @@ from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
     _attach_execution_diagnostics,
     _build_rule_implementation_map,
     _closes_to_equity,
+    _CodeSynthesisPhaseResult,
     _daily_returns_from_trades,
     _DesignLoopOutcome,
     _DesignPersistContext,
+    _DesignPhaseResult,
     _DriftCollector,
     _equity_to_returns,
     _format_execution_diagnostics,
@@ -5056,6 +5329,7 @@ from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
     _maybe_attach_coverage_report,
     _merge_risk_limits_tighten_only,
     _parse_bar_date,
+    _RefinementAlignmentResult,
     _resolve_vix_provider,
     _SynthesisEvaluateResult,
     _SynthesisFetchResult,
