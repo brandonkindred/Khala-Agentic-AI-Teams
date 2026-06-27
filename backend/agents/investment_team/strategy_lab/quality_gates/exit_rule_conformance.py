@@ -44,7 +44,7 @@ of which the alignment agent's LLM-driven audit should defer to.
 
 from __future__ import annotations
 
-from typing import ClassVar, List, Mapping, Optional, Sequence
+from typing import ClassVar, List, Literal, Mapping, Optional, Sequence
 
 from ...market_data_service import OHLCVBar
 from ...models import (
@@ -54,7 +54,7 @@ from ...models import (
     scaled_level_key,
 )
 from ...trading_service.service import ENGINE_EXIT_REASON_PREFIX
-from ..executor.rule_compiler import BarSnapshot, PositionState, _stop_loss_triggers
+from ..executor.rule_compiler import BarSnapshot, PositionState, stop_loss_triggers
 from ..spec_dsl import (
     ExitRule,
     ScaledTakeProfitRule,
@@ -357,7 +357,7 @@ class ExitRuleConformanceGate(GateResultsMixin):
         (1 + pct)`` short) moves every bar and the trade ledger does not carry the
         per-bar watermark. This replay reconstructs the watermark from cached bars
         and asks the SAME geometry the executor uses
-        (:func:`_stop_loss_triggers`) whether the floor was breached on a bar
+        (:func:`stop_loss_triggers`) whether the floor was breached on a bar
         strictly before the position actually closed — i.e. the engine had a bar
         to emit the close AND a following bar to fill it, yet the position stayed
         open. That is a trailing-stop leak.
@@ -388,22 +388,30 @@ class ExitRuleConformanceGate(GateResultsMixin):
         """
         # Pair the rule with the side it governs: ``trailing_high`` ratchets a
         # long's floor up off the running high; ``trailing_low`` ratchets a
-        # short's cap down off the running low. ``_stop_loss_triggers`` already
+        # short's cap down off the running low. ``stop_loss_triggers`` already
         # no-ops the mismatched side, but filtering keeps the skip accounting
         # honest and avoids wasted replays.
-        applicable_side = "long" if rule.basis == "trailing_high" else "short"
+        applicable_side: Literal["long", "short"] = (
+            "long" if rule.basis == "trailing_high" else "short"
+        )
         candidates = [t for t in trades if t.side == applicable_side]
 
         leaks: list[tuple[int, str, str]] = []
         replayed = 0
         skipped = 0
         symbols_seen: set[str] = set()
+        # Cache each symbol's date -> bar-index map so trades that share a symbol
+        # reuse one build instead of re-scanning the bar series per trade.
+        symbol_date_index: dict[str, dict[str, int]] = {}
         for t in candidates:
             bars = market_data.get(t.symbol)
             if not bars:
                 skipped += 1
                 continue
-            date_to_idx = {b.date: i for i, b in enumerate(bars)}
+            date_to_idx = symbol_date_index.get(t.symbol)
+            if date_to_idx is None:
+                date_to_idx = {b.date: i for i, b in enumerate(bars)}
+                symbol_date_index[t.symbol] = date_to_idx
             entry_i = date_to_idx.get(t.entry_date)
             exit_i = date_to_idx.get(t.exit_date)
             if entry_i is None or exit_i is None or exit_i < entry_i:
@@ -429,14 +437,14 @@ class ExitRuleConformanceGate(GateResultsMixin):
                 bar = bars[i]
                 position = PositionState(
                     symbol=t.symbol,
-                    side=applicable_side,  # type: ignore[arg-type]
+                    side=applicable_side,
                     qty=1.0,
                     entry_price=t.entry_price,
                     high_since_entry=hi,
                     low_since_entry=lo,
                 )
                 snapshot = BarSnapshot(high=bar.high, low=bar.low, close=bar.close)
-                if _stop_loss_triggers(rule, position, snapshot):
+                if stop_loss_triggers(rule, position, snapshot):
                     # Breach on bar ``i`` → engine should fill on ``i + 1``. A leak
                     # only if the position survived past that fill opportunity
                     # (actual fill bar ``exit_i`` is strictly later).
