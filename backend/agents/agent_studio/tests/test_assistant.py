@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from agent_studio.assistant import (
+    _CONTENT_FIELDS,
     AgentDesignerAgent,
     _merge_definition,
     _parse_agent_block,
@@ -120,6 +121,46 @@ def test_merge_definition_bad_field_type_returns_none() -> None:
     # A valid-JSON block with a wrong-typed field must not 500 — merge returns None
     # (treated as "no update"), leaving the stored definition unchanged.
     assert _merge_definition(AgentDefinition(name="ok"), {"name": 123}) is None
+
+
+def test_merge_definition_overlays_edited_state_prompt() -> None:
+    # Editing a state's prompt via chat is the feature — it round-trips through merge.
+    edited = [
+        {"key": "planning", "label": "Planning", "system_prompt": "EDITED plan"},
+        {"key": "executing", "label": "Executing", "system_prompt": "exec"},
+        {"key": "researching", "label": "Researching", "system_prompt": "research"},
+    ]
+    merged = _merge_definition(AgentDefinition(name="ok"), {"states": edited})
+    assert merged is not None
+    assert merged.states[0].system_prompt == "EDITED plan"
+
+
+def test_merge_definition_bogus_state_key_returns_none() -> None:
+    # The three keys are locked: a model-invented/renamed key fails validation,
+    # so the whole update degrades to "no update" rather than corrupting the draft.
+    bad = [{"key": "deploying", "label": "Deploying", "system_prompt": "x"}]
+    assert _merge_definition(AgentDefinition(name="ok"), {"states": bad}) is None
+
+
+def test_content_fields_includes_states() -> None:
+    assert "states" in _CONTENT_FIELDS
+
+
+def test_build_prompt_echoes_definition_with_edited_state() -> None:
+    # A definition whose state prompt was edited differs from the default seed, so
+    # it must be echoed back into <definition> context on the next turn.
+    edited = AgentDefinition()
+    edited.states[0].system_prompt = "EDITED plan prompt"
+    prompt = AgentDesignerAgent._build_prompt([], edited, "go")
+    assert "<definition>" in prompt
+    assert "EDITED plan prompt" in prompt
+
+
+def test_build_prompt_omits_definition_for_freshly_seeded_states() -> None:
+    # A freshly-seeded (unedited) definition equals the default, so the seeded
+    # states alone must NOT bloat the prompt context.
+    prompt = AgentDesignerAgent._build_prompt([], AgentDefinition(), "go")
+    assert "<definition>" not in prompt
 
 
 def test_respond_new_mode_parses_and_merges() -> None:

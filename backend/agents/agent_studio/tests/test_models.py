@@ -5,8 +5,10 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from agent_studio.agent_states import STATE_ORDER
 from agent_studio.models import (
     AgentDefinition,
+    AgentState,
     SaveAgentRequest,
     SendMessageRequest,
     StartConversationRequest,
@@ -35,6 +37,45 @@ def test_definition_defaults() -> None:
     assert d.cloned_from is None
     assert d.tags == [] and d.tools == []
     assert d.input_schema is None and d.output_schema is None
+
+
+def test_definition_seeds_three_operating_states() -> None:
+    # Every fresh definition is born with the three fixed states, in order, each
+    # with a non-empty behavioral prompt.
+    d = AgentDefinition()
+    assert [s.key for s in d.states] == list(STATE_ORDER)
+    assert all(s.system_prompt.strip() for s in d.states)
+    assert [s.label for s in d.states] == ["Planning", "Executing", "Researching"]
+
+
+def test_definition_states_are_independent_per_instance() -> None:
+    # The default_factory must hand each instance its own list/objects, so editing
+    # one draft's state prompt never leaks into another's.
+    a = AgentDefinition()
+    b = AgentDefinition()
+    a.states[0].system_prompt = "MUTATED"
+    assert b.states[0].system_prompt != "MUTATED"
+    assert a.states is not b.states
+
+
+def test_agent_state_rejects_unknown_key() -> None:
+    # key is a fixed Literal — the model can never invent a fourth state.
+    AgentState(key="planning", label="Planning", system_prompt="x")  # valid
+    with pytest.raises(ValidationError):
+        AgentState(key="bogus", label="Bogus", system_prompt="x")
+
+
+def test_save_request_seeds_states_and_to_definition_carries_edits() -> None:
+    # A save request defaults to the three seeded states...
+    assert [s.key for s in SaveAgentRequest().states] == list(STATE_ORDER)
+    # ...and an edited set flows through to_definition() unchanged.
+    edited = [
+        AgentState(key="planning", label="Planning", system_prompt="EDITED plan prompt"),
+        AgentState(key="executing", label="Executing", system_prompt="exec"),
+        AgentState(key="researching", label="Researching", system_prompt="research"),
+    ]
+    definition = SaveAgentRequest(name="A", role="r", states=edited).to_definition()
+    assert definition.states[0].system_prompt == "EDITED plan prompt"
 
 
 def test_start_conversation_request_defaults_to_new() -> None:

@@ -13,9 +13,30 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agent_registry.models import AgentManifest
 
+from .agent_states import default_agent_states
+
 # The two authoring modes. ``new`` builds from scratch; ``refine`` starts from a
 # clone of an existing registry agent (``cloned_from`` records the source id).
 StudioMode = Literal["new", "refine"]
+
+# The three operating "states of being" every authored agent is seeded with. The
+# key set is fixed (see ``agent_states.STATE_ORDER``); only a state's prompt is
+# editable. ``Literal`` here is the authoring-time guard that locks the keys.
+AgentStateKey = Literal["planning", "executing", "researching"]
+
+
+class AgentState(BaseModel):
+    """One behavioral operating state seeded onto an authored agent.
+
+    Invariants:
+        * ``key`` is one of the three fixed ``AgentStateKey`` literals — the merge
+          identity. The model can refine ``system_prompt`` but can never add,
+          remove, or rename a state (an invalid key fails validation).
+    """
+
+    key: AgentStateKey
+    label: str
+    system_prompt: str
 
 
 class AgentDefinition(BaseModel):
@@ -34,6 +55,11 @@ class AgentDefinition(BaseModel):
     system_prompt: str = ""
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+    states: list[AgentState] = Field(
+        default_factory=default_agent_states,
+        description="The agent's operating states (planning/executing/researching). "
+        "Auto-seeded on creation; each state's system_prompt is editable, the key set is fixed.",
+    )
     mode: StudioMode = "new"
     cloned_from: str | None = Field(
         default=None, description="Source registry manifest id when mode == 'refine'."
@@ -109,6 +135,11 @@ class SaveAgentRequest(BaseModel):
     system_prompt: str = ""
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
+    states: list[AgentState] = Field(
+        default_factory=default_agent_states,
+        description="The agent's operating states. Defaults to the three seeded states so a "
+        "client that omits them still saves an agent with planning/executing/researching.",
+    )
 
     def to_definition(self) -> AgentDefinition:
         """Project into an :class:`AgentDefinition` for the save pipeline.

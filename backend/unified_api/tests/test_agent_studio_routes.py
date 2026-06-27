@@ -247,6 +247,42 @@ def test_save_agent_same_name_reports_not_created(client: TestClient, registry: 
     assert registry.registered[second["agent_id"]].summary == "Edited"
 
 
+def test_save_agent_persists_edited_states(client: TestClient) -> None:
+    """A save carrying edited operating states persists them onto the manifest."""
+    resp = client.post(
+        "/api/agent-studio/agents",
+        json={
+            "name": "Stateful",
+            "role": "Has states",
+            "states": [
+                {"key": "planning", "label": "Planning", "system_prompt": "EDITED plan"},
+                {"key": "executing", "label": "Executing", "system_prompt": "exec"},
+                {"key": "researching", "label": "Researching", "system_prompt": "research"},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    states = resp.json()["manifest"]["states"]
+    assert [s["key"] for s in states] == ["planning", "executing", "researching"]
+    assert states[0]["system_prompt"] == "EDITED plan"
+
+
+def test_save_agent_seeds_states_when_omitted(client: TestClient) -> None:
+    """A thin client that omits states still saves an agent with the three seeds."""
+    resp = client.post("/api/agent-studio/agents", json={"name": "Seeded", "role": "r"})
+    assert resp.status_code == 200
+    states = resp.json()["manifest"]["states"]
+    assert [s["key"] for s in states] == ["planning", "executing", "researching"]
+
+
+def test_clone_from_registry_returns_states(client: TestClient) -> None:
+    """A cloned draft carries the three operating states (back-filled for legacy)."""
+    resp = client.post("/api/agent-studio/agents/from-registry/blogging.planner")
+    assert resp.status_code == 200
+    states = resp.json()["states"]
+    assert [s["key"] for s in states] == ["planning", "executing", "researching"]
+
+
 def test_save_agent_not_ready_is_400(client: TestClient) -> None:
     """Saving a definition missing required fields is a 400."""
     resp = client.post("/api/agent-studio/agents", json={"name": "OnlyName"})

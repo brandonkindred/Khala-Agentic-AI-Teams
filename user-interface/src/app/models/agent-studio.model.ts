@@ -34,6 +34,51 @@ export const STUDIO_STAGES: readonly StudioStage[] = [
   { key: 'personas', label: 'Test Team w/ Personas', icon: 'science', blurb: 'Drive the team manually or with autonomous personas.' },
 ] as const;
 
+/**
+ * The three fixed operating "states of being" every authored agent is seeded
+ * with. The key set is fixed; only a state's prompt is editable. Mirrors the
+ * backend `AgentStateKey` literal.
+ */
+export type AgentStateKey = 'planning' | 'executing' | 'researching';
+
+/** Display labels for the operating states, keyed by `AgentStateKey`. */
+export const AGENT_STATE_LABELS: Readonly<Record<AgentStateKey, string>> = {
+  planning: 'Planning',
+  executing: 'Executing',
+  researching: 'Researching',
+} as const;
+
+/**
+ * One behavioral operating state on an authored agent. `system_prompt` is the
+ * snake_case wire field name returned by the backend; the (future)
+ * agent-studio API service owns any snake↔camel mapping.
+ */
+export interface AgentState {
+  key: AgentStateKey;
+  label: string;
+  system_prompt: string;
+}
+
+/**
+ * The draft agent being authored in Stage 1 (Build). Mirrors the backend
+ * `AgentDefinition` wire shape. The build UI is still a placeholder; this is the
+ * contract the future build component / API service will bind to. Field names
+ * match the JSON wire shape (snake_case) the backend serializes.
+ */
+export interface AgentDefinition {
+  name: string;
+  role: string;
+  description: string | null;
+  tags: string[];
+  tools: string[];
+  system_prompt: string;
+  input_schema: Record<string, unknown> | null;
+  output_schema: Record<string, unknown> | null;
+  states: AgentState[];
+  mode: 'new' | 'refine';
+  cloned_from: string | null;
+}
+
 /** Progress state of a single stepper indicator. */
 export type StudioStageStatus = 'done' | 'active' | 'todo';
 
