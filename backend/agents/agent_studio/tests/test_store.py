@@ -145,4 +145,4 @@ def test_concurrent_creates_are_thread_safe() -> None:
 
     assert len(ids) == 20 * 25
     assert len(set(ids)) == len(ids)  # no duplicate / lost ids
-    assert len(store._records) == cap  # cap held under concurrency
+    assert len(store) == cap  # cap held under concurrency (public __len__)

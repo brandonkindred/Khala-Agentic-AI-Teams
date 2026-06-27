@@ -105,3 +105,9 @@ def test_clone_does_not_mutate_source() -> None:
     before = manifest.model_dump()
     clone_from_manifest(manifest)
     assert manifest.model_dump() == before
+
+
+def test_clone_of_already_copy_name_does_not_double_suffix() -> None:
+    # Cloning an already-cloned name must not produce "X.copy.copy".
+    draft = clone_from_manifest(_manifest(name="Planner.copy"))
+    assert draft.name == "Planner.copy"

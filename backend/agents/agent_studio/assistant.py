@@ -121,7 +121,12 @@ def _neutralize(content: str) -> str:
 
 
 def _parse_agent_block(text: str) -> dict | None:
-    """Extract the ```agent ... ``` JSON object from the assistant reply."""
+    """Extract the ```agent ... ``` JSON object from the assistant reply.
+
+    The non-greedy match takes the **first** ``agent`` block; the assistant
+    contract (system prompt) guarantees exactly one per reply, so this stays
+    deterministic even if a misbehaving model emits more than one.
+    """
     match = re.search(r"```agent\s*\n?(.*?)```", text, re.DOTALL)
     if not match:
         return None

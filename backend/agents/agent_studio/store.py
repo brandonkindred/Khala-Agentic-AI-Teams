@@ -23,9 +23,9 @@ store and is out of scope here.
 
 Invariants:
     * A ``conversation_id`` returned by :meth:`create` resolves via :meth:`get`
-      until it is evicted by the FIFO cap or the process exits; ids are never
+      until it is evicted by the LRU cap or the process exits; ids are never
       reused.
-    * ``len(self._records) <= max_conversations`` holds after every operation.
+    * ``len(self) <= max_conversations`` holds after every operation.
     * All access to ``self._records`` happens while holding ``self._lock``.
 """
 
@@ -115,7 +115,9 @@ class AgentStudioConversationStore:
               list and a deep-copied ``definition`` — so callers never hold a
               reference to internal mutable state past the lock; mutating it can't
               race with concurrent ``append_message`` / ``set_definition``.
-              Mutations must go through the store's methods.
+              Mutations must go through the store's methods. (The ``messages`` list
+              is copied but its ``ConversationMessage`` elements are shared — safe
+              because they are treated as immutable.)
         """
         with self._lock:
             record = self._records.get(conversation_id)
@@ -157,3 +159,8 @@ class AgentStudioConversationStore:
                 raise LookupError(f"Unknown conversation: {conversation_id}")
             record.definition = definition
             self._records.move_to_end(conversation_id)
+
+    def __len__(self) -> int:
+        """Number of live conversations (public read of the cap-bounded size)."""
+        with self._lock:
+            return len(self._records)

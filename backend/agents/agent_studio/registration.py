@@ -104,8 +104,12 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     """
     tools = list(manifest.cognition.tools) if manifest.cognition else []
     tags = [t for t in manifest.tags if t not in _PLUMBING_TAGS]
+    # Avoid a confusing "name.copy.copy" when cloning an already-cloned name.
+    # Per-team disambiguation (".copy-2", …) is the frontend's job — it knows the
+    # team's existing names; the backend only avoids the doubled suffix here.
+    name = manifest.name if manifest.name.endswith(".copy") else f"{manifest.name}.copy"
     return AgentDefinition(
-        name=f"{manifest.name}.copy",
+        name=name,
         role=manifest.summary,
         description=manifest.description,
         tags=tags,

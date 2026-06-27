@@ -47,9 +47,14 @@ class AgentStudioService:
         store: AgentStudioConversationStore | None = None,
         registry_getter: RegistryGetter | None = None,
     ) -> None:
-        self._assistant = assistant or AgentDesignerAgent()
-        self._store = store or AgentStudioConversationStore()
-        self._get_registry = registry_getter or _default_registry_getter
+        # Use explicit None checks, not ``or`` — an empty store is falsy now that
+        # the store defines ``__len__``, so ``store or ...`` would discard a
+        # passed-in empty store.
+        self._assistant = assistant if assistant is not None else AgentDesignerAgent()
+        self._store = store if store is not None else AgentStudioConversationStore()
+        self._get_registry = (
+            registry_getter if registry_getter is not None else _default_registry_getter
+        )
 
     # ── Conversations ──────────────────────────────────────────────────────────
 
@@ -103,13 +108,15 @@ class AgentStudioService:
     def _handle_message(self, conversation_id: str, message: str) -> ConversationStateResponse:
         """Run one assistant turn: read state, call the LLM, persist user + reply.
 
-        Concurrency note: the store locks each individual op, but this whole turn
-        (read history+definition → LLM → append → set_definition) is **not**
-        serialized, so two concurrent sends on the *same* conversation can
-        interleave (last write wins). Per-conversation turn serialization (and the
-        cross-worker case) is a deferred follow-up that lands with the durable
-        store. For Stage 1 the frontend should prevent concurrent sends on one
-        conversation.
+        ⚠️ CONCURRENCY — MUST be resolved before production. The store locks each
+        individual op, but this whole turn (read history+definition → LLM → append
+        → set_definition) is **not** serialized, so two concurrent sends on the
+        *same* conversation can interleave (last write wins → a lost definition
+        update or out-of-order messages). Proper per-conversation turn
+        serialization (a per-conversation lock, or a row lock) lands with the
+        durable store — until then **the frontend must strictly prevent concurrent
+        sends on one conversation**, and a multi-worker deployment compounds this
+        (the in-process store isn't shared across workers).
         """
         record = self._store.get(conversation_id)
         if record is None:  # callers validate first; defensive guard
