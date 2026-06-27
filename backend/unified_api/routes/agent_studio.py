@@ -11,6 +11,13 @@ Tool discovery for the definition panel reuses the existing ``GET /api/llm-tools
 (no new route here). Handlers are synchronous ``def`` so FastAPI runs them in its
 threadpool, keeping the blocking LLM/registry calls off the event loop. Errors
 map cleanly: :class:`ValueError` → 400, :class:`LookupError` → 404.
+
+Auth: these routes carry no per-route authentication dependency, consistent with
+the other team routers on the Unified API. Authentication/authorization is expected
+to be enforced upstream (reverse proxy / API gateway) rather than at the application
+layer for the Stage-1 backend; application-level auth is a platform-wide follow-up.
+Note the ``SecurityGatewayMiddleware`` fronting all ``/api/*`` routes is an
+abuse/prompt-injection scanner, **not** an authn/authz layer.
 """
 
 from __future__ import annotations

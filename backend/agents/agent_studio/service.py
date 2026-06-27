@@ -167,12 +167,23 @@ class AgentStudioService:
         (``False``) — the UI surfaces this so a same-name save is never a silent
         clobber.
 
+        Concurrency: the get-then-register below is **not** atomic, so under two
+        concurrent saves of the same name the ``created`` flags can both read
+        ``True``. This is benign — ``created`` is an advisory UI hint (warn before a
+        same-name overwrite), not a correctness guarantee, and ``register`` is
+        idempotent by id so the final stored manifest is consistent regardless. A
+        truly atomic flag needs the shared ``agent_registry`` to return creation
+        status from ``register`` itself; that's a registry-level change, out of scope
+        for this Stage-1 slice and in the same deferred concurrency class as the
+        per-conversation turn serialization.
+
         Preconditions:
             * ``definition`` is ready (``definition.missing_required()`` is empty).
         Postconditions:
             * The manifest is registered (resolvable via ``get(manifest.id)``).
               Returns ``(manifest, created)`` where ``created`` is ``True`` iff no
-              agent with ``manifest.id`` existed before this call.
+              agent with ``manifest.id`` existed before this call (subject to the
+              concurrency caveat above).
         """
         missing = definition.missing_required()
         if missing:

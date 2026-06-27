@@ -116,6 +116,13 @@ _DELIMITER_RE = re.compile(
 def _neutralize(content: str) -> str:
     """Defang attempts to break out of the ``<user_message>``/``<history>``/``<definition>`` wrappers.
 
+    Only the *literal* tag forms are stripped. Encoded/obfuscated variants (HTML
+    entities, percent-encoding, zero-width characters) are intentionally left as-is:
+    they are not literal delimiters, so the model reads them as inert text inside the
+    data block rather than as wrapper boundaries. This residual is accepted —
+    defense-in-depth here is the system prompt's untrusted-data clause (the primary
+    defense), not exhaustive input rewriting.
+
     Postconditions:
         * The returned string contains no literal ``<user_message>``/``<history>``/
           ``<definition>`` open or close tag, so user text cannot forge or close a
@@ -130,6 +137,12 @@ def _parse_agent_block(text: str) -> dict | None:
     The non-greedy match takes the **first** ``agent`` block; the assistant
     contract (system prompt) guarantees exactly one per reply, so this stays
     deterministic even if a misbehaving model emits more than one.
+
+    Robustness: a block whose body is truncated or malformed (e.g. a model that
+    embeds a stray ``` inside a string value, prematurely closing the fence) fails
+    ``json.loads`` and returns ``None`` — i.e. "no parseable update": the prose reply
+    still stands and the stored definition is left unchanged. It never raises, so a
+    pathological model output degrades to a no-op rather than a 500.
     """
     match = re.search(r"```agent\s*\n?(.*?)```", text, re.DOTALL)
     if not match:
