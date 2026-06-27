@@ -482,8 +482,10 @@ class ClaudeLLMClient(LLMClient):
         """Reduce a final message to ``(kind, value)``.
 
         Returns ``("tools", envelope)`` when the model invoked tools (``envelope``
-        is ``{"__tool_calls__": [...]}``), else ``("text", text)`` with the joined
-        text blocks. Maps ``stop_reason`` edge cases onto the unified hierarchy.
+        is ``{"__tool_calls__": [...]}``, plus ``"__thinking_blocks__": [...]`` when
+        the turn carried signed ``thinking``/``redacted_thinking`` blocks so they can
+        be replayed unchanged on the next request), else ``("text", text)`` with the
+        joined text blocks. Maps ``stop_reason`` edge cases onto the unified hierarchy.
 
         Postconditions: raises ``LLMPermanentError`` on a ``refusal`` stop reason
             and ``LLMTruncatedError`` on a ``max_tokens`` or ``pause_turn`` stop
@@ -496,6 +498,11 @@ class ClaudeLLMClient(LLMClient):
         blocks = list(getattr(message, "content", None) or [])
         tool_calls = []
         text_parts: list[str] = []
+        # Signed thinking blocks from a tool-use turn must be replayed unchanged on
+        # the next request (Anthropic 400s otherwise under extended thinking). We
+        # capture them here, in Anthropic *input* shape, and carry them through the
+        # tool-call envelope so the caller (tool loop) can echo them back verbatim.
+        thinking_blocks: list[dict] = []
         for block in blocks:
             btype = getattr(block, "type", None)
             if btype == "tool_use":
@@ -511,6 +518,18 @@ class ClaudeLLMClient(LLMClient):
                 )
             elif btype == "text":
                 text_parts.append(getattr(block, "text", "") or "")
+            elif btype == "thinking":
+                tb: dict = {"type": "thinking", "thinking": getattr(block, "thinking", "") or ""}
+                signature = getattr(block, "signature", None)
+                # Preserve the opaque signature verbatim — it is what Anthropic
+                # validates on replay; never regenerate or drop it when present.
+                if signature is not None:
+                    tb["signature"] = signature
+                thinking_blocks.append(tb)
+            elif btype == "redacted_thinking":
+                thinking_blocks.append(
+                    {"type": "redacted_thinking", "data": getattr(block, "data", "") or ""}
+                )
 
         text = "".join(text_parts)
         stop_reason = getattr(message, "stop_reason", None)
@@ -548,7 +567,10 @@ class ClaudeLLMClient(LLMClient):
             )
         if tool_calls:
             logger.info("Claude returned %d tool call(s)", len(tool_calls))
-            return "tools", {"__tool_calls__": tool_calls}
+            envelope: dict = {"__tool_calls__": tool_calls}
+            if thinking_blocks:
+                envelope["__thinking_blocks__"] = thinking_blocks
+            return "tools", envelope
         return "text", text
 
     def _record(
@@ -763,7 +785,9 @@ class ClaudeLLMClient(LLMClient):
             use; otherwise a parsed ``dict`` (json mode) or ``str`` (text mode).
             OpenAI-style ``role:"tool"`` results and assistant ``tool_calls`` in
             ``messages`` are translated to Anthropic blocks (orphan tool results
-            with no matching tool_use are dropped). Raises ``LLMPermanentError``
+            with no matching tool_use are dropped); signed ``thinking`` blocks carried
+            on a replayed assistant tool-use turn are re-emitted unchanged so
+            extended-thinking tool loops do not 400. Raises ``LLMPermanentError``
             when ``messages`` yields no user/assistant turn, ``LLMJsonParseError``
             (json mode, unparseable), or the unified ``LLM*`` errors. A telemetry
             record is emitted for the call.
@@ -873,7 +897,10 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
     - ``role:"system"`` entries are concatenated into the returned system text.
     - ``role:"assistant"`` with ``tool_calls`` becomes an assistant turn whose
       content is ``tool_use`` blocks (plus any leading text); string ``arguments``
-      are parsed to a dict (Anthropic requires an object ``input``).
+      are parsed to a dict (Anthropic requires an object ``input``). Any signed
+      ``thinking``/``redacted_thinking`` blocks carried on the message under a
+      ``thinking_blocks`` key are re-emitted unchanged and FIRST (before text and
+      ``tool_use``), as Anthropic requires under extended thinking.
     - ``role:"tool"`` results become ``tool_result`` blocks; consecutive tool
       results are coalesced into a single user turn (Anthropic groups all results
       for one assistant turn in one user message).
@@ -947,6 +974,14 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
             tool_calls = msg.get("tool_calls") or []
             if tool_calls:
                 blocks: list[dict] = []
+                # Anthropic requires the signed thinking/redacted_thinking blocks from
+                # a tool-use turn to be replayed unchanged and FIRST (ahead of text and
+                # tool_use), or an extended-thinking tool loop 400s on the next request
+                # ("thinking blocks are required / signature mismatch"). Emit them
+                # verbatim; skip anything that is not a well-formed thinking block.
+                for tb in msg.get("thinking_blocks") or []:
+                    if isinstance(tb, dict) and tb.get("type") in ("thinking", "redacted_thinking"):
+                        blocks.append(tb)
                 if isinstance(content, str) and content.strip():
                     blocks.append({"type": "text", "text": content})
                 for tc in tool_calls:

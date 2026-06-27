@@ -837,3 +837,149 @@ def test_non_rate_limit_error_not_retried(monkeypatch, _fast_rate_limit):
         client._invoke_with_rate_limit_retry(**_invoke_kwargs())
     assert calls["n"] == 1
     assert _fast_rate_limit == []
+
+
+# ---------------------------------------------------------------------------
+# Signed thinking blocks must round-trip across tool-use turns. Under extended
+# thinking (the default), Anthropic 400s if the signed thinking/redacted_thinking
+# blocks from a tool-use turn are not replayed unchanged and first on the next
+# request. These tests cover capture (_content_from_message), replay ordering
+# (_to_anthropic_messages), and the end-to-end tool loop.
+# ---------------------------------------------------------------------------
+
+
+def _thinking_block(thinking="reasoning", signature="sig-abc"):
+    return SimpleNamespace(type="thinking", thinking=thinking, signature=signature)
+
+
+def _thinking_tool_message(name, tool_input, *, tool_id="toolu_1", signature="sig-abc"):
+    return SimpleNamespace(
+        content=[
+            _thinking_block(signature=signature),
+            SimpleNamespace(type="tool_use", id=tool_id, name=name, input=tool_input),
+        ],
+        stop_reason="tool_use",
+        usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+    )
+
+
+def test_content_from_message_captures_signed_thinking_block():
+    client, _ = _make_client()
+    kind, env = client._content_from_message(
+        _thinking_tool_message("get_weather", {"city": "Paris"}, signature="sig-xyz")
+    )
+    assert kind == "tools"
+    # signature preserved verbatim alongside the tool calls
+    assert env["__thinking_blocks__"] == [
+        {"type": "thinking", "thinking": "reasoning", "signature": "sig-xyz"}
+    ]
+    assert env["__tool_calls__"][0]["function"]["name"] == "get_weather"
+
+
+def test_content_from_message_captures_redacted_thinking_block():
+    client, _ = _make_client()
+    msg = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="redacted_thinking", data="enc-1"),
+            SimpleNamespace(type="tool_use", id="t1", name="f", input={}),
+        ],
+        stop_reason="tool_use",
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    _kind, env = client._content_from_message(msg)
+    assert env["__thinking_blocks__"] == [{"type": "redacted_thinking", "data": "enc-1"}]
+
+
+def test_content_from_message_omits_thinking_key_when_absent():
+    # A tool turn with no thinking blocks must not grow a spurious key.
+    client, _ = _make_client()
+    kind, env = client._content_from_message(_tool_message("f", {}))
+    assert kind == "tools"
+    assert "__thinking_blocks__" not in env
+
+
+def test_to_anthropic_messages_replays_thinking_blocks_first():
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    _system, msgs = _to_anthropic_messages(
+        [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "thinking out loud",
+                "tool_calls": [{"id": "t1", "function": {"name": "f", "arguments": "{}"}}],
+                "thinking_blocks": [
+                    {"type": "thinking", "thinking": "reasoning", "signature": "sig-xyz"}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "t1", "content": "r"},
+        ]
+    )
+    assistant = msgs[1]
+    assert assistant["role"] == "assistant"
+    # Signed thinking block must be first and unchanged, then text, then tool_use.
+    assert assistant["content"][0] == {
+        "type": "thinking",
+        "thinking": "reasoning",
+        "signature": "sig-xyz",
+    }
+    assert [b["type"] for b in assistant["content"]] == ["thinking", "text", "tool_use"]
+
+
+def test_to_anthropic_messages_skips_malformed_thinking_blocks():
+    # Only well-formed thinking/redacted_thinking dicts are re-emitted.
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    _system, msgs = _to_anthropic_messages(
+        [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "t1", "function": {"name": "f", "arguments": "{}"}}],
+                "thinking_blocks": ["not-a-dict", {"type": "text", "text": "nope"}],
+            },
+            {"role": "tool", "tool_call_id": "t1", "content": "r"},
+        ]
+    )
+    assert [b["type"] for b in msgs[1]["content"]] == ["tool_use"]
+
+
+def test_tool_loop_replays_signed_thinking_block():
+    # End-to-end regression: a two-round Claude + tools exchange with thinking on
+    # must echo the original signed thinking block, first, on the second request.
+    from llm_service.tool_loop import complete_json_with_tool_loop
+
+    sent: list[list] = []
+    responses = [
+        _thinking_tool_message("f", {"x": 1}, signature="sig-123"),
+        _text_message('{"done": true}'),
+    ]
+
+    class _MultiMessages:
+        def stream(self, **kwargs):
+            sent.append(kwargs["messages"])
+            return _FakeStreamCtx(message=responses[len(sent) - 1])
+
+    client = ClaudeLLMClient(model="claude-opus-4-8", api_key="sk-test")
+    client._client = SimpleNamespace(messages=_MultiMessages())
+
+    out = complete_json_with_tool_loop(
+        client,
+        objective="t",
+        user_prompt="go",
+        system_prompt="be brief",
+        tools=[{"name": "f", "input_schema": {}}],
+        tool_handlers={"f": lambda _args: {"ok": True}},
+        think=True,
+    )
+    assert out == {"done": True}
+    # The second request replays the assistant tool-use turn with the signed
+    # thinking block restored first (this is the 400 the issue describes).
+    assistant = next(m for m in sent[1] if m["role"] == "assistant")
+    assert assistant["content"][0] == {
+        "type": "thinking",
+        "thinking": "reasoning",
+        "signature": "sig-123",
+    }
+    assert any(b["type"] == "tool_use" for b in assistant["content"])
