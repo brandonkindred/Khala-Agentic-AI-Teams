@@ -160,6 +160,22 @@ class AgentStudioConversationStore:
             record.definition = definition
             self._records.move_to_end(conversation_id)
 
+    def discard(self, conversation_id: str) -> None:
+        """Remove a conversation if present; a no-op when the id is unknown.
+
+        Used to roll back a conversation whose very first turn failed, so a
+        partially-started conversation isn't orphaned in the store.
+
+        Postconditions:
+            * ``get(conversation_id)`` returns ``None`` afterward.
+            * Idempotent: discarding an unknown (or already-discarded) id does
+              nothing rather than raising — unlike :meth:`append_message` /
+              :meth:`set_definition`, since cleanup must never mask the original
+              failure with a second exception.
+        """
+        with self._lock:
+            self._records.pop(conversation_id, None)
+
     def __len__(self) -> int:
         """Number of live conversations (public read of the cap-bounded size)."""
         with self._lock:

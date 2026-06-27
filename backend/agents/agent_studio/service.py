@@ -75,6 +75,10 @@ class AgentStudioService:
         Postconditions:
             * Returns the initial conversation state. In ``refine`` mode the
               definition is pre-seeded from a clone of the source manifest.
+            * If the first turn fails (an ``initial_message`` whose assistant call
+              raises), the just-created conversation is discarded before the error
+              propagates, so a failed start leaves no orphaned empty record —
+              matching ``send_message``'s consistent-state-on-failure property.
         """
         if mode == "refine":
             if not source_agent_id:
@@ -90,7 +94,13 @@ class AgentStudioService:
 
         conversation_id = self._store.create(mode, source_agent_id, definition)
         if initial_message:
-            return self._handle_message(conversation_id, initial_message)
+            try:
+                return self._handle_message(conversation_id, initial_message)
+            except Exception:
+                # Roll back the just-created conversation so a failed first turn
+                # doesn't leak an orphaned empty record, then re-raise unchanged.
+                self._store.discard(conversation_id)
+                raise
 
         self._store.append_message(conversation_id, "assistant", GREETING[mode])
         return self._state(conversation_id, suggestions=list(DEFAULT_SUGGESTIONS))

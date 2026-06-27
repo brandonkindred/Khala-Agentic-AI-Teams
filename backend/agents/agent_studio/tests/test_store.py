@@ -121,6 +121,22 @@ def test_set_definition_unknown_id_raises_lookup_error() -> None:
         AgentStudioConversationStore().set_definition("nope", AgentDefinition())
 
 
+def test_discard_removes_conversation() -> None:
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition())
+    store.discard(cid)
+    assert store.get(cid) is None
+    assert len(store) == 0
+
+
+def test_discard_unknown_id_is_noop() -> None:
+    # Unlike append/set_definition, discard must not raise on an unknown id, so
+    # cleanup can't mask the original failure with a second exception.
+    store = AgentStudioConversationStore()
+    store.discard("nope")  # no exception
+    assert len(store) == 0
+
+
 def test_concurrent_creates_are_thread_safe() -> None:
     # Many threads hammering create() must not corrupt the OrderedDict or
     # violate the cap; every returned id is unique.

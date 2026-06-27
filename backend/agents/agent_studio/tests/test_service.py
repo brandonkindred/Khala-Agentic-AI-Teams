@@ -132,6 +132,22 @@ def test_send_message_assistant_failure_leaves_no_partial_message() -> None:
     assert len(store.get(cid).messages) == before
 
 
+def test_start_conversation_initial_message_failure_discards_conversation() -> None:
+    # If the very first turn fails, start_conversation must roll back the
+    # just-created conversation rather than leaving an orphaned empty record.
+    class _BoomAssistant:
+        def respond(self, *_args):
+            raise RuntimeError("llm down")
+
+    store = AgentStudioConversationStore()
+    svc = AgentStudioService(
+        assistant=_BoomAssistant(), store=store, registry_getter=lambda: FakeRegistry()
+    )
+    with pytest.raises(RuntimeError):
+        svc.start_conversation("new", None, "build me a planner")
+    assert len(store) == 0  # no orphaned conversation left behind
+
+
 def test_fake_registry_register_takes_precedence_over_seed() -> None:
     # Regression for the test double: a registered agent must not be shadowed by
     # a seed of the same id.
