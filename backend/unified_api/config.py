@@ -271,6 +271,25 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         timeout_seconds=60.0,
         in_process=True,
     ),
+    # In-process module (not a proxy team): the unified API mounts the
+    # agent_studio router directly via `app.include_router(...)`. Stage-1
+    # "build an agent" touchpoints (authoring assistant, clone-from-registry,
+    # save+register). `in_process=True` so `_register_proxy_routes` skips
+    # proxy registration but the security gateway picks up the prefix and
+    # discovery surfaces report the team as live.
+    "agent_studio": TeamConfig(
+        name="Agent Studio",
+        prefix="/api/agent-studio",
+        description=(
+            "Stage-1 build flow for authoring a single agent: a per-agent authoring "
+            "assistant, clone-from-registry into an editable draft, and save+register "
+            "into the live agent registry. In-process module mounted on the unified API."
+        ),
+        tags=["agent-studio", "authoring", "registry"],
+        cell="core_dev",
+        timeout_seconds=120.0,
+        in_process=True,
+    ),
 }
 
 

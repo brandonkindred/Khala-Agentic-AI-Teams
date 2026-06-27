@@ -104,6 +104,13 @@ def complete_json_with_tool_loop(
             if result.get("__reasoning_content__"):
                 assistant_msg["reasoning"] = result["__reasoning_content__"]
                 assistant_msg["reasoning_content"] = result["__reasoning_content__"]
+            # Anthropic extended thinking requires the signed thinking blocks from a
+            # tool-use turn to be echoed back unchanged on the next request (the API
+            # 400s without them). The Claude client carries them in the envelope and
+            # re-emits them when this assistant turn is replayed; other providers
+            # never set the key, so this is a no-op for them.
+            if result.get("__thinking_blocks__"):
+                assistant_msg["thinking_blocks"] = result["__thinking_blocks__"]
             messages.append(assistant_msg)
             for tc in tcalls:
                 if not isinstance(tc, dict):
