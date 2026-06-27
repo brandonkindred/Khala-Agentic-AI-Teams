@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import List
 
+import pytest
+
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import (
     BacktestConfig,
@@ -510,6 +512,20 @@ def test_trailing_replay_none_entry_order_type_defaults_to_market() -> None:
     assert len(fails) == 1
     assert fails[0].severity == "warning"
     assert "2024-01-03" in fails[0].details
+
+
+def test_trailing_replay_rejects_non_trailing_basis() -> None:
+    """The replay's precondition is enforced with an explicit raise (not a bare
+    assert that ``python -O`` would strip): a non-trailing basis is a caller bug
+    and must fail loudly rather than silently mapping to a side.
+    """
+    gate = ExitRuleConformanceGate()
+    with pytest.raises(ValueError, match="non-trailing basis"):
+        gate._check_stop_loss_trailing_replay(
+            StopLossRule(pct=0.05),  # default basis="entry_price"
+            [],
+            {},
+        )
 
 
 # ---------------------------------------------------------------------------

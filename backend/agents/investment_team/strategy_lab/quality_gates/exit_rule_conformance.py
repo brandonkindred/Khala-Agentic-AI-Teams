@@ -387,12 +387,12 @@ class ExitRuleConformanceGate(GateResultsMixin):
         reconstructed watermark is an approximation and must not veto a run.
         """
         # Precondition (DbC): this path is reached only for a trailing basis.
-        # Asserting it makes the side derivation below provably exhaustive — a
-        # future/unexpected basis fails loudly here instead of silently mapping
-        # to "short".
-        assert rule.basis in ("trailing_high", "trailing_low"), (
-            f"trailing replay called with non-trailing basis {rule.basis!r}"
-        )
+        # Enforced with an explicit raise (not a bare ``assert``, which ``python
+        # -O`` strips) so the side derivation below is provably exhaustive and a
+        # future/unexpected basis fails loudly instead of silently mapping to
+        # "short". A violation is a caller bug, never silently coerced.
+        if rule.basis not in ("trailing_high", "trailing_low"):
+            raise ValueError(f"trailing replay called with non-trailing basis {rule.basis!r}")
         # Pair the rule with the side it governs: ``trailing_high`` ratchets a
         # long's floor up off the running high; ``trailing_low`` ratchets a
         # short's cap down off the running low. ``stop_loss_triggers`` already
