@@ -122,6 +122,61 @@ class TestSetupPhase:
         assert result.repo_initialized or (tmp_path / ".git").exists()
         assert result.summary
 
+    def test_run_setup_commits_scaffolding_leaving_clean_tree(self, tmp_path):
+        """Setup must commit its lint/test scaffolding so the tree stays clean.
+
+        Uncommitted scaffolding on ``development`` is regenerated as untracked
+        files on a later pass and blocks the development agent's checkout of the
+        review feature branch.
+        """
+        from frontend_code_v2_team.phases.setup import run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        run_setup(repo_path=tmp_path, task_title="My App")
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert status.stdout.strip() == ""
+
+    def test_revision_branch_checkout_survives_setup_regeneration(self, tmp_path):
+        """A feature branch tracking the scaffolding must remain checkout-able.
+
+        Reproduces the rejected-task revision flow: pass 1 leaves the scaffolding
+        committed (on development and inherited by the feature branch); a second
+        ``run_setup`` on development must not strand untracked copies that abort
+        the feature-branch checkout.
+        """
+        from frontend_code_v2_team.phases.setup import run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        run_setup(repo_path=tmp_path, task_title="My App")
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/task-1"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+        (tmp_path / "feature_change.ts").write_text("export const x = 1;\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "feat: pass 1"], cwd=tmp_path, capture_output=True, check=True
+        )
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        run_setup(repo_path=tmp_path, task_title="My App")
+        checkout = subprocess.run(
+            ["git", "checkout", "feature/task-1"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        assert checkout.returncode == 0, checkout.stderr
+
 
 class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):

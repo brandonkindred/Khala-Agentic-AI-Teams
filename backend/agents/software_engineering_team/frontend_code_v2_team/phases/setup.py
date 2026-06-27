@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 
 from software_engineering_team.shared.git_utils import (
+    commit_working_tree,
     ensure_development_branch,
     initialize_new_repo,
 )
@@ -134,6 +135,33 @@ def _ensure_package_script(path: Path, script_name: str, script_cmd: str) -> Non
         logger.warning("Could not update package.json script %s: %s", script_name, e)
 
 
+def _commit_scaffolding(path: Path) -> None:
+    """Commit any lint/test scaffolding written by setup onto the current branch.
+
+    Setup runs on ``development`` and may write linting/testing config and test
+    scaffolding. Leaving those changes uncommitted means a later revision pass
+    regenerates them as *untracked* files on ``development``; the development
+    agent's subsequent ``git checkout`` of the review feature branch (which
+    already tracks those same paths) then aborts because the checkout would
+    overwrite untracked files, failing the task before it can apply the
+    requested revision. Committing the scaffolding to ``development`` keeps the
+    working tree clean and makes the idempotent ``_ensure_*_configured`` checks
+    a no-op on every subsequent pass.
+
+    Preconditions:
+        - ``path`` is a git repository checked out on the development branch.
+
+    Postconditions:
+        - The working tree is clean (scaffolding committed), or unchanged when
+          there was nothing to commit. Commit failures are swallowed so setup
+          never fails solely because the scaffolding could not be committed.
+    """
+    try:
+        commit_working_tree(path, "chore: configure linting and testing scaffolding")
+    except Exception as e:  # noqa: BLE001 - scaffolding commit is best-effort
+        logger.warning("Could not commit setup scaffolding: %s", e)
+
+
 def run_setup(
     *,
     repo_path: Path,
@@ -170,6 +198,7 @@ def run_setup(
         # Ensure linting and testing are configured before any coding begins
         result.linting_configured = _ensure_linting_configured(path)
         result.testing_configured = _ensure_testing_configured(path)
+        _commit_scaffolding(path)
 
         result.summary = f"Initialized repo: {msg}"
         logger.info("Setup: %s", result.summary)
@@ -189,6 +218,7 @@ def run_setup(
     # Ensure linting and testing are configured before any coding begins
     result.linting_configured = _ensure_linting_configured(path)
     result.testing_configured = _ensure_testing_configured(path)
+    _commit_scaffolding(path)
 
     result.summary = msg or "Repo ready; on development branch."
     logger.info(
