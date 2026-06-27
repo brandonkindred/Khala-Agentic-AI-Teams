@@ -38,6 +38,9 @@
 
   <main class="studio__stage">
     @switch (activeStageDef().key) {
+      @case ('build') {
+        <app-agent-studio-build-agent />
+      }
       @case ('test') {
         <app-agent-studio-test-agent />
       }
