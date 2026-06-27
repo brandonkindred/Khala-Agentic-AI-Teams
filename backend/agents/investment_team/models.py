@@ -639,6 +639,19 @@ class BacktestConfig(BaseModel):
             "the remainder is dropped. Ignored by the optimistic model."
         ),
     )
+    exit_rule_trailing_replay_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in. When True, the exit-rule conformance gate runs a "
+            "bar-by-bar replay for trailing stop-loss rules "
+            "(``basis='trailing_high'``/``'trailing_low'``): it reconstructs "
+            "the per-bar high/low watermark from cached bars and surfaces a "
+            "``warning`` (never a ``critical``) when the engine's trailing "
+            "floor was breached on a bar strictly before the position closed "
+            "but the engine did not fire. Defaults False so the gate stays "
+            "deterministic/post-hoc with no replay."
+        ),
+    )
 
 
 # Asset-class-aware fee defaults.  Crypto uses Kraken taker fees (lowest
