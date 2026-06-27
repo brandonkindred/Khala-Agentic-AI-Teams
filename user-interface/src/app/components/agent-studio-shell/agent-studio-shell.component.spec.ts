@@ -1,6 +1,17 @@
+import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
+import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
+
+/** Stub the heavy Agent Console runner so the Test stage can mount with an agent
+ *  set without firing sandbox polling / HTTP inside the shell tests. */
+@Component({ selector: 'app-agent-runner', standalone: true, template: '' })
+class StubAgentRunnerComponent {
+  @Input() preselectedAgentId: string | null = null;
+  @Output() readonly requestCatalogReturn = new EventEmitter<void>();
+}
 
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
@@ -9,7 +20,12 @@ describe('AgentStudioShellComponent', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [AgentStudioShellComponent, NoopAnimationsModule],
-    }).compileComponents();
+    })
+      .overrideComponent(AgentStudioTestAgentComponent, {
+        remove: { imports: [AgentRunnerComponent] },
+        add: { imports: [StubAgentRunnerComponent] },
+      })
+      .compileComponents();
 
     fixture = TestBed.createComponent(AgentStudioShellComponent);
     component = fixture.componentInstance;
@@ -90,5 +106,32 @@ describe('AgentStudioShellComponent', () => {
     fixture.detectChanges();
     expect(steps[0].getAttribute('aria-current')).toBeNull();
     expect(steps[1].getAttribute('aria-current')).toBe('step');
+  });
+
+  it('renders the real Test Agent stage (not the placeholder) on Stage 2', () => {
+    component.state.navigateToStage(1);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-agent-studio-test-agent')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
+  });
+
+  it('gates the "Add to team →" forward step until an agent is selected', () => {
+    component.state.navigateToStage(1);
+    fixture.detectChanges();
+    let button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__continue');
+    expect(component.forwardDisabled()).toBe(true);
+    expect(button.disabled).toBe(true);
+
+    component.state.setRegistryAgentId('reg-9');
+    fixture.detectChanges();
+    button = fixture.nativeElement.querySelector('.studio__continue');
+    expect(component.forwardDisabled()).toBe(false);
+    expect(button.disabled).toBe(false);
+  });
+
+  it('keeps the Build forward step enabled (the gate is Stage-2 only)', () => {
+    // On Build (Stage 1) the forward step is never gated by an agent selection.
+    expect(component.activeStageDef().key).toBe('build');
+    expect(component.forwardDisabled()).toBe(false);
   });
 });
