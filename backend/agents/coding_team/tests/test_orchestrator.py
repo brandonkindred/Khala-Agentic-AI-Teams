@@ -982,12 +982,56 @@ def test_v2_worker_clones_injected_strands_model_to_text_mode(monkeypatch):
     assert worker.team_lead.llm.response_format == "text"
 
 
-def test_v2_text_mode_llm_resolves_on_clone_failure(monkeypatch):
-    """A clone() that raises falls back to the text-mode resolver, never the JSON-mode handle."""
+def test_v2_text_mode_llm_resolves_underlying_client_on_clone_failure(monkeypatch):
+    """A clone() failure re-resolves text mode from the wrapped client, not the JSON-mode model.
+
+    resolve_strands_model returns a pre-built Strands Model as-is, so passing the original
+    model back would leak JSON mode. Re-resolving from the model's ``_client`` guarantees a
+    fresh text-mode wrapper.
+    """
     import software_engineering_team.shared.strands_model as strands_model_mod
 
+    received: Dict[str, Any] = {}
     sentinel = object()
-    monkeypatch.setattr(strands_model_mod, "resolve_text_mode_strands_model", lambda llm: sentinel)
+
+    def _fake_resolve(llm):
+        received["arg"] = llm
+        return sentinel
+
+    monkeypatch.setattr(strands_model_mod, "resolve_text_mode_strands_model", _fake_resolve)
+
+    client = object()
+
+    class _BrokenJsonModel:
+        _client = client
+
+        def get_config(self):
+            return {"response_format": "json"}
+
+        def clone(self, **_overrides):
+            raise RuntimeError("clone boom")
+
+    model = _BrokenJsonModel()
+    result = orch_mod._v2_text_mode_llm(model)
+
+    assert result is sentinel
+    # Re-resolved from the wrapped client (guaranteed text mode), not the JSON-mode model.
+    assert received["arg"] is client
+    assert received["arg"] is not model
+
+
+def test_v2_text_mode_llm_clone_failure_without_client_uses_default(monkeypatch):
+    """A clone() failure on a handle with no ``_client`` falls back to a fresh text model."""
+    import software_engineering_team.shared.strands_model as strands_model_mod
+
+    received: Dict[str, Any] = {}
+    sentinel = object()
+
+    def _fake_resolve(llm):
+        received["arg"] = llm
+        return sentinel
+
+    monkeypatch.setattr(strands_model_mod, "resolve_text_mode_strands_model", _fake_resolve)
 
     class _BrokenCloneModel:
         def get_config(self):
@@ -999,8 +1043,9 @@ def test_v2_text_mode_llm_resolves_on_clone_failure(monkeypatch):
     broken = _BrokenCloneModel()
     result = orch_mod._v2_text_mode_llm(broken)
 
-    # The original JSON-mode handle must not leak through; the resolver result is used.
+    # No wrapped client → resolver builds a fresh default text model (arg is None).
     assert result is sentinel
+    assert received["arg"] is None
     assert result is not broken
 
 

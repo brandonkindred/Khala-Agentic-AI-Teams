@@ -631,11 +631,16 @@ def _v2_text_mode_llm(llm: Any) -> Any:
                 return llm
             return clone(response_format="text")
         except Exception as exc:  # noqa: BLE001 - resolve explicitly when clone fails
-            # clone() exists but raised: we cannot trust the handle's mode, so do NOT fall
-            # through and return it as-is (it may still be in JSON/structured mode, which the
-            # v2 template parsers cannot read). Resolve a guaranteed text-mode model instead.
+            # clone() raised, so we cannot reconfigure this handle in place. Returning it
+            # as-is (or passing it back to the resolver) would risk leaking a JSON/structured-
+            # mode model to the text template parsers — resolve_strands_model passes pre-built
+            # Strands Models through unchanged. Re-resolve from the wrapped LLMClient when the
+            # handle exposes one (LLMClientModel stores it as ``_client``), which yields a
+            # genuine text-mode wrapper; otherwise fall through to a fresh default text model.
+            # Either way, never return the original non-text handle.
             logger.warning("Could not clone v2 LLM into text mode: %s", exc)
-            return resolve_text_mode_strands_model(llm)
+            underlying_client = getattr(llm, "_client", None)
+            return resolve_text_mode_strands_model(underlying_client)
 
     if llm is None or isinstance(llm, LLMClient):
         return resolve_text_mode_strands_model(llm)
