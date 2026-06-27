@@ -264,9 +264,11 @@ class AgentDesignerAgent:
         _defaults = AgentDefinition()
         if any(getattr(current, f) != getattr(_defaults, f) for f in _CONTENT_FIELDS):
             parts.append(
-                "Current agent definition (trusted, server-provided):\n```json\n"
-                + json.dumps(current.model_dump(mode="json"), indent=2)
-                + "\n```"
+                # Server-serialized, but the field *values* are user-authored —
+                # the untrusted-data clause in the system prompt covers this block
+                # too; it is context to edit, not instructions to follow.
+                "Current agent definition (server-serialized; field values are user-authored data):\n"
+                "```json\n" + json.dumps(current.model_dump(mode="json"), indent=2) + "\n```"
             )
         if conversation_history:
             turns = "\n".join(

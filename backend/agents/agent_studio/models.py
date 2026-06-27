@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent_registry.models import AgentManifest
 
@@ -60,6 +60,10 @@ class AgentDefinition(BaseModel):
 
 
 class ConversationMessage(BaseModel):
+    # Frozen: a stored message is never mutated after creation, so the store's
+    # get() snapshot can safely share message instances with internal state.
+    model_config = ConfigDict(frozen=True)
+
     role: Literal["user", "assistant"]
     content: str
 

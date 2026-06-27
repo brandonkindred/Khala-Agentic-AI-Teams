@@ -33,18 +33,21 @@ Drafted it.
 """
 
 
-def _make_client(service: object) -> TestClient:
+def _make_client(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
     """Build a TestClient for a fresh app with ``service`` injected as the dependency.
 
     Each call gets its own ``FastAPI`` instance, so the override is scoped to that
-    app and there's no cross-test leakage to clean up.
+    app and there's no cross-test leakage to clean up. Pass
+    ``raise_server_exceptions=False`` to let the app's exception handler turn an
+    unhandled error into a 500 response (instead of re-raising into the test) when
+    asserting on server-error mapping.
     """
     from unified_api.routes.agent_studio import get_agent_studio_service, router
 
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_agent_studio_service] = lambda: service
-    return TestClient(app)
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
 
 
 def _service(reply: str, registry: FakeRegistry) -> AgentStudioService:
@@ -227,20 +230,44 @@ def test_save_agent_registers(client: TestClient, registry: FakeRegistry) -> Non
     assert body["created"] is True
 
 
-def test_save_agent_same_name_reports_not_created(client: TestClient) -> None:
-    """Re-saving the same name updates in place and reports ``created`` false."""
+def test_save_agent_same_name_reports_not_created(client: TestClient, registry: FakeRegistry) -> None:
+    """Re-saving the same name updates in place and reports ``created`` false.
+
+    The second save must actually overwrite the registered manifest, not just
+    report ``created=False`` — assert the registry now holds the edited role
+    (manifest ``summary`` mirrors ``definition.role``).
+    """
     payload = {"name": "Dup", "role": "Does a thing"}
     first = client.post("/api/agent-studio/agents", json=payload).json()
     second = client.post("/api/agent-studio/agents", json={**payload, "role": "Edited"}).json()
     assert first["created"] is True
     assert second["created"] is False
     assert first["agent_id"] == second["agent_id"]
+    # The in-place update is real: the live manifest reflects the new role.
+    assert registry.registered[second["agent_id"]].summary == "Edited"
 
 
 def test_save_agent_not_ready_is_400(client: TestClient) -> None:
     """Saving a definition missing required fields is a 400."""
     resp = client.post("/api/agent-studio/agents", json={"name": "OnlyName"})
     assert resp.status_code == 400
+
+
+def test_save_agent_unexpected_error_is_500() -> None:
+    """An unmapped service error surfaces as a 500, not a swallowed success.
+
+    Only ``ValueError`` (→400) is caught in the route; any other exception must
+    propagate to FastAPI's default 500 handler. ``raise_server_exceptions=False``
+    lets the TestClient return that 500 instead of re-raising into the test.
+    """
+    service = Mock(spec=AgentStudioService)
+    service.save_agent.side_effect = RuntimeError("registry exploded")
+    client = _make_client(service, raise_server_exceptions=False)
+    resp = client.post(
+        "/api/agent-studio/agents",
+        json={"name": "Boom", "role": "Explodes"},
+    )
+    assert resp.status_code == 500
 
 
 def test_default_dependency_returns_module_service() -> None:

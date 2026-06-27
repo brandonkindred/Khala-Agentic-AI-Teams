@@ -116,8 +116,8 @@ class AgentStudioConversationStore:
               reference to internal mutable state past the lock; mutating it can't
               race with concurrent ``append_message`` / ``set_definition``.
               Mutations must go through the store's methods. (The ``messages`` list
-              is copied but its ``ConversationMessage`` elements are shared — safe
-              because they are treated as immutable.)
+              is copied; its ``ConversationMessage`` elements are shared but
+              **frozen**, so they can't be mutated through the snapshot.)
         """
         with self._lock:
             record = self._records.get(conversation_id)
