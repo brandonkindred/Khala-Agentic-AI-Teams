@@ -6,12 +6,11 @@ Uses only shared.git_utils and shared.repo_writer. No frontend_team code.
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from software_engineering_team.shared.branch_utils import make_branch_suffix, make_slug
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
@@ -37,30 +36,6 @@ class _FilesPayload:
         self.gitignore_entries: list[str] = []
 
 
-def _make_slug(task_id: str, task_title: str) -> str:
-    """Return the stable branch/commit scope slug for a delivery task."""
-    return re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
-
-
-def _make_task_id_slug(task_id: str) -> str:
-    """Return a branch-safe task-id slug for feature branch names."""
-    return re.sub(r"[^a-z0-9-]+", "-", (task_id or "task").lower()).strip("-")[:20] or "task"
-
-
-def _make_branch_suffix(task_id: str, task_title: str) -> str:
-    """Return the branch suffix used by ``create_feature_branch``.
-
-    Appends a stable short hash of the raw task id so two distinct tasks whose
-    slugs collide (e.g. both reduce to ``task-task``) never resolve to the same
-    branch — ``create_feature_branch`` deletes-and-recreates an existing branch,
-    so a collision would silently destroy another task's unmerged handoff branch.
-    The hash is deterministic per task id, so retries of the same task reuse it.
-    """
-    base = f"{_make_task_id_slug(task_id)}-{_make_slug(task_id, task_title)}"
-    digest = hashlib.sha1((task_id or "task").encode("utf-8")).hexdigest()[:8]
-    return f"{base}-{digest}"
-
-
 def _cleanup_handoff_failure(repo_path: Path, branch_name: str, *, created_branch: bool) -> None:
     """Return to development and remove a newly-created failed handoff branch."""
     checkout_branch(repo_path, DEVELOPMENT_BRANCH)
@@ -83,8 +58,8 @@ def _prepare_handoff_branch(
         result.summary = "No files to deliver."
         return result
     result.delivered_files = sorted(deliver_files)
-    slug = _make_slug(task_id, task_title)
-    branch_suffix = _make_branch_suffix(task_id, task_title)
+    slug = make_slug(task_id, task_title)
+    branch_suffix = make_branch_suffix(task_id, task_title)
     branch_name = feature_branch_name
     created_branch = False
     if branch_name:
@@ -228,8 +203,8 @@ def run_deliver(
             feature_branch_name=feature_branch_name,
         )
 
-    slug = _make_slug(task_id, task_title)
-    branch_suffix = _make_branch_suffix(task_id, task_title)
+    slug = make_slug(task_id, task_title)
+    branch_suffix = make_branch_suffix(task_id, task_title)
     ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, branch_suffix)
     if not ok:
         result.summary = f"Feature branch creation failed: {branch_msg}"
