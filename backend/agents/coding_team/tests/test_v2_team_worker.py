@@ -350,6 +350,20 @@ def test_task_feature_name_truncates_long_titles_with_hash() -> None:
     assert len(name.rsplit("-", 1)[-1]) == 8
 
 
+def test_task_feature_name_disambiguates_punctuation_only_collisions() -> None:
+    """Task ids that slug identically still get distinct branch names via the id hash."""
+    name_a = worker_mod._task_feature_name(Task(id="api.v1", title="Build API"))
+    name_b = worker_mod._task_feature_name(Task(id="api-v1", title="Build API"))
+
+    # Same human-readable slug prefix, but the trailing task-id hash keeps them apart so
+    # create_feature_branch cannot clobber one task's unmerged branch with the other's.
+    assert name_a != name_b
+    assert name_a.startswith("api-v1-")
+    assert name_b.startswith("api-v1-")
+    # Stable per task id: a retry of the same task reuses the same branch name.
+    assert worker_mod._task_feature_name(Task(id="api.v1", title="Build API")) == name_a
+
+
 def test_v2_worker_uses_final_files_when_deliver_result_has_no_file_list(
     tmp_path, monkeypatch
 ) -> None:

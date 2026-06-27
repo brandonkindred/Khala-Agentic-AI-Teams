@@ -166,16 +166,21 @@ def _task_feature_name(task: Any) -> str:
         task: Coding-team task-like object with an id and optional title.
 
     Returns:
-        A git-branch-safe slug with a hash suffix when truncation is required.
+        A git-branch-safe slug ending in a stable task-id hash.
+
+    The hash is appended unconditionally (not only on truncation): the slug regex
+    collapses punctuation, so two distinct task ids that differ only by punctuation
+    (e.g. ``api.v1`` and ``api-v1``) would otherwise produce the same branch name —
+    and ``create_feature_branch`` deletes-and-recreates an existing branch on
+    collision, discarding the other task's unmerged handoff branch. The digest is
+    derived from the raw task id, so retries of the same task reuse the same branch.
     """
     task_id = str(getattr(task, "id", "") or "task").strip() or "task"
     title = str(getattr(task, "title", "") or "").strip()
     source = f"{task_id}-{title}" if title and title != task_id else task_id
     slug = _BRANCH_SLUG_RE.sub("-", source.lower()).strip("-_")
     slug = slug or _BRANCH_SLUG_RE.sub("-", task_id.lower()).strip("-_") or "task"
-    if len(slug) <= _MAX_FEATURE_SLUG_LENGTH:
-        return slug
-    digest = hashlib.sha1(slug.encode("utf-8")).hexdigest()[:8]
+    digest = hashlib.sha1(task_id.encode("utf-8")).hexdigest()[:8]
     prefix = slug[: _MAX_FEATURE_SLUG_LENGTH - len(digest) - 1].rstrip("-_") or "task"
     return f"{prefix}-{digest}"
 

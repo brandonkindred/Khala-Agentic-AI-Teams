@@ -402,6 +402,7 @@ _BACKEND_TEAM_ALIASES = {
     "springboot",
     "spring_boot",
     "express",
+    "express_js",
     "postgres",
     "postgresql",
     "mysql",
@@ -424,10 +425,13 @@ _FRONTEND_TEAM_ALIASES = {
     # Concrete frontend languages/frameworks a Tech Lead may name as the target_team
     # instead of the canonical "frontend_v2". Unambiguous tech tokens only.
     "angular",
+    "angular_js",
     "react",
     "reactjs",
+    "react_js",
     "vue",
     "vuejs",
+    "vue_js",
     "svelte",
     "typescript",
     "javascript",
