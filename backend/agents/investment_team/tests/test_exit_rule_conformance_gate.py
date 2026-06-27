@@ -299,6 +299,28 @@ def test_trailing_replay_enabled_but_no_bars_skips() -> None:
     assert sl and "check not run" in sl[0].details
 
 
+def test_trailing_replay_not_run_for_intraday_timeframe() -> None:
+    """Trade dates are stored date-only, which only addresses daily bars. On an
+    intraday timeframe the replay is scoped out with an explicit info result
+    (rather than silently skipping every trade as unmatched/malformed), even over
+    bars that would otherwise surface a leak.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-09")],
+        diagnostics=_diagnostics(),  # engine never fired (would warn on 1d)
+        config=_replay_config(),
+        market_data=_trailing_high_bars(),
+        timeframe="1h",
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+    sl = [r for r in results if "StopLossRule(basis=" in r.details]
+    assert sl and "intraday timeframe '1h'" in sl[0].details
+    assert "trailing replay:" not in sl[0].details  # the daily replay summary never ran
+
+
 def test_trailing_replay_known_good_run_passes() -> None:
     """Engine fired on time: floor breached on d2, position closed on d3 (the
     next-bar fill). No earlier breach → info, no warning.

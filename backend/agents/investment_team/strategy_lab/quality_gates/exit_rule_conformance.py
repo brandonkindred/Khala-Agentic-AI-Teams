@@ -119,7 +119,12 @@ class ExitRuleConformanceGate(GateResultsMixin):
             for rule in stop_losses:
                 results.append(
                     self._check_stop_loss(
-                        rule, trades, firings_by_symbol, config=config, market_data=market_data
+                        rule,
+                        trades,
+                        firings_by_symbol,
+                        config=config,
+                        market_data=market_data,
+                        timeframe=timeframe,
                     )
                 )
 
@@ -214,6 +219,7 @@ class ExitRuleConformanceGate(GateResultsMixin):
         *,
         config: BacktestConfig,
         market_data: Optional[Mapping[str, Sequence[OHLCVBar]]] = None,
+        timeframe: str = "1d",
     ) -> QualityGateResult:
         """Reconcile engine-attributed below-floor trades against per-symbol
         ``stop_loss`` emission firings.
@@ -221,7 +227,9 @@ class ExitRuleConformanceGate(GateResultsMixin):
         Preconditions: ``rule`` is a ``StopLossRule``; ``trades`` is the run's
         closed-trade ledger; ``firings_by_symbol`` is the emission-time per-symbol
         firing telemetry (``symbol -> rule_kind -> count``). ``config`` is the run
-        config; ``market_data`` (when provided) maps symbol -> ascending bar series.
+        config; ``market_data`` (when provided) maps symbol -> ascending bar series;
+        ``timeframe`` is the run's bar cadence (the trailing replay runs only on
+        daily ``"1d"`` bars — see the trailing branch below).
         Postconditions: returns a critical result iff some symbol's
         ``engine_exit:stop_loss`` below-floor trade count exceeds its emission
         firing count (a real enforcement/bookkeeping leak); otherwise an info
@@ -250,6 +258,22 @@ class ExitRuleConformanceGate(GateResultsMixin):
         """
         if rule.basis != "entry_price":
             if config.exit_rule_trailing_replay_enabled and market_data:
+                # The replay matches trades to bars by date string. Trade dates
+                # are stored date-only (``entry_timestamp[:10]`` in the fill
+                # simulator), which lines up with daily bars but NOT intraday
+                # ones: on an intraday timeframe the cached bars are finer-grained
+                # (full timestamps or several bars per calendar day), so a
+                # date-only key can't address a specific bar. Rather than silently
+                # skip/“malformed” every intraday trade, scope the replay to daily
+                # bars and say so. Full intraday support would require persisting
+                # fill timestamps on ``TradeRecord`` (a separate enhancement).
+                if timeframe != "1d":
+                    return self._info(
+                        f"StopLossRule(basis={rule.basis!r}) trailing replay not run for "
+                        f"intraday timeframe {timeframe!r} — trade dates are date-only while "
+                        "intraday bars are finer-grained, so reliable bar matching needs full "
+                        "fill timestamps. Supported on daily ('1d') bars."
+                    )
                 return self._check_stop_loss_trailing_replay(rule, trades, market_data)
             return self._info(
                 f"StopLossRule(basis={rule.basis!r}) ledger-leak check not run "
