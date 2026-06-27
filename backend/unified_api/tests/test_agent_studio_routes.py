@@ -275,6 +275,22 @@ def test_save_agent_seeds_states_when_omitted(client: TestClient) -> None:
     assert [s["key"] for s in states] == ["planning", "executing", "researching"]
 
 
+def test_save_agent_normalizes_partial_states(client: TestClient) -> None:
+    """An explicit partial/empty states list is normalized to all three on save."""
+    resp = client.post(
+        "/api/agent-studio/agents",
+        json={
+            "name": "Partial",
+            "role": "r",
+            "states": [{"key": "planning", "label": "Planning", "system_prompt": "EDITED"}],
+        },
+    )
+    assert resp.status_code == 200
+    states = resp.json()["manifest"]["states"]
+    assert [s["key"] for s in states] == ["planning", "executing", "researching"]
+    assert states[0]["system_prompt"] == "EDITED"
+
+
 def test_clone_from_registry_returns_states(client: TestClient) -> None:
     """A cloned draft carries the three operating states (back-filled for legacy)."""
     resp = client.post("/api/agent-studio/agents/from-registry/blogging.planner")

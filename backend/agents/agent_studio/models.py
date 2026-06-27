@@ -7,13 +7,13 @@ endpoint consumes. All other models are request/response envelopes.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from agent_registry.models import AgentManifest
 
-from .agent_states import default_agent_states
+from .agent_states import default_agent_states, normalize_agent_states
 
 # The two authoring modes. ``new`` builds from scratch; ``refine`` starts from a
 # clone of an existing registry agent (``cloned_from`` records the source id).
@@ -39,6 +39,15 @@ class AgentState(BaseModel):
     system_prompt: str
 
 
+# A states list that is normalized on assignment to exactly the three fixed keys
+# (one each, canonical order). The ``AfterValidator`` runs whenever ``states`` is
+# supplied explicitly — by a client POST, the clone path, or the LLM merge — so a
+# ``[]`` / partial / duplicate-keyed list can never be persisted. The
+# ``default_factory`` already yields a canonical list, so omitting ``states`` is
+# unaffected (defaults are not re-validated).
+SeededAgentStates = Annotated[list[AgentState], AfterValidator(normalize_agent_states)]
+
+
 class AgentDefinition(BaseModel):
     """The in-progress definition of one agent being authored.
 
@@ -55,10 +64,11 @@ class AgentDefinition(BaseModel):
     system_prompt: str = ""
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
-    states: list[AgentState] = Field(
+    states: SeededAgentStates = Field(
         default_factory=default_agent_states,
         description="The agent's operating states (planning/executing/researching). "
-        "Auto-seeded on creation; each state's system_prompt is editable, the key set is fixed.",
+        "Auto-seeded on creation; each state's system_prompt is editable, the key set is fixed "
+        "(a supplied list is normalized to exactly the three states).",
     )
     mode: StudioMode = "new"
     cloned_from: str | None = Field(
@@ -135,10 +145,10 @@ class SaveAgentRequest(BaseModel):
     system_prompt: str = ""
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
-    states: list[AgentState] = Field(
+    states: SeededAgentStates = Field(
         default_factory=default_agent_states,
-        description="The agent's operating states. Defaults to the three seeded states so a "
-        "client that omits them still saves an agent with planning/executing/researching.",
+        description="The agent's operating states. Omitting them seeds the three defaults; a "
+        "supplied list is normalized to exactly planning/executing/researching before save.",
     )
 
     def to_definition(self) -> AgentDefinition:

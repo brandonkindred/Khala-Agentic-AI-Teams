@@ -96,3 +96,35 @@ def default_agent_states() -> list[AgentState]:
         AgentState(key=key, label=STATE_LABELS[key], system_prompt=DEFAULT_STATE_PROMPTS[key])
         for key in STATE_ORDER
     ]
+
+
+def normalize_agent_states(states: list[AgentState]) -> list[AgentState]:
+    """Coerce an arbitrary state list into exactly the three fixed states.
+
+    The per-item ``Literal`` key locks each state's identity, but a supplied
+    ``list[AgentState]`` is otherwise unconstrained: a client or LLM could send
+    ``[]``, a partial list (missing ``executing`` / ``researching``), or duplicate
+    keys. This normalizes any such list so the fixed-key-set invariant holds before
+    the value is ever persisted — without raising, so neither the save API nor the
+    authoring conversation breaks on a partial emission.
+
+    For each canonical key in ``STATE_ORDER`` it keeps the supplied state's
+    ``system_prompt`` (last wins on duplicates), or the default prompt when absent,
+    and always stamps the canonical label (labels are display-only, not editable).
+
+    Postconditions:
+        * Returns exactly ``len(STATE_ORDER)`` states whose keys equal
+          ``STATE_ORDER`` in order — one of each fixed key, no duplicates.
+    """
+    from .models import AgentState
+
+    # Last occurrence of a key wins, so a duplicate edit collapses to one state.
+    supplied_prompts = {s.key: s.system_prompt for s in states}
+    return [
+        AgentState(
+            key=key,
+            label=STATE_LABELS[key],
+            system_prompt=supplied_prompts.get(key, DEFAULT_STATE_PROMPTS[key]),
+        )
+        for key in STATE_ORDER
+    ]

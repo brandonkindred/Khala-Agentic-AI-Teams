@@ -65,6 +65,29 @@ def test_agent_state_rejects_unknown_key() -> None:
         AgentState(key="bogus", label="Bogus", system_prompt="x")
 
 
+def test_definition_normalizes_explicit_partial_states() -> None:
+    # Supplying a partial/empty/duplicate list must not bypass the fixed key set —
+    # the AfterValidator normalizes it to exactly the three states on construction.
+    d = AgentDefinition(name="a", role="b", states=[])
+    assert [s.key for s in d.states] == list(STATE_ORDER)
+
+    partial = AgentDefinition(
+        states=[AgentState(key="executing", label="Executing", system_prompt="EDIT")]
+    )
+    assert [s.key for s in partial.states] == list(STATE_ORDER)
+    # The supplied edit survives in its canonical slot.
+    assert partial.states[1].system_prompt == "EDIT"
+
+
+def test_save_request_normalizes_explicit_partial_states() -> None:
+    # The save surface is the one a thin client/LLM hits directly — normalize there
+    # too, so build_studio_agent_manifest never persists a partial list.
+    req = SaveAgentRequest(name="a", role="b", states=[])
+    assert [s.key for s in req.states] == list(STATE_ORDER)
+    definition = req.to_definition()
+    assert [s.key for s in definition.states] == list(STATE_ORDER)
+
+
 def test_save_request_seeds_states_and_to_definition_carries_edits() -> None:
     # A save request defaults to the three seeded states...
     assert [s.key for s in SaveAgentRequest().states] == list(STATE_ORDER)
