@@ -16,7 +16,8 @@ class FakeRegistry:
 
     Satisfies the :class:`agent_studio.service.RegistryLike` protocol. ``seed``
     pre-loads agents that already exist (clone/refine sources); ``register``
-    records agents saved during the test.
+    records agents saved during the test. On an id collision, ``register`` wins
+    over ``seed`` (see :meth:`get`), so a save is never shadowed by a seed.
     """
 
     def __init__(self) -> None:
@@ -27,7 +28,11 @@ class FakeRegistry:
         self._seed[manifest.id] = manifest
 
     def get(self, agent_id: str) -> AgentManifest | None:
-        return self._seed.get(agent_id) or self.registered.get(agent_id)
+        # `registered` (agents saved during the test) takes precedence over
+        # `_seed` (pre-existing agents) so a save is never shadowed by a seed of
+        # the same id — that would otherwise mask a test registering onto an
+        # existing id.
+        return self.registered.get(agent_id) or self._seed.get(agent_id)
 
     def register(self, manifest: AgentManifest) -> None:
         self.registered[manifest.id] = manifest

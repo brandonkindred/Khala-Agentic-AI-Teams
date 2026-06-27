@@ -32,7 +32,7 @@ import os
 import threading
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .models import AgentDefinition, ConversationMessage, StudioMode
 
@@ -70,7 +70,8 @@ class AgentStudioConversationStore:
         resolved = (
             max_conversations if max_conversations is not None else _default_max_conversations()
         )
-        assert resolved > 0, "max_conversations must be positive"
+        if resolved <= 0:
+            raise ValueError(f"max_conversations must be positive, got {resolved}")
         self._max = resolved
         # OrderedDict so the oldest entry is cheap to evict (FIFO).
         self._records: OrderedDict[str, ConversationRecord] = OrderedDict()
@@ -100,9 +101,17 @@ class AgentStudioConversationStore:
         return conversation_id
 
     def get(self, conversation_id: str) -> ConversationRecord | None:
-        """Return the record, or ``None`` if the id is unknown."""
+        """Return a snapshot of the record, or ``None`` if the id is unknown.
+
+        Postconditions:
+            * The returned record is a **copy** with its own ``messages`` list, so
+              callers never hold a reference to internal mutable state past the
+              lock — mutating it can't race with concurrent ``append_message`` /
+              ``set_definition``. Mutations must go through the store's methods.
+        """
         with self._lock:
-            return self._records.get(conversation_id)
+            record = self._records.get(conversation_id)
+            return replace(record, messages=list(record.messages)) if record is not None else None
 
     def append_message(self, conversation_id: str, role: str, content: str) -> None:
         """Append one message.

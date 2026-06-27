@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from agent_studio.models import AgentDefinition
+from agent_studio.models import AgentDefinition, ConversationMessage
 from agent_studio.store import AgentStudioConversationStore, _default_max_conversations
 
 
@@ -60,8 +60,19 @@ def test_bounded_store_evicts_oldest() -> None:
 
 
 def test_invalid_max_conversations_rejected() -> None:
-    with pytest.raises(AssertionError):
+    # Explicit raise (not assert) so it survives `python -O`.
+    with pytest.raises(ValueError):
         AgentStudioConversationStore(max_conversations=0)
+
+
+def test_get_returns_snapshot_not_internal_record() -> None:
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition())
+    store.append_message(cid, "user", "hi")
+    snap = store.get(cid)
+    # Mutating the returned snapshot must not touch the store's internal state.
+    snap.messages.append(ConversationMessage(role="user", content="injected"))
+    assert len(store.get(cid).messages) == 1
 
 
 def test_default_max_conversations_from_env(monkeypatch) -> None:

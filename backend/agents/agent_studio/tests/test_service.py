@@ -105,6 +105,35 @@ def test_send_message_without_block_leaves_definition() -> None:
     assert state.suggested_questions == []
 
 
+def test_send_message_assistant_failure_leaves_no_partial_message() -> None:
+    # If the assistant raises, the user message must NOT be persisted (it's
+    # appended only after a successful respond), so the conversation isn't left
+    # with a dangling user turn and no reply.
+    class _BoomAssistant:
+        def respond(self, *_args):
+            raise RuntimeError("llm down")
+
+    store = AgentStudioConversationStore()
+    svc = AgentStudioService(assistant=_BoomAssistant(), store=store, registry_getter=FakeRegistry)
+    started = svc.start_conversation("new", None, None)  # greeting only
+    cid = started.conversation_id
+    before = len(store.get(cid).messages)
+    with pytest.raises(RuntimeError):
+        svc.send_message(cid, "hi")
+    assert len(store.get(cid).messages) == before
+
+
+def test_fake_registry_register_takes_precedence_over_seed() -> None:
+    # Regression for the test double: a registered agent must not be shadowed by
+    # a seed of the same id.
+    registry = FakeRegistry()
+    seeded = seed_manifest(agent_id="dup.id", summary="seeded")
+    registry.seed(seeded)
+    replacement = seed_manifest(agent_id="dup.id", summary="registered")
+    registry.register(replacement)
+    assert registry.get("dup.id").summary == "registered"
+
+
 # ── clone_from_registry ──────────────────────────────────────────────────────
 
 

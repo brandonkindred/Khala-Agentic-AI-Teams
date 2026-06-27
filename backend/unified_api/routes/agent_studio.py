@@ -50,6 +50,12 @@ ServiceDep = Annotated[AgentStudioService, Depends(get_agent_studio_service)]
 
 @router.post("/conversations", response_model=ConversationStateResponse)
 def start_conversation(req: StartConversationRequest, service: ServiceDep) -> ConversationStateResponse:
+    """Start an authoring conversation in ``new`` or ``refine`` mode.
+
+    Returns the initial conversation state (greeting + seeded definition).
+    Maps the service error contract to HTTP: ``ValueError`` → 400 (e.g. ``refine``
+    without a source), ``LookupError`` → 404 (unknown source agent).
+    """
     try:
         return service.start_conversation(req.mode, req.source_agent_id, req.initial_message)
     except ValueError as exc:
@@ -60,14 +66,27 @@ def start_conversation(req: StartConversationRequest, service: ServiceDep) -> Co
 
 @router.post("/conversations/{conversation_id}/messages", response_model=ConversationStateResponse)
 def send_message(conversation_id: str, req: SendMessageRequest, service: ServiceDep) -> ConversationStateResponse:
+    """Send a user message; the assistant updates the draft and replies.
+
+    Returns the updated conversation state. Maps the service error contract:
+    ``ValueError`` → 400 (invalid input), ``LookupError`` → 404 (unknown
+    conversation) — both branches present so neither escapes as a 500.
+    """
     try:
         return service.send_message(conversation_id, req.message)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/agents/from-registry/{agent_id}", response_model=AgentDefinition)
 def clone_from_registry(agent_id: str, service: ServiceDep) -> AgentDefinition:
+    """Clone a registered agent into an editable refine-mode draft.
+
+    Returns the new draft definition (the source manifest is never mutated).
+    ``LookupError`` → 404 when ``agent_id`` names no registered agent.
+    """
     try:
         return service.clone_from_registry(agent_id)
     except LookupError as exc:
@@ -76,6 +95,12 @@ def clone_from_registry(agent_id: str, service: ServiceDep) -> AgentDefinition:
 
 @router.post("/agents", response_model=SaveAgentResponse)
 def save_agent(req: SaveAgentRequest, service: ServiceDep) -> SaveAgentResponse:
+    """Save + register a finished definition into the live ``agent_registry``.
+
+    Returns the registered manifest plus ``created`` (``True`` for a new agent,
+    ``False`` when an existing same-id agent was updated in place). ``ValueError``
+    → 400 when the definition is not ready (missing required fields).
+    """
     try:
         manifest, created = service.save_agent(req.to_definition())
     except ValueError as exc:

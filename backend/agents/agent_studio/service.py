@@ -100,9 +100,11 @@ class AgentStudioService:
         if record is None:  # callers validate first; defensive guard
             raise RuntimeError("Conversation record unexpectedly missing")  # pragma: no cover
         history = [(m.role, m.content) for m in record.messages]
-        self._store.append_message(conversation_id, "user", message)
-
+        # Call the assistant first, then persist the user turn + reply together.
+        # If the assistant raises, the conversation isn't left with a dangling
+        # user message and no reply (consistent state on failure / retry).
         reply, updated, suggestions = self._assistant.respond(history, record.definition, message)
+        self._store.append_message(conversation_id, "user", message)
         self._store.append_message(conversation_id, "assistant", reply)
         if updated is not None:
             self._store.set_definition(conversation_id, updated)

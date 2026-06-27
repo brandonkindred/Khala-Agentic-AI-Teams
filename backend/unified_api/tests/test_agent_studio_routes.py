@@ -127,6 +127,23 @@ def test_send_message_rejects_empty_body(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
+def test_send_message_value_error_is_400() -> None:
+    # The handler must map a service ValueError to 400 (not let it 500).
+    from unified_api.routes.agent_studio import get_agent_studio_service, router
+
+    class _BoomService:
+        def send_message(self, *_args):
+            raise ValueError("bad input")
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_agent_studio_service] = lambda: _BoomService()
+    client = TestClient(app)
+    resp = client.post("/api/agent-studio/conversations/x/messages", json={"message": "hi"})
+    app.dependency_overrides.clear()
+    assert resp.status_code == 400
+
+
 def test_clone_from_registry_endpoint(client: TestClient) -> None:
     resp = client.post("/api/agent-studio/agents/from-registry/blogging.planner")
     assert resp.status_code == 200

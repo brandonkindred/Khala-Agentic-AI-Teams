@@ -252,10 +252,12 @@ class AgentDesignerAgent:
         server-built current-definition JSON is the only trusted block.
         """
         parts: list[str] = []
-        # Include the current definition once any content field is set — not just
-        # name/role/tools — so context built only from description, tags, prompt, or
-        # schemas isn't dropped on the next turn.
-        if any(getattr(current, f) for f in _CONTENT_FIELDS):
+        # Include the current definition once any content field differs from its
+        # default — not by truthiness — so context built only from
+        # description/tags/prompt/schemas (including an explicitly empty `{}`/`[]`,
+        # which is falsy but non-default) isn't dropped on the next turn.
+        _defaults = AgentDefinition()
+        if any(getattr(current, f) != getattr(_defaults, f) for f in _CONTENT_FIELDS):
             parts.append(
                 "Current agent definition (trusted, server-provided):\n```json\n"
                 + json.dumps(current.model_dump(mode="json"), indent=2)

@@ -92,6 +92,13 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
 
     The source manifest is never mutated — this returns a *new* definition.
 
+    Only the fields the manifest carries are cloned (name → ``<name>.copy``,
+    ``summary`` → role, description, tags, cognition tools). ``system_prompt``,
+    ``input_schema``, and ``output_schema`` are **not** transferred because the
+    registry manifest does not store them (inputs/outputs are dotted
+    ``schema_ref``s, not inline schemas) — consistent with the deferred
+    "authored inline schemas" follow-up. The refine conversation re-elicits them.
+
     Postconditions:
         * ``mode == "refine"`` and ``cloned_from == manifest.id``.
     """

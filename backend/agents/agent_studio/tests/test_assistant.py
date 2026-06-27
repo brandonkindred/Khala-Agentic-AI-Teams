@@ -2,6 +2,14 @@
 
 A scripted completion fn replaces the live LLM so the parsing/merge contract is
 exercised deterministically.
+
+The fenced-block parsers and the merge helper (``_parse_agent_block``,
+``_parse_suggestions``, ``_strip_code_blocks``, ``_merge_definition``,
+``_neutralize``) are unit-tested **directly**: this module's whole job is to
+extract structured blocks from free-form LLM prose, so the parsers' many edge
+cases (malformed JSON, wrong types, forged delimiters) are far cheaper and more
+precise to pin down at the function boundary than by round-tripping every case
+through ``respond``. ``respond`` itself is also covered end-to-end below.
 """
 
 from __future__ import annotations
@@ -195,6 +203,13 @@ def test_build_prompt_wraps_history_in_delimiters() -> None:
     )
     assert "<history>" in prompt and "</history>" in prompt
     assert "user: hi" in prompt
+
+
+def test_build_prompt_includes_definition_for_explicit_empty_schema() -> None:
+    # input_schema={} is falsy but differs from the default (None) — must still
+    # include the current-definition block (compared against defaults, not truthiness).
+    prompt = AgentDesignerAgent._build_prompt([], AgentDefinition(input_schema={}), "go")
+    assert "Current agent definition" in prompt
 
 
 def test_build_prompt_neutralizes_injected_delimiters() -> None:
