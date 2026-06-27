@@ -3780,6 +3780,9 @@ class StrategyLabOrchestrator:
             as_of=as_of,
             legacy_fingerprint=metrics.dataset_fingerprint,
         )
+        # Materialise the per-rule findings once — consumed both by the
+        # backtest record and the rule-implementation map below.
+        normalized_alignment_findings = list(alignment_findings or [])
         backtest_record = BacktestRecord(
             backtest_id=backtest_id,
             strategy_id=spec.strategy_id,
@@ -3794,7 +3797,7 @@ class StrategyLabOrchestrator:
             requested_symbols=requested_symbols,
             fetched_symbols=fetched_symbols,
             data_provenance=data_provenance,
-            alignment_findings=list(alignment_findings or []),
+            alignment_findings=normalized_alignment_findings,
         )
 
         design_context = design_context or _DesignPersistContext()
@@ -3810,7 +3813,7 @@ class StrategyLabOrchestrator:
             )
             for g in all_gate_results
         ]
-        rule_impl_map = _build_rule_implementation_map(spec, list(alignment_findings or []), code)
+        rule_impl_map = _build_rule_implementation_map(spec, normalized_alignment_findings, code)
         lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
         loop_telemetry = _finalize_loop_telemetry(
             design_context,
