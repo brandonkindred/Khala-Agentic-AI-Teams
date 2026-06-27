@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 from software_engineering_team.shared.git_utils import (
+    commit_paths,
     ensure_development_branch,
     initialize_new_repo,
 )
@@ -21,12 +22,15 @@ from ..models import SetupResult
 logger = logging.getLogger(__name__)
 
 
-def _ensure_linting_configured(path: Path) -> bool:
+def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
     """Verify that a Python linter is configured in the project.
 
     Checks for ruff.toml, [tool.ruff] in pyproject.toml, .flake8, or [flake8]
     in setup.cfg. If none are found, creates a minimal pyproject.toml with ruff
     configuration so linting never silently skips.
+
+    Side effect: every repo-relative path this call creates or modifies is added
+    to ``written`` so the caller can commit exactly what setup touched.
     """
     ruff_toml = path / "ruff.toml"
     pyproject = path / "pyproject.toml"
@@ -74,17 +78,22 @@ def _ensure_linting_configured(path: Path) -> bool:
                 'ignore = ["E501"]\n'
             )
             pyproject.write_text(existing + ruff_section, encoding="utf-8")
+            written.add("pyproject.toml")
     else:
         pyproject.write_text(_MINIMAL_PYPROJECT_TOML, encoding="utf-8")
+        written.add("pyproject.toml")
     return True
 
 
-def _ensure_testing_configured(path: Path) -> bool:
+def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
     """Verify that a Python test framework is configured in the project.
 
     Checks for pytest.ini, [tool.pytest] in pyproject.toml, or a tests/
     directory. If missing, creates a minimal pytest configuration and test
     directory so tests never silently skip.
+
+    Side effect: every repo-relative path this call creates or modifies is added
+    to ``written`` so the caller can commit exactly what setup touched.
     """
     pytest_ini = path / "pytest.ini"
     pyproject = path / "pyproject.toml"
@@ -109,12 +118,14 @@ def _ensure_testing_configured(path: Path) -> bool:
         init_file = tests_dir / "__init__.py"
         if not init_file.exists():
             init_file.write_text("", encoding="utf-8")
+            written.add("tests/__init__.py")
         test_file = tests_dir / "test_main.py"
         if not test_file.exists():
             test_file.write_text(
                 '"""Minimal test so pytest runs."""\n\ndef test_health():\n    assert True\n',
                 encoding="utf-8",
             )
+            written.add("tests/test_main.py")
 
     # Ensure pytest config exists
     if not has_pytest_config:
@@ -126,14 +137,68 @@ def _ensure_testing_configured(path: Path) -> bool:
                     '\n[tool.pytest.ini_options]\naddopts = "-v"\ntestpaths = ["tests"]\n'
                 )
                 pyproject.write_text(existing + pytest_section, encoding="utf-8")
+                written.add("pyproject.toml")
         else:
             # If pyproject.toml doesn't exist yet (unlikely after linting setup), use pytest.ini
             pytest_ini.write_text(
                 "[pytest]\naddopts = -v\ntestpaths = tests\n",
                 encoding="utf-8",
             )
+            written.add("pytest.ini")
 
     return True
+
+
+def _commit_scaffolding(path: Path, scaffolding_paths: set[str]) -> None:
+    """Commit only the lint/test scaffolding setup wrote onto the current branch.
+
+    Setup runs on ``development`` and may write linting/testing config and a
+    ``tests/`` skeleton. Leaving those changes uncommitted means a later
+    revision pass regenerates them as *untracked* files on ``development``; the
+    development agent's subsequent ``git checkout`` of the review feature branch
+    (which already tracks those same paths) then aborts because the checkout
+    would overwrite untracked files, failing the task before it can apply the
+    requested revision. Committing the scaffolding to ``development`` keeps the
+    working tree clean and makes the idempotent ``_ensure_*_configured`` checks
+    a no-op on every subsequent pass.
+
+    Only the paths setup actually created/updated this run are committed (scoped
+    via :func:`commit_paths`), so unrelated uncommitted work that happened to be
+    in the tree is never swept into the scaffolding commit — while a config file
+    setup edited is still committed even if it was already dirty for unrelated
+    reasons, since leaving setup's edit uncommitted would re-block the checkout.
+
+    Preconditions:
+        - ``path`` is a git repository checked out on the development branch.
+        - ``scaffolding_paths`` are repo-relative paths setup wrote this run.
+
+    Postconditions:
+        - The named scaffolding paths are committed (or no-op when empty/clean);
+          other working-tree changes are left untouched. A failed commit never
+          fails setup, but it is logged (not silently swallowed) so the later
+          feature-branch checkout conflict it can cause stays diagnosable.
+    """
+    if not scaffolding_paths:
+        return
+    try:
+        committed, detail = commit_paths(
+            path,
+            sorted(scaffolding_paths),
+            "chore: configure linting and testing scaffolding",
+        )
+    except Exception as e:  # noqa: BLE001 - scaffolding commit is best-effort
+        logger.warning("Could not commit setup scaffolding: %s", e)
+        return
+    if not committed:
+        # A non-raising failure (e.g. a repo pre-commit/commit-msg hook rejecting
+        # the synthetic commit) leaves the scaffolding uncommitted; surface it so
+        # the later feature-branch checkout conflict this guards against is
+        # diagnosable instead of silently reappearing.
+        logger.warning(
+            "Setup scaffolding was not committed (%s); it remains uncommitted on the "
+            "current branch and may cause a later feature-branch checkout conflict.",
+            detail,
+        )
 
 
 def run_setup(
@@ -171,8 +236,10 @@ def run_setup(
             _ensure_readme_with_title(path, task_title)
 
         # Ensure linting and testing are configured before any coding begins
-        result.linting_configured = _ensure_linting_configured(path)
-        result.testing_configured = _ensure_testing_configured(path)
+        scaffolding: set[str] = set()
+        result.linting_configured = _ensure_linting_configured(path, scaffolding)
+        result.testing_configured = _ensure_testing_configured(path, scaffolding)
+        _commit_scaffolding(path, scaffolding)
 
         result.summary = f"Initialized repo: {msg}"
         logger.info("Setup: %s", result.summary)
@@ -191,8 +258,10 @@ def run_setup(
         result.readme_created = True
 
     # Ensure linting and testing are configured before any coding begins
-    result.linting_configured = _ensure_linting_configured(path)
-    result.testing_configured = _ensure_testing_configured(path)
+    scaffolding: set[str] = set()
+    result.linting_configured = _ensure_linting_configured(path, scaffolding)
+    result.testing_configured = _ensure_testing_configured(path, scaffolding)
+    _commit_scaffolding(path, scaffolding)
 
     result.summary = msg or "Repo ready; on development branch."
     logger.info(
