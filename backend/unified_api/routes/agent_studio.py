@@ -77,7 +77,7 @@ def clone_from_registry(agent_id: str, service: ServiceDep) -> AgentDefinition:
 @router.post("/agents", response_model=SaveAgentResponse)
 def save_agent(req: SaveAgentRequest, service: ServiceDep) -> SaveAgentResponse:
     try:
-        manifest = service.save_agent(req.to_definition())
+        manifest, created = service.save_agent(req.to_definition())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return SaveAgentResponse(agent_id=manifest.id, manifest=manifest)
+    return SaveAgentResponse(agent_id=manifest.id, manifest=manifest, created=created)

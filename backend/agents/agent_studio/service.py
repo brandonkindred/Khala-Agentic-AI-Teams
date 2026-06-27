@@ -121,14 +121,24 @@ class AgentStudioService:
             raise LookupError(f"Unknown source agent: {agent_id}")
         return clone_from_manifest(manifest)
 
-    def save_agent(self, definition: AgentDefinition) -> AgentManifest:
+    def save_agent(self, definition: AgentDefinition) -> tuple[AgentManifest, bool]:
         """Build, register, and return the manifest for a finished definition.
+
+        The registry id is derived from ``definition.name`` (see
+        :func:`registration.studio_agent_id`), so the agent **name is its
+        identity**: re-saving a definition with the same name updates that agent
+        in place rather than creating a second entry. To keep that overwrite from
+        being silent, the returned ``created`` flag tells the caller whether a new
+        agent was registered (``True``) or an existing same-id one was replaced
+        (``False``) — the UI surfaces this so a same-name save is never a silent
+        clobber.
 
         Preconditions:
             * ``definition`` is ready (``definition.missing_required()`` is empty).
         Postconditions:
-            * The manifest is registered (resolvable via ``get(manifest.id)``) and
-              invokable via the shared generated-agent runtime.
+            * The manifest is registered (resolvable via ``get(manifest.id)``).
+              Returns ``(manifest, created)`` where ``created`` is ``True`` iff no
+              agent with ``manifest.id`` existed before this call.
         """
         missing = definition.missing_required()
         if missing:
@@ -136,8 +146,10 @@ class AgentStudioService:
                 f"Agent is not ready to save — missing required fields: {', '.join(missing)}"
             )
         manifest = build_studio_agent_manifest(definition)
-        self._get_registry().register(manifest)
-        return manifest
+        registry = self._get_registry()
+        created = registry.get(manifest.id) is None
+        registry.register(manifest)
+        return manifest, created
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

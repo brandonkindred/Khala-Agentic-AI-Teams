@@ -149,6 +149,16 @@ def test_save_agent_registers(client: TestClient, registry: FakeRegistry) -> Non
     body = resp.json()
     assert body["agent_id"] in registry.registered
     assert body["manifest"]["team"] == "agent_studio"
+    assert body["created"] is True
+
+
+def test_save_agent_same_name_reports_not_created(client: TestClient) -> None:
+    payload = {"name": "Dup", "role": "Does a thing"}
+    first = client.post("/api/agent-studio/agents", json=payload).json()
+    second = client.post("/api/agent-studio/agents", json={**payload, "role": "Edited"}).json()
+    assert first["created"] is True
+    assert second["created"] is False
+    assert first["agent_id"] == second["agent_id"]
 
 
 def test_save_agent_not_ready_is_400(client: TestClient) -> None:

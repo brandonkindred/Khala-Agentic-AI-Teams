@@ -120,3 +120,10 @@ class SaveAgentResponse(BaseModel):
 
     agent_id: str
     manifest: AgentManifest
+    created: bool = Field(
+        ...,
+        description=(
+            "True if a new agent was registered; False if an existing agent with the same id "
+            "(derived from the name) was updated in place. Lets the UI warn before a same-name overwrite."
+        ),
+    )

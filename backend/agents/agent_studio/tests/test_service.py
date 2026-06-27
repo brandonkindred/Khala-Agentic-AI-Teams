@@ -127,10 +127,24 @@ def test_clone_from_registry_unknown_raises_lookup_error() -> None:
 
 def test_save_agent_registers_manifest() -> None:
     svc, registry = _service()
-    manifest = svc.save_agent(AgentDefinition(name="Saver", role="Saves things"))
+    manifest, created = svc.save_agent(AgentDefinition(name="Saver", role="Saves things"))
     assert manifest.id in registry.registered
     assert registry.get(manifest.id) is manifest
     assert manifest.team == "agent_studio"
+    assert created is True
+
+
+def test_save_agent_same_name_updates_in_place_and_reports_not_created() -> None:
+    # Name is identity: a second save with the same name replaces the first
+    # (one entry), and `created` is False so the overwrite isn't silent.
+    svc, registry = _service()
+    first, created_first = svc.save_agent(AgentDefinition(name="Dup", role="v1"))
+    second, created_second = svc.save_agent(AgentDefinition(name="Dup", role="v2"))
+    assert created_first is True
+    assert created_second is False
+    assert first.id == second.id
+    assert len(registry.registered) == 1
+    assert registry.get(second.id).summary == "v2"
 
 
 def test_save_agent_not_ready_raises_value_error() -> None:
