@@ -406,19 +406,33 @@ class ExitRuleConformanceGate(GateResultsMixin):
         leaks: list[tuple[int, str, str]] = []
         replayed = 0
         skipped = 0
+        malformed = 0
         symbols_seen: set[str] = set()
         # Cache each symbol's date -> bar-index map so trades that share a symbol
-        # reuse one build instead of re-scanning the bar series per trade.
-        symbol_date_index: dict[str, dict[str, int]] = {}
+        # reuse one build instead of re-scanning the bar series per trade. The
+        # cache value is ``None`` for a symbol whose series violates the
+        # ascending-unique-date precondition (see below).
+        symbol_date_index: dict[str, Optional[dict[str, int]]] = {}
         for t in candidates:
             bars = market_data.get(t.symbol)
             if not bars:
                 skipped += 1
                 continue
-            date_to_idx = symbol_date_index.get(t.symbol)
+            if t.symbol not in symbol_date_index:
+                # Precondition: bars are in strictly-ascending, unique date order
+                # (what ``MarketDataService`` guarantees). If they are not, the
+                # date->index map would silently collide duplicate dates and the
+                # index-range walk would no longer be chronological — either could
+                # mis-detect leaks. Rather than crash the whole verification phase
+                # on one bad symbol, mark the series unreplayable and skip its
+                # trades (reported below, never silently dropped).
+                idx = {b.date: i for i, b in enumerate(bars)}
+                ascending = all(bars[i].date <= bars[i + 1].date for i in range(len(bars) - 1))
+                symbol_date_index[t.symbol] = idx if (len(idx) == len(bars) and ascending) else None
+            date_to_idx = symbol_date_index[t.symbol]
             if date_to_idx is None:
-                date_to_idx = {b.date: i for i, b in enumerate(bars)}
-                symbol_date_index[t.symbol] = date_to_idx
+                malformed += 1
+                continue
             entry_i = date_to_idx.get(t.entry_date)
             exit_i = date_to_idx.get(t.exit_date)
             if entry_i is None or exit_i is None or exit_i < entry_i:
@@ -468,9 +482,14 @@ class ExitRuleConformanceGate(GateResultsMixin):
                 hi = max(hi, bar.high)
                 lo = min(lo, bar.low)
 
-        skipped_suffix = (
-            f"; skipped {skipped} trade(s) with no matching bar window" if skipped else ""
-        )
+        suffix_parts: list[str] = []
+        if skipped:
+            suffix_parts.append(f"skipped {skipped} trade(s) with no matching bar window")
+        if malformed:
+            suffix_parts.append(
+                f"skipped {malformed} trade(s) on malformed (unsorted/duplicate-date) bar series"
+            )
+        skipped_suffix = "; " + "; ".join(suffix_parts) if suffix_parts else ""
         if leaks:
             return self._warning(
                 f"StopLossRule(basis={rule.basis!r}, pct={rule.pct}) trailing replay: "

@@ -424,6 +424,37 @@ def test_trailing_replay_detects_short_leak_via_trailing_low() -> None:
     assert "2024-01-04" in fails[0].details
 
 
+def test_trailing_replay_skips_malformed_bar_series() -> None:
+    """A bar series that violates the ascending-unique-date precondition
+    (duplicate OR unsorted dates) is unreplayable: the trade is skipped and
+    reported as malformed, never silently mis-detected as a leak.
+    """
+    duplicate = [
+        _bar("2024-01-02", high=100.0, low=100.0),
+        _bar("2024-01-03", high=110.0, low=108.0),
+        _bar("2024-01-03", high=110.0, low=104.0),  # duplicate date
+        _bar("2024-01-05", high=106.0, low=103.0),
+    ]
+    unsorted = [
+        _bar("2024-01-05", high=100.0, low=100.0),  # out of chronological order
+        _bar("2024-01-02", high=110.0, low=104.0),
+        _bar("2024-01-03", high=106.0, low=103.0),
+    ]
+    gate = ExitRuleConformanceGate()
+    for series in (duplicate, unsorted):
+        results = gate.check(
+            exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+            trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-05")],
+            diagnostics=_diagnostics(),
+            config=_replay_config(),
+            market_data={"AAA": series},
+        )
+        fails = [r for r in results if not r.passed]
+        assert fails == []
+        replay = [r for r in results if "trailing replay" in r.details]
+        assert replay and "malformed" in replay[0].details
+
+
 def _pre_entry_spike_bars() -> dict[str, list[OHLCVBar]]:
     """Long entry at 100 whose ENTRY bar prints a pre-entry high of 120. Folding
     that spike into the watermark ratchets the trailing floor (pct=0.05) to 114,
