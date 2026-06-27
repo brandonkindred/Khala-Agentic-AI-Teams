@@ -7,50 +7,19 @@ No code from ``backend_agent`` is used.
 
 from __future__ import annotations
 
-import logging
-
-from ...models import (
-    ToolAgentInput,
-    ToolAgentOutput,
-    ToolAgentPhaseInput,
-    ToolAgentPhaseOutput,
-)
-
-logger = logging.getLogger(__name__)
+from ..static_agents import StubToolAgent
 
 
-class CicdAdapterAgent:
+class CicdAdapterAgent(StubToolAgent):
     """Stub CI/CD tool agent — extend to delegate to the DevOps team."""
 
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
-
-    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        logger.info("CI/CD stub: microtask %s (not yet implemented)", inp.microtask.id)
-        return ToolAgentOutput(
-            summary="CI/CD adapter stub — no changes applied.",
-            recommendations=["Integrate with DevOps Team CI/CD agents for full support."],
-        )
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(
-            recommendations=["Include CI/CD pipeline and deployment steps in the plan."],
-            summary="CI/CD planning stub.",
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(
-            recommendations=["Validate pipeline config and build scripts."],
-            summary="CI/CD review stub.",
-        )
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(
-            recommendations=["Fix pipeline failures and dependency issues."],
-            summary="CI/CD problem-solving stub.",
-        )
-
-    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(
-            summary="CI/CD deliver stub — validate pipeline before merge.",
-        )
+    label = "CI/CD"
+    execute_summary = "CI/CD adapter stub — no changes applied."
+    execute_recommendations = ["Integrate with DevOps Team CI/CD agents for full support."]
+    plan_recommendations = ["Include CI/CD pipeline and deployment steps in the plan."]
+    plan_summary = "CI/CD planning stub."
+    review_recommendations = ["Validate pipeline config and build scripts."]
+    review_summary = "CI/CD review stub."
+    problem_solve_recommendations = ["Fix pipeline failures and dependency issues."]
+    problem_solve_summary = "CI/CD problem-solving stub."
+    deliver_summary = "CI/CD deliver stub — validate pipeline before merge."

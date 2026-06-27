@@ -9,6 +9,7 @@ Uses template-based output (not JSON) so parsing works across model providers.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -697,6 +698,169 @@ def run_code_review_phase(
     )
 
 
+@dataclass(frozen=True)
+class _AgentTestingPhaseSpec:
+    """Differences between the QA and security testing phases.
+
+    Both phases share the same shape (external agent pass + optional tool-agent
+    review + a "gate skipped" issue when neither is wired); only the labels,
+    routed :class:`ToolAgentKind`, and the skipped-gate issue differ.
+    """
+
+    phase_name: str  # ReviewIssue.source + PhaseReviewResult.phase_name
+    phase_label: str  # e.g. "QA testing" -> "<label> phase for <id>"
+    next_step: str  # logged "Next step -> <...>"
+    detail_run_msg: str
+    tool_kind: "ToolAgentKind"
+    tool_detail_msg: str
+    tool_label: str  # used in the "<label> tool agent review failed" warning
+    missing_agent_label: str  # e.g. "QA agent"
+    gate_label: str  # e.g. "QA gate"
+    missing_severity: str
+    missing_description: str
+    missing_recommendation: str
+
+
+def _run_agent_testing_phase(
+    *,
+    spec: _AgentTestingPhaseSpec,
+    task: Task,
+    microtask: Microtask,
+    files: Dict[str, str],
+    review_agent: Any,
+    agent_runner: Callable[..., List[ReviewIssue]],
+    tool_agents: Optional[Dict[ToolAgentKind, Any]],
+    repo_path: Optional[Path],
+    detail_callback: Optional[Callable[[str], None]],
+    language: str,
+) -> PhaseReviewResult:
+    """Shared QA/security testing-phase body parameterised by ``spec``.
+
+    Preconditions: when ``review_agent`` is not None, ``agent_runner`` runs it
+    over ``files`` and returns ``ReviewIssue``s.
+    Postconditions: returns a :class:`PhaseReviewResult` that fails on any
+    critical/high issue, including a synthesised "gate skipped" issue when
+    neither ``review_agent`` nor the spec's tool agent is available.
+    """
+    task_id = task.id
+    microtask_id = microtask.id
+    issues: List[ReviewIssue] = []
+
+    logger.info(
+        "[%s] %s phase for %s. Next step -> %s",
+        task_id,
+        spec.phase_label,
+        microtask_id,
+        spec.next_step,
+    )
+
+    if review_agent is not None:
+        if detail_callback:
+            detail_callback(spec.detail_run_msg)
+        issues.extend(
+            agent_runner(
+                files=files,
+                language=language,
+                task_description=f"Microtask: {microtask.description or microtask.title}",
+                task_id=task_id,
+                context=f" for microtask {microtask_id}",
+            )
+        )
+
+    has_tool_agent = bool(tool_agents and spec.tool_kind in tool_agents)
+    if has_tool_agent:
+        tool_agent = tool_agents[spec.tool_kind]
+        if hasattr(tool_agent, "review"):
+            if detail_callback:
+                detail_callback(spec.tool_detail_msg)
+            try:
+                phase_inp = ToolAgentPhaseInput(
+                    phase=Phase.REVIEW,
+                    microtask=microtask,
+                    repo_path=str(repo_path) if repo_path else "",
+                    existing_code="",
+                    spec_context=task.description or "",
+                    language=language,
+                    current_files=files,
+                    review_issues=issues,
+                    task_title=task.title or "",
+                    task_description=f"Microtask: {microtask.description or microtask.title}",
+                    task_id=task_id,
+                )
+                out = tool_agent.review(phase_inp)
+                if out.issues:
+                    issues.extend(out.issues)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] %s tool agent review failed for microtask %s: %s",
+                    task_id,
+                    spec.tool_label,
+                    microtask_id,
+                    exc,
+                )
+
+    if review_agent is None and not has_tool_agent:
+        logger.warning(
+            "[%s] %s not available for microtask %s — %s skipped",
+            task_id,
+            spec.missing_agent_label,
+            microtask_id,
+            spec.gate_label,
+        )
+        issues.append(
+            ReviewIssue(
+                source=spec.phase_name,
+                severity=spec.missing_severity,
+                description=spec.missing_description,
+                recommendation=spec.missing_recommendation,
+            )
+        )
+
+    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
+    passed = len(critical_or_high) == 0
+
+    summary = f"{spec.phase_label} phase for {microtask_id}: {len(issues)} issues ({len(critical_or_high)} critical/high). {'PASSED' if passed else 'FAILED'}"
+    logger.info("[%s] %s", task_id, summary)
+
+    return PhaseReviewResult(
+        passed=passed,
+        issues=issues,
+        summary=summary,
+        phase_name=spec.phase_name,
+    )
+
+
+_QA_TESTING_PHASE_SPEC = _AgentTestingPhaseSpec(
+    phase_name="qa",
+    phase_label="QA testing",
+    next_step="Running QA agent analysis",
+    detail_run_msg="Running QA testing...",
+    tool_kind=ToolAgentKind.TESTING_QA,
+    tool_detail_msg="Running QA tool agent review...",
+    tool_label="QA",
+    missing_agent_label="QA agent",
+    gate_label="QA gate",
+    missing_severity="high",
+    missing_description="QA agent not available — QA review was skipped. This is a quality risk.",
+    missing_recommendation="Ensure QA agent is configured before running the pipeline.",
+)
+
+_SECURITY_TESTING_PHASE_SPEC = _AgentTestingPhaseSpec(
+    phase_name="security",
+    phase_label="Security testing",
+    next_step="Running security scan",
+    detail_run_msg="Running security scan...",
+    tool_kind=ToolAgentKind.SECURITY,
+    tool_detail_msg="Running security tool agent review...",
+    tool_label="Security",
+    missing_agent_label="Security agent",
+    gate_label="security gate",
+    missing_severity="critical",
+    missing_description="Security agent not available — security review was skipped. This is a critical risk.",
+    missing_recommendation="Ensure security agent is configured before running the pipeline.",
+)
+
+
 def run_qa_testing_phase(
     *,
     task: Task,
@@ -714,84 +878,17 @@ def run_qa_testing_phase(
     This phase runs after code review passes, focusing on finding bugs
     and ensuring test coverage.
     """
-    task_id = task.id
-    microtask_id = microtask.id
-    issues: List[ReviewIssue] = []
-
-    logger.info(
-        "[%s] QA testing phase for %s. Next step -> Running QA agent analysis",
-        task_id,
-        microtask_id,
-    )
-
-    if qa_agent is not None:
-        if detail_callback:
-            detail_callback("Running QA testing...")
-        issues.extend(
-            _run_qa_agent(
-                qa_agent=qa_agent,
-                files=files,
-                language=language,
-                task_description=f"Microtask: {microtask.description or microtask.title}",
-                task_id=task_id,
-                context=f" for microtask {microtask_id}",
-            )
-        )
-
-    if tool_agents and ToolAgentKind.TESTING_QA in tool_agents:
-        qa_tool_agent = tool_agents[ToolAgentKind.TESTING_QA]
-        if hasattr(qa_tool_agent, "review"):
-            if detail_callback:
-                detail_callback("Running QA tool agent review...")
-            try:
-                phase_inp = ToolAgentPhaseInput(
-                    phase=Phase.REVIEW,
-                    microtask=microtask,
-                    repo_path=str(repo_path) if repo_path else "",
-                    existing_code="",
-                    spec_context=task.description or "",
-                    language=language,
-                    current_files=files,
-                    review_issues=issues,
-                    task_title=task.title or "",
-                    task_description=f"Microtask: {microtask.description or microtask.title}",
-                    task_id=task_id,
-                )
-                out = qa_tool_agent.review(phase_inp)
-                if out.issues:
-                    issues.extend(out.issues)
-            except Exception as exc:
-                logger.warning(
-                    "[%s] QA tool agent review failed for microtask %s: %s",
-                    task_id,
-                    microtask_id,
-                    exc,
-                )
-
-    if qa_agent is None and not (tool_agents and ToolAgentKind.TESTING_QA in tool_agents):
-        logger.warning(
-            "[%s] QA agent not available for microtask %s — QA gate skipped", task_id, microtask_id
-        )
-        issues.append(
-            ReviewIssue(
-                source="qa",
-                severity="high",
-                description="QA agent not available — QA review was skipped. This is a quality risk.",
-                recommendation="Ensure QA agent is configured before running the pipeline.",
-            )
-        )
-
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
-    passed = len(critical_or_high) == 0
-
-    summary = f"QA testing phase for {microtask_id}: {len(issues)} issues ({len(critical_or_high)} critical/high). {'PASSED' if passed else 'FAILED'}"
-    logger.info("[%s] %s", task_id, summary)
-
-    return PhaseReviewResult(
-        passed=passed,
-        issues=issues,
-        summary=summary,
-        phase_name="qa",
+    return _run_agent_testing_phase(
+        spec=_QA_TESTING_PHASE_SPEC,
+        task=task,
+        microtask=microtask,
+        files=files,
+        review_agent=qa_agent,
+        agent_runner=lambda **kw: _run_qa_agent(qa_agent=qa_agent, **kw),
+        tool_agents=tool_agents,
+        repo_path=repo_path,
+        detail_callback=detail_callback,
+        language=language,
     )
 
 
@@ -812,86 +909,17 @@ def run_security_testing_phase(
     This phase runs after QA testing passes, focusing on identifying
     security vulnerabilities and ensuring secure coding practices.
     """
-    task_id = task.id
-    microtask_id = microtask.id
-    issues: List[ReviewIssue] = []
-
-    logger.info(
-        "[%s] Security testing phase for %s. Next step -> Running security scan",
-        task_id,
-        microtask_id,
-    )
-
-    if security_agent is not None:
-        if detail_callback:
-            detail_callback("Running security scan...")
-        issues.extend(
-            _run_security_agent(
-                security_agent=security_agent,
-                files=files,
-                language=language,
-                task_description=f"Microtask: {microtask.description or microtask.title}",
-                task_id=task_id,
-                context=f" for microtask {microtask_id}",
-            )
-        )
-
-    if tool_agents and ToolAgentKind.SECURITY in tool_agents:
-        sec_tool_agent = tool_agents[ToolAgentKind.SECURITY]
-        if hasattr(sec_tool_agent, "review"):
-            if detail_callback:
-                detail_callback("Running security tool agent review...")
-            try:
-                phase_inp = ToolAgentPhaseInput(
-                    phase=Phase.REVIEW,
-                    microtask=microtask,
-                    repo_path=str(repo_path) if repo_path else "",
-                    existing_code="",
-                    spec_context=task.description or "",
-                    language=language,
-                    current_files=files,
-                    review_issues=issues,
-                    task_title=task.title or "",
-                    task_description=f"Microtask: {microtask.description or microtask.title}",
-                    task_id=task_id,
-                )
-                out = sec_tool_agent.review(phase_inp)
-                if out.issues:
-                    issues.extend(out.issues)
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Security tool agent review failed for microtask %s: %s",
-                    task_id,
-                    microtask_id,
-                    exc,
-                )
-
-    if security_agent is None and not (tool_agents and ToolAgentKind.SECURITY in tool_agents):
-        logger.warning(
-            "[%s] Security agent not available for microtask %s — security gate skipped",
-            task_id,
-            microtask_id,
-        )
-        issues.append(
-            ReviewIssue(
-                source="security",
-                severity="critical",
-                description="Security agent not available — security review was skipped. This is a critical risk.",
-                recommendation="Ensure security agent is configured before running the pipeline.",
-            )
-        )
-
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
-    passed = len(critical_or_high) == 0
-
-    summary = f"Security testing phase for {microtask_id}: {len(issues)} issues ({len(critical_or_high)} critical/high). {'PASSED' if passed else 'FAILED'}"
-    logger.info("[%s] %s", task_id, summary)
-
-    return PhaseReviewResult(
-        passed=passed,
-        issues=issues,
-        summary=summary,
-        phase_name="security",
+    return _run_agent_testing_phase(
+        spec=_SECURITY_TESTING_PHASE_SPEC,
+        task=task,
+        microtask=microtask,
+        files=files,
+        review_agent=security_agent,
+        agent_runner=lambda **kw: _run_security_agent(security_agent=security_agent, **kw),
+        tool_agents=tool_agents,
+        repo_path=repo_path,
+        detail_callback=detail_callback,
+        language=language,
     )
 
 

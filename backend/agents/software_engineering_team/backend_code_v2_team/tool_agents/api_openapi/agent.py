@@ -7,20 +7,10 @@ Uses template-based output (not JSON) so parsing works across model providers.
 
 from __future__ import annotations
 
-import logging
+from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from strands import Agent
-
-from ...models import (
-    ToolAgentInput,
-    ToolAgentOutput,
-    ToolAgentPhaseInput,
-    ToolAgentPhaseOutput,
-)
-from ...output_templates import parse_files_and_summary_template
 from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
-
-logger = logging.getLogger(__name__)
+from ..static_agents import FileGeneratorToolAgent
 
 API_OPENAPI_PROMPT = (
     """You are an API / OpenAPI specialist.
@@ -37,57 +27,18 @@ openapi.yaml fragments, etc.).
 )
 
 
-class ApiOpenApiToolAgent:
+class ApiOpenApiToolAgent(FileGeneratorToolAgent):
     """Produces API routes, OpenAPI specs, and service contracts."""
 
-    def __init__(self, llm=None) -> None:
-        from software_engineering_team.shared.strands_model import resolve_strands_model
+    log_label = "ApiOpenApi"
+    generation_prompt = API_OPENAPI_PROMPT
 
-        # v2 tool agents consume template-parsed output (parse_review_template /
-        # parse_files_and_summary_template / parse_problem_solving_single_issue_template);
-        # the mixed-mode ones (accessibility / performance / ux_usability) have
-        # JSON paths with defensive fence-stripping fallbacks that work in text mode.
-        self._model = resolve_strands_model(llm, response_format="text")
-
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
-
-    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        prompt = API_OPENAPI_PROMPT.format(
-            description=inp.microtask.description or inp.microtask.title,
-            language=inp.language,
-            existing_code=inp.existing_code[:4000] if inp.existing_code else "(none)",
-        )
-        logger.info("ApiOpenApi: running for microtask %s", inp.microtask.id)
-        raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
-        data = parse_files_and_summary_template(raw)
-        return ToolAgentOutput(
-            files=data.get("files") or {},
-            recommendations=[],
-            summary=data.get("summary", ""),
-        )
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Recommend how API/contract work should be reflected in the plan."""
-        return ToolAgentPhaseOutput(
-            recommendations=["Include API contract and OpenAPI spec in the microtask plan."],
-            summary="API/OpenAPI planning input provided.",
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Domain-specific review: contract consistency, spec validation."""
-        return ToolAgentPhaseOutput(
-            recommendations=["Verify OpenAPI spec matches implemented endpoints."],
-            summary="API/OpenAPI review completed.",
-        )
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Suggest API-layer fixes for issues found in review."""
-        return ToolAgentPhaseOutput(
-            recommendations=["Align contract and implementation; fix status codes and schemas."],
-            summary="API/OpenAPI problem-solving input provided.",
-        )
-
-    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Final API-domain actions before merge."""
-        return ToolAgentPhaseOutput(summary="API/OpenAPI deliver phase completed.")
+    plan_recommendations = ["Include API contract and OpenAPI spec in the microtask plan."]
+    plan_summary = "API/OpenAPI planning input provided."
+    review_recommendations = ["Verify OpenAPI spec matches implemented endpoints."]
+    review_summary = "API/OpenAPI review completed."
+    problem_solve_recommendations = [
+        "Align contract and implementation; fix status codes and schemas."
+    ]
+    problem_solve_summary = "API/OpenAPI problem-solving input provided."
+    deliver_summary = "API/OpenAPI deliver phase completed."
