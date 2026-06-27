@@ -7,10 +7,10 @@ Uses only ``shared.git_utils`` — no code from ``backend_agent``.
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from software_engineering_team.shared.branch_utils import make_branch_suffix, make_slug
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
@@ -38,21 +38,6 @@ class _FilesPayload:
         self.gitignore_entries: list[str] = []
 
 
-def _make_slug(task_id: str, task_title: str) -> str:
-    """Return the stable branch/commit scope slug for a delivery task."""
-    return re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
-
-
-def _make_task_id_slug(task_id: str) -> str:
-    """Return a branch-safe task-id slug for feature branch names."""
-    return re.sub(r"[^a-z0-9-]+", "-", (task_id or "task").lower()).strip("-")[:20] or "task"
-
-
-def _make_branch_suffix(task_id: str, task_title: str) -> str:
-    """Return the branch suffix used by ``create_feature_branch``."""
-    return f"{_make_task_id_slug(task_id)}-{_make_slug(task_id, task_title)}"
-
-
 def _cleanup_handoff_failure(repo_path: Path, branch_name: str, *, created_branch: bool) -> None:
     """Return to development and remove a newly-created failed handoff branch."""
     checkout_branch(repo_path, DEVELOPMENT_BRANCH)
@@ -75,8 +60,8 @@ def _prepare_handoff_branch(
         result.summary = "No files to deliver."
         return result
     result.delivered_files = sorted(deliver_files)
-    slug = _make_slug(task_id, task_title)
-    branch_suffix = _make_branch_suffix(task_id, task_title)
+    slug = make_slug(task_id, task_title)
+    branch_suffix = make_branch_suffix(task_id, task_title)
     branch_name = feature_branch_name
     created_branch = False
     if branch_name:
@@ -84,6 +69,16 @@ def _prepare_handoff_branch(
         if not ok:
             result.summary = f"Feature branch checkout failed: {checkout_msg}"
             logger.error("[%s] Deliver: %s", task_id, result.summary)
+            # Restore development so the shared workspace is not left on an arbitrary
+            # branch for the next task (symmetric with the create/write/commit failures).
+            restore_ok, restore_msg = checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+            if not restore_ok:
+                logger.error(
+                    "[%s] Deliver: failed to restore %s after checkout failure: %s",
+                    task_id,
+                    DEVELOPMENT_BRANCH,
+                    restore_msg,
+                )
             return result
     else:
         ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, branch_suffix)
@@ -221,8 +216,8 @@ def run_deliver(
 
     # Fallback: inline git (no Git agent or Git agent failed). Real git ops
     # below require a writable repo — covered indirectly via integration runs.
-    slug = _make_slug(task_id, task_title)
-    branch_suffix = _make_branch_suffix(task_id, task_title)
+    slug = make_slug(task_id, task_title)
+    branch_suffix = make_branch_suffix(task_id, task_title)
     ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, branch_suffix)
     if not ok:  # pragma: no cover  # integration-only: real git ops follow
         result.summary = f"Feature branch creation failed: {branch_msg}"

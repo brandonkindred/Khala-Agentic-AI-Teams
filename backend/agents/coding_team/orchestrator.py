@@ -364,6 +364,11 @@ _BACKEND_HINTS = {
     "spring",
 }
 _BACKEND_TEAM_ALIASES = {
+    # Compact separator-less form of the canonical team name. The token-exact frontend/
+    # backend check below only matches when "backend" is its own token (so "backendv2"
+    # collapses to a single token); this alias preserves the old substring behavior for
+    # the v2 label without re-introducing matches on unrelated words like "mybackend".
+    "backendv2",
     "api",
     "apis",
     "backend_api",
@@ -383,13 +388,47 @@ _BACKEND_TEAM_ALIASES = {
     "servers",
     "service",
     "services",
+    # The entries above are legacy generic aliases (e.g. "service", "data") kept for
+    # backward compatibility. The entries below are concrete backend languages/frameworks
+    # a Tech Lead may name as the target_team instead of the canonical "backend_v2"; new
+    # additions should stay unambiguous tech tokens (never generic words like "build").
+    "python",
+    "java",
+    "nodejs",
+    "node_js",
+    "golang",
+    "rust",
+    "ruby",
+    "php",
+    "dotnet",
+    # .NET spellings: "_team_key" normalizes ".NET" -> "net" and ".NET Core" -> "net_core",
+    # so alias those normalized forms (not just "dotnet") or they fail to route.
+    "net",
+    "netcore",
+    "net_core",
+    "aspnet",
+    "asp_net",
+    "django",
+    "flask",
+    "fastapi",
+    "spring",
+    "springboot",
+    "spring_boot",
+    "express",
+    "express_js",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "mongodb",
 }
 # Frontend-owned target_team/stack aliases. Mirrors _BACKEND_TEAM_ALIASES so common
 # UI/UX target labels a Tech Lead may emit (or copy from a "UI" stack name) canonicalize
 # to frontend_v2 rather than failing to match the available frontend worker. Compared by
-# exact normalized-token equality in _team_key, so unrelated words containing these as a
-# substring (e.g. "build", "guides") are unaffected.
+# exact normalized-label equality in _team_key (``text in _FRONTEND_TEAM_ALIASES``), so
+# unrelated words containing these as a substring (e.g. "build", "guides") are unaffected.
 _FRONTEND_TEAM_ALIASES = {
+    # Compact separator-less form of the canonical team name (see _BACKEND_TEAM_ALIASES).
+    "frontendv2",
     "ui",
     "ux",
     "ui_ux",
@@ -398,6 +437,31 @@ _FRONTEND_TEAM_ALIASES = {
     "webapp",
     "web_app",
     "client",
+    # The entries above are legacy generic aliases (e.g. "client", "webapp") kept for
+    # backward compatibility. The entries below are concrete frontend languages/frameworks
+    # a Tech Lead may name as the target_team instead of the canonical "frontend_v2"; new
+    # additions should stay unambiguous tech tokens only.
+    "angular",
+    "angularjs",
+    "angular_js",
+    "react",
+    "reactjs",
+    "react_js",
+    "vue",
+    "vuejs",
+    "vue_js",
+    "svelte",
+    "html",
+    "css",
+    "scss",
+    "sass",
+    "tailwind",
+    "nextjs",
+    "next_js",
+    # NOTE: bare "typescript"/"javascript" are intentionally NOT aliased here. They are
+    # ambiguous — this team's backend_v2 stack includes Node.js — so a "TypeScript"/
+    # "JavaScript" target_team must not be hard-routed to frontend. The Tech Lead should
+    # emit the canonical frontend_v2/backend_v2 (or a specific framework) for those.
 }
 _LEGACY_BACKEND_STACK_ALIASES = {
     "default",
@@ -419,9 +483,15 @@ _CONTEXT_EXCLUDE_DIRS: Optional[frozenset[str]] = None
 
 def _team_key(value: Optional[str]) -> str:
     """Normalize a stack/team label for routing comparisons."""
-    text = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    has_frontend = "frontend" in text
-    has_backend = "backend" in text
+    # Collapse every run of non-alphanumeric characters (dots, hyphens, spaces, repeats)
+    # to a single underscore, so "Node.js", "Node. JS" and "node-js" all normalize to the
+    # same token sequence; strip leading/trailing separators.
+    text = re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower()).strip("_")
+    # Exact-token membership (not substring) so unrelated labels that merely contain
+    # "frontend"/"backend" as a substring (e.g. "myfrontend") are not misclassified.
+    tokens = set(text.split("_"))
+    has_frontend = "frontend" in tokens
+    has_backend = "backend" in tokens
     if has_frontend and has_backend:
         logger.warning(
             "Ambiguous team label %r contains both frontend and backend; "
@@ -566,6 +636,12 @@ def _ensure_target_team_stack_specs(
 
 def _v2_text_mode_llm(llm: Any) -> Any:
     """Return an LLM handle suitable for v2 phases that parse text templates."""
+    # Function-level imports (not module-level) keep the optional Strands SDK and the
+    # LLMClient off the orchestrator's import path, matching shared.strands_model's own
+    # convention; resolved once here so all branches below share a single import.
+    from llm_service import LLMClient
+    from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+
     clone = getattr(llm, "clone", None)
     if callable(clone):
         try:
@@ -574,15 +650,26 @@ def _v2_text_mode_llm(llm: Any) -> Any:
             if isinstance(config, dict) and config.get("response_format") == "text":
                 return llm
             return clone(response_format="text")
-        except Exception as exc:  # noqa: BLE001 - fall back to resolver for unusual test doubles
+        except Exception as exc:  # noqa: BLE001 - resolve explicitly when clone fails
+            # clone() raised, so we cannot reconfigure this handle in place. Returning it
+            # as-is (or passing it back to the resolver) would risk leaking a JSON/structured-
+            # mode model to the text template parsers — resolve_strands_model passes pre-built
+            # Strands Models through unchanged. Re-resolve from the wrapped LLMClient when the
+            # handle exposes one (LLMClientModel stores it as ``_client``), which yields a
+            # genuine text-mode wrapper; otherwise fall through to a fresh default text model.
+            # Either way, never return the original non-text handle.
             logger.warning("Could not clone v2 LLM into text mode: %s", exc)
-
-    from llm_service import LLMClient
+            # Prefer a public ``client`` accessor if the model exposes one; fall back to the
+            # ``_client`` attribute LLMClientModel currently stores it under. This couples to a
+            # private name by necessity (no public accessor today) — guarded with getattr so a
+            # future rename degrades to the default text model rather than raising.
+            underlying_client = getattr(llm, "client", None) or getattr(llm, "_client", None)
+            return resolve_text_mode_strands_model(underlying_client)
 
     if llm is None or isinstance(llm, LLMClient):
-        from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
-
         return resolve_text_mode_strands_model(llm)
+    # A non-None, non-LLMClient handle without a clone() is an opaque caller-injected model
+    # (e.g. a pre-built Strands model already in the right mode); pass it through unchanged.
     return llm
 
 
@@ -1298,6 +1385,15 @@ class CodingTeamSwarm:
             for agent_id in self.agent_ids
         )
 
+    def _try_assign(self, task_id: str, agent_id: str) -> bool:
+        """Assign a task to an agent, swallowing transient errors so one bad assignment
+        cannot abort the whole assignment round. Returns True only on a real placement."""
+        try:
+            return bool(self.graph.assign_task_to_agent(task_id, agent_id))
+        except Exception as exc:  # noqa: BLE001 - keep assigning the remaining ready tasks
+            logger.warning("Failed to assign task %s to agent %s: %s", task_id, agent_id, exc)
+            return False
+
     def _assign_tasks(self, ready: List[Task], free_agents: List[str]) -> None:
         """Coordinator decides which tasks go to which workers."""
         if not free_agents or not ready:
@@ -1335,7 +1431,7 @@ class CodingTeamSwarm:
                     agent_id,
                 )
                 continue
-            if self.graph.assign_task_to_agent(task.id, agent_id):
+            if self._try_assign(task.id, agent_id):
                 used_agents.add(agent_id)
                 assigned_tasks.add(task.id)
 
@@ -1352,20 +1448,20 @@ class CodingTeamSwarm:
                     task.target_team, self.agent_team_keys.get(agent_id, agent_id)
                 ):
                     continue
-                if self.graph.assign_task_to_agent(task.id, agent_id):
+                # Only stop once the task is actually placed. If assignment fails (e.g. the
+                # agent's prior task isn't merged yet, or a transient error), keep trying the
+                # remaining matching free workers instead of leaving the task idle for the round.
+                if self._try_assign(task.id, agent_id):
                     used_agents.add(agent_id)
                     assigned_tasks.add(task.id)
-                break
+                    break
 
         for task in ready:
             if task.id in assigned_tasks or not task.target_team:
                 continue
             if self._has_worker_for_target(task.target_team):
                 continue
-            reason = (
-                f"No implementation worker is available for target_team "
-                f"{task.target_team!r}."
-            )
+            reason = f"No implementation worker is available for target_team {task.target_team!r}."
             logger.warning("Failing task %s: %s", task.id, reason)
             self.graph.update_task(
                 task.id,

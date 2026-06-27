@@ -767,6 +767,89 @@ def test_target_match_normalizes_frontend_owned_aliases() -> None:
     assert orch_mod._team_key("guidelines") == "guidelines"
 
 
+def test_team_key_routes_framework_and_language_labels() -> None:
+    """Concrete tech labels route to the owning v2 team instead of failing to match."""
+    for label in ("React", "Angular", "AngularJS", "scss", "Next.js", "React.js", "Vue.js"):
+        assert orch_mod._team_key(label) == "frontend_v2"
+    for label in (
+        "Python",
+        "Java",
+        "FastAPI",
+        "Spring Boot",
+        "Postgres",
+        "Node.js",
+        "Express.js",
+        ".NET",
+        ".NET Core",
+        "ASP.NET",
+    ):
+        assert orch_mod._team_key(label) == "backend_v2"
+    # Ambiguous languages (used by frontend frameworks AND Node backends) must NOT be
+    # forced onto a team — routing them would mis-send backend work to the frontend worker.
+    for label in ("TypeScript", "JavaScript"):
+        assert orch_mod._team_key(label) not in ("frontend_v2", "backend_v2")
+    # A capable worker now matches these labels rather than the task being dropped.
+    assert orch_mod._target_matches_agent("react", "frontend_v2") is True
+    assert orch_mod._target_matches_agent("python", "backend_v2") is True
+    # Generic, non-tech words still pass through unmapped.
+    assert orch_mod._team_key("build") == "build"
+
+
+def test_team_key_accepts_compact_v2_labels() -> None:
+    """Separator-less v2 labels still route, without matching unrelated substrings."""
+    assert orch_mod._team_key("frontendv2") == "frontend_v2"
+    assert orch_mod._team_key("BackendV2") == "backend_v2"
+    # Exact-match only: a word merely containing the alias as a substring is unaffected.
+    assert orch_mod._team_key("myfrontend") == "myfrontend"
+
+
+def test_assign_tasks_survives_assignment_error(tmp_path):
+    """A transient assign_task_to_agent error is logged and skipped, not propagated."""
+
+    class OneAssignTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "backend_v2", "task_id": "t1"}]}
+
+    workers = [StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, OneAssignTL(approved=True), workers)
+    graph.add_task("t1", title="Build API", target_team="backend_v2")
+
+    def _boom(task_id, agent_id):
+        raise RuntimeError("transient store error")
+
+    swarm.graph.assign_task_to_agent = _boom  # type: ignore[method-assign]
+
+    # Must not raise; the task simply stays unassigned for this round.
+    swarm._assign_tasks(graph.get_tasks(), ["backend_v2"])
+    assert graph.get_task("t1").assigned_agent_id is None
+    assert graph.get_task("t1").status == TaskStatus.TO_DO
+
+
+def test_assign_tasks_continues_to_next_agent_after_error(tmp_path):
+    """When the first matching worker's assignment raises, a second free worker still gets it."""
+
+    class NoopTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": []}
+
+    workers = [StubWorker("backend_v2"), StubWorker("backend_v2_alt")]
+    swarm, graph = _make_swarm(tmp_path, NoopTL(approved=True), workers)
+    graph.add_task("t1", title="Build API", target_team="backend_v2")
+
+    real_assign = graph.assign_task_to_agent
+
+    def _flaky(task_id, agent_id):
+        if agent_id == "backend_v2":
+            raise RuntimeError("transient store error")
+        return real_assign(task_id, agent_id)
+
+    swarm.graph.assign_task_to_agent = _flaky  # type: ignore[method-assign]
+
+    # The guardrail loop skips the failing worker and places the task on the second one.
+    swarm._assign_tasks(graph.get_tasks(), ["backend_v2", "backend_v2_alt"])
+    assert graph.get_task("t1").assigned_agent_id == "backend_v2_alt"
+
+
 def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
     """A target_team that no worker can satisfy fails instead of waiting forever."""
 
@@ -816,9 +899,7 @@ def test_v2_team_kind_matches_frontend_hint_tokens_without_substrings() -> None:
     assert orch_mod._v2_team_kind_for_stack(StackSpec(name="UI", tools_services=[])) == "frontend"
     assert orch_mod._v2_team_kind_for_stack(StackSpec(name="build", tools_services=[])) == "backend"
     assert (
-        orch_mod._v2_team_kind_for_stack(
-            StackSpec(name="documentation", tools_services=["guides"])
-        )
+        orch_mod._v2_team_kind_for_stack(StackSpec(name="documentation", tools_services=["guides"]))
         is None
     )
     assert (
@@ -832,13 +913,17 @@ def test_v2_team_kind_matches_frontend_hint_tokens_without_substrings() -> None:
 @pytest.mark.parametrize("stack_name", ["platform", "ci_cd", "services"])
 def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None:
     """Backend-owned alias stack names build backend v2 workers instead of failing."""
-    assert orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    assert (
+        orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    )
 
 
 @pytest.mark.parametrize("stack_name", ["default", "Senior Software Engineer"])
 def test_v2_team_kind_accepts_legacy_default_stack_names(stack_name: str) -> None:
     """Legacy generic stack names now route to backend v2 after removing the Senior SWE worker."""
-    assert orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    assert (
+        orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    )
 
 
 def test_legacy_default_stack_spec_is_repaired_to_backend_v2() -> None:
@@ -965,6 +1050,73 @@ def test_v2_worker_clones_injected_strands_model_to_text_mode(monkeypatch):
     assert model.response_format == "json"
     assert model.clones == ["text"]
     assert worker.team_lead.llm.response_format == "text"
+
+
+def test_v2_text_mode_llm_resolves_underlying_client_on_clone_failure(monkeypatch):
+    """A clone() failure re-resolves text mode from the wrapped client, not the JSON-mode model.
+
+    resolve_strands_model returns a pre-built Strands Model as-is, so passing the original
+    model back would leak JSON mode. Re-resolving from the model's ``_client`` guarantees a
+    fresh text-mode wrapper.
+    """
+    import software_engineering_team.shared.strands_model as strands_model_mod
+
+    received: Dict[str, Any] = {}
+    sentinel = object()
+
+    def _fake_resolve(llm):
+        received["arg"] = llm
+        return sentinel
+
+    monkeypatch.setattr(strands_model_mod, "resolve_text_mode_strands_model", _fake_resolve)
+
+    client = object()
+
+    class _BrokenJsonModel:
+        _client = client
+
+        def get_config(self):
+            return {"response_format": "json"}
+
+        def clone(self, **_overrides):
+            raise RuntimeError("clone boom")
+
+    model = _BrokenJsonModel()
+    result = orch_mod._v2_text_mode_llm(model)
+
+    assert result is sentinel
+    # Re-resolved from the wrapped client (guaranteed text mode), not the JSON-mode model.
+    assert received["arg"] is client
+    assert received["arg"] is not model
+
+
+def test_v2_text_mode_llm_clone_failure_without_client_uses_default(monkeypatch):
+    """A clone() failure on a handle with no ``_client`` falls back to a fresh text model."""
+    import software_engineering_team.shared.strands_model as strands_model_mod
+
+    received: Dict[str, Any] = {}
+    sentinel = object()
+
+    def _fake_resolve(llm):
+        received["arg"] = llm
+        return sentinel
+
+    monkeypatch.setattr(strands_model_mod, "resolve_text_mode_strands_model", _fake_resolve)
+
+    class _BrokenCloneModel:
+        def get_config(self):
+            return {"response_format": "json"}
+
+        def clone(self, **_overrides):
+            raise RuntimeError("clone boom")
+
+    broken = _BrokenCloneModel()
+    result = orch_mod._v2_text_mode_llm(broken)
+
+    # No wrapped client → resolver builds a fresh default text model (arg is None).
+    assert result is sentinel
+    assert received["arg"] is None
+    assert result is not broken
 
 
 def test_frontend_v2_worker_uses_injected_llm_getter(monkeypatch):
@@ -1419,7 +1571,7 @@ def test_escalate_done_non_empty_branch_merges_and_preserves_work(tmp_path, monk
     merge_calls: List[Any] = []
     monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
     monkeypatch.setattr(
-        f"{GIT_UTILS}.merge_branch", lambda *a, **k: (merge_calls.append(a) or (True, "ok"))
+        f"{GIT_UTILS}.merge_branch", lambda *a, **k: merge_calls.append(a) or (True, "ok")
     )
     tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
     swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
@@ -1444,7 +1596,7 @@ def test_escalate_done_failed_merge_marks_failed_not_merged(tmp_path, monkeypatc
     monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
     monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: (False, "merge conflict"))
     monkeypatch.setattr(
-        f"{GIT_UTILS}.abort_merge", lambda p, *a, **k: (aborted.append(p) or (True, "aborted"))
+        f"{GIT_UTILS}.abort_merge", lambda p, *a, **k: aborted.append(p) or (True, "aborted")
     )
     swarm, graph = _make_swarm(
         tmp_path, StubTechLead(approved=False, adjudication_verdict="done"), [StubWorker("a1")]
