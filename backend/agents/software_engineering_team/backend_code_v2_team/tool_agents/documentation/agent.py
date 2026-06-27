@@ -7,6 +7,8 @@ from typing import Dict, List
 
 from strands import Agent
 
+from software_engineering_team.shared.tool_agent_base import relevant_code_for_issue
+
 from ...models import (
     Microtask,
     ReviewIssue,
@@ -32,24 +34,7 @@ MAX_RELEVANT_CODE_CHARS = 10_000
 
 def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) -> str:
     """Return code context for a single issue: prefer issue's file, else first files."""
-    if issue.file_path and issue.file_path in current_files:
-        content = current_files[issue.file_path]
-        if len(content) <= MAX_RELEVANT_CODE_CHARS:
-            return f"--- {issue.file_path} ---\n{content}"
-        return f"--- {issue.file_path} ---\n{content[:MAX_RELEVANT_CODE_CHARS]}\n... [truncated]"
-    parts: List[str] = []
-    total = 0
-    for path, content in list(current_files.items())[:10]:
-        chunk = f"--- {path} ---\n{content}\n"
-        if total + len(chunk) > MAX_RELEVANT_CODE_CHARS:
-            remaining = MAX_RELEVANT_CODE_CHARS - total
-            if remaining > 200:
-                chunk = f"--- {path} ---\n{content[:remaining]}\n... [truncated]"
-                parts.append(chunk)
-            break
-        parts.append(chunk)
-        total += len(chunk)
-    return "\n".join(parts) if parts else "(no code)"
+    return relevant_code_for_issue(issue, current_files, MAX_RELEVANT_CODE_CHARS)
 
 
 def _extract_doc_files(files: Dict[str, str]) -> Dict[str, str]:
