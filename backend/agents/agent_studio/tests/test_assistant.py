@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from agent_studio.agent_states import STATE_ORDER
 from agent_studio.assistant import (
     _CONTENT_FIELDS,
     AgentDesignerAgent,
@@ -133,6 +134,20 @@ def test_merge_definition_overlays_edited_state_prompt() -> None:
     merged = _merge_definition(AgentDefinition(name="ok"), {"states": edited})
     assert merged is not None
     assert merged.states[0].system_prompt == "EDITED plan"
+
+
+def test_merge_definition_partial_states_preserve_prior_edits() -> None:
+    # A partial states echo must keep the draft's prior edits for the keys it omits,
+    # not reset them to defaults via the normalizer.
+    current = AgentDefinition(name="ok")
+    current.states[0].system_prompt = "PLANNING EDIT"  # planning edited earlier
+    block = {"states": [{"key": "executing", "label": "Executing", "system_prompt": "EXEC EDIT"}]}
+    merged = _merge_definition(current, block)
+    assert merged is not None
+    by_key = {s.key: s.system_prompt for s in merged.states}
+    assert by_key["planning"] == "PLANNING EDIT"  # preserved (omitted by the echo)
+    assert by_key["executing"] == "EXEC EDIT"  # applied from the echo
+    assert [s.key for s in merged.states] == list(STATE_ORDER)
 
 
 def test_merge_definition_bogus_state_key_returns_none() -> None:

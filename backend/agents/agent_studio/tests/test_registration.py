@@ -129,6 +129,21 @@ def test_clone_round_trips_persisted_states() -> None:
     assert all(isinstance(s, AgentState) for s in draft.states)
 
 
+def test_clone_filters_unsupported_state_keys_without_raising() -> None:
+    # AgentStateSpec.key is a permissive str; a manifest carrying a non-canonical
+    # key must not 500 the clone — the unsupported key is dropped and the canonical
+    # set is backfilled, while a supported edited key survives.
+    states = [
+        AgentStateSpec(key="planning", label="Planning", system_prompt="EDIT"),
+        AgentStateSpec(key="deploying", label="Deploying", system_prompt="bad"),
+    ]
+    draft = clone_from_manifest(_manifest(states=states))
+    assert [s.key for s in draft.states] == list(STATE_ORDER)
+    assert draft.states[0].system_prompt == "EDIT"
+    # The dropped key's slot is filled from defaults, not left missing.
+    assert all(s.system_prompt.strip() for s in draft.states)
+
+
 def test_clone_backfills_default_states_for_legacy_manifest() -> None:
     # A pre-feature manifest (no states) still yields the three seeded defaults.
     draft = clone_from_manifest(_manifest())  # _manifest() has no states -> []

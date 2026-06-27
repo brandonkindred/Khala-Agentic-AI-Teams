@@ -22,11 +22,16 @@ import re
 
 from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
 
-from .agent_states import default_agent_states
+from .agent_states import STATE_ORDER
 from .models import AgentDefinition, AgentState
 
 # The registry "team" Studio agents are filed under (must match a TEAM_CONFIGS key).
 STUDIO_TEAM = "agent_studio"
+
+# The fixed Studio state keys. AgentStateSpec.key is a permissive str (the registry
+# accepts arbitrary persisted data), so a manifest may carry a key outside this set;
+# clone drops such keys and lets the AgentDefinition normalizer backfill the rest.
+_KNOWN_STATE_KEYS = frozenset(STATE_ORDER)
 
 # Shared generated-agent runtime — reused so a saved Studio agent is invokable
 # exactly like a generated team agent.
@@ -107,8 +112,10 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     "authored inline schemas" follow-up. The refine conversation re-elicits them.
 
     The operating ``states`` ARE transferred (the manifest persists them). Cloning
-    a legacy manifest saved before states existed (empty ``states``) back-fills the
-    three default seeded states, so every refine draft has them.
+    a legacy manifest saved before states existed (empty ``states``), or one whose
+    persisted keys fall outside the fixed Studio set, back-fills the missing default
+    seeded states via the ``AgentDefinition`` normalizer, so every refine draft has
+    exactly the three states.
 
     Postconditions:
         * ``mode == "refine"`` and ``cloned_from == manifest.id``.
@@ -116,14 +123,14 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     """
     tools = list(manifest.cognition.tools) if manifest.cognition else []
     tags = [t for t in manifest.tags if t not in _PLUMBING_TAGS]
-    states = (
-        [
-            AgentState(key=s.key, label=s.label, system_prompt=s.system_prompt)
-            for s in manifest.states
-        ]
-        if manifest.states
-        else default_agent_states()
-    )
+    # Keep only canonical keys: AgentState.key is a Literal, so a manifest carrying
+    # an unsupported (permissive-str) key would raise here and surface as a 500.
+    # Dropped/missing keys are backfilled by the AgentDefinition states normalizer.
+    states = [
+        AgentState(key=s.key, label=s.label, system_prompt=s.system_prompt)
+        for s in manifest.states
+        if s.key in _KNOWN_STATE_KEYS
+    ]
     # Avoid a confusing "name.copy.copy" when cloning an already-cloned name.
     # Per-team disambiguation (".copy-2", …) is the frontend's job — it knows the
     # team's existing names; the backend only avoids the doubled suffix here.

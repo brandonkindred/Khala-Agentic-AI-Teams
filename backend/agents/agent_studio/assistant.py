@@ -190,6 +190,12 @@ def _merge_definition(current: AgentDefinition, block: dict) -> AgentDefinition 
     one so the durable handoff fields (``mode``, ``cloned_from``) are preserved
     regardless of what the model echoes.
 
+    ``states`` is merged **by key** rather than wholesale-replaced: when the model
+    echoes only a subset of states, the omitted keys keep the draft's current
+    (possibly user-edited) values instead of being reset to defaults by the states
+    normalizer. A non-list ``states`` value is left untouched so ``model_validate``
+    still rejects it.
+
     Postconditions:
         * Returns the merged definition, or ``None`` when the block carries a
           wrong-typed value. The merge is re-validated (``model_validate`` —
@@ -199,13 +205,21 @@ def _merge_definition(current: AgentDefinition, block: dict) -> AgentDefinition 
           still stands and the stored definition is left unchanged.
     """
     merged = current.model_dump()
-    merged.update(
-        {
-            k: v
-            for k, v in block.items()
-            if k in AgentDefinition.model_fields and k not in ("mode", "cloned_from")
-        }
-    )
+    updates = {
+        k: v
+        for k, v in block.items()
+        if k in AgentDefinition.model_fields and k not in ("mode", "cloned_from")
+    }
+    # Overlay states by key onto the current draft so a partial echo doesn't discard
+    # prior edits to the keys it omits. The normalizer then canonicalizes the result.
+    incoming_states = updates.get("states")
+    if isinstance(incoming_states, list):
+        by_key = {s["key"]: s for s in merged["states"]}
+        for state in incoming_states:
+            if isinstance(state, dict) and "key" in state:
+                by_key[state["key"]] = state
+        updates["states"] = list(by_key.values())
+    merged.update(updates)
     try:
         updated = AgentDefinition.model_validate(merged)
     except ValidationError:
