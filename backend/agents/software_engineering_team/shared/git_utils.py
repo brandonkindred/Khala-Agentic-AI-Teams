@@ -308,40 +308,6 @@ def commit_paths(repo_path: str | Path, paths: List[str], message: str) -> Tuple
     return True, "Committed"
 
 
-def list_changed_paths(repo_path: str | Path) -> set[str]:
-    """
-    Return the set of repo-relative paths with pending working-tree changes.
-
-    Includes modified, added, deleted, and untracked paths (``git status
-    --porcelain``). For renames, the destination path is reported. Useful for
-    snapshotting before/after an operation to learn exactly which paths it
-    touched.
-
-    Postconditions:
-        - Returns an empty set when the path is not a git repo or the tree is
-          clean; never raises for those cases.
-    """
-    path = Path(repo_path).resolve()
-    if not (path / ".git").exists():
-        return set()
-    code, out = _run_git(path, ["git", "status", "--porcelain"])
-    if code != 0:
-        return set()
-    changed: set[str] = set()
-    for line in out.splitlines():
-        if len(line) <= 3:
-            continue
-        entry = line[3:].strip()
-        if " -> " in entry:  # rename/copy: "old -> new" — track the destination
-            entry = entry.split(" -> ", 1)[1].strip()
-        # Porcelain quotes paths containing special chars; strip the wrapping quotes.
-        if len(entry) >= 2 and entry[0] == '"' and entry[-1] == '"':
-            entry = entry[1:-1]
-        if entry:
-            changed.add(entry)
-    return changed
-
-
 def branch_has_commits_ahead_of(repo_path: str | Path, branch: str, base: str) -> bool:
     """
     Return True if branch has commits not in base.

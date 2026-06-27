@@ -16,7 +16,6 @@ from software_engineering_team.shared.git_utils import (
     commit_paths,
     ensure_development_branch,
     initialize_new_repo,
-    list_changed_paths,
 )
 
 from ..models import SetupResult
@@ -24,12 +23,15 @@ from ..models import SetupResult
 logger = logging.getLogger(__name__)
 
 
-def _ensure_linting_configured(path: Path) -> bool:
+def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
     """Verify that a frontend linter is configured in the project.
 
     Checks for eslint config files (eslint.config.*, .eslintrc*) or ng lint
     availability (angular.json). If none are found, creates a minimal ESLint
     flat config so linting never silently skips.
+
+    Side effect: every repo-relative path this call creates or modifies is added
+    to ``written`` so the caller can commit exactly what setup touched.
     """
     # Check for existing eslint config
     eslint_patterns = ("eslint.config.*", ".eslintrc*", ".eslintrc.json", ".eslintrc.js")
@@ -46,6 +48,7 @@ def _ensure_linting_configured(path: Path) -> bool:
         config_file = path / "eslint.config.js"
         if not config_file.exists():
             config_file.write_text(_MINIMAL_ANGULAR_ESLINT_CONFIG, encoding="utf-8")
+            written.add("eslint.config.js")
         return True
 
     # React/generic project — create ESLint flat config
@@ -55,17 +58,22 @@ def _ensure_linting_configured(path: Path) -> bool:
     config_file = path / "eslint.config.mjs"
     if not config_file.exists():
         config_file.write_text(_MINIMAL_REACT_ESLINT_CONFIG, encoding="utf-8")
+        written.add("eslint.config.mjs")
 
     # Ensure lint script exists in package.json
-    _ensure_package_script(path, "lint", "eslint .")
+    if _ensure_package_script(path, "lint", "eslint ."):
+        written.add("package.json")
     return True
 
 
-def _ensure_testing_configured(path: Path) -> bool:
+def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
     """Verify that a frontend test framework is configured in the project.
 
     Checks for vitest/jest config files or test scripts in package.json.
     If missing, creates a minimal vitest configuration so tests never skip.
+
+    Side effect: every repo-relative path this call creates or modifies is added
+    to ``written`` so the caller can commit exactly what setup touched.
     """
     # Check for existing test config
     test_configs = (
@@ -102,12 +110,14 @@ def _ensure_testing_configured(path: Path) -> bool:
         config_file = path / "vitest.config.mts"
         if not config_file.exists():
             config_file.write_text(_MINIMAL_ANGULAR_VITEST_CONFIG, encoding="utf-8")
+            written.add("vitest.config.mts")
         # Ensure test setup file
         src = path / "src"
         src.mkdir(parents=True, exist_ok=True)
         setup_file = src / "test-setup.ts"
         if not setup_file.exists():
             setup_file.write_text(_MINIMAL_ANGULAR_TEST_SETUP, encoding="utf-8")
+            written.add("src/test-setup.ts")
     else:
         logger.info("Setup: creating vitest.config.ts for React project")
         from software_engineering_team.shared.command_runner import _MINIMAL_REACT_VITEST_CONFIG
@@ -115,25 +125,35 @@ def _ensure_testing_configured(path: Path) -> bool:
         config_file = path / "vitest.config.ts"
         if not config_file.exists():
             config_file.write_text(_MINIMAL_REACT_VITEST_CONFIG, encoding="utf-8")
+            written.add("vitest.config.ts")
 
-    _ensure_package_script(path, "test", "vitest run")
-    _ensure_package_script(path, "test:coverage", "vitest run --coverage")
+    if _ensure_package_script(path, "test", "vitest run"):
+        written.add("package.json")
+    if _ensure_package_script(path, "test:coverage", "vitest run --coverage"):
+        written.add("package.json")
     return True
 
 
-def _ensure_package_script(path: Path, script_name: str, script_cmd: str) -> None:
-    """Add a script to package.json if it doesn't already exist."""
+def _ensure_package_script(path: Path, script_name: str, script_cmd: str) -> bool:
+    """Add a script to package.json if it doesn't already exist.
+
+    Returns:
+        True when package.json was modified, False otherwise (missing file,
+        script already present, or a read/parse error).
+    """
     pkg_json = path / "package.json"
     if not pkg_json.exists():
-        return
+        return False
     try:
         pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
         scripts = pkg.setdefault("scripts", {})
         if script_name not in scripts or "exit 1" in scripts.get(script_name, ""):
             scripts[script_name] = script_cmd
             pkg_json.write_text(json.dumps(pkg, indent=2), encoding="utf-8")
+            return True
     except Exception as e:
         logger.warning("Could not update package.json script %s: %s", script_name, e)
+    return False
 
 
 def _commit_scaffolding(path: Path, scaffolding_paths: set[str]) -> None:
@@ -149,9 +169,11 @@ def _commit_scaffolding(path: Path, scaffolding_paths: set[str]) -> None:
     working tree clean and makes the idempotent ``_ensure_*_configured`` checks
     a no-op on every subsequent pass.
 
-    Only the paths setup actually created/updated are committed (scoped via
-    :func:`commit_paths`), so unrelated uncommitted work that happened to be in
-    the tree is never swept into the scaffolding commit.
+    Only the paths setup actually created/updated this run are committed (scoped
+    via :func:`commit_paths`), so unrelated uncommitted work that happened to be
+    in the tree is never swept into the scaffolding commit — while a config file
+    setup edited is still committed even if it was already dirty for unrelated
+    reasons, since leaving setup's edit uncommitted would re-block the checkout.
 
     Preconditions:
         - ``path`` is a git repository checked out on the development branch.
@@ -220,10 +242,10 @@ def run_setup(
             _ensure_readme_with_title(path, task_title)
 
         # Ensure linting and testing are configured before any coding begins
-        before = list_changed_paths(path)
-        result.linting_configured = _ensure_linting_configured(path)
-        result.testing_configured = _ensure_testing_configured(path)
-        _commit_scaffolding(path, list_changed_paths(path) - before)
+        scaffolding: set[str] = set()
+        result.linting_configured = _ensure_linting_configured(path, scaffolding)
+        result.testing_configured = _ensure_testing_configured(path, scaffolding)
+        _commit_scaffolding(path, scaffolding)
 
         result.summary = f"Initialized repo: {msg}"
         logger.info("Setup: %s", result.summary)
@@ -241,10 +263,10 @@ def run_setup(
         result.readme_created = True
 
     # Ensure linting and testing are configured before any coding begins
-    before = list_changed_paths(path)
-    result.linting_configured = _ensure_linting_configured(path)
-    result.testing_configured = _ensure_testing_configured(path)
-    _commit_scaffolding(path, list_changed_paths(path) - before)
+    scaffolding: set[str] = set()
+    result.linting_configured = _ensure_linting_configured(path, scaffolding)
+    result.testing_configured = _ensure_testing_configured(path, scaffolding)
+    _commit_scaffolding(path, scaffolding)
 
     result.summary = msg or "Repo ready; on development branch."
     logger.info(

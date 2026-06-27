@@ -224,6 +224,37 @@ class TestSetupPhase:
             setup_mod.run_setup(repo_path=tmp_path, task_title="My App")
         assert "not committed" in caplog.text.lower()
 
+    def test_setup_commits_its_edit_to_already_dirty_config(self, tmp_path):
+        """Setup's edit to a pre-existing dirty package.json must be committed.
+
+        A dirty-delta approach would drop setup's added lint/test scripts when
+        package.json was already dirty, leaving it dirty and re-blocking the
+        later feature-branch checkout. The committed file must be clean after.
+        """
+        import json
+
+        from frontend_code_v2_team.phases.setup import run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        # package.json present and dirty (no lint/test scripts) before setup runs.
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "demo", "scripts": {}}, indent=2), encoding="utf-8"
+        )
+        run_setup(repo_path=tmp_path, task_title="My App")
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "package.json"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert status.stdout.strip() == ""  # setup's script edits committed, not left dirty
+        scripts = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))["scripts"]
+        assert "lint" in scripts and "test" in scripts
+
 
 class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):

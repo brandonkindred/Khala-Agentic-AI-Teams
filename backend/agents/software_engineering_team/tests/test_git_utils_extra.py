@@ -15,7 +15,6 @@ from software_engineering_team.shared.git_utils import (
     ensure_development_branch,
     ensure_files_committed_on_main,
     initialize_new_repo,
-    list_changed_paths,
     write_files_and_commit,
 )
 
@@ -202,7 +201,14 @@ def test_commit_paths_commits_only_named_paths(init_git_repo: Path):
     assert "wanted.py" in tracked
     assert "unrelated.py" not in tracked
     # The unrelated file is still untracked, never swept into the commit.
-    assert "unrelated.py" in list_changed_paths(repo)
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "unrelated.py"],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert status.stdout.strip() == "?? unrelated.py"
 
 
 def test_commit_paths_no_changes_is_success(init_git_repo: Path):
@@ -218,17 +224,31 @@ def test_commit_paths_empty_list_is_noop(init_git_repo: Path):
     assert ok
 
 
-def test_list_changed_paths_reports_modified_and_untracked(init_git_repo: Path):
-    """list_changed_paths surfaces both modified tracked files and untracked files."""
+def test_commit_paths_commits_setup_edit_to_already_dirty_file(init_git_repo: Path):
+    """A named path that was already dirty is still committed (setup's edit lands).
+
+    Guards the case where a config file (e.g. pyproject.toml) had unrelated local
+    edits before setup appended to it: scoping by name must not drop it.
+    """
     repo = init_git_repo
-    assert list_changed_paths(repo) == set()
-    (repo / "README.md").write_text("changed", encoding="utf-8")
-    (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
-    changed = list_changed_paths(repo)
-    assert "README.md" in changed
-    assert "new.py" in changed
+    subprocess.run(
+        ["git", "checkout", "-b", "development"], cwd=repo, capture_output=True, check=True
+    )
+    cfg = repo / "pyproject.toml"
+    cfg.write_text("[project]\nname = 'x'\n", encoding="utf-8")  # pre-existing dirty edit
 
-
-def test_list_changed_paths_no_repo_returns_empty(tmp_path: Path):
-    """list_changed_paths returns an empty set when the path is not a git repo."""
-    assert list_changed_paths(tmp_path / "nope") == set()
+    ok, _ = commit_paths(repo, ["pyproject.toml"], "chore: scaffolding")
+    assert ok
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=repo, capture_output=True, check=True, text=True
+    ).stdout.split()
+    assert "pyproject.toml" in tracked
+    # No leftover dirty state for the committed path.
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "pyproject.toml"],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert status.stdout.strip() == ""

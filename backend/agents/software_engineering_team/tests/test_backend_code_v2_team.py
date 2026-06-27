@@ -258,6 +258,34 @@ class TestSetupPhase:
             setup_mod.run_setup(repo_path=tmp_path, task_title="My Project")
         assert "not committed" in caplog.text.lower()
 
+    def test_setup_commits_its_edit_to_already_dirty_config(self, tmp_path):
+        """Setup's edit to a pre-existing dirty config file must be committed.
+
+        If pyproject.toml was already dirty before setup, a dirty-delta approach
+        would drop setup's appended ruff/pytest config, leaving the file dirty
+        and re-blocking the later feature-branch checkout. The committed file
+        must be clean afterward.
+        """
+        from backend_code_v2_team.phases.setup import run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        # pyproject.toml present and dirty (no ruff config yet) before setup runs.
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+        run_setup(repo_path=tmp_path, task_title="My Project")
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "pyproject.toml"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert status.stdout.strip() == ""  # setup's edit committed, not left dirty
+        content = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+        assert "[tool.ruff]" in content
+
 
 # ---------------------------------------------------------------------------
 # Planning phase tests
