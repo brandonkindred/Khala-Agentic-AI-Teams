@@ -515,13 +515,13 @@ def _next_scaled_rung(
 
 def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
     """Resolve the price level at which ``rule`` floors (long) / caps (short)
-    the position. Single source of the stop-level geometry: :func:`_stop_loss_triggers`
+    the position. Single source of the stop-level geometry: :func:`stop_loss_triggers`
     compares the bar against this level, and the limit-style evaluator rests a
     STOP_LIMIT here, so the trigger decision and the resting limit can never
     disagree.
 
     Preconditions: ``rule`` is side-compatible with ``position`` — the basis can
-    fire for this side. ``_stop_loss_triggers`` enforces this by returning early
+    fire for this side. ``stop_loss_triggers`` enforces this by returning early
     for a mismatched basis (``trailing_low`` on a long / ``trailing_high`` on a
     short) before calling this helper, and the evaluator only resolves a level
     for a rule that just triggered.
@@ -557,7 +557,7 @@ def _rule_triggers(
     view: Optional[HistoryView] = None,
 ) -> bool:
     if isinstance(rule, StopLossRule):
-        return _stop_loss_triggers(rule, position, bar)
+        return stop_loss_triggers(rule, position, bar)
 
     if isinstance(rule, TakeProfitRule):
         return _take_profit_triggers(rule, position, bar)
@@ -574,7 +574,21 @@ def _rule_triggers(
     raise TypeError(f"unknown ExitRule subclass: {type(rule).__name__}")
 
 
-def _stop_loss_triggers(rule: StopLossRule, position: PositionState, bar: BarSnapshot) -> bool:
+def stop_loss_triggers(rule: StopLossRule, position: PositionState, bar: BarSnapshot) -> bool:
+    """Decide whether ``rule`` would fire against ``bar`` for ``position``.
+
+    Public trigger-decision entry point: besides the executor's own bar loop
+    (via :func:`_rule_triggers`), the post-hoc ``ExitRuleConformanceGate``
+    trailing replay imports this so the gate and the engine share one source of
+    stop-trigger geometry and can never drift. Pairs with the public
+    :class:`PositionState` / :class:`BarSnapshot` evaluator types.
+
+    Preconditions: ``rule`` is a ``StopLossRule``; ``position``/``bar`` are
+    populated snapshots. Postconditions: returns ``True`` iff the bar breaches the
+    rule's floor (long) / cap (short) for the matching side; a basis that does not
+    apply to ``position.side`` (``trailing_low`` on a long / ``trailing_high`` on a
+    short) is a no-op returning ``False``.
+    """
     if position.side == "long":
         if rule.basis == "trailing_low":
             # ``trailing_low`` only makes sense for shorts; treated as no-op
