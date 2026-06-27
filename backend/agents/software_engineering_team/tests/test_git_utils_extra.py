@@ -10,10 +10,12 @@ import pytest
 from software_engineering_team.shared.git_utils import (
     _clear_disposable_files_if_blocking,
     branch_diff,
+    commit_paths,
     create_feature_branch,
     ensure_development_branch,
     ensure_files_committed_on_main,
     initialize_new_repo,
+    list_changed_paths,
     write_files_and_commit,
 )
 
@@ -183,3 +185,50 @@ def test_branch_diff_failed_command_returns_empty(tmp_path: Path):
     ok, _ = initialize_new_repo(tmp_path)
     assert ok
     assert branch_diff(tmp_path, "development", "feature/does-not-exist") == ""
+
+
+def test_commit_paths_commits_only_named_paths(init_git_repo: Path):
+    """commit_paths stages/commits only the named paths, leaving other work alone."""
+    repo = init_git_repo
+    (repo / "wanted.py").write_text("a = 1\n", encoding="utf-8")
+    (repo / "unrelated.py").write_text("b = 2\n", encoding="utf-8")
+
+    ok, _ = commit_paths(repo, ["wanted.py"], "chore: only wanted")
+    assert ok
+
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=repo, capture_output=True, check=True, text=True
+    ).stdout.split()
+    assert "wanted.py" in tracked
+    assert "unrelated.py" not in tracked
+    # The unrelated file is still untracked, never swept into the commit.
+    assert "unrelated.py" in list_changed_paths(repo)
+
+
+def test_commit_paths_no_changes_is_success(init_git_repo: Path):
+    """commit_paths treats 'nothing to commit for these paths' as success."""
+    ok, msg = commit_paths(init_git_repo, ["README.md"], "noop")
+    assert ok
+    assert "No changes" in msg
+
+
+def test_commit_paths_empty_list_is_noop(init_git_repo: Path):
+    """commit_paths with no paths is a success no-op."""
+    ok, _ = commit_paths(init_git_repo, [], "noop")
+    assert ok
+
+
+def test_list_changed_paths_reports_modified_and_untracked(init_git_repo: Path):
+    """list_changed_paths surfaces both modified tracked files and untracked files."""
+    repo = init_git_repo
+    assert list_changed_paths(repo) == set()
+    (repo / "README.md").write_text("changed", encoding="utf-8")
+    (repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+    changed = list_changed_paths(repo)
+    assert "README.md" in changed
+    assert "new.py" in changed
+
+
+def test_list_changed_paths_no_repo_returns_empty(tmp_path: Path):
+    """list_changed_paths returns an empty set when the path is not a git repo."""
+    assert list_changed_paths(tmp_path / "nope") == set()

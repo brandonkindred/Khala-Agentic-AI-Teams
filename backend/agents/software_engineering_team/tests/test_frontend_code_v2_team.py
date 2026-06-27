@@ -177,6 +177,37 @@ class TestSetupPhase:
         )
         assert checkout.returncode == 0, checkout.stderr
 
+    def test_setup_does_not_sweep_unrelated_work_into_commit(self, tmp_path):
+        """The scaffolding commit must include only what setup wrote.
+
+        Pre-existing uncommitted/untracked work must not be swept onto
+        ``development`` under the scaffolding commit.
+        """
+        from frontend_code_v2_team.phases.setup import run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        (tmp_path / "unrelated.ts").write_text("export const y = 2;\n", encoding="utf-8")
+        run_setup(repo_path=tmp_path, task_title="My App")
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "unrelated.ts"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert status.stdout.strip() == "?? unrelated.ts"
+        committed = subprocess.run(
+            ["git", "ls-files", "unrelated.ts"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert committed.stdout.strip() == ""
+
 
 class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):

@@ -267,6 +267,81 @@ def commit_working_tree(repo_path: str | Path, message: str) -> Tuple[bool, str]
     return True, "Committed"
 
 
+def commit_paths(repo_path: str | Path, paths: List[str], message: str) -> Tuple[bool, str]:
+    """
+    Stage and commit ONLY the given repo-relative paths.
+
+    Unlike :func:`commit_working_tree` (which stages everything via
+    ``git add -A``), this scopes both the stage and the commit to ``paths`` so
+    unrelated working-tree changes are never swept into the commit. The commit
+    itself is pathspec-limited (``git commit -- <paths>``), so any other staged
+    index content is left untouched too. Newly created (untracked) paths are
+    picked up because they are staged first.
+
+    Preconditions:
+        - ``repo_path`` is a git repository; ``paths`` are repo-relative.
+
+    Postconditions:
+        - Only changes under ``paths`` are committed; all other working-tree and
+          index changes remain uncommitted. Treats "nothing to commit" (the named
+          paths have no pending changes) as success.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    cleaned = [str(p).strip() for p in (paths or []) if str(p).strip()]
+    if not cleaned:
+        return True, "No paths to commit"
+    code, out = _run_git(path, ["git", "add", "--", *cleaned])
+    if code != 0:
+        return False, f"git add failed: {out}"
+    code, out = _run_git(path, ["git", "diff", "--cached", "--name-only", "--", *cleaned])
+    if code != 0:
+        return False, f"git diff failed: {out}"
+    if not out.strip():
+        logger.info("No changes to commit for given paths")
+        return True, "No changes to commit"
+    code, out = _run_git(path, ["git", "commit", "-m", message, "--", *cleaned])
+    if code != 0:
+        return False, f"git commit failed: {out}"
+    logger.info("Committed: %s", message[:50])
+    return True, "Committed"
+
+
+def list_changed_paths(repo_path: str | Path) -> set[str]:
+    """
+    Return the set of repo-relative paths with pending working-tree changes.
+
+    Includes modified, added, deleted, and untracked paths (``git status
+    --porcelain``). For renames, the destination path is reported. Useful for
+    snapshotting before/after an operation to learn exactly which paths it
+    touched.
+
+    Postconditions:
+        - Returns an empty set when the path is not a git repo or the tree is
+          clean; never raises for those cases.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return set()
+    code, out = _run_git(path, ["git", "status", "--porcelain"])
+    if code != 0:
+        return set()
+    changed: set[str] = set()
+    for line in out.splitlines():
+        if len(line) <= 3:
+            continue
+        entry = line[3:].strip()
+        if " -> " in entry:  # rename/copy: "old -> new" — track the destination
+            entry = entry.split(" -> ", 1)[1].strip()
+        # Porcelain quotes paths containing special chars; strip the wrapping quotes.
+        if len(entry) >= 2 and entry[0] == '"' and entry[-1] == '"':
+            entry = entry[1:-1]
+        if entry:
+            changed.add(entry)
+    return changed
+
+
 def branch_has_commits_ahead_of(repo_path: str | Path, branch: str, base: str) -> bool:
     """
     Return True if branch has commits not in base.

@@ -13,9 +13,10 @@ import logging
 from pathlib import Path
 
 from software_engineering_team.shared.git_utils import (
-    commit_working_tree,
+    commit_paths,
     ensure_development_branch,
     initialize_new_repo,
+    list_changed_paths,
 )
 
 from ..models import SetupResult
@@ -135,8 +136,8 @@ def _ensure_package_script(path: Path, script_name: str, script_cmd: str) -> Non
         logger.warning("Could not update package.json script %s: %s", script_name, e)
 
 
-def _commit_scaffolding(path: Path) -> None:
-    """Commit any lint/test scaffolding written by setup onto the current branch.
+def _commit_scaffolding(path: Path, scaffolding_paths: set[str]) -> None:
+    """Commit only the lint/test scaffolding setup wrote onto the current branch.
 
     Setup runs on ``development`` and may write linting/testing config and test
     scaffolding. Leaving those changes uncommitted means a later revision pass
@@ -148,16 +149,28 @@ def _commit_scaffolding(path: Path) -> None:
     working tree clean and makes the idempotent ``_ensure_*_configured`` checks
     a no-op on every subsequent pass.
 
+    Only the paths setup actually created/updated are committed (scoped via
+    :func:`commit_paths`), so unrelated uncommitted work that happened to be in
+    the tree is never swept into the scaffolding commit.
+
     Preconditions:
         - ``path`` is a git repository checked out on the development branch.
+        - ``scaffolding_paths`` are repo-relative paths setup wrote this run.
 
     Postconditions:
-        - The working tree is clean (scaffolding committed), or unchanged when
-          there was nothing to commit. Commit failures are swallowed so setup
-          never fails solely because the scaffolding could not be committed.
+        - The named scaffolding paths are committed (or no-op when empty/clean);
+          other working-tree changes are left untouched. Commit failures are
+          swallowed so setup never fails solely because the scaffolding could
+          not be committed.
     """
+    if not scaffolding_paths:
+        return
     try:
-        commit_working_tree(path, "chore: configure linting and testing scaffolding")
+        commit_paths(
+            path,
+            sorted(scaffolding_paths),
+            "chore: configure linting and testing scaffolding",
+        )
     except Exception as e:  # noqa: BLE001 - scaffolding commit is best-effort
         logger.warning("Could not commit setup scaffolding: %s", e)
 
@@ -196,9 +209,10 @@ def run_setup(
             _ensure_readme_with_title(path, task_title)
 
         # Ensure linting and testing are configured before any coding begins
+        before = list_changed_paths(path)
         result.linting_configured = _ensure_linting_configured(path)
         result.testing_configured = _ensure_testing_configured(path)
-        _commit_scaffolding(path)
+        _commit_scaffolding(path, list_changed_paths(path) - before)
 
         result.summary = f"Initialized repo: {msg}"
         logger.info("Setup: %s", result.summary)
@@ -216,9 +230,10 @@ def run_setup(
         result.readme_created = True
 
     # Ensure linting and testing are configured before any coding begins
+    before = list_changed_paths(path)
     result.linting_configured = _ensure_linting_configured(path)
     result.testing_configured = _ensure_testing_configured(path)
-    _commit_scaffolding(path)
+    _commit_scaffolding(path, list_changed_paths(path) - before)
 
     result.summary = msg or "Repo ready; on development branch."
     logger.info(
