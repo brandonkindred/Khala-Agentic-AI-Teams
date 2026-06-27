@@ -22,7 +22,9 @@ from software_engineering_team.shared.models import TaskStatus as SETaskStatus
 from software_engineering_team.shared.models import TaskType
 
 logger = logging.getLogger(__name__)
-_BRANCH_SLUG_RE = re.compile(r"[^a-z0-9._-]+")
+# Excludes '.' deliberately: git rejects refs containing '..', ending in '.' or
+# '.lock', so a dot-bearing task title must not survive into a branch name.
+_BRANCH_SLUG_RE = re.compile(r"[^a-z0-9_-]+")
 _MAX_FEATURE_SLUG_LENGTH = 80
 
 
@@ -105,8 +107,11 @@ def _changes_summary(
         parts.append(f"Implementation summary:\n{result_summary}")
     feedback_lines = _feedback_lines(feedback)
     if feedback_lines:
+        # Echo the feedback the team was asked to act on; this does NOT assert it was
+        # resolved — the coding-team Tech Lead review verifies the actual diff.
         parts.append(
-            "Feedback addressed:\n" + "\n".join(f"- {line}" for line in feedback_lines)
+            "Revision feedback provided to the team (verify in review):\n"
+            + "\n".join(f"- {line}" for line in feedback_lines)
         )
     return "\n\n".join(parts)
 
@@ -129,9 +134,7 @@ def _validate_task_interface(task: Any) -> None:
     list_fields = ("dependencies", "acceptance_criteria", "revision_feedback")
     invalid = [name for name in list_fields if not isinstance(getattr(task, name), list)]
     if invalid:
-        raise ValueError(
-            "coding-team task field(s) must be lists: " + ", ".join(sorted(invalid))
-        )
+        raise ValueError("coding-team task field(s) must be lists: " + ", ".join(sorted(invalid)))
 
 
 def _accepts_keyword(fn: Any, name: str) -> bool:
@@ -147,7 +150,9 @@ def _accepts_keyword(fn: Any, name: str) -> bool:
     try:
         signature = inspect.signature(fn)
     except (TypeError, ValueError):
-        return True
+        # Cannot introspect: assume the keyword is NOT accepted rather than risk a
+        # "unexpected keyword argument" TypeError crashing the worker at call time.
+        return False
     return any(
         param.kind == inspect.Parameter.VAR_KEYWORD or param_name == name
         for param_name, param in signature.parameters.items()
@@ -166,12 +171,12 @@ def _task_feature_name(task: Any) -> str:
     task_id = str(getattr(task, "id", "") or "task").strip() or "task"
     title = str(getattr(task, "title", "") or "").strip()
     source = f"{task_id}-{title}" if title and title != task_id else task_id
-    slug = _BRANCH_SLUG_RE.sub("-", source.lower()).strip("-._")
-    slug = slug or _BRANCH_SLUG_RE.sub("-", task_id.lower()).strip("-._") or "task"
+    slug = _BRANCH_SLUG_RE.sub("-", source.lower()).strip("-_")
+    slug = slug or _BRANCH_SLUG_RE.sub("-", task_id.lower()).strip("-_") or "task"
     if len(slug) <= _MAX_FEATURE_SLUG_LENGTH:
         return slug
     digest = hashlib.sha1(slug.encode("utf-8")).hexdigest()[:8]
-    prefix = slug[: _MAX_FEATURE_SLUG_LENGTH - len(digest) - 1].rstrip("-._") or "task"
+    prefix = slug[: _MAX_FEATURE_SLUG_LENGTH - len(digest) - 1].rstrip("-_") or "task"
     return f"{prefix}-{digest}"
 
 
@@ -335,10 +340,13 @@ class V2TeamWorker:
         try:
             _validate_task_interface(task)
         except ValueError as exc:
-            logger.warning("%s worker received malformed task %s: %s", self._team_label, task_id, exc)
+            logger.warning(
+                "%s worker received malformed task %s: %s", self._team_label, task_id, exc
+            )
             return {
                 "status": "failed",
-                "feature_branch": getattr(task, "feature_branch", None) or f"feature/{task_id}",
+                "feature_branch": getattr(task, "feature_branch", None)
+                or f"feature/{_task_feature_name(task)}",
                 "changes_summary": "",
                 "files_to_create_or_edit": [],
                 "commands_run": [],
@@ -355,7 +363,8 @@ class V2TeamWorker:
             )
             return {
                 "status": "failed",
-                "feature_branch": getattr(task, "feature_branch", None) or f"feature/{task_id}",
+                "feature_branch": getattr(task, "feature_branch", None)
+                or f"feature/{_task_feature_name(task)}",
                 "changes_summary": "",
                 "files_to_create_or_edit": [],
                 "commands_run": [],
@@ -385,7 +394,7 @@ class V2TeamWorker:
             getattr(deliver, "branch_name", "")
             or getattr(se_task, "feature_branch_name", None)
             or getattr(task, "feature_branch", None)
-            or f"feature/{task.id}"
+            or f"feature/{_task_feature_name(task)}"
         )
         files_changed = _workflow_file_list(result, deliver)
         branch_ready = bool(getattr(deliver, "branch_ready", False))

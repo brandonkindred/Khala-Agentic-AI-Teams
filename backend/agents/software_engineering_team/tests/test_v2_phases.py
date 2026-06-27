@@ -521,7 +521,10 @@ def test_fe_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypat
     )
 
     assert result.branch_ready is True
-    assert create_mock.call_args.args[2] == "task-1-bad-id-build-ui"
+    suffix = create_mock.call_args.args[2]
+    # Suffix carries a stable task-id hash to avoid cross-task branch collisions.
+    assert suffix.startswith("task-1-bad-id-build-ui-")
+    assert len(suffix.rsplit("-", 1)[-1]) == 8
 
 
 def test_fe_deliver_handoff_with_tool_agent_appends_files(tmp_path: Path, monkeypatch) -> None:
@@ -689,7 +692,10 @@ def test_be_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypat
     )
 
     assert result.merged is True
-    assert create_mock.call_args.args[2] == "api-task-bad-id-build-api"
+    suffix = create_mock.call_args.args[2]
+    # Suffix carries a stable task-id hash to avoid cross-task branch collisions.
+    assert suffix.startswith("api-task-bad-id-build-api-")
+    assert len(suffix.rsplit("-", 1)[-1]) == 8
 
 
 def test_be_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -> None:

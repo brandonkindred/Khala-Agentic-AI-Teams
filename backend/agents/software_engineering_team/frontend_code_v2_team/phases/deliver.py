@@ -6,6 +6,7 @@ Uses only shared.git_utils and shared.repo_writer. No frontend_team code.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -47,8 +48,17 @@ def _make_task_id_slug(task_id: str) -> str:
 
 
 def _make_branch_suffix(task_id: str, task_title: str) -> str:
-    """Return the branch suffix used by ``create_feature_branch``."""
-    return f"{_make_task_id_slug(task_id)}-{_make_slug(task_id, task_title)}"
+    """Return the branch suffix used by ``create_feature_branch``.
+
+    Appends a stable short hash of the raw task id so two distinct tasks whose
+    slugs collide (e.g. both reduce to ``task-task``) never resolve to the same
+    branch — ``create_feature_branch`` deletes-and-recreates an existing branch,
+    so a collision would silently destroy another task's unmerged handoff branch.
+    The hash is deterministic per task id, so retries of the same task reuse it.
+    """
+    base = f"{_make_task_id_slug(task_id)}-{_make_slug(task_id, task_title)}"
+    digest = hashlib.sha1((task_id or "task").encode("utf-8")).hexdigest()[:8]
+    return f"{base}-{digest}"
 
 
 def _cleanup_handoff_failure(repo_path: Path, branch_name: str, *, created_branch: bool) -> None:
@@ -82,6 +92,9 @@ def _prepare_handoff_branch(
         if not ok:
             result.summary = f"Feature branch checkout failed: {checkout_msg}"
             logger.error("[%s] Deliver: %s", task_id, result.summary)
+            # Restore development so the shared workspace is not left on an arbitrary
+            # branch for the next task (symmetric with the create/write/commit failures).
+            checkout_branch(repo_path, DEVELOPMENT_BRANCH)
             return result
     else:
         ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, branch_suffix)

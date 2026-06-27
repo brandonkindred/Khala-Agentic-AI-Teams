@@ -383,6 +383,29 @@ _BACKEND_TEAM_ALIASES = {
     "servers",
     "service",
     "services",
+    # Concrete backend languages/frameworks a Tech Lead may name as the target_team
+    # instead of the canonical "backend_v2". Only unambiguous tech tokens (never generic
+    # words like "build") so exact-match routing does not over-claim.
+    "python",
+    "java",
+    "nodejs",
+    "node_js",
+    "golang",
+    "rust",
+    "ruby",
+    "php",
+    "dotnet",
+    "django",
+    "flask",
+    "fastapi",
+    "spring",
+    "springboot",
+    "spring_boot",
+    "express",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "mongodb",
 }
 # Frontend-owned target_team/stack aliases. Mirrors _BACKEND_TEAM_ALIASES so common
 # UI/UX target labels a Tech Lead may emit (or copy from a "UI" stack name) canonicalize
@@ -398,6 +421,23 @@ _FRONTEND_TEAM_ALIASES = {
     "webapp",
     "web_app",
     "client",
+    # Concrete frontend languages/frameworks a Tech Lead may name as the target_team
+    # instead of the canonical "frontend_v2". Unambiguous tech tokens only.
+    "angular",
+    "react",
+    "reactjs",
+    "vue",
+    "vuejs",
+    "svelte",
+    "typescript",
+    "javascript",
+    "html",
+    "css",
+    "scss",
+    "sass",
+    "tailwind",
+    "nextjs",
+    "next_js",
 }
 _LEGACY_BACKEND_STACK_ALIASES = {
     "default",
@@ -419,7 +459,7 @@ _CONTEXT_EXCLUDE_DIRS: Optional[frozenset[str]] = None
 
 def _team_key(value: Optional[str]) -> str:
     """Normalize a stack/team label for routing comparisons."""
-    text = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    text = (value or "").strip().lower().replace("-", "_").replace(" ", "_").replace(".", "_")
     has_frontend = "frontend" in text
     has_backend = "backend" in text
     if has_frontend and has_backend:
@@ -574,8 +614,16 @@ def _v2_text_mode_llm(llm: Any) -> Any:
             if isinstance(config, dict) and config.get("response_format") == "text":
                 return llm
             return clone(response_format="text")
-        except Exception as exc:  # noqa: BLE001 - fall back to resolver for unusual test doubles
+        except Exception as exc:  # noqa: BLE001 - resolve explicitly when clone fails
+            # clone() exists but raised: we cannot trust the handle's mode, so do NOT fall
+            # through and return it as-is (it may still be in JSON/structured mode, which the
+            # v2 template parsers cannot read). Resolve a guaranteed text-mode model instead.
             logger.warning("Could not clone v2 LLM into text mode: %s", exc)
+            from software_engineering_team.shared.strands_model import (
+                resolve_text_mode_strands_model,
+            )
+
+            return resolve_text_mode_strands_model(llm)
 
     from llm_service import LLMClient
 
@@ -583,6 +631,8 @@ def _v2_text_mode_llm(llm: Any) -> Any:
         from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 
         return resolve_text_mode_strands_model(llm)
+    # A non-None, non-LLMClient handle without a clone() is an opaque caller-injected model
+    # (e.g. a pre-built Strands model already in the right mode); pass it through unchanged.
     return llm
 
 
@@ -1352,20 +1402,20 @@ class CodingTeamSwarm:
                     task.target_team, self.agent_team_keys.get(agent_id, agent_id)
                 ):
                     continue
+                # Only stop once the task is actually placed. If assign_task_to_agent fails
+                # (e.g. the agent's prior task isn't merged yet), keep trying the remaining
+                # matching free workers instead of leaving the task idle for the round.
                 if self.graph.assign_task_to_agent(task.id, agent_id):
                     used_agents.add(agent_id)
                     assigned_tasks.add(task.id)
-                break
+                    break
 
         for task in ready:
             if task.id in assigned_tasks or not task.target_team:
                 continue
             if self._has_worker_for_target(task.target_team):
                 continue
-            reason = (
-                f"No implementation worker is available for target_team "
-                f"{task.target_team!r}."
-            )
+            reason = f"No implementation worker is available for target_team {task.target_team!r}."
             logger.warning("Failing task %s: %s", task.id, reason)
             self.graph.update_task(
                 task.id,

@@ -767,6 +767,19 @@ def test_target_match_normalizes_frontend_owned_aliases() -> None:
     assert orch_mod._team_key("guidelines") == "guidelines"
 
 
+def test_team_key_routes_framework_and_language_labels() -> None:
+    """Concrete tech labels route to the owning v2 team instead of failing to match."""
+    for label in ("React", "Angular", "TypeScript", "scss", "Next.js"):
+        assert orch_mod._team_key(label) == "frontend_v2"
+    for label in ("Python", "Java", "FastAPI", "Spring Boot", "Postgres", "Node.js"):
+        assert orch_mod._team_key(label) == "backend_v2"
+    # A capable worker now matches these labels rather than the task being dropped.
+    assert orch_mod._target_matches_agent("react", "frontend_v2") is True
+    assert orch_mod._target_matches_agent("python", "backend_v2") is True
+    # Generic, non-tech words still pass through unmapped.
+    assert orch_mod._team_key("build") == "build"
+
+
 def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
     """A target_team that no worker can satisfy fails instead of waiting forever."""
 

@@ -111,7 +111,7 @@ def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path, monkey
     assert out["status"] == "in_review"
     assert out["feature_branch"] == "feature/ui-task"
     assert out["files_to_create_or_edit"] == ["src/app.component.ts"]
-    assert "Feedback addressed" in out["changes_summary"]
+    assert "Revision feedback provided" in out["changes_summary"]
     assert "Add aria-labels" in out["changes_summary"]
     assert order == ["ensure_development", "create", "workflow"]
     assert lead.calls[0]["merge_to_development"] is False
