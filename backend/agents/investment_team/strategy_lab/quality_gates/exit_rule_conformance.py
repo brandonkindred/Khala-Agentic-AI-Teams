@@ -21,10 +21,15 @@ and the execution diagnostics and reports:
   (long) / high (short) and fills on bar N+1's open, so realised
   return can land below the rule's raw threshold via gap fills —
   those are absorbed when matched 1:1 with firings. Trailing variants
-  need bar-by-bar replay this post-hoc gate cannot reconstruct, so the
-  ledger-leak check is not run for them; their execution correctness is
-  instead guaranteed deterministically by ``tests/test_trailing_stop.py``,
-  and their firing counts surface via ``exit_rule_firings_by_basis``.
+  cannot reconstruct their moving floor from the ledger alone, so the
+  static-floor leak check is not run for them by default; their firing
+  counts surface via ``exit_rule_firings_by_basis``. When
+  ``config.exit_rule_trailing_replay_enabled`` is set and cached bars are
+  supplied via ``market_data``, an opt-in bar-by-bar replay
+  (``_check_stop_loss_trailing_replay``) reconstructs the per-bar
+  watermark and raises a ``warning`` (never ``critical``) if a trailing
+  stop should have fired but did not. Execution correctness is also
+  guaranteed deterministically by ``tests/test_trailing_stop.py``.
 * **TakeProfitRule(pct=P)** — sanity-only: when ``exit_rules`` contains
   exactly one rule and that rule is the take-profit, we expect at least
   one engine firing. When other rules are present, the take-profit may
@@ -41,6 +46,7 @@ from __future__ import annotations
 
 from typing import ClassVar, List, Mapping, Optional, Sequence
 
+from ...market_data_service import OHLCVBar
 from ...models import (
     BacktestConfig,
     BacktestExecutionDiagnostics,
@@ -48,6 +54,7 @@ from ...models import (
     scaled_level_key,
 )
 from ...trading_service.service import ENGINE_EXIT_REASON_PREFIX
+from ..executor.rule_compiler import BarSnapshot, PositionState, _stop_loss_triggers
 from ..spec_dsl import (
     ExitRule,
     ScaledTakeProfitRule,
@@ -74,6 +81,7 @@ class ExitRuleConformanceGate(GateResultsMixin):
         config: BacktestConfig,
         timeframe: str = "1d",
         phase: StrategyLabPhase = "verification",
+        market_data: Optional[Mapping[str, Sequence[OHLCVBar]]] = None,
     ) -> List[QualityGateResult]:
         with self._using_phase(phase):
             if not exit_rules:
@@ -109,7 +117,11 @@ class ExitRuleConformanceGate(GateResultsMixin):
             # ledger alone) ----
             stop_losses = [r for r in exit_rules if isinstance(r, StopLossRule)]
             for rule in stop_losses:
-                results.append(self._check_stop_loss(rule, trades, firings_by_symbol))
+                results.append(
+                    self._check_stop_loss(
+                        rule, trades, firings_by_symbol, config=config, market_data=market_data
+                    )
+                )
 
             # ---- TakeProfitRule (sanity only) ----
             take_profits = [r for r in exit_rules if isinstance(r, TakeProfitRule)]
@@ -199,19 +211,30 @@ class ExitRuleConformanceGate(GateResultsMixin):
         rule: StopLossRule,
         trades: Sequence[TradeRecord],
         firings_by_symbol: Mapping[str, Mapping[str, int]],
+        *,
+        config: BacktestConfig,
+        market_data: Optional[Mapping[str, Sequence[OHLCVBar]]] = None,
     ) -> QualityGateResult:
         """Reconcile engine-attributed below-floor trades against per-symbol
         ``stop_loss`` emission firings.
 
         Preconditions: ``rule`` is a ``StopLossRule``; ``trades`` is the run's
         closed-trade ledger; ``firings_by_symbol`` is the emission-time per-symbol
-        firing telemetry (``symbol -> rule_kind -> count``).
+        firing telemetry (``symbol -> rule_kind -> count``). ``config`` is the run
+        config; ``market_data`` (when provided) maps symbol -> ascending bar series.
         Postconditions: returns a critical result iff some symbol's
         ``engine_exit:stop_loss`` below-floor trade count exceeds its emission
         firing count (a real enforcement/bookkeeping leak); otherwise an info
-        result. Trailing-basis rules are skipped (info). Holds for both
-        ``style`` values — see the note below on why firings (not fills) is the
-        reconciliation denominator even for limit-style stops.
+        result. Holds for both ``style`` values — see the note below on why firings
+        (not fills) is the reconciliation denominator even for limit-style stops.
+
+        Trailing-basis rules (``trailing_high`` / ``trailing_low``) take a separate
+        path: by default they are skipped (info), because the static-floor leak
+        check cannot reconstruct the per-bar watermark from the ledger alone. When
+        ``config.exit_rule_trailing_replay_enabled`` is set AND ``market_data`` is
+        available, they are routed to :meth:`_check_stop_loss_trailing_replay`,
+        which reconstructs the watermark bar-by-bar and surfaces a ``warning``
+        (never a ``critical``) on divergence.
 
         Reconciliation denominator. We compare against emission *firings*, which
         come from ``_record_emission`` independently of the trade ledger — the
@@ -226,12 +249,16 @@ class ExitRuleConformanceGate(GateResultsMixin):
         ``check``.)
         """
         if rule.basis != "entry_price":
+            if config.exit_rule_trailing_replay_enabled and market_data:
+                return self._check_stop_loss_trailing_replay(rule, trades, market_data)
             return self._info(
                 f"StopLossRule(basis={rule.basis!r}) ledger-leak check not run "
                 "(trailing variants require bar-by-bar replay the post-hoc gate "
-                "cannot reconstruct). Trailing-stop execution correctness is "
-                "covered deterministically by tests/test_trailing_stop.py; the "
-                "per-basis firing counts above show how often it fired."
+                "cannot reconstruct from the ledger alone; enable "
+                "config.exit_rule_trailing_replay_enabled with cached bars to opt "
+                "in). Trailing-stop execution correctness is covered "
+                "deterministically by tests/test_trailing_stop.py; the per-basis "
+                "firing counts above show how often it fired."
             )
         # The engine detects the trigger on bar N's low (long) / high
         # (short), but the synthetic market close fills on bar N+1's
@@ -315,6 +342,114 @@ class ExitRuleConformanceGate(GateResultsMixin):
             f"{total_tripped} engine-attributed below-floor trade(s) across "
             f"{len(by_symbol_tripped)} symbol(s); "
             f"total firings={total_firings}{skipped_suffix}{limit_suffix}."
+        )
+
+    def _check_stop_loss_trailing_replay(
+        self,
+        rule: StopLossRule,
+        trades: Sequence[TradeRecord],
+        market_data: Mapping[str, Sequence[OHLCVBar]],
+    ) -> QualityGateResult:
+        """Opt-in bar-by-bar replay verifying a trailing stop fired on time.
+
+        The static-floor leak check cannot run for a trailing stop because the
+        floor (``high_since_entry * (1 - pct)`` long / ``low_since_entry *
+        (1 + pct)`` short) moves every bar and the trade ledger does not carry the
+        per-bar watermark. This replay reconstructs the watermark from cached bars
+        and asks the SAME geometry the executor uses
+        (:func:`_stop_loss_triggers`) whether the floor was breached on a bar
+        strictly before the position actually closed — i.e. the engine had a bar
+        to emit the close AND a following bar to fill it, yet the position stayed
+        open. That is a trailing-stop leak.
+
+        Watermark reconstruction mirrors ``TradingService._extend_watermarks``:
+        the watermark starts at ``entry_price`` and is extended with each bar's
+        high/low AFTER that bar's rule evaluation, so a trailing rule never fires
+        off a floor that moved up on the same bar's high (the executor's
+        intrabar-lookahead guard). A legitimate next-bar gap fill trips its
+        trigger on the bar immediately before the fill bar (no EARLIER breach), so
+        it produces no warning — that is what keeps gap fills from becoming false
+        positives.
+
+        Preconditions: ``rule.basis`` is ``trailing_high`` or ``trailing_low``;
+        ``market_data`` maps symbol -> bars in ascending date order.
+        Postconditions: returns a ``warning`` (never ``critical``) listing a sample
+        of leaking ``(trade_num, symbol, first_breach_date)`` when any matching
+        trade's floor was breached with a fill bar to spare; otherwise an info
+        result summarizing how many trades/symbols were replayed and how many were
+        skipped (a trade whose symbol or entry/exit date is absent from the bar
+        series cannot be replayed). Severity is capped at ``warning`` by contract:
+        the ledger cannot reveal entry order type or scale-in re-basing, so the
+        reconstructed watermark is an approximation and must not veto a run.
+        """
+        # Pair the rule with the side it governs: ``trailing_high`` ratchets a
+        # long's floor up off the running high; ``trailing_low`` ratchets a
+        # short's cap down off the running low. ``_stop_loss_triggers`` already
+        # no-ops the mismatched side, but filtering keeps the skip accounting
+        # honest and avoids wasted replays.
+        applicable_side = "long" if rule.basis == "trailing_high" else "short"
+        candidates = [t for t in trades if t.side == applicable_side]
+
+        leaks: list[tuple[int, str, str]] = []
+        replayed = 0
+        skipped = 0
+        symbols_seen: set[str] = set()
+        for t in candidates:
+            bars = market_data.get(t.symbol)
+            if not bars:
+                skipped += 1
+                continue
+            date_to_idx = {b.date: i for i, b in enumerate(bars)}
+            entry_i = date_to_idx.get(t.entry_date)
+            exit_i = date_to_idx.get(t.exit_date)
+            if entry_i is None or exit_i is None or exit_i < entry_i:
+                skipped += 1
+                continue
+            replayed += 1
+            symbols_seen.add(t.symbol)
+            hi = t.entry_price
+            lo = t.entry_price
+            # Decision bars are those strictly before the fill bar (``exit_i``):
+            # a trigger on bar ``i`` lets the engine fill on bar ``i + 1``.
+            for i in range(entry_i, exit_i):
+                bar = bars[i]
+                position = PositionState(
+                    symbol=t.symbol,
+                    side=applicable_side,  # type: ignore[arg-type]
+                    qty=1.0,
+                    entry_price=t.entry_price,
+                    high_since_entry=hi,
+                    low_since_entry=lo,
+                )
+                snapshot = BarSnapshot(high=bar.high, low=bar.low, close=bar.close)
+                if _stop_loss_triggers(rule, position, snapshot):
+                    # Breach on bar ``i`` → engine should fill on ``i + 1``. A leak
+                    # only if the position survived past that fill opportunity
+                    # (actual fill bar ``exit_i`` is strictly later).
+                    if i + 1 < exit_i:
+                        leaks.append((t.trade_num, t.symbol, bar.date))
+                    break
+                # Extend the watermark AFTER evaluation (deferred, as the engine
+                # does) so the next bar sees this bar's extreme but this bar does
+                # not fire off its own freshly-raised floor.
+                hi = max(hi, bar.high)
+                lo = min(lo, bar.low)
+
+        skipped_suffix = (
+            f"; skipped {skipped} trade(s) with no matching bar window" if skipped else ""
+        )
+        if leaks:
+            return self._warning(
+                f"StopLossRule(basis={rule.basis!r}, pct={rule.pct}) trailing replay: "
+                f"{len(leaks)} {applicable_side} trade(s) breached the trailing floor on a "
+                f"bar before the position closed but the engine did not fire in time. "
+                f"Sample (trade_num, symbol, first_breach_date)={leaks[:5]}"
+                f"{skipped_suffix}."
+            )
+        return self._info(
+            f"StopLossRule(basis={rule.basis!r}, pct={rule.pct}) trailing replay: "
+            f"no leaks across {replayed} {applicable_side} trade(s) over "
+            f"{len(symbols_seen)} symbol(s){skipped_suffix}."
         )
 
     def _check_take_profit(
