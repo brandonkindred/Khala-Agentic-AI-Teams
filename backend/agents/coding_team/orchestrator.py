@@ -463,9 +463,15 @@ _CONTEXT_EXCLUDE_DIRS: Optional[frozenset[str]] = None
 
 def _team_key(value: Optional[str]) -> str:
     """Normalize a stack/team label for routing comparisons."""
-    text = (value or "").strip().lower().replace("-", "_").replace(" ", "_").replace(".", "_")
-    has_frontend = "frontend" in text
-    has_backend = "backend" in text
+    # Collapse every run of non-alphanumeric characters (dots, hyphens, spaces, repeats)
+    # to a single underscore, so "Node.js", "Node. JS" and "node-js" all normalize to the
+    # same token sequence; strip leading/trailing separators.
+    text = re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower()).strip("_")
+    # Exact-token membership (not substring) so unrelated labels that merely contain
+    # "frontend"/"backend" as a substring (e.g. "myfrontend") are not misclassified.
+    tokens = set(text.split("_"))
+    has_frontend = "frontend" in tokens
+    has_backend = "backend" in tokens
     if has_frontend and has_backend:
         logger.warning(
             "Ambiguous team label %r contains both frontend and backend; "
@@ -610,6 +616,12 @@ def _ensure_target_team_stack_specs(
 
 def _v2_text_mode_llm(llm: Any) -> Any:
     """Return an LLM handle suitable for v2 phases that parse text templates."""
+    # Function-level imports (not module-level) keep the optional Strands SDK and the
+    # LLMClient off the orchestrator's import path, matching shared.strands_model's own
+    # convention; resolved once here so all branches below share a single import.
+    from llm_service import LLMClient
+    from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+
     clone = getattr(llm, "clone", None)
     if callable(clone):
         try:
@@ -623,17 +635,9 @@ def _v2_text_mode_llm(llm: Any) -> Any:
             # through and return it as-is (it may still be in JSON/structured mode, which the
             # v2 template parsers cannot read). Resolve a guaranteed text-mode model instead.
             logger.warning("Could not clone v2 LLM into text mode: %s", exc)
-            from software_engineering_team.shared.strands_model import (
-                resolve_text_mode_strands_model,
-            )
-
             return resolve_text_mode_strands_model(llm)
 
-    from llm_service import LLMClient
-
     if llm is None or isinstance(llm, LLMClient):
-        from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
-
         return resolve_text_mode_strands_model(llm)
     # A non-None, non-LLMClient handle without a clone() is an opaque caller-injected model
     # (e.g. a pre-built Strands model already in the right mode); pass it through unchanged.

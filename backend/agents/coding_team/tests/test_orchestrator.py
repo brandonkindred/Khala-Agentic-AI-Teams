@@ -829,9 +829,7 @@ def test_v2_team_kind_matches_frontend_hint_tokens_without_substrings() -> None:
     assert orch_mod._v2_team_kind_for_stack(StackSpec(name="UI", tools_services=[])) == "frontend"
     assert orch_mod._v2_team_kind_for_stack(StackSpec(name="build", tools_services=[])) == "backend"
     assert (
-        orch_mod._v2_team_kind_for_stack(
-            StackSpec(name="documentation", tools_services=["guides"])
-        )
+        orch_mod._v2_team_kind_for_stack(StackSpec(name="documentation", tools_services=["guides"]))
         is None
     )
     assert (
@@ -845,13 +843,17 @@ def test_v2_team_kind_matches_frontend_hint_tokens_without_substrings() -> None:
 @pytest.mark.parametrize("stack_name", ["platform", "ci_cd", "services"])
 def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None:
     """Backend-owned alias stack names build backend v2 workers instead of failing."""
-    assert orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    assert (
+        orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    )
 
 
 @pytest.mark.parametrize("stack_name", ["default", "Senior Software Engineer"])
 def test_v2_team_kind_accepts_legacy_default_stack_names(stack_name: str) -> None:
     """Legacy generic stack names now route to backend v2 after removing the Senior SWE worker."""
-    assert orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    assert (
+        orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    )
 
 
 def test_legacy_default_stack_spec_is_repaired_to_backend_v2() -> None:
@@ -978,6 +980,28 @@ def test_v2_worker_clones_injected_strands_model_to_text_mode(monkeypatch):
     assert model.response_format == "json"
     assert model.clones == ["text"]
     assert worker.team_lead.llm.response_format == "text"
+
+
+def test_v2_text_mode_llm_resolves_on_clone_failure(monkeypatch):
+    """A clone() that raises falls back to the text-mode resolver, never the JSON-mode handle."""
+    import software_engineering_team.shared.strands_model as strands_model_mod
+
+    sentinel = object()
+    monkeypatch.setattr(strands_model_mod, "resolve_text_mode_strands_model", lambda llm: sentinel)
+
+    class _BrokenCloneModel:
+        def get_config(self):
+            return {"response_format": "json"}
+
+        def clone(self, **_overrides):
+            raise RuntimeError("clone boom")
+
+    broken = _BrokenCloneModel()
+    result = orch_mod._v2_text_mode_llm(broken)
+
+    # The original JSON-mode handle must not leak through; the resolver result is used.
+    assert result is sentinel
+    assert result is not broken
 
 
 def test_frontend_v2_worker_uses_injected_llm_getter(monkeypatch):
@@ -1432,7 +1456,7 @@ def test_escalate_done_non_empty_branch_merges_and_preserves_work(tmp_path, monk
     merge_calls: List[Any] = []
     monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
     monkeypatch.setattr(
-        f"{GIT_UTILS}.merge_branch", lambda *a, **k: (merge_calls.append(a) or (True, "ok"))
+        f"{GIT_UTILS}.merge_branch", lambda *a, **k: merge_calls.append(a) or (True, "ok")
     )
     tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
     swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
@@ -1457,7 +1481,7 @@ def test_escalate_done_failed_merge_marks_failed_not_merged(tmp_path, monkeypatc
     monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
     monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: (False, "merge conflict"))
     monkeypatch.setattr(
-        f"{GIT_UTILS}.abort_merge", lambda p, *a, **k: (aborted.append(p) or (True, "aborted"))
+        f"{GIT_UTILS}.abort_merge", lambda p, *a, **k: aborted.append(p) or (True, "aborted")
     )
     swarm, graph = _make_swarm(
         tmp_path, StubTechLead(approved=False, adjudication_verdict="done"), [StubWorker("a1")]
