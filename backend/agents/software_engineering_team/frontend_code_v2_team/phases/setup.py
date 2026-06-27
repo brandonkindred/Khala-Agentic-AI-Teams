@@ -159,20 +159,31 @@ def _commit_scaffolding(path: Path, scaffolding_paths: set[str]) -> None:
 
     Postconditions:
         - The named scaffolding paths are committed (or no-op when empty/clean);
-          other working-tree changes are left untouched. Commit failures are
-          swallowed so setup never fails solely because the scaffolding could
-          not be committed.
+          other working-tree changes are left untouched. A failed commit never
+          fails setup, but it is logged (not silently swallowed) so the later
+          feature-branch checkout conflict it can cause stays diagnosable.
     """
     if not scaffolding_paths:
         return
     try:
-        commit_paths(
+        committed, detail = commit_paths(
             path,
             sorted(scaffolding_paths),
             "chore: configure linting and testing scaffolding",
         )
     except Exception as e:  # noqa: BLE001 - scaffolding commit is best-effort
         logger.warning("Could not commit setup scaffolding: %s", e)
+        return
+    if not committed:
+        # A non-raising failure (e.g. a repo pre-commit/commit-msg hook rejecting
+        # the synthetic commit) leaves the scaffolding uncommitted; surface it so
+        # the later feature-branch checkout conflict this guards against is
+        # diagnosable instead of silently reappearing.
+        logger.warning(
+            "Setup scaffolding was not committed (%s); it remains uncommitted on the "
+            "current branch and may cause a later feature-branch checkout conflict.",
+            detail,
+        )
 
 
 def run_setup(

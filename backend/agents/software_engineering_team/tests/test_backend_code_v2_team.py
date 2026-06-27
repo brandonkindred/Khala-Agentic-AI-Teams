@@ -242,6 +242,22 @@ class TestSetupPhase:
         )
         assert committed.stdout.strip() == ""
 
+    def test_setup_logs_when_scaffolding_commit_fails(self, tmp_path, monkeypatch, caplog):
+        """A non-raising commit failure (e.g. a rejecting hook) must be logged.
+
+        Otherwise setup reports success while the scaffolding stays uncommitted,
+        silently reintroducing the feature-branch checkout conflict.
+        """
+        from backend_code_v2_team.phases import setup as setup_mod
+
+        init_repo_with_existing_development(tmp_path)
+        monkeypatch.setattr(
+            setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook")
+        )
+        with caplog.at_level("WARNING"):
+            setup_mod.run_setup(repo_path=tmp_path, task_title="My Project")
+        assert "not committed" in caplog.text.lower()
+
 
 # ---------------------------------------------------------------------------
 # Planning phase tests
