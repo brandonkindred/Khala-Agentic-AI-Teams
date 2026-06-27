@@ -382,7 +382,10 @@ class ExitRuleConformanceGate(GateResultsMixin):
         trade's floor was breached with a fill bar to spare; otherwise an info
         result summarizing how many trades/symbols were replayed and how many were
         skipped (a trade whose symbol or entry/exit date is absent from the bar
-        series cannot be replayed). Severity is capped at ``warning`` by contract:
+        series, whose series violates the ascending-unique-date precondition, or
+        whose exit was a participation-clipped / multi-slice partial fill — whose
+        ``exit_date`` legitimately spans bars — is not leak-checked). Severity is
+        capped at ``warning`` by contract:
         the ledger cannot reveal scale-in re-basing of the entry price, so the
         reconstructed watermark is an approximation and must not veto a run.
         """
@@ -407,6 +410,7 @@ class ExitRuleConformanceGate(GateResultsMixin):
         replayed = 0
         skipped = 0
         malformed = 0
+        partial_skipped = 0
         symbols_seen: set[str] = set()
         # Cache each symbol's date -> bar-index map so trades that share a symbol
         # reuse one build instead of re-scanning the bar series per trade. The
@@ -437,6 +441,17 @@ class ExitRuleConformanceGate(GateResultsMixin):
             exit_i = date_to_idx.get(t.exit_date)
             if entry_i is None or exit_i is None or exit_i < entry_i:
                 skipped += 1
+                continue
+            # A participation-capped / multi-slice exit fills across several bars
+            # under the realistic execution model, so its final ``exit_date`` can
+            # land well after the trigger bar even though the stop fired on time.
+            # The leak rule below (a breach with a fill bar to spare) would read
+            # that legitimate multi-bar fill as a missed firing. The ledger can't
+            # separate "fired late" from "fired on time, filled slowly", so we
+            # don't leak-check clipped/partial exits — skipping them (reported
+            # below) rather than emitting a false warning.
+            if t.participation_clipped or (t.partial_fill_count or 0) > 1:
+                partial_skipped += 1
                 continue
             replayed += 1
             symbols_seen.add(t.symbol)
@@ -488,6 +503,10 @@ class ExitRuleConformanceGate(GateResultsMixin):
         if malformed:
             suffix_parts.append(
                 f"skipped {malformed} trade(s) on malformed (unsorted/duplicate-date) bar series"
+            )
+        if partial_skipped:
+            suffix_parts.append(
+                f"skipped {partial_skipped} clipped/partial-fill multi-bar exit(s) (not leak-checked)"
             )
         skipped_suffix = "; " + "; ".join(suffix_parts) if suffix_parts else ""
         if leaks:

@@ -120,6 +120,8 @@ def _trailing_trade(
     return_pct: float = -10.0,
     exit_reason: str | None = None,
     entry_order_type: str = "market",
+    participation_clipped: bool | None = None,
+    partial_fill_count: int | None = None,
 ) -> TradeRecord:
     """A TradeRecord with caller-controlled entry/exit dates, for replay tests."""
     return TradeRecord(
@@ -140,6 +142,8 @@ def _trailing_trade(
         cumulative_pnl=0.0,
         exit_reason=exit_reason,
         entry_order_type=entry_order_type,
+        participation_clipped=participation_clipped,
+        partial_fill_count=partial_fill_count,
     )
 
 
@@ -334,6 +338,34 @@ def test_trailing_replay_detects_injected_leak() -> None:
     assert "2024-01-04" in fails[0].details
     # Never escalates to a critical veto.
     assert all(r.severity != "critical" for r in results)
+
+
+def test_trailing_replay_skips_clipped_partial_fill_exit() -> None:
+    """A participation-capped / multi-slice exit fills across several bars, so its
+    final exit_date lands well after the trigger even though the stop fired on
+    time. Over the injected-leak bars (which would otherwise warn at exit
+    2024-01-09), a clipped/partial trade is skipped — not flagged — and reported.
+    """
+    gate = ExitRuleConformanceGate()
+    for clipped, partials in ((True, None), (None, 2)):
+        results = gate.check(
+            exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+            trades=[
+                _trailing_trade(
+                    entry_date="2024-01-02",
+                    exit_date="2024-01-09",
+                    participation_clipped=clipped,
+                    partial_fill_count=partials,
+                )
+            ],
+            diagnostics=_diagnostics(),  # engine never fired (would warn if leak-checked)
+            config=_replay_config(),
+            market_data=_trailing_high_bars(),
+        )
+        fails = [r for r in results if not r.passed]
+        assert fails == [], [r.details for r in results]
+        replay = [r for r in results if "trailing replay" in r.details]
+        assert replay and "clipped/partial-fill" in replay[0].details
 
 
 def test_trailing_replay_gap_fill_is_not_a_false_positive() -> None:
