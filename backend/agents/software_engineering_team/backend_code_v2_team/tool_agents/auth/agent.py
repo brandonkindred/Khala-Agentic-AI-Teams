@@ -7,20 +7,10 @@ Uses template-based output (not JSON) so parsing works across model providers.
 
 from __future__ import annotations
 
-import logging
+from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from strands import Agent
-
-from ...models import (
-    ToolAgentInput,
-    ToolAgentOutput,
-    ToolAgentPhaseInput,
-    ToolAgentPhaseOutput,
-)
-from ...output_templates import parse_files_and_summary_template
 from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
-
-logger = logging.getLogger(__name__)
+from ..static_agents import FileGeneratorToolAgent
 
 AUTH_PROMPT = (
     """You are an expert Authentication and Authorization specialist.
@@ -36,59 +26,16 @@ produce the required files (auth modules, middleware, permission models, etc.).
 )
 
 
-class AuthToolAgent:
+class AuthToolAgent(FileGeneratorToolAgent):
     """Produces authentication and authorization code and configurations."""
 
-    def __init__(self, llm=None) -> None:
-        from software_engineering_team.shared.strands_model import resolve_strands_model
+    log_label = "Auth"
+    generation_prompt = AUTH_PROMPT
 
-        # v2 tool agents consume template-parsed output (parse_review_template /
-        # parse_files_and_summary_template / parse_problem_solving_single_issue_template);
-        # the mixed-mode ones (accessibility / performance / ux_usability) have
-        # JSON paths with defensive fence-stripping fallbacks that work in text mode.
-        self._model = resolve_strands_model(llm, response_format="text")
-
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
-
-    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        prompt = AUTH_PROMPT.format(
-            description=inp.microtask.description or inp.microtask.title,
-            language=inp.language,
-            existing_code=inp.existing_code[:4000] if inp.existing_code else "(none)",
-        )
-        logger.info("Auth: running for microtask %s", inp.microtask.id)
-        raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
-        data = parse_files_and_summary_template(raw)
-        return ToolAgentOutput(
-            files=data.get("files") or {},
-            recommendations=[],
-            summary=data.get("summary", ""),
-        )
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Recommend how auth/RBAC work should be reflected in the plan."""
-        return ToolAgentPhaseOutput(
-            recommendations=[
-                "Include auth middleware and permission checks in the microtask plan."
-            ],
-            summary="Auth planning input provided.",
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Domain-specific review: no hardcoded secrets, RBAC consistency."""
-        return ToolAgentPhaseOutput(
-            recommendations=["Check for hardcoded secrets and correct permission boundaries."],
-            summary="Auth review completed.",
-        )
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Suggest auth-layer fixes for issues found in review."""
-        return ToolAgentPhaseOutput(
-            recommendations=["Fix token handling and permission checks as needed."],
-            summary="Auth problem-solving input provided.",
-        )
-
-    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Final auth-domain actions before merge."""
-        return ToolAgentPhaseOutput(summary="Auth deliver phase completed.")
+    plan_recommendations = ["Include auth middleware and permission checks in the microtask plan."]
+    plan_summary = "Auth planning input provided."
+    review_recommendations = ["Check for hardcoded secrets and correct permission boundaries."]
+    review_summary = "Auth review completed."
+    problem_solve_recommendations = ["Fix token handling and permission checks as needed."]
+    problem_solve_summary = "Auth problem-solving input provided."
+    deliver_summary = "Auth deliver phase completed."

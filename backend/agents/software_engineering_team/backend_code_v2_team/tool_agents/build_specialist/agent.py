@@ -7,11 +7,9 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
-
-from software_engineering_team.shared.tool_agent_base import relevant_code_for_issue
 
 from ...models import (
     ReviewIssue,
@@ -27,11 +25,6 @@ from ..base import BackendReviewToolAgent
 logger = logging.getLogger(__name__)
 
 MAX_RELEVANT_CODE_CHARS = 8_000
-
-
-def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) -> str:
-    """Return code context for a single issue: prefer issue's file, else first files."""
-    return relevant_code_for_issue(issue, current_files, MAX_RELEVANT_CODE_CHARS)
 
 
 def _run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
