@@ -25,6 +25,8 @@ from investment_team.models import (
     StrategySpec,
     TradeRecord,
 )
+from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
+from investment_team.strategy_lab.alignment_findings import AlignmentFinding
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
@@ -294,6 +296,46 @@ def test_publication_decision_else_path_stamps_execution_failed() -> None:
     assert out_metrics.acceptance_reason == "publication_disabled: execution_failed"
 
 
+def test_publication_decision_else_path_stamps_no_trades() -> None:
+    """Executed but produced no trades (no acceptance / no fallback) →
+    ``publication_disabled: no trades produced``."""
+    orch = _orch()
+
+    out_metrics, admitted = orch._resolve_publication_decision(
+        metrics=_metrics(),
+        trades=[],
+        market_data={"QQQ": []},
+        config=_config(),
+        execution_succeeded=True,
+        acceptance_results=[],
+        walk_forward_failed=False,
+        all_gate_results=[],
+    )
+
+    assert admitted is False
+    assert out_metrics.acceptance_reason == "publication_disabled: no trades produced"
+
+
+def test_publication_decision_else_path_stamps_walk_forward_disabled() -> None:
+    """Executed with trades but walk-forward disabled (no acceptance / no
+    fallback) → ``publication_disabled: walk_forward_enabled=False``."""
+    orch = _orch()
+
+    out_metrics, admitted = orch._resolve_publication_decision(
+        metrics=_metrics(),
+        trades=[_trade()],
+        market_data={"QQQ": []},
+        config=_config(walk_forward_enabled=False),
+        execution_succeeded=True,
+        acceptance_results=[],
+        walk_forward_failed=False,
+        all_gate_results=[],
+    )
+
+    assert admitted is False
+    assert out_metrics.acceptance_reason == "publication_disabled: walk_forward_enabled=False"
+
+
 def test_publication_decision_fallback_passes_on_clean_recheck(monkeypatch) -> None:
     """Fallback path with a clean anomaly recheck and qualifying return →
     admitted, reason stamped, no fallback_ gates appended."""
@@ -413,6 +455,37 @@ def test_apply_vetoes_realism_failure_stamps_reason() -> None:
     )
 
     assert "realism_failed: too costly" in (out_metrics.acceptance_reason or "")
+    assert admitted is False
+
+
+def test_apply_vetoes_alignment_failure_stamps_reason() -> None:
+    """Unresolved alignment (``trades_aligned=False`` + a critical alignment
+    finding on the last report) stamps ``alignment_unresolved`` and demotes
+    admission."""
+    orch = _orch()
+    finding = AlignmentFinding(
+        trade_num=1,
+        check_name="entry_signal",
+        passed=False,
+        severity="critical",
+        details="entry fired without a signal",
+    )
+    report = TradeAlignmentReport(
+        aligned=False,
+        rationale="off-spec",
+        alignment_findings=[finding],
+    )
+
+    out_metrics, admitted = orch._apply_publication_vetoes(
+        metrics=_metrics(acceptance_reason="walk_forward_passed: ok"),
+        **_veto_kwargs(
+            trades_aligned=False,
+            alignment_reports=[report],
+        ),
+    )
+
+    assert "alignment_unresolved:" in (out_metrics.acceptance_reason or "")
+    assert "entry fired without a signal" in (out_metrics.acceptance_reason or "")
     assert admitted is False
 
 
