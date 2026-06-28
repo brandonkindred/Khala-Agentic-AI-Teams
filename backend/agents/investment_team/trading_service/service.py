@@ -2689,14 +2689,20 @@ class TradingService:
         engine_entries: _EngineEntryDispatcher,
         streaming_views: Dict[str, StreamingHistoryView],
     ) -> List[OrderRequest]:
-        """Run the four-step per-bar event loop for a single bar.
+        """Run the per-bar event loop for a single bar.
 
-        Steps (post-warmup): (1) expire day orders on date change,
-        (2) submit the orders queued against the previous bar — pinning any
-        engine-emitted exit to its target entry, (3) process fills, mark to
-        market and stamp the equity curve, then refresh the engine position
-        tracker. The streaming view is appended for every bar (incl. warm-up);
-        the strategy response is fetched via ``fetch_response`` and applied.
+        Steps, in execution order:
+        1. Expire day orders on date change.
+        2. Submit the orders queued against the previous bar, pinning any
+           engine-emitted exit to its target entry.
+        3. Process fills, mark to market, stamp the equity curve, increment
+           ``bars_processed``, and refresh the engine position tracker.
+        4. Append the current bar to the streaming views.
+        5. Fetch the strategy response via ``fetch_response``.
+        6. Apply the strategy response (orders/cancels) and return the updated
+           pending queue.
+
+        Warm-up bars skip steps 1-3 (and the count) but still run steps 4-6.
 
         Preconditions: ``fetch_response`` returns ``(bar_orders, bar_cancels)``
         for ``cur_bar`` using post-fill portfolio state; the ``process_bar`` →

@@ -1239,6 +1239,19 @@ def test_drain_unfilled_at_eos_records_end_of_stream() -> None:
     assert events[-1].timestamp == "2024-01-05T00:00:00"
 
 
+def test_drain_unfilled_at_eos_without_prev_bar() -> None:
+    """With prev_bar None (no bars ever produced), recorded events carry timestamp=None."""
+    result = TradingServiceResult()
+    req = SimpleNamespace(
+        symbol="AAPL",
+        side=SimpleNamespace(value="buy"),
+        order_type=SimpleNamespace(value="market"),
+    )
+    _bare_service()._drain_unfilled_at_eos([req], None, result)
+    assert result.execution_diagnostics.orders_unfilled == 1
+    assert result.execution_diagnostics.last_order_events[-1].timestamp is None
+
+
 def test_finalize_result_success_records_open_positions() -> None:
     """On the success path (fill_sim supplied) open-position entry reasons are recorded."""
     result = TradingServiceResult()
@@ -1527,3 +1540,44 @@ def test_process_one_bar_binds_engine_exit_to_entry() -> None:
     assert submitted_po.working_against_entry_order_id == "entry-123"
     assert engine_exits.engine_exit_bindings == {}  # binding consumed via pop
     assert result.execution_diagnostics.orders_accepted == 1
+
+
+def test_process_one_bar_updates_position_tracker_when_exit_rules_present() -> None:
+    """With a non-empty ``_exit_rules``, the post-fill position tracker is refreshed
+    for the current bar."""
+    svc = _bare_service()
+    svc._exit_rules = ["a-rule"]  # non-empty → tracker refresh runs
+    result = TradingServiceResult()
+    cur_bar = SimpleNamespace(symbol="AAPL", timestamp="2024-01-03T00:00:00", close=12.0)
+    outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
+    fill_sim = SimpleNamespace(process_bar=lambda _cur, next_bar=None: outcome)
+    portfolio = SimpleNamespace(update_last_price=lambda *a: None, mark_to_market=lambda: 100_000.0)
+    eod_buffer = SimpleNamespace(record=lambda *a: None)
+    tracker: dict = {}
+
+    with (
+        patch.object(svc, "_append_streaming_bar"),
+        patch.object(svc, "_process_bar_strategy_response"),
+        patch.object(svc, "_update_position_tracker") as tracker_mock,
+    ):
+        svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=None,
+            is_warmup=False,
+            fetch_response=lambda: ([], []),
+            pending_for_prev=[],
+            portfolio=portfolio,
+            order_book=None,
+            fill_sim=fill_sim,
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=eod_buffer,
+            position_tracker=tracker,
+            engine_exits=None,
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    tracker_mock.assert_called_once_with(tracker=tracker, cur_bar=cur_bar, portfolio=portfolio)
