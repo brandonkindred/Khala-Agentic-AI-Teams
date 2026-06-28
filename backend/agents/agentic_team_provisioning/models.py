@@ -127,6 +127,12 @@ class ProcessDefinition(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# Roster-entry provenance values (the ``AgenticTeamAgent.source`` Literal). Named
+# constants so the projection / registration filters reference one source of truth.
+SOURCE_GENERATED = "generated"
+SOURCE_REGISTRY = "registry"
+
+
 class AgenticTeamAgent(BaseModel):
     """A named agent in the team's roster.
 
@@ -160,7 +166,7 @@ class AgenticTeamAgent(BaseModel):
         description="Domain expertise areas (e.g. 'customer support', 'financial analysis', 'HIPAA compliance')",
     )
     source: Literal["generated", "registry"] = Field(
-        default="generated",
+        default=SOURCE_GENERATED,
         description="Provenance of this roster entry: 'generated' (LLM-authored on this team) "
         "or 'registry' (added from a registered AgentManifest via Agent Studio).",
     )

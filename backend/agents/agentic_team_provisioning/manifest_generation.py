@@ -19,7 +19,7 @@ import logging
 
 from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
 from agentic_team_provisioning.agent_env_provisioning import _slug
-from agentic_team_provisioning.models import AgenticTeamAgent
+from agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
 
 logger = logging.getLogger(__name__)
 
@@ -164,13 +164,22 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     Preconditions:
         * ``team_id`` is non-empty.
     Postconditions:
-        * Returns one validated manifest per roster agent, each registered
-          (``get_registry().get(m.id)`` returns it). Acts as a full replace for the
+        * Returns one validated manifest per **generated** roster agent (registry-
+          source agents are skipped — they're already in the registry), each
+          registered (``get_registry().get(m.id)`` returns it). Acts as a full
+          replace for the
           team: previously-registered generated manifests for ``team_id`` that are
           absent from this roster are unregistered, so removed/renamed agents stop
           appearing in the catalog. In-memory and idempotent. Best-effort — a
           registry failure is logged, never raised, so generation still succeeds.
     """
+    # Only *generated* roster agents get a team-namespaced wrapper installed here.
+    # Registry-source agents (added via Agent Studio's from-registry endpoint)
+    # already exist in the registry on their own, so wrapping them would register a
+    # duplicate "generated"-tagged entry — e.g. on every restart via the retroactive
+    # recovery path, which passes the whole roster. The stale-cleanup below then also
+    # drops any such wrapper left behind by an older build.
+    agents = [a for a in agents if a.source == SOURCE_GENERATED]
     manifests = [build_agent_manifest(team_id, a) for a in agents]
     new_ids = {m.id for m in manifests}
     try:

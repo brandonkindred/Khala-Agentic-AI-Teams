@@ -79,6 +79,7 @@ def _new_team() -> str:
 
 
 def test_from_registry_projects_and_persists(client: TestClient) -> None:
+    """201 with the projected fields, and the agent is persisted on the roster."""
     team_id = _new_team()
 
     resp = client.post(
@@ -134,13 +135,25 @@ def test_from_registry_is_idempotent_by_name(client: TestClient) -> None:
     assert len(roster) == 1
 
 
+def test_from_registry_invalid_body_422(client: TestClient) -> None:
+    """The API contract is enforced: a missing or empty manifest_id is a 422."""
+    team_id = _new_team()
+    assert client.post(f"/teams/{team_id}/agents/from-registry", json={}).status_code == 422
+    assert (
+        client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": ""}).status_code
+        == 422
+    )
+
+
 def test_from_registry_unknown_manifest_404(client: TestClient) -> None:
+    """An unknown manifest id is a 404."""
     team_id = _new_team()
     resp = client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "nope"})
     assert resp.status_code == 404
 
 
 def test_from_registry_unknown_team_404(client: TestClient) -> None:
+    """Adding to an unknown team is a 404."""
     resp = client.post(
         "/teams/missing/agents/from-registry", json={"manifest_id": "blogging.planner"}
     )
@@ -148,6 +161,7 @@ def test_from_registry_unknown_team_404(client: TestClient) -> None:
 
 
 def test_delete_removes_agent(client: TestClient) -> None:
+    """Deleting a rostered agent returns 204 and empties the roster."""
     team_id = _new_team()
     client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
 
@@ -157,12 +171,14 @@ def test_delete_removes_agent(client: TestClient) -> None:
 
 
 def test_delete_unknown_agent_404(client: TestClient) -> None:
+    """Deleting an agent that isn't on the roster is a 404."""
     team_id = _new_team()
     resp = client.delete(f"/teams/{team_id}/agents/ghost")
     assert resp.status_code == 404
 
 
 def test_delete_unknown_team_404(client: TestClient) -> None:
+    """Deleting from an unknown team is a 404."""
     resp = client.delete("/teams/missing/agents/whoever")
     assert resp.status_code == 404
 
@@ -197,6 +213,55 @@ def test_delete_generated_agent_unregisters_its_manifest(
     resp = client.delete(f"/teams/{team_id}/agents/Writer Agent")
     assert resp.status_code == 204
     assert registry.get(manifest.id) is None  # unregistered
+
+
+def test_from_registry_replacing_generated_unregisters_old_manifest(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Adding a registry agent whose name matches an existing *generated* agent
+    drops that generated agent's stale manifest from the live registry."""
+    from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+    team_id = _new_team()
+    # A generated agent already on the roster + installed in the registry, named to
+    # collide with the registry manifest we'll add (_PLANNER.name).
+    gen = AgenticTeamAgent(
+        agent_name="blogging.planner", role="old", skills=["x"], source="generated"
+    )
+    AgenticTeamStore().save_team_agents(team_id, [gen])
+    old_manifest = build_agent_manifest(team_id, gen)
+    registry.register(old_manifest)
+    assert registry.get(old_manifest.id) is not None
+
+    resp = client.post(
+        f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"}
+    )
+    assert resp.status_code == 201
+    assert resp.json()["source"] == "registry"  # roster row replaced
+    assert registry.get(old_manifest.id) is None  # stale generated manifest dropped
+
+
+def test_register_team_manifests_skips_registry_agents(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """register_team_manifests must not install a generated wrapper for a
+    registry-source agent (which would duplicate it on every restart)."""
+    from agentic_team_provisioning.manifest_generation import register_team_manifests
+
+    team_id = _new_team()
+    gen = AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"], source="generated")
+    reg = AgenticTeamAgent(
+        agent_name="blogging.planner",
+        role="p",
+        skills=["seo"],
+        source="registry",
+        manifest_id="blogging.planner",
+    )
+
+    manifests = register_team_manifests(team_id, [gen, reg])
+    assert len(manifests) == 1  # only the generated agent is wrapped
+    # The original registry manifest is untouched; no generated wrapper was added.
+    assert registry.get("blogging.planner") is _PLANNER
 
 
 def test_delete_registry_agent_keeps_global_manifest(

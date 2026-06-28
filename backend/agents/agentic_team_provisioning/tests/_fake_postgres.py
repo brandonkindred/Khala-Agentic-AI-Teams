@@ -144,11 +144,43 @@ class _FakeCursor:
             return
 
         # -- team_agents --------------------------------------------------
+        # Single-row targeted delete (RETURNING the deleted row) — must precede the
+        # team-wide delete handler, whose prefix this also matches.
+        if (
+            norm.startswith("delete from agentic_team_agents where team_id")
+            and "agent_name" in norm
+        ):
+            team_id, agent_name = params
+            removed = self._db["team_agents"].pop((team_id, agent_name), None)
+            self.rowcount = 1 if removed else 0
+            self._last_fetch_one = {"data_json": removed["data_json"]} if removed else None
+            return
+
         if norm.startswith("delete from agentic_team_agents where team_id"):
             (team_id,) = params
             for k in list(self._db["team_agents"].keys()):
                 if k[0] == team_id:
                     del self._db["team_agents"][k]
+            return
+
+        # Single-row upsert (ON CONFLICT) — preserves the existing created_at, like
+        # real Postgres. Must precede the plain INSERT handler.
+        if norm.startswith("insert into agentic_team_agents") and "on conflict" in norm:
+            team_id, agent_name, data_json, created_at, updated_at = params
+            data = _unwrap_json(data_json)
+            existing = self._db["team_agents"].get((team_id, agent_name))
+            if existing:
+                existing["data_json"] = data
+                existing["updated_at"] = updated_at
+            else:
+                self._db["team_agents"][(team_id, agent_name)] = {
+                    "team_id": team_id,
+                    "agent_name": agent_name,
+                    "data_json": data,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                }
+            self.rowcount = 1
             return
 
         if norm.startswith("insert into agentic_team_agents"):

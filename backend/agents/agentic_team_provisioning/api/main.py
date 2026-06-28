@@ -17,6 +17,8 @@ from agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
 from agentic_team_provisioning.models import (
+    SOURCE_GENERATED,
+    SOURCE_REGISTRY,
     AddAgentFromRegistryRequest,
     AgentEnvProvisionSummary,
     AgenticTeamAgent,
@@ -263,8 +265,10 @@ def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
         role=manifest.summary or manifest.name,
         skills=list(manifest.tags),
         tools=list(manifest.cognition.tools) if manifest.cognition else [],
-        expertise=[manifest.team],
-        source="registry",
+        # ``team`` is a required, non-empty str on AgentManifest; the guard is
+        # belt-and-suspenders so a degenerate empty team can never inject ``[""]``.
+        expertise=[manifest.team] if manifest.team else [],
+        source=SOURCE_REGISTRY,
         manifest_id=manifest.id,
     )
 
@@ -274,18 +278,27 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     """Add a registered agent to the team roster, projected from its manifest (§5.3).
 
     Returns the projected roster agent. ``404`` when the team or the manifest id is
-    unknown. Re-adding the same manifest updates that roster entry in place.
+    unknown. Re-adding the same manifest updates that roster entry in place. If this
+    replaces a *generated* agent of the same name, that generated agent's stale
+    in-process manifest is unregistered (the new entry is registry-source and
+    resolves on its own) — mirroring the delete route's cleanup.
     """
     from agent_registry import get_registry
 
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    manifest = get_registry().get(req.manifest_id)
+    registry = get_registry()
+    manifest = registry.get(req.manifest_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent manifest: {req.manifest_id}")
     agent = _roster_agent_from_manifest(manifest)
+    prior = next((a for a in team.agents if a.agent_name == agent.agent_name), None)
     _store.add_or_replace_team_agent(team_id, agent)
+    if prior is not None and prior.source == SOURCE_GENERATED:
+        from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+        registry.unregister(build_agent_manifest(team_id, prior).id)
     return agent
 
 
@@ -307,14 +320,16 @@ def remove_agent_from_roster(team_id: str, agent_name: str):
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    agent = next((a for a in team.agents if a.agent_name == agent_name), None)
-    if not _store.delete_team_agent(team_id, agent_name):
+    deleted = _store.delete_team_agent(team_id, agent_name)
+    if deleted is None:
         raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
-    if agent is not None and agent.source == "generated":
+    if deleted.source == SOURCE_GENERATED:
+        # Lazy imports: ``manifest_generation`` pulls the cognition/runtime stack and
+        # is only needed on this branch, matching the other in-handler imports here.
         from agent_registry import get_registry
         from agentic_team_provisioning.manifest_generation import build_agent_manifest
 
-        get_registry().unregister(build_agent_manifest(team_id, agent).id)
+        get_registry().unregister(build_agent_manifest(team_id, deleted).id)
     return Response(status_code=204)
 
 

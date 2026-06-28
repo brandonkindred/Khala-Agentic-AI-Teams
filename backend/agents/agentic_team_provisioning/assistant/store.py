@@ -211,32 +211,55 @@ class AgenticTeamStore:
         Preconditions: ``team_id`` names an existing team.
         Postconditions: the roster contains exactly one entry named
             ``agent.agent_name`` (the supplied ``agent``); all other entries are
-            unchanged. Re-adding an existing name overwrites it in place.
+            unchanged. Re-adding an existing name overwrites it in place, preserving
+            that row's original ``created_at``.
+
+        Concurrency: a single ``INSERT ... ON CONFLICT`` touches only this agent's
+            row (no read-modify-write of the whole roster), so concurrent
+            single-agent adds on the same team cannot drop one another's writes.
         """
         now = datetime.now(tz=timezone.utc)
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            roster = [
-                a for a in self._load_team_agents(cur, team_id) if a.agent_name != agent.agent_name
-            ]
-            roster.append(agent)
-            self._write_team_agents(cur, team_id, roster, now)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agentic_team_agents "
+                "(team_id, agent_name, data_json, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
+                "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
+                (team_id, agent.agent_name, Json(agent.model_dump(mode="json")), now, now),
+            )
+            cur.execute(
+                "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
+                (now, team_id),
+            )
 
     @timed_query(store=_STORE, op="delete_team_agent")
-    def delete_team_agent(self, team_id: str, agent_name: str) -> bool:
-        """Remove a single roster agent by name.
+    def delete_team_agent(self, team_id: str, agent_name: str) -> Optional[AgenticTeamAgent]:
+        """Remove a single roster agent by name and return it.
 
-        Postconditions: returns ``True`` and removes the entry when it existed;
-            returns ``False`` and leaves the roster unchanged when no entry named
-            ``agent_name`` is present.
+        Postconditions: returns the deleted :class:`AgenticTeamAgent` when an entry
+            named ``agent_name`` existed (removing only that row); returns ``None``
+            and leaves the roster unchanged otherwise.
+
+        Concurrency: a single ``DELETE ... RETURNING`` removes only this agent's row
+            and reports its data atomically — no read-modify-write of the roster, and
+            the caller's source check sees the row that was actually deleted.
         """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            roster = self._load_team_agents(cur, team_id)
-            remaining = [a for a in roster if a.agent_name != agent_name]
-            if len(remaining) == len(roster):
-                return False
-            self._write_team_agents(cur, team_id, remaining, now)
-            return True
+            cur.execute(
+                "DELETE FROM agentic_team_agents WHERE team_id = %s AND agent_name = %s "
+                "RETURNING data_json",
+                (team_id, agent_name),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cur.execute(
+                "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
+                (now, team_id),
+            )
+            return AgenticTeamAgent.model_validate(row["data_json"])
 
     @timed_query(store=_STORE, op="list_team_agents")
     def list_team_agents(self, team_id: str) -> list[AgenticTeamAgent]:
