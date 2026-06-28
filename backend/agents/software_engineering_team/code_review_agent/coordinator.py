@@ -26,7 +26,6 @@ import json
 import logging
 import re
 import threading
-from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -40,6 +39,7 @@ from llm_service import (
     LLMUnreachableAfterRetriesError,
     compact_text,
 )
+from shared_concurrency import parallel_map
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_existing_codebase_chars,
@@ -1036,28 +1036,24 @@ def _map_chunks(
                 )
         return outcome
 
-    workers = min(_map_parallelism(), total)
-    if workers <= 1:
-        return [_run_one(c) for c in chunks]
-    executor = ThreadPoolExecutor(max_workers=workers)
-    try:
-        futures = [executor.submit(_run_one, c) for c in chunks]
-        # Wake on the first failure instead of joining futures in submission
-        # order, so a fast failure is never hidden behind a slow earlier chunk.
-        wait(futures, return_when=FIRST_EXCEPTION)
-        for f in futures:
-            if f.done() and f.exception() is not None:
-                f.result()  # re-raises the worker's exception with its traceback
-        results = [f.result() for f in futures]
-    except BaseException:
+    def _abandon() -> None:
         # Setting the flag under the progress lock guarantees any in-flight
         # report finishes before the failure propagates and none follows it.
         with progress_lock:
             abandoned.set()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    executor.shutdown(wait=True)
-    return results
+
+    # parallel_map owns the bounded pool, input-order results, fast-fail on the
+    # first exception (pending chunks cancelled, original traceback preserved),
+    # and per-task context propagation so LLM attribution reaches the workers.
+    # Outcomes are never None, so skip_none is off; _abandon runs before any
+    # cancellation so abandoned in-flight workers suppress their progress.
+    return parallel_map(
+        chunks,
+        _run_one,
+        max_workers=_map_parallelism(),
+        skip_none=False,
+        on_first_exception=_abandon,
+    )
 
 
 def run_coordinator(

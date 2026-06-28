@@ -14,6 +14,7 @@ from strands import Agent
 logger = logging.getLogger(__name__)
 
 from llm_service import compact_text  # noqa: E402
+from shared_concurrency import parallel_map  # noqa: E402
 
 from .agent_cache import AgentCache  # noqa: E402
 from .models import (  # noqa: E402
@@ -492,12 +493,15 @@ class ResearchAgent:
         )
         self._report_llm("Scoring documents for relevance...", 0.50)
 
-        max_workers = min(n_docs, 8)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(self._score_one_document, doc, brief_input) for doc in documents
-            ]
-            scored = [fut.result() for fut in futures]
+        # parallel_map copies this thread's context per task so the LLM
+        # attribution/request-id contextvars propagate into the scoring workers
+        # (raw threads don't copy them; see llm_service.attribution).
+        scored = parallel_map(
+            documents,
+            lambda doc: self._score_one_document(doc, brief_input),
+            max_workers=8,
+            skip_none=False,
+        )
 
         scored.sort(key=lambda t: t[1], reverse=True)
         self._report_llm("Document scoring complete.", 0.65)
@@ -577,12 +581,15 @@ class ResearchAgent:
         self._report_llm("Summarizing references...", 0.65)
 
         items = scored_docs[: brief_input.max_results]
-        max_workers = min(cap, 8)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(self._summarize_one_document, item, brief_input) for item in items
-            ]
-            references = [fut.result() for fut in futures]
+        # parallel_map copies this thread's context per task so the LLM
+        # attribution/request-id contextvars propagate into the summarizing
+        # workers (raw threads don't copy them; see llm_service.attribution).
+        references = parallel_map(
+            items,
+            lambda item: self._summarize_one_document(item, brief_input),
+            max_workers=8,
+            skip_none=False,
+        )
 
         self._report_llm("Summarization complete.", 0.78)
         logger.info("Produced %s references", len(references))
