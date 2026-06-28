@@ -157,6 +157,13 @@ def test_merge_definition_bogus_state_key_returns_none() -> None:
     assert _merge_definition(AgentDefinition(name="ok"), {"states": bad}) is None
 
 
+def test_merge_definition_unhashable_state_key_returns_none() -> None:
+    # A malformed, unhashable state key (e.g. a list) must not crash the by-key
+    # overlay with a TypeError — it degrades to "no update" like any bad field.
+    bad = [{"key": ["planning"], "label": "x", "system_prompt": "y"}]
+    assert _merge_definition(AgentDefinition(name="ok"), {"states": bad}) is None
+
+
 def test_content_fields_includes_states() -> None:
     assert "states" in _CONTENT_FIELDS
 

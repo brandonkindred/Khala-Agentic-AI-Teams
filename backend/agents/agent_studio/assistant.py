@@ -212,12 +212,17 @@ def _merge_definition(current: AgentDefinition, block: dict) -> AgentDefinition 
     }
     # Overlay states by key onto the current draft so a partial echo doesn't discard
     # prior edits to the keys it omits. The normalizer then canonicalizes the result.
+    # Only overlay when every entry is a dict with a *string* key: a malformed key
+    # (e.g. a list) is unhashable and would raise a TypeError that escapes the
+    # ValidationError handler below — so leave such a list untouched and let
+    # ``model_validate`` reject it (→ ``None``, the "ignore bad update" contract).
     incoming_states = updates.get("states")
-    if isinstance(incoming_states, list):
+    if isinstance(incoming_states, list) and all(
+        isinstance(s, dict) and isinstance(s.get("key"), str) for s in incoming_states
+    ):
         by_key = {s["key"]: s for s in merged["states"]}
         for state in incoming_states:
-            if isinstance(state, dict) and "key" in state:
-                by_key[state["key"]] = state
+            by_key[state["key"]] = state
         updates["states"] = list(by_key.values())
     merged.update(updates)
     try:
