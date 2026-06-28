@@ -1657,6 +1657,12 @@ import { BrowserDynamicTestingModule, platformBrowserDynamicTesting } from '@ang
 getTestBed().initTestEnvironment(BrowserDynamicTestingModule, platformBrowserDynamicTesting());
 """
 
+MINIMAL_REACT_ESLINT_CONFIG = _MINIMAL_REACT_ESLINT_CONFIG
+MINIMAL_REACT_VITEST_CONFIG = _MINIMAL_REACT_VITEST_CONFIG
+MINIMAL_ANGULAR_ESLINT_CONFIG = _MINIMAL_ANGULAR_ESLINT_CONFIG
+MINIMAL_ANGULAR_VITEST_CONFIG = _MINIMAL_ANGULAR_VITEST_CONFIG
+MINIMAL_ANGULAR_TEST_SETUP = _MINIMAL_ANGULAR_TEST_SETUP
+
 _MINIMAL_REACT_VITE_CONFIG = """\
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';

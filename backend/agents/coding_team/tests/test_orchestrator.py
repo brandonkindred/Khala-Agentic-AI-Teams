@@ -1,4 +1,4 @@
-"""Tests for the coding-team swarm review/merge loop.
+"""Tests for the coding-team orchestrator and review/merge loop.
 
 Covers the Tech-Lead review deadlock fix: a rejected task is sent back to the SAME engineer
 for revision (IN_PROGRESS, assignment retained, reviewer reasons attached) rather than demoted
@@ -9,6 +9,7 @@ serialization round-trip, the branch_diff helper, and the final status line.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -17,10 +18,6 @@ import pytest
 from coding_team import orchestrator as orch_mod
 from coding_team.models import CodingTeamPlanInput, StackSpec, Task, TaskStatus
 from coding_team.orchestrator import CodingTeamSwarm, run_coding_team_orchestrator
-from coding_team.senior_software_engineer_agent.agent import (
-    SeniorSWEAgent,
-    _render_revision_feedback,
-)
 from coding_team.task_graph import TaskGraphService
 
 GIT_UTILS = "software_engineering_team.shared.git_utils"
@@ -78,7 +75,7 @@ class StubTechLead:
 
 
 class StubWorker:
-    """Duck-typed Senior SWE that always reports a ready implementation."""
+    """Duck-typed implementation worker that always reports a ready implementation."""
 
     def __init__(self, agent_id: str) -> None:
         self.agent_id = agent_id
@@ -392,68 +389,8 @@ def test_persistent_implement_failure_fails_task(tmp_path, monkeypatch):
     assert len(worker.implement_calls) <= orch_mod.MAX_TASK_REVISIONS + 1  # bounded, not 50
 
 
-def test_revision_feedback_threaded_into_implement_prompt(tmp_path, monkeypatch):
-    """Reviewer reasons on the task reach the SWE's implement prompt so it revises, not restarts."""
-    from coding_team.senior_software_engineer_agent import agent as swe_mod
-
-    captured: Dict[str, str] = {}
-
-    class FakeAgent:
-        def __init__(self, **kw):
-            pass
-
-        def __call__(self, prompt):
-            captured["prompt"] = prompt
-            return (
-                '{"summary":"ok","files_to_create_or_edit":[],"commands_run":[],'
-                '"ready_for_review":true,"feature_branch":"feature/t1"}'
-            )
-
-    monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
-    swe = SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
-    task = Task(
-        id="t1",
-        title="T1",
-        description="do the thing",
-        revision_feedback=[
-            {
-                "source": "tech_lead",
-                "reason": "missing tests",
-                "requested_changes": ["add unit tests"],
-            }
-        ],
-    )
-
-    swe.run_implement(task, tmp_path, repo_context="ctx")
-
-    assert "REVISIONS REQUESTED" in captured["prompt"]
-    assert "missing tests" in captured["prompt"]
-    assert "add unit tests" in captured["prompt"]
-
-
-def test_render_revision_feedback_formats_entries():
-    out = _render_revision_feedback(
-        [
-            {"source": "tech_lead", "reason": "bad", "requested_changes": ["x", "y"]},
-            {"type": "build", "error": "boom"},
-        ]
-    )
-    assert "[tech_lead] bad" in out
-    assert "  - x" in out
-    assert "  - y" in out
-    assert "[build] boom" in out
-
-
-def test_render_revision_feedback_empty():
-    assert _render_revision_feedback([]) == ""
-
-
-def test_render_revision_feedback_non_dict_entry():
-    """Defensive: a non-dict feedback entry is rendered as a plain bullet, not dropped."""
-    assert "- just a string" in _render_revision_feedback(["just a string"])
-
-
 def test_approved_task_merges(tmp_path, monkeypatch):
+    """Approved in-review tasks are merged and marked terminal."""
     _patch_git(monkeypatch, merge=(True, "ok"))
     swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [StubWorker("a1")])
     graph.add_task("t1", title="T1")
@@ -586,10 +523,6 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
                 "stacks": [{"name": "backend", "tools_services": []}],
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -599,7 +532,11 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
             self.graph.update_task("t2", status=TaskStatus.FAILED)
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
     # No job service in unit tests — skip the persistence write.
 
@@ -764,6 +701,500 @@ def test_return_for_revision_unassigns_task(tmp_path, monkeypatch):
     assert graph.assign_task_to_agent("t1", "a1") is True
 
 
+def test_assignment_respects_target_team_and_falls_back_to_matching_v2_worker(tmp_path):
+    """A mismatched LLM assignment is ignored; target_team routes to the matching v2 worker."""
+
+    class MismatchingTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "backend_v2", "task_id": "ui"}]}
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, MismatchingTL(approved=True), workers)
+    graph.add_task("ui", title="Build UI", target_team="frontend_v2")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    task = graph.get_task("ui")
+    assert task.assigned_agent_id == "frontend_v2"
+    assert graph.get_task_for_agent("backend_v2") is None
+
+
+def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
+    """Backend-owned target aliases such as devops route to the backend v2 worker."""
+
+    class AssignDevOpsTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "backend_v2", "task_id": "deploy"}]}
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, AssignDevOpsTL(approved=True), workers)
+    graph.add_task("deploy", title="Deploy service", target_team="devops")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    task = graph.get_task("deploy")
+    assert task.assigned_agent_id == "backend_v2"
+    assert graph.get_task_for_agent("frontend_v2") is None
+
+
+def test_assignment_normalizes_frontend_owned_target_aliases(tmp_path):
+    """Frontend-owned target aliases such as ui/ux route to the frontend v2 worker."""
+
+    class AssignUiTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "frontend_v2", "task_id": "screen"}]}
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, AssignUiTL(approved=True), workers)
+    graph.add_task("screen", title="Build settings screen", target_team="ui")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    task = graph.get_task("screen")
+    assert task.assigned_agent_id == "frontend_v2"
+    assert graph.get_task_for_agent("backend_v2") is None
+
+
+def test_target_match_normalizes_frontend_owned_aliases() -> None:
+    """UI/UX target aliases canonicalize to the frontend v2 team for matching."""
+    assert orch_mod._team_key("ui") == "frontend_v2"
+    assert orch_mod._team_key("UX") == "frontend_v2"
+    assert orch_mod._team_key("Web App") == "frontend_v2"
+    assert orch_mod._target_matches_agent("ui", "frontend-v2-worker-2") is True
+    assert orch_mod._target_matches_agent("ux", "backend_v2_worker_1") is False
+    # Exact-token match only: unrelated words containing an alias substring are unaffected.
+    assert orch_mod._team_key("build") == "build"
+    assert orch_mod._team_key("guidelines") == "guidelines"
+
+
+def test_team_key_routes_framework_and_language_labels() -> None:
+    """Concrete tech labels route to the owning v2 team instead of failing to match."""
+    for label in ("React", "Angular", "AngularJS", "scss", "Next.js", "React.js", "Vue.js"):
+        assert orch_mod._team_key(label) == "frontend_v2"
+    for label in (
+        "Python",
+        "Java",
+        "FastAPI",
+        "Spring Boot",
+        "Postgres",
+        "Node.js",
+        "Express.js",
+        ".NET",
+        ".NET Core",
+        "ASP.NET",
+    ):
+        assert orch_mod._team_key(label) == "backend_v2"
+    # Ambiguous languages (used by frontend frameworks AND Node backends) must NOT be
+    # forced onto a team — routing them would mis-send backend work to the frontend worker.
+    for label in ("TypeScript", "JavaScript"):
+        assert orch_mod._team_key(label) not in ("frontend_v2", "backend_v2")
+    # A capable worker now matches these labels rather than the task being dropped.
+    assert orch_mod._target_matches_agent("react", "frontend_v2") is True
+    assert orch_mod._target_matches_agent("python", "backend_v2") is True
+    # Generic, non-tech words still pass through unmapped.
+    assert orch_mod._team_key("build") == "build"
+
+
+def test_team_key_accepts_compact_v2_labels() -> None:
+    """Separator-less v2 labels still route, without matching unrelated substrings."""
+    assert orch_mod._team_key("frontendv2") == "frontend_v2"
+    assert orch_mod._team_key("BackendV2") == "backend_v2"
+    # Exact-match only: a word merely containing the alias as a substring is unaffected.
+    assert orch_mod._team_key("myfrontend") == "myfrontend"
+
+
+def test_assign_tasks_survives_assignment_error(tmp_path):
+    """A transient assign_task_to_agent error is logged and skipped, not propagated."""
+
+    class OneAssignTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "backend_v2", "task_id": "t1"}]}
+
+    workers = [StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, OneAssignTL(approved=True), workers)
+    graph.add_task("t1", title="Build API", target_team="backend_v2")
+
+    def _boom(task_id, agent_id):
+        raise RuntimeError("transient store error")
+
+    swarm.graph.assign_task_to_agent = _boom  # type: ignore[method-assign]
+
+    # Must not raise; the task simply stays unassigned for this round.
+    swarm._assign_tasks(graph.get_tasks(), ["backend_v2"])
+    assert graph.get_task("t1").assigned_agent_id is None
+    assert graph.get_task("t1").status == TaskStatus.TO_DO
+
+
+def test_assign_tasks_continues_to_next_agent_after_error(tmp_path):
+    """When the first matching worker's assignment raises, a second free worker still gets it."""
+
+    class NoopTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": []}
+
+    workers = [StubWorker("backend_v2"), StubWorker("backend_v2_alt")]
+    swarm, graph = _make_swarm(tmp_path, NoopTL(approved=True), workers)
+    graph.add_task("t1", title="Build API", target_team="backend_v2")
+
+    real_assign = graph.assign_task_to_agent
+
+    def _flaky(task_id, agent_id):
+        if agent_id == "backend_v2":
+            raise RuntimeError("transient store error")
+        return real_assign(task_id, agent_id)
+
+    swarm.graph.assign_task_to_agent = _flaky  # type: ignore[method-assign]
+
+    # The guardrail loop skips the failing worker and places the task on the second one.
+    swarm._assign_tasks(graph.get_tasks(), ["backend_v2", "backend_v2_alt"])
+    assert graph.get_task("t1").assigned_agent_id == "backend_v2_alt"
+
+
+def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
+    """A target_team that no worker can satisfy fails with blocked dependents."""
+
+    class NoopTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": []}
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, NoopTL(approved=True), workers)
+    graph.add_task("unknown", title="Unknown target", target_team="unknown_team")
+    graph.add_task("blocked", title="Blocked follow-up", dependencies=["unknown"])
+
+    with caplog.at_level(logging.WARNING, logger=orch_mod.logger.name):
+        swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    task = graph.get_task("unknown")
+    assert task.status == TaskStatus.FAILED
+    assert task.assigned_agent_id is None
+    assert "No implementation worker is available" in task.changes_summary
+    assert task.revision_feedback[-1]["source"] == "system"
+    assert graph.get_task("blocked").status == TaskStatus.FAILED
+    assert "unknown_team" in caplog.text
+
+
+def test_target_match_normalizes_raw_v2_agent_ids() -> None:
+    """Raw worker IDs with suffixes still compare by their canonical v2 team."""
+    assert orch_mod._target_matches_agent("frontend_v2", "frontend-v2-worker-2") is True
+    assert orch_mod._target_matches_agent("devops", "backend_v2_worker_1") is True
+    assert orch_mod._target_matches_agent("frontend_v2", "backend_v2_worker_1") is False
+
+
+def test_team_key_warns_on_ambiguous_frontend_backend_label(caplog) -> None:
+    """Ambiguous raw labels are visible in logs while preserving current precedence."""
+    with caplog.at_level(logging.WARNING, logger=orch_mod.logger.name):
+        assert orch_mod._team_key("frontend-backend") == "frontend_v2"
+
+    assert "contains both frontend and backend" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("front-end", "frontend_v2"),
+        ("front end", "frontend_v2"),
+        ("back-end", "backend_v2"),
+        ("back end", "backend_v2"),
+    ],
+)
+def test_team_key_normalizes_separated_frontend_backend_labels(
+    label: str, expected: str
+) -> None:
+    """Common separated frontend/backend labels route to canonical v2 teams."""
+    assert orch_mod._team_key(label) == expected
+
+
+def test_quality_gate_type_uses_v2_stack_inference_for_hint_stack_names() -> None:
+    """Hint-only stack names still map to canonical quality gate agent types."""
+    assert orch_mod._quality_gate_agent_type("Angular") == "frontend"
+    assert orch_mod._quality_gate_agent_type("Spring Boot") == "backend"
+    assert orch_mod._quality_gate_agent_type("Python") == "backend"
+
+
+def test_v2_team_kind_matches_frontend_hint_tokens_without_substrings() -> None:
+    """Frontend hint aliases must match as tokens, not substrings inside unrelated words."""
+    assert orch_mod._v2_team_kind_for_stack(StackSpec(name="UI", tools_services=[])) == "frontend"
+    assert orch_mod._v2_team_kind_for_stack(StackSpec(name="build", tools_services=[])) == "backend"
+    assert (
+        orch_mod._v2_team_kind_for_stack(StackSpec(name="documentation", tools_services=["guides"]))
+        is None
+    )
+    assert (
+        orch_mod._v2_team_kind_for_stack(
+            StackSpec(name="release automation", tools_services=["CI build"])
+        )
+        == "backend"
+    )
+
+
+@pytest.mark.parametrize("stack_name", ["platform", "ci_cd", "services"])
+def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None:
+    """Backend-owned alias stack names build backend v2 workers instead of failing."""
+    assert (
+        orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    )
+
+
+@pytest.mark.parametrize("stack_name", ["default", "Senior Software Engineer"])
+def test_v2_team_kind_accepts_legacy_default_stack_names(stack_name: str) -> None:
+    """Legacy generic stack names now route to backend v2 after removing the Senior SWE worker."""
+    assert (
+        orch_mod._v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+    )
+
+
+def test_legacy_default_stack_spec_is_repaired_to_backend_v2() -> None:
+    """Persisted pre-v2 fallback stacks are replaced with the backend v2 team."""
+    stacks = orch_mod._ensure_target_team_stack_specs(
+        [{"name": "default", "tools_services": ["legacy"]}],
+        [],
+    )
+
+    assert stacks == [
+        {
+            "name": "backend_v2",
+            "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
+        }
+    ]
+
+
+def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, monkeypatch):
+    """Old persisted jobs with a default stack still resume after the legacy worker removal."""
+
+    class ExplodingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            raise AssertionError("planning must not run on resume")
+
+    captured_specs: List[str] = []
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            self.aborted = False
+
+        def run(self, **kw):
+            pass
+
+    def _build_worker(agent_id, spec, llm_getter):
+        captured_specs.append(spec.name)
+        return StubWorker(agent_id)
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", ExplodingTL)
+    monkeypatch.setattr(orch_mod, "_build_implementation_worker", _build_worker)
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    snapshot = {
+        "task_graph_snapshot": [
+            {"id": "t1", "title": "T1", "status": "to_do", "dependencies": []},
+        ],
+        "stack_specs": [{"name": "default", "tools_services": ["legacy"]}],
+    }
+    updates: List[Dict[str, Any]] = []
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: snapshot,
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert captured_specs == ["backend_v2"]
+    assert any(update.get("stack_specs") == [orch_mod._BACKEND_V2_STACK_SPEC] for update in updates)
+
+
+def test_backend_v2_worker_uses_injected_llm_getter(monkeypatch):
+    """Backend v2 worker construction must honor the coding-team LLM injection path."""
+    from software_engineering_team import backend_code_v2_team
+
+    captured_keys: List[str] = []
+
+    class FakeBackendLead:
+        def __init__(self, llm):
+            self.llm = llm
+
+    monkeypatch.setattr(backend_code_v2_team, "BackendCodeV2TeamLead", FakeBackendLead)
+
+    def _llm_getter(key: str) -> str:
+        captured_keys.append(key)
+        return f"{key}-client"
+
+    worker = orch_mod._build_implementation_worker(
+        "backend_v2",
+        StackSpec(name="backend_v2", tools_services=["Python"]),
+        _llm_getter,
+    )
+
+    assert captured_keys == ["backend"]
+    assert worker.team_lead.llm == "backend-client"
+
+
+def test_v2_worker_clones_injected_strands_model_to_text_mode(monkeypatch):
+    """Cloneable JSON-mode Strands models are passed to v2 teams in text mode."""
+    from software_engineering_team import backend_code_v2_team
+
+    class _CloneableModel:
+        def __init__(self, response_format: str) -> None:
+            self.response_format = response_format
+            self.clones: List[str] = []
+
+        def get_config(self) -> Dict[str, str]:
+            return {"response_format": self.response_format}
+
+        def clone(self, **overrides):
+            response_format = overrides.get("response_format", self.response_format)
+            self.clones.append(response_format)
+            return _CloneableModel(response_format)
+
+    class FakeBackendLead:
+        def __init__(self, llm):
+            self.llm = llm
+
+    model = _CloneableModel("json")
+    monkeypatch.setattr(backend_code_v2_team, "BackendCodeV2TeamLead", FakeBackendLead)
+
+    worker = orch_mod._build_implementation_worker(
+        "backend_v2",
+        StackSpec(name="backend_v2", tools_services=["Python"]),
+        lambda key: model,
+    )
+
+    assert model.response_format == "json"
+    assert model.clones == ["text"]
+    assert worker.team_lead.llm.response_format == "text"
+
+
+def test_v2_text_mode_llm_resolves_underlying_client_on_clone_failure(monkeypatch):
+    """A clone() failure re-resolves text mode from the wrapped client, not the JSON-mode model.
+
+    resolve_strands_model returns a pre-built Strands Model as-is, so passing the original
+    model back would leak JSON mode. Re-resolving from the model's ``_client`` guarantees a
+    fresh text-mode wrapper.
+    """
+    import software_engineering_team.shared.strands_model as strands_model_mod
+
+    received: Dict[str, Any] = {}
+    sentinel = object()
+
+    def _fake_resolve(llm):
+        received["arg"] = llm
+        return sentinel
+
+    monkeypatch.setattr(strands_model_mod, "resolve_text_mode_strands_model", _fake_resolve)
+
+    client = object()
+
+    class _BrokenJsonModel:
+        _client = client
+
+        def get_config(self):
+            return {"response_format": "json"}
+
+        def clone(self, **_overrides):
+            raise RuntimeError("clone boom")
+
+    model = _BrokenJsonModel()
+    result = orch_mod._v2_text_mode_llm(model)
+
+    assert result is sentinel
+    # Re-resolved from the wrapped client (guaranteed text mode), not the JSON-mode model.
+    assert received["arg"] is client
+    assert received["arg"] is not model
+
+
+def test_v2_text_mode_llm_clone_failure_without_client_uses_default(monkeypatch):
+    """A clone() failure on a handle with no ``_client`` falls back to a fresh text model."""
+    import software_engineering_team.shared.strands_model as strands_model_mod
+
+    received: Dict[str, Any] = {}
+    sentinel = object()
+
+    def _fake_resolve(llm):
+        received["arg"] = llm
+        return sentinel
+
+    monkeypatch.setattr(strands_model_mod, "resolve_text_mode_strands_model", _fake_resolve)
+
+    class _BrokenCloneModel:
+        def get_config(self):
+            return {"response_format": "json"}
+
+        def clone(self, **_overrides):
+            raise RuntimeError("clone boom")
+
+    broken = _BrokenCloneModel()
+    result = orch_mod._v2_text_mode_llm(broken)
+
+    # No wrapped client → resolver builds a fresh default text model (arg is None).
+    assert result is sentinel
+    assert received["arg"] is None
+    assert result is not broken
+
+
+def test_frontend_v2_worker_uses_injected_llm_getter(monkeypatch):
+    """Frontend v2 worker construction must honor the coding-team LLM injection path."""
+    from software_engineering_team import frontend_code_v2_team
+
+    captured_keys: List[str] = []
+
+    class FakeFrontendLead:
+        def __init__(self, llm):
+            self.llm = llm
+
+    monkeypatch.setattr(frontend_code_v2_team, "FrontendCodeV2TeamLead", FakeFrontendLead)
+
+    def _llm_getter(key: str) -> str:
+        captured_keys.append(key)
+        return f"{key}-client"
+
+    worker = orch_mod._build_implementation_worker(
+        "frontend_v2",
+        StackSpec(name="frontend_v2", tools_services=["React"]),
+        _llm_getter,
+    )
+
+    assert captured_keys == ["frontend"]
+    assert worker.team_lead.llm == "frontend-client"
+
+
+def test_target_team_alias_adds_missing_backend_v2_stack_spec() -> None:
+    """Backend-owned aliases repair an incomplete stack roster before worker creation."""
+    graph = TaskGraphService(job_id="j1")
+    graph.add_task("deploy", title="Deploy service", target_team="infrastructure")
+
+    stacks = orch_mod._ensure_target_team_stack_specs([], graph.get_tasks())
+
+    assert {
+        "name": "backend_v2",
+        "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
+    } in stacks
+
+
+def test_target_team_adds_missing_v2_stack_specs() -> None:
+    """Targeted v2 tasks repair an incomplete stack roster before worker creation."""
+    graph = TaskGraphService(job_id="j1")
+    graph.add_task("ui", title="Build UI", target_team="frontend_v2")
+    graph.add_task("api", title="Build API", target_team="backend_v2")
+
+    stacks = orch_mod._ensure_target_team_stack_specs(
+        [{"name": "backend", "tools_services": []}],
+        graph.get_tasks(),
+    )
+
+    assert {
+        "name": "frontend_v2",
+        "tools_services": ["Angular", "TypeScript", "React", "CSS", "HTML"],
+    } in stacks
+    assert {"name": "backend", "tools_services": []} in stacks
+    assert [s.get("name") for s in stacks].count("backend_v2") == 0
+
+
 # ----------------------------------------------------- IN_REVIEW is not re-implemented
 
 
@@ -890,10 +1321,6 @@ def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
         def run_plan_to_task_graph(self, plan_input):
             raise AssertionError("planning must not run on resume")
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     captured: Dict[str, Any] = {}
 
     class StubSwarm:
@@ -905,7 +1332,11 @@ def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
             pass  # leave the restored state as-is so we can assert on it
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", ExplodingTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     snapshot = {
@@ -957,10 +1388,6 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
                 "stacks": [{"name": "backend", "tools_services": ["pytest"]}],
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -969,7 +1396,11 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
             self.graph.mark_branch_merged("t1")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     updates: List[Dict[str, Any]] = []
@@ -987,6 +1418,52 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
     stack_updates = [u for u in updates if "stack_specs" in u]
     assert stack_updates, "fresh run must persist stack_specs for resume"
     assert stack_updates[0]["stack_specs"] == [{"name": "backend", "tools_services": ["pytest"]}]
+
+
+def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
+    """Malformed Tech Lead task output without an id becomes a stable fallback task."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"title": "Untitled task"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    captured: Dict[str, TaskGraphService] = {}
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            captured["graph"] = self.graph
+
+        def run(self, **kw):
+            self.graph.mark_branch_merged("task_1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    task = captured["graph"].get_task("task_1")
+    assert task.title == "Untitled task"
+    assert task.status == TaskStatus.MERGED
 
 
 # ----------------------------------------------------- task graph helpers (direct)
@@ -1037,10 +1514,6 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
                 "stacks": [{"name": "backend", "tools_services": []}],
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -1049,7 +1522,11 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
             self.graph.mark_branch_merged("t1")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     updates: List[Dict[str, Any]] = []
@@ -1158,7 +1635,7 @@ def test_escalate_done_non_empty_branch_merges_and_preserves_work(tmp_path, monk
     merge_calls: List[Any] = []
     monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
     monkeypatch.setattr(
-        f"{GIT_UTILS}.merge_branch", lambda *a, **k: (merge_calls.append(a) or (True, "ok"))
+        f"{GIT_UTILS}.merge_branch", lambda *a, **k: merge_calls.append(a) or (True, "ok")
     )
     tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
     swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
@@ -1183,7 +1660,7 @@ def test_escalate_done_failed_merge_marks_failed_not_merged(tmp_path, monkeypatc
     monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
     monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: (False, "merge conflict"))
     monkeypatch.setattr(
-        f"{GIT_UTILS}.abort_merge", lambda p, *a, **k: (aborted.append(p) or (True, "aborted"))
+        f"{GIT_UTILS}.abort_merge", lambda p, *a, **k: aborted.append(p) or (True, "aborted")
     )
     swarm, graph = _make_swarm(
         tmp_path, StubTechLead(approved=False, adjudication_verdict="done"), [StubWorker("a1")]
@@ -1345,10 +1822,6 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
                 "completion_evidence": "",
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -1359,7 +1832,11 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
             self.graph.mark_branch_merged("t1")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     updates: List[Dict[str, Any]] = []
@@ -1394,10 +1871,6 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
                 "completion_evidence": "",
             }
 
-    class StubSWE:
-        def __init__(self, *a, **k):
-            self.agent_id = k.get("agent_id", "backend")
-
     class StubSwarm:
         def __init__(self, *a, **k):
             self.graph = k["graph"]
@@ -1409,7 +1882,11 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
             self.graph.mark_branch_merged("t1")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     updates: List[Dict[str, Any]] = []
@@ -1527,39 +2004,6 @@ def test_build_review_evidence_no_diff():
     assert orch_mod._build_review_evidence("ONLY SUMMARY", "") == "ONLY SUMMARY"
 
 
-# ----------------------------------------------------- implement passes inputs in full
-
-
-def test_implement_passes_full_task_description_and_repo_context(tmp_path, monkeypatch):
-    """A large task description and repo context reach the implement prompt in full — the
-    engineer's inputs are never truncated."""
-    from coding_team.senior_software_engineer_agent import agent as swe_mod
-
-    captured: Dict[str, str] = {}
-
-    class FakeAgent:
-        def __init__(self, **kw):
-            pass
-
-        def __call__(self, prompt):
-            captured["prompt"] = prompt
-            return (
-                '{"summary":"ok","files_to_create_or_edit":[],"commands_run":[],'
-                '"ready_for_review":true,"feature_branch":"feature/t1"}'
-            )
-
-    monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
-    swe = SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
-    huge = "X" * 60000
-    big_ctx = "C" * 30000
-    task = Task(id="t1", title="T1", description=huge)
-
-    swe.run_implement(task, tmp_path, repo_context=big_ctx)
-
-    assert huge in captured["prompt"]  # full description embedded, uncut
-    assert big_ctx in captured["prompt"]  # full repo context embedded, uncut
-
-
 # ----------------------------------------------------- live progress reporting (code review)
 
 
@@ -1669,7 +2113,11 @@ def test_orchestrator_does_not_stamp_activity_and_terminal_clears(tmp_path, monk
             kw["update_fn"](status_text="working")
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: _PlanningTechLead())
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
 
     run_coding_team_orchestrator(
@@ -1869,7 +2317,11 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
             kw["persist_fn"]()
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: _PlanningTechLead())
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _MergingSwarm)
 
     run_coding_team_orchestrator(
@@ -1914,7 +2366,11 @@ def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
             kw["persist_fn"]()
 
     monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: object())
-    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
 
     run_coding_team_orchestrator(

@@ -1,4 +1,4 @@
-"""Extra coverage for shared.git_utils."""
+"""Real-repository coverage for shared.git_utils path and branch helpers."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import pytest
 from software_engineering_team.shared.git_utils import (
     _clear_disposable_files_if_blocking,
     branch_diff,
+    commit_paths,
     create_feature_branch,
     ensure_development_branch,
     ensure_files_committed_on_main,
@@ -67,8 +68,8 @@ def test_ensure_development_branch_non_git(tmp_path: Path):
 
 def test_ensure_development_branch_creates_from_main(init_git_repo: Path):
     """When dev branch doesn't exist, creates it from main."""
-    created, msg = ensure_development_branch(init_git_repo)
-    assert created is True
+    ok, msg = ensure_development_branch(init_git_repo)
+    assert ok is True
     assert "development" in msg
 
 
@@ -83,8 +84,8 @@ def test_ensure_development_branch_existing(init_git_repo: Path):
     subprocess.run(
         ["git", "checkout", "main"], cwd=init_git_repo, capture_output=True, check=False
     )
-    created, msg = ensure_development_branch(init_git_repo)
-    assert created is False
+    ok, msg = ensure_development_branch(init_git_repo)
+    assert ok is True
     assert "existing" in msg or "development" in msg
 
 
@@ -183,3 +184,71 @@ def test_branch_diff_failed_command_returns_empty(tmp_path: Path):
     ok, _ = initialize_new_repo(tmp_path)
     assert ok
     assert branch_diff(tmp_path, "development", "feature/does-not-exist") == ""
+
+
+def test_commit_paths_commits_only_named_paths(init_git_repo: Path):
+    """commit_paths stages/commits only the named paths, leaving other work alone."""
+    repo = init_git_repo
+    (repo / "wanted.py").write_text("a = 1\n", encoding="utf-8")
+    (repo / "unrelated.py").write_text("b = 2\n", encoding="utf-8")
+
+    ok, _ = commit_paths(repo, ["wanted.py"], "chore: only wanted")
+    assert ok
+
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=repo, capture_output=True, check=True, text=True
+    ).stdout.split()
+    assert "wanted.py" in tracked
+    assert "unrelated.py" not in tracked
+    # The unrelated file is still untracked, never swept into the commit.
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "unrelated.py"],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert status.stdout.strip() == "?? unrelated.py"
+
+
+def test_commit_paths_no_changes_is_success(init_git_repo: Path):
+    """commit_paths treats 'nothing to commit for these paths' as success."""
+    ok, msg = commit_paths(init_git_repo, ["README.md"], "noop")
+    assert ok
+    assert "No changes" in msg
+
+
+def test_commit_paths_empty_list_is_noop(init_git_repo: Path):
+    """commit_paths with no paths is a success no-op."""
+    ok, _ = commit_paths(init_git_repo, [], "noop")
+    assert ok
+
+
+def test_commit_paths_commits_setup_edit_to_already_dirty_file(init_git_repo: Path):
+    """A named path that was already dirty is still committed (setup's edit lands).
+
+    Guards the case where a config file (e.g. pyproject.toml) had unrelated local
+    edits before setup appended to it: scoping by name must not drop it.
+    """
+    repo = init_git_repo
+    subprocess.run(
+        ["git", "checkout", "-b", "development"], cwd=repo, capture_output=True, check=True
+    )
+    cfg = repo / "pyproject.toml"
+    cfg.write_text("[project]\nname = 'x'\n", encoding="utf-8")  # pre-existing dirty edit
+
+    ok, _ = commit_paths(repo, ["pyproject.toml"], "chore: scaffolding")
+    assert ok
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=repo, capture_output=True, check=True, text=True
+    ).stdout.split()
+    assert "pyproject.toml" in tracked
+    # No leftover dirty state for the committed path.
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "pyproject.toml"],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert status.stdout.strip() == ""

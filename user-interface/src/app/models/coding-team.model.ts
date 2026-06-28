@@ -40,7 +40,7 @@ export interface CodingTeamJobStatus {
   /** True when the job is paused waiting for the user to answer pending questions. */
   waiting_for_answers?: boolean;
   /**
-   * Per-agent status roster (Tech Lead + one Senior SWE per stack), derived server-side: who
+   * Per-agent status roster (Tech Lead + one implementation worker per stack), derived server-side: who
    * is working now, each agent's status, and the task each is on. Absent on older records.
    */
   agents?: CodingTeamAgentStatus[];
@@ -48,7 +48,7 @@ export interface CodingTeamJobStatus {
 
 /**
  * Live status of one coding-team agent, for the per-agent monitor cards. Mirrors the backend
- * `AgentStatusEntry`. The roster is the Tech Lead (coordinator) plus one Senior SWE per stack.
+ * `AgentStatusEntry`. The roster is the Tech Lead (coordinator) plus one implementation worker per stack.
  *
  * Properties are intentionally snake_case: like the other API-model interfaces in this codebase
  * (e.g. `CodingTeamJobStatus` above, `JobStatusResponse`), this type is the direct JSON shape of
@@ -58,8 +58,8 @@ export interface CodingTeamAgentStatus {
   /** Stable agent id (engineer stack name, or 'tech_lead'). */
   agent_id: string;
   /** The agent's role in the team. */
-  role: 'tech_lead' | 'senior_engineer';
-  /** Human-readable label for the agent card, e.g. "Tech Lead" or "Senior Engineer — frontend". */
+  role: 'tech_lead' | 'implementation_worker' | 'senior_engineer';
+  /** Human-readable label for the agent card, e.g. "Tech Lead" or "Implementation Worker - frontend". */
   display_name: string;
   /** Stack name for engineers; null for the Tech Lead. Always present (backend serializes null). */
   stack: string | null;

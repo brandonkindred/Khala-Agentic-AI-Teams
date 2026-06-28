@@ -27,7 +27,7 @@ describe('CodingTeamMonitorComponent', () => {
   function agent(over: Partial<CodingTeamAgentStatus>): CodingTeamAgentStatus {
     return {
       agent_id: 'a',
-      role: 'senior_engineer',
+      role: 'implementation_worker',
       display_name: 'A',
       stack: null,
       tools_services: [],
@@ -339,7 +339,7 @@ describe('CodingTeamMonitorComponent', () => {
   it('exposes role icons, status labels, active flag, and clamped per-agent fraction', () => {
     const c = component;
     expect(c.agentRoleIcon(agent({ role: 'tech_lead' }))).toBe('supervisor_account');
-    expect(c.agentRoleIcon(agent({ role: 'senior_engineer' }))).toBe('code');
+    expect(c.agentRoleIcon(agent({ role: 'implementation_worker' }))).toBe('code');
     expect(c.agentStatusLabel(agent({ status: 'working' }))).toBe('Working');
     expect(c.agentStatusLabel(agent({ status: 'in_review' }))).toBe('In review');
     expect(c.agentStatusLabel(agent({ status: 'reviewing' }))).toBe('Reviewing');

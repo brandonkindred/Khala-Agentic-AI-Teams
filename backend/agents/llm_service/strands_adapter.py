@@ -320,6 +320,19 @@ class LLMClientModel(Model):
         adapter use where attribute access is cleaner."""
         return self._config.as_dict()
 
+    @property
+    def client(self) -> LLMClient:
+        """Public accessor for the backing ``LLMClient``.
+
+        Lets callers obtain the underlying client without reaching into the
+        private ``_client`` attribute (e.g. to re-wrap it in a different
+        ``response_format`` when this model cannot be cloned in place).
+
+        Postconditions:
+            - Returns the non-None ``LLMClient`` this adapter was built with.
+        """
+        return self._client
+
     def get_max_context_tokens(self) -> int:
         """Delegate to the backing client (``LLMClient`` contract).
 
