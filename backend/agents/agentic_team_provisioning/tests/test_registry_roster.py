@@ -316,3 +316,42 @@ def test_delete_agent_name_with_slash(client: TestClient) -> None:
     resp = client.delete(f"/teams/{team_id}/agents/{name}")
     assert resp.status_code == 204
     assert client.get(f"/teams/{team_id}/agents").json() == []
+
+
+def _raise(*_args, **_kwargs):
+    raise KeyError("registry exploded")
+
+
+def test_delete_unregister_failure_still_returns_204(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """A best-effort registry failure during cleanup must not 500 a succeeded delete."""
+    from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+    team_id = _new_team()
+    gen = AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"], source="generated")
+    AgenticTeamStore().save_team_agents(team_id, [gen])
+    registry.register(build_agent_manifest(team_id, gen))
+    registry.unregister = _raise  # cleanup blows up
+
+    resp = client.delete(f"/teams/{team_id}/agents/Writer")
+    assert resp.status_code == 204  # primary op still succeeds
+    assert client.get(f"/teams/{team_id}/agents").json() == []
+
+
+def test_from_registry_replace_unregister_failure_still_returns_201(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Same best-effort guarantee on the from-registry replace-unregister path."""
+    team_id = _new_team()
+    gen = AgenticTeamAgent(
+        agent_name="blogging.planner", role="old", skills=["x"], source="generated"
+    )
+    AgenticTeamStore().save_team_agents(team_id, [gen])
+    registry.unregister = _raise  # cleanup blows up
+
+    resp = client.post(
+        f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"}
+    )
+    assert resp.status_code == 201  # primary op still succeeds
+    assert resp.json()["source"] == "registry"

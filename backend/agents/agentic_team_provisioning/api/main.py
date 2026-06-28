@@ -320,9 +320,20 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     prior = next((a for a in team.agents if a.agent_name == agent.agent_name), None)
     _store.add_or_replace_team_agent(team_id, agent)
     if prior is not None and prior.source == SOURCE_GENERATED:
-        from agentic_team_provisioning.manifest_generation import build_agent_manifest
+        # Best-effort cleanup: the roster row is already replaced, so a registry
+        # failure here must not 500 the request (mirrors register_team_manifests,
+        # which logs registry errors rather than raising).
+        try:
+            from agentic_team_provisioning.manifest_generation import build_agent_manifest
 
-        registry.unregister(build_agent_manifest(team_id, prior).id)
+            registry.unregister(build_agent_manifest(team_id, prior).id)
+        except Exception:
+            logger.warning(
+                "Failed to unregister stale manifest for replaced agent %s in team %s",
+                prior.agent_name,
+                team_id,
+                exc_info=True,
+            )
     return agent
 
 
@@ -348,12 +359,22 @@ def remove_agent_from_roster(team_id: str, agent_name: str):
     if deleted is None:
         raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
     if deleted.source == SOURCE_GENERATED:
-        # Lazy imports: ``manifest_generation`` pulls the cognition/runtime stack and
-        # is only needed on this branch, matching the other in-handler imports here.
-        from agent_registry import get_registry
-        from agentic_team_provisioning.manifest_generation import build_agent_manifest
+        # Best-effort cleanup: the agent is already deleted, so a registry failure
+        # must not 500 the request (mirrors register_team_manifests, which logs
+        # registry errors rather than raising). Lazy imports: ``manifest_generation``
+        # pulls the cognition/runtime stack and is only needed on this branch.
+        try:
+            from agent_registry import get_registry
+            from agentic_team_provisioning.manifest_generation import build_agent_manifest
 
-        get_registry().unregister(build_agent_manifest(team_id, deleted).id)
+            get_registry().unregister(build_agent_manifest(team_id, deleted).id)
+        except Exception:
+            logger.warning(
+                "Failed to unregister manifest for deleted agent %s in team %s",
+                deleted.agent_name,
+                team_id,
+                exc_info=True,
+            )
     return Response(status_code=204)
 
 
