@@ -279,7 +279,7 @@ def _entry_archetype(strategy: object) -> str:
         when = getattr(rule, "when", None)
         lhs = getattr(when, "lhs", None)
         rhs = getattr(when, "rhs", None)
-        names = sorted({str(getattr(s, "name")) for s in (lhs, rhs) if getattr(s, "name", None)})
+        names = sorted({str(n) for s in (lhs, rhs) if (n := getattr(s, "name", None))})
         if names:
             base = "+".join(names)
         elif isinstance(lhs, str) or isinstance(rhs, (str, int, float)):
