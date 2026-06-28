@@ -187,6 +187,13 @@ def _run_blogging_service_shutdown() -> (
     except Exception:
         logger.warning("Temporal worker shutdown failed", exc_info=True)
 
+    try:
+        from shared.job_event_bus import shutdown as _shutdown_event_bus
+
+        _shutdown_event_bus()
+    except Exception:
+        logger.debug("Event-bus reaper shutdown skipped", exc_info=True)
+
 
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
 # The Postgres schema registers on startup (no-op when POSTGRES_HOST is unset);
@@ -947,9 +954,9 @@ _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "needs_human
 )
 def stream_job_status(job_id: str) -> StreamingResponse:
     """SSE stream for a pipeline job. Falls back gracefully if job is already terminal."""
-    import time
-
     from shared.job_event_bus import subscribe, unsubscribe
+
+    from shared_sse import sse_job_stream_sync, sse_line
 
     if get_blog_job is None:
         raise HTTPException(status_code=501, detail="Job store not available")
@@ -957,9 +964,6 @@ def stream_job_status(job_id: str) -> StreamingResponse:
     job = get_blog_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    def _sse_line(data: dict) -> str:
-        return f"data: {json_module.dumps(data, default=str)}\n\n"
 
     def _snapshot_event() -> dict:
         current = get_blog_job(job_id) or {}
@@ -970,45 +974,21 @@ def stream_job_status(job_id: str) -> StreamingResponse:
     if job.get("status") in _TERMINAL_STATUSES:
 
         def _terminal_gen():
-            yield _sse_line(_snapshot_event())
-            yield _sse_line({"type": "done"})
+            yield sse_line(_snapshot_event())
+            yield sse_line({"type": "done"})
 
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
-    def event_generator():
-        sub = subscribe(job_id)
-        try:
-            # Initial snapshot so the client has the full current state
-            yield _sse_line(_snapshot_event())
-
-            deadline = time.monotonic() + 4 * 3600  # 4-hour max connection
-            while time.monotonic() < deadline:
-                # Liveness signal for the event-bus reaper: this consumer is
-                # still reading, so don't evict the subscription even if the
-                # job is quiet for longer than the idle TTL.
-                sub.touch()
-
-                # Drain all queued events
-                sent_terminal = False
-                while sub.events:
-                    event = sub.events.popleft()
-                    yield _sse_line(event)
-                    if event.get("type") in ("complete", "error", "cancelled"):
-                        sent_terminal = True
-                if sent_terminal:
-                    yield _sse_line({"type": "done"})
-                    return
-
-                # Keepalive (SSE comment — keeps proxies from closing idle connections)
-                yield ": keepalive\n\n"
-
-                # Wait for notification or timeout after 1s
-                sub.notify.wait(timeout=1.0)
-                sub.notify.clear()
-        finally:
-            unsubscribe(job_id, sub)
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        sse_job_stream_sync(
+            subscribe=subscribe,
+            unsubscribe=unsubscribe,
+            job_id=job_id,
+            snapshot=_snapshot_event,
+            terminal_types=("complete", "error", "cancelled"),
+        ),
+        media_type="text/event-stream",
+    )
 
 
 class CancelJobResponse(BaseModel):
