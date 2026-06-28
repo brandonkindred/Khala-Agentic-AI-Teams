@@ -29,7 +29,7 @@ from .models import (
 from .phases.deliver import run_deliver
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
 from .phases.planning import run_planning
-from .phases.setup import run_setup
+from .phases.setup import configure_quality_tooling, run_setup
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,29 @@ class BackendDevelopmentAgent:
             "[%s] WORKFLOW START: Backend Development Agent (per-microtask review gates)", task_id
         )
 
+        # ── Check out the review feature branch FIRST, then ensure tooling ──
+        # Setup commits lint/test scaffolding to ``development``, but a handoff
+        # feature branch created before setup does not inherit it. Configure the
+        # tooling on the branch we will actually edit so the pre-flight check and
+        # later quality gates see the config (idempotent when already present).
+        feature_branch_name = (task.feature_branch_name or "").strip() or None
+        if feature_branch_name:
+            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
+            if not ok:
+                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
+                logger.error("[%s] %s", task_id, result.failure_reason)
+                return result
+            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
+            configure_quality_tooling(repo_path)
+            _update_job(
+                current_phase="planning",
+                progress=4,
+                status_text=f"Branch {feature_branch_name} ready",
+            )
+
         # ── Pre-flight: verify linting & testing are configured ───────
+        # Runs after the feature-branch checkout so it validates the branch that
+        # will actually be edited, not whatever branch setup last left checked out.
         _has_lint = (
             (repo_path / "ruff.toml").exists()
             or (repo_path / ".flake8").exists()
@@ -202,20 +224,6 @@ class BackendDevelopmentAgent:
             )
             return result
         logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
-
-        feature_branch_name = (task.feature_branch_name or "").strip() or None
-        if feature_branch_name:
-            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
-            if not ok:
-                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
-                logger.error("[%s] %s", task_id, result.failure_reason)
-                return result
-            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
-            _update_job(
-                current_phase="planning",
-                progress=4,
-                status_text=f"Branch {feature_branch_name} ready",
-            )
 
         existing_code = self._read_repo_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)

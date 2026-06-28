@@ -286,6 +286,49 @@ class TestSetupPhase:
         content = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
         assert "[tool.ruff]" in content
 
+    def test_configure_quality_tooling_adds_config_to_handoff_branch(self, tmp_path):
+        """A feature branch created before setup must get lint/test config on demand.
+
+        Reproduces the coding-team handoff: the adapter creates the review branch
+        from development *before* setup commits scaffolding there, so the branch
+        lacks the config until the dev-agent calls configure_quality_tooling on
+        it. Without that, pre-flight (and later quality gates) fail on a
+        config-less branch.
+        """
+        from backend_code_v2_team.phases.setup import configure_quality_tooling, run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        # Adapter pre-creates the review branch from development (pre-scaffolding).
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/task-1"], cwd=tmp_path, capture_output=True, check=True
+        )
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        # Setup commits scaffolding to development; the feature branch lacks it.
+        run_setup(repo_path=tmp_path, task_title="My Project")
+        subprocess.run(
+            ["git", "checkout", "feature/task-1"], cwd=tmp_path, capture_output=True, check=True
+        )
+        assert not (tmp_path / "pyproject.toml").exists()  # branch has no ruff config yet
+
+        lint_ok, test_ok = configure_quality_tooling(tmp_path)
+
+        assert lint_ok and test_ok
+        assert "[tool.ruff]" in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+        assert (tmp_path / "tests").is_dir()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert status.stdout.strip() == ""  # config committed to the feature branch, tree clean
+
 
 # ---------------------------------------------------------------------------
 # Planning phase tests
