@@ -138,3 +138,59 @@ def test_cleanup_job_unknown_id_is_noop() -> None:
     from investment_team.api.job_event_bus import cleanup_job
 
     cleanup_job("never-existed")  # no exception
+
+
+# ---------------------------------------------------------------------------
+# Reaper — bounds in-memory growth for subscriptions that skip cleanup_job
+# (a crash, or an SSE client that abandons its connection). Previously absent
+# from the investment binding, which made it a latent memory leak.
+# ---------------------------------------------------------------------------
+
+
+def test_subscribe_starts_reaper_thread() -> None:
+    import threading
+
+    from investment_team.api import job_event_bus
+
+    job_event_bus.shutdown()  # clean slate
+    try:
+        job_event_bus.subscribe("run-reaper-start")
+        assert any(t.name == "investment-event-bus-reaper" for t in threading.enumerate())
+    finally:
+        job_event_bus.shutdown()
+
+
+def test_reap_once_evicts_idle_subscription() -> None:
+    from investment_team.api import job_event_bus
+
+    sub = job_event_bus.subscribe("run-idle")
+    try:
+        sub.last_activity -= 1e9  # ancient → past the TTL
+        job_event_bus._reap_once()
+        assert "run-idle" not in job_event_bus._subscribers
+    finally:
+        job_event_bus.shutdown()
+
+
+def test_reap_once_enforces_job_cap(monkeypatch) -> None:
+    from investment_team.api import job_event_bus
+
+    monkeypatch.setattr(job_event_bus, "_MAX_JOBS_TRACKED", 2)
+    try:
+        job_event_bus.subscribe("cap-a")
+        job_event_bus.subscribe("cap-b")
+        job_event_bus.subscribe("cap-c")
+        job_event_bus._reap_once()
+        assert len(job_event_bus._subscribers) <= 2
+        assert "cap-a" not in job_event_bus._subscribers  # oldest evicted first
+    finally:
+        job_event_bus.shutdown()
+
+
+def test_shutdown_is_idempotent() -> None:
+    from investment_team.api import job_event_bus
+
+    job_event_bus.shutdown()  # never started / already stopped → no-op
+    job_event_bus._start_reaper_if_needed()
+    job_event_bus._start_reaper_if_needed()  # second start is a no-op
+    job_event_bus.shutdown()

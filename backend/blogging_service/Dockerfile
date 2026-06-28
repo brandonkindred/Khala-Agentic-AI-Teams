@@ -33,6 +33,10 @@ COPY agents/shared_env_config /app/shared_env_config
 # Imported by blogging.shared.job_event_bus.
 COPY agents/shared_job_event_bus /app/shared_job_event_bus
 
+# Shared SSE streaming helper (framing + per-job stream generators; leaf).
+# Imported by blogging.api.main's job-status stream endpoint.
+COPY agents/shared_sse /app/shared_sse
+
 # LLM service (used by all blogging agents)
 COPY agents/llm_service /app/llm_service
 
