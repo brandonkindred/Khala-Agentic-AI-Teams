@@ -2709,7 +2709,8 @@ class TradingService:
             # 1) Expire day orders on date change. Routes through
             #    ``FillSimulator.expire_day_orders`` so partially-filled
             #    bracket parents get protective legs before the parent is
-            #    dropped.
+            #    dropped. ``timestamp`` is an ISO-8601 string
+            #    (``YYYY-MM-DD[THH:MM:SS]``), so ``[:10]`` is the calendar date.
             if prev_bar is not None and (cur_bar.timestamp[:10] != prev_bar.timestamp[:10]):
                 expired = fill_sim.expire_day_orders(cur_bar)
                 if expired:

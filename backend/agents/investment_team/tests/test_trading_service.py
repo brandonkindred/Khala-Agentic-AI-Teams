@@ -12,7 +12,9 @@ Covers:
 from __future__ import annotations
 
 import textwrap
+from types import SimpleNamespace
 from typing import Dict, List
+from unittest.mock import patch
 
 import pytest
 
@@ -39,6 +41,7 @@ from investment_team.trading_service.modes.backtest import run_backtest
 from investment_team.trading_service.service import (
     _MAX_ORDER_EVENTS,
     TradingService,
+    TradingServiceResult,
     _increment_rejection,
     _record_event,
 )
@@ -1213,8 +1216,6 @@ def _bare_service() -> "TradingService":
 
 def test_drain_unfilled_at_eos_empty_queue_is_noop() -> None:
     """An empty pending queue records nothing and leaves diagnostics untouched."""
-    from investment_team.trading_service.service import TradingServiceResult
-
     result = TradingServiceResult()
     _bare_service()._drain_unfilled_at_eos([], None, result)
     assert result.execution_diagnostics.orders_unfilled == 0
@@ -1223,10 +1224,6 @@ def test_drain_unfilled_at_eos_empty_queue_is_noop() -> None:
 
 def test_drain_unfilled_at_eos_records_end_of_stream() -> None:
     """Each still-pending order is counted and recorded as an end_of_stream unfilled event."""
-    from types import SimpleNamespace
-
-    from investment_team.trading_service.service import TradingServiceResult
-
     result = TradingServiceResult()
     req = SimpleNamespace(
         symbol="AAPL",
@@ -1244,10 +1241,6 @@ def test_drain_unfilled_at_eos_records_end_of_stream() -> None:
 
 def test_finalize_result_success_records_open_positions() -> None:
     """On the success path (fill_sim supplied) open-position entry reasons are recorded."""
-    from types import SimpleNamespace
-
-    from investment_team.trading_service.service import TradingServiceResult
-
     result = TradingServiceResult()
     eod_buffer = SimpleNamespace(materialize=lambda: ["curve"])
     harness = SimpleNamespace(probe_events=["probe"])
@@ -1268,10 +1261,6 @@ def test_finalize_result_success_records_open_positions() -> None:
 
 def test_finalize_result_abort_omits_open_positions() -> None:
     """Without fill_sim (abort path) the open-position list is left untouched."""
-    from types import SimpleNamespace
-
-    from investment_team.trading_service.service import TradingServiceResult
-
     result = TradingServiceResult()
     eod_buffer = SimpleNamespace(materialize=lambda: [])
     harness = SimpleNamespace(probe_events=[])
@@ -1281,10 +1270,7 @@ def test_finalize_result_abort_omits_open_positions() -> None:
 
 def test_abort_result_classifies_lookahead_violations() -> None:
     """LookAheadError and a lookahead StrategyRuntimeError both set lookahead_violation."""
-    from types import SimpleNamespace
-
     from investment_team.execution.bar_safety import LookAheadError
-    from investment_team.trading_service.service import TradingServiceResult
     from investment_team.trading_service.strategy.streaming_harness import StrategyRuntimeError
 
     eod_buffer = SimpleNamespace(materialize=lambda: [])
@@ -1319,11 +1305,6 @@ def test_abort_result_classifies_lookahead_violations() -> None:
 def test_process_one_bar_warmup_skips_fills_and_does_not_count() -> None:
     """A warm-up bar skips fills/MTM (bars_processed unchanged), still appends the bar
     and applies the strategy response fetched via the thunk."""
-    from types import SimpleNamespace
-    from unittest.mock import patch
-
-    from investment_team.trading_service.service import TradingServiceResult
-
     svc = _bare_service()
     result = TradingServiceResult()
     pending_in = [SimpleNamespace(symbol="AAPL")]
@@ -1378,11 +1359,6 @@ def test_process_one_bar_warmup_skips_fills_and_does_not_count() -> None:
 def test_process_one_bar_normal_path_processes_fills_and_counts() -> None:
     """A post-warm-up bar processes fills, marks to market, stamps EOD equity, and
     increments bars_processed; the thunk's orders/cancels are forwarded."""
-    from types import SimpleNamespace
-    from unittest.mock import patch
-
-    from investment_team.trading_service.service import TradingServiceResult
-
     svc = _bare_service()
     svc._exit_rules = []  # skip the engine position-tracker update
     result = TradingServiceResult()
@@ -1433,3 +1409,121 @@ def test_process_one_bar_normal_path_processes_fills_and_counts() -> None:
     assert resp_kwargs["bar_cancels"] == [{"cancel": 2}]
     assert resp_kwargs["is_warmup"] is False
     assert out_pending == []
+
+
+def test_process_one_bar_expires_day_orders_on_date_change() -> None:
+    """When cur_bar's date differs from prev_bar's, fill_sim.expire_day_orders is
+    invoked and each expired order is recorded as a day_expired unfilled diagnostic."""
+    svc = _bare_service()
+    svc._exit_rules = []
+    result = TradingServiceResult()
+    prev_bar = SimpleNamespace(timestamp="2024-01-02T00:00:00")
+    cur_bar = SimpleNamespace(symbol="AAPL", timestamp="2024-01-03T00:00:00", close=12.0)
+    expired_order = SimpleNamespace(
+        request=SimpleNamespace(
+            symbol="AAPL",
+            side=SimpleNamespace(value="buy"),
+            order_type=SimpleNamespace(value="limit"),
+        )
+    )
+    outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
+    expire_calls: list = []
+
+    def _expire(bar: object) -> list:
+        expire_calls.append(bar)
+        return [expired_order]
+
+    fill_sim = SimpleNamespace(
+        expire_day_orders=_expire,
+        process_bar=lambda _cur, next_bar=None: outcome,
+    )
+    portfolio = SimpleNamespace(update_last_price=lambda *a: None, mark_to_market=lambda: 100_000.0)
+    eod_buffer = SimpleNamespace(record=lambda *a: None)
+
+    with (
+        patch.object(svc, "_append_streaming_bar"),
+        patch.object(svc, "_process_bar_strategy_response"),
+    ):
+        svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=prev_bar,
+            is_warmup=False,
+            fetch_response=lambda: ([], []),
+            pending_for_prev=[],
+            portfolio=portfolio,
+            order_book=None,
+            fill_sim=fill_sim,
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=eod_buffer,
+            position_tracker={},
+            engine_exits=None,
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    assert expire_calls == [cur_bar]
+    assert result.execution_diagnostics.orders_unfilled == 1
+    day_expired = [
+        e for e in result.execution_diagnostics.last_order_events if e.reason == "day_expired"
+    ]
+    assert len(day_expired) == 1
+    assert day_expired[0].event_type == "unfilled"
+
+
+def test_process_one_bar_binds_engine_exit_to_entry() -> None:
+    """A queued order whose client_order_id has an engine-exit binding gets that
+    binding pinned onto the submitted order, and the binding is consumed."""
+    svc = _bare_service()
+    svc._exit_rules = []
+    svc._default_unfilled_policy = None
+    result = TradingServiceResult()
+    # Same calendar date as prev_bar → the day-order expiry branch is skipped.
+    prev_bar = SimpleNamespace(timestamp="2024-01-03T00:00:00")
+    cur_bar = SimpleNamespace(symbol="AAPL", timestamp="2024-01-03T12:00:00", close=12.0)
+    req = SimpleNamespace(
+        client_order_id="co-1",
+        unfilled_policy=None,
+        attached_stop_loss=None,
+        attached_take_profit=None,
+        symbol="AAPL",
+        side=SimpleNamespace(value="buy"),
+        order_type=SimpleNamespace(value="market"),
+    )
+    submitted_po = SimpleNamespace(working_against_entry_order_id=None)
+    order_book = SimpleNamespace(submit=lambda *a, **k: submitted_po)
+    engine_exits = SimpleNamespace(engine_exit_bindings={"co-1": "entry-123"})
+    outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
+    fill_sim = SimpleNamespace(process_bar=lambda _cur, next_bar=None: outcome)
+    portfolio = SimpleNamespace(update_last_price=lambda *a: None, mark_to_market=lambda: 100_000.0)
+    eod_buffer = SimpleNamespace(record=lambda *a: None)
+
+    with (
+        patch.object(svc, "_append_streaming_bar"),
+        patch.object(svc, "_process_bar_strategy_response"),
+    ):
+        svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=prev_bar,
+            is_warmup=False,
+            fetch_response=lambda: ([], []),
+            pending_for_prev=[req],
+            portfolio=portfolio,
+            order_book=order_book,
+            fill_sim=fill_sim,
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=eod_buffer,
+            position_tracker={},
+            engine_exits=engine_exits,
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    assert submitted_po.working_against_entry_order_id == "entry-123"
+    assert engine_exits.engine_exit_bindings == {}  # binding consumed via pop
+    assert result.execution_diagnostics.orders_accepted == 1

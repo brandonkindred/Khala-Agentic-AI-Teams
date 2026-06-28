@@ -2133,6 +2133,8 @@ class ProductRequirementsAnalysisAgent:
                 )
 
             def _phase_spec_review() -> Tuple["SpecReviewResult", str]:
+                """Review the spec (re-running once if a clarification changed it);
+                return the review result and the (possibly updated) spec."""
                 _update_job(
                     status_text="Analyzing full specification for gaps and inconsistencies..."
                 )
@@ -2328,6 +2330,7 @@ class ProductRequirementsAnalysisAgent:
             )
 
             def _phase_spec_update() -> str:
+                """Incorporate the answered questions into the spec; return the updated spec."""
                 _update_job(status_text="Generating updated specification based on your answers")
                 cur_spec = self._update_spec(
                     current_spec=current_spec,
@@ -2353,7 +2356,9 @@ class ProductRequirementsAnalysisAgent:
             status_text="Validating specification completeness and consistency",
         )
 
-        def _phase_cleanup() -> Tuple[Any, str]:
+        def _phase_cleanup() -> Tuple[SpecCleanupResult, str]:
+            """Validate/clean the spec and generate the PRD; return the cleanup
+            result and the generated PRD content."""
             _update_job(status_text="Running final validation and cleanup on specification")
             cleanup_chunks = default_decompose_by_sections(current_spec)
             cleanup_titles = [_section_title_from_chunk(c) for c in cleanup_chunks]
@@ -2569,6 +2574,7 @@ class ProductRequirementsAnalysisAgent:
         ``result.spec_review_result`` on every pass.
         """
         consistency_loops = 0
+        spec_version = base_version + (iteration - 1)
         while (
             reduction_ratio >= DEDUP_REDUCTION_THRESHOLD
             and consistency_loops < MAX_CONSISTENCY_LOOPS
@@ -2587,7 +2593,7 @@ class ProductRequirementsAnalysisAgent:
                 repo_path,
                 qa_history,
                 all_answered_questions,
-                base_version + (iteration - 1),
+                spec_version,
                 consistency_loops,
             )
             update_job(
@@ -2597,7 +2603,7 @@ class ProductRequirementsAnalysisAgent:
                 current_spec,
                 repo_path,
                 iteration=iteration,
-                spec_version=base_version + (iteration - 1),
+                spec_version=spec_version,
                 answered_questions=all_answered_questions,
                 on_chunk_progress=on_chunk_progress,
             )
