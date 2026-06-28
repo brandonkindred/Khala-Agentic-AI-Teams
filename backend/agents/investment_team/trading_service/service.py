@@ -18,7 +18,18 @@ from dataclasses import dataclass, field
 from datetime import date as date_cls
 from functools import cached_property
 from types import MappingProxyType
-from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import numpy as np
 
@@ -70,6 +81,7 @@ from .engine.fill_simulator import (
 from .engine.order_book import FILL_QTY_REL_TOL, OrderBook, PendingOrder
 from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
+    Bar,
     OrderRequest,
     OrderSide,
     OrderType,
@@ -2420,165 +2432,34 @@ class TradingService:
                             break
                         # Skip non-bar events but keep looking.
 
-                    if not is_warmup:
-                        # 1) Expire day orders on date change. Routes through
-                        #    ``FillSimulator.expire_day_orders`` so partially-
-                        #    filled bracket parents get protective legs before
-                        #    the parent is dropped (#389).
-                        if prev_bar is not None and (
-                            cur_bar.timestamp[:10] != prev_bar.timestamp[:10]
-                        ):
-                            expired = fill_sim.expire_day_orders(cur_bar)
-                            if expired:
-                                result.execution_diagnostics.orders_unfilled += len(expired)
-                                for ex in expired:
-                                    _record_event(
-                                        result.execution_diagnostics,
-                                        "unfilled",
-                                        timestamp=cur_bar.timestamp,
-                                        symbol=ex.request.symbol,
-                                        side=ex.request.side.value,
-                                        order_type=ex.request.order_type.value,
-                                        reason="day_expired",
-                                    )
+                    # Per-bar mode: deliver this bar to the strategy inline,
+                    # using post-fill portfolio state, and apply its response.
+                    def _fetch_response() -> Tuple[List[Dict], List[Dict]]:
+                        resp = harness.send_bar(
+                            bar=cur_bar.model_dump(mode="json"),
+                            state=self._state(portfolio),
+                            is_warmup=is_warmup,
+                        )
+                        return resp.orders, resp.cancels
 
-                        # 2) Fill any orders from the previous iteration against
-                        #    *this* (current) bar. These were submitted by the
-                        #    strategy after seeing `prev_bar`.
-                        if pending_for_prev:
-                            # #385 — apply the mode-level default unfilled
-                            # policy parent-side (after the request has left
-                            # the strategy process), so strategy bytes stay
-                            # identical regardless of the flag. Step 3 only
-                            # plumbs the value through; downstream consumers
-                            # (order_book / fill_simulator) start acting on
-                            # it in #386.
-                            apply_default = _partial_fill_defaults_enabled()
-                            for req in pending_for_prev:
-                                if apply_default and req.unfilled_policy is None:
-                                    req.unfilled_policy = self._default_unfilled_policy
-                                equity = portfolio.mark_to_market()
-                                submitted_po = order_book.submit(
-                                    req,
-                                    submitted_at=prev_bar.timestamp,
-                                    submitted_equity=equity,
-                                    # #389: register the parent as eligible to
-                                    # carry bracket children when the strategy
-                                    # attached protective legs. ``submit_attached``
-                                    # rejects children whose parent isn't in the
-                                    # eligible-parent set; non-bracket entries
-                                    # pay zero overhead (flag is False).
-                                    expect_brackets=(
-                                        req.attached_stop_loss is not None
-                                        or req.attached_take_profit is not None
-                                    ),
-                                )
-                                # Issue #527 — pin engine-emitted exits to the
-                                # Position they target so the fill simulator's
-                                # stale-continuation guard drops them when a
-                                # prior strategy exit closes the position first.
-                                # Without this, an engine_exit submitted while a
-                                # GTC/limit strategy exit is resting on the book
-                                # could fall through to ``_fill_entry`` and open
-                                # a new opposite-side position.
-                                bound_entry = engine_exits.engine_exit_bindings.pop(
-                                    req.client_order_id, None
-                                )
-                                if bound_entry is not None:
-                                    submitted_po.working_against_entry_order_id = bound_entry
-                                result.execution_diagnostics.orders_accepted += 1
-                                _record_event(
-                                    result.execution_diagnostics,
-                                    "accepted",
-                                    timestamp=prev_bar.timestamp,
-                                    symbol=req.symbol,
-                                    side=req.side.value,
-                                    order_type=req.order_type.value,
-                                )
-                            pending_for_prev = []
-
-                        # Ordering invariant (relied on by the exit reconciler in
-                        # ``_build_exit_reconciler``): ``process_bar`` runs BEFORE
-                        # ``_update_position_tracker`` and ``_append_streaming_bar``
-                        # below. So when the fill simulator stamps an exit during
-                        # this call, ``streaming_views``' latest bar is still the
-                        # signal bar (cur_bar not yet appended) and
-                        # ``position_tracker[sym].just_opened`` still reflects it.
-                        # Do not move the tracker/view updates above this call.
-                        outcome = fill_sim.process_bar(cur_bar, next_bar=next_bar)
-                        _apply_fill_outcome_events(result.execution_diagnostics, outcome)
-                        for fill in outcome.entry_fills + outcome.exit_fills:
-                            harness.send_fill(
-                                fill=fill.model_dump(mode="json"),
-                                state=self._state(portfolio),
-                            )
-                        result.trades.extend(outcome.closed_trades)
-                        if on_trade is not None:
-                            for trade in outcome.closed_trades:
-                                on_trade(trade)
-
-                        # 3) Mark-to-market and stamp the equity curve. There is
-                        # no drawdown circuit-breaker — a Strategy Lab run is an
-                        # experiment and must be free to lose up to 100% so its
-                        # true downside is observed, not truncated by a limit.
-                        portfolio.update_last_price(cur_bar.symbol, cur_bar.close)
-                        equity = portfolio.mark_to_market()
-                        # #430: stamp EOD equity for the streaming curve.
-                        # Sub-daily bars overwrite the same calendar-day key,
-                        # so the last MTM of each trading day wins.
-                        eod_buffer.record(cur_bar.timestamp, equity)
-
-                        # Issue #527 — refresh engine-side per-position state
-                        # for ``cur_bar.symbol`` based on the post-fill
-                        # portfolio. No-op when exit_rules is empty (the
-                        # tracker stays empty, the rule-eval block at the
-                        # bottom of the loop short-circuits). Updating here
-                        # — after fills but before send_bar — keeps trailing
-                        # watermarks consistent with every bar the engine
-                        # has actually seen, regardless of strategy behaviour.
-                        if self._exit_rules:
-                            self._update_position_tracker(
-                                tracker=position_tracker,
-                                cur_bar=cur_bar,
-                                portfolio=portfolio,
-                            )
-
-                    # Append every bar (including warm-up) to the streaming
-                    # view so indicators have full history for predicate
-                    # evaluation once warm-up ends.
-                    self._append_streaming_bar(streaming_views, cur_bar)
-
-                    # 4) Deliver the current bar to the strategy and collect
-                    #    any orders it submits in response. Warm-up bars set
-                    #    ``ctx.is_warmup = True`` in the subprocess so the
-                    #    strategy can short-circuit order emission; we also
-                    #    drop any orders it emits anyway as a safety net
-                    #    (handled inside ``_process_bar_strategy_response``).
-                    resp = harness.send_bar(
-                        bar=cur_bar.model_dump(mode="json"),
-                        state=self._state(portfolio),
-                        is_warmup=is_warmup,
-                    )
-
-                    if not is_warmup:
-                        # Track only post-warmup bars — Phase 4's
-                        # signals_per_bar diagnostic divides trades by
-                        # bars the strategy could actually have signaled on.
-                        result.bars_processed += 1
-
-                    self._process_bar_strategy_response(
+                    pending_for_prev = self._process_one_bar(
                         cur_bar=cur_bar,
-                        bar_orders=resp.orders,
-                        bar_cancels=resp.cancels,
+                        next_bar=next_bar,
+                        prev_bar=prev_bar,
                         is_warmup=is_warmup,
+                        fetch_response=_fetch_response,
+                        pending_for_prev=pending_for_prev,
                         portfolio=portfolio,
                         order_book=order_book,
-                        pending_for_prev=pending_for_prev,
+                        fill_sim=fill_sim,
+                        harness=harness,
+                        on_trade=on_trade,
+                        result=result,
+                        eod_buffer=eod_buffer,
                         position_tracker=position_tracker,
                         engine_exits=engine_exits,
                         engine_entries=engine_entries,
                         streaming_views=streaming_views,
-                        result=result,
                     )
 
                     prev_bar = cur_bar
@@ -2586,47 +2467,18 @@ class TradingService:
                 # End-of-stream: any orders still queued for "next bar" are
                 # dropped with a log note — matches the legacy engine's
                 # behavior of not fabricating a terminal fill bar.
-                if pending_for_prev:
-                    logger.info(
-                        "%d orders queued at end-of-stream with no next bar; dropped",
-                        len(pending_for_prev),
-                    )
-                    result.execution_diagnostics.orders_unfilled += len(pending_for_prev)
-                    last_ts = prev_bar.timestamp if prev_bar is not None else None
-                    for req in pending_for_prev:
-                        _record_event(
-                            result.execution_diagnostics,
-                            "unfilled",
-                            timestamp=last_ts,
-                            symbol=req.symbol,
-                            side=req.side.value,
-                            order_type=req.order_type.value,
-                            reason="end_of_stream",
-                        )
+                self._drain_unfilled_at_eos(pending_for_prev, prev_bar, result)
 
                 harness.send_end()
             except LookAheadError as exc:
-                # Parent-side look-ahead guard fired inside the fill
-                # simulator: classify the same way as a subprocess-side
-                # violation so operators see a single error category.
-                result.error = str(exc)
-                result.lookahead_violation = True
-                result.streaming_equity_curve = eod_buffer.materialize()
-                result.probe_events = harness.probe_events
-                return _finalize_diagnostics(result)
+                # Parent-side look-ahead guard fired inside the fill simulator:
+                # classified the same way as a subprocess-side violation so
+                # operators see a single error category.
+                return self._abort_result(result, exc, eod_buffer, harness)
             except StrategyRuntimeError as exc:
-                result.error = str(exc)
-                result.lookahead_violation = exc.etype == "lookahead_violation"
-                result.streaming_equity_curve = eod_buffer.materialize()
-                result.probe_events = harness.probe_events
-                return _finalize_diagnostics(result)
+                return self._abort_result(result, exc, eod_buffer, harness)
 
-        result.streaming_equity_curve = eod_buffer.materialize()
-        result.probe_events = harness.probe_events
-        result.open_position_entry_reasons = [
-            pos.entry_reason for pos in fill_sim.portfolio.positions.values() if pos.entry_reason
-        ]
-        return _finalize_diagnostics(result)
+        return self._finalize_result(result, eod_buffer, harness, fill_sim=fill_sim)
 
     # ------------------------------------------------------------------
     # Issue #377: chunked-bar protocol path. Buffers up to ``chunk_size``
@@ -2723,127 +2575,37 @@ class TradingService:
                 bar_orders = orders_by_bar.get(i, [])
                 bar_cancels = cancels_by_bar.get(i, [])
 
-                if not is_warmup:
-                    # 1) Expire day orders on date change. See chunked path
-                    #    above — routes through the simulator so brackets on
-                    #    partially-filled parents survive expiry (#389).
-                    if prev_bar is not None and (cur_bar.timestamp[:10] != prev_bar.timestamp[:10]):
-                        expired = fill_sim.expire_day_orders(cur_bar)
-                        if expired:
-                            result.execution_diagnostics.orders_unfilled += len(expired)
-                            for ex in expired:
-                                _record_event(
-                                    result.execution_diagnostics,
-                                    "unfilled",
-                                    timestamp=cur_bar.timestamp,
-                                    symbol=ex.request.symbol,
-                                    side=ex.request.side.value,
-                                    order_type=ex.request.order_type.value,
-                                    reason="day_expired",
-                                )
-
-                    # 2) Submit pending_for_prev against this (current) bar.
-                    if pending_for_prev:
-                        apply_default = _partial_fill_defaults_enabled()
-                        for req in pending_for_prev:
-                            if apply_default and req.unfilled_policy is None:
-                                req.unfilled_policy = self._default_unfilled_policy
-                            equity = portfolio.mark_to_market()
-                            order_book.submit(
-                                req,
-                                submitted_at=prev_bar.timestamp,
-                                submitted_equity=equity,
-                                # #389: register the parent as eligible to
-                                # carry bracket children when the strategy
-                                # attached protective legs.
-                                expect_brackets=(
-                                    req.attached_stop_loss is not None
-                                    or req.attached_take_profit is not None
-                                ),
-                            )
-                            result.execution_diagnostics.orders_accepted += 1
-                            _record_event(
-                                result.execution_diagnostics,
-                                "accepted",
-                                timestamp=prev_bar.timestamp,
-                                symbol=req.symbol,
-                                side=req.side.value,
-                                order_type=req.order_type.value,
-                            )
-                        pending_for_prev = []
-
-                    # Ordering invariant (see the chunked path above and the exit
-                    # reconciler): ``process_bar`` must run BEFORE
-                    # ``_update_position_tracker`` / ``_append_streaming_bar`` so the
-                    # reconciler sees the signal bar (not the fill bar) and the
-                    # pre-update ``just_opened`` flag. Do not reorder.
-                    outcome = fill_sim.process_bar(cur_bar, next_bar=next_bar)
-                    _apply_fill_outcome_events(result.execution_diagnostics, outcome)
-                    for fill in outcome.entry_fills + outcome.exit_fills:
-                        # send_fill is per-fill; happens between chunks too.
-                        # The strategy sees fills from the *previous* chunk
-                        # before its next chunk arrives.
-                        harness.send_fill(
-                            fill=fill.model_dump(mode="json"),
-                            state=self._state(portfolio),
-                        )
-                    result.trades.extend(outcome.closed_trades)
-                    if on_trade is not None:
-                        for trade in outcome.closed_trades:
-                            on_trade(trade)
-
-                    # 3) Mark-to-market and stamp the equity curve. There is no
-                    # drawdown circuit-breaker — a Strategy Lab run is an
-                    # experiment and must be free to lose up to 100% so its true
-                    # downside is observed, not truncated by a limit.
-                    portfolio.update_last_price(cur_bar.symbol, cur_bar.close)
-                    equity = portfolio.mark_to_market()
-                    # #430: stamp EOD equity for the streaming curve.
-                    eod_buffer.record(cur_bar.timestamp, equity)
-
-                    result.bars_processed += 1
-
-                    # Issue #527 — refresh engine-side per-position state
-                    # for ``cur_bar.symbol`` based on the post-fill
-                    # portfolio. Mirrors the per-bar (``run``) path's
-                    # placement between fills+drawdown and the strategy-
-                    # response processing step. No-op when exit_rules is
-                    # empty.
-                    if self._exit_rules:
-                        self._update_position_tracker(
-                            tracker=position_tracker,
-                            cur_bar=cur_bar,
-                            portfolio=portfolio,
-                        )
-
-                # Append every bar (including warm-up) to the streaming
-                # view so indicators have full history for predicate
-                # evaluation once warm-up ends.
-                self._append_streaming_bar(streaming_views, cur_bar)
-
-                # 4) Process the strategy's response for this bar.
+                # Per-bar replay: the strategy response was already collected
+                # by the batched ``send_bars`` above, so the thunk just hands
+                # back this bar's ``bar_index``-tagged orders/cancels (bound as
+                # defaults so the closure captures this iteration's values).
                 try:
-                    self._process_bar_strategy_response(
+                    pending_for_prev = self._process_one_bar(
                         cur_bar=cur_bar,
-                        bar_orders=bar_orders,
-                        bar_cancels=bar_cancels,
+                        next_bar=next_bar,
+                        prev_bar=prev_bar,
                         is_warmup=is_warmup,
+                        fetch_response=lambda o=bar_orders, c=bar_cancels: (o, c),
+                        pending_for_prev=pending_for_prev,
                         portfolio=portfolio,
                         order_book=order_book,
-                        pending_for_prev=pending_for_prev,
+                        fill_sim=fill_sim,
+                        harness=harness,
+                        on_trade=on_trade,
+                        result=result,
+                        eod_buffer=eod_buffer,
                         position_tracker=position_tracker,
                         engine_exits=engine_exits,
                         engine_entries=engine_entries,
                         streaming_views=streaming_views,
-                        result=result,
                     )
                 except StrategyRuntimeError:
-                    # ``_process_bar_strategy_response`` raises on an
-                    # ``UnsupportedOrderFeatureError`` from the strategy.
-                    # The per-bar path just lets it propagate; the
-                    # chunked path needs to clear the buffer first so
-                    # the outer loop's recovery path doesn't replay
-                    # any buffered bars.
+                    # ``_process_bar_strategy_response`` (inside
+                    # ``_process_one_bar``) raises on an
+                    # ``UnsupportedOrderFeatureError`` from the strategy. The
+                    # per-bar path lets it propagate; the chunked path must
+                    # clear the buffer first so the outer loop's recovery path
+                    # doesn't replay any buffered bars.
                     chunk_buffer.clear()
                     raise
 
@@ -2885,44 +2647,317 @@ class TradingService:
             if not terminated:
                 _flush_chunk()
 
-            if pending_for_prev:
-                logger.info(
-                    "%d orders queued at end-of-stream with no next bar; dropped",
-                    len(pending_for_prev),
-                )
-                result.execution_diagnostics.orders_unfilled += len(pending_for_prev)
-                last_ts = prev_bar.timestamp if prev_bar is not None else None
-                for req in pending_for_prev:
-                    _record_event(
-                        result.execution_diagnostics,
-                        "unfilled",
-                        timestamp=last_ts,
-                        symbol=req.symbol,
-                        side=req.side.value,
-                        order_type=req.order_type.value,
-                        reason="end_of_stream",
-                    )
+            self._drain_unfilled_at_eos(pending_for_prev, prev_bar, result)
 
             harness.send_end()
         except LookAheadError as exc:
-            result.error = str(exc)
-            result.lookahead_violation = True
-            result.streaming_equity_curve = eod_buffer.materialize()
-            result.probe_events = harness.probe_events
-            return _finalize_diagnostics(result)
+            return self._abort_result(result, exc, eod_buffer, harness)
         except StrategyRuntimeError as exc:
-            result.error = str(exc)
-            result.lookahead_violation = exc.etype == "lookahead_violation"
-            result.streaming_equity_curve = eod_buffer.materialize()
-            result.probe_events = harness.probe_events
-            return _finalize_diagnostics(result)
+            return self._abort_result(result, exc, eod_buffer, harness)
 
+        return self._finalize_result(result, eod_buffer, harness, fill_sim=fill_sim)
+
+    # ------------------------------------------------------------------
+    # Shared per-bar loop body + stream-teardown tail.
+    #
+    # Extracted so the per-bar (``run``) and chunked (``_run_chunked``)
+    # paths cannot drift: the two used to carry ~120 lines of near-identical
+    # logic and a clone-class divergence had already caused a bug. The only
+    # genuine difference between the paths — per-bar ``send_bar`` vs a single
+    # batched ``send_bars`` per chunk — is threaded in via the
+    # ``fetch_response`` thunk, invoked at the same point in both paths.
+    # ------------------------------------------------------------------
+
+    def _process_one_bar(
+        self,
+        *,
+        cur_bar: Bar,
+        next_bar: Optional[Bar],
+        prev_bar: Optional[Bar],
+        is_warmup: bool,
+        fetch_response: Callable[[], Tuple[List[Dict], List[Dict]]],
+        pending_for_prev: List[OrderRequest],
+        portfolio: Portfolio,
+        order_book: OrderBook,
+        fill_sim: FillSimulator,
+        harness: "StreamingHarness",
+        on_trade: Optional[Callable[[TradeRecord], None]],
+        result: TradingServiceResult,
+        eod_buffer: "_StreamingEquityBuffer",
+        position_tracker: Dict[str, _TrackedPosition],
+        engine_exits: _EngineExitDispatcher,
+        engine_entries: _EngineEntryDispatcher,
+        streaming_views: Dict[str, StreamingHistoryView],
+    ) -> List[OrderRequest]:
+        """Run the per-bar event loop for a single bar.
+
+        Steps, in execution order:
+        1. Expire day orders on date change.
+        2. Submit the orders queued against the previous bar, pinning any
+           engine-emitted exit to its target entry.
+        3. Process fills, mark to market, stamp the equity curve, increment
+           ``bars_processed``, and refresh the engine position tracker.
+        4. Append the current bar to the streaming views.
+        5. Fetch the strategy response via ``fetch_response``.
+        6. Apply the strategy response (orders/cancels) and return the updated
+           pending queue.
+
+        Warm-up bars skip steps 1-3 (and the count) but still run steps 4-6.
+
+        Preconditions: ``fetch_response`` returns ``(bar_orders, bar_cancels)``
+        for ``cur_bar`` using post-fill portfolio state; the ``process_bar`` →
+        tracker → append ordering must not be reordered (the exit reconciler
+        relies on it).
+        Postconditions: returns the new ``pending_for_prev`` queue (the orders
+        the strategy emitted this bar, to be submitted against the next bar).
+        """
+        if not is_warmup:
+            # 1) Expire day orders on date change. Routes through
+            #    ``FillSimulator.expire_day_orders`` so partially-filled
+            #    bracket parents get protective legs before the parent is
+            #    dropped. ``timestamp`` is an ISO-8601 string
+            #    (``YYYY-MM-DD[THH:MM:SS]``), so ``[:10]`` is the calendar date.
+            if prev_bar is not None and (cur_bar.timestamp[:10] != prev_bar.timestamp[:10]):
+                expired = fill_sim.expire_day_orders(cur_bar)
+                if expired:
+                    result.execution_diagnostics.orders_unfilled += len(expired)
+                    for ex in expired:
+                        _record_event(
+                            result.execution_diagnostics,
+                            "unfilled",
+                            timestamp=cur_bar.timestamp,
+                            symbol=ex.request.symbol,
+                            side=ex.request.side.value,
+                            order_type=ex.request.order_type.value,
+                            reason="day_expired",
+                        )
+
+            # 2) Fill any orders from the previous iteration against *this*
+            #    (current) bar. These were submitted by the strategy after
+            #    seeing ``prev_bar``.
+            if pending_for_prev:
+                # Invariant: the queue is only populated after a prior bar was
+                # delivered to the strategy, so ``prev_bar`` is necessarily set
+                # here. Make it explicit (stripped under ``-O``) so a future
+                # caller that violates it fails loudly rather than with a bare
+                # AttributeError on ``prev_bar.timestamp``.
+                assert prev_bar is not None, "pending_for_prev implies a prior bar was seen"
+                # Apply the mode-level default unfilled policy parent-side
+                # (after the request has left the strategy process), so
+                # strategy bytes stay identical regardless of the flag.
+                apply_default = _partial_fill_defaults_enabled()
+                for req in pending_for_prev:
+                    if apply_default and req.unfilled_policy is None:
+                        req.unfilled_policy = self._default_unfilled_policy
+                    equity = portfolio.mark_to_market()
+                    submitted_po = order_book.submit(
+                        req,
+                        submitted_at=prev_bar.timestamp,
+                        submitted_equity=equity,
+                        # Register the parent as eligible to carry bracket
+                        # children when the strategy attached protective legs;
+                        # non-bracket entries pay zero overhead (flag is False).
+                        expect_brackets=(
+                            req.attached_stop_loss is not None
+                            or req.attached_take_profit is not None
+                        ),
+                    )
+                    # Pin engine-emitted exits to the Position they target so
+                    # the fill simulator's stale-continuation guard drops them
+                    # when a prior strategy exit closes the position first.
+                    # No-op on the chunked path (engine exits require the
+                    # per-bar protocol, so the bindings map is empty there).
+                    bound_entry = engine_exits.engine_exit_bindings.pop(req.client_order_id, None)
+                    if bound_entry is not None:
+                        submitted_po.working_against_entry_order_id = bound_entry
+                    result.execution_diagnostics.orders_accepted += 1
+                    _record_event(
+                        result.execution_diagnostics,
+                        "accepted",
+                        timestamp=prev_bar.timestamp,
+                        symbol=req.symbol,
+                        side=req.side.value,
+                        order_type=req.order_type.value,
+                    )
+                pending_for_prev = []
+
+            # Ordering invariant (relied on by the exit reconciler in
+            # ``_build_exit_reconciler``): ``process_bar`` runs BEFORE
+            # ``_update_position_tracker`` and ``_append_streaming_bar`` below.
+            # So when the fill simulator stamps an exit during this call,
+            # ``streaming_views``' latest bar is still the signal bar (cur_bar
+            # not yet appended) and ``position_tracker[sym].just_opened`` still
+            # reflects it. Do not move the tracker/view updates above this call.
+            outcome = fill_sim.process_bar(cur_bar, next_bar=next_bar)
+            _apply_fill_outcome_events(result.execution_diagnostics, outcome)
+            for fill in outcome.entry_fills + outcome.exit_fills:
+                harness.send_fill(
+                    fill=fill.model_dump(mode="json"),
+                    state=self._state(portfolio),
+                )
+            result.trades.extend(outcome.closed_trades)
+            if on_trade is not None:
+                for trade in outcome.closed_trades:
+                    on_trade(trade)
+
+            # 3) Mark-to-market and stamp the equity curve. There is no
+            # drawdown circuit-breaker — a Strategy Lab run is an experiment
+            # and must be free to lose up to 100% so its true downside is
+            # observed, not truncated by a limit.
+            portfolio.update_last_price(cur_bar.symbol, cur_bar.close)
+            equity = portfolio.mark_to_market()
+            # Stamp EOD equity for the streaming curve. Sub-daily bars
+            # overwrite the same calendar-day key, so the last MTM of each
+            # trading day wins.
+            eod_buffer.record(cur_bar.timestamp, equity)
+
+            # Refresh engine-side per-position state for ``cur_bar.symbol``
+            # based on the post-fill portfolio. No-op when exit_rules is empty.
+            if self._exit_rules:
+                self._update_position_tracker(
+                    tracker=position_tracker,
+                    cur_bar=cur_bar,
+                    portfolio=portfolio,
+                )
+
+        # Append every bar (including warm-up) to the streaming view so
+        # indicators have full history for predicate evaluation once warm-up
+        # ends.
+        self._append_streaming_bar(streaming_views, cur_bar)
+
+        # 4) Deliver the current bar to the strategy and apply the orders it
+        #    submits in response. Warm-up bars set ``ctx.is_warmup = True`` in
+        #    the subprocess so the strategy can short-circuit order emission;
+        #    any orders it emits anyway are dropped as a safety net inside
+        #    ``_process_bar_strategy_response``.
+        bar_orders, bar_cancels = fetch_response()
+
+        # Count only post-warmup bars, and only after the strategy has been
+        # consulted for this bar — Phase 4's signals_per_bar diagnostic divides
+        # trades by bars the strategy could actually have signaled on. Placing
+        # the increment after ``fetch_response`` (the per-bar path's
+        # ``send_bar``) preserves the error-path behaviour: a strategy that
+        # raises before returning a response leaves ``bars_processed`` unchanged
+        # for that bar, so a first-bar crash does not fabricate a misleading
+        # ``signals_per_bar`` / ``low_signals_per_bar`` diagnostic. (No-op
+        # difference on the chunked path, where ``fetch_response`` cannot fail.)
+        if not is_warmup:
+            result.bars_processed += 1
+
+        self._process_bar_strategy_response(
+            cur_bar=cur_bar,
+            bar_orders=bar_orders,
+            bar_cancels=bar_cancels,
+            is_warmup=is_warmup,
+            portfolio=portfolio,
+            order_book=order_book,
+            pending_for_prev=pending_for_prev,
+            position_tracker=position_tracker,
+            engine_exits=engine_exits,
+            engine_entries=engine_entries,
+            streaming_views=streaming_views,
+            result=result,
+        )
+        return pending_for_prev
+
+    def _drain_unfilled_at_eos(
+        self,
+        pending_for_prev: List[OrderRequest],
+        prev_bar: Optional[Bar],
+        result: TradingServiceResult,
+    ) -> None:
+        """Drop orders still queued for a next bar that never arrives.
+
+        Matches the legacy engine's behaviour of not fabricating a terminal
+        fill bar.
+
+        Args:
+            pending_for_prev: orders the strategy queued against a next bar that
+                never arrived; dropped (not filled).
+            prev_bar: the last processed bar, used to timestamp the diagnostics
+                (``None`` if the stream produced no bars).
+            result: the in-progress service result whose execution diagnostics
+                are updated in place.
+
+        Postconditions: each still-pending order is recorded as an
+        ``end_of_stream`` unfilled diagnostic.
+        """
+        if not pending_for_prev:
+            return
+        logger.info(
+            "%d orders queued at end-of-stream with no next bar; dropped",
+            len(pending_for_prev),
+        )
+        result.execution_diagnostics.orders_unfilled += len(pending_for_prev)
+        last_ts = prev_bar.timestamp if prev_bar is not None else None
+        for req in pending_for_prev:
+            _record_event(
+                result.execution_diagnostics,
+                "unfilled",
+                timestamp=last_ts,
+                symbol=req.symbol,
+                side=req.side.value,
+                order_type=req.order_type.value,
+                reason="end_of_stream",
+            )
+
+    def _finalize_result(
+        self,
+        result: TradingServiceResult,
+        eod_buffer: "_StreamingEquityBuffer",
+        harness: "StreamingHarness",
+        *,
+        fill_sim: Optional[FillSimulator] = None,
+    ) -> TradingServiceResult:
+        """Materialize the streaming equity curve + probe events and finalize.
+
+        When ``fill_sim`` is supplied (the success path), also records the entry
+        reasons of any still-open positions.
+
+        Args:
+            result: the in-progress service result, mutated in place.
+            eod_buffer: end-of-day equity buffer materialized into
+                ``result.streaming_equity_curve``.
+            harness: streaming harness whose ``probe_events`` are copied onto
+                the result.
+            fill_sim: supplied only on the success path; its open positions'
+                entry reasons are recorded. ``None`` on the abort path.
+        """
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
-        result.open_position_entry_reasons = [
-            pos.entry_reason for pos in fill_sim.portfolio.positions.values() if pos.entry_reason
-        ]
+        if fill_sim is not None:
+            result.open_position_entry_reasons = [
+                pos.entry_reason
+                for pos in fill_sim.portfolio.positions.values()
+                if pos.entry_reason
+            ]
         return _finalize_diagnostics(result)
+
+    def _abort_result(
+        self,
+        result: TradingServiceResult,
+        exc: Exception,
+        eod_buffer: "_StreamingEquityBuffer",
+        harness: "StreamingHarness",
+    ) -> TradingServiceResult:
+        """Shared ``except`` tail for both event loops.
+
+        Classifies look-ahead violations the same way whether they surface as a
+        parent-side ``LookAheadError`` or a subprocess-side ``StrategyRuntimeError``
+        with ``etype == "lookahead_violation"``, then materializes and finalizes.
+
+        Args:
+            result: the in-progress service result, mutated in place.
+            exc: the exception that aborted the run; its message and type drive
+                ``result.error`` / ``result.lookahead_violation``.
+            eod_buffer: end-of-day equity buffer (see :meth:`_finalize_result`).
+            harness: streaming harness (see :meth:`_finalize_result`).
+        """
+        result.error = str(exc)
+        result.lookahead_violation = isinstance(exc, LookAheadError) or (
+            isinstance(exc, StrategyRuntimeError) and exc.etype == "lookahead_violation"
+        )
+        return self._finalize_result(result, eod_buffer, harness)
 
     # ------------------------------------------------------------------
     # Issue #527 — engine-side enforcement of structured ``exit_rules``.

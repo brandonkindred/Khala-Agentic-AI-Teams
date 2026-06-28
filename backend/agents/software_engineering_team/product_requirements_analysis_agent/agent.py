@@ -2102,93 +2102,17 @@ class ProductRequirementsAnalysisAgent:
             return result
 
         # One-time context and constraints discovery (before first spec review) when job_id is set
-        skip_context_discovery = False
-        if job_id is not None:
-            if self._has_existing_pra_artifacts(repo_path):
-                logger.info(
-                    "Skipping context discovery; plan/product_analysis has prior PRA output, picking up from there."
-                )
-                skip_context_discovery = True
-                result.current_phase = AnalysisPhase.SPEC_REVIEW
-                _update_job(
-                    current_phase=AnalysisPhase.SPEC_REVIEW.value,
-                    progress=5,
-                    message="Resuming from prior analysis; reviewing specification...",
-                    status_text="Resuming from prior analysis; reviewing specification...",
-                )
-                # Load current_spec from existing artifacts when resuming
-                validated_spec_path = product_analysis_dir / "validated_spec.md"
-                if validated_spec_path.is_file():
-                    current_spec = validated_spec_path.read_text(encoding="utf-8")
-                else:
-                    # Latest updated_spec_v*.md or updated_spec.md by version or mtime
-                    candidates: List[Path] = []
-                    for p in product_analysis_dir.iterdir():
-                        if not p.is_file() or p.suffix != ".md":
-                            continue
-                        name = p.name
-                        if name == "updated_spec.md":
-                            candidates.append(p)
-                        elif name.startswith("updated_spec_v") and name.endswith(".md"):
-                            candidates.append(p)
-                    if candidates:
-
-                        def _spec_sort_key(path: Path) -> Tuple[int, float]:
-                            # Prefer higher version number; then mtime
-                            name = path.stem
-                            if name.startswith("updated_spec_v"):
-                                try:
-                                    ver = int(name.split("_v")[-1].split("_")[0])
-                                    return (ver, path.stat().st_mtime)
-                                except (ValueError, IndexError):
-                                    pass
-                            return (0, path.stat().st_mtime)
-
-                        latest_spec_file = max(candidates, key=_spec_sort_key)
-                        current_spec = latest_spec_file.read_text(encoding="utf-8")
-            if not skip_context_discovery:
-                # SOP Phase 1: Structured environment/constraint questions
-                result.current_phase = AnalysisPhase.SOP_PHASE1
-                _update_job(
-                    current_phase=AnalysisPhase.SOP_PHASE1.value,
-                    progress=2,
-                    message="Gathering environment constraints (SOP Phase 1)...",
-                    status_text="Gathering environment constraints (SOP Phase 1)...",
-                )
-                try:
-                    sop_decisions, current_spec, sop_answered = self._run_sop_phase1(
-                        current_spec,
-                        repo_path,
-                        job_id,
-                        _update_job,
-                    )
-                    all_answered_questions.extend(sop_answered)
-                except Exception as exc:
-                    result.failure_reason = f"SOP Phase 1 failed: {exc}"
-                    logger.error("Product Requirements Analysis: %s", result.failure_reason)
-                    return result
-
-                # SOP Phase 2: Architecture analysis (autonomous + approval)
-                result.current_phase = AnalysisPhase.SOP_PHASE2_ARCHITECTURE
-                _update_job(
-                    current_phase=AnalysisPhase.SOP_PHASE2_ARCHITECTURE.value,
-                    progress=8,
-                    message="Analyzing architecture (SOP Phase 2)...",
-                    status_text="Analyzing architecture (SOP Phase 2)...",
-                )
-                try:
-                    arch_result, current_spec = self._run_sop_phase2_architecture(
-                        current_spec,
-                        sop_decisions,
-                        repo_path,
-                        job_id,
-                        _update_job,
-                    )
-                    result.architecture_analysis = arch_result
-                except Exception as exc:
-                    logger.warning("SOP Phase 2 failed (non-fatal): %s", str(exc)[:200])
-        else:
-            logger.info("job_id is None; skipping context discovery")
+        ok, current_spec = self._run_context_discovery(
+            current_spec=current_spec,
+            repo_path=repo_path,
+            job_id=job_id,
+            product_analysis_dir=product_analysis_dir,
+            all_answered_questions=all_answered_questions,
+            result=result,
+            update_job=_update_job,
+        )
+        if not ok:
+            return result
 
         while iteration < max_iterations:
             iteration += 1
@@ -2203,18 +2127,19 @@ class ProductRequirementsAnalysisAgent:
                 status_text=f"Analyzing specification for gaps and inconsistencies (iteration {iteration})",
             )
 
-            try:
+            def _on_spec_review_progress(_chunk_index: int, _total_chunks: int) -> None:
                 _update_job(
                     status_text="Analyzing full specification for gaps and inconsistencies..."
                 )
 
-                def _on_spec_review_progress(_chunk_index: int, _total_chunks: int) -> None:
-                    _update_job(
-                        status_text="Analyzing full specification for gaps and inconsistencies..."
-                    )
-
+            def _phase_spec_review() -> Tuple["SpecReviewResult", str]:
+                """Review the spec (re-running once if a clarification changed it);
+                return the review result and the (possibly updated) spec."""
+                _update_job(
+                    status_text="Analyzing full specification for gaps and inconsistencies..."
+                )
                 spec_before_review = current_spec
-                spec_review_result, current_spec = self._run_spec_review(
+                review, cur_spec = self._run_spec_review(
                     current_spec,
                     repo_path,
                     iteration=iteration,
@@ -2222,12 +2147,12 @@ class ProductRequirementsAnalysisAgent:
                     answered_questions=all_answered_questions,
                     on_chunk_progress=_on_spec_review_progress,
                 )
-                if current_spec != spec_before_review:
+                if cur_spec != spec_before_review:
                     _update_job(
                         status_text="Re-analyzing full specification after clarification..."
                     )
-                    spec_review_result, current_spec = self._run_spec_review(
-                        current_spec,
+                    review, cur_spec = self._run_spec_review(
+                        cur_spec,
                         repo_path,
                         iteration=iteration,
                         spec_version=base_version + (iteration - 1),
@@ -2235,15 +2160,17 @@ class ProductRequirementsAnalysisAgent:
                         on_chunk_progress=_on_spec_review_progress,
                     )
                     logger.info("Re-ran spec review on clarified spec")
-                result.spec_review_result = spec_review_result
-                if spec_review_result.open_questions:
+                result.spec_review_result = review
+                if review.open_questions:
                     _update_job(
-                        status_text=f"Found {len(spec_review_result.issues)} issues, {len(spec_review_result.gaps)} gaps, {len(spec_review_result.open_questions)} questions"
+                        status_text=f"Found {len(review.issues)} issues, {len(review.gaps)} gaps, {len(review.open_questions)} questions"
                     )
-            except Exception as exc:
-                result.failure_reason = f"Spec review failed: {exc}"
-                logger.error("Product Requirements Analysis: %s", result.failure_reason)
+                return review, cur_spec
+
+            ok, ret = self._run_phase(result, "Spec review", _phase_spec_review)
+            if not ok:
                 return result
+            spec_review_result, current_spec = ret
 
             # Consolidate duplicate/semantically-similar questions before sending to user
             original_count = len(spec_review_result.open_questions)
@@ -2295,75 +2222,21 @@ class ProductRequirementsAnalysisAgent:
                 if count_before_dedup > 0
                 else 0.0
             )
-            consistency_loops = 0
-            while (
-                reduction_ratio >= DEDUP_REDUCTION_THRESHOLD
-                and consistency_loops < MAX_CONSISTENCY_LOOPS
-                and len(spec_review_result.open_questions) > 0
-            ):
-                consistency_loops += 1
-                _update_job(
-                    status_text="Many duplicate questions found. Updating spec for clarity and to resolve conflicts using Q&A history...",
-                )
-                qa_history = self._read_qa_history(repo_path)
-                _update_job(
-                    status_text="Editing spec: clarifying answers and removing conflicting information...",
-                )
-                current_spec = self._update_spec_for_consistency_and_clarity(
-                    current_spec,
-                    repo_path,
-                    qa_history,
-                    all_answered_questions,
-                    base_version + (iteration - 1),
-                    consistency_loops,
-                )
-                _update_job(
-                    status_text="Spec updated. Re-analyzing full specification after consistency update...",
-                )
-                spec_review_result, current_spec = self._run_spec_review(
-                    current_spec,
-                    repo_path,
-                    iteration=iteration,
-                    spec_version=base_version + (iteration - 1),
-                    answered_questions=all_answered_questions,
-                    on_chunk_progress=_on_spec_review_progress,
-                )
-                result.spec_review_result = spec_review_result
-                # Re-consolidate and re-dedupe
-                _update_job(
-                    status_text="Re-consolidating and re-deduplicating questions after spec update...",
-                )
-                consolidated_questions = self._consolidate_open_questions(
-                    spec_review_result.open_questions
-                )
-                spec_review_result = spec_review_result.model_copy(
-                    update={"open_questions": consolidated_questions}
-                )
-                open_count = len(spec_review_result.open_questions)
-                count_before_dedup = open_count
-                deduped_questions = self._dedupe_questions_by_answer_similarity(
-                    spec_review_result.open_questions,
-                    all_answered_questions,
-                )
-                if len(deduped_questions) < open_count:
-                    logger.info(
-                        "After consistency loop %d: deduped %d -> %d",
-                        consistency_loops,
-                        open_count,
-                        len(deduped_questions),
-                    )
-                spec_review_result = spec_review_result.model_copy(
-                    update={"open_questions": deduped_questions}
-                )
-                open_count = len(spec_review_result.open_questions)
-                reduction_ratio = (
-                    (count_before_dedup - len(deduped_questions)) / count_before_dedup
-                    if count_before_dedup > 0
-                    else 0.0
-                )
-                if not spec_review_result.open_questions:
-                    logger.info("No open questions after consistency update, proceeding")
-                    break
+            spec_review_result, current_spec, open_count = self._run_consistency_loops(
+                result=result,
+                current_spec=current_spec,
+                spec_review_result=spec_review_result,
+                open_count=open_count,
+                reduction_ratio=reduction_ratio,
+                count_before_dedup=count_before_dedup,
+                deduped_questions=deduped_questions,
+                repo_path=repo_path,
+                iteration=iteration,
+                base_version=base_version,
+                all_answered_questions=all_answered_questions,
+                update_job=_update_job,
+                on_chunk_progress=_on_spec_review_progress,
+            )
 
             _update_job(
                 status_text="Checking question and answer alignment...",
@@ -2425,16 +2298,17 @@ class ProductRequirementsAnalysisAgent:
                 status_text=f"Waiting for your input on {len(spec_review_result.open_questions)} question(s)",
             )
 
-            try:
-                answered_questions = self._communicate_with_user(
+            ok, answered_questions = self._run_phase(
+                result,
+                "Communication",
+                lambda: self._communicate_with_user(
                     job_id=job_id,
                     open_questions=spec_review_result.open_questions,
                     repo_path=repo_path,
                     iteration=iteration,
-                )
-            except Exception as exc:
-                result.failure_reason = f"Communication failed: {exc}"
-                logger.error("Product Requirements Analysis: %s", result.failure_reason)
+                ),
+            )
+            if not ok:
                 return result
 
             if not answered_questions:
@@ -2455,9 +2329,10 @@ class ProductRequirementsAnalysisAgent:
                 status_text=f"Incorporating {len(answered_questions)} answer(s) into the specification",
             )
 
-            try:
+            def _phase_spec_update() -> str:
+                """Incorporate the answered questions into the spec; return the updated spec."""
                 _update_job(status_text="Generating updated specification based on your answers")
-                current_spec = self._update_spec(
+                cur_spec = self._update_spec(
                     current_spec=current_spec,
                     answered_questions=answered_questions,
                     repo_path=repo_path,
@@ -2465,10 +2340,12 @@ class ProductRequirementsAnalysisAgent:
                 )
                 _update_job(status_text="Incorporated answers into spec")
                 _update_job(status_text="Specification updated successfully")
-            except Exception as exc:
-                result.failure_reason = f"Spec update failed: {exc}"
-                logger.error("Product Requirements Analysis: %s", result.failure_reason)
+                return cur_spec
+
+            ok, ret = self._run_phase(result, "Spec update", _phase_spec_update)
+            if not ok:
                 return result
+            current_spec = ret
 
         # Phase 4: Spec Cleanup
         result.current_phase = AnalysisPhase.SPEC_CLEANUP
@@ -2479,7 +2356,9 @@ class ProductRequirementsAnalysisAgent:
             status_text="Validating specification completeness and consistency",
         )
 
-        try:
+        def _phase_cleanup() -> Tuple[SpecCleanupResult, str]:
+            """Validate/clean the spec and generate the PRD; return the cleanup
+            result and the generated PRD content."""
             _update_job(status_text="Running final validation and cleanup on specification")
             cleanup_chunks = default_decompose_by_sections(current_spec)
             cleanup_titles = [_section_title_from_chunk(c) for c in cleanup_chunks]
@@ -2493,23 +2372,25 @@ class ProductRequirementsAnalysisAgent:
                     )
                 _update_job(status_text=status_text)
 
-            cleanup_result = self._run_spec_cleanup(
+            cleanup = self._run_spec_cleanup(
                 current_spec,
                 repo_path,
                 on_chunk_progress=_on_spec_cleanup_chunk,
             )
-            result.spec_cleanup_result = cleanup_result
+            result.spec_cleanup_result = cleanup
             _update_job(status_text="Validation complete")
             # Generate a Product Requirements Document (PRD) from the cleaned spec
-            prd_content = self._generate_prd_document(
-                cleaned_spec=cleanup_result.cleaned_spec,
+            prd = self._generate_prd_document(
+                cleaned_spec=cleanup.cleaned_spec,
                 answered_questions=all_answered_questions,
             )
-            result.final_spec_content = cleanup_result.cleaned_spec
-        except Exception as exc:
-            result.failure_reason = f"Spec cleanup failed: {exc}"
-            logger.error("Product Requirements Analysis: %s", result.failure_reason)
+            result.final_spec_content = cleanup.cleaned_spec
+            return cleanup, prd
+
+        ok, cleanup_ret = self._run_phase(result, "Spec cleanup", _phase_cleanup)
+        if not ok:
             return result
+        cleanup_result, prd_content = cleanup_ret
 
         # Save validated spec (cleaned spec) and PRD separately.
         product_analysis_dir = repo_path / "plan" / "product_analysis"
@@ -2544,6 +2425,225 @@ class ProductRequirementsAnalysisAgent:
         logger.info("Product Requirements Analysis Agent: WORKFLOW COMPLETE in %.1fs", elapsed)
 
         return result
+
+    def _run_context_discovery(
+        self,
+        *,
+        current_spec: str,
+        repo_path: Path,
+        job_id: Optional[str],
+        product_analysis_dir: Path,
+        all_answered_questions: List[AnsweredQuestion],
+        result: "AnalysisWorkflowResult",
+        update_job: Callable[..., None],
+    ) -> Tuple[bool, str]:
+        """Run one-time SOP context/constraint + architecture discovery.
+
+        When prior PRA artifacts exist, resumes by loading the latest spec and
+        skipping discovery. Otherwise runs SOP Phase 1 (environment constraints)
+        and the non-fatal SOP Phase 2 (architecture analysis). A no-op when
+        ``job_id`` is ``None``.
+
+        Preconditions: ``product_analysis_dir`` exists.
+        Postconditions: returns ``(ok, current_spec)``. ``ok`` is ``False`` only
+        when SOP Phase 1 fails (``result.failure_reason`` set); the caller must
+        then ``return result``. Mutates ``result`` and ``all_answered_questions``.
+        """
+        if job_id is None:
+            logger.info("job_id is None; skipping context discovery")
+            return True, current_spec
+
+        if self._has_existing_pra_artifacts(repo_path):
+            logger.info(
+                "Skipping context discovery; plan/product_analysis has prior PRA output, picking up from there."
+            )
+            result.current_phase = AnalysisPhase.SPEC_REVIEW
+            update_job(
+                current_phase=AnalysisPhase.SPEC_REVIEW.value,
+                progress=5,
+                message="Resuming from prior analysis; reviewing specification...",
+                status_text="Resuming from prior analysis; reviewing specification...",
+            )
+            # Load current_spec from existing artifacts when resuming
+            validated_spec_path = product_analysis_dir / "validated_spec.md"
+            if validated_spec_path.is_file():
+                current_spec = validated_spec_path.read_text(encoding="utf-8")
+            else:
+                # Latest updated_spec_v*.md or updated_spec.md by version or mtime
+                candidates: List[Path] = []
+                for p in product_analysis_dir.iterdir():
+                    if not p.is_file() or p.suffix != ".md":
+                        continue
+                    name = p.name
+                    if name == "updated_spec.md":
+                        candidates.append(p)
+                    elif name.startswith("updated_spec_v") and name.endswith(".md"):
+                        candidates.append(p)
+                if candidates:
+
+                    def _spec_sort_key(path: Path) -> Tuple[int, float]:
+                        # Prefer higher version number; then mtime
+                        name = path.stem
+                        if name.startswith("updated_spec_v"):
+                            try:
+                                ver = int(name.split("_v")[-1].split("_")[0])
+                                return (ver, path.stat().st_mtime)
+                            except (ValueError, IndexError):
+                                pass
+                        return (0, path.stat().st_mtime)
+
+                    latest_spec_file = max(candidates, key=_spec_sort_key)
+                    current_spec = latest_spec_file.read_text(encoding="utf-8")
+            return True, current_spec
+
+        # SOP Phase 1: Structured environment/constraint questions
+        result.current_phase = AnalysisPhase.SOP_PHASE1
+        update_job(
+            current_phase=AnalysisPhase.SOP_PHASE1.value,
+            progress=2,
+            message="Gathering environment constraints (SOP Phase 1)...",
+            status_text="Gathering environment constraints (SOP Phase 1)...",
+        )
+
+        def _phase_sop1() -> Tuple[List[SOPDecision], str]:
+            decisions, cur_spec, sop_answered = self._run_sop_phase1(
+                current_spec,
+                repo_path,
+                job_id,
+                update_job,
+            )
+            all_answered_questions.extend(sop_answered)
+            return decisions, cur_spec
+
+        ok, ret = self._run_phase(result, "SOP Phase 1", _phase_sop1)
+        if not ok:
+            return False, current_spec
+        sop_decisions, current_spec = ret
+
+        # SOP Phase 2: Architecture analysis (autonomous + approval)
+        result.current_phase = AnalysisPhase.SOP_PHASE2_ARCHITECTURE
+        update_job(
+            current_phase=AnalysisPhase.SOP_PHASE2_ARCHITECTURE.value,
+            progress=8,
+            message="Analyzing architecture (SOP Phase 2)...",
+            status_text="Analyzing architecture (SOP Phase 2)...",
+        )
+        try:
+            arch_result, current_spec = self._run_sop_phase2_architecture(
+                current_spec,
+                sop_decisions,
+                repo_path,
+                job_id,
+                update_job,
+            )
+            result.architecture_analysis = arch_result
+        except Exception as exc:
+            logger.warning("SOP Phase 2 failed (non-fatal): %s", str(exc)[:200])
+        return True, current_spec
+
+    def _run_consistency_loops(
+        self,
+        *,
+        result: "AnalysisWorkflowResult",
+        current_spec: str,
+        spec_review_result: "SpecReviewResult",
+        open_count: int,
+        reduction_ratio: float,
+        count_before_dedup: int,
+        deduped_questions: List[OpenQuestion],
+        repo_path: Path,
+        iteration: int,
+        base_version: int,
+        all_answered_questions: List[AnsweredQuestion],
+        update_job: Callable[..., None],
+        on_chunk_progress: Callable[[int, int], None],
+    ) -> Tuple["SpecReviewResult", str, int]:
+        """Clarify the spec and re-review while dedup keeps collapsing questions.
+
+        Runs up to ``MAX_CONSISTENCY_LOOPS`` passes: each rewrites the spec for
+        consistency/clarity from the Q&A history, re-reviews it, then
+        re-consolidates and re-dedupes the resulting questions. Stops early once
+        a pass drops below ``DEDUP_REDUCTION_THRESHOLD`` reduction or no open
+        questions remain.
+
+        Preconditions: ``spec_review_result``/``current_spec`` are the latest
+        review output; ``reduction_ratio``/``count_before_dedup``/
+        ``deduped_questions`` describe the dedup that just ran.
+        Postconditions: returns the updated
+        ``(spec_review_result, current_spec, open_count)``; sets
+        ``result.spec_review_result`` on every pass.
+        """
+        consistency_loops = 0
+        spec_version = base_version + (iteration - 1)
+        while (
+            reduction_ratio >= DEDUP_REDUCTION_THRESHOLD
+            and consistency_loops < MAX_CONSISTENCY_LOOPS
+            and len(spec_review_result.open_questions) > 0
+        ):
+            consistency_loops += 1
+            update_job(
+                status_text="Many duplicate questions found. Updating spec for clarity and to resolve conflicts using Q&A history...",
+            )
+            qa_history = self._read_qa_history(repo_path)
+            update_job(
+                status_text="Editing spec: clarifying answers and removing conflicting information...",
+            )
+            current_spec = self._update_spec_for_consistency_and_clarity(
+                current_spec,
+                repo_path,
+                qa_history,
+                all_answered_questions,
+                spec_version,
+                consistency_loops,
+            )
+            update_job(
+                status_text="Spec updated. Re-analyzing full specification after consistency update...",
+            )
+            spec_review_result, current_spec = self._run_spec_review(
+                current_spec,
+                repo_path,
+                iteration=iteration,
+                spec_version=spec_version,
+                answered_questions=all_answered_questions,
+                on_chunk_progress=on_chunk_progress,
+            )
+            result.spec_review_result = spec_review_result
+            # Re-consolidate and re-dedupe
+            update_job(
+                status_text="Re-consolidating and re-deduplicating questions after spec update...",
+            )
+            consolidated_questions = self._consolidate_open_questions(
+                spec_review_result.open_questions
+            )
+            spec_review_result = spec_review_result.model_copy(
+                update={"open_questions": consolidated_questions}
+            )
+            open_count = len(spec_review_result.open_questions)
+            count_before_dedup = open_count
+            deduped_questions = self._dedupe_questions_by_answer_similarity(
+                spec_review_result.open_questions,
+                all_answered_questions,
+            )
+            if len(deduped_questions) < open_count:
+                logger.info(
+                    "After consistency loop %d: deduped %d -> %d",
+                    consistency_loops,
+                    open_count,
+                    len(deduped_questions),
+                )
+            spec_review_result = spec_review_result.model_copy(
+                update={"open_questions": deduped_questions}
+            )
+            open_count = len(spec_review_result.open_questions)
+            reduction_ratio = (
+                (count_before_dedup - len(deduped_questions)) / count_before_dedup
+                if count_before_dedup > 0
+                else 0.0
+            )
+            if not spec_review_result.open_questions:
+                logger.info("No open questions after consistency update, proceeding")
+                break
+        return spec_review_result, current_spec, open_count
 
     def _merge_spec_review_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Combine issues, gaps, and questions from multiple chunk reviews.
@@ -3123,6 +3223,68 @@ Previously Answered Questions:
         except json.JSONDecodeError:
             return None
 
+    def _call_llm_text(self, prompt: str) -> str:
+        """Run one Strands ``Agent`` round-trip and return the stripped text.
+
+        Single seam for every raw LLM invocation in this agent; collapses the
+        former ``str(Agent(model=self._model, callback_handler=None)(prompt))``
+        idiom that was copy-pasted across the workflow.
+
+        Preconditions: ``prompt`` is a non-empty string; ``self._model`` is a
+        Strands ``Model``.
+        Postconditions: returns the model's response coerced to ``str`` and
+        whitespace-stripped (possibly empty).
+
+        Raises:
+            ValueError: if ``prompt`` is not a non-empty string. (An explicit
+            raise rather than ``assert`` so the precondition holds under ``-O``.)
+        """
+        if not isinstance(prompt, str) or not prompt:
+            raise ValueError("prompt must be a non-empty string")
+        return str(Agent(model=self._model, callback_handler=None)(prompt)).strip()
+
+    def _call_llm_json(self, prompt: str) -> Optional[dict]:
+        """Run one LLM round-trip and parse the response as a JSON object.
+
+        Builds on :meth:`_call_llm_text` + :meth:`_parse_llm_json` (fence-aware).
+
+        Preconditions: ``prompt`` is a non-empty string.
+        Postconditions: returns the parsed ``dict`` on success, or ``None`` when
+        the response is empty or not valid JSON (never raises on parse failure).
+        """
+        raw = self._call_llm_text(prompt)
+        return self._parse_llm_json(raw) if raw else None
+
+    def _run_phase(
+        self,
+        result: "AnalysisWorkflowResult",
+        name: str,
+        fn: Callable[[], Any],
+    ) -> Tuple[bool, Any]:
+        """Run one fatal workflow phase, capturing failures uniformly.
+
+        Collapses the ``try: <phase> except Exception as exc:
+        result.failure_reason = f"... failed: {exc}"; logger.error(...); return``
+        block that was copy-pasted across ``run_workflow``.
+
+        The broad ``except Exception`` is intentional: it reproduces the five
+        original copy-pasted phase guards verbatim, so failure handling is
+        behaviour-identical. The full traceback is logged (``exc_info=True``) so
+        the broad catch does not hide where an unexpected error originated.
+
+        Preconditions: ``fn`` is a zero-argument callable implementing the phase;
+        ``result`` is the in-progress :class:`AnalysisWorkflowResult`.
+        Postconditions: returns ``(True, fn())`` when the phase succeeds. On any
+        exception, sets ``result.failure_reason = f"{name} failed: {exc}"``, logs
+        it, and returns ``(False, None)`` — the caller must then ``return result``.
+        """
+        try:
+            return True, fn()
+        except Exception as exc:
+            result.failure_reason = f"{name} failed: {exc}"
+            logger.error("Product Requirements Analysis: %s", result.failure_reason, exc_info=True)
+            return False, None
+
     @staticmethod
     def _evaluate_sop_conditionals(
         question_def: Dict[str, Any],
@@ -3180,10 +3342,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
-            if not raw or not raw.strip():
-                return []
-            parsed = self._parse_llm_json(raw)
+            parsed = self._call_llm_json(prompt)
             if not isinstance(parsed, dict):
                 return []
             extracted = parsed.get("extracted_decisions", [])
@@ -3239,10 +3398,7 @@ Previously Answered Questions:
             spec_excerpt=spec_content[:4000],
         )
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
-            if not raw or not raw.strip():
-                return []
-            parsed = self._parse_llm_json(raw)
+            parsed = self._call_llm_json(prompt)
             if not isinstance(parsed, dict):
                 return []
             raw_options = parsed.get("options", [])
@@ -3390,12 +3546,9 @@ Previously Answered Questions:
         )
 
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
-            if not raw or not raw.strip():
-                return True, []  # On failure, consider complete to avoid blocking
-            parsed = self._parse_llm_json(raw)
+            parsed = self._call_llm_json(prompt)
             if not isinstance(parsed, dict):
-                return True, []
+                return True, []  # On failure, consider complete to avoid blocking
 
             is_complete = bool(parsed.get("is_complete", True))
             if is_complete:
@@ -3741,32 +3894,30 @@ Previously Answered Questions:
         )
 
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
-            if raw and raw.strip():
-                parsed = self._parse_llm_json(raw)
-                if isinstance(parsed, dict):
-                    arch_result = ArchitectureAnalysisResult(
-                        architecture_type=str(parsed.get("architecture_type", "")),
-                        architecture_rationale=str(parsed.get("architecture_rationale", "")),
-                        data_types_and_storage=parsed.get("data_types_and_storage", []),
-                        task_types=parsed.get("task_types", []),
-                        tool_gaps=[
-                            ToolGapAnalysis(
-                                gap_description=g.get("gap_description", ""),
-                                recommendations=[
-                                    ToolRecommendation(
-                                        name=r.get("name", ""),
-                                        description=r.get("description", ""),
-                                        why_recommended=r.get("why_recommended", ""),
-                                    )
-                                    for r in g.get("recommendations", [])
-                                ],
-                            )
-                            for g in parsed.get("tool_gaps", [])
-                        ],
-                        diagrams=parsed.get("diagrams", {}),
-                        summary=str(parsed.get("summary", "")),
-                    )
+            parsed = self._call_llm_json(prompt)
+            if isinstance(parsed, dict):
+                arch_result = ArchitectureAnalysisResult(
+                    architecture_type=str(parsed.get("architecture_type", "")),
+                    architecture_rationale=str(parsed.get("architecture_rationale", "")),
+                    data_types_and_storage=parsed.get("data_types_and_storage", []),
+                    task_types=parsed.get("task_types", []),
+                    tool_gaps=[
+                        ToolGapAnalysis(
+                            gap_description=g.get("gap_description", ""),
+                            recommendations=[
+                                ToolRecommendation(
+                                    name=r.get("name", ""),
+                                    description=r.get("description", ""),
+                                    why_recommended=r.get("why_recommended", ""),
+                                )
+                                for r in g.get("recommendations", [])
+                            ],
+                        )
+                        for g in parsed.get("tool_gaps", [])
+                    ],
+                    diagrams=parsed.get("diagrams", {}),
+                    summary=str(parsed.get("summary", "")),
+                )
         except Exception as exc:
             logger.warning("SOP Phase 2 architecture analysis failed: %s", str(exc)[:200])
 
@@ -3960,25 +4111,7 @@ Previously Answered Questions:
         spec_excerpt = (spec_content or "")[:4000]
         prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
-            if not raw or not raw.strip():
-                return _context_discovery_fallback_questions()
-            # Try to extract JSON (allow optional markdown code fence)
-            text = raw.strip()
-            parsed = None
-            if "```" in text:
-                for part in text.split("```"):
-                    part = part.strip()
-                    if part.lower().startswith("json"):
-                        part = part[4:].strip()
-                    if part.startswith("{"):
-                        try:
-                            parsed = json.loads(part)
-                            break
-                        except json.JSONDecodeError:
-                            continue
-            if parsed is None:
-                parsed = json.loads(text)
+            parsed = self._call_llm_json(prompt)
             questions_data = parsed.get("open_questions") if isinstance(parsed, dict) else None
             if not questions_data or not isinstance(questions_data, list):
                 return _context_discovery_fallback_questions()
@@ -4130,7 +4263,7 @@ Previously Answered Questions:
         )
         prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
         try:
-            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip())
+            raw = self._call_llm_json(prompt)
             if not isinstance(raw, dict):
                 return list(open_questions)
             consolidated = raw.get("consolidated_questions", [])
@@ -4186,7 +4319,7 @@ Previously Answered Questions:
         questions_json = json.dumps(questions_payload, indent=2)
         prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
         try:
-            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip())
+            raw = self._call_llm_json(prompt)
             if not isinstance(raw, dict):
                 return list(open_questions)
             aligned = raw.get("aligned_questions", [])
@@ -4232,7 +4365,7 @@ Previously Answered Questions:
             questions_json=questions_json,
         )
         try:
-            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip())
+            raw = self._call_llm_json(prompt)
             if not isinstance(raw, dict):
                 return list(open_questions)
             recs = raw.get("recommendations", [])
@@ -4490,7 +4623,7 @@ Previously Answered Questions:
         )
 
         try:
-            updated_spec = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
+            updated_spec = self._call_llm_text(prompt)
         except Exception as e:
             logger.error("Failed to update spec with LLM: %s", e)
             return current_spec
@@ -4680,7 +4813,7 @@ Previously Answered Questions:
         )
 
         try:
-            prd_content = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
+            prd_content = self._call_llm_text(prompt)
         except Exception as e:
             logger.error("Failed to generate PRD with LLM: %s", e)
             return cleaned_spec
@@ -4745,7 +4878,7 @@ Previously Answered Questions:
         )
 
         try:
-            clarified_spec = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
+            clarified_spec = self._call_llm_text(prompt)
         except Exception as e:
             logger.error("Failed to clarify spec with LLM: %s", e)
             return current_spec
@@ -4789,7 +4922,7 @@ Previously Answered Questions:
             qa_source=qa_source,
         )
         try:
-            updated_spec = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
+            updated_spec = self._call_llm_text(prompt)
         except Exception as e:
             logger.error("Failed to update spec for consistency with LLM: %s", e)
             return current_spec
