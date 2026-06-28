@@ -242,6 +242,13 @@ class AgenticTeamStore:
     def save_team_agents(self, team_id: str, agents: list[AgenticTeamAgent]) -> None:
         """Replace the full agents roster for a team (upsert semantics).
 
+        Preconditions: ``team_id`` is a non-empty string; ``agents`` have unique
+            ``agent_name`` within the team.
+        Postconditions: the team's ``agentic_team_agents`` rows are exactly ``agents``
+            (rows absent from ``agents`` are removed; surviving rows keep their
+            ``created_at`` via ``_write_team_agents``'s upsert); the team's
+            ``updated_at`` is bumped. No-op write if ``team_id`` names no team.
+
         Concurrency: takes the team-row ``FOR UPDATE`` lock before touching child
         ``agentic_team_agents`` rows, so every roster write (this, the single-agent
         helpers, and ``merge_generated_agents``) acquires locks in the same
