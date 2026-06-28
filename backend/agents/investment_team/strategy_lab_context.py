@@ -64,6 +64,25 @@ _NON_EXECUTED_BACKTEST_STATUSES: frozenset[str] = frozenset(
 )
 
 
+def _is_executed_record(record: StrategyLabRecord) -> bool:
+    """True when a record ran a real backtest (not a pre-backtest short-circuit).
+
+    Single source of truth for the executed/non-executed split shared by
+    :func:`asset_class_mix_hint` (diversity steering) and :func:`_executed_records`
+    (performance attribution), so the two never disagree on which records count.
+    Records persisted before ``BacktestRecord.status`` existed default to
+    ``"completed"``, so legacy rows count as executed.
+
+    Preconditions: ``record.backtest`` exposes a ``status`` (or none, treated as
+    ``"completed"``).
+    Postconditions: returns ``True`` iff the status is not in
+    ``_NON_EXECUTED_BACKTEST_STATUSES``.
+    """
+    return (
+        str(getattr(record.backtest, "status", "completed")) not in _NON_EXECUTED_BACKTEST_STATUSES
+    )
+
+
 def normalize_asset_class(ac: object) -> str:
     """Map any asset-class string variant to one of the canonical labels.
 
@@ -307,21 +326,19 @@ def _executed_records(
     """Chronological, tail-trimmed records that ran a real backtest.
 
     Shares the tail-trim of :func:`format_prior_results` and the
-    ``_NON_EXECUTED_BACKTEST_STATUSES`` filter of :func:`asset_class_mix_hint` so
+    :func:`_is_executed_record` filter of :func:`asset_class_mix_hint` so
     attribution spans exactly the records whose metrics and asset class are real.
 
     Preconditions: ``max_records >= 0``.
     Postconditions: returns records sorted by ``created_at``, at most the last
-    ``max_records``, with pre-backtest short-circuit rows removed.
+    ``max_records`` (``max_records == 0`` → empty list), with pre-backtest
+    short-circuit rows removed.
     """
     ordered = sorted(records, key=lambda x: x.created_at)
-    if len(ordered) > max_records:
-        ordered = ordered[-max_records:]
-    return [
-        r
-        for r in ordered
-        if str(getattr(r.backtest, "status", "completed")) not in _NON_EXECUTED_BACKTEST_STATUSES
-    ]
+    # ``ordered[-0:]`` is ``ordered[0:]`` (the whole list), so the zero case must
+    # be handled explicitly rather than via the slice.
+    ordered = ordered[-max_records:] if max_records else []
+    return [r for r in ordered if _is_executed_record(r)]
 
 
 def aggregate_prior_results(
@@ -336,10 +353,10 @@ def aggregate_prior_results(
     samples large enough to be informative on a diverse history.
 
     Preconditions:
-      - ``records`` is a list of ``StrategyLabRecord``; ``max_records >= 1``.
+      - ``records`` is a list of ``StrategyLabRecord``; ``max_records >= 0``.
     Postconditions:
       - Returns ``{(dimension, value): {"win_rate", "annual_return", "n"}}``.
-      - Empty / all-non-executed input → ``{}``.
+      - Empty / all-non-executed / ``max_records == 0`` input → ``{}``.
       - Every value dict has ``n >= 1`` and means equal to the arithmetic mean of
         the contributing records' ``win_rate_pct`` / ``annualized_return_pct``.
       - A record contributes to exactly one ``asset_class``/``entry``/``sizing``
@@ -479,11 +496,7 @@ def asset_class_mix_hint(
     # repeated failed futures/forex/etc. runs would be omitted from steering.
     # Records persisted before ``BacktestRecord.status`` existed default to
     # ``"completed"``, so legacy rows are unaffected.
-    executed = [
-        r
-        for r in ordered
-        if str(getattr(r.backtest, "status", "completed")) not in _NON_EXECUTED_BACKTEST_STATUSES
-    ]
+    executed = [r for r in ordered if _is_executed_record(r)]
     sample = executed[-tail:] if len(executed) > tail else executed
     if not sample:
         return (

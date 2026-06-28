@@ -672,6 +672,13 @@ def test_aggregate_prior_results_respects_max_records_tail() -> None:
     assert agg[("asset_class", "stocks")]["annual_return"] == pytest.approx(3.5)
 
 
+def test_aggregate_prior_results_max_records_zero_yields_empty() -> None:
+    # max_records=0 must mean "keep none", not slip through ordered[-0:] (the
+    # whole list). Guards the contract that 0 → {}.
+    recs = [_attr_record(i=i, entry_rules=[_rsi_entry()]) for i in range(3)]
+    assert aggregate_prior_results(recs, max_records=0) == {}
+
+
 def test_format_prior_attribution_empty_sentinel() -> None:
     out = format_prior_attribution([])
     assert "Not enough" in out

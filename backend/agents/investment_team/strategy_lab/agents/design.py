@@ -189,11 +189,9 @@ class DesignAgent:
             if prior_records
             else "No prior strategies tested yet."
         )
-        prior_attribution = (
-            format_prior_attribution(prior_records)
-            if prior_records
-            else "Not enough executed history yet to attribute performance."
-        )
+        # ``format_prior_attribution`` returns its own "not enough history"
+        # sentinel for an empty / all-non-executed list, so no guard is needed.
+        prior_attribution = format_prior_attribution(prior_records)
         if exclude_asset_classes:
             # The menu-restricted mix hint already supplies the positive
             # allowed-class menu — even with no priors, since asset_class_mix_hint
