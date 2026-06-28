@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import httpx
+import pytest
 
 from coding_team import hitl, job_store
 
@@ -522,6 +523,30 @@ def test_wait_for_answers_renews_heartbeat_on_transient_read_failure():
     assert len(beats) == 3  # one heartbeat per failed read; the 4th poll cleared and returned
     for ts in beats:
         assert "T" in ts  # ISO-8601 timestamps
+
+
+def test_wait_for_answers_propagates_non_transport_error():
+    """A non-transport exception (a programming bug, not a transient blip) must NOT be
+    swallowed by the read-retry path — it propagates so the bug surfaces immediately
+    instead of the loop silently spinning to its timeout."""
+
+    def get_job(jid):
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError, match="boom"):
+        hitl.wait_for_answers("j", get_job, sleep=lambda s: None)
+
+
+def test_wait_for_answers_propagates_permanent_transport_error():
+    """A permanent transport fault (e.g. an unsupported URL scheme) is not in the
+    transient set, so it propagates rather than being retried until timeout — a real
+    misconfiguration must surface, not hide behind a long wait."""
+
+    def get_job(jid):
+        raise httpx.UnsupportedProtocol("Request URL has an unsupported protocol.")
+
+    with pytest.raises(httpx.UnsupportedProtocol):
+        hitl.wait_for_answers("j", get_job, sleep=lambda s: None)
 
 
 def test_wait_for_answers_times_out():

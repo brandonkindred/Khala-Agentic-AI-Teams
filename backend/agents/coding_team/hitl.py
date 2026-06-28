@@ -62,6 +62,25 @@ _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
 # endpoint's staleness window.
 ANSWER_WAIT_POLL_INTERVAL_S = _ANSWER_WAIT_POLL_INTERVAL_S
 
+# The job-service transport failures that ``JobServiceClient._request`` itself classifies as
+# transient and retries before giving up (its ``_RETRY_ANY_METHOD_ERRORS`` +
+# ``_RETRY_IDEMPOTENT_ONLY_ERRORS``). The wait loop extends that same tolerance: when the client
+# exhausts its own retry budget on a blip — e.g. a connection reset together with the brief connect
+# failures that accompany a job-service restart — re-poll instead of crashing a long HITL wait.
+# Permanent transport faults (``UnsupportedProtocol``, ``LocalProtocolError``, ``ProxyError``) and
+# HTTP status errors are deliberately excluded so a real misconfiguration surfaces immediately
+# rather than spinning to the timeout. ``ConnectTimeout`` is excluded for the same reason (the
+# client does not retry it either).
+_TRANSIENT_JOB_READ_ERRORS = (
+    httpx.ConnectError,
+    httpx.PoolTimeout,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.WriteError,
+)
+
 # Terminal SUCCESS statuses for a coding-team job: the run finished and the outcome is a success —
 # a clean completion, a partial success (some tasks failed), or an already-complete no-op (the work
 # was already done, no changes needed). Single source of truth so every consumer (the publish-defer
@@ -477,15 +496,17 @@ def wait_for_answers(
     while now() - start < timeout:
         try:
             data = get_job_fn(job_id) or {}
-        except httpx.TransportError:
+        except _TRANSIENT_JOB_READ_ERRORS:
             # A transient job-service transport failure (e.g. a connection reset that
             # outlived the client's own retry budget) must not kill the wait — treat
             # it like a missed poll: log, keep the liveness heartbeat fresh so another
             # worker doesn't treat this still-alive loop as dead and auto-resume the
             # job elsewhere, then back off and re-read. The ``timeout`` bound still
             # caps the total wait, so a sustained outage ends the loop the same way a
-            # timeout does. Only transport errors are swallowed here — an HTTP status
-            # error or a programming bug (TypeError, etc.) still propagates.
+            # timeout does. Only the transient transport failures the client itself
+            # retries are swallowed (see ``_TRANSIENT_JOB_READ_ERRORS``); permanent
+            # transport faults (UnsupportedProtocol, LocalProtocolError), HTTP status
+            # errors, and programming bugs (TypeError, etc.) propagate.
             logger.warning(
                 "answer-wait job read failed for job %s; retrying after poll interval",
                 job_id,
