@@ -3,7 +3,6 @@
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from backend_agent import BackendExpertAgent, BackendInput
 from devops_agent import DevOpsExpertAgent, DevOpsInput
-from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
 from qa_agent import QAExpertAgent, QAInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 from tech_lead_agent import TechLeadAgent, TechLeadInput
@@ -63,7 +62,6 @@ Build a REST API for task management.
     agent_map = {
         "devops": DevOpsExpertAgent(llm),
         "backend": BackendExpertAgent(llm),
-        "frontend": FrontendExpertAgent(llm),
         "security": CybersecurityExpertAgent(llm),
         "qa": QAExpertAgent(llm),
     }
@@ -93,15 +91,6 @@ Build a REST API for task management.
                 )
             )
             assert result.language == "python"
-        elif task.assignee == "frontend":
-            result = agent.run(
-                FrontendInput(
-                    task_description=task.description,
-                    requirements=task.requirements,
-                    architecture=architecture,
-                )
-            )
-            assert result is not None
         elif task.assignee == "security":
             result = agent.run(
                 SecurityInput(

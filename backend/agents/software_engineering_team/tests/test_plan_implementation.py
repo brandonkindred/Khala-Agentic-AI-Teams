@@ -4,7 +4,6 @@ import inspect
 from pathlib import Path
 
 from backend_agent.agent import BackendExpertAgent
-from frontend_team.feature_agent.agent import FrontendExpertAgent
 
 from llm_service import DummyLLMClient
 
@@ -59,27 +58,13 @@ def test_backend_persist_qa_artifacts_writes_test_files(tmp_path: Path) -> None:
     assert (tmp_path / "tests" / "test_unit_qa_backend-task-1.py").exists()
 
 
-def test_frontend_has_run_workflow() -> None:
-    """FrontendExpertAgent has run_workflow method (unified workflow)."""
-    assert hasattr(FrontendExpertAgent, "run_workflow")
-    sig = inspect.signature(FrontendExpertAgent.run_workflow)
-    params = list(sig.parameters)
-    assert "repo_path" in params
-    assert "backend_dir" in params
-    assert "qa_agent" in params
-    assert "accessibility_agent" in params
-    assert "security_agent" in params
-    assert "code_review_agent" in params
-    assert "dbc_agent" in params
-
-
 def test_orchestrator_passes_security_agent_to_backend() -> None:
-    """Orchestrator passes security_agent when calling backend run_workflow."""
+    """Orchestrator passes security_agent when calling the code-v2 run_workflow."""
 
-    # Read orchestrator source and verify the call includes security_agent
+    # Read orchestrator source and verify the workflow invocation includes security_agent
     orchestrator_path = Path(__file__).resolve().parent.parent / "orchestrator.py"
     content = orchestrator_path.read_text()
-    assert 'security_agent=agents["security"]' in content
+    assert 'security_agent=agents.get("security")' in content
     assert "run_workflow" in content
 
 
@@ -159,11 +144,3 @@ def test_acceptance_verifier_agent_exists_and_flags_unsatisfied() -> None:
     )
     assert hasattr(result, "all_satisfied")
     assert hasattr(result, "per_criterion")
-
-
-def test_run_failed_tasks_uses_frontend_run_workflow() -> None:
-    """run_failed_tasks calls frontend run_workflow (not simplified inline loop)."""
-    orchestrator_path = Path(__file__).resolve().parent.parent / "orchestrator.py"
-    content = orchestrator_path.read_text()
-    assert "run_workflow" in content
-    assert "acceptance_verifier_agent" in content
