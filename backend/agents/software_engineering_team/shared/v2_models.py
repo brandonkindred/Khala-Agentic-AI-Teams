@@ -141,8 +141,15 @@ class DeliverResult(BaseModel):
     """Output of the Deliver phase."""
 
     branch_name: str = Field(default="")
+    branch_ready: bool = Field(
+        default=False,
+        description="True when the feature branch has been committed and left ready for external review.",
+    )
     merged: bool = Field(default=False)
     commit_messages: List[str] = Field(default_factory=list)
+    delivered_files: List[str] = Field(
+        default_factory=list, description="Repo-relative file paths written during delivery"
+    )
     summary: str = Field(default="")
 
 

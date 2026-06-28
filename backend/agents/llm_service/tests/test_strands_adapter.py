@@ -620,6 +620,14 @@ def test_clone_returns_new_model_sharing_backing_client() -> None:
     assert client.chat_calls[0]["response_format"] == "text"
 
 
+def test_client_property_exposes_backing_client() -> None:
+    """The public ``client`` property returns the backing LLMClient without reaching
+    into the private ``_client`` attribute."""
+    client = _RecordingClient("hi")
+    model = LLMClientModel(client, response_format="json")
+    assert model.client is client
+
+
 def test_clone_rejects_invalid_response_format() -> None:
     base = LLMClientModel(_RecordingClient({}))
     with pytest.raises(ValueError, match="response_format"):
