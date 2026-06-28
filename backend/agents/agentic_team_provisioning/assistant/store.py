@@ -220,9 +220,20 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="save_team_agents")
     def save_team_agents(self, team_id: str, agents: list[AgenticTeamAgent]) -> None:
-        """Replace the full agents roster for a team (upsert semantics)."""
+        """Replace the full agents roster for a team (upsert semantics).
+
+        Concurrency: takes the team-row ``FOR UPDATE`` lock before touching child
+        ``agentic_team_agents`` rows, so every roster write (this, the single-agent
+        helpers, and ``merge_generated_agents``) acquires locks in the same
+        parent→child order and they can't deadlock by interleaving.
+        """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
+            # Parent-first lock (see merge_generated_agents) — uniform lock order.
+            cur.execute(
+                "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
+                (team_id,),
+            )
             self._write_team_agents(cur, team_id, agents, now)
 
     @timed_query(store=_STORE, op="merge_generated_agents")
@@ -274,10 +285,19 @@ class AgenticTeamStore:
 
         Concurrency: a single ``INSERT ... ON CONFLICT`` touches only this agent's
             row (no read-modify-write of the whole roster), so concurrent
-            single-agent adds on the same team cannot drop one another's writes.
+            single-agent adds on the same team cannot drop one another's writes. The
+            team-row ``FOR UPDATE`` lock is taken first so this shares the
+            parent→child lock order of ``merge_generated_agents`` — a chat-save merge
+            and a single-agent write can't deadlock by locking the rows in opposite
+            order.
         """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
+            # Parent-first lock (see merge_generated_agents) — uniform lock order.
+            cur.execute(
+                "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
+                (team_id,),
+            )
             cur.execute(
                 "INSERT INTO agentic_team_agents "
                 "(team_id, agent_name, data_json, created_at, updated_at) "
@@ -301,10 +321,21 @@ class AgenticTeamStore:
 
         Concurrency: a single ``DELETE ... RETURNING`` removes only this agent's row
             and reports its data atomically — no read-modify-write of the roster, and
-            the caller's source check sees the row that was actually deleted.
+            the caller's source check sees the row that was actually deleted. The
+            team-row ``FOR UPDATE`` lock is taken first so this shares the
+            parent→child lock order of ``merge_generated_agents`` — a chat-save merge
+            and a concurrent delete can't deadlock by locking the parent and child
+            rows in opposite order.
         """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            # Parent-first lock (see merge_generated_agents) — uniform lock order.
+            # This sets _last_fetch_one, immediately overwritten by the DELETE's
+            # RETURNING below, so the fetchone() still reads the delete result.
+            cur.execute(
+                "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
+                (team_id,),
+            )
             cur.execute(
                 "DELETE FROM agentic_team_agents WHERE team_id = %s AND agent_name = %s "
                 "RETURNING data_json",
