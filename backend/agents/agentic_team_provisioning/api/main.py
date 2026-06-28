@@ -132,15 +132,23 @@ DEFAULT_SUGGESTIONS = [
 
 
 def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
-    """Persist agents roster from the LLM ``agents`` block (if present)."""
+    """Persist the LLM ``agents`` block, preserving any registry-source roster entries.
+
+    The chat round-trips only generated agents, so a naive full replace would drop
+    the registry agents a user added via the from-registry endpoint (Agent Studio
+    §5.3). We therefore merge: existing ``source == "registry"`` entries are kept, and
+    the LLM's generated agents are layered on top — a generated agent that collides
+    by name with a preserved registry agent is dropped, so the explicitly-added
+    registry agent wins.
+    """
     if not agents_data:
         return
-    agents: list[AgenticTeamAgent] = []
+    generated: list[AgenticTeamAgent] = []
     for a in agents_data:
         name = a.get("agent_name", "")
         if not name:
             continue
-        agents.append(
+        generated.append(
             AgenticTeamAgent(
                 agent_name=name,
                 role=a.get("role", ""),
@@ -150,13 +158,21 @@ def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
                 expertise=a.get("expertise", []),
             )
         )
-    if agents:
-        _store.save_team_agents(team_id, agents)
-        # Install the generated agents into the live registry so the Agent Console
-        # catalog and /api/agents/{id}/invoke resolve them (best-effort).
-        from agentic_team_provisioning.manifest_generation import register_team_manifests
+    if not generated:
+        return
+    # Keep user-added registry agents (the chat can't see them); registry wins on
+    # a name collision so a generated agent never silently overwrites one.
+    preserved = [a for a in _store.list_team_agents(team_id) if a.source == SOURCE_REGISTRY]
+    preserved_names = {a.agent_name for a in preserved}
+    merged = preserved + [g for g in generated if g.agent_name not in preserved_names]
 
-        register_team_manifests(team_id, agents)
+    _store.save_team_agents(team_id, merged)
+    # Install the generated agents into the live registry so the Agent Console
+    # catalog and /api/agents/{id}/invoke resolve them (best-effort).
+    # register_team_manifests skips registry-source entries internally.
+    from agentic_team_provisioning.manifest_generation import register_team_manifests
+
+    register_team_manifests(team_id, merged)
 
 
 def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:

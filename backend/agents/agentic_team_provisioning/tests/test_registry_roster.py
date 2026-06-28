@@ -241,6 +241,28 @@ def test_from_registry_replacing_generated_unregisters_old_manifest(
     assert registry.get(old_manifest.id) is None  # stale generated manifest dropped
 
 
+def test_llm_save_preserves_registry_agents(client: TestClient, registry: _FakeRegistry) -> None:
+    """A chat-driven roster save must not drop a user-added registry agent, and a
+    generated agent can't overwrite one by name (registry wins the collision)."""
+    from agentic_team_provisioning.api.main import _save_agents_from_llm
+
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+
+    # The LLM round-trip only knows generated agents; one collides by name.
+    _save_agents_from_llm(
+        team_id,
+        [
+            {"agent_name": "Writer", "role": "Writes"},
+            {"agent_name": "blogging.planner", "role": "x"},
+        ],
+    )
+
+    roster = {a["agent_name"]: a["source"] for a in client.get(f"/teams/{team_id}/agents").json()}
+    assert roster["blogging.planner"] == "registry"  # preserved, not overwritten
+    assert roster["Writer"] == "generated"  # the new generated agent was added
+
+
 def test_register_team_manifests_skips_registry_agents(
     client: TestClient, registry: _FakeRegistry
 ) -> None:
