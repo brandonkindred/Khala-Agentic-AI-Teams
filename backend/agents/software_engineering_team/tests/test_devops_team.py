@@ -772,6 +772,46 @@ class TestDevOpsTestValidationAgent:
         )
         assert out.quality_gates["unit_tests"] == "not_run"
 
+    def test_unapproved_without_fail_gate_fails_closed(self) -> None:
+        """An unapproved validation with no failing gate must synthesize one so
+        the gate-only DevOps pipeline still blocks (fail closed)."""
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": False,  # unapproved but no "fail" gate present
+                "quality_gates": {"unit_tests": "not_run"},
+                "summary": "could not validate",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
+        )
+        assert not out.approved
+        assert any(v == "fail" for v in out.quality_gates.values())
+
+    def test_approved_does_not_synthesize_fail_gate(self) -> None:
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"unit_tests": "pass"},
+                "summary": "ok",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
+        )
+        assert out.approved
+        assert "test_validation" not in out.quality_gates
+
 
 class TestChangeReviewAgent:
     def test_approves(self) -> None:

@@ -62,7 +62,10 @@ class DevOpsTestValidationAgent:
         Postconditions: returns a ``DevOpsTestValidationOutput`` whose
         ``quality_gates`` values are valid ``GateStatus`` members and whose
         ``approved`` is ``False`` whenever any gate failed (the unified QA agent
-        already applies this rule in ``acceptance_evidence`` mode).
+        already applies this rule in ``acceptance_evidence`` mode). Whenever the
+        validation is unapproved, at least one gate is ``"fail"`` so the result
+        fails closed (the DevOps pipeline blocks on a failing gate and does not
+        read ``approved`` directly).
         """
         qa_out = self._qa.run(
             QAInput(
@@ -73,6 +76,13 @@ class DevOpsTestValidationAgent:
             )
         )
         gates = {k: _coerce_gate_status(v) for k, v in qa_out.quality_gates.items()}
+        # Fail closed. The DevOps pipeline blocks on a gate == "fail" and never
+        # inspects ``approved``; an unapproved validation that carries no failing
+        # gate (e.g. the QA agent's structured-output fallback returns
+        # approved=False with an empty gate map) would otherwise let the run
+        # proceed. Synthesize an explicit failed gate to surface the block.
+        if not qa_out.approved and not any(v == "fail" for v in gates.values()):
+            gates["test_validation"] = "fail"
         return DevOpsTestValidationOutput(
             approved=qa_out.approved,
             quality_gates=gates,
