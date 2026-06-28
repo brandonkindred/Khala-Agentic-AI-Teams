@@ -45,7 +45,6 @@ AGENT_LOGGERS = [
     "architecture_expert.agent",
     "tech_lead_agent.agent",
     "backend_agent.agent",
-    "frontend_team.feature_agent.agent",
     "devops_agent.agent",
     "security_agent.agent",
     "qa_agent.agent",
