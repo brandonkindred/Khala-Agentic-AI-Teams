@@ -28,7 +28,7 @@ from software_engineering_team.shared.review_utils import (
 from software_engineering_team.shared.review_utils import (
     run_documentation_self_review as _shared_run_documentation_self_review,
 )
-from software_engineering_team.shared.security_service import is_blocking
+from software_engineering_team.shared.security_service import any_blocking
 from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 
 from ..models import (
@@ -309,7 +309,7 @@ def run_review(
             except Exception as exc:
                 logger.warning("[%s] Tool agent %s review() failed: %s", task_id, kind.value, exc)
 
-    passed = build_ok and lint_ok and len([i for i in issues if is_blocking(i.severity)]) == 0
+    passed = build_ok and lint_ok and not any_blocking(issues)
     summary = f"Review {'passed' if passed else 'failed'}; {len(issues)} issue(s)."
     return ReviewResult(
         passed=passed, issues=issues, build_ok=build_ok, lint_ok=lint_ok, summary=summary
@@ -507,7 +507,7 @@ def run_microtask_review(
                     exc,
                 )
 
-    passed = build_ok and lint_ok and len([i for i in issues if is_blocking(i.severity)]) == 0
+    passed = build_ok and lint_ok and not any_blocking(issues)
     summary = f"Microtask {microtask_id} review {'passed' if passed else 'failed'}; {len(issues)} issue(s)."
     logger.info("[%s] %s", task_id, summary)
     return ReviewResult(

@@ -28,6 +28,13 @@ class CybersecurityExpertAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
+        """Resolve the review model.
+
+        Preconditions: ``llm_client`` is ``None``, an ``LLMClient``, or a Strands
+        ``Model``.
+        Postconditions: ``self._model`` is a usable Strands model — the passed
+        client when it is already a Strands ``Model``, else the ``security`` model.
+        """
         from strands.models.model import Model as _StrandsModel
 
         if llm_client is not None and isinstance(llm_client, _StrandsModel):
