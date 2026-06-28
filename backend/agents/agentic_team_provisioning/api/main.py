@@ -11,11 +11,13 @@ from typing import List, Optional
 from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 
+from agent_registry.models import AgentManifest
 from agentic_team_provisioning.agent_env_provisioning import schedule_provision_step_agents
 from agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
 from agentic_team_provisioning.models import (
+    AddAgentFromRegistryRequest,
     AgentEnvProvisionSummary,
     AgenticTeamAgent,
     AgentQualityScore,
@@ -241,6 +243,61 @@ def validate_team_roster(team_id: str):
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
     return validate_roster(team)
+
+
+def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
+    """Project a registry ``AgentManifest`` into a roster agent (Agent Studio §5.3).
+
+    Preconditions: ``manifest`` is a registered manifest.
+    Postconditions: returns an ``AgenticTeamAgent`` with ``source == "registry"``
+        and ``manifest_id == manifest.id``. ``skills`` come from the manifest tags
+        and ``tools`` from ``cognition.tools``, so the projected agent satisfies
+        ``roster_validation`` depth checks for any tagged manifest (Studio-saved
+        manifests always carry the ``"studio"`` tag, so ``skills`` is non-empty).
+    """
+    return AgenticTeamAgent(
+        agent_name=manifest.name,
+        role=manifest.summary or manifest.name,
+        skills=list(manifest.tags),
+        tools=list(manifest.cognition.tools) if manifest.cognition else [],
+        source="registry",
+        manifest_id=manifest.id,
+    )
+
+
+@app.post("/teams/{team_id}/agents/from-registry", response_model=AgenticTeamAgent, status_code=201)
+def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
+    """Add a registered agent to the team roster, projected from its manifest (§5.3).
+
+    Returns the projected roster agent. ``404`` when the team or the manifest id is
+    unknown. Re-adding the same manifest updates that roster entry in place.
+    """
+    from agent_registry import get_registry
+
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    manifest = get_registry().get(req.manifest_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent manifest: {req.manifest_id}")
+    agent = _roster_agent_from_manifest(manifest)
+    _store.add_or_replace_team_agent(team_id, agent)
+    return agent
+
+
+@app.delete("/teams/{team_id}/agents/{agent_name}", status_code=204)
+def remove_agent_from_roster(team_id: str, agent_name: str):
+    """Remove a single agent from the team roster by name (§5.3).
+
+    ``204`` on success; ``404`` when the team is unknown or no roster entry has
+    that name.
+    """
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    if not _store.delete_team_agent(team_id, agent_name):
+        raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------

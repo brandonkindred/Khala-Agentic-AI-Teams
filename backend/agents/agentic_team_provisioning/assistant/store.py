@@ -59,7 +59,9 @@ class AgenticTeamStore:
             )
         # Best-effort: link the team to the default profile. record_association_safe
         # never raises, so a link failure can't break team creation.
-        record_association_safe(ArtifactType.AGENTIC_TEAM, "agentic_team_provisioning", team_id, label=name)
+        record_association_safe(
+            ArtifactType.AGENTIC_TEAM, "agentic_team_provisioning", team_id, label=name
+        )
         return AgenticTeam(
             team_id=team_id,
             name=name,
@@ -172,24 +174,69 @@ class AgenticTeamStore:
     # Team agents pool
     # ------------------------------------------------------------------
 
+    def _write_team_agents(
+        self, cur, team_id: str, agents: list[AgenticTeamAgent], now: datetime
+    ) -> None:
+        """Replace all roster rows for a team on an open cursor (DELETE-all + INSERT-all).
+
+        Preconditions: ``cur`` is an open cursor in a live transaction; ``agents``
+            have unique ``agent_name`` within the team.
+        Postconditions: the team's ``agentic_team_agents`` rows are exactly
+            ``agents`` and the team's ``updated_at`` is bumped to ``now``.
+        """
+        cur.execute("DELETE FROM agentic_team_agents WHERE team_id = %s", (team_id,))
+        for a in agents:
+            cur.execute(
+                "INSERT INTO agentic_team_agents "
+                "(team_id, agent_name, data_json, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (team_id, a.agent_name, Json(a.model_dump(mode="json")), now, now),
+            )
+        cur.execute(
+            "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
+            (now, team_id),
+        )
+
     @timed_query(store=_STORE, op="save_team_agents")
     def save_team_agents(self, team_id: str, agents: list[AgenticTeamAgent]) -> None:
         """Replace the full agents roster for a team (upsert semantics)."""
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM agentic_team_agents WHERE team_id = %s", (team_id,))
-            for a in agents:
-                data = a.model_dump(mode="json")
-                cur.execute(
-                    "INSERT INTO agentic_team_agents "
-                    "(team_id, agent_name, data_json, created_at, updated_at) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (team_id, a.agent_name, Json(data), now, now),
-                )
-            cur.execute(
-                "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
-                (now, team_id),
-            )
+            self._write_team_agents(cur, team_id, agents, now)
+
+    @timed_query(store=_STORE, op="add_or_replace_team_agent")
+    def add_or_replace_team_agent(self, team_id: str, agent: AgenticTeamAgent) -> None:
+        """Add (or replace, by name) a single roster agent without disturbing the rest.
+
+        Preconditions: ``team_id`` names an existing team.
+        Postconditions: the roster contains exactly one entry named
+            ``agent.agent_name`` (the supplied ``agent``); all other entries are
+            unchanged. Re-adding an existing name overwrites it in place.
+        """
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            roster = [
+                a for a in self._load_team_agents(cur, team_id) if a.agent_name != agent.agent_name
+            ]
+            roster.append(agent)
+            self._write_team_agents(cur, team_id, roster, now)
+
+    @timed_query(store=_STORE, op="delete_team_agent")
+    def delete_team_agent(self, team_id: str, agent_name: str) -> bool:
+        """Remove a single roster agent by name.
+
+        Postconditions: returns ``True`` and removes the entry when it existed;
+            returns ``False`` and leaves the roster unchanged when no entry named
+            ``agent_name`` is present.
+        """
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            roster = self._load_team_agents(cur, team_id)
+            remaining = [a for a in roster if a.agent_name != agent_name]
+            if len(remaining) == len(roster):
+                return False
+            self._write_team_agents(cur, team_id, remaining, now)
+            return True
 
     @timed_query(store=_STORE, op="list_team_agents")
     def list_team_agents(self, team_id: str) -> list[AgenticTeamAgent]:
