@@ -31,6 +31,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 WAITING_STATUS = "waiting_for_user"
@@ -59,6 +61,27 @@ _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
 # this so the renewal cadence and the wait-loop cadence stay in lockstep, well under the answer
 # endpoint's staleness window.
 ANSWER_WAIT_POLL_INTERVAL_S = _ANSWER_WAIT_POLL_INTERVAL_S
+
+# The exact set of job-service transport failures that ``JobServiceClient._request`` itself
+# classifies as transient and retries before giving up (its ``_RETRY_ANY_METHOD_ERRORS`` +
+# ``_RETRY_IDEMPOTENT_ONLY_ERRORS``); kept in lockstep with that classification. The wait loop
+# extends the same tolerance — when the client exhausts its own retry budget on a blip (e.g. a
+# connection reset, or the brief connect failures during a job-service restart), it re-polls
+# instead of crashing a long HITL wait. Everything the client does NOT retry is deliberately left
+# to propagate rather than be swallowed and spun to the timeout: permanent transport faults
+# (``UnsupportedProtocol``, ``LocalProtocolError``, ``ProxyError``) and HTTP status errors. Note
+# ``ConnectTimeout`` is also NOT in this set and is NOT matched by ``ConnectError`` below: it is an
+# ``httpx.TimeoutException``, a different branch from ``ConnectError`` (a ``NetworkError``) and not
+# a subclass of it (MRO: ConnectTimeout -> TimeoutException -> TransportError), so it propagates.
+_TRANSIENT_JOB_READ_ERRORS = (
+    httpx.ConnectError,
+    httpx.PoolTimeout,
+    httpx.ReadTimeout,
+    httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.WriteError,
+)
 
 # Terminal SUCCESS statuses for a coding-team job: the run finished and the outcome is a success —
 # a clean completion, a partial success (some tasks failed), or an already-complete no-op (the work
@@ -452,23 +475,53 @@ def wait_for_answers(
           went terminal or the timeout elapsed; returns False on terminal/timeout. Never proceeds on
           its own — the only True path is an explicit answer submission clearing the flag.
         - When ``heartbeat_fn`` is provided, it is invoked with a current UTC ISO timestamp once per
-          poll iteration while waiting, so other processes can distinguish a live (but blocked)
-          wait loop from a dead one. Heartbeat failures are swallowed — proving liveness must never
-          break the wait itself.
+          poll iteration — both while waiting and when a poll read fails transiently — so other
+          processes can distinguish a live (but blocked or read-stalled) wait loop from a dead one
+          and never auto-resume the job elsewhere while this loop is still alive. Heartbeat failures
+          are swallowed — proving liveness must never break the wait itself.
     """
     timeout = timeout_s if timeout_s is not None else answer_wait_timeout_s()
     start = now()
+
+    def _renew_heartbeat() -> None:
+        # Prove this wait loop is still alive so a second worker doesn't treat it as
+        # dead (heartbeat older than the answer endpoint's staleness window) and
+        # auto-resume the job elsewhere. Heartbeat failures are swallowed — proving
+        # liveness must never break the wait itself.
+        if heartbeat_fn is None:
+            return
+        try:
+            heartbeat_fn(heartbeat_timestamp())
+        except Exception:
+            logger.debug("answer-wait heartbeat write failed for job %s", job_id, exc_info=True)
+
     while now() - start < timeout:
-        data = get_job_fn(job_id) or {}
+        try:
+            data = get_job_fn(job_id) or {}
+        except _TRANSIENT_JOB_READ_ERRORS:
+            # A transient job-service transport failure (e.g. a connection reset that
+            # outlived the client's own retry budget) must not kill the wait — treat
+            # it like a missed poll: log, keep the liveness heartbeat fresh so another
+            # worker doesn't treat this still-alive loop as dead and auto-resume the
+            # job elsewhere, then back off and re-read. The ``timeout`` bound still
+            # caps the total wait, so a sustained outage ends the loop the same way a
+            # timeout does. Only the transient transport failures the client itself
+            # retries are swallowed (see ``_TRANSIENT_JOB_READ_ERRORS``); permanent
+            # transport faults (UnsupportedProtocol, LocalProtocolError), HTTP status
+            # errors, and programming bugs (TypeError, etc.) propagate.
+            logger.warning(
+                "answer-wait job read failed for job %s; retrying after poll interval",
+                job_id,
+                exc_info=True,
+            )
+            _renew_heartbeat()
+            sleep(poll_interval_s)
+            continue
         if not data.get("waiting_for_answers", False):
             return True
         if is_terminal(data):
             return False
-        if heartbeat_fn is not None:
-            try:
-                heartbeat_fn(heartbeat_timestamp())
-            except Exception:
-                logger.debug("answer-wait heartbeat write failed for job %s", job_id, exc_info=True)
+        _renew_heartbeat()
         sleep(poll_interval_s)
     logger.warning("Coding team job %s timed out waiting for user answers", job_id)
     return False
