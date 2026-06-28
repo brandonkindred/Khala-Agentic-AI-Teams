@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from llm_service import LLMClient
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
+from software_engineering_team.shared.security_service import infra_gate_passed
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
 from .cicd_pipeline_agent import CICDPipelineAgent
@@ -532,7 +533,12 @@ class DevOpsTeamLeadAgent:
         )
 
         quality_gates = dict(val.quality_gates)
-        quality_gates.setdefault("security_review", "pass" if devsec.approved else "fail")
+        # The infra security gate routes both the DevSecOps LLM review and the
+        # policy-as-code (checkov) scan through the unified infra decision.
+        quality_gates.setdefault(
+            "security_review",
+            "pass" if infra_gate_passed(devsec.approved, policy_checks.success) else "fail",
+        )
         quality_gates.setdefault("change_review", "pass" if change_review.approved else "fail")
 
         if any(v == "fail" for v in quality_gates.values()):

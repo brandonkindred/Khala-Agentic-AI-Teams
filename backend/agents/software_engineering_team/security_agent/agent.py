@@ -13,6 +13,7 @@ import logging
 from strands import Agent
 
 from llm_service import get_strands_model
+from software_engineering_team.shared.security_service import derive_approved
 
 from .models import SecurityInput, SecurityOutput
 from .prompts import SECURITY_PROMPT
@@ -61,11 +62,11 @@ class CybersecurityExpertAgent:
                 suggested_commit_message="",
             )
 
-        # Re-derive ``approved`` from severities so a disagreement between the
-        # LLM's ``approved`` flag and the reported vulnerability list is
-        # resolved in favor of the vulnerability list.
-        critical_or_high = [v for v in result.vulnerabilities if v.severity in ("critical", "high")]
-        result.approved = len(critical_or_high) == 0
+        # Re-derive ``approved`` via the unified rule so a disagreement between
+        # the LLM's ``approved`` flag and the reported vulnerability list is
+        # resolved in favor of the vulnerability list. ``SecurityVulnerability``
+        # has no ``blocking`` attribute, so this reduces to "no critical/high".
+        result.approved = derive_approved(result.vulnerabilities, llm_approved=None)
 
         logger.info(
             "Security: done, %s issues found, approved=%s",

@@ -8,6 +8,7 @@ from devops_team.models import ReviewFinding
 from strands import Agent
 
 from llm_service import LLMClient, get_strands_model
+from software_engineering_team.shared.security_service import derive_approved
 
 from .models import DevSecOpsReviewInput, DevSecOpsReviewOutput
 from .prompts import DEVSECOPS_REVIEW_PROMPT
@@ -33,8 +34,7 @@ class DevSecOpsReviewAgent:
             DEVSECOPS_REVIEW_PROMPT + "\n\n---\n\n" + context, temperature=0.0, think=True
         )).strip())
         findings = [ReviewFinding(**f) for f in (data.get("findings") or []) if isinstance(f, dict)]
-        blocking = any(f.blocking or f.severity in ("critical", "high") for f in findings)
-        approved = bool(data.get("approved", not blocking)) and not blocking
+        approved = derive_approved(findings, llm_approved=data.get("approved"))
         return DevSecOpsReviewOutput(
             approved=approved,
             findings=findings,
