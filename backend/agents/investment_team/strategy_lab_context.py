@@ -333,22 +333,24 @@ def _exit_archetypes(strategy: object) -> List[str]:
 def _executed_records(
     records: List[StrategyLabRecord], *, max_records: int
 ) -> List[StrategyLabRecord]:
-    """Chronological, tail-trimmed records that ran a real backtest.
+    """The last ``max_records`` executed records, in chronological order.
 
-    Shares the tail-trim of :func:`format_prior_results` and the
-    :func:`_is_executed_record` filter of :func:`asset_class_mix_hint` so
-    attribution spans exactly the records whose metrics and asset class are real.
+    Drops pre-backtest short-circuits with :func:`_is_executed_record` and
+    *then* tail-trims — the same order as :func:`asset_class_mix_hint` — so a
+    window full of recent non-executed rows never crowds out older real
+    backtests. (Trimming first, then filtering, would let 50 recent
+    short-circuits hide every executed run behind them.)
 
     Preconditions: ``max_records >= 0``.
-    Postconditions: returns records sorted by ``created_at``, at most the last
-    ``max_records`` (``max_records == 0`` → empty list), with pre-backtest
-    short-circuit rows removed.
+    Postconditions: returns the last ``max_records`` records satisfying
+    :func:`_is_executed_record`, in ``created_at`` order
+    (``max_records == 0`` → empty list).
     """
     ordered = sorted(records, key=lambda x: x.created_at)
-    # ``ordered[-0:]`` is ``ordered[0:]`` (the whole list), so the zero case must
-    # be handled explicitly rather than via the slice.
-    ordered = ordered[-max_records:] if max_records else []
-    return [r for r in ordered if _is_executed_record(r)]
+    executed = [r for r in ordered if _is_executed_record(r)]
+    # ``executed[-0:]`` is ``executed[0:]`` (the whole list), so the zero case
+    # must be handled explicitly rather than via the slice.
+    return executed[-max_records:] if max_records else []
 
 
 def _has_parseable_design(strategy: object) -> bool:
@@ -523,20 +525,15 @@ def asset_class_mix_hint(
             f"{stocks_nudge}pick the class that best fits your multi-signal story."
         )
 
-    ordered = sorted(records, key=lambda x: x.created_at)
-    # Exclude only cycles that short-circuited *before* running a backtest
-    # (``_NON_EXECUTED_BACKTEST_STATUSES``): their ``strategy.asset_class`` may
-    # be a coerced placeholder (an unsupported class like ``bonds`` mapped to
-    # ``stocks`` for schema validity before the redesign route), so counting
-    # them would let a rejected, never-backtested design pollute the stock
-    # history and skew the diversity steering. Executed-but-losing cycles
-    # (status ``failed`` / ``failed: max_refinement_rounds``) DID run a backtest
-    # with a genuine canonical class and must keep counting — otherwise
-    # repeated failed futures/forex/etc. runs would be omitted from steering.
-    # Records persisted before ``BacktestRecord.status`` existed default to
-    # ``"completed"``, so legacy rows are unaffected.
-    executed = [r for r in ordered if _is_executed_record(r)]
-    sample = executed[-tail:] if len(executed) > tail else executed
+    # Steer on the most recent executed backtests only. ``_executed_records``
+    # drops cycles that short-circuited *before* running a backtest (their
+    # ``strategy.asset_class`` may be a coerced placeholder like ``bonds`` →
+    # ``stocks`` that would pollute the diversity picture) and tail-trims to the
+    # window afterwards. Executed-but-losing cycles (status ``failed`` /
+    # ``failed: max_refinement_rounds``) DID run a real backtest with a genuine
+    # canonical class and keep counting; legacy rows without a status default to
+    # ``"completed"`` and are unaffected.
+    sample = _executed_records(records, max_records=tail)
     if not sample:
         return (
             "No executed lab backtests yet. Choose **asset_class** from "

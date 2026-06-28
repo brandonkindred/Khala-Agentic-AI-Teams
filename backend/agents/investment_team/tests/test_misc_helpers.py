@@ -724,6 +724,18 @@ def test_aggregate_prior_results_unparsed_rules_alone_excludes_design_dims() -> 
     assert ("entry", "rsi") not in agg
 
 
+def test_aggregate_prior_results_filters_before_tail_trim() -> None:
+    # An older executed run followed by a window-full of recent pre-backtest
+    # short-circuits. Filtering must precede the tail-trim, else the executed
+    # evidence is hidden behind the recent short-circuits and attribution is
+    # empty (regression: slice-before-filter returned {}).
+    recs = [_attr_record(i=0, entry_rules=[_rsi_entry()], status="completed")]
+    recs += [_attr_record(i=j, status="failed: design_not_ready") for j in range(1, 5)]
+    agg = aggregate_prior_results(recs, max_records=2)
+    assert ("entry", "rsi") in agg
+    assert agg[("asset_class", "stocks")]["n"] == 1
+
+
 def test_aggregate_prior_results_max_records_zero_yields_empty() -> None:
     # max_records=0 must mean "keep none", not slip through ordered[-0:] (the
     # whole list). Guards the contract that 0 → {}.
