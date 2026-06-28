@@ -26,10 +26,9 @@ pattern-matches on its anchor words; only the shared *logic* is centralized
 here, not that one large prompt body.
 
 Invariants:
-    * ``SEVERITY_ORDER`` lists severities most-to-least severe; severities not
-      listed (e.g. ``"minor"``/``"nit"``) rank below every listed one.
     * A finding blocks approval iff its severity is in
-      :data:`BLOCKING_SEVERITIES` or it is explicitly flagged ``blocking``.
+      :data:`BLOCKING_SEVERITIES` (case-insensitively) or it is explicitly
+      flagged ``blocking``.
 """
 
 from __future__ import annotations
@@ -37,17 +36,10 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Iterable, Optional
 
-# --- Canonical severity model (single source of truth) -------------------
-# Ordered most-severe first. The two structured agents emit only these five;
-# devops ``ReviewFinding`` additionally allows "minor"/"nit", which rank below
-# "low" and never block.
-SEVERITY_ORDER: tuple[str, ...] = ("critical", "high", "medium", "low", "info")
+# --- Canonical blocking rule (single source of truth) --------------------
+# A finding blocks merge/approval iff its severity is one of these (the two
+# structured agents and the devops findings all share this vocabulary).
 BLOCKING_SEVERITIES: frozenset[str] = frozenset({"critical", "high"})
-
-FALSE_POSITIVE_GUIDANCE: str = (
-    "Be thorough but avoid false positives. Only report issues you can justify "
-    "with a concrete attack vector and impact. Each recommendation must be actionable."
-)
 
 # --- Focus lists (lifted verbatim from the legacy prompts) ---------------
 # The ``code`` profile differs between backend and frontend only by this list;
@@ -139,23 +131,6 @@ Output JSON:
 Set blocking=true for high-risk exploitable defaults.
 Return JSON only.
 """
-
-
-def severity_rank(severity: str) -> int:
-    """Return a stable sort index for ``severity`` (lower == more severe).
-
-    Preconditions:
-        ``severity`` is a string (case-insensitive); empty/unknown values are
-        accepted and ranked last.
-    Postconditions:
-        Returns the index of ``severity`` in :data:`SEVERITY_ORDER`, or
-        ``len(SEVERITY_ORDER)`` for any value not listed there (so unknown
-        severities sort after every known one). Pure; no side effects.
-    """
-    try:
-        return SEVERITY_ORDER.index((severity or "").strip().lower())
-    except ValueError:
-        return len(SEVERITY_ORDER)
 
 
 def is_blocking(severity: str, *, explicit_blocking: bool = False) -> bool:

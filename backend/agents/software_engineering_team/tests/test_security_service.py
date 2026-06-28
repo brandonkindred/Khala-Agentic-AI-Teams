@@ -14,7 +14,6 @@ from software_engineering_team.shared.security_service import (
     BLOCKING_SEVERITIES,
     CODE_BACKEND_FOCUS,
     CODE_FRONTEND_FOCUS,
-    SEVERITY_ORDER,
     SecurityProfile,
     any_blocking,
     build_review_prompt,
@@ -22,7 +21,6 @@ from software_engineering_team.shared.security_service import (
     infra_gate_passed,
     is_blocking,
     run_policy_scan,
-    severity_rank,
 )
 
 
@@ -39,22 +37,6 @@ class _Vuln:
 
     def __init__(self, severity: str) -> None:
         self.severity = severity
-
-
-# --- severity_rank --------------------------------------------------------
-def test_severity_rank_orders_known_severities() -> None:
-    ranks = [severity_rank(s) for s in SEVERITY_ORDER]
-    assert ranks == sorted(ranks)
-    assert severity_rank("critical") < severity_rank("info")
-
-
-def test_severity_rank_is_case_insensitive() -> None:
-    assert severity_rank("CRITICAL") == severity_rank("critical")
-
-
-def test_severity_rank_unknown_sorts_last() -> None:
-    assert severity_rank("nit") == len(SEVERITY_ORDER)
-    assert severity_rank("") == len(SEVERITY_ORDER)
 
 
 # --- is_blocking ----------------------------------------------------------
