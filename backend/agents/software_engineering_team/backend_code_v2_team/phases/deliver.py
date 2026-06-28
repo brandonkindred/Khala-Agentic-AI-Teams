@@ -7,14 +7,19 @@ Uses only ``shared.git_utils`` — no code from ``backend_agent``.
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from software_engineering_team.shared.deliver_utils import (
+    DeliverGitOps,
+    deliver_inline_merge,
+    prepare_handoff_branch,
+)
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
     checkout_branch,
+    commit_working_tree,
     create_feature_branch,
     delete_branch,
     merge_branch,
@@ -25,16 +30,20 @@ from ..models import DeliverResult, Phase, ToolAgentKind, ToolAgentPhaseInput
 from ..prompts import DELIVER_COMMIT_MSG_TEMPLATE
 
 logger = logging.getLogger(__name__)
+__all__ = ["DEVELOPMENT_BRANCH", "run_deliver"]
 
 
-class _FilesPayload:
-    """Minimal duck-type wrapper so ``write_agent_output`` can consume it."""
-
-    def __init__(self, files: Dict[str, str], summary: str, commit_msg: str) -> None:
-        self.files = files
-        self.summary = summary
-        self.suggested_commit_message = commit_msg
-        self.gitignore_entries: list[str] = []
+def _git_ops() -> DeliverGitOps:
+    """Return current module git functions so tests can monkeypatch this boundary."""
+    return DeliverGitOps(
+        abort_merge=abort_merge,
+        checkout_branch=checkout_branch,
+        commit_working_tree=commit_working_tree,
+        create_feature_branch=create_feature_branch,
+        delete_branch=delete_branch,
+        merge_branch=merge_branch,
+        write_agent_output=write_agent_output,
+    )
 
 
 def run_deliver(
@@ -47,14 +56,15 @@ def run_deliver(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     task_description: str = "",
     feature_branch_name: Optional[str] = None,
+    merge_to_development: bool = True,
 ) -> DeliverResult:
     """
     Create feature branch, write files, commit, merge to development.
 
     If the Git branch management agent is present, delegate all git operations to it
     (merge to development when feature_branch_name is set, or create/write/commit/merge
-    when not). Otherwise call other tool agents' deliver() for domain actions, then
-    perform inline git create/write/commit/merge.
+    when not). When merge_to_development is False, prepare and commit the feature branch
+    but leave it unmerged for an external Tech Lead review.
     """
     result = DeliverResult()
     deliver_files = dict(files)
@@ -80,6 +90,25 @@ def run_deliver(
             except Exception as exc:
                 logger.warning("[%s] Tool agent %s deliver() failed: %s", task_id, kind.value, exc)
 
+    if not deliver_files:
+        result.summary = "No files to deliver."
+        return result
+    result.delivered_files = sorted(deliver_files)
+
+    if not merge_to_development:
+        return prepare_handoff_branch(
+            task_id=task_id,
+            repo_path=repo_path,
+            deliver_files=deliver_files,
+            summary=summary,
+            task_title=task_title,
+            feature_branch_name=feature_branch_name,
+            commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
+            ops=_git_ops(),
+            logger=logger,
+        )
+
+    if tool_agents:  # pragma: no cover  # integration-only: dispatches tool agents that run real git/build/deploy
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
         if git_agent is not None and hasattr(git_agent, "deliver"):
             phase_inp = ToolAgentPhaseInput(
@@ -94,10 +123,12 @@ def run_deliver(
             try:
                 out = git_agent.deliver(phase_inp)
                 result.merged = out.success
+                result.branch_ready = bool(out.success)
                 result.summary = out.summary or result.summary
                 result.branch_name = feature_branch_name or ""
                 if out.success:
                     result.commit_messages.append(out.summary or "Merged to development")
+                    result.delivered_files = sorted(deliver_files)
                 logger.info("[%s] Deliver (Git agent): %s", task_id, result.summary)
                 return result
             except Exception as exc:
@@ -105,48 +136,13 @@ def run_deliver(
                     "[%s] Git agent deliver() failed, falling back to inline: %s", task_id, exc
                 )
 
-    if not deliver_files:
-        result.summary = "No files to deliver."
-        return result
-
-    # Fallback: inline git (no Git agent or Git agent failed). Real git ops
-    # below require a writable repo — covered indirectly via integration runs.
-    slug = re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
-    ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
-    if not ok:  # pragma: no cover  # integration-only: real git ops follow
-        result.summary = f"Feature branch creation failed: {branch_msg}"
-        logger.error("[%s] Deliver: %s", task_id, result.summary)
-        checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-        return result
-    result.branch_name = branch_msg or f"feature/{task_id}-{slug}"
-
-    # 2. Write files and commit
-    scope = slug[:20]
-    commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=scope, summary=summary[:72])
-    payload = _FilesPayload(deliver_files, summary, commit_msg)
-    write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
-    if not write_ok:  # pragma: no cover  # integration-only: depends on real git workspace
-        result.summary = f"Write failed: {write_msg}"
-        logger.error("[%s] Deliver: %s", task_id, result.summary)
-        checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-        return result
-    result.commit_messages.append(commit_msg)
-
-    # 3. Merge to development
-    merge_ok, merge_msg = merge_branch(repo_path, result.branch_name, DEVELOPMENT_BRANCH)
-    if not merge_ok:  # pragma: no cover  # integration-only: depends on real git workspace
-        result.summary = f"Merge failed: {merge_msg}"
-        logger.error("[%s] Deliver: %s", task_id, result.summary)
-        abort_merge(repo_path)
-        checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-        return result
-
-    result.merged = True
-
-    # 4. Cleanup feature branch
-    delete_branch(repo_path, result.branch_name)
-    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-
-    result.summary = f"Merged {result.branch_name} → {DEVELOPMENT_BRANCH}."
-    logger.info("[%s] Deliver: %s", task_id, result.summary)
-    return result
+    return deliver_inline_merge(
+        task_id=task_id,
+        repo_path=repo_path,
+        deliver_files=deliver_files,
+        summary=summary,
+        task_title=task_title,
+        commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
+        ops=_git_ops(),
+        logger=logger,
+    )

@@ -1277,7 +1277,7 @@ def test_status_progress_coercion_clamps_garbage(monkeypatch):
 
 
 def test_status_surfaces_agent_roster(monkeypatch):
-    """/status derives the per-agent roster (Tech Lead + one Senior SWE per stack) from the
+    """/status derives the per-agent roster (Tech Lead + implementation workers) from the
     persisted stack_specs / agent_task_map / task graph / current_activity so the UI can show
     which agent is working and each agent's status."""
     monkeypatch.setattr(
