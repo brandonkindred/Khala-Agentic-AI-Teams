@@ -540,6 +540,18 @@ def _price_level_entry():
     return EntryRule(when=Predicate(lhs="bar.close", op=">", rhs=100.0))
 
 
+def _close_cross_ema_entry():
+    # Prompt-recommended breakout form: price literal on the lhs, indicator on
+    # the rhs. The indicator family lives on the rhs here.
+    from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate
+
+    return EntryRule(
+        when=Predicate(
+            lhs="bar.close", op="cross_above", rhs=IndicatorRef(name="ema", params={"period": 20})
+        )
+    )
+
+
 def _trailing_stop():
     from investment_team.strategy_lab.spec_dsl import StopLossRule
 
@@ -568,6 +580,13 @@ def test_entry_archetype_indicator_vs_price_vs_crossover() -> None:
     assert _entry_archetype(price) == "price_level"
     assert _entry_archetype(crossover) == "sma_crossover"
     assert _entry_archetype(none) == "none"
+
+
+def test_entry_archetype_rhs_indicator_in_crossover() -> None:
+    # `bar.close cross_above ema` keys on the RHS indicator family — it must NOT
+    # collapse to a bare price_level bucket and lose the EMA/SMA/VWAP family.
+    strat = _attr_record(entry_rules=[_close_cross_ema_entry()]).strategy
+    assert _entry_archetype(strat) == "ema_crossover"
 
 
 def test_entry_archetype_multi_signal_joins_distinct_sorted() -> None:

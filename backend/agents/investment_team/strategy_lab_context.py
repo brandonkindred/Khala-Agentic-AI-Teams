@@ -250,18 +250,24 @@ def format_prior_results(records: List[StrategyLabRecord], *, max_records: int =
 def _entry_archetype(strategy: object) -> str:
     """Classify a strategy's entry rules into a coarse, comparable archetype label.
 
-    The label names the signal family the entry keys on (the indicator on the
-    predicate's left-hand side, or ``"price_level"`` for a raw price reference),
+    The label names the signal family the entry keys on (the indicator(s) named
+    in the predicate, or ``"price_level"`` for a pure price/threshold compare),
     suffixed ``_crossover`` when the comparison is a cross. Multiple entry rules
     collapse to the sorted, ``+``-joined set of their distinct archetypes so a
     multi-signal entry (e.g. ``"macd+rsi"``) forms its own bucket.
 
+    The signal family can sit on *either* side of the predicate: ``rsi < 30``
+    keys on the left-hand side, while the prompt-recommended
+    ``bar.close cross_above ema`` keys on the right. Both sides are inspected so
+    EMA/SMA/VWAP breakouts written in the latter form keep their indicator
+    family instead of all collapsing into ``"price_level"``.
+
     Preconditions:
       - ``strategy`` exposes an ``entry_rules`` iterable; each rule exposes a
-        ``when`` predicate with ``lhs`` (an ``IndicatorRef`` carrying ``name``,
-        or a price-ref ``str``) and ``op``. Missing/odd shapes degrade to
-        ``"unknown"`` rather than raising — this is prompt-context formatting,
-        never a correctness gate.
+        ``when`` predicate whose ``lhs``/``rhs`` are each an ``IndicatorRef``
+        (carrying ``name``), a price-ref ``str``, or a numeric threshold, plus an
+        ``op``. Missing/odd shapes degrade to ``"unknown"`` rather than raising —
+        this is prompt-context formatting, never a correctness gate.
     Postconditions:
       - Returns a non-empty string. No entry rules → ``"none"``.
     """
@@ -272,10 +278,14 @@ def _entry_archetype(strategy: object) -> str:
     for rule in rules:
         when = getattr(rule, "when", None)
         lhs = getattr(when, "lhs", None)
-        if isinstance(lhs, str):
+        rhs = getattr(when, "rhs", None)
+        names = sorted({str(getattr(s, "name")) for s in (lhs, rhs) if getattr(s, "name", None)})
+        if names:
+            base = "+".join(names)
+        elif isinstance(lhs, str) or isinstance(rhs, (str, int, float)):
             base = "price_level"
         else:
-            base = str(getattr(lhs, "name", "") or "unknown")
+            base = "unknown"
         if str(getattr(when, "op", "")) in ("cross_above", "cross_below"):
             base = f"{base}_crossover"
         tokens.add(base)
