@@ -351,6 +351,28 @@ def _executed_records(
     return [r for r in ordered if _is_executed_record(r)]
 
 
+def _has_parseable_design(strategy: object) -> bool:
+    """True when a strategy's structured rules can be meaningfully bucketed.
+
+    Legacy pre-migration specs stored prose entry/exit rules; on load,
+    ``_coerce_legacy_strategy_spec_dict`` moves them into ``unparsed_rules`` and
+    sets ``requires_redesign=True``, leaving ``entry_rules``/``exit_rules`` empty
+    and the sizing at its schema default. Attributing such a record's real
+    returns to ``entry:none`` / ``exit:none`` / the default sizing bucket would
+    tell the designer that "none" is a winning archetype rather than that the
+    design is simply unknown — so these records are excluded from the
+    entry/exit/sizing dimensions (their genuine ``asset_class`` still counts).
+
+    Preconditions: ``strategy`` may expose ``requires_redesign`` (bool) and
+    ``unparsed_rules`` (list); absent attributes are treated as parseable.
+    Postconditions: returns ``False`` iff the spec requires redesign or carries
+    any unparsed rules.
+    """
+    return not getattr(strategy, "requires_redesign", False) and not getattr(
+        strategy, "unparsed_rules", None
+    )
+
+
 def aggregate_prior_results(
     records: List[StrategyLabRecord], *, max_records: int = 50
 ) -> dict[tuple[str, str], dict]:
@@ -369,8 +391,11 @@ def aggregate_prior_results(
       - Empty / all-non-executed / ``max_records == 0`` input → ``{}``.
       - Every value dict has ``n >= 1`` and means equal to the arithmetic mean of
         the contributing records' ``win_rate_pct`` / ``annualized_return_pct``.
-      - A record contributes to exactly one ``asset_class``/``entry``/``sizing``
-        bucket and to one ``exit`` bucket per distinct exit type it uses.
+      - A record with a parseable design contributes to exactly one
+        ``asset_class``/``entry``/``sizing`` bucket and to one ``exit`` bucket
+        per distinct exit type it uses. A redesign-pending / unparsed-rules
+        record contributes to its ``asset_class`` bucket only (see
+        :func:`_has_parseable_design`).
     """
     executed = _executed_records(records, max_records=max_records)
     if not executed:
@@ -390,11 +415,15 @@ def aggregate_prior_results(
         win = float(res.win_rate_pct)
         ann = float(res.annualized_return_pct)
         strat = r.strategy
+        # asset_class is genuine even for legacy redesign-pending rows, so it
+        # always counts; the structured design dimensions only count when the
+        # spec actually carries parseable rules (see _has_parseable_design).
         _add("asset_class", normalize_asset_class(strat.asset_class), win, ann)
-        _add("entry", _entry_archetype(strat), win, ann)
-        _add("sizing", str(getattr(strat.sizing, "kind", "") or "unknown"), win, ann)
-        for exit_label in _exit_archetypes(strat):
-            _add("exit", exit_label, win, ann)
+        if _has_parseable_design(strat):
+            _add("entry", _entry_archetype(strat), win, ann)
+            _add("sizing", str(getattr(strat.sizing, "kind", "") or "unknown"), win, ann)
+            for exit_label in _exit_archetypes(strat):
+                _add("exit", exit_label, win, ann)
 
     return {
         key: {"win_rate": sw / n, "annual_return": sa / n, "n": int(n)}

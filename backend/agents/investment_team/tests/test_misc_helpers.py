@@ -447,6 +447,8 @@ def _attr_record(
     exit_rules=None,
     sizing=None,
     status: str = "completed",
+    requires_redesign: bool = False,
+    unparsed_rules=None,
 ):
     """Build a ``StrategyLabRecord`` with the DSL knobs the attribution buckets on.
 
@@ -476,6 +478,10 @@ def _attr_record(
         spec_kwargs["exit_rules"] = exit_rules
     if sizing is not None:
         spec_kwargs["sizing"] = sizing
+    if requires_redesign:
+        spec_kwargs["requires_redesign"] = requires_redesign
+    if unparsed_rules is not None:
+        spec_kwargs["unparsed_rules"] = unparsed_rules
     strat = StrategySpec(**spec_kwargs)
     res = BacktestResult(
         total_return_pct=1.0,
@@ -689,6 +695,33 @@ def test_aggregate_prior_results_respects_max_records_tail() -> None:
     # Only the two newest (i=3, i=4) survive the tail trim → asset_class n == 2.
     assert agg[("asset_class", "stocks")]["n"] == 2
     assert agg[("asset_class", "stocks")]["annual_return"] == pytest.approx(3.5)
+
+
+def test_aggregate_prior_results_excludes_redesign_pending_design_dims() -> None:
+    # A legacy redesign-pending row (prose rules migrated to unparsed_rules, empty
+    # entry/exit rules) must NOT make entry:none / exit:none look like a winning
+    # archetype. Its genuine asset_class still counts.
+    legacy = _attr_record(
+        i=0,
+        asset_class="crypto",
+        annual_return=30.0,
+        requires_redesign=True,
+        unparsed_rules=["buy when it looks cheap"],
+    )
+    agg = aggregate_prior_results([legacy])
+    assert ("asset_class", "crypto") in agg
+    assert ("entry", "none") not in agg
+    assert ("exit", "none") not in agg
+    assert not any(dim == "sizing" for dim, _ in agg)
+
+
+def test_aggregate_prior_results_unparsed_rules_alone_excludes_design_dims() -> None:
+    # unparsed_rules present without requires_redesign is enough to skip the
+    # structured dimensions.
+    legacy = _attr_record(i=0, unparsed_rules=["sell on a hunch"], entry_rules=[_rsi_entry()])
+    agg = aggregate_prior_results([legacy])
+    assert ("asset_class", "stocks") in agg
+    assert ("entry", "rsi") not in agg
 
 
 def test_aggregate_prior_results_max_records_zero_yields_empty() -> None:
