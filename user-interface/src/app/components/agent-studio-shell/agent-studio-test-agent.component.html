@@ -1,0 +1,18 @@
+@if (agentId(); as id) {
+  <section class="studio-test">
+    <div class="studio-test__bar">
+      <span class="studio-test__agent">
+        <mat-icon aria-hidden="true">smart_toy</mat-icon>
+        <span>agent:&nbsp;<strong>{{ id }}</strong></span>
+      </span>
+    </div>
+    <app-agent-runner [preselectedAgentId]="id" (requestCatalogReturn)="onReturnToBuild()" />
+  </section>
+} @else {
+  <div class="studio-test__empty">
+    <mat-icon aria-hidden="true">science</mat-icon>
+    <h2>No agent selected yet</h2>
+    <p>Pick or build an agent in <strong>Build</strong> first, then return here to run it in its sandbox.</p>
+    <button mat-stroked-button type="button" (click)="onReturnToBuild()">← Back to Build</button>
+  </div>
+}

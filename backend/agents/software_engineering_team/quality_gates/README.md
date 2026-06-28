@@ -15,7 +15,7 @@ All agents consume implementation output and return review results. For discover
 
 ```python
 from quality_gates import CodeReviewAgent, QAExpertAgent, CybersecurityExpertAgent, AcceptanceVerifierAgent, DbcCommentsAgent
-# Accessibility: from frontend_team.accessibility_agent import AccessibilityExpertAgent
+# Accessibility: from accessibility_agent import AccessibilityExpertAgent
 ```
 
 ## Khala platform

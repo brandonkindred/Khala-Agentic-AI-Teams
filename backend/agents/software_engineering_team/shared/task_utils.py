@@ -2,7 +2,7 @@
 
 Consolidates ``_task_requirements``, ``_task_requirements_with_test_expectations``,
 and ``_task_requirements_with_route_expectations`` that were previously duplicated
-across backend_agent, orchestrator, and frontend_team modules.
+across backend_agent and orchestrator modules.
 """
 
 from __future__ import annotations
