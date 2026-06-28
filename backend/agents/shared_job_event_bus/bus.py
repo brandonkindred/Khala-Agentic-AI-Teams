@@ -64,12 +64,19 @@ class Subscription:
     by more than 500 undrained events silently loses the **oldest** ones (the
     deque evicts from the left on overflow). SSE consumers should drain promptly
     — a slow reader drops old progress events, never the newest.
+
+    ``closed`` is set by :func:`reap_once` when it detaches this subscription from
+    the bus (idle past the TTL, or evicted to enforce the job cap). The bus also
+    sets ``notify`` so a blocked consumer wakes; the consumer should check
+    ``closed`` after draining and end its stream rather than spin to its deadline
+    on a subscription that will never receive another event.
     """
 
     notify: threading.Event = field(default_factory=threading.Event)
     events: deque = field(default_factory=lambda: deque(maxlen=500))
     created_at: float = field(default_factory=time.monotonic)
     last_activity: float = field(default_factory=time.monotonic)
+    closed: bool = False
 
     def touch(self) -> None:
         """Refresh the liveness timestamp (cheap, lock-free — atomic attr write)."""
@@ -211,6 +218,7 @@ def reap_once(
             kept: List[Subscription] = []
             for sub in state.subscribers[job_id]:
                 if now - sub.last_activity > ttl_seconds:
+                    sub.closed = True
                     woken.append(sub)
                     evicted_subs += 1
                 else:
@@ -232,6 +240,7 @@ def reap_once(
             subs = state.subscribers.pop(oldest_job, None) or []
             state.job_created_at.pop(oldest_job, None)
             for sub in subs:
+                sub.closed = True
                 woken.append(sub)
                 evicted_subs += 1
             evicted_jobs += 1

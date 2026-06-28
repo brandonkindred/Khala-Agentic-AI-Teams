@@ -54,6 +54,14 @@ SSE_KEEPALIVE = ": keepalive\n\n"
 
 # Default terminal types and connection deadline shared by the per-job streams.
 _DONE_EVENT: Dict[str, str] = {"type": "done"}
+# Sent when the bus detaches the subscription (idle past the TTL, or evicted to
+# enforce the job cap) so the client learns the stream ended abnormally and can
+# reconnect, instead of receiving keepalives until the deadline. It is an
+# ``error`` so a client does not mistake it for successful job completion.
+_CLOSED_EVENT: Dict[str, str] = {
+    "type": "error",
+    "error": "stream closed: the server reclaimed this subscription",
+}
 _DEFAULT_DEADLINE_SECONDS = 4 * 3600  # 4-hour max connection
 _DEFAULT_POLL_INTERVAL = 1.0
 
@@ -99,6 +107,11 @@ def _drain_pass(sub: Any, terminal_types: Collection[str]) -> Tuple[List[str], b
     return lines, sent_terminal
 
 
+def _closed_lines() -> List[str]:
+    """Framed terminal lines for a subscription the bus detached (reaper eviction)."""
+    return [sse_line(_CLOSED_EVENT), sse_line(_DONE_EVENT)]
+
+
 def sse_job_stream_sync(
     *,
     subscribe: SubscribeFn,
@@ -120,6 +133,9 @@ def sse_job_stream_sync(
           a single ``done`` line after the first terminal event (then stops), and
           a keepalive comment each idle pass until ``deadline_seconds`` elapses.
           ``sub.touch()`` is called every pass to keep a reaper from evicting it.
+        - If the bus detaches the subscription anyway (``sub.closed`` — idle past
+          the TTL, or evicted to enforce the job cap), yields a terminal error +
+          ``done`` and stops, rather than pinging keepalives to the deadline.
     """
     sub = subscribe(job_id)
     try:
@@ -137,6 +153,14 @@ def sse_job_stream_sync(
             for line in lines:
                 yield line
             if sent_terminal:
+                return
+
+            # The bus detached this subscription (idle past the TTL, or evicted
+            # to enforce the job cap): it will never receive another event, so
+            # close the stream now instead of pinging keepalives to the deadline.
+            if getattr(sub, "closed", False):
+                for line in _closed_lines():
+                    yield line
                 return
 
             yield SSE_KEEPALIVE
@@ -177,6 +201,14 @@ async def sse_job_stream_async(
             for line in lines:
                 yield line
             if sent_terminal:
+                return
+
+            # The bus detached this subscription (idle past the TTL, or evicted
+            # to enforce the job cap): close the stream now rather than ping
+            # keepalives to the deadline (see the sync variant).
+            if getattr(sub, "closed", False):
+                for line in _closed_lines():
+                    yield line
                 return
 
             yield SSE_KEEPALIVE

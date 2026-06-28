@@ -109,6 +109,20 @@ def test_reap_keeps_active_and_enforces_job_cap() -> None:
     assert "a" not in state.subscribers
 
 
+def test_reap_marks_evicted_subscriptions_closed() -> None:
+    # Both eviction passes must flag the detached subscription as closed (and
+    # wake it) so a streaming consumer can end its stream instead of hanging.
+    state = BusState()
+    idle = subscribe(state, "idle")
+    idle.last_activity -= 1e9  # ancient → TTL pass
+    capped = subscribe(state, "capped")  # newest, but cap=1 with idle evicted...
+    reap_once(state, ttl_seconds=3600, max_jobs=1)
+    assert idle.closed is True and idle.notify.is_set()
+    # "capped" survives here (idle freed the only slot); force the cap pass.
+    reap_once(state, ttl_seconds=3600, max_jobs=0)
+    assert capped.closed is True and capped.notify.is_set()
+
+
 def test_reap_logs_when_evicting(caplog) -> None:
     import logging
 

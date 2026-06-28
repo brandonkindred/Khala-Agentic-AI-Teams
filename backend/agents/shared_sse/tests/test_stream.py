@@ -23,6 +23,7 @@ class _FakeSub:
         self.events: deque = deque()
         self.notify = threading.Event()
         self.touched = 0
+        self.closed = False
 
     def touch(self) -> None:
         self.touched += 1
@@ -141,6 +142,33 @@ def test_sync_keepalive_then_terminal_across_passes() -> None:
         next(gen)
 
 
+def test_sync_closes_when_subscription_detached_by_reaper() -> None:
+    # A subscription the bus detaches (sub.closed) must end the stream with a
+    # terminal error + done, not ping keepalives until the deadline.
+    sub = _FakeSub()
+    sub.events.append({"type": "progress", "n": 1})  # buffered before eviction
+    subscribe, unsubscribe, calls = _bus(sub)
+
+    gen = sse_job_stream_sync(
+        subscribe=subscribe,
+        unsubscribe=unsubscribe,
+        job_id="j",
+        snapshot=lambda: None,
+        terminal_types=("complete",),
+        poll_interval=0.0,
+    )
+    first = next(gen)  # the buffered progress event is still delivered
+    assert '"type": "progress"' in first
+
+    sub.closed = True  # reaper detaches the subscription
+    second = next(gen)  # terminal error frame
+    assert '"type": "error"' in second
+    assert next(gen) == sse_line({"type": "done"})
+    with pytest.raises(StopIteration):
+        next(gen)
+    assert calls["unsubscribed"] == [("j", sub)]
+
+
 # ---------------------------------------------------------------------------
 # Async stream
 # ---------------------------------------------------------------------------
@@ -187,6 +215,29 @@ def test_async_keepalive_then_terminal_across_passes() -> None:
         first = await agen.__anext__()  # keepalive (empty queue, no snapshot)
         assert first == SSE_KEEPALIVE
         sub.events.append({"type": "error"})
+        assert '"type": "error"' in await agen.__anext__()
+        assert await agen.__anext__() == sse_line({"type": "done"})
+        with pytest.raises(StopAsyncIteration):
+            await agen.__anext__()
+
+    asyncio.run(_drive())
+
+
+def test_async_closes_when_subscription_detached_by_reaper() -> None:
+    sub = _FakeSub()
+    subscribe, unsubscribe, _ = _bus(sub)
+
+    async def _drive():
+        agen = sse_job_stream_async(
+            subscribe=subscribe,
+            unsubscribe=unsubscribe,
+            job_id="run",
+            snapshot=lambda: None,
+            terminal_types=("complete",),
+            poll_interval=0.0,
+        )
+        assert await agen.__anext__() == SSE_KEEPALIVE  # empty, still attached
+        sub.closed = True  # reaper detaches the subscription
         assert '"type": "error"' in await agen.__anext__()
         assert await agen.__anext__() == sse_line({"type": "done"})
         with pytest.raises(StopAsyncIteration):
