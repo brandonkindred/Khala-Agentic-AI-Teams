@@ -35,12 +35,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from shared_concurrency import BackgroundHeartbeat
 from shared_env_config import env_int
-from shared_job_event_bus import BusState, Subscription
+from shared_job_event_bus import BusState, ReaperHandle, Subscription
 from shared_job_event_bus import cleanup_job as _cleanup_job
 from shared_job_event_bus import publish as _publish
-from shared_job_event_bus import reap_once as _reap_once_core
 from shared_job_event_bus import subscribe as _subscribe
 from shared_job_event_bus import unsubscribe as _unsubscribe
 
@@ -67,45 +65,28 @@ _lock = _state.lock
 _subscribers = _state.subscribers
 _job_created_at = _state.job_created_at
 
-_reaper: Optional[BackgroundHeartbeat] = None
+# The TTL/cap are passed as callables over the module globals (rather than
+# captured once) so tests can ``monkeypatch`` the tunables and have the very
+# next reap honour them.
+_reaper = ReaperHandle(
+    _state,
+    ttl_seconds=lambda: _SUB_TTL_SECONDS,
+    max_jobs=lambda: _MAX_JOBS_TRACKED,
+    interval_seconds=_REAPER_INTERVAL_SECONDS,
+    name="blogging-event-bus-reaper",
+    label="blogging event-bus",
+    logger=logger,
+)
 
 
 def _start_reaper_if_needed() -> None:
-    """Lazily start the reaper (calls ``_reap_once`` every ``_REAPER_INTERVAL_SECONDS``).
-
-    The check-and-start runs under ``_lock`` so concurrent subscribes can't double-start
-    and orphan a beater (idempotent). Spawning the thread under the lock is safe — it
-    does no join, and the new beater's first ``_reap_once`` is a full interval away.
-    """
-    global _reaper
-    with _lock:
-        if _reaper is not None and _reaper.is_alive():
-            return
-        _reaper = BackgroundHeartbeat(
-            _reap_once,
-            _REAPER_INTERVAL_SECONDS,
-            name="blogging-event-bus-reaper",
-            join_timeout=2.0,
-            on_error=lambda exc: logger.error(
-                "blogging event-bus reaper iteration failed", exc_info=exc
-            ),
-        ).start()
+    """Lazily start the reaper; idempotent and concurrency-safe (see :class:`ReaperHandle`)."""
+    _reaper.ensure_started()
 
 
 def _reap_once() -> None:
-    """Single reaper pass (exposed for tests). Reads the current TTL/cap globals.
-
-    Indirecting through the module globals (rather than capturing them once)
-    keeps the documented behaviour that tests can ``monkeypatch`` the tunables
-    and have the very next reap honour them.
-    """
-    _reap_once_core(
-        _state,
-        ttl_seconds=_SUB_TTL_SECONDS,
-        max_jobs=_MAX_JOBS_TRACKED,
-        logger=logger,
-        label="blogging event-bus",
-    )
+    """Single reaper pass (exposed for tests). Reads the current TTL/cap globals."""
+    _reaper.reap_once()
 
 
 def subscribe(job_id: str) -> Subscription:
@@ -131,14 +112,5 @@ def cleanup_job(job_id: str) -> None:
 
 
 def shutdown() -> None:
-    """Stop the reaper thread (tests / lifespan); idempotent and re-startable.
-
-    The global is swapped under ``_lock``, but ``stop()`` (which joins the beater,
-    and ``_reap_once`` takes ``_lock``) runs *outside* the lock to avoid a deadlock.
-    """
-    global _reaper
-    with _lock:
-        reaper = _reaper
-        _reaper = None
-    if reaper is not None:
-        reaper.stop()
+    """Stop the reaper thread (tests / lifespan); idempotent and re-startable."""
+    _reaper.shutdown()

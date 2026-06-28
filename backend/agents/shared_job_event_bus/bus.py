@@ -64,12 +64,19 @@ class Subscription:
     by more than 500 undrained events silently loses the **oldest** ones (the
     deque evicts from the left on overflow). SSE consumers should drain promptly
     — a slow reader drops old progress events, never the newest.
+
+    ``closed`` is set by :func:`reap_once` when it detaches this subscription from
+    the bus (idle past the TTL, or evicted to enforce the job cap). The bus also
+    sets ``notify`` so a blocked consumer wakes; the consumer should check
+    ``closed`` after draining and end its stream rather than spin to its deadline
+    on a subscription that will never receive another event.
     """
 
     notify: threading.Event = field(default_factory=threading.Event)
     events: deque = field(default_factory=lambda: deque(maxlen=500))
     created_at: float = field(default_factory=time.monotonic)
     last_activity: float = field(default_factory=time.monotonic)
+    closed: bool = False
 
     def touch(self) -> None:
         """Refresh the liveness timestamp (cheap, lock-free — atomic attr write)."""
@@ -167,14 +174,22 @@ def cleanup_job(state: BusState, job_id: str) -> None:
     """Drop and wake every subscriber for *job_id* (call after a terminal event).
 
     Postconditions:
-        - ``job_id`` is absent from both maps; each former subscriber's ``notify``
-          is set so blocked consumers exit. Unknown job id is a no-op.
+        - ``job_id`` is absent from both maps; each former subscriber is marked
+          ``closed`` and its ``notify`` is set so blocked consumers exit. Unknown
+          job id is a no-op.
+
+    Like :func:`reap_once`, this detaches subscriptions from the bus, so it marks
+    them ``closed`` too: every code path that removes a subscription leaves the
+    same end-of-stream signal, so a consumer that drained no terminal event
+    (e.g. cleanup without a preceding terminal publish) still ends its stream
+    instead of pinging keepalives to its deadline.
     """
     with state.lock:
         subs = state.subscribers.pop(job_id, None)
         state.job_created_at.pop(job_id, None)
     if subs:
         for sub in subs:
+            sub.closed = True
             sub.notify.set()  # wake any blocked consumers so they exit
 
 
@@ -211,6 +226,7 @@ def reap_once(
             kept: List[Subscription] = []
             for sub in state.subscribers[job_id]:
                 if now - sub.last_activity > ttl_seconds:
+                    sub.closed = True
                     woken.append(sub)
                     evicted_subs += 1
                 else:
@@ -232,6 +248,7 @@ def reap_once(
             subs = state.subscribers.pop(oldest_job, None) or []
             state.job_created_at.pop(oldest_job, None)
             for sub in subs:
+                sub.closed = True
                 woken.append(sub)
                 evicted_subs += 1
             evicted_jobs += 1

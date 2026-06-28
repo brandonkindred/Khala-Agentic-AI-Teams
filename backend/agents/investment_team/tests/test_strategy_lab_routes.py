@@ -61,8 +61,13 @@ def api_client(monkeypatch: pytest.MonkeyPatch):
     from investment_team.api import main as api_main
 
     for attr in (
-        "_profiles", "_proposals", "_strategies", "_validations",
-        "_backtests", "_strategy_lab_records", "_paper_trading_sessions",
+        "_profiles",
+        "_proposals",
+        "_strategies",
+        "_validations",
+        "_backtests",
+        "_strategy_lab_records",
+        "_paper_trading_sessions",
         "_advisor_sessions",
     ):
         monkeypatch.setattr(api_main, attr, _InMemoryDict())
@@ -115,9 +120,7 @@ def test_run_strategy_lab_returns_409_when_already_running(
     assert "already in progress" in resp.json()["detail"]
 
 
-def test_run_strategy_lab_starts_run_when_idle(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_run_strategy_lab_starts_run_when_idle(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 
     resp = api_client.post(
@@ -211,9 +214,7 @@ def test_resume_strategy_lab_run_409_when_another_active(
     assert resp.status_code == 409
 
 
-def test_resume_strategy_lab_run_happy_path(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_resume_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-d"] = _resumable_state("run-d")
@@ -264,9 +265,7 @@ def test_restart_strategy_lab_run_409_when_other_active(
     assert resp.status_code == 409
 
 
-def test_restart_strategy_lab_run_happy_path(
-    monkeypatch: pytest.MonkeyPatch, api_client
-) -> None:
+def test_restart_strategy_lab_run_happy_path(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     from investment_team.api import main as api_main
 
     api_main._active_runs["run-g"] = {
@@ -299,9 +298,11 @@ def test_list_strategy_lab_runs_reconciles_terminal_job_service_status(
         "started_at": "2024-01-01T00:00:00Z",
         "total_cycles": 5,
     }
-    stub = _StubLabClient(jobs=[
-        {"job_id": "run-1", "status": "cancelled", "error": "user request"},
-    ])
+    stub = _StubLabClient(
+        jobs=[
+            {"job_id": "run-1", "status": "cancelled", "error": "user request"},
+        ]
+    )
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
 
     resp = api_client.get("/strategy-lab/runs")
@@ -319,19 +320,21 @@ def test_list_strategy_lab_runs_merges_persisted_only_runs(
     from investment_team.api import main as api_main
 
     api_main._active_runs.clear()
-    stub = _StubLabClient(jobs=[
-        {
-            "job_id": "run-x",
-            "status": "running",
-            "data": {
-                "started_at": "2024-01-01T00:00:00Z",
-                "total_cycles": 3,
-                "completed_cycles": 1,
-                "batch_size": 1,
-                "batch_count": 3,
-            },
-        }
-    ])
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "run-x",
+                "status": "running",
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 3,
+                    "completed_cycles": 1,
+                    "batch_size": 1,
+                    "batch_count": 3,
+                },
+            }
+        ]
+    )
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
     resp = api_client.get("/strategy-lab/runs")
     body = resp.json()
@@ -382,13 +385,19 @@ def test_list_strategy_lab_jobs_merges_persisted_completed_runs(
         "started_at": "2024-01-01T00:00:00Z",
         "current_cycle": {"phase": "ideation", "strategy": {"hypothesis": "test"}},
     }
-    stub = _StubLabClient(jobs=[
-        {
-            "job_id": "persisted-c",
-            "status": "completed",
-            "data": {"started_at": "2024-01-01T00:00:00Z", "total_cycles": 2, "completed_cycles": 2},
-        }
-    ])
+    stub = _StubLabClient(
+        jobs=[
+            {
+                "job_id": "persisted-c",
+                "status": "completed",
+                "data": {
+                    "started_at": "2024-01-01T00:00:00Z",
+                    "total_cycles": 2,
+                    "completed_cycles": 2,
+                },
+            }
+        ]
+    )
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
     resp = api_client.get("/strategy-lab/jobs")
     body = resp.json()
@@ -420,9 +429,7 @@ def test_get_strategy_lab_run_status_reconciles_terminal(
         "started_at": "2024-01-01T00:00:00Z",
         "total_cycles": 3,
     }
-    stub = _StubLabClient(jobs=[
-        {"job_id": "run-r", "status": "failed", "error": "boom"}
-    ])
+    stub = _StubLabClient(jobs=[{"job_id": "run-r", "status": "failed", "error": "boom"}])
     monkeypatch.setattr(api_main, "_get_lab_run_job_client", lambda: stub)
     resp = api_client.get("/strategy-lab/runs/run-r/status")
     body = resp.json()
@@ -516,9 +523,7 @@ def test_stream_strategy_lab_run_terminal_short_circuit(
 # can't hang CI.
 
 
-def _wait_for_terminal_sse(
-    body_iter, *, max_chunks: int = 50, timeout_seconds: float = 2.0
-) -> str:
+def _wait_for_terminal_sse(body_iter, *, max_chunks: int = 50, timeout_seconds: float = 2.0) -> str:
     """Read SSE chunks until the terminal ``data: {"type": "done"}`` line.
 
     Preconditions:
@@ -581,6 +586,9 @@ def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
         def __init__(self) -> None:
             self.events = pre_events
 
+        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
+            pass
+
     sub_holder = {"sub": None, "unsubscribed": False}
 
     def _fake_subscribe(rid: str):
@@ -632,6 +640,9 @@ def test_stream_strategy_lab_run_terminates_on_error_event(
         def __init__(self) -> None:
             self.events = pre_events
 
+        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
+            pass
+
     monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
@@ -642,5 +653,3 @@ def test_stream_strategy_lab_run_terminates_on_error_event(
     assert '"type": "snapshot"' in body
     assert '"type": "error"' in body
     assert '"type": "done"' in body
-
-

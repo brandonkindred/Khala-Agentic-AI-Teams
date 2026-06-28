@@ -1,33 +1,22 @@
-"""Containerization adapter stub for frontend-code-v2."""
+"""Containerization adapter stub for frontend-code-v2.
+
+Declarative :class:`StubToolAgent` profile — frontend containerization is not yet
+implemented, so every phase returns a static advisory message via the shared
+static base.
+"""
 
 from __future__ import annotations
 
-import logging
-
-from ...models import ToolAgentInput, ToolAgentOutput, ToolAgentPhaseInput, ToolAgentPhaseOutput
-
-logger = logging.getLogger(__name__)
+from software_engineering_team.shared.tool_agent_static import StubToolAgent
 
 
-class ContainerizationAdapterAgent:
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
+class ContainerizationAdapterAgent(StubToolAgent):
+    """Frontend containerization adapter stub (no changes applied)."""
 
-    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        logger.info("Containerization stub: microtask %s", inp.microtask.id)
-        return ToolAgentOutput(summary="Containerization stub — no changes applied.")
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(
-            recommendations=["Consider Dockerfile for frontend app."],
-            summary="Containerization planning stub.",
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Containerization review stub.")
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Containerization problem-solving stub.")
-
-    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Containerization deliver stub.")
+    label = "Containerization"
+    execute_summary = "Containerization stub — no changes applied."
+    plan_recommendations = ["Consider Dockerfile for frontend app."]
+    plan_summary = "Containerization planning stub."
+    review_summary = "Containerization review stub."
+    problem_solve_summary = "Containerization problem-solving stub."
+    deliver_summary = "Containerization deliver stub."

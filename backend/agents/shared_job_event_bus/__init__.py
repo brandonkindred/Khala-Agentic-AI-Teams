@@ -17,6 +17,7 @@ from shared_job_event_bus.bus import (
     subscribe,
     unsubscribe,
 )
+from shared_job_event_bus.reaper import ReaperHandle
 
 __all__ = [
     "Subscription",
@@ -26,4 +27,5 @@ __all__ = [
     "publish",
     "cleanup_job",
     "reap_once",
+    "ReaperHandle",
 ]

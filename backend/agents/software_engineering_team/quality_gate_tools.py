@@ -4,7 +4,7 @@ Each function is a self-contained tool that can be called by any agent or
 orchestrator.  They instantiate their own agent/LLM when needed (no shared
 mutable state), making them safe for concurrent and cross-activity use.
 
-Usage from a Senior SWE, orchestrator, or Temporal activity::
+Usage from an implementation worker, orchestrator, or Temporal activity::
 
     from software_engineering_team.quality_gate_tools import (
         run_build_verification,
