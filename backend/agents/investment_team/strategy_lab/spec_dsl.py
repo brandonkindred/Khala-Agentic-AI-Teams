@@ -555,7 +555,7 @@ def is_entry_anchored_exit(rule: Any) -> bool:
 def stop_caps_side(basis: str, side: str) -> bool:
     """Whether a ``StopLossRule`` ``basis`` can cap loss for an entry ``side``.
 
-    Mirrors the executor's stop-trigger semantics (``rule_compiler._stop_loss_triggers``):
+    Mirrors the executor's stop-trigger semantics (``rule_compiler.stop_loss_triggers``):
     a ``trailing_high`` stop only fires for a LONG (it tracks the running high
     and floors below it), ``trailing_low`` only fires for a SHORT, and
     ``entry_price`` fires for both. A stop whose basis cannot fire for the

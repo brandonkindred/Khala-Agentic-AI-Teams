@@ -3190,6 +3190,7 @@ class StrategyLabOrchestrator:
             config=config,
             execution_succeeded=execution_succeeded,
             all_gate_results=all_gate_results,
+            market_data=market_data,
         )
 
         # Step 3 — realism cycle: verification-phase checks that the trade
@@ -3348,11 +3349,15 @@ class StrategyLabOrchestrator:
         config: BacktestConfig,
         execution_succeeded: bool,
         all_gate_results: List[QualityGateResult],
+        market_data: Optional[Dict[str, List[OHLCVBar]]] = None,
     ) -> bool:
         """Deterministically verify the engine enforced ``spec.exit_rules``.
 
         Pre: ``trades`` is the FINAL post-alignment ledger and
-        ``all_gate_results`` is the running gate list.
+        ``all_gate_results`` is the running gate list. ``market_data`` (when
+        supplied) carries the run's cached bars so the opt-in trailing-stop
+        replay (gated by ``config.exit_rule_trailing_replay_enabled``) can
+        reconstruct per-bar watermarks.
         Post: returns ``True`` when no critical conformance finding fired — or
         when the check is skipped because the run did not execute / produced
         no trades — and ``False`` when a critical engine-enforcement leak was
@@ -3368,6 +3373,7 @@ class StrategyLabOrchestrator:
             diagnostics=metrics.execution_diagnostics,
             config=config,
             timeframe=spec.timeframe,
+            market_data=market_data,
         )
         all_gate_results.extend(conformance_results)
         return not any((not r.passed) and r.severity == "critical" for r in conformance_results)

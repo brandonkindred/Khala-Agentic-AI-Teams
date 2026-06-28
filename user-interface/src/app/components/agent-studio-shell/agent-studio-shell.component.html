@@ -37,12 +37,19 @@
   </nav>
 
   <main class="studio__stage">
-    <app-agent-studio-stage-placeholder
-      [title]="activeStageDef().label"
-      [blurb]="activeStageDef().blurb"
-      [icon]="activeStageDef().icon"
-      [handoff]="state.handoff()"
-    />
+    @switch (activeStageDef().key) {
+      @case ('test') {
+        <app-agent-studio-test-agent />
+      }
+      @default {
+        <app-agent-studio-stage-placeholder
+          [title]="activeStageDef().label"
+          [blurb]="activeStageDef().blurb"
+          [icon]="activeStageDef().icon"
+          [handoff]="state.handoff()"
+        />
+      }
+    }
   </main>
 
   <footer class="studio__footer">
@@ -55,7 +62,13 @@
       fully staffed + process complete) land with each real stage.
     -->
     @if (state.canAdvance()) {
-      <button mat-flat-button type="button" class="studio__continue" (click)="onContinue()">
+      <button
+        mat-flat-button
+        type="button"
+        class="studio__continue"
+        [disabled]="forwardDisabled()"
+        (click)="onContinue()"
+      >
         {{ activeStageDef().forwardLabel ?? 'Continue' }}
       </button>
     }

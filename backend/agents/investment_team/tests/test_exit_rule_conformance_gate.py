@@ -10,6 +10,9 @@ from __future__ import annotations
 import re
 from typing import List
 
+import pytest
+
+from investment_team.market_data_service import OHLCVBar
 from investment_team.models import (
     BacktestConfig,
     BacktestExecutionDiagnostics,
@@ -81,6 +84,66 @@ def _diagnostics(*, symbol: str = "AAA", **firings: int) -> BacktestExecutionDia
     return BacktestExecutionDiagnostics(
         exit_rule_firings=dict(firings),
         exit_rule_firings_by_symbol={symbol: dict(firings)} if firings else {},
+    )
+
+
+def _replay_config(enabled: bool = True) -> BacktestConfig:
+    return BacktestConfig(
+        start_date="2024-01-01",
+        end_date="2024-12-31",
+        exit_rule_trailing_replay_enabled=enabled,
+    )
+
+
+def _bar(date: str, *, high: float, low: float, open_: float | None = None) -> OHLCVBar:
+    """Minimal OHLCV bar. Only ``high``/``low`` drive the trailing trigger; the
+    open/close default to the high so the bar is self-consistent.
+    """
+    return OHLCVBar(
+        date=date,
+        open=open_ if open_ is not None else high,
+        high=high,
+        low=low,
+        close=high,
+        volume=1_000_000.0,
+    )
+
+
+def _trailing_trade(
+    *,
+    entry_date: str,
+    exit_date: str,
+    side: str = "long",
+    entry_price: float = 100.0,
+    symbol: str = "AAA",
+    trade_num: int = 1,
+    return_pct: float = -10.0,
+    exit_reason: str | None = None,
+    entry_order_type: str = "market",
+    participation_clipped: bool | None = None,
+    partial_fill_count: int | None = None,
+) -> TradeRecord:
+    """A TradeRecord with caller-controlled entry/exit dates, for replay tests."""
+    return TradeRecord(
+        trade_num=trade_num,
+        entry_date=entry_date,
+        exit_date=exit_date,
+        symbol=symbol,
+        side=side,
+        entry_price=entry_price,
+        exit_price=entry_price * (1.0 + return_pct / 100.0),
+        shares=100.0,
+        position_value=entry_price * 100.0,
+        gross_pnl=0.0,
+        net_pnl=0.0,
+        return_pct=return_pct,
+        hold_days=3,
+        outcome="loss" if return_pct < 0 else "win",
+        cumulative_pnl=0.0,
+        exit_reason=exit_reason,
+        entry_order_type=entry_order_type,
+        participation_clipped=participation_clipped,
+        partial_fill_count=partial_fill_count,
     )
 
 
@@ -179,6 +242,375 @@ def test_stop_loss_trailing_variant_skipped() -> None:
     )
     fails = [r for r in results if not r.passed]
     assert fails == []
+
+
+# ---------------------------------------------------------------------------
+# StopLossRule — opt-in trailing bar-by-bar replay
+# ---------------------------------------------------------------------------
+
+
+def _trailing_high_bars() -> dict[str, list[OHLCVBar]]:
+    """Long position, entry 100. The running high reaches 110 on d1, so the
+    trailing floor (pct=0.05) ratchets to 110*0.95 = 104.5. d2's low of 104
+    breaches it. The engine should emit on d2 and fill on d3.
+    """
+    return {
+        "AAA": [
+            _bar("2024-01-02", high=100.0, low=100.0),  # entry bar
+            _bar("2024-01-03", high=110.0, low=108.0),  # high ratchets to 110
+            _bar("2024-01-04", high=110.0, low=104.0),  # low 104 <= floor 104.5 -> trigger
+            _bar("2024-01-05", high=106.0, low=103.0),  # fill bar
+            _bar("2024-01-08", high=105.0, low=100.0),
+            _bar("2024-01-09", high=101.0, low=95.0),
+        ]
+    }
+
+
+def test_trailing_replay_disabled_by_default_even_with_market_data() -> None:
+    """Flag off (default): the gate keeps the post-hoc info-skip line and never
+    replays, even when bars are supplied.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-09")],
+        diagnostics=_diagnostics(),
+        config=_config(),  # exit_rule_trailing_replay_enabled defaults False
+        market_data=_trailing_high_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+    sl = [r for r in results if "StopLossRule(basis=" in r.details]
+    assert sl and "check not run" in sl[0].details
+    assert "trailing replay" not in sl[0].details
+
+
+def test_trailing_replay_enabled_but_no_bars_skips() -> None:
+    """Flag on but no market_data → still the post-hoc info-skip line."""
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-09")],
+        diagnostics=_diagnostics(),
+        config=_replay_config(enabled=True),
+        market_data=None,
+    )
+    sl = [r for r in results if "StopLossRule(basis=" in r.details]
+    assert sl and "check not run" in sl[0].details
+
+
+def test_trailing_replay_not_run_for_intraday_timeframe() -> None:
+    """Trade dates are stored date-only, which only addresses daily bars. On an
+    intraday timeframe the replay is scoped out with an explicit info result
+    (rather than silently skipping every trade as unmatched/malformed), even over
+    bars that would otherwise surface a leak.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-09")],
+        diagnostics=_diagnostics(),  # engine never fired (would warn on 1d)
+        config=_replay_config(),
+        market_data=_trailing_high_bars(),
+        timeframe="1h",
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+    sl = [r for r in results if "StopLossRule(basis=" in r.details]
+    assert sl and "intraday timeframe '1h'" in sl[0].details
+    assert "trailing replay:" not in sl[0].details  # the daily replay summary never ran
+
+
+def test_trailing_replay_known_good_run_passes() -> None:
+    """Engine fired on time: floor breached on d2, position closed on d3 (the
+    next-bar fill). No earlier breach → info, no warning.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-05")],
+        diagnostics=_diagnostics(stop_loss=1),
+        config=_replay_config(),
+        market_data=_trailing_high_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == [], [r.details for r in results]
+    replay = [r for r in results if "trailing replay" in r.details]
+    assert replay and replay[0].severity == "info"
+    assert "no leaks" in replay[0].details
+
+
+def test_trailing_replay_detects_injected_leak() -> None:
+    """Floor breached on d2 but the position stayed open until d9 — the engine
+    had a trigger bar AND a fill bar to spare. Warning (never critical).
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-09")],
+        diagnostics=_diagnostics(),  # engine never fired
+        config=_replay_config(),
+        market_data=_trailing_high_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "warning"
+    assert "trailing replay" in fails[0].details
+    # First breach is the d2 bar (2024-01-04).
+    assert "2024-01-04" in fails[0].details
+    # Never escalates to a critical veto.
+    assert all(r.severity != "critical" for r in results)
+
+
+def test_trailing_replay_skips_clipped_partial_fill_exit() -> None:
+    """A participation-capped / multi-slice exit fills across several bars, so its
+    final exit_date lands well after the trigger even though the stop fired on
+    time. Over the injected-leak bars (which would otherwise warn at exit
+    2024-01-09), a clipped/partial trade is skipped — not flagged — and reported.
+    """
+    gate = ExitRuleConformanceGate()
+    for clipped, partials in ((True, None), (None, 2)):
+        results = gate.check(
+            exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+            trades=[
+                _trailing_trade(
+                    entry_date="2024-01-02",
+                    exit_date="2024-01-09",
+                    participation_clipped=clipped,
+                    partial_fill_count=partials,
+                )
+            ],
+            diagnostics=_diagnostics(),  # engine never fired (would warn if leak-checked)
+            config=_replay_config(),
+            market_data=_trailing_high_bars(),
+        )
+        fails = [r for r in results if not r.passed]
+        assert fails == [], [r.details for r in results]
+        replay = [r for r in results if "trailing replay" in r.details]
+        assert replay and "clipped/partial-fill" in replay[0].details
+
+
+def test_trailing_replay_gap_fill_is_not_a_false_positive() -> None:
+    """A deep next-bar gap fill (trigger on d2, fill on d3 well below the floor)
+    is legitimate: the trigger bar immediately precedes the fill bar, so there
+    is no EARLIER breach to flag.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-05", return_pct=-30.0)],
+        diagnostics=_diagnostics(stop_loss=1),
+        config=_replay_config(),
+        market_data=_trailing_high_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+
+
+def test_trailing_replay_skips_trade_without_bar_window() -> None:
+    """A trade whose symbol/dates are absent from the bar series is skipped and
+    reported, not crashed.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-05", symbol="ZZZ")],
+        diagnostics=_diagnostics(),
+        config=_replay_config(),
+        market_data=_trailing_high_bars(),  # only has AAA
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+    replay = [r for r in results if "trailing replay" in r.details]
+    assert replay and "skipped 1 trade" in replay[0].details
+
+
+def test_trailing_replay_skips_trade_with_date_outside_series() -> None:
+    """Symbol is present but the trade's exit_date is not in the bar series →
+    skipped via the date-index lookup, reported, not crashed.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-12-31")],
+        diagnostics=_diagnostics(),
+        config=_replay_config(),
+        market_data=_trailing_high_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+    replay = [r for r in results if "trailing replay" in r.details]
+    assert replay and "skipped 1 trade" in replay[0].details
+
+
+def test_trailing_replay_detects_short_leak_via_trailing_low() -> None:
+    """Short position, entry 100. Running low reaches 90 on d1, so the trailing
+    cap (pct=0.05) ratchets to 90*1.05 = 94.5. d2's high of 95 breaches it but
+    the position stayed open until d5 → warning.
+    """
+    bars = {
+        "AAA": [
+            _bar("2024-01-02", high=100.0, low=100.0),  # entry
+            _bar("2024-01-03", high=92.0, low=90.0),  # low ratchets to 90
+            _bar("2024-01-04", high=95.0, low=93.0),  # high 95 >= cap 94.5 -> trigger
+            _bar("2024-01-05", high=96.0, low=94.0),
+            _bar("2024-01-08", high=98.0, low=95.0),
+        ]
+    }
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_low")],
+        trades=[
+            _trailing_trade(
+                entry_date="2024-01-02",
+                exit_date="2024-01-08",
+                side="short",
+                return_pct=2.0,
+            )
+        ],
+        diagnostics=_diagnostics(),
+        config=_replay_config(),
+        market_data=bars,
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "warning"
+    assert "2024-01-04" in fails[0].details
+
+
+def test_trailing_replay_skips_malformed_bar_series() -> None:
+    """A bar series that violates the ascending-unique-date precondition
+    (duplicate OR unsorted dates) is unreplayable: the trade is skipped and
+    reported as malformed, never silently mis-detected as a leak.
+    """
+    duplicate = [
+        _bar("2024-01-02", high=100.0, low=100.0),
+        _bar("2024-01-03", high=110.0, low=108.0),
+        _bar("2024-01-03", high=110.0, low=104.0),  # duplicate date
+        _bar("2024-01-05", high=106.0, low=103.0),
+    ]
+    unsorted = [
+        _bar("2024-01-05", high=100.0, low=100.0),  # out of chronological order
+        _bar("2024-01-02", high=110.0, low=104.0),
+        _bar("2024-01-03", high=106.0, low=103.0),
+    ]
+    gate = ExitRuleConformanceGate()
+    for series in (duplicate, unsorted):
+        results = gate.check(
+            exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+            trades=[_trailing_trade(entry_date="2024-01-02", exit_date="2024-01-05")],
+            diagnostics=_diagnostics(),
+            config=_replay_config(),
+            market_data={"AAA": series},
+        )
+        fails = [r for r in results if not r.passed]
+        assert fails == []
+        replay = [r for r in results if "trailing replay" in r.details]
+        assert replay and "malformed" in replay[0].details
+
+
+def _pre_entry_spike_bars() -> dict[str, list[OHLCVBar]]:
+    """Long entry at 100 whose ENTRY bar prints a pre-entry high of 120. Folding
+    that spike into the watermark ratchets the trailing floor (pct=0.05) to 114,
+    which the next bar's low of 99 breaches — a leak that only exists if the
+    entry bar is (wrongly) consumed. After the entry bar, price is flat near 100.
+    """
+    return {
+        "AAA": [
+            _bar("2024-01-02", high=120.0, low=100.0),  # entry bar w/ pre-entry spike
+            _bar("2024-01-03", high=101.0, low=99.0),
+            _bar("2024-01-04", high=101.0, low=99.0),
+            _bar("2024-01-05", high=100.0, low=98.0),  # fill bar
+        ]
+    }
+
+
+def test_trailing_replay_skips_non_market_entry_bar() -> None:
+    """A non-market (limit/stop) entry shares its fill bar with pre-entry price
+    action, so — like the engine's ``just_opened`` guard — the replay must NOT
+    evaluate or fold in the entry bar. Without the guard the d0 high of 120 would
+    ratchet the floor and report a false leak; with it, no warning.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[
+            _trailing_trade(
+                entry_date="2024-01-02",
+                exit_date="2024-01-05",
+                entry_order_type="limit",
+            )
+        ],
+        diagnostics=_diagnostics(),
+        config=_replay_config(),
+        market_data=_pre_entry_spike_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == [], [r.details for r in results]
+    replay = [r for r in results if "trailing replay" in r.details]
+    assert replay and replay[0].severity == "info"
+
+
+def test_trailing_replay_market_entry_consumes_entry_bar() -> None:
+    """Contrast to the non-market case: a MARKET entry IS evaluated/extended from
+    the entry bar (matching the engine), so the d0 high of 120 ratchets the floor
+    and d1's low of 99 is a genuine breach. The position closing on d5 instead of
+    d4 is a real leak → warning at the d1 bar.
+    """
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[
+            _trailing_trade(
+                entry_date="2024-01-02",
+                exit_date="2024-01-05",
+                entry_order_type="market",
+            )
+        ],
+        diagnostics=_diagnostics(),
+        config=_replay_config(),
+        market_data=_pre_entry_spike_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "warning"
+    assert "2024-01-03" in fails[0].details
+
+
+def test_trailing_replay_none_entry_order_type_defaults_to_market() -> None:
+    """A missing ``entry_order_type`` (``None`` on a legacy/partial record) is
+    treated as a market entry — the leak-detection-safe default — so the entry
+    bar is evaluated and a real leak is still surfaced rather than masked.
+    """
+    trade = _trailing_trade(entry_date="2024-01-02", exit_date="2024-01-05")
+    # Force the field absent (pydantic v2 models are mutable by default).
+    trade.entry_order_type = None  # type: ignore[assignment]
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_high")],
+        trades=[trade],
+        diagnostics=_diagnostics(),
+        config=_replay_config(),
+        market_data=_pre_entry_spike_bars(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "warning"
+    assert "2024-01-03" in fails[0].details
+
+
+def test_trailing_replay_rejects_non_trailing_basis() -> None:
+    """The replay's precondition is enforced with an explicit raise (not a bare
+    assert that ``python -O`` would strip): a non-trailing basis is a caller bug
+    and must fail loudly rather than silently mapping to a side.
+    """
+    gate = ExitRuleConformanceGate()
+    with pytest.raises(ValueError, match="non-trailing basis"):
+        gate._check_stop_loss_trailing_replay(
+            StopLossRule(pct=0.05),  # default basis="entry_price"
+            [],
+            {},
+        )
 
 
 # ---------------------------------------------------------------------------
