@@ -100,14 +100,14 @@ def lenient_json_object(
                 logger.warning(
                     "%s: model output did not parse as JSON (first 200 chars: %r); %s",
                     context,
-                    raw[:200],
+                    raw,
                     on_fail_msg,
                 )
                 return {}
         logger.warning(
             "%s: model output contained no JSON object (first 200 chars: %r); %s",
             context,
-            raw[:200],
+            raw,
             on_fail_msg,
         )
         return {}

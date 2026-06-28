@@ -117,11 +117,11 @@ def run_strategy_code(
         return StrategyRunResult(
             success=False,
             error_type=_RUNTIME_ERROR_TYPE,
-            stderr=str(exc)[:2000],
+            stderr=str(exc),
             execution_time_seconds=time.monotonic() - start,
             execution_diagnostics=BacktestExecutionDiagnostics(
                 zero_trade_category="UNKNOWN_ZERO_TRADE_PATH",
-                summary=f"Strategy startup failure before backtest could run: {str(exc)[:500]}",
+                summary=f"Strategy startup failure before backtest could run: {str(exc)}",
             ),
         )
 
@@ -133,7 +133,7 @@ def run_strategy_code(
             success=False,
             trades=run.trades,
             error_type=_LOOKAHEAD_ERROR_TYPE,
-            stderr=(service_result.error or "")[:2000],
+            stderr=(service_result.error or ""),
             execution_time_seconds=elapsed,
             execution_diagnostics=service_result.execution_diagnostics,
             probe_events=service_result.probe_events,
@@ -151,7 +151,7 @@ def run_strategy_code(
             success=False,
             trades=run.trades,
             error_type=_RUNTIME_ERROR_TYPE,
-            stderr=service_result.error[:2000],
+            stderr=service_result.error,
             execution_time_seconds=elapsed,
             execution_diagnostics=service_result.execution_diagnostics,
             probe_events=service_result.probe_events,

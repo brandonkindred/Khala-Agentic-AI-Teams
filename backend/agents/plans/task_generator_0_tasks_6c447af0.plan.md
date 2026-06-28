@@ -135,7 +135,7 @@ Add DEBUG-level logging before the final fallback to capture what the model actu
 ```python
 logger.debug(
     "Raw LLM response that failed all JSON extraction strategies (first 2000 chars):\n%s",
-    text[:2000],
+    text,
 )
 logger.warning(
     "Could not parse structured JSON from LLM response; returning raw content wrapper | failure_class=json_parse_failure",

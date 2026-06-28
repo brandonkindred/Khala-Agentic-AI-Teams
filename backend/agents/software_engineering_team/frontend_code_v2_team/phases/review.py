@@ -191,7 +191,7 @@ def run_review(
             ReviewIssue(
                 source="build",
                 severity="critical",
-                description=f"Build failed: {build_msg[:300]}",
+                description=f"Build failed: {build_msg}",
                 recommendation="Fix build errors; consider triggering Build Specialist.",
             )
         )
@@ -362,7 +362,7 @@ def run_microtask_review(
             ReviewIssue(
                 source="build",
                 severity="critical",
-                description=f"Build failed after microtask {microtask_id}: {build_msg[:300]}",
+                description=f"Build failed after microtask {microtask_id}: {build_msg}",
                 recommendation="Fix build errors before proceeding.",
             )
         )

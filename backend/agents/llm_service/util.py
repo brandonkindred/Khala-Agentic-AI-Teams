@@ -302,7 +302,7 @@ def extract_json_from_response(
                 continue
     raise LLMJsonParseError(
         "Could not parse structured JSON from LLM response. Model returned invalid or non-JSON output. "
-        f"Response preview: {text[:500]!r}...",
+        f"Response preview: {text!r}...",
         error_kind="json_parse",
-        response_preview=text[:500],
+        response_preview=text,
     )

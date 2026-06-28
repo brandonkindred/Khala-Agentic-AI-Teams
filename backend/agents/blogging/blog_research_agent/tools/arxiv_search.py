@@ -64,7 +64,7 @@ def search_arxiv(
             raise ArxivSearchError(f"arXiv request failed: {exc}") from exc
 
         if resp.status_code >= 400:
-            raise ArxivSearchError(f"arXiv API returned {resp.status_code}: {resp.text[:200]}")
+            raise ArxivSearchError(f"arXiv API returned {resp.status_code}: {resp.text}")
 
         papers: List[AcademicPaper] = []
         try:
@@ -95,5 +95,5 @@ def search_arxiv(
         except ElementTree.ParseError as e:
             raise ArxivSearchError(f"Failed to parse arXiv response: {e}") from e
 
-        logger.info("arXiv search returned %s papers for query=%s", len(papers), query[:50])
+        logger.info("arXiv search returned %s papers for query=%s", len(papers), query)
         return papers

@@ -103,17 +103,17 @@ class CicdAdapterAgent:
         data = self._parse_json(raw)
         recommendations = []
         if data.get("ci_plan"):
-            recommendations.append(f"CI Plan: {data['ci_plan'][:500]}")
+            recommendations.append(f"CI Plan: {data['ci_plan']}")
         if data.get("preview_env_plan"):
-            recommendations.append(f"Preview Env: {data['preview_env_plan'][:500]}")
+            recommendations.append(f"Preview Env: {data['preview_env_plan']}")
         if data.get("release_rollback_plan"):
-            recommendations.append(f"Release/Rollback: {data['release_rollback_plan'][:500]}")
+            recommendations.append(f"Release/Rollback: {data['release_rollback_plan']}")
         if data.get("source_maps_error_reporting"):
-            recommendations.append(f"Error Reporting: {data['source_maps_error_reporting'][:500]}")
+            recommendations.append(f"Error Reporting: {data['source_maps_error_reporting']}")
         summary = data.get("summary", "CI/CD artifacts generated.")
         return ToolAgentPhaseOutput(
             recommendations=recommendations if recommendations else ["CI/CD artifacts generated."],
-            summary=summary[:500] if summary else "CI/CD planning complete.",
+            summary=summary if summary else "CI/CD planning complete.",
         )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:

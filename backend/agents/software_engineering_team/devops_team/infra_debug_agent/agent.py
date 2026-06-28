@@ -30,7 +30,7 @@ class InfraDebugAgent:
     def run(self, input_data: IaCDebugInput) -> IaCDebugOutput:
         artifacts_snippet = ""
         for fname, content in list(input_data.artifacts.items())[:5]:
-            artifacts_snippet += f"\n### {fname} ###\n{content[:2000]}\n"
+            artifacts_snippet += f"\n### {fname} ###\n{content}\n"
 
         context = (
             f"Tool: {input_data.tool_name}\n"
@@ -54,7 +54,7 @@ class InfraDebugAgent:
                     file_path=err_data.get("file_path"),
                     line_number=err_data.get("line_number"),
                     error_message=err_data.get("error_message", ""),
-                    raw_output=input_data.execution_output[:500],
+                    raw_output=input_data.execution_output,
                 )
             )
 

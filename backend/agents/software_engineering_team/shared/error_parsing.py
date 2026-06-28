@@ -278,7 +278,7 @@ def _parse_pytest_assertion(text: str) -> Optional[ParsedFailure]:
     # AssertionError: assert 200 == 401  or  E       AssertionError: assert 200 == 401
     assert_err_match = re.search(r"AssertionError:\s*(assert\s+[^\n]+)", text)
     if assert_err_match:
-        assertion_line = assert_err_match.group(1).strip()[:200]
+        assertion_line = assert_err_match.group(1).strip()
 
     # E         +200  /  E         -401  (actual vs expected) -> got 401
     expected_match = re.search(r"E\s+[+-]\s*(\d+)\s*\n\s*E\s+[+-]\s*(\d+)", text)
@@ -433,7 +433,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
     if yaml_match or ("yaml" in text.lower() and "parse" in text.lower()) or yamlerror_in_text:
         file_path = yaml_match.group(1).strip() if yaml_match and yaml_match.group(1) else None
         msg = (
-            yaml_match.group(2).strip()[:300]
+            yaml_match.group(2).strip()
             if yaml_match and yaml_match.group(2)
             else "YAML parse error"
         )
@@ -442,7 +442,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
                 failure_class=FailureClass.YAML_PARSE_ERROR,
                 file_path=file_path,
                 message=msg,
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion="Fix YAML syntax: indentation, colons, and quoting.",
                 playbook_hint=PLAYBOOK_YAML_SYNTAX,
             )
@@ -461,7 +461,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message=f"COPY failed: {src} - {err}",
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion=f"Ensure '{src}' exists in the build context. Check path and .dockerignore.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -480,7 +480,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message=f"Docker build failed: {msg}",
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion="Fix the Dockerfile: valid base image, correct paths, working RUN commands.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -494,12 +494,12 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
         re.IGNORECASE | re.DOTALL,
     )
     if run_match:
-        detail = run_match.group(1).strip()[:200] if run_match.group(1) else ""
+        detail = run_match.group(1).strip() if run_match.group(1) else ""
         failures.append(
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message=f"RUN command failed: {detail}",
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion="Fix the failing RUN step: check package names, install commands, and paths.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -512,7 +512,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message="Docker build failed",
-                raw_excerpt=text[:2000],
+                raw_excerpt=text,
                 suggestion="Fix the Dockerfile and build context. Check COPY paths and RUN commands.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -524,7 +524,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.UNKNOWN,
                 message="Unrecognized DevOps failure",
-                raw_excerpt=text[:2000] if text else "",
+                raw_excerpt=text if text else "",
             )
         )
     return failures

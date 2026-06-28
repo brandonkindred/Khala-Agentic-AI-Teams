@@ -101,7 +101,7 @@ def run_requirements(
     brief = context.get("initial_brief") or ""
     spec = context.get("spec_content") or ""
     problem = (client_context.problem_summary if client_context else "") or ""
-    input_text = f"Brief: {brief[:2000]}\nSpec: {spec[:2000]}\nProblem: {problem}"
+    input_text = f"Brief: {brief}\nSpec: {spec}\nProblem: {problem}"
 
     open_questions: List[OpenQuestion] = []
     try:

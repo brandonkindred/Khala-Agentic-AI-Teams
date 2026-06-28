@@ -182,7 +182,7 @@ class ResponseContinuator:
                 logger.warning(
                     "Continuation cycle %d failed: %s",
                     cycle + 1,
-                    str(e)[:100],
+                    str(e),
                 )
                 return ContinuationResult(
                     success=False,
@@ -349,7 +349,7 @@ class ResponseContinuator:
 
             if response.status_code != 200:
                 raise Exception(
-                    f"Chat request failed with status {response.status_code}: {response.text[:200]}"
+                    f"Chat request failed with status {response.status_code}: {response.text}"
                 )
 
             data = response.json()
@@ -469,7 +469,7 @@ class ResponseContinuator:
         except Exception as e:
             logger.warning(
                 "Failed to log continuation response: %s",
-                str(e)[:100],
+                str(e),
             )
 
 

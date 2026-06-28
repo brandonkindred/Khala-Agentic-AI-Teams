@@ -415,8 +415,8 @@ def _log_task_completion_banner(
 ) -> None:
     """Log a big, flashy banner when a task is considered complete."""
     stats = _get_task_stats()
-    title_display = (task_title[:50] + "...") if len(task_title) > 53 else task_title
-    desc_display = (description[:56] + "...") if len(description) > 59 else (description or "-")
+    title_display = task_title[:50] + ("..." if len(task_title) > 50 else "")
+    desc_display = description[:60] + ("..." if len(description) > 60 else (""))
     assignee_display = assignee.replace("_", " ").title()
 
     # Progress bar (40 chars wide)
@@ -844,7 +844,7 @@ def _run_build_verification(
                 )
                 return False, feedback
             logger.warning(
-                "Build verification failed for task %s: %s", task_id, result.error_summary[:200]
+                "Build verification failed for task %s: %s", task_id, result.error_summary
             )
             return False, result.error_summary
         logger.info("Build verification passed for frontend task %s", task_id)
@@ -859,7 +859,7 @@ def _run_build_verification(
         result = run_python_syntax_check(backend_dir)
         if not result.success:  # pragma: no cover  # integration-only: syntax-check + LLM fix loop
             logger.warning(
-                "Syntax check failed for task %s: %s", task_id, result.error_summary[:200]
+                "Syntax check failed for task %s: %s", task_id, result.error_summary
             )
             fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
             if fixed:
@@ -885,7 +885,7 @@ def _run_build_verification(
                     if not pip_result.success:
                         logger.warning(
                             "pip install -r requirements.txt failed (non-fatal): %s",
-                            pip_result.error_summary[:200],
+                            pip_result.error_summary,
                         )
                 except Exception as e:
                     logger.warning("pip install before pytest failed (non-fatal): %s", e)
@@ -979,7 +979,7 @@ def _run_build_verification(
                 )
                 if not result.success:
                     logger.warning(
-                        "Docker build failed for task %s: %s", task_id, result.error_summary[:200]
+                        "Docker build failed for task %s: %s", task_id, result.error_summary
                     )
                     return False, result.error_summary
 
@@ -1029,8 +1029,8 @@ def _try_build_fix_one_at_a_time(
         for f in failures:
             issues.append(
                 {
-                    "description": (f.message or f.raw_excerpt or "")[:500],
-                    "file_path": (f.file_path or "")[:300],
+                    "description": (f.message or f.raw_excerpt or ""),
+                    "file_path": (f.file_path or ""),
                     "recommendation": (f.suggestion or f.playbook_hint or "Fix the build error.")[
                         :500
                     ],
@@ -1039,7 +1039,7 @@ def _try_build_fix_one_at_a_time(
         if not issues:
             issues.append(
                 {
-                    "description": result.error_summary[:500],
+                    "description": result.error_summary,
                     "file_path": "",
                     "recommendation": "Fix the build error.",
                 }
@@ -1067,15 +1067,15 @@ def _try_build_fix_one_at_a_time(
                     if path and msg:
                         issues.append(
                             {
-                                "description": msg[:500],
-                                "file_path": path[:300],
+                                "description": msg,
+                                "file_path": path,
                                 "recommendation": "Fix the syntax error in this file.",
                             }
                         )
             if not issues:
                 issues.append(
                     {
-                        "description": result.error_summary[:500],
+                        "description": result.error_summary,
                         "file_path": "",
                         "recommendation": "Fix the syntax errors.",
                     }
@@ -1098,19 +1098,19 @@ def _try_build_fix_one_at_a_time(
                     for f in test_result.parsed_failures("pytest"):
                         issues.append(
                             {
-                                "description": (f.message or f.raw_excerpt or "")[:500],
-                                "file_path": (f.file_path or "")[:300],
+                                "description": (f.message or f.raw_excerpt or ""),
+                                "file_path": (f.file_path or ""),
                                 "recommendation": (
                                     f.suggestion
                                     or f.playbook_hint
                                     or "Fix the test or implementation."
-                                )[:500],
+                                ),
                             }
                         )
                     if not issues:
                         issues.append(
                             {
-                                "description": test_result.pytest_error_summary()[:500],
+                                "description": test_result.pytest_error_summary(),
                                 "file_path": "",
                                 "recommendation": "Fix the failing tests.",
                             }
@@ -1204,7 +1204,7 @@ def _try_build_fix_one_at_a_time(
         else:
             parts = []
             for p, c in list(current_files.items())[:10]:
-                parts.append(f"--- {p} ---\n{c[:2000]}")
+                parts.append(f"--- {p} ---\n{c}")
             relevant_code = "\n".join(parts) if parts else "(no code)"
         if prompt_module == "frontend_code_v2_team.prompts":
             prompt = FIX_PROMPT.format(
@@ -1270,16 +1270,16 @@ def _try_build_fix_one_at_a_time(
             failures = result.parsed_failures("ng_build")
             issues = [
                 {
-                    "description": (f.message or f.raw_excerpt or "")[:500],
-                    "file_path": (f.file_path or "")[:300],
-                    "recommendation": (f.suggestion or f.playbook_hint or "Fix.")[:500],
+                    "description": (f.message or f.raw_excerpt or ""),
+                    "file_path": (f.file_path or ""),
+                    "recommendation": (f.suggestion or f.playbook_hint or "Fix."),
                 }
                 for f in failures
             ]
             if not issues:
                 issues.append(
                     {
-                        "description": result.error_summary[:500],
+                        "description": result.error_summary,
                         "file_path": "",
                         "recommendation": "Fix.",
                     }
@@ -1297,15 +1297,15 @@ def _try_build_fix_one_at_a_time(
                             if path and msg:
                                 issues.append(
                                     {
-                                        "description": msg[:500],
-                                        "file_path": path[:300],
+                                        "description": msg,
+                                        "file_path": path,
                                         "recommendation": "Fix syntax.",
                                     }
                                 )
                 if not issues:
                     issues.append(
                         {
-                            "description": result.error_summary[:500],
+                            "description": result.error_summary,
                             "file_path": "",
                             "recommendation": "Fix.",
                         }
@@ -1316,16 +1316,16 @@ def _try_build_fix_one_at_a_time(
                 if not result.success:
                     issues = [
                         {
-                            "description": (f.message or f.raw_excerpt or "")[:500],
-                            "file_path": (f.file_path or "")[:300],
-                            "recommendation": (f.suggestion or f.playbook_hint or "Fix.")[:500],
+                            "description": (f.message or f.raw_excerpt or ""),
+                            "file_path": (f.file_path or ""),
+                            "recommendation": (f.suggestion or f.playbook_hint or "Fix."),
                         }
                         for f in result.parsed_failures("pytest")
                     ]
                     if not issues:
                         issues.append(
                             {
-                                "description": result.pytest_error_summary()[:500],
+                                "description": result.pytest_error_summary(),
                                 "file_path": "",
                                 "recommendation": "Fix.",
                             }
@@ -1341,7 +1341,7 @@ def _try_build_fix_one_at_a_time(
         "each applying LLM-generated patches then re-running build. Final error: %s",
         task_id,
         max_fix_attempts,
-        error_summary[:200],
+        error_summary,
     )
     return False, error_summary
 

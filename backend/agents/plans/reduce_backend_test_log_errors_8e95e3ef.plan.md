@@ -6,13 +6,13 @@ todos:
     content: In shared/command_runner.py run_pytest(), set env_override so PYTHONPATH includes the project root (merge with existing PYTHONPATH if any) and pass it to run_command().
     status: completed
   - id: increase-orchestrator-test-failure-log
-    content: In orchestrator.py line ~387, change the tests-failed log from summary[:200] to summary[:1200] (or 800) so the traceback is visible.
+    content: In orchestrator.py line ~387, change the tests-failed log from summary so the traceback is visible.
     status: completed
   - id: increase-backend-agent-build-failed-log
-    content: In backend_agent/agent.py line ~392, change build_errors[:200] to build_errors[:800] in the Build FAILED log.
+    content: In backend_agent/agent.py line ~392, change build_errors to build_errors in the Build FAILED log.
     status: completed
   - id: increase-backend-agent-last-error-logs
-    content: In backend_agent/agent.py lines ~397-413, increase build_errors[:500] to build_errors[:800] for the repeated-failure reason and repeated_build_failure_reason[:300] to [:800] for the final error log.
+    content: In backend_agent/agent.py lines ~397-413, increase build_errors to build_errors for the repeated-failure reason and repeated_build_failure_reason to  for the final error log.
     status: completed
   - id: run-tests-verify
     content: Run the software_engineering_team test suite (e.g. pytest from software_engineering_team/) to ensure command_runner and orchestrator/agent changes do not break existing tests.
@@ -27,9 +27,9 @@ isProject: false
 Execute in this order:
 
 1. **set-pythonpath-in-run-pytest** — In `software_engineering_team/shared/command_runner.py`, in `run_pytest()`, set `env_override` so `PYTHONPATH` includes the resolved project root. Prepend the project root to any existing `os.environ.get("PYTHONPATH", "")` so existing path is preserved, then pass `env_override={"PYTHONPATH": ...}` to `run_command()`.
-2. **increase-orchestrator-test-failure-log** — In `software_engineering_team/orchestrator.py`, find the log line for "Tests failed for task" and change the slice from `summary[:200]` to `summary[:1200]` (or 800).
-3. **increase-backend-agent-build-failed-log** — In `software_engineering_team/backend_agent/agent.py`, find the "Build FAILED" log and change `build_errors[:200]` to `build_errors[:800]`.
-4. **increase-backend-agent-last-error-logs** — In the same file, in the repeated-build-failure block: use `build_errors[:800]` for the "Last error" text and log `repeated_build_failure_reason[:800]` instead of `[:300]`.
+2. **increase-orchestrator-test-failure-log** — In `software_engineering_team/orchestrator.py`, find the log line for "Tests failed for task" and change the slice from `summary`.
+3. **increase-backend-agent-build-failed-log** — In `software_engineering_team/backend_agent/agent.py`, find the "Build FAILED" log and change `build_errors` to `build_errors`.
+4. **increase-backend-agent-last-error-logs** — In the same file, in the repeated-build-failure block: use `build_errors` for the "Last error" text and log `repeated_build_failure_reason` instead of ``.
 5. **run-tests-verify** — From `software_engineering_team/`, run `pytest` (or the project’s test command) and fix any regressions.
 
 ---
@@ -66,12 +66,12 @@ Today the **full** pytest error is passed to the agent (up to 2500 chars via `py
 
 **Orchestrator** ([orchestrator.py](software_engineering_team/orchestrator.py)):
 
-- Line 387: `logger.warning("Tests failed for task %s: %s", task_id, summary[:200])` — increase the slice so the traceback is visible (e.g. **800–1200** chars), or log the full summary and use a short one-line summary in the same message.
+- Line 387: `logger.warning("Tests failed for task %s: %s", task_id, summary)` — increase the slice so the traceback is visible (e.g. **800–1200** chars), or log the full summary and use a short one-line summary in the same message.
 
 **Backend agent** ([backend_agent/agent.py](software_engineering_team/backend_agent/agent.py)):
 
-- Line 392: `build_errors[:200]` in the “Build FAILED” log — increase to **800** (or similar) so the critical part of the error is visible.
-- Lines 407 and 413: “Last error” uses `build_errors[:500]` and then logs `repeated_build_failure_reason[:300]` — increase to **800** for both so that when the loop stops after 3 identical failures, the log still shows the meaningful part of the error.
+- Line 392: `build_errors` in the “Build FAILED” log — increase to **800** (or similar) so the critical part of the error is visible.
+- Lines 407 and 413: “Last error” uses `build_errors` and then logs `repeated_build_failure_reason` — increase to **800** for both so that when the loop stops after 3 identical failures, the log still shows the meaningful part of the error.
 
 Optional: if you want to avoid huge log lines, you could log a short one-liner and “Full error (N chars) written to …” and write the full `build_errors` / `summary` to a file under the job or repo path. The minimal improvement is just increasing the character limits above.
 

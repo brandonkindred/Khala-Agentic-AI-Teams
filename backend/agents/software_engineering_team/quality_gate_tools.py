@@ -221,7 +221,7 @@ def run_dbc_comments(
 
         # Read code from repo
         code_parts: list[str] = []
-        for f in sorted(repo_path.rglob("*"))[:200]:
+        for f in sorted(repo_path.rglob("*")):
             if not f.is_file():
                 continue
             if f.suffix not in {".py", ".ts", ".js", ".java"}:

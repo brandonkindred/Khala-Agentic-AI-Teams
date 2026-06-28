@@ -577,7 +577,7 @@ def _stub_heavy_modules() -> None:
                 text=True,
             )
             ok = r.returncode == 0 or "nothing to commit" in (r.stdout + r.stderr)
-            return ok, (r.stdout + r.stderr).strip()[:200]
+            return ok, (r.stdout + r.stderr).strip()
 
         gu_mod.commit_working_tree = _stub_commit_working_tree  # type: ignore[attr-defined]
 

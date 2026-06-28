@@ -38,7 +38,7 @@ class DeploymentDryRunPlanToolAgent:
             else:
                 checks["deployment_dry_run"] = "pass" if lint.success else "fail"
                 if not lint.success:
-                    findings.append(lint.error_summary or lint.stderr[:1000])
+                    findings.append(lint.error_summary or lint.stderr)
 
         return DeploymentDryRunOutput(
             success=checks["deployment_dry_run"] != "fail",

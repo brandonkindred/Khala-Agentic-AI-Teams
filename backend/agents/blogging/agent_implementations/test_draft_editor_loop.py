@@ -120,7 +120,7 @@ def main() -> None:
     print("\n" + "=" * 60)
     print("FINAL DRAFT (first 800 chars):")
     print("=" * 60)
-    print(draft_result.draft[:800])
+    print(draft_result.draft)
     if len(draft_result.draft) > 800:
         print("\n... [truncated] ...")
     print("\n✓ Draft-editor loop completed successfully!")

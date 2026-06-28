@@ -112,15 +112,15 @@ class BrandingThemeToolAgent:
                 data = {}
         recommendations: List[str] = []
         if data.get("component_library_plan"):
-            recommendations.append(f"Component Library: {data['component_library_plan'][:500]}")
+            recommendations.append(f"Component Library: {data['component_library_plan']}")
         if data.get("token_implementation_plan"):
             recommendations.append(
-                f"Token Implementation: {data['token_implementation_plan'][:500]}"
+                f"Token Implementation: {data['token_implementation_plan']}"
             )
         if data.get("a11y_in_components"):
-            recommendations.append(f"A11y in Components: {data['a11y_in_components'][:500]}")
+            recommendations.append(f"A11y in Components: {data['a11y_in_components']}")
         if data.get("documentation_plan"):
-            recommendations.append(f"Documentation: {data['documentation_plan'][:500]}")
+            recommendations.append(f"Documentation: {data['documentation_plan']}")
         return ToolAgentPhaseOutput(
             recommendations=recommendations
             if recommendations

@@ -107,8 +107,8 @@ def market_research_to_evidence(data: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(s, dict) and s.get("signal")
     ]
     return {
-        "summary": summary[:2000] if summary else "",
-        "insights": insights[:30],
-        "market_signals": signals[:20],
+        "summary": summary if summary else "",
+        "insights": insights,
+        "market_signals": signals,
         "source": "market_research_team",
     }

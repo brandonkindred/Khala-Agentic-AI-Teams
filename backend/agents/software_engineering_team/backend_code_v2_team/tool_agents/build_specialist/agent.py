@@ -59,8 +59,8 @@ def _run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
                         ReviewIssue(
                             source="build_specialist",
                             severity="critical",
-                            description=msg[:500],
-                            file_path=path[:300],
+                            description=msg,
+                            file_path=path,
                             recommendation="Fix the syntax error in this file.",
                         )
                     )
@@ -69,7 +69,7 @@ def _run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
                 ReviewIssue(
                     source="build_specialist",
                     severity="critical",
-                    description=result.error_summary[:500],
+                    description=result.error_summary,
                     recommendation="Fix the syntax errors.",
                 )
             )
@@ -96,9 +96,9 @@ def _run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
                     ReviewIssue(
                         source="build_specialist",
                         severity="critical",
-                        description=(f.message or f.raw_excerpt or "")[:500],
-                        file_path=(f.file_path or "")[:300],
-                        recommendation=rec[:500],
+                        description=(f.message or f.raw_excerpt or ""),
+                        file_path=(f.file_path or ""),
+                        recommendation=rec,
                     )
                 )
             if not issues:
@@ -106,7 +106,7 @@ def _run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
                     ReviewIssue(
                         source="build_specialist",
                         severity="critical",
-                        description=test_result.pytest_error_summary()[:500],
+                        description=test_result.pytest_error_summary(),
                         recommendation="Fix the failing tests.",
                     )
                 )

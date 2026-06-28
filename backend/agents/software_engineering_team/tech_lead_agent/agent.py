@@ -145,7 +145,7 @@ class TechLeadAgent:
         parts.append(f"# Development Plan: {requirements.title}\n")
         parts.append("\n## Overview\n")
         parts.append(
-            f"This development plan covers {requirements.description[:200]}{'...' if len(requirements.description) > 200 else ''}\n"
+            f"This development plan covers {requirements.description}{'...' if len(requirements.description) > 200 else ''}\n"
         )
 
         # Hierarchy summary
@@ -438,11 +438,11 @@ class TechLeadAgent:
                     f"- **id:** {t.id} | **type:** {t.type} | **title:** {t.title} | **status:** {t.status} | **assignee:** {t.assignee}"
                 )
                 task_lines.append(
-                    f"  **description:** {t.description[:500]}{'...' if len(t.description) > 500 else ''}"
+                    f"  **description:** {t.description}{'...' if len(t.description) > 500 else ''}"
                 )
                 if t.requirements:
                     task_lines.append(
-                        f"  **requirements:** {t.requirements[:300]}{'...' if len(t.requirements) > 300 else ''}"
+                        f"  **requirements:** {t.requirements}{'...' if len(t.requirements) > 300 else ''}"
                     )
                 if t.acceptance_criteria:
                     task_lines.append(
@@ -928,7 +928,7 @@ class TechLeadAgent:
                 "Tech Lead: should_update_docs=%s for task %s (%s)%s",
                 should_update,
                 task_update.task_id,
-                rationale[:100] if rationale else "N/A",
+                rationale if rationale else "N/A",
                 " (forced: README missing, empty, or minimal)"
                 if force_docs_because_readme_empty
                 else "",
@@ -952,7 +952,7 @@ class TechLeadAgent:
             logger.info(
                 "Tech Lead: Documentation Agent completed for task %s: %s",
                 task_update.task_id,
-                doc_result.summary[:200] if doc_result.summary else "no summary",
+                doc_result.summary if doc_result.summary else "no summary",
             )
 
         except Exception as e:

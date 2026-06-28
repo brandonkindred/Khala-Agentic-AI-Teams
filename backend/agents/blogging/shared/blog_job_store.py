@@ -234,7 +234,7 @@ def list_blog_jobs(
             {
                 "job_id": data.get("job_id", ""),
                 "status": data.get("status", JOB_STATUS_PENDING),
-                "brief": (data.get("brief") or "")[:100],
+                "brief": (data.get("brief") or ""),
                 "phase": data.get("phase"),
                 "progress": data.get("progress", 0),
                 "created_at": data.get("created_at"),

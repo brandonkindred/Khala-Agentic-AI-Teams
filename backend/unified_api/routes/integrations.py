@@ -1253,7 +1253,7 @@ def _build_issue_item(raw: dict[str, Any], raw_deps: list[dict[str, Any]]) -> Gi
     return GitHubIssueItem(
         number=raw["number"],
         title=raw.get("title") or "",
-        body_preview=(raw.get("body") or "")[:200],
+        body_preview=(raw.get("body") or ""),
         labels=[lbl["name"] for lbl in (raw.get("labels") or []) if isinstance(lbl, dict) and lbl.get("name")],
         html_url=raw.get("html_url") or "",
         dependencies=refs,
@@ -1421,7 +1421,7 @@ def _build_pull_request_item(raw: dict[str, Any]) -> GitHubPullRequestItem:
     return GitHubPullRequestItem(
         number=detail.number,
         title=detail.title,
-        body_preview=detail.body[:200],
+        body_preview=detail.body,
         author=detail.author,
         html_url=detail.html_url,
         head=detail.head,
@@ -1681,7 +1681,7 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
                     env=env,
                 )
                 if result.returncode != 0:
-                    return f"git fetch failed: {_scrub_git_secret(result.stderr, token)[:300]}"
+                    return f"git fetch failed: {_scrub_git_secret(result.stderr, token)}"
                 return None
 
             clone_url = f"https://github.com/{owner}/{repo}.git"
@@ -1693,7 +1693,7 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
                 env=env,
             )
             if result.returncode != 0:
-                safe_err = _scrub_git_secret(result.stderr, token)[:300]
+                safe_err = _scrub_git_secret(result.stderr, token)
                 return f"git clone failed: {safe_err}"
             return None
         except FileNotFoundError:
@@ -1807,9 +1807,9 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
 
     if resp.status_code != 200:
         try:
-            detail = resp.json().get("detail", resp.text[:300])
+            detail = resp.json().get("detail", resp.text)
         except Exception:
-            detail = resp.text[:300]
+            detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
 
     try:
@@ -1883,9 +1883,9 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
 
     if resp.status_code != 200:
         try:
-            detail = resp.json().get("detail", resp.text[:300])
+            detail = resp.json().get("detail", resp.text)
         except Exception:
-            detail = resp.text[:300]
+            detail = resp.text
         raise HTTPException(status_code=resp.status_code, detail=detail)
 
     try:
@@ -1957,9 +1957,9 @@ async def list_github_reviews(
         # on an unhandled 500, etc.). Log it server-side and return a generic
         # message to the client, preserving the upstream status code.
         try:
-            upstream_detail = resp.json().get("detail", resp.text[:300])
+            upstream_detail = resp.json().get("detail", resp.text)
         except Exception:
-            upstream_detail = resp.text[:300]
+            upstream_detail = resp.text
         logger.warning("github reviews: coding team service returned %s: %s", resp.status_code, upstream_detail)
         raise HTTPException(status_code=resp.status_code, detail="Failed to retrieve review history.")
 

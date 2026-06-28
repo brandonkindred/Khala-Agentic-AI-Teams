@@ -201,7 +201,7 @@ def run_review(
             ReviewIssue(
                 source="build",
                 severity="critical",
-                description=f"Build failed: {build_msg[:300]}",
+                description=f"Build failed: {build_msg}",
                 recommendation="Fix compilation/test errors before proceeding.",
             )
         )
@@ -389,7 +389,7 @@ def run_microtask_review(
             ReviewIssue(
                 source="build",
                 severity="critical",
-                description=f"Build failed after microtask {microtask_id}: {build_msg[:300]}",
+                description=f"Build failed after microtask {microtask_id}: {build_msg}",
                 recommendation="Fix build errors before proceeding.",
             )
         )
@@ -601,7 +601,7 @@ def run_code_review_phase(
             ReviewIssue(
                 source="build",
                 severity="critical",
-                description=f"Build failed after microtask {microtask_id}: {build_msg[:300]}",
+                description=f"Build failed after microtask {microtask_id}: {build_msg}",
                 recommendation="Fix build errors before proceeding.",
             )
         )

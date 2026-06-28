@@ -281,7 +281,7 @@ sequenceDiagram
     participant FS as File System
 
     ORC->>PC: compute_planning_cache_key()
-    Note over PC: SHA256(spec + architecture +<br/>project_overview[:2000])[:24]
+    Note over PC: SHA256(spec + architecture +<br/>project_overview)[:24]
 
     PC->>FS: Check plan_dir/planning_cache/{key}.json
 

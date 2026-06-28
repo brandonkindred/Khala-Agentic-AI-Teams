@@ -125,12 +125,12 @@ def record_gate_outcome(
             task_id=task_id,
             phase=phase,
             gate=gate,
-            detail={"summary": summary[:500], "trigger": trigger[:500]},
+            detail={"summary": summary, "trigger": trigger},
         )
         upsert_learning(
             pattern=f"{gate} rejection",
-            trigger=trigger[:500] or summary[:500] or f"{gate} gate rejected output",
-            counter_measure=counter_measure[:500],
+            trigger=trigger or summary or f"{gate} gate rejected output",
+            counter_measure=counter_measure,
             source="gate_rejection",
             category=gate,
         )

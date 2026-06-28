@@ -466,7 +466,7 @@ def _build_error_signature(build_errors: str) -> str:
     """
     if _is_pytest_assertion_failure(build_errors):
         return (build_errors[-1200:] if len(build_errors) > 1200 else build_errors).strip()
-    return (build_errors[:800] or build_errors).strip()
+    return (build_errors or build_errors).strip()
 
 
 def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[str, Any]]:
@@ -1913,7 +1913,7 @@ class BackendExpertAgent:
                     "[%s] WORKFLOW   [%d] Build FAILED: %s",
                     task_id,
                     iteration,
-                    build_errors[:800],
+                    build_errors,
                 )
                 record.action_taken = "fixed_build"
                 review_history.append(record)
@@ -1929,13 +1929,13 @@ class BackendExpertAgent:
                     repeated_build_failure_reason = (
                         "Build failed 5 times with the same error; "
                         "stopping early so Tech Lead can create follow-up fix task. Last error: "
-                        + build_errors[:800]
+                        + build_errors
                     )
                     logger.error(
                         "[%s] WORKFLOW   [%d] %s",
                         task_id,
                         iteration,
-                        repeated_build_failure_reason[:800],
+                        repeated_build_failure_reason,
                     )
                     break
                 # Resolve the failing-test context once for the specialist and
@@ -1967,7 +1967,7 @@ class BackendExpertAgent:
                 if problem_solver_agent is not None:
                     bug_issue = {
                         "severity": "critical",
-                        "description": f"Build/test failure: {build_errors[:1000]}",
+                        "description": f"Build/test failure: {build_errors}",
                         "location": _extract_failing_test_file_from_build_errors(build_errors)
                         or "",
                         "recommendation": "Use specialist-guided root-cause analysis and patch the bug.",
@@ -1989,7 +1989,7 @@ class BackendExpertAgent:
                         "[%s] WORKFLOW   ProblemSolver did not resolve bug within %d cycles: %s",
                         task_id,
                         MAX_PROBLEM_SOLVER_CYCLES,
-                        (solver_error or "")[:500],
+                        (solver_error or ""),
                     )
                 # Invoke testing sub-agent to analyze build errors and produce fix recommendations
                 code_on_branch = _read_repo_code(repo_path)
@@ -2536,7 +2536,7 @@ class BackendExpertAgent:
                             "[%s] WORKFLOW   [%d] Build failed after QA artifact persist: %s",
                             task_id,
                             iteration,
-                            build_errors[:500],
+                            build_errors,
                         )
                         code_on_branch = _read_repo_code(repo_path)
                         from qa_agent.models import QAInput as QAI
@@ -3614,7 +3614,7 @@ class BackendExpertAgent:
                 security_count,
                 code_review_count,
             )
-            logger.info("Backend problem-solving header for LLM:\n%s", context_parts[0][:800])
+            logger.info("Backend problem-solving header for LLM:\n%s", context_parts[0])
         if input_data.task_plan:
             plan_instruction = (
                 "**IMPLEMENTATION PLAN (follow this):**\n"
@@ -3779,9 +3779,9 @@ class BackendExpertAgent:
             if not data.get("needs_clarification", False) and total_chars == 0 and attempt < 3:
                 response_preview = ""
                 if data.get("content"):
-                    response_preview = (str(data["content"]) or "")[:200]
+                    response_preview = (str(data["content"]) or "")
                 elif data:
-                    response_preview = str(data)[:200]
+                    response_preview = str(data)
                 logger.warning(
                     "Backend: produced no files and no code (failure_class=empty_completion); re-prompting (attempt %d/4) | prompt_len=%d response_len=%d raw_keys=%s content_preview=%s",
                     attempt + 1,

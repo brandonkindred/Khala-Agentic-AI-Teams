@@ -36,6 +36,6 @@ def request_design_assets(
         status="pending",
         artifacts=[
             "Design request queued; attach a design service when available.",
-            f"Brand direction: {positioning[:100]}..." if positioning else "No positioning yet.",
+            f"Brand direction: {positioning}..." if positioning else "No positioning yet.",
         ],
     )

@@ -56,9 +56,9 @@ def _run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
             ReviewIssue(
                 source="build_specialist",
                 severity="critical",
-                description=(f.message or f.raw_excerpt or "")[:500],
-                file_path=(f.file_path or "")[:300],
-                recommendation=rec[:500],
+                description=(f.message or f.raw_excerpt or ""),
+                file_path=(f.file_path or ""),
+                recommendation=rec,
             )
         )
     if not issues:
@@ -66,7 +66,7 @@ def _run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
             ReviewIssue(
                 source="build_specialist",
                 severity="critical",
-                description=result.error_summary[:500],
+                description=result.error_summary,
                 recommendation="Fix the build error.",
             )
         )

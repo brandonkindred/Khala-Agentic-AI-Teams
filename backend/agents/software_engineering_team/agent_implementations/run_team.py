@@ -70,7 +70,7 @@ def main() -> None:
     architecture = arch_output.architecture
     logger.info(
         "Architecture: %s",
-        architecture.overview[:200] + "..."
+        architecture.overview + "..."
         if len(architecture.overview) > 200
         else architecture.overview,
     )
@@ -199,9 +199,7 @@ def main() -> None:
     print("\n--- Team pipeline complete ---")
     print(
         "Architecture:",
-        architecture.overview[:300] + "..."
-        if len(architecture.overview) > 300
-        else architecture.overview,
+        architecture.overview,
     )
     print("\nTasks executed:", assignment.execution_order)
 

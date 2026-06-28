@@ -1888,7 +1888,7 @@ def main() -> None:
     print("\n--- Outline ---\n")
     print(content_plan_to_outline_markdown(plan))
     print("\n--- Draft ---\n")
-    print(draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else ""))
+    print(draft_result.draft)
     print(f"\nStatus: {status}")
     print(f"Artifacts written to {work_dir}")
 

@@ -146,7 +146,7 @@ class JobMatchingStore:
             cur.execute(
                 "UPDATE job_matching_runs SET status = %s, error = %s, completed_at = %s "
                 "WHERE run_id = %s",
-                (RUN_STATUS_FAILED, error[:2000], _now(), run_id),
+                (RUN_STATUS_FAILED, error, _now(), run_id),
             )
 
     @timed_query(store=_STORE, op="list_runs")

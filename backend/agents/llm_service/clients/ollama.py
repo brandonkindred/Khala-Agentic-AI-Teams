@@ -1276,7 +1276,7 @@ class OllamaLLMClient(LLMClient):
                                 ):
                                     hint = " If using Ollama Cloud with qwen3.5, try passing think=False."
                                 last_error = LLMTemporaryError(
-                                    f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}.{hint}",
+                                    f"LLM server error {status} after {attempt + 1} attempt(s): {response.text}.{hint}",
                                     status_code=status,
                                 )
                                 if _retry_transient_step(
@@ -1292,7 +1292,7 @@ class OllamaLLMClient(LLMClient):
                                 )
                                 raise last_error
                             if 400 <= status < 500:
-                                err_text = response.text[:500]
+                                err_text = response.text
                                 self._log_llm_server_error(
                                     status,
                                     response.text,
@@ -1304,7 +1304,7 @@ class OllamaLLMClient(LLMClient):
                                     "not found" in err_text.lower() or "model" in err_text.lower()
                                 ):
                                     raise LLMPermanentError(
-                                        f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text[:200]}",
+                                        f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text}",
                                         status_code=status,
                                     )
                                 if status == 401:
@@ -1314,7 +1314,7 @@ class OllamaLLMClient(LLMClient):
                                         else " Check that the key is valid and not expired."
                                     )
                                     raise LLMPermanentError(
-                                        f"LLM unauthorized (401): {err_text[:200]}.{auth_hint}",
+                                        f"LLM unauthorized (401): {err_text}.{auth_hint}",
                                         status_code=status,
                                     )
                                 raise LLMPermanentError(
@@ -1328,7 +1328,7 @@ class OllamaLLMClient(LLMClient):
                                 reason="unexpected status",
                             )
                             raise LLMPermanentError(
-                                f"Unexpected LLM response status {status}: {response.text[:200]}",
+                                f"Unexpected LLM response status {status}: {response.text}",
                                 status_code=status,
                             )
             except LLMPermanentError:

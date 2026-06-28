@@ -121,7 +121,7 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     language = input_data.language.strip().lower() if input_data.language else ""
     if not language:
         # Fallback guess for legacy callers that did not declare a language.
-        language = "python" if "def " in code_chunk[:500] else "typescript"
+        language = "python" if "def " in code_chunk else "typescript"
 
     context_parts = [CHUNK_REVIEW_NOTE]
     if input_data.segment_note:

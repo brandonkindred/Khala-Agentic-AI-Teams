@@ -90,7 +90,7 @@ def _run_general_microtask(
     """Use the LLM to implement a general (non-specialist) microtask."""
     arch_ctx = ""
     if architecture:
-        arch_ctx = architecture.overview[:2000]
+        arch_ctx = architecture.overview
 
     prompt = EXECUTION_PROMPT.format(
         language_conventions=_language_conventions(language),
@@ -490,7 +490,7 @@ def run_execution_with_review_gates(
                     task_id,
                     mt.id,
                     config.code_review_max_retries,
-                    cr_result.summary[:200],
+                    cr_result.summary,
                 )
                 # Rollback: remove this microtask's files from all_files
                 for fk in microtask_file_keys:

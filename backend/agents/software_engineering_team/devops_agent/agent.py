@@ -26,7 +26,7 @@ MAX_SAME_BUILD_FAILURES = _int_env("SW_MAX_SAME_BUILD_FAILURES", 6)
 
 def _build_error_signature(build_errors: str) -> str:
     """Compute a signature for same-error detection. Uses first 800 chars."""
-    return (build_errors[:800] or build_errors).strip()
+    return (build_errors or build_errors).strip()
 
 
 def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
@@ -45,7 +45,7 @@ def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
         if f.exists() and f.is_file():
             try:
                 content = f.read_text(encoding="utf-8", errors="replace")
-                parts.append(f"**{name}:**\n```\n{content[:2000]}\n```")
+                parts.append(f"**{name}:**\n```\n{content}\n```")
             except (OSError, UnicodeDecodeError) as e:
                 logger.debug("Could not read %s: %s", f, e)
 
@@ -54,7 +54,7 @@ def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
     if pkg.exists() and pkg.is_file():
         try:
             content = pkg.read_text(encoding="utf-8", errors="replace")
-            parts.append(f"**package.json:**\n```\n{content[:2000]}\n```")
+            parts.append(f"**package.json:**\n```\n{content}\n```")
         except (OSError, UnicodeDecodeError) as e:
             logger.debug("Could not read %s: %s", pkg, e)
 
@@ -65,14 +65,14 @@ def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
             if wf.is_file():
                 try:
                     content = wf.read_text(encoding="utf-8", errors="replace")
-                    parts.append(f"**Existing {wf.name}:**\n```yaml\n{content[:1500]}\n```")
+                    parts.append(f"**Existing {wf.name}:**\n```yaml\n{content}\n```")
                 except (OSError, UnicodeDecodeError) as e:
                     logger.debug("Could not read workflow %s: %s", wf, e)
         for wf in workflows_dir.glob("*.yaml"):
             if wf.is_file():
                 try:
                     content = wf.read_text(encoding="utf-8", errors="replace")
-                    parts.append(f"**Existing {wf.name}:**\n```yaml\n{content[:1500]}\n```")
+                    parts.append(f"**Existing {wf.name}:**\n```yaml\n{content}\n```")
                 except (OSError, UnicodeDecodeError) as e:
                     logger.debug("Could not read workflow %s: %s", wf, e)
 
@@ -82,7 +82,7 @@ def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
         if m.exists() and m.is_file():
             try:
                 content = m.read_text(encoding="utf-8", errors="replace")
-                parts.append(f"**{main} (entry):**\n```\n{content[:800]}\n```")
+                parts.append(f"**{main} (entry):**\n```\n{content}\n```")
             except (OSError, UnicodeDecodeError) as e:
                 logger.debug("Could not read %s: %s", m, e)
             break
@@ -420,7 +420,7 @@ class DevOpsExpertAgent:
             if result.needs_clarification and result.clarification_requests:
                 return DevOpsWorkflowResult(
                     success=False,
-                    failure_reason=f"Clarification requested: {result.clarification_requests[0][:200]}",
+                    failure_reason=f"Clarification requested: {result.clarification_requests[0]}",
                     iterations=iteration,
                 )
 
@@ -448,7 +448,7 @@ class DevOpsExpertAgent:
                     )
                     return DevOpsWorkflowResult(
                         success=False,
-                        failure_reason=repeated_reason + " " + build_errors[:500],
+                        failure_reason=repeated_reason + " " + build_errors,
                         iterations=iteration,
                     )
                 logger.warning(
@@ -505,7 +505,7 @@ class DevOpsExpertAgent:
                             logger.error("DevOps WORKFLOW: %s", repeated_reason)
                             return DevOpsWorkflowResult(
                                 success=False,
-                                failure_reason=repeated_reason + " " + build_errors[:500],
+                                failure_reason=repeated_reason + " " + build_errors,
                                 iterations=iteration,
                             )
                         logger.warning(
@@ -531,9 +531,9 @@ class DevOpsExpertAgent:
             if consecutive_same_build_failures >= MAX_SAME_BUILD_FAILURES:
                 repeated_reason = (
                     f"Build failed {MAX_SAME_BUILD_FAILURES} times with the same error; "
-                    "stopping to avoid loop. Last error: " + build_errors[:800]
+                    "stopping to avoid loop. Last error: " + build_errors
                 )
-                logger.error("DevOps WORKFLOW: %s", repeated_reason[:800])
+                logger.error("DevOps WORKFLOW: %s", repeated_reason)
                 return DevOpsWorkflowResult(
                     success=False,
                     failure_reason=repeated_reason,
