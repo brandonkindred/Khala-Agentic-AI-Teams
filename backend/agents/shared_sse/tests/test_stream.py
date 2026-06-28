@@ -169,6 +169,36 @@ def test_sync_closes_when_subscription_detached_by_reaper() -> None:
     assert calls["unsubscribed"] == [("j", sub)]
 
 
+def test_sync_closed_with_queued_terminal_delivers_terminal_not_error() -> None:
+    # Race guard: cleanup_job enqueues the terminal event, THEN marks the sub
+    # closed. If the close flag is observed before the terminal is drained, the
+    # generator must still re-drain and deliver the real terminal — never a
+    # spurious eviction error on the normal completion path.
+    sub = _FakeSub()
+    subscribe, unsubscribe, _ = _bus(sub)
+
+    gen = sse_job_stream_sync(
+        subscribe=subscribe,
+        unsubscribe=unsubscribe,
+        job_id="j",
+        snapshot=lambda: None,
+        terminal_types=("complete",),
+        poll_interval=0.0,
+    )
+    assert next(gen) == SSE_KEEPALIVE  # empty, still attached
+
+    # Terminal published, then sub detached+closed (the cleanup_job ordering).
+    sub.events.append({"type": "complete", "ok": True})
+    sub.closed = True
+
+    out = [next(gen), next(gen)]  # complete frame, then done
+    assert '"type": "complete"' in out[0]
+    assert out[1] == sse_line({"type": "done"})
+    assert all('"type": "error"' not in line for line in out)
+    with pytest.raises(StopIteration):
+        next(gen)
+
+
 # ---------------------------------------------------------------------------
 # Async stream
 # ---------------------------------------------------------------------------
@@ -239,6 +269,32 @@ def test_async_closes_when_subscription_detached_by_reaper() -> None:
         assert await agen.__anext__() == SSE_KEEPALIVE  # empty, still attached
         sub.closed = True  # reaper detaches the subscription
         assert '"type": "error"' in await agen.__anext__()
+        assert await agen.__anext__() == sse_line({"type": "done"})
+        with pytest.raises(StopAsyncIteration):
+            await agen.__anext__()
+
+    asyncio.run(_drive())
+
+
+def test_async_closed_with_queued_terminal_delivers_terminal_not_error() -> None:
+    # Async counterpart of the race guard: a terminal queued before the close
+    # flag is observed must still be delivered, not replaced by an eviction error.
+    sub = _FakeSub()
+    subscribe, unsubscribe, _ = _bus(sub)
+
+    async def _drive():
+        agen = sse_job_stream_async(
+            subscribe=subscribe,
+            unsubscribe=unsubscribe,
+            job_id="run",
+            snapshot=lambda: None,
+            terminal_types=("complete",),
+            poll_interval=0.0,
+        )
+        assert await agen.__anext__() == SSE_KEEPALIVE
+        sub.events.append({"type": "complete", "ok": True})
+        sub.closed = True
+        assert '"type": "complete"' in await agen.__anext__()
         assert await agen.__anext__() == sse_line({"type": "done"})
         with pytest.raises(StopAsyncIteration):
             await agen.__anext__()

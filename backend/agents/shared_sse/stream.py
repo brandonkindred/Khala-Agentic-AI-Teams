@@ -107,9 +107,28 @@ def _drain_pass(sub: Any, terminal_types: Collection[str]) -> Tuple[List[str], b
     return lines, sent_terminal
 
 
-def _closed_lines() -> List[str]:
-    """Framed terminal lines for a subscription the bus detached (reaper eviction)."""
-    return [sse_line(_CLOSED_EVENT), sse_line(_DONE_EVENT)]
+def _closed_drain(sub: Any, terminal_types: Collection[str]) -> List[str]:
+    """Framed terminal lines for a subscription the bus just detached.
+
+    Preconditions:
+        - ``sub.closed`` is True (the bus has detached this subscription).
+    Postconditions:
+        - Re-drains ``sub.events`` once and returns those framed lines. The bus
+          enqueues a job's terminal event *before* marking the subscription
+          closed (``publish`` then ``cleanup_job``), and the close flag may be
+          observed between the caller's drain and this call, so an unread
+          terminal event can still be sitting in the deque — deliver it (with its
+          ``done``) when present. Only when no terminal event was drained (a
+          reaper eviction, which enqueues nothing) is the synthetic close frame
+          (``error`` + ``done``) emitted instead. This makes the close path
+          race-free: a normal completion never surfaces as a spurious eviction
+          error.
+    """
+    lines, sent_terminal = _drain_pass(sub, terminal_types)
+    if not sent_terminal:
+        lines.append(sse_line(_CLOSED_EVENT))
+        lines.append(sse_line(_DONE_EVENT))
+    return lines
 
 
 def sse_job_stream_sync(
@@ -155,11 +174,12 @@ def sse_job_stream_sync(
             if sent_terminal:
                 return
 
-            # The bus detached this subscription (idle past the TTL, or evicted
-            # to enforce the job cap): it will never receive another event, so
-            # close the stream now instead of pinging keepalives to the deadline.
+            # The bus detached this subscription (idle past the TTL, evicted to
+            # enforce the job cap, or cleaned up after its terminal event): it
+            # will never receive another event, so close the stream now instead
+            # of pinging keepalives to the deadline.
             if getattr(sub, "closed", False):
-                for line in _closed_lines():
+                for line in _closed_drain(sub, terminal_types):
                     yield line
                 return
 
@@ -203,11 +223,12 @@ async def sse_job_stream_async(
             if sent_terminal:
                 return
 
-            # The bus detached this subscription (idle past the TTL, or evicted
-            # to enforce the job cap): close the stream now rather than ping
-            # keepalives to the deadline (see the sync variant).
+            # The bus detached this subscription (idle past the TTL, evicted to
+            # enforce the job cap, or cleaned up after its terminal event): close
+            # the stream now rather than ping keepalives to the deadline (see the
+            # sync variant).
             if getattr(sub, "closed", False):
-                for line in _closed_lines():
+                for line in _closed_drain(sub, terminal_types):
                     yield line
                 return
 
