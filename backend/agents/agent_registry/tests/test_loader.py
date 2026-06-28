@@ -79,6 +79,37 @@ def _manifest(agent_id: str, name: str) -> AgentManifest:
     )
 
 
+def test_agent_state_spec_is_exported_from_package_root() -> None:
+    # AgentManifest.states is list[AgentStateSpec], so the spec must be reachable
+    # via the package-root import style like the other registry spec models.
+    import agent_registry
+
+    assert "AgentStateSpec" in agent_registry.__all__
+    spec = agent_registry.AgentStateSpec
+    assert spec is AgentManifest.model_fields["states"].annotation.__args__[0]
+
+
+def test_manifest_states_field_is_additive_and_backward_compatible() -> None:
+    # `states` is an optional additive field: a manifest validates with it omitted
+    # (defaults to []) and with a populated list — old YAML keeps loading.
+    from agent_registry.models import AgentStateSpec
+
+    legacy = _manifest("gen.legacy", "Legacy")
+    assert legacy.states == []
+
+    with_states = AgentManifest.model_validate(
+        {
+            **legacy.model_dump(),
+            "states": [
+                {"key": "planning", "label": "Planning", "system_prompt": "plan"},
+                {"key": "executing", "label": "Executing", "system_prompt": "exec"},
+            ],
+        }
+    )
+    assert [s.key for s in with_states.states] == ["planning", "executing"]
+    assert isinstance(with_states.states[0], AgentStateSpec)
+
+
 def test_register_installs_and_overwrites() -> None:
     reg = AgentRegistry([], {})
     first = _manifest("gen.a", "First")

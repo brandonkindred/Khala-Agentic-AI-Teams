@@ -14,6 +14,7 @@ from .loader import AgentRegistry, get_registry
 from .models import (
     AgentDetail,
     AgentManifest,
+    AgentStateSpec,
     AgentSummary,
     CognitionKnowledgeGraphSpec,
     CognitionMemorySpec,
@@ -28,6 +29,7 @@ from .models import (
 __all__ = [
     "AgentDetail",
     "AgentManifest",
+    "AgentStateSpec",
     "AgentRegistry",
     "AgentSummary",
     "CognitionKnowledgeGraphSpec",

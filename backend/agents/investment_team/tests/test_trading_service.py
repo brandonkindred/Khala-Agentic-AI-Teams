@@ -12,7 +12,9 @@ Covers:
 from __future__ import annotations
 
 import textwrap
+from types import SimpleNamespace
 from typing import Dict, List
+from unittest.mock import patch
 
 import pytest
 
@@ -39,6 +41,7 @@ from investment_team.trading_service.modes.backtest import run_backtest
 from investment_team.trading_service.service import (
     _MAX_ORDER_EVENTS,
     TradingService,
+    TradingServiceResult,
     _increment_rejection,
     _record_event,
 )
@@ -1196,3 +1199,385 @@ def test_compiled_src_helper_canonicalizes_nonfinite_volume() -> None:
     assert math.isfinite(src(stub, nan_bar, "volume"))
     # Non-volume sources are unaffected.
     assert src(stub, good_bar, "close") == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for the helpers extracted from the per-bar event loop.
+# These methods do not depend on instance state, so they are exercised on a
+# bare instance (``__new__``) with lightweight fakes; the full per-bar loop is
+# additionally covered end-to-end by the golden snapshot + simulator-invariant
+# suites and the integration tests above.
+# ---------------------------------------------------------------------------
+
+
+def _bare_service() -> "TradingService":
+    return TradingService.__new__(TradingService)
+
+
+def test_drain_unfilled_at_eos_empty_queue_is_noop() -> None:
+    """An empty pending queue records nothing and leaves diagnostics untouched."""
+    result = TradingServiceResult()
+    _bare_service()._drain_unfilled_at_eos([], None, result)
+    assert result.execution_diagnostics.orders_unfilled == 0
+    assert result.execution_diagnostics.last_order_events == []
+
+
+def test_drain_unfilled_at_eos_records_end_of_stream() -> None:
+    """Each still-pending order is counted and recorded as an end_of_stream unfilled event."""
+    result = TradingServiceResult()
+    req = SimpleNamespace(
+        symbol="AAPL",
+        side=SimpleNamespace(value="buy"),
+        order_type=SimpleNamespace(value="market"),
+    )
+    prev_bar = SimpleNamespace(timestamp="2024-01-05T00:00:00")
+    _bare_service()._drain_unfilled_at_eos([req, req], prev_bar, result)
+    assert result.execution_diagnostics.orders_unfilled == 2
+    events = result.execution_diagnostics.last_order_events
+    assert len(events) == 2
+    assert all(e.event_type == "unfilled" and e.reason == "end_of_stream" for e in events)
+    assert events[-1].timestamp == "2024-01-05T00:00:00"
+
+
+def test_drain_unfilled_at_eos_without_prev_bar() -> None:
+    """With prev_bar None (no bars ever produced), recorded events carry timestamp=None."""
+    result = TradingServiceResult()
+    req = SimpleNamespace(
+        symbol="AAPL",
+        side=SimpleNamespace(value="buy"),
+        order_type=SimpleNamespace(value="market"),
+    )
+    _bare_service()._drain_unfilled_at_eos([req], None, result)
+    assert result.execution_diagnostics.orders_unfilled == 1
+    assert result.execution_diagnostics.last_order_events[-1].timestamp is None
+
+
+def test_finalize_result_success_records_open_positions() -> None:
+    """On the success path (fill_sim supplied) open-position entry reasons are recorded."""
+    result = TradingServiceResult()
+    eod_buffer = SimpleNamespace(materialize=lambda: ["curve"])
+    harness = SimpleNamespace(probe_events=["probe"])
+    fill_sim = SimpleNamespace(
+        portfolio=SimpleNamespace(
+            positions={
+                "AAPL": SimpleNamespace(entry_reason="breakout"),
+                "MSFT": SimpleNamespace(entry_reason=""),  # falsy → skipped
+            }
+        )
+    )
+    out = _bare_service()._finalize_result(result, eod_buffer, harness, fill_sim=fill_sim)
+    assert out is result
+    assert result.streaming_equity_curve == ["curve"]
+    assert result.probe_events == ["probe"]
+    assert result.open_position_entry_reasons == ["breakout"]
+
+
+def test_finalize_result_abort_omits_open_positions() -> None:
+    """Without fill_sim (abort path) the open-position list is left untouched."""
+    result = TradingServiceResult()
+    eod_buffer = SimpleNamespace(materialize=lambda: [])
+    harness = SimpleNamespace(probe_events=[])
+    _bare_service()._finalize_result(result, eod_buffer, harness)
+    assert result.open_position_entry_reasons == []
+
+
+def test_abort_result_classifies_lookahead_violations() -> None:
+    """LookAheadError and a lookahead StrategyRuntimeError both set lookahead_violation."""
+    from investment_team.execution.bar_safety import LookAheadError
+    from investment_team.trading_service.strategy.streaming_harness import StrategyRuntimeError
+
+    eod_buffer = SimpleNamespace(materialize=lambda: [])
+    harness = SimpleNamespace(probe_events=[])
+    svc = _bare_service()
+
+    look_ahead = LookAheadError(
+        order_id="o1", submitted_at="2024-01-02", fill_bar_timestamp="2024-01-02"
+    )
+    r1 = svc._abort_result(TradingServiceResult(), look_ahead, eod_buffer, harness)
+    assert r1.error == str(look_ahead)
+    assert r1.lookahead_violation is True
+
+    r2 = svc._abort_result(
+        TradingServiceResult(),
+        StrategyRuntimeError("future read", etype="lookahead_violation"),
+        eod_buffer,
+        harness,
+    )
+    assert r2.lookahead_violation is True
+
+    r3 = svc._abort_result(
+        TradingServiceResult(),
+        StrategyRuntimeError("boom", etype="runtime_error"),
+        eod_buffer,
+        harness,
+    )
+    assert r3.error == "boom"
+    assert r3.lookahead_violation is False
+
+
+def test_process_one_bar_warmup_skips_fills_and_does_not_count() -> None:
+    """A warm-up bar skips fills/MTM (bars_processed unchanged), still appends the bar
+    and applies the strategy response fetched via the thunk."""
+    svc = _bare_service()
+    result = TradingServiceResult()
+    pending_in = [SimpleNamespace(symbol="AAPL")]
+    cur_bar = SimpleNamespace(symbol="AAPL", timestamp="2024-01-02T00:00:00", close=10.0)
+    fetched: dict = {}
+
+    def _fetch() -> tuple:
+        fetched["called"] = True
+        return ([], [])
+
+    with (
+        patch.object(svc, "_append_streaming_bar") as append_mock,
+        patch.object(svc, "_process_bar_strategy_response") as resp_mock,
+    ):
+        out_pending = svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=None,
+            is_warmup=True,
+            fetch_response=_fetch,
+            pending_for_prev=pending_in,
+            portfolio=None,
+            order_book=None,
+            fill_sim=None,
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=None,
+            position_tracker={},
+            engine_exits=None,
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    # Warm-up bars are not counted and the fill path (which would need the
+    # portfolio/fill_sim fakes) is skipped entirely.
+    assert result.bars_processed == 0
+    assert fetched.get("called") is True
+    # The current bar is appended to the streaming views, and the strategy
+    # response from the thunk is forwarded verbatim with is_warmup=True.
+    append_mock.assert_called_once_with({}, cur_bar)
+    resp_mock.assert_called_once()
+    resp_kwargs = resp_mock.call_args.kwargs
+    assert resp_kwargs["cur_bar"] is cur_bar
+    assert resp_kwargs["bar_orders"] == []
+    assert resp_kwargs["bar_cancels"] == []
+    assert resp_kwargs["is_warmup"] is True
+    # The pending queue passes through unchanged on warm-up bars.
+    assert out_pending is pending_in
+
+
+def test_process_one_bar_normal_path_processes_fills_and_counts() -> None:
+    """A post-warm-up bar processes fills, marks to market, stamps EOD equity, and
+    increments bars_processed; the thunk's orders/cancels are forwarded."""
+    svc = _bare_service()
+    svc._exit_rules = []  # skip the engine position-tracker update
+    result = TradingServiceResult()
+    cur_bar = SimpleNamespace(symbol="AAPL", timestamp="2024-01-03T00:00:00", close=12.0)
+    outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
+    fill_sim = SimpleNamespace(process_bar=lambda _cur, next_bar=None: outcome)
+    mtm_calls: list = []
+    eod_records: list = []
+    portfolio = SimpleNamespace(
+        update_last_price=lambda sym, px: mtm_calls.append((sym, px)),
+        mark_to_market=lambda: 100_000.0,
+    )
+    eod_buffer = SimpleNamespace(record=lambda ts, eq: eod_records.append((ts, eq)))
+
+    def _fetch() -> tuple:
+        return ([{"order": 1}], [{"cancel": 2}])
+
+    with (
+        patch.object(svc, "_append_streaming_bar") as append_mock,
+        patch.object(svc, "_process_bar_strategy_response") as resp_mock,
+    ):
+        out_pending = svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=None,  # no prior bar → date-change expiry skipped
+            is_warmup=False,
+            fetch_response=_fetch,
+            pending_for_prev=[],  # empty → pending-submit block skipped
+            portfolio=portfolio,
+            order_book=None,
+            fill_sim=fill_sim,
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=eod_buffer,
+            position_tracker={},
+            engine_exits=None,
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    assert result.bars_processed == 1  # counted after fetch_response on the non-warmup path
+    assert mtm_calls == [("AAPL", 12.0)]
+    assert eod_records == [("2024-01-03T00:00:00", 100_000.0)]
+    append_mock.assert_called_once_with({}, cur_bar)
+    resp_kwargs = resp_mock.call_args.kwargs
+    assert resp_kwargs["bar_orders"] == [{"order": 1}]
+    assert resp_kwargs["bar_cancels"] == [{"cancel": 2}]
+    assert resp_kwargs["is_warmup"] is False
+    assert out_pending == []
+
+
+def test_process_one_bar_expires_day_orders_on_date_change() -> None:
+    """When cur_bar's date differs from prev_bar's, fill_sim.expire_day_orders is
+    invoked and each expired order is recorded as a day_expired unfilled diagnostic."""
+    svc = _bare_service()
+    svc._exit_rules = []
+    result = TradingServiceResult()
+    prev_bar = SimpleNamespace(timestamp="2024-01-02T00:00:00")
+    cur_bar = SimpleNamespace(symbol="AAPL", timestamp="2024-01-03T00:00:00", close=12.0)
+    expired_order = SimpleNamespace(
+        request=SimpleNamespace(
+            symbol="AAPL",
+            side=SimpleNamespace(value="buy"),
+            order_type=SimpleNamespace(value="limit"),
+        )
+    )
+    outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
+    expire_calls: list = []
+
+    def _expire(bar: object) -> list:
+        expire_calls.append(bar)
+        return [expired_order]
+
+    fill_sim = SimpleNamespace(
+        expire_day_orders=_expire,
+        process_bar=lambda _cur, next_bar=None: outcome,
+    )
+    portfolio = SimpleNamespace(update_last_price=lambda *a: None, mark_to_market=lambda: 100_000.0)
+    eod_buffer = SimpleNamespace(record=lambda *a: None)
+
+    with (
+        patch.object(svc, "_append_streaming_bar"),
+        patch.object(svc, "_process_bar_strategy_response"),
+    ):
+        svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=prev_bar,
+            is_warmup=False,
+            fetch_response=lambda: ([], []),
+            pending_for_prev=[],
+            portfolio=portfolio,
+            order_book=None,
+            fill_sim=fill_sim,
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=eod_buffer,
+            position_tracker={},
+            engine_exits=None,
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    assert expire_calls == [cur_bar]
+    assert result.execution_diagnostics.orders_unfilled == 1
+    day_expired = [
+        e for e in result.execution_diagnostics.last_order_events if e.reason == "day_expired"
+    ]
+    assert len(day_expired) == 1
+    assert day_expired[0].event_type == "unfilled"
+
+
+def test_process_one_bar_binds_engine_exit_to_entry() -> None:
+    """A queued order whose client_order_id has an engine-exit binding gets that
+    binding pinned onto the submitted order, and the binding is consumed."""
+    svc = _bare_service()
+    svc._exit_rules = []
+    svc._default_unfilled_policy = None
+    result = TradingServiceResult()
+    # Same calendar date as prev_bar → the day-order expiry branch is skipped.
+    prev_bar = SimpleNamespace(timestamp="2024-01-03T00:00:00")
+    cur_bar = SimpleNamespace(symbol="AAPL", timestamp="2024-01-03T12:00:00", close=12.0)
+    req = SimpleNamespace(
+        client_order_id="co-1",
+        unfilled_policy=None,
+        attached_stop_loss=None,
+        attached_take_profit=None,
+        symbol="AAPL",
+        side=SimpleNamespace(value="buy"),
+        order_type=SimpleNamespace(value="market"),
+    )
+    submitted_po = SimpleNamespace(working_against_entry_order_id=None)
+    order_book = SimpleNamespace(submit=lambda *a, **k: submitted_po)
+    engine_exits = SimpleNamespace(engine_exit_bindings={"co-1": "entry-123"})
+    outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
+    fill_sim = SimpleNamespace(process_bar=lambda _cur, next_bar=None: outcome)
+    portfolio = SimpleNamespace(update_last_price=lambda *a: None, mark_to_market=lambda: 100_000.0)
+    eod_buffer = SimpleNamespace(record=lambda *a: None)
+
+    with (
+        patch.object(svc, "_append_streaming_bar"),
+        patch.object(svc, "_process_bar_strategy_response"),
+    ):
+        svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=prev_bar,
+            is_warmup=False,
+            fetch_response=lambda: ([], []),
+            pending_for_prev=[req],
+            portfolio=portfolio,
+            order_book=order_book,
+            fill_sim=fill_sim,
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=eod_buffer,
+            position_tracker={},
+            engine_exits=engine_exits,
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    assert submitted_po.working_against_entry_order_id == "entry-123"
+    assert engine_exits.engine_exit_bindings == {}  # binding consumed via pop
+    assert result.execution_diagnostics.orders_accepted == 1
+
+
+def test_process_one_bar_updates_position_tracker_when_exit_rules_present() -> None:
+    """With a non-empty ``_exit_rules``, the post-fill position tracker is refreshed
+    for the current bar."""
+    svc = _bare_service()
+    svc._exit_rules = ["a-rule"]  # non-empty → tracker refresh runs
+    result = TradingServiceResult()
+    cur_bar = SimpleNamespace(symbol="AAPL", timestamp="2024-01-03T00:00:00", close=12.0)
+    outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
+    fill_sim = SimpleNamespace(process_bar=lambda _cur, next_bar=None: outcome)
+    portfolio = SimpleNamespace(update_last_price=lambda *a: None, mark_to_market=lambda: 100_000.0)
+    eod_buffer = SimpleNamespace(record=lambda *a: None)
+    tracker: dict = {}
+
+    with (
+        patch.object(svc, "_append_streaming_bar"),
+        patch.object(svc, "_process_bar_strategy_response"),
+        patch.object(svc, "_update_position_tracker") as tracker_mock,
+    ):
+        svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=None,
+            is_warmup=False,
+            fetch_response=lambda: ([], []),
+            pending_for_prev=[],
+            portfolio=portfolio,
+            order_book=None,
+            fill_sim=fill_sim,
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=eod_buffer,
+            position_tracker=tracker,
+            engine_exits=None,
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    tracker_mock.assert_called_once_with(tracker=tracker, cur_bar=cur_bar, portfolio=portfolio)

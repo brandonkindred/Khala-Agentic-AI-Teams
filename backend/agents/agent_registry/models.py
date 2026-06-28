@@ -126,6 +126,25 @@ class CognitionSpec(BaseModel):
     )
 
 
+class AgentStateSpec(BaseModel):
+    """One persisted operating-state persona (planning/executing/researching).
+
+    Metadata only — the registry never consumes it; nothing reads it at invoke
+    time. It rides along with the saved manifest so an authored agent's behavioral
+    states survive ``register()`` / ``get()`` and are available to clone-back.
+    Runtime binding is the same deferred follow-up the persona ``system_prompt``
+    already carries.
+
+    ``key`` is a plain ``str`` (not an enum) so the registry never fails validation
+    on persisted data; the authoring layer (``agent_studio``) enforces the fixed
+    key set at write time.
+    """
+
+    key: str
+    label: str
+    system_prompt: str
+
+
 class SourceInfo(BaseModel):
     """Traceability — where the agent lives in the codebase."""
 
@@ -155,6 +174,12 @@ class AgentManifest(BaseModel):
     invoke: InvokeSpec | None = None
     sandbox: SandboxSpec | None = None
     cognition: CognitionSpec | None = None
+    states: list[AgentStateSpec] = Field(
+        default_factory=list,
+        description="Seeded operating-state personas (planning/executing/researching). "
+        "Additive metadata — inert until the deferred runtime-binding follow-up; absent "
+        "on agents authored before this field existed.",
+    )
     source: SourceInfo
 
 

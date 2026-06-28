@@ -52,10 +52,18 @@ _RETRY_ANY_METHOD_ERRORS = (httpx.ConnectError, httpx.PoolTimeout)
 # Transport errors where the request may already have been sent before the
 # failure (the server closed a stale keep-alive connection, or timed out
 # mid-exchange), so they are retried ONLY for idempotent methods.
+# ``RemoteProtocolError``/``ReadError``/``WriteError`` are all the same
+# stale-keep-alive failure mode — the server (or a proxy/LB) reset a pooled idle
+# socket and we discover it mid-exchange (ReadError is ECONNRESET while reading
+# the response; WriteError its write-side analog). ``ReadError``/``WriteError``
+# are ``httpx.NetworkError`` subclasses, distinct from the ``*Timeout`` errors
+# above, so there is no overlap with the existing tuples.
 _RETRY_IDEMPOTENT_ONLY_ERRORS = (
     httpx.ReadTimeout,
     httpx.WriteTimeout,
     httpx.RemoteProtocolError,
+    httpx.ReadError,
+    httpx.WriteError,
 )
 
 
@@ -159,13 +167,15 @@ class JobServiceClient:
                 * ``ConnectError`` / ``PoolTimeout`` — the request provably never
                   reached the server (no connection was established / acquired),
                   so they are retried for ANY method.
-                * ``ReadTimeout`` / ``WriteTimeout`` / ``RemoteProtocolError`` —
-                  the request may already have been sent (e.g. a stale keep-alive
-                  connection the server closed, or a timeout mid-exchange), so
-                  they are retried ONLY for idempotent methods
-                  (GET/HEAD/OPTIONS/PUT/DELETE). For non-idempotent methods (e.g.
-                  POST) they propagate immediately — replaying could duplicate
-                  the operation, and the caller must decide how to recover.
+                * ``ReadTimeout`` / ``WriteTimeout`` / ``RemoteProtocolError`` /
+                  ``ReadError`` / ``WriteError`` — the request may already have
+                  been sent (e.g. a stale keep-alive connection the server reset,
+                  surfacing as a disconnect or ECONNRESET mid-exchange, or a
+                  timeout mid-exchange), so they are retried ONLY for idempotent
+                  methods (GET/HEAD/OPTIONS/PUT/DELETE). For non-idempotent
+                  methods (e.g. POST) they propagate immediately — replaying could
+                  duplicate the operation, and the caller must decide how to
+                  recover.
                 * ``HTTPStatusError`` is never retried.
         """
         delays = [0.5, 1.0, 2.0]
