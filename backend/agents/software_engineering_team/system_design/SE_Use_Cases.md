@@ -48,7 +48,7 @@ sequenceDiagram
     participant ARCH as Architecture Expert
     participant CT as Coding Team
     participant TL as Tech Lead
-    participant SWE as Senior SWE(s)
+    participant V2 as frontend_v2/backend_v2
     participant QG as Quality Gates
 
     Note over ORC: Phase 1: product_analysis
@@ -85,8 +85,8 @@ sequenceDiagram
         CT->>TL: run_assignments(ready, free)
         TL-->>CT: assignments[]
 
-        CT->>SWE: run_implement(task)
-        SWE-->>CT: files, feature_branch
+        CT->>V2: run_implement(task)
+        V2-->>CT: branch, summary
 
         CT->>QG: build → lint → code_review
         alt Gates pass

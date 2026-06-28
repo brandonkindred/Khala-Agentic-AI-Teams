@@ -3,13 +3,13 @@
 The coding-team status endpoint surfaces *which* agents exist and what each is doing, so the
 UI can render per-agent cards (which agent is working now, a status per agent, what the team
 is working on). The roster is derived — not stored — from four pieces of already-persisted
-job state: the stack specs (the engineer roster), the agent->task map (who holds which
+job state: the stack specs (the worker roster), the agent->task map (who holds which
 non-merged task), the task-graph snapshot (task titles + statuses), and the current_activity
 (the single live review sub-step). Keeping the derivation here, as a pure function, keeps the
 status endpoint thin and makes the logic unit-testable without a job store.
 
-The Tech Lead is the coordinator: it is never present in ``agent_task_map`` (only Senior SWEs
-are assigned tasks via ``TaskGraphService.assign_task_to_agent``), so its card is always
+The Tech Lead is the coordinator: it is never present in ``agent_task_map`` (only
+implementation workers are assigned tasks via ``TaskGraphService.assign_task_to_agent``), so its card is always
 synthesized here regardless of the persisted state.
 """
 
@@ -26,10 +26,11 @@ TECH_LEAD_AGENT_ID = "tech_lead"
 # The ``current_activity.agent`` literal the Tech Lead's merge review reports under. The other
 # literal in the system is ``"code_review"`` (a quality gate that runs on an engineer's task).
 _TECH_LEAD_ACTIVITY_AGENT = "tech_lead_review"
+_REVIEWING_STEP = "reviewing"
 
 
 class StackRosterEntry(NamedTuple):
-    """One Senior SWE slot derived from a stack spec. ``agent_id == display_name`` (the
+    """One implementation-worker slot derived from a stack spec. ``agent_id == display_name`` (the
     agent_task_map key the orchestrator writes); ``tools_services`` is the stack's tool list."""
 
     agent_id: str
@@ -40,7 +41,7 @@ class StackRosterEntry(NamedTuple):
 def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[StackRosterEntry]:
     """Map raw stack specs to ``(agent_id, display_name, tools_services)``, one per stack.
 
-    This MUST stay faithful to how the orchestrator names Senior SWE agents (the
+    This MUST stay faithful to how the orchestrator names implementation workers (the
     ``run_coding_team_orchestrator`` worker-build loop), because the returned ``agent_id`` is
     the exact key the orchestrator writes into ``agent_task_map``. A stack with no name falls
     back to ``f"stack_{i}"``, and that same value is the agent id — so the two sides cannot
@@ -111,27 +112,27 @@ def build_agent_statuses(
     corrupt job record must degrade the cards, not break the status endpoint. The parameter type
     hints describe the expected/normal shapes; non-list/non-dict/None inputs (and non-hashable
     task ids) are coerced or skipped defensively rather than rejected. The roster is
-    the Tech Lead (always, first) followed by one Senior SWE per entry in ``stack_specs``.
+    the Tech Lead (always, first) followed by one implementation worker per entry in ``stack_specs``.
 
     Preconditions:
         - ``stack_specs`` is a list of stack dicts (may be empty — old or SE-pipeline records
-          carry none, which yields a Tech-Lead-only roster). Engineer ids are derived from it
+          carry none, which yields a Tech-Lead-only roster). Worker ids are derived from it
           via :func:`derive_stack_roster`, matching the orchestrator's assignment keys.
-        - ``agent_task_map`` maps an engineer ``agent_id`` to the id of its current non-merged
+        - ``agent_task_map`` maps a worker ``agent_id`` to the id of its current non-merged
           task (the only entries the orchestrator ever writes).
         - ``task_graph_snapshot`` is the list of task dicts (each with ``id``/``title``/``status``).
         - ``current_activity`` is the single live review sub-step dict, or None; only a dict is
           honoured.
         - ``phase`` is the job phase string, or None.
     Postconditions:
-        - Returns ``[tech_lead, *engineers]`` in stack order. Each engineer's ``status`` is
+        - Returns ``[tech_lead, *workers]`` in stack order. Each worker's ``status`` is
           ``working`` (its task is in_progress), ``in_review`` (its task is in_review), or
           ``idle`` (no live task). The Tech Lead is ``planning`` during ``task_graph``,
           ``reviewing`` while a merge review runs or any task is in_review, else ``idle``.
         - The single ``current_activity`` is overlaid onto exactly one agent: the Tech Lead
           when it is a ``tech_lead_review`` (checked first — that activity also carries the
-          engineer's task_id, which is still mapped while the task is in_review), otherwise the
-          engineer that owns the activity's task.
+          worker's task_id, which is still mapped while the task is in_review), otherwise the
+          worker that owns the activity's task.
     """
     # Coerce malformed inputs so the function never raises (derive_stack_roster guards stack_specs
     # itself). A corrupt record with e.g. task_graph_snapshot=None must degrade, not crash.
@@ -162,10 +163,10 @@ def build_agent_statuses(
         if activity is not None
         else {}
     )
-    overlay_for_engineers = overlay if activity_agent != _TECH_LEAD_ACTIVITY_AGENT else {}
+    overlay_for_workers = overlay if activity_agent != _TECH_LEAD_ACTIVITY_AGENT else {}
 
-    # --- Engineer cards (one per stack) ------------------------------------------------
-    engineers: List[AgentStatusEntry] = []
+    # --- Implementation worker cards (one per stack/team) -----------------------------
+    workers: List[AgentStatusEntry] = []
     overlay_used = False
     for agent_id, display_name, tools in derive_stack_roster(stack_specs):
         task_id = agent_task_map.get(agent_id)
@@ -179,23 +180,23 @@ def build_agent_statuses(
             # The map only ever holds in_progress/in_review tasks (merge/fail frees the agent),
             # so anything that is not in_review is active implementation work.
             status = "in_review" if task.get("status") == "in_review" else "working"
-        # Apply the overlay to the first engineer that owns the activity's task, once. The
+        # Apply the overlay to the first worker that owns the activity's task, once. The
         # ``activity_task_id`` truthy check keeps a task-less activity from matching an idle
-        # engineer (whose current_task_id is None) via ``None == None``.
+        # worker (whose current_task_id is None) via ``None == None``.
         fields: Dict[str, Any] = {}
         if (
-            overlay_for_engineers
+            overlay_for_workers
             and not overlay_used
             and activity_task_id
             and activity_task_id == current_task_id
         ):
-            fields = overlay_for_engineers
+            fields = overlay_for_workers
             overlay_used = True
-        engineers.append(
+        workers.append(
             AgentStatusEntry(
                 agent_id=agent_id,
-                role="senior_engineer",
-                display_name=f"Senior Engineer — {display_name}",
+                role="implementation_worker",
+                display_name=f"Implementation Worker - {display_name}",
                 stack=display_name,
                 tools_services=tools,
                 status=status,
@@ -211,7 +212,7 @@ def build_agent_statuses(
     if phase == "task_graph":
         tl_status = "planning"
     elif activity_agent == _TECH_LEAD_ACTIVITY_AGENT or any_in_review:
-        tl_status = "reviewing"
+        tl_status = _REVIEWING_STEP
     else:
         tl_status = "idle"
     tl_fields = overlay if activity_agent == _TECH_LEAD_ACTIVITY_AGENT else {}
@@ -225,4 +226,4 @@ def build_agent_statuses(
         **tl_fields,
     )
 
-    return [tech_lead, *engineers]
+    return [tech_lead, *workers]
