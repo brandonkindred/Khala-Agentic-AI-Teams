@@ -223,6 +223,18 @@ class _FakeCursor:
             self.rowcount = 1
             return
 
+        # Single-row read by name (under the team lock) — must precede the team-wide
+        # list select below, whose prefix this also matches. Keyed on the WHERE
+        # "and agent_name" so the list query's "ORDER BY agent_name" doesn't match.
+        if (
+            norm.startswith("select data_json from agentic_team_agents where team_id")
+            and "and agent_name" in norm
+        ):
+            team_id, agent_name = params
+            row = self._db["team_agents"].get((team_id, agent_name))
+            self._last_fetch_one = {"data_json": row["data_json"]} if row else None
+            return
+
         if norm.startswith("select data_json from agentic_team_agents where team_id"):
             (team_id,) = params
             rows = [

@@ -437,20 +437,42 @@ def test_manifests_endpoint_returns_original_for_registry_agent(client: TestClie
     assert manifests["Writer"]["id"].startswith("agentic_team_provisioning.")
 
 
-def test_manifests_endpoint_falls_back_when_registry_missing(client: TestClient) -> None:
-    """A registry-source agent whose manifest_id doesn't resolve in this process's
-    registry falls back to the generated wrapper rather than being omitted."""
+def test_manifests_endpoint_omits_unresolvable_registry_agent(client: TestClient) -> None:
+    """A registry-source agent whose manifest_id doesn't resolve in this process is
+    omitted (not advertised with a synthetic generated id that invoke would 404 on),
+    while a resolvable registry sibling is still returned."""
     team_id = _new_team()
-    orphan = AgenticTeamAgent(
-        agent_name="Orphan",
-        role="r",
-        skills=["x"],
-        source="registry",
-        manifest_id="not.in.registry",
+    store = AgenticTeamStore()
+    store.add_or_replace_team_agent(
+        team_id,
+        AgenticTeamAgent(
+            agent_name="Orphan",
+            role="r",
+            skills=["x"],
+            source="registry",
+            manifest_id="not.in.registry",
+        ),
     )
-    AgenticTeamStore().add_or_replace_team_agent(team_id, orphan)
+    # A resolvable registry sibling.
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
 
-    manifests = client.get(f"/teams/{team_id}/agents/manifests").json()["manifests"]
-    assert len(manifests) == 1
-    # Unresolvable original → stamped wrapper (still returned, not dropped).
-    assert manifests[0]["id"].startswith("agentic_team_provisioning.")
+    names = {
+        m["name"] for m in client.get(f"/teams/{team_id}/agents/manifests").json()["manifests"]
+    }
+    assert names == {"blogging.planner"}  # Orphan omitted, resolvable one kept
+
+
+def test_merge_generated_agents_invokes_on_merged(client: TestClient) -> None:
+    """``merge_generated_agents`` calls ``on_merged`` once, under the lock, with the
+    merged roster — the hook the chat-save path uses to register under the lock."""
+    team_id = _new_team()
+    seen: list[list[str]] = []
+
+    store = AgenticTeamStore()
+    merged = store.merge_generated_agents(
+        team_id,
+        [AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"])],
+        on_merged=lambda ms: seen.append([m.agent_name for m in ms]),
+    )
+    assert [m.agent_name for m in merged] == ["Writer"]
+    assert seen == [["Writer"]]  # called exactly once with the merged list
