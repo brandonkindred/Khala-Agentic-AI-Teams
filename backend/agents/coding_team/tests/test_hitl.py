@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import httpx
+
 from coding_team import hitl, job_store
 
 # --------------------------------------------------------------------------- convert / normalize
@@ -462,6 +464,38 @@ def test_wait_for_answers_heartbeat_failure_does_not_break_wait():
         raise RuntimeError("job service down")
 
     assert hitl.wait_for_answers("j", get_job, sleep=lambda s: None, heartbeat_fn=boom) is True
+
+
+def test_wait_for_answers_survives_transient_get_job_failure():
+    """A transient job-service read failure (e.g. a connection reset that outlived
+    the client's retry budget) must not kill the wait — the loop logs, backs off,
+    and re-reads, eventually returning once the flag clears."""
+    state = {"polls": 0}
+
+    def get_job(jid):
+        state["polls"] += 1
+        if state["polls"] in (2, 3):
+            raise httpx.ReadError("[Errno 104] Connection reset by peer")
+        return {"waiting_for_answers": state["polls"] < 5}
+
+    assert hitl.wait_for_answers("j", get_job, sleep=lambda s: None) is True
+    assert state["polls"] >= 5  # the two failing reads did not abort the loop
+
+
+def test_wait_for_answers_sustained_failure_times_out():
+    """If the read keeps failing past the timeout, the loop ends like any other
+    timeout (returns False) instead of propagating the exception."""
+    clock = {"t": 0.0}
+
+    def now():
+        clock["t"] += 10.0
+        return clock["t"]
+
+    def get_job(jid):
+        raise httpx.ReadError("[Errno 104] Connection reset by peer")
+
+    out = hitl.wait_for_answers("j", get_job, timeout_s=5.0, sleep=lambda s: None, now=now)
+    assert out is False
 
 
 def test_wait_for_answers_times_out():

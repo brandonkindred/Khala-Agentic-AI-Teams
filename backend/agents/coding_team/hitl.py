@@ -459,7 +459,21 @@ def wait_for_answers(
     timeout = timeout_s if timeout_s is not None else answer_wait_timeout_s()
     start = now()
     while now() - start < timeout:
-        data = get_job_fn(job_id) or {}
+        try:
+            data = get_job_fn(job_id) or {}
+        except Exception:
+            # A transient job-service read failure (e.g. a connection reset that
+            # outlived the client's own retry budget) must not kill the wait —
+            # treat it like a missed poll: log, back off, and re-read. The
+            # ``timeout`` bound still caps the total wait, so a sustained outage
+            # ends the loop the same way a timeout does.
+            logger.warning(
+                "answer-wait job read failed for job %s; retrying after poll interval",
+                job_id,
+                exc_info=True,
+            )
+            sleep(poll_interval_s)
+            continue
         if not data.get("waiting_for_answers", False):
             return True
         if is_terminal(data):
