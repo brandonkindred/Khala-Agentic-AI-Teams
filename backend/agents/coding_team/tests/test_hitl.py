@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import httpx
+import pytest
+
 from coding_team import hitl, job_store
 
 # --------------------------------------------------------------------------- convert / normalize
@@ -462,6 +465,88 @@ def test_wait_for_answers_heartbeat_failure_does_not_break_wait():
         raise RuntimeError("job service down")
 
     assert hitl.wait_for_answers("j", get_job, sleep=lambda s: None, heartbeat_fn=boom) is True
+
+
+def test_wait_for_answers_survives_transient_get_job_failure():
+    """A transient job-service read failure (e.g. a connection reset that outlived
+    the client's retry budget) must not kill the wait — the loop logs, backs off,
+    and re-reads, eventually returning once the flag clears."""
+    state = {"polls": 0}
+
+    def get_job(jid):
+        state["polls"] += 1
+        if state["polls"] in (2, 3):
+            raise httpx.ReadError("[Errno 104] Connection reset by peer")
+        return {"waiting_for_answers": state["polls"] < 5}
+
+    assert hitl.wait_for_answers("j", get_job, sleep=lambda s: None) is True
+    assert state["polls"] >= 5  # the two failing reads did not abort the loop
+
+
+def test_wait_for_answers_sustained_failure_times_out():
+    """If the read keeps failing, the loop must actually enter, hit the except path
+    each iteration, and end via the timeout bound (returns False) instead of
+    propagating the exception. The clock advances slowly enough (1s/check vs a 5s
+    timeout) that the loop body runs several times and ``get_job`` is exercised —
+    otherwise the test would be a false positive (loop never entered)."""
+    clock = {"t": 0.0}
+    calls = {"get_job": 0}
+
+    def now():
+        t = clock["t"]
+        clock["t"] += 1.0
+        return t
+
+    def get_job(jid):
+        calls["get_job"] += 1
+        raise httpx.ReadError("[Errno 104] Connection reset by peer")
+
+    out = hitl.wait_for_answers("j", get_job, timeout_s=5.0, sleep=lambda s: None, now=now)
+    assert out is False
+    assert calls["get_job"] >= 3  # the loop entered and exercised the except path repeatedly
+
+
+def test_wait_for_answers_renews_heartbeat_on_transient_read_failure():
+    """While reads keep failing, the loop must keep the liveness heartbeat fresh so a
+    second worker doesn't treat this still-alive loop as dead (stale
+    ``answer_wait_heartbeat_at``) and auto-resume the job elsewhere, double-driving it."""
+    state = {"polls": 0}
+    beats: list = []
+
+    def get_job(jid):
+        state["polls"] += 1
+        if state["polls"] <= 3:
+            raise httpx.ReadError("[Errno 104] Connection reset by peer")
+        return {"waiting_for_answers": False}  # outage clears -> flag down -> loop returns
+
+    assert hitl.wait_for_answers("j", get_job, sleep=lambda s: None, heartbeat_fn=beats.append) is True
+    assert len(beats) == 3  # one heartbeat per failed read; the 4th poll cleared and returned
+    for ts in beats:
+        assert "T" in ts  # ISO-8601 timestamps
+
+
+def test_wait_for_answers_propagates_non_transport_error():
+    """A non-transport exception (a programming bug, not a transient blip) must NOT be
+    swallowed by the read-retry path — it propagates so the bug surfaces immediately
+    instead of the loop silently spinning to its timeout."""
+
+    def get_job(jid):
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError, match="boom"):
+        hitl.wait_for_answers("j", get_job, sleep=lambda s: None)
+
+
+def test_wait_for_answers_propagates_permanent_transport_error():
+    """A permanent transport fault (e.g. an unsupported URL scheme) is not in the
+    transient set, so it propagates rather than being retried until timeout — a real
+    misconfiguration must surface, not hide behind a long wait."""
+
+    def get_job(jid):
+        raise httpx.UnsupportedProtocol("Request URL has an unsupported protocol.")
+
+    with pytest.raises(httpx.UnsupportedProtocol):
+        hitl.wait_for_answers("j", get_job, sleep=lambda s: None)
 
 
 def test_wait_for_answers_times_out():
