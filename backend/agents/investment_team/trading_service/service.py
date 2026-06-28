@@ -2797,11 +2797,6 @@ class TradingService:
             # trading day wins.
             eod_buffer.record(cur_bar.timestamp, equity)
 
-            # Track only post-warmup bars — Phase 4's signals_per_bar
-            # diagnostic divides trades by bars the strategy could actually
-            # have signaled on.
-            result.bars_processed += 1
-
             # Refresh engine-side per-position state for ``cur_bar.symbol``
             # based on the post-fill portfolio. No-op when exit_rules is empty.
             if self._exit_rules:
@@ -2822,6 +2817,19 @@ class TradingService:
         #    any orders it emits anyway are dropped as a safety net inside
         #    ``_process_bar_strategy_response``.
         bar_orders, bar_cancels = fetch_response()
+
+        # Count only post-warmup bars, and only after the strategy has been
+        # consulted for this bar — Phase 4's signals_per_bar diagnostic divides
+        # trades by bars the strategy could actually have signaled on. Placing
+        # the increment after ``fetch_response`` (the per-bar path's
+        # ``send_bar``) preserves the error-path behaviour: a strategy that
+        # raises before returning a response leaves ``bars_processed`` unchanged
+        # for that bar, so a first-bar crash does not fabricate a misleading
+        # ``signals_per_bar`` / ``low_signals_per_bar`` diagnostic. (No-op
+        # difference on the chunked path, where ``fetch_response`` cannot fail.)
+        if not is_warmup:
+            result.bars_processed += 1
+
         self._process_bar_strategy_response(
             cur_bar=cur_bar,
             bar_orders=bar_orders,
