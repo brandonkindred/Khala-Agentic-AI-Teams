@@ -4,27 +4,19 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from software_engineering_team.shared.tool_agent_base import (
-    BaseReviewToolAgent,
-    relevant_code_for_issue,
-)
+from software_engineering_team.shared.tool_agent_base import ReviewToolAgent
 
-from ...models import ReviewIssue, ToolAgentPhaseInput, ToolAgentPhaseOutput
+from ...models import ReviewIssue
 from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
 logger = logging.getLogger(__name__)
 
 MAX_RELEVANT_CODE_CHARS = 8_000
-
-
-def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) -> str:
-    """Return code context for a single issue: prefer issue's file, else first files."""
-    return relevant_code_for_issue(issue, current_files, MAX_RELEVANT_CODE_CHARS)
 
 
 def _run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
@@ -73,11 +65,12 @@ def _run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     return issues
 
 
-class BuildSpecialistAdapterAgent(BaseReviewToolAgent):
+class BuildSpecialistAdapterAgent(ReviewToolAgent):
     """Identifies all build issues in review and fixes them one at a time in problem_solve.
 
-    ``review`` is bespoke (it runs the frontend build); ``problem_solve`` and the
-    other lifecycle methods are inherited from :class:`BaseReviewToolAgent`.
+    ``review`` runs the frontend build via the shared ``build_runner`` path;
+    ``problem_solve`` and the other lifecycle methods are inherited from
+    :class:`ReviewToolAgent`.
     """
 
     name = "Build Specialist"
@@ -90,19 +83,6 @@ class BuildSpecialistAdapterAgent(BaseReviewToolAgent):
     default_recommendation = "Fix the build error."
     plan_recommendations = ["Ensure build config and dependencies are in scope."]
     plan_summary = "Build Specialist planning."
+    build_runner = staticmethod(_run_frontend_build_and_parse)
+    build_review_noun = "build issue(s)"
     _parse_single_issue = staticmethod(parse_problem_solving_single_issue_template)
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Run frontend build and return one issue per parsed failure (identify all issues)."""
-        if not inp.repo_path:
-            return ToolAgentPhaseOutput(summary="Build Specialist review skipped (no repo_path).")
-        path = Path(inp.repo_path).resolve()
-        if not path.exists():
-            return ToolAgentPhaseOutput(
-                summary="Build Specialist review skipped (repo path missing)."
-            )
-        issues = _run_frontend_build_and_parse(path)
-        return ToolAgentPhaseOutput(
-            issues=issues,
-            summary=f"Build Specialist review: {len(issues)} build issue(s) found.",
-        )
