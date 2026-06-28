@@ -1,7 +1,10 @@
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
+import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
+import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 
@@ -12,6 +15,16 @@ class StubAgentRunnerComponent {
   @Input() preselectedAgentId: string | null = null;
   @Output() readonly requestCatalogReturn = new EventEmitter<void>();
 }
+
+/** Stub the catalog + provisioning dashboard so the Build stage (the default
+ *  active stage) mounts without firing catalog HTTP / provisioning polling. */
+@Component({ selector: 'app-agent-catalog', standalone: true, template: '' })
+class StubAgentCatalogComponent {
+  @Output() readonly requestRun = new EventEmitter<string>();
+}
+
+@Component({ selector: 'app-agent-provisioning-dashboard', standalone: true, template: '' })
+class StubProvisioningDashboardComponent {}
 
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
@@ -24,6 +37,10 @@ describe('AgentStudioShellComponent', () => {
       .overrideComponent(AgentStudioTestAgentComponent, {
         remove: { imports: [AgentRunnerComponent] },
         add: { imports: [StubAgentRunnerComponent] },
+      })
+      .overrideComponent(AgentStudioBuildAgentComponent, {
+        remove: { imports: [AgentCatalogComponent, AgentProvisioningDashboardComponent] },
+        add: { imports: [StubAgentCatalogComponent, StubProvisioningDashboardComponent] },
       })
       .compileComponents();
 
@@ -90,8 +107,9 @@ describe('AgentStudioShellComponent', () => {
     expect(component.state.activeStage()).toBe(3);
   });
 
-  it('passes the active stage and live handoff into the placeholder', () => {
+  it('passes the live handoff into a still-stubbed stage (Compose)', () => {
     component.state.setRegistryAgentId('reg-1');
+    component.state.navigateToStage(2); // Compose is still a placeholder.
     fixture.detectChanges();
     const map = new Map(Object.entries(component.state.handoff()));
     expect(map.get('registryAgentId')).toBe('reg-1');
@@ -129,9 +147,23 @@ describe('AgentStudioShellComponent', () => {
     expect(button.disabled).toBe(false);
   });
 
-  it('keeps the Build forward step enabled (the gate is Stage-2 only)', () => {
-    // On Build (Stage 1) the forward step is never gated by an agent selection.
+  it('renders the real Build Agent stage (not the placeholder) on Stage 1', () => {
     expect(component.activeStageDef().key).toBe('build');
+    expect(fixture.nativeElement.querySelector('app-agent-studio-build-agent')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
+  });
+
+  it('gates the Build "Test this agent →" forward step until an agent is selected', () => {
+    // On Build (Stage 1) the forward step requires an agent to have been picked.
+    expect(component.activeStageDef().key).toBe('build');
+    let button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__continue');
+    expect(component.forwardDisabled()).toBe(true);
+    expect(button.disabled).toBe(true);
+
+    component.state.setRegistryAgentId('reg-1');
+    fixture.detectChanges();
+    button = fixture.nativeElement.querySelector('.studio__continue');
     expect(component.forwardDisabled()).toBe(false);
+    expect(button.disabled).toBe(false);
   });
 });
