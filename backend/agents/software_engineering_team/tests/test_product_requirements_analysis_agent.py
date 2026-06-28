@@ -14,6 +14,7 @@ from product_requirements_analysis_agent.agent import (
     _sop_phase1_fallback_questions,
 )
 from product_requirements_analysis_agent.models import (
+    AnalysisPhase,
     AnalysisWorkflowResult,
     AnsweredQuestion,
     ArchitectureAnalysisResult,
@@ -1991,3 +1992,63 @@ def test_run_consistency_loops_runs_one_pass_then_exits(tmp_path: Path) -> None:
     assert out_count == 0
     assert out_sr.open_questions == []
     assert result.spec_review_result is not None
+
+
+def test_run_context_discovery_noop_when_job_id_none(tmp_path: Path) -> None:
+    """With job_id None, context discovery is a no-op that returns the spec unchanged."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient({}))
+    result = AnalysisWorkflowResult()
+    ok, spec = agent._run_context_discovery(
+        current_spec="# Original",
+        repo_path=tmp_path,
+        job_id=None,
+        product_analysis_dir=tmp_path,
+        all_answered_questions=[],
+        result=result,
+        update_job=lambda **_k: None,
+    )
+    assert ok is True
+    assert spec == "# Original"
+
+
+def test_run_context_discovery_resumes_from_validated_spec(tmp_path: Path) -> None:
+    """When prior PRA artifacts exist, discovery is skipped and current_spec is loaded
+    from validated_spec.md, with the phase set to SPEC_REVIEW."""
+    pa_dir = tmp_path / "plan" / "product_analysis"
+    pa_dir.mkdir(parents=True)
+    (pa_dir / "validated_spec.md").write_text("# Resumed spec", encoding="utf-8")
+    agent = ProductRequirementsAnalysisAgent(_StubClient({}))
+    result = AnalysisWorkflowResult()
+    ok, spec = agent._run_context_discovery(
+        current_spec="# Original",
+        repo_path=tmp_path,
+        job_id="job-1",
+        product_analysis_dir=pa_dir,
+        all_answered_questions=[],
+        result=result,
+        update_job=lambda **_k: None,
+    )
+    assert ok is True
+    assert spec == "# Resumed spec"
+    assert result.current_phase == AnalysisPhase.SPEC_REVIEW
+
+
+def test_run_context_discovery_resume_falls_back_to_latest_updated_spec(tmp_path: Path) -> None:
+    """Without validated_spec.md, resume loads the highest-versioned updated_spec_v*.md."""
+    pa_dir = tmp_path / "plan" / "product_analysis"
+    pa_dir.mkdir(parents=True)
+    (pa_dir / "updated_spec_v3.md").write_text("# v3", encoding="utf-8")
+    (pa_dir / "updated_spec_v11.md").write_text("# v11", encoding="utf-8")
+    agent = ProductRequirementsAnalysisAgent(_StubClient({}))
+    result = AnalysisWorkflowResult()
+    ok, spec = agent._run_context_discovery(
+        current_spec="# Original",
+        repo_path=tmp_path,
+        job_id="job-1",
+        product_analysis_dir=pa_dir,
+        all_answered_questions=[],
+        result=result,
+        update_job=lambda **_k: None,
+    )
+    assert ok is True
+    assert spec == "# v11"  # version 11 sorts above version 3

@@ -3261,6 +3261,11 @@ Previously Answered Questions:
         result.failure_reason = f"... failed: {exc}"; logger.error(...); return``
         block that was copy-pasted across ``run_workflow``.
 
+        The broad ``except Exception`` is intentional: it reproduces the five
+        original copy-pasted phase guards verbatim, so failure handling is
+        behaviour-identical. The full traceback is logged (``exc_info=True``) so
+        the broad catch does not hide where an unexpected error originated.
+
         Preconditions: ``fn`` is a zero-argument callable implementing the phase;
         ``result`` is the in-progress :class:`AnalysisWorkflowResult`.
         Postconditions: returns ``(True, fn())`` when the phase succeeds. On any
@@ -3271,7 +3276,7 @@ Previously Answered Questions:
             return True, fn()
         except Exception as exc:
             result.failure_reason = f"{name} failed: {exc}"
-            logger.error("Product Requirements Analysis: %s", result.failure_reason)
+            logger.error("Product Requirements Analysis: %s", result.failure_reason, exc_info=True)
             return False, None
 
     @staticmethod
