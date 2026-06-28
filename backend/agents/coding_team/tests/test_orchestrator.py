@@ -851,7 +851,7 @@ def test_assign_tasks_continues_to_next_agent_after_error(tmp_path):
 
 
 def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
-    """A target_team that no worker can satisfy fails instead of waiting forever."""
+    """A target_team that no worker can satisfy fails with blocked dependents."""
 
     class NoopTL(StubTechLead):
         def run_assignments(self, agent_ids, ready_tasks, free_agents):
@@ -860,6 +860,7 @@ def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
     workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
     swarm, graph = _make_swarm(tmp_path, NoopTL(approved=True), workers)
     graph.add_task("unknown", title="Unknown target", target_team="unknown_team")
+    graph.add_task("blocked", title="Blocked follow-up", dependencies=["unknown"])
 
     with caplog.at_level(logging.WARNING, logger=orch_mod.logger.name):
         swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
@@ -869,6 +870,7 @@ def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
     assert task.assigned_agent_id is None
     assert "No implementation worker is available" in task.changes_summary
     assert task.revision_feedback[-1]["source"] == "system"
+    assert graph.get_task("blocked").status == TaskStatus.FAILED
     assert "unknown_team" in caplog.text
 
 

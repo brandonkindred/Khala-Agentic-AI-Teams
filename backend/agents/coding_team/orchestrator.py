@@ -1470,6 +1470,7 @@ class CodingTeamSwarm:
                 revision_feedback=list(task.revision_feedback or [])
                 + [{"source": "system", "reason": reason}],
             )
+            self._cascade_fail_dependents(task.id)
 
     def _implement_and_verify(self, swe: Any, update_fn: Callable) -> None:
         """Worker implements its assigned task, then runs quality gate tools."""
