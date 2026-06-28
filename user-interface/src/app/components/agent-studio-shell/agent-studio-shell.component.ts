@@ -3,15 +3,16 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { STUDIO_STAGES } from '../../models/agent-studio.model';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
+import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 
 /**
  * Agent Studio shell — the single `/agent-studio` surface (spec §2.1). Renders
- * the forward-only 4-stage stepper and the active stage. Stage 2 (Test Agent)
- * is implemented; Build / Compose / Personas are still stubbed by the
- * placeholder. Owns one `AgentStudioStateService` per session (provided here,
- * not at root, so each visit starts clean).
+ * the forward-only 4-stage stepper and the active stage. Stage 1 (Build Agent)
+ * and Stage 2 (Test Agent) are implemented; Compose / Personas are still stubbed
+ * by the placeholder. Owns one `AgentStudioStateService` per session (provided
+ * here, not at root, so each visit starts clean).
  */
 @Component({
   selector: 'app-agent-studio-shell',
@@ -19,6 +20,7 @@ import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.compone
   imports: [
     MatButtonModule,
     MatIconModule,
+    AgentStudioBuildAgentComponent,
     AgentStudioStagePlaceholderComponent,
     AgentStudioTestAgentComponent,
   ],
@@ -49,18 +51,19 @@ export class AgentStudioShellComponent {
 
   /**
    * Whether the shell's forward affordance is disabled for the current stage.
-   * Stage 2 ("Test Agent") gates "Add to team →" on an agent actually being
-   * selected, so the journey can't hand an empty roster candidate to Stage 3.
-   * Other stages keep the scaffold's always-enabled forward step until their
-   * own gates land.
+   * Both Build ("Test this agent →") and Test ("Add to team →") require an agent
+   * to have been selected before the journey can move forward — you can't test
+   * or hand off an agent you haven't picked. The remaining stages keep the
+   * scaffold's always-enabled forward step until their own gates land.
    */
-  readonly forwardDisabled = computed(
-    () => this.activeStageDef().key === 'test' && !this.state.registryAgentId(),
-  );
+  readonly forwardDisabled = computed(() => {
+    const key = this.activeStageDef().key;
+    return (key === 'build' || key === 'test') && !this.state.registryAgentId();
+  });
 
   /**
    * Temporary scaffold control: advance to the next stage. Real stages will
-   * each own their forward gate (Stage 2's is `forwardDisabled` above).
+   * each own their forward gate (Build's and Stage 2's is `forwardDisabled`).
    */
   onContinue(): void {
     this.state.advance();
