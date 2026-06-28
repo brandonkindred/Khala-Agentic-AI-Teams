@@ -31,7 +31,11 @@ from investment_team.strategy_lab.quality_gates.convergence_tracker import (
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab_context import (
+    _entry_archetype,
+    _exit_archetypes,
+    aggregate_prior_results,
     asset_class_mix_hint,
+    format_prior_attribution,
     format_prior_results,
     normalize_asset_class,
     normalize_asset_class_strict,
@@ -425,6 +429,263 @@ def test_format_prior_results_truncates_to_tail() -> None:
     assert "h-3" in out
     assert "h-4" in out
     assert "h-0" not in out
+
+
+# ---------------------------------------------------------------------------
+# Prior-results performance attribution (aggregate_prior_results /
+# format_prior_attribution + the entry/exit classifiers).
+# ---------------------------------------------------------------------------
+
+
+def _attr_record(
+    *,
+    i: int = 0,
+    asset_class: str = "stocks",
+    win_rate: float = 50.0,
+    annual_return: float = 2.0,
+    entry_rules=None,
+    exit_rules=None,
+    sizing=None,
+    status: str = "completed",
+):
+    """Build a ``StrategyLabRecord`` with the DSL knobs the attribution buckets on.
+
+    Each varying dimension (asset class, entry/exit/sizing rules, backtest status,
+    win rate, annualized return) is a keyword so individual tests vary exactly the
+    axis under test and leave the rest at neutral defaults.
+    """
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        StrategyLabRecord,
+        StrategySpec,
+    )
+
+    spec_kwargs: Dict[str, Any] = dict(
+        strategy_id=f"s-{i}",
+        authored_by="x",
+        asset_class=asset_class,
+        hypothesis=f"h-{i}",
+        signal_definition="s",
+        timeframe="1d",
+    )
+    if entry_rules is not None:
+        spec_kwargs["entry_rules"] = entry_rules
+    if exit_rules is not None:
+        spec_kwargs["exit_rules"] = exit_rules
+    if sizing is not None:
+        spec_kwargs["sizing"] = sizing
+    strat = StrategySpec(**spec_kwargs)
+    res = BacktestResult(
+        total_return_pct=1.0,
+        annualized_return_pct=annual_return,
+        volatility_pct=10.0,
+        sharpe_ratio=0.1,
+        max_drawdown_pct=1.0,
+        win_rate_pct=win_rate,
+        profit_factor=1.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    bt = BacktestRecord(
+        backtest_id=f"bt-{i}",
+        strategy_id=f"s-{i}",
+        strategy=strat,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=res,
+        trades=[],
+        status=status,
+    )
+    return StrategyLabRecord(
+        lab_record_id=f"l-{i}",
+        strategy=strat,
+        backtest=bt,
+        is_winning=annual_return >= 8.0,
+        strategy_rationale="r",
+        analysis_narrative="n",
+        created_at=f"2024-01-{i + 1:02d}T00:00:00Z",
+    )
+
+
+def _rsi_entry(threshold: float = 30.0):
+    from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate
+
+    return EntryRule(
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=threshold)
+    )
+
+
+def _sma_crossover_entry():
+    from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate
+
+    return EntryRule(
+        when=Predicate(
+            lhs=IndicatorRef(name="sma", params={"period": 20}),
+            op="cross_above",
+            rhs=IndicatorRef(name="sma", params={"period": 50}),
+        )
+    )
+
+
+def _price_level_entry():
+    from investment_team.strategy_lab.spec_dsl import EntryRule, Predicate
+
+    return EntryRule(when=Predicate(lhs="bar.close", op=">", rhs=100.0))
+
+
+def _trailing_stop():
+    from investment_team.strategy_lab.spec_dsl import StopLossRule
+
+    return StopLossRule(pct=0.05, basis="trailing_high")
+
+
+def _fixed_stop():
+    from investment_team.strategy_lab.spec_dsl import StopLossRule
+
+    return StopLossRule(pct=0.05, basis="entry_price")
+
+
+def _take_profit():
+    from investment_team.strategy_lab.spec_dsl import TakeProfitRule
+
+    return TakeProfitRule(pct=0.1)
+
+
+def test_entry_archetype_indicator_vs_price_vs_crossover() -> None:
+    rsi = _attr_record(entry_rules=[_rsi_entry()]).strategy
+    price = _attr_record(entry_rules=[_price_level_entry()]).strategy
+    crossover = _attr_record(entry_rules=[_sma_crossover_entry()]).strategy
+    none = _attr_record(entry_rules=[]).strategy
+
+    assert _entry_archetype(rsi) == "rsi"
+    assert _entry_archetype(price) == "price_level"
+    assert _entry_archetype(crossover) == "sma_crossover"
+    assert _entry_archetype(none) == "none"
+
+
+def test_entry_archetype_multi_signal_joins_distinct_sorted() -> None:
+    multi = _attr_record(entry_rules=[_sma_crossover_entry(), _rsi_entry()]).strategy
+    # Distinct archetypes, sorted, joined with '+'.
+    assert _entry_archetype(multi) == "rsi+sma_crossover"
+
+
+def test_exit_archetypes_maps_each_kind_and_basis() -> None:
+    trailing = _attr_record(exit_rules=[_trailing_stop()]).strategy
+    fixed = _attr_record(exit_rules=[_fixed_stop()]).strategy
+    tp = _attr_record(exit_rules=[_take_profit()]).strategy
+    none = _attr_record(exit_rules=[]).strategy
+
+    assert _exit_archetypes(trailing) == ["trailing_stop"]
+    assert _exit_archetypes(fixed) == ["fixed_stop"]
+    assert _exit_archetypes(tp) == ["take_profit"]
+    assert _exit_archetypes(none) == ["none"]
+
+
+def test_aggregate_prior_results_empty() -> None:
+    assert aggregate_prior_results([]) == {}
+
+
+def test_aggregate_prior_results_single_record_keys_and_means() -> None:
+    rec = _attr_record(
+        asset_class="crypto",
+        win_rate=60.0,
+        annual_return=12.0,
+        entry_rules=[_rsi_entry()],
+        exit_rules=[_trailing_stop()],
+    )
+    agg = aggregate_prior_results([rec])
+
+    assert agg[("asset_class", "crypto")] == {"win_rate": 60.0, "annual_return": 12.0, "n": 1}
+    assert agg[("entry", "rsi")] == {"win_rate": 60.0, "annual_return": 12.0, "n": 1}
+    assert agg[("exit", "trailing_stop")] == {"win_rate": 60.0, "annual_return": 12.0, "n": 1}
+    # Sizing defaults to fixed_fraction on StrategySpec.
+    assert agg[("sizing", "fixed_fraction")]["n"] == 1
+
+
+def test_aggregate_prior_results_averages_within_bucket() -> None:
+    recs = [
+        _attr_record(i=0, win_rate=40.0, annual_return=4.0, entry_rules=[_rsi_entry()]),
+        _attr_record(i=1, win_rate=60.0, annual_return=8.0, entry_rules=[_rsi_entry()]),
+    ]
+    agg = aggregate_prior_results(recs)
+    bucket = agg[("entry", "rsi")]
+    assert bucket["n"] == 2
+    assert bucket["win_rate"] == pytest.approx(50.0)
+    assert bucket["annual_return"] == pytest.approx(6.0)
+
+
+def test_aggregate_prior_results_distinct_entry_buckets() -> None:
+    recs = [
+        _attr_record(i=0, entry_rules=[_rsi_entry()]),
+        _attr_record(i=1, entry_rules=[_sma_crossover_entry()]),
+    ]
+    agg = aggregate_prior_results(recs)
+    assert ("entry", "rsi") in agg
+    assert ("entry", "sma_crossover") in agg
+    assert agg[("entry", "rsi")]["n"] == 1
+    assert agg[("entry", "sma_crossover")]["n"] == 1
+
+
+def test_aggregate_prior_results_exit_multi_membership() -> None:
+    rec = _attr_record(exit_rules=[_trailing_stop(), _take_profit()])
+    agg = aggregate_prior_results([rec])
+    # The one record is counted under BOTH exit buckets.
+    assert agg[("exit", "trailing_stop")]["n"] == 1
+    assert agg[("exit", "take_profit")]["n"] == 1
+
+
+def test_aggregate_prior_results_excludes_non_executed_status() -> None:
+    recs = [
+        _attr_record(i=0, entry_rules=[_rsi_entry()], status="completed"),
+        _attr_record(i=1, entry_rules=[_sma_crossover_entry()], status="failed: spec_validation"),
+    ]
+    agg = aggregate_prior_results(recs)
+    assert ("entry", "rsi") in agg
+    # The pre-backtest short-circuit record never reaches attribution.
+    assert ("entry", "sma_crossover") not in agg
+
+
+def test_aggregate_prior_results_respects_max_records_tail() -> None:
+    recs = [_attr_record(i=i, annual_return=float(i)) for i in range(5)]
+    agg = aggregate_prior_results(recs, max_records=2)
+    # Only the two newest (i=3, i=4) survive the tail trim → asset_class n == 2.
+    assert agg[("asset_class", "stocks")]["n"] == 2
+    assert agg[("asset_class", "stocks")]["annual_return"] == pytest.approx(3.5)
+
+
+def test_format_prior_attribution_empty_sentinel() -> None:
+    out = format_prior_attribution([])
+    assert "Not enough" in out
+
+
+def test_format_prior_attribution_shows_sample_size_and_groups() -> None:
+    recs = [
+        _attr_record(
+            i=0, asset_class="crypto", win_rate=58.0, annual_return=11.0, entry_rules=[_rsi_entry()]
+        ),
+        _attr_record(
+            i=1,
+            asset_class="stocks",
+            win_rate=41.0,
+            annual_return=3.0,
+            entry_rules=[_sma_crossover_entry()],
+        ),
+    ]
+    out = format_prior_attribution(recs)
+    # Every rendered bucket line carries its sample size.
+    assert "n=" in out
+    # Dimension group headers are present.
+    assert "Asset class" in out
+    assert "Entry archetype" in out
+    # Thin (n=1) buckets are flagged so the model discounts them.
+    assert "(thin sample)" in out
 
 
 def test_asset_class_mix_hint_empty_records() -> None:

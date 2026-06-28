@@ -223,6 +223,199 @@ def format_prior_results(records: List[StrategyLabRecord], *, max_records: int =
     return "\n\n".join(lines)
 
 
+def _entry_archetype(strategy: object) -> str:
+    """Classify a strategy's entry rules into a coarse, comparable archetype label.
+
+    The label names the signal family the entry keys on (the indicator on the
+    predicate's left-hand side, or ``"price_level"`` for a raw price reference),
+    suffixed ``_crossover`` when the comparison is a cross. Multiple entry rules
+    collapse to the sorted, ``+``-joined set of their distinct archetypes so a
+    multi-signal entry (e.g. ``"macd+rsi"``) forms its own bucket.
+
+    Preconditions:
+      - ``strategy`` exposes an ``entry_rules`` iterable; each rule exposes a
+        ``when`` predicate with ``lhs`` (an ``IndicatorRef`` carrying ``name``,
+        or a price-ref ``str``) and ``op``. Missing/odd shapes degrade to
+        ``"unknown"`` rather than raising — this is prompt-context formatting,
+        never a correctness gate.
+    Postconditions:
+      - Returns a non-empty string. No entry rules → ``"none"``.
+    """
+    rules = list(getattr(strategy, "entry_rules", None) or [])
+    if not rules:
+        return "none"
+    tokens: set[str] = set()
+    for rule in rules:
+        when = getattr(rule, "when", None)
+        lhs = getattr(when, "lhs", None)
+        if isinstance(lhs, str):
+            base = "price_level"
+        else:
+            base = str(getattr(lhs, "name", "") or "unknown")
+        if str(getattr(when, "op", "")) in ("cross_above", "cross_below"):
+            base = f"{base}_crossover"
+        tokens.add(base)
+    return "+".join(sorted(tokens))
+
+
+def _exit_archetypes(strategy: object) -> List[str]:
+    """Classify a strategy's exit rules into the distinct exit-type labels present.
+
+    A record contributes to *each* exit bucket it uses, so a spec carrying both a
+    trailing stop and a take-profit is counted under both — enabling
+    "trailing stops vs fixed take-profits" comparisons in the attribution.
+
+    Label map: ``stop_loss`` with a trailing ``basis`` → ``"trailing_stop"``,
+    ``stop_loss`` on ``entry_price`` → ``"fixed_stop"``, ``take_profit`` →
+    ``"take_profit"``, ``scaled_take_profit`` → ``"scaled_tp"``, ``signal_exit``
+    → ``"signal_exit"``; any other/unknown ``kind`` passes through verbatim.
+
+    Preconditions:
+      - ``strategy`` exposes an ``exit_rules`` iterable; each rule exposes a
+        ``kind`` (and, for stops, a ``basis``). Odd shapes degrade gracefully.
+    Postconditions:
+      - Returns a sorted list of distinct labels. No exit rules → ``["none"]``.
+    """
+    rules = list(getattr(strategy, "exit_rules", None) or [])
+    if not rules:
+        return ["none"]
+    labels: set[str] = set()
+    for rule in rules:
+        kind = str(getattr(rule, "kind", "") or "unknown")
+        if kind == "stop_loss":
+            basis = str(getattr(rule, "basis", "") or "")
+            labels.add("trailing_stop" if basis.startswith("trailing") else "fixed_stop")
+        elif kind == "take_profit":
+            labels.add("take_profit")
+        elif kind == "scaled_take_profit":
+            labels.add("scaled_tp")
+        elif kind == "signal_exit":
+            labels.add("signal_exit")
+        else:
+            labels.add(kind)
+    return sorted(labels)
+
+
+def _executed_records(
+    records: List[StrategyLabRecord], *, max_records: int
+) -> List[StrategyLabRecord]:
+    """Chronological, tail-trimmed records that ran a real backtest.
+
+    Shares the tail-trim of :func:`format_prior_results` and the
+    ``_NON_EXECUTED_BACKTEST_STATUSES`` filter of :func:`asset_class_mix_hint` so
+    attribution spans exactly the records whose metrics and asset class are real.
+
+    Preconditions: ``max_records >= 0``.
+    Postconditions: returns records sorted by ``created_at``, at most the last
+    ``max_records``, with pre-backtest short-circuit rows removed.
+    """
+    ordered = sorted(records, key=lambda x: x.created_at)
+    if len(ordered) > max_records:
+        ordered = ordered[-max_records:]
+    return [
+        r
+        for r in ordered
+        if str(getattr(r.backtest, "status", "completed")) not in _NON_EXECUTED_BACKTEST_STATUSES
+    ]
+
+
+def aggregate_prior_results(
+    records: List[StrategyLabRecord], *, max_records: int = 50
+) -> dict[tuple[str, str], dict]:
+    """Aggregate prior lab records into per-dimension performance attribution.
+
+    Buckets the executed records *marginally* along four independent dimensions —
+    ``asset_class``, ``entry`` archetype, ``exit`` archetype, and ``sizing`` kind —
+    and reports the mean win rate, mean annualized return, and sample size for each
+    bucket value. Marginal (rather than composite 4-tuple) bucketing keeps the
+    samples large enough to be informative on a diverse history.
+
+    Preconditions:
+      - ``records`` is a list of ``StrategyLabRecord``; ``max_records >= 1``.
+    Postconditions:
+      - Returns ``{(dimension, value): {"win_rate", "annual_return", "n"}}``.
+      - Empty / all-non-executed input → ``{}``.
+      - Every value dict has ``n >= 1`` and means equal to the arithmetic mean of
+        the contributing records' ``win_rate_pct`` / ``annualized_return_pct``.
+      - A record contributes to exactly one ``asset_class``/``entry``/``sizing``
+        bucket and to one ``exit`` bucket per distinct exit type it uses.
+    """
+    executed = _executed_records(records, max_records=max_records)
+    if not executed:
+        return {}
+
+    # bucket_key -> [sum_win_rate, sum_annual_return, count]
+    acc: dict[tuple[str, str], list[float]] = {}
+
+    def _add(dimension: str, value: str, win_rate: float, annual_return: float) -> None:
+        slot = acc.setdefault((dimension, value), [0.0, 0.0, 0.0])
+        slot[0] += win_rate
+        slot[1] += annual_return
+        slot[2] += 1.0
+
+    for r in executed:
+        res = r.backtest.result
+        win = float(res.win_rate_pct)
+        ann = float(res.annualized_return_pct)
+        strat = r.strategy
+        _add("asset_class", normalize_asset_class(strat.asset_class), win, ann)
+        _add("entry", _entry_archetype(strat), win, ann)
+        _add("sizing", str(getattr(strat.sizing, "kind", "") or "unknown"), win, ann)
+        for exit_label in _exit_archetypes(strat):
+            _add("exit", exit_label, win, ann)
+
+    return {
+        key: {"win_rate": sw / n, "annual_return": sa / n, "n": int(n)}
+        for key, (sw, sa, n) in acc.items()
+    }
+
+
+_ATTRIBUTION_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("asset_class", "Asset class"),
+    ("entry", "Entry archetype"),
+    ("exit", "Exit type"),
+    ("sizing", "Position sizing"),
+)
+
+
+def format_prior_attribution(
+    records: List[StrategyLabRecord], *, max_records: int = 50, thin_n: int = 3
+) -> str:
+    """Render per-dimension attribution as a compact "what has worked" digest.
+
+    Wraps :func:`aggregate_prior_results`, grouping buckets by dimension and
+    sorting each group by mean annualized return (descending) so the
+    highest-scoring regions of the design space lead. Every line shows the sample
+    size ``n`` — and a ``(thin sample)`` flag below ``thin_n`` — so the designer
+    can exploit strong buckets without over-fitting to a single record.
+
+    Preconditions: ``records`` is a list of ``StrategyLabRecord``; ``thin_n >= 1``.
+    Postconditions:
+      - Returns a non-empty string. Empty / all-non-executed input → a short
+        "not enough history" sentinel.
+      - Every rendered bucket line contains its ``n=`` sample size.
+    """
+    agg = aggregate_prior_results(records, max_records=max_records)
+    if not agg:
+        return "Not enough executed history yet to attribute performance."
+
+    sections: List[str] = []
+    for dim_key, dim_label in _ATTRIBUTION_DIMENSIONS:
+        rows = [(value, stats) for (dim, value), stats in agg.items() if dim == dim_key]
+        if not rows:
+            continue
+        rows.sort(key=lambda kv: kv[1]["annual_return"], reverse=True)
+        lines = [f"- {dim_label}:"]
+        for value, stats in rows:
+            thin = "  (thin sample)" if stats["n"] < thin_n else ""
+            lines.append(
+                f"    - {value}: win {stats['win_rate']:.1f}%, "
+                f"annual {stats['annual_return']:.1f}%, n={stats['n']}{thin}"
+            )
+        sections.append("\n".join(lines))
+    return "\n".join(sections)
+
+
 def _or_join(items: List[str]) -> str:
     """Render a list as an Oxford-style ``a, b, or c`` menu (single item → itself)."""
     if not items:

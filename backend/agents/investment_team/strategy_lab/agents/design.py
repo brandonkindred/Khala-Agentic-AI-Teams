@@ -29,7 +29,11 @@ from strands import Agent
 from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block
 from ...signal_intelligence_models import SignalIntelligenceBriefV1
-from ...strategy_lab_context import asset_class_mix_hint, format_prior_results
+from ...strategy_lab_context import (
+    asset_class_mix_hint,
+    format_prior_attribution,
+    format_prior_results,
+)
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import (
@@ -69,6 +73,10 @@ Objective: maximize annualized return AND win rate, subject to positive, robust 
 
 ## Prior Strategy Results ({n_prior} tested so far, chronological)
 {prior_results_text}
+
+## What has worked so far (performance attribution)
+Mean win rate and mean annualized return per design-space bucket, across executed prior runs. Treat this as your edge map: **prefer the historically high-scoring buckets** (high annual return AND win rate) when they fit a coherent thesis. Weigh each bucket by its sample size `n` — a single-record bucket flagged `(thin sample)` is a weak prior, not a mandate — and never let attribution override the mandatory asset-class diversity rule below.
+{prior_attribution}
 
 ## Asset-class diversity (mandatory)
 {asset_class_mix_hint}
@@ -181,6 +189,11 @@ class DesignAgent:
             if prior_records
             else "No prior strategies tested yet."
         )
+        prior_attribution = (
+            format_prior_attribution(prior_records)
+            if prior_records
+            else "Not enough executed history yet to attribute performance."
+        )
         if exclude_asset_classes:
             # The menu-restricted mix hint already supplies the positive
             # allowed-class menu — even with no priors, since asset_class_mix_hint
@@ -211,6 +224,7 @@ class DesignAgent:
         user_prompt = _DESIGN_USER_TEMPLATE.format(
             n_prior=len(prior_records),
             prior_results_text=prior_text,
+            prior_attribution=prior_attribution,
             asset_class_mix_hint=mix_hint,
             signal_section=signal_section,
             convergence_directives=directives_text,
