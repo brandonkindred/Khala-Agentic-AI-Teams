@@ -1882,7 +1882,9 @@ def test_call_llm_text_rejects_empty_or_non_string_prompt() -> None:
 
 def test_call_llm_json_parses_object() -> None:
     """_call_llm_json returns the parsed dict when the model emits a JSON object."""
-    agent = ProductRequirementsAnalysisAgent(_StubClient({"consolidated_questions": []}))
+    # Pass the model output as an explicit JSON *string* (what a real model
+    # emits on the wire) rather than relying on the stub serializing a dict.
+    agent = ProductRequirementsAnalysisAgent(_StubClient('{"consolidated_questions": []}'))
     assert agent._call_llm_json("prompt") == {"consolidated_questions": []}
 
 
@@ -1992,6 +1994,63 @@ def test_run_consistency_loops_runs_one_pass_then_exits(tmp_path: Path) -> None:
     assert out_count == 0
     assert out_sr.open_questions == []
     assert result.spec_review_result is not None
+
+
+def test_run_consistency_loops_runs_multiple_passes(tmp_path: Path) -> None:
+    """When each pass keeps reducing questions above the threshold, the loop runs
+    again; it terminates once dedup empties the question set."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient({}))
+    result = AnalysisWorkflowResult()
+    sr_pass1 = SpecReviewResult(
+        issues=[],
+        gaps=[],
+        open_questions=[_single_open_question(), _single_open_question()],
+        summary="",
+    )
+    sr_pass2 = SpecReviewResult(
+        issues=[], gaps=[], open_questions=[_single_open_question()], summary=""
+    )
+    with (
+        patch.object(agent, "_read_qa_history", return_value="qa"),
+        patch.object(
+            agent, "_update_spec_for_consistency_and_clarity", side_effect=["# v2", "# v3"]
+        ) as upd,
+        patch.object(
+            agent, "_run_spec_review", side_effect=[(sr_pass1, "# v2"), (sr_pass2, "# v3")]
+        ),
+        patch.object(agent, "_consolidate_open_questions", side_effect=lambda qs: list(qs)),
+        # Pass 1: 2 → 1 question (ratio 0.5 ≥ threshold → loop again).
+        # Pass 2: 1 → 0 questions (loop breaks on empty open_questions).
+        patch.object(
+            agent,
+            "_dedupe_questions_by_answer_similarity",
+            side_effect=[[_single_open_question()], []],
+        ),
+    ):
+        out_sr, out_spec, out_count = agent._run_consistency_loops(
+            result=result,
+            current_spec="# v1",
+            spec_review_result=SpecReviewResult(
+                issues=[],
+                gaps=[],
+                open_questions=[_single_open_question(), _single_open_question()],
+                summary="",
+            ),
+            open_count=2,
+            reduction_ratio=1.0,
+            count_before_dedup=2,
+            deduped_questions=[_single_open_question()],
+            repo_path=tmp_path,
+            iteration=1,
+            base_version=1,
+            all_answered_questions=[],
+            update_job=lambda **_k: None,
+            on_chunk_progress=lambda _a, _b: None,
+        )
+    assert upd.call_count == 2  # two consistency passes ran
+    assert out_count == 0
+    assert out_spec == "# v3"
+    assert out_sr.open_questions == []
 
 
 def test_run_context_discovery_noop_when_job_id_none(tmp_path: Path) -> None:

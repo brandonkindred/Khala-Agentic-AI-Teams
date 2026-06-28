@@ -81,6 +81,7 @@ from .engine.fill_simulator import (
 from .engine.order_book import FILL_QTY_REL_TOL, OrderBook, PendingOrder
 from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
+    Bar,
     OrderRequest,
     OrderSide,
     OrderType,
@@ -2670,9 +2671,9 @@ class TradingService:
     def _process_one_bar(
         self,
         *,
-        cur_bar,
-        next_bar,
-        prev_bar,
+        cur_bar: Bar,
+        next_bar: Optional[Bar],
+        prev_bar: Optional[Bar],
         is_warmup: bool,
         fetch_response: Callable[[], Tuple[List[Dict], List[Dict]]],
         pending_for_prev: List[OrderRequest],
@@ -2728,6 +2729,12 @@ class TradingService:
             #    (current) bar. These were submitted by the strategy after
             #    seeing ``prev_bar``.
             if pending_for_prev:
+                # Invariant: the queue is only populated after a prior bar was
+                # delivered to the strategy, so ``prev_bar`` is necessarily set
+                # here. Make it explicit (stripped under ``-O``) so a future
+                # caller that violates it fails loudly rather than with a bare
+                # AttributeError on ``prev_bar.timestamp``.
+                assert prev_bar is not None, "pending_for_prev implies a prior bar was seen"
                 # Apply the mode-level default unfilled policy parent-side
                 # (after the request has left the strategy process), so
                 # strategy bytes stay identical regardless of the flag.
@@ -2849,7 +2856,7 @@ class TradingService:
     def _drain_unfilled_at_eos(
         self,
         pending_for_prev: List[OrderRequest],
-        prev_bar,
+        prev_bar: Optional[Bar],
         result: TradingServiceResult,
     ) -> None:
         """Drop orders still queued for a next bar that never arrives.

@@ -1362,7 +1362,74 @@ def test_process_one_bar_warmup_skips_fills_and_does_not_count() -> None:
     # portfolio/fill_sim fakes) is skipped entirely.
     assert result.bars_processed == 0
     assert fetched.get("called") is True
-    append_mock.assert_called_once()
+    # The current bar is appended to the streaming views, and the strategy
+    # response from the thunk is forwarded verbatim with is_warmup=True.
+    append_mock.assert_called_once_with({}, cur_bar)
     resp_mock.assert_called_once()
+    resp_kwargs = resp_mock.call_args.kwargs
+    assert resp_kwargs["cur_bar"] is cur_bar
+    assert resp_kwargs["bar_orders"] == []
+    assert resp_kwargs["bar_cancels"] == []
+    assert resp_kwargs["is_warmup"] is True
     # The pending queue passes through unchanged on warm-up bars.
     assert out_pending is pending_in
+
+
+def test_process_one_bar_normal_path_processes_fills_and_counts() -> None:
+    """A post-warm-up bar processes fills, marks to market, stamps EOD equity, and
+    increments bars_processed; the thunk's orders/cancels are forwarded."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from investment_team.trading_service.service import TradingServiceResult
+
+    svc = _bare_service()
+    svc._exit_rules = []  # skip the engine position-tracker update
+    result = TradingServiceResult()
+    cur_bar = SimpleNamespace(symbol="AAPL", timestamp="2024-01-03T00:00:00", close=12.0)
+    outcome = SimpleNamespace(entry_fills=[], exit_fills=[], closed_trades=[], diagnostic_events=[])
+    fill_sim = SimpleNamespace(process_bar=lambda _cur, next_bar=None: outcome)
+    mtm_calls: list = []
+    eod_records: list = []
+    portfolio = SimpleNamespace(
+        update_last_price=lambda sym, px: mtm_calls.append((sym, px)),
+        mark_to_market=lambda: 100_000.0,
+    )
+    eod_buffer = SimpleNamespace(record=lambda ts, eq: eod_records.append((ts, eq)))
+
+    def _fetch() -> tuple:
+        return ([{"order": 1}], [{"cancel": 2}])
+
+    with (
+        patch.object(svc, "_append_streaming_bar") as append_mock,
+        patch.object(svc, "_process_bar_strategy_response") as resp_mock,
+    ):
+        out_pending = svc._process_one_bar(
+            cur_bar=cur_bar,
+            next_bar=None,
+            prev_bar=None,  # no prior bar → date-change expiry skipped
+            is_warmup=False,
+            fetch_response=_fetch,
+            pending_for_prev=[],  # empty → pending-submit block skipped
+            portfolio=portfolio,
+            order_book=None,
+            fill_sim=fill_sim,
+            harness=None,
+            on_trade=None,
+            result=result,
+            eod_buffer=eod_buffer,
+            position_tracker={},
+            engine_exits=None,
+            engine_entries=None,
+            streaming_views={},
+        )
+
+    assert result.bars_processed == 1  # counted after fetch_response on the non-warmup path
+    assert mtm_calls == [("AAPL", 12.0)]
+    assert eod_records == [("2024-01-03T00:00:00", 100_000.0)]
+    append_mock.assert_called_once_with({}, cur_bar)
+    resp_kwargs = resp_mock.call_args.kwargs
+    assert resp_kwargs["bar_orders"] == [{"order": 1}]
+    assert resp_kwargs["bar_cancels"] == [{"cancel": 2}]
+    assert resp_kwargs["is_warmup"] is False
+    assert out_pending == []
