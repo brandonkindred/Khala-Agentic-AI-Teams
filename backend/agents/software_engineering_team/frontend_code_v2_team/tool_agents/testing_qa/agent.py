@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Dict
-
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
-from software_engineering_team.shared.tool_agent_base import (
-    BaseReviewToolAgent,
-    relevant_code_for_issue,
-)
+from software_engineering_team.shared.tool_agent_base import ReviewToolAgent
 
-from ...models import ReviewIssue
 from ...output_templates import parse_problem_solving_single_issue_template, parse_review_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT, QA_TOOL_AGENT_REVIEW_PROMPT
 
@@ -19,12 +13,7 @@ MAX_QA_CODE_CHARS = 12_000
 MAX_RELEVANT_CODE_CHARS = 8_000
 
 
-def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) -> str:
-    """Return code context for a single issue: prefer issue's file, else first files."""
-    return relevant_code_for_issue(issue, current_files, MAX_RELEVANT_CODE_CHARS)
-
-
-class TestingQAToolAgent(BaseReviewToolAgent):
+class TestingQAToolAgent(ReviewToolAgent):
     """QA tool agent: finds testing/quality issues in review and fixes them one at a time in problem_solve."""
 
     name = "Testing/QA"

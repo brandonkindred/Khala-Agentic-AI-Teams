@@ -1,23 +1,22 @@
-"""Backend-specific base for the code-v2 review tool agents.
+"""Backend conventions profile for the code-v2 review tool agents.
 
-Backend agents share :class:`BaseReviewToolAgent` with the frontend team but
-their single-issue problem-solving prompt carries a ``{language_conventions}``
-slot (python vs java). This intermediate injects those conventions from the
-microtask's ``language`` so the concrete agents stay purely declarative.
+Backend agents share the generalized
+:class:`~software_engineering_team.shared.tool_agent_base.ReviewToolAgent` with the
+frontend team. The only backend-specific bit is that their single-issue
+problem-solving prompt carries a ``{language_conventions}`` slot (python vs java).
+This intermediate supplies those conventions purely as data via
+``conventions_by_language`` — the base injects them from the microtask's
+``language`` — so the concrete agents stay declarative.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
-
-from software_engineering_team.shared.tool_agent_base import BaseReviewToolAgent
+from software_engineering_team.shared.tool_agent_base import ReviewToolAgent
 
 from ..prompts import JAVA_CONVENTIONS, PYTHON_CONVENTIONS
 
 
-class BackendReviewToolAgent(BaseReviewToolAgent):
-    """``BaseReviewToolAgent`` that feeds python/java conventions to the fix prompt."""
+class BackendReviewToolAgent(ReviewToolAgent):
+    """``ReviewToolAgent`` profile that feeds python/java conventions to the fix prompt."""
 
-    def _problem_solving_kwargs(self, inp) -> Dict[str, Any]:
-        lang = (inp.language or "python").strip().lower()
-        return {"language_conventions": JAVA_CONVENTIONS if lang == "java" else PYTHON_CONVENTIONS}
+    conventions_by_language = {"java": JAVA_CONVENTIONS, "_default": PYTHON_CONVENTIONS}
