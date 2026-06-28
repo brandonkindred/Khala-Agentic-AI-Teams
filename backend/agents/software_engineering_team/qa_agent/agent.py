@@ -106,8 +106,10 @@ class QAExpertAgent:
         # blocking signal (mirroring the former DevOpsTestValidationAgent),
         # whereas the bug-review modes block on critical/high bug severities.
         if mode == "acceptance_evidence":
+            # ``.strip().lower()`` mirrors ``DevOpsTestValidationAgent._coerce_gate_status``
+            # so a whitespace-padded ``" fail "`` from the model still blocks approval.
             result.approved = bool(result.approved) and not any(
-                (v or "").lower() == "fail" for v in result.quality_gates.values()
+                (v or "").strip().lower() == "fail" for v in result.quality_gates.values()
             )
         else:
             critical_or_high = [b for b in result.bugs_found if b.severity in ("critical", "high")]

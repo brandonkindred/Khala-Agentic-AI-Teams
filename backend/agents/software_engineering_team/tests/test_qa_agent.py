@@ -240,6 +240,28 @@ def test_qa_expert_agent_acceptance_evidence_gate_fail_forces_unapproved() -> No
     assert result.approved is False
 
 
+def test_qa_expert_agent_acceptance_evidence_whitespace_fail_forces_unapproved() -> None:
+    """A whitespace-padded ``" fail "`` gate must still block approval, matching
+    the DevOps shim's strip-then-lower normalization."""
+
+    class _PaddedFailClient(DummyLLMClient):
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            return {
+                "approved": True,
+                "quality_gates": {"deploy_dry_run": "  FAIL  "},
+                "acceptance_trace": [],
+                "validation_evidence": [],
+                "bugs_found": [],
+                "summary": "padded fail",
+            }
+
+    agent = QAExpertAgent(_PaddedFailClient())
+    result = agent.run(_input(request_mode="acceptance_evidence", acceptance_criteria=["c1"]))
+    assert result.approved is False
+
+
 def test_qa_expert_agent_acceptance_evidence_all_pass_approves() -> None:
     class _AllPassClient(DummyLLMClient):
         def complete_json(
