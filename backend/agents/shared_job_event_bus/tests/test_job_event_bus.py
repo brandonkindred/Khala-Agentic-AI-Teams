@@ -84,6 +84,9 @@ def test_cleanup_job_wakes_all_and_drops() -> None:
     cleanup_job(state, "j4")
     assert "j4" not in state.subscribers and "j4" not in state.job_created_at
     assert a.notify.is_set() and b.notify.is_set()
+    # Detaching marks subs closed so a consumer that drained no terminal event
+    # still ends its stream (uniform end-of-stream signal with reap_once).
+    assert a.closed is True and b.closed is True
     cleanup_job(state, "unknown")  # no-op
 
 

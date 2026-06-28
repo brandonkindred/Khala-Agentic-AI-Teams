@@ -179,7 +179,13 @@ def _clamp_max_parallel(requested: int) -> int:
 def _run_investment_service_shutdown() -> (
     None
 ):  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; the meaningful exercise needs a live server. The body is a defensive try/except around the event-bus reaper teardown.
-    """Stop the per-job event-bus reaper thread before process exit."""
+    """Stop the per-job event-bus reaper thread before process exit.
+
+    Postconditions:
+        - The event-bus reaper thread is stopped (idempotent; a missing or
+          already-stopped reaper is a no-op). Never raises — teardown failures are
+          logged and swallowed so they cannot abort process shutdown.
+    """
     try:
         from investment_team.api.job_event_bus import shutdown as _shutdown_event_bus
 

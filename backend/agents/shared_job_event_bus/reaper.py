@@ -113,7 +113,14 @@ class ReaperHandle:
     def reap_once(self) -> Tuple[int, int]:
         """Single reaper pass (exposed for tests). Resolves the TTL/cap live.
 
-        Returns ``(evicted_jobs, evicted_subs)``.
+        Preconditions:
+            - The resolved ``ttl_seconds``/``max_jobs`` are non-negative (enforced
+              by the underlying :func:`~shared_job_event_bus.bus.reap_once`, which
+              raises ``ValueError`` otherwise).
+        Postconditions:
+            - Subscriptions idle past the TTL and the oldest jobs over the cap are
+              detached, marked ``closed``, and woken. Returns
+              ``(evicted_jobs, evicted_subs)``.
         """
         return reap_once(
             self._state,

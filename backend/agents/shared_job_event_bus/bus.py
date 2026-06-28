@@ -174,14 +174,22 @@ def cleanup_job(state: BusState, job_id: str) -> None:
     """Drop and wake every subscriber for *job_id* (call after a terminal event).
 
     Postconditions:
-        - ``job_id`` is absent from both maps; each former subscriber's ``notify``
-          is set so blocked consumers exit. Unknown job id is a no-op.
+        - ``job_id`` is absent from both maps; each former subscriber is marked
+          ``closed`` and its ``notify`` is set so blocked consumers exit. Unknown
+          job id is a no-op.
+
+    Like :func:`reap_once`, this detaches subscriptions from the bus, so it marks
+    them ``closed`` too: every code path that removes a subscription leaves the
+    same end-of-stream signal, so a consumer that drained no terminal event
+    (e.g. cleanup without a preceding terminal publish) still ends its stream
+    instead of pinging keepalives to its deadline.
     """
     with state.lock:
         subs = state.subscribers.pop(job_id, None)
         state.job_created_at.pop(job_id, None)
     if subs:
         for sub in subs:
+            sub.closed = True
             sub.notify.set()  # wake any blocked consumers so they exit
 
 

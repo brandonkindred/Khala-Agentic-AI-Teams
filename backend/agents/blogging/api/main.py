@@ -187,6 +187,13 @@ def _run_blogging_service_shutdown() -> (
     except Exception:
         logger.warning("Temporal worker shutdown failed", exc_info=True)
 
+    try:
+        from shared.job_event_bus import shutdown as _shutdown_event_bus
+
+        _shutdown_event_bus()
+    except Exception:
+        logger.debug("Event-bus reaper shutdown skipped", exc_info=True)
+
 
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
 # The Postgres schema registers on startup (no-op when POSTGRES_HOST is unset);
