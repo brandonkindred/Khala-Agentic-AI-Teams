@@ -6,7 +6,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -348,37 +348,50 @@ def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> Non
         )
 
 
+def _generated_manifest_cleanup(team_id: str) -> Callable[[Optional[AgenticTeamAgent]], None]:
+    """Build the registry-cleanup hook shared by the add (``on_replaced``) and delete
+    (``on_deleted``) routes.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: returns a callback that, run under the store's team lock with the
+        row a roster mutation removed/replaced (``None`` for a plain insert),
+        unregisters that row's stale manifest **iff** it was generated. Registry-source
+        rows and ``None`` are left untouched. The callback is best-effort (non-raising).
+    """
+
+    def _cleanup(prior: Optional[AgenticTeamAgent]) -> None:
+        if prior is not None and prior.source == SOURCE_GENERATED:
+            _unregister_generated_manifest(team_id, prior)
+
+    return _cleanup
+
+
 @app.post("/teams/{team_id}/agents/from-registry", response_model=AgenticTeamAgent, status_code=201)
 def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     """Add a registered agent to the team roster, projected from its manifest (§5.3).
 
-    Returns the projected roster agent. ``404`` when the team or the manifest id is
-    unknown. Re-adding the same manifest updates that roster entry in place. If this
-    replaces a *generated* agent of the same name, that generated agent's stale
-    in-process manifest is unregistered (the new entry is registry-source and
-    resolves on its own) — mirroring the delete route's cleanup. The cleanup runs in
-    the store's locked transaction against the row actually replaced, so it can't
-    race a concurrent chat-save's register.
+    Re-adding the same manifest updates that roster entry in place. If this replaces a
+    *generated* agent of the same name, that generated agent's stale in-process
+    manifest is unregistered (the new entry is registry-source and resolves on its
+    own) — the cleanup runs in the store's locked transaction against the row actually
+    replaced, so it can't race a concurrent chat-save's register.
+
+    Preconditions: ``req.manifest_id`` is non-empty (enforced by the request model).
+    Postconditions: ``201`` with the projected roster agent persisted on the roster;
+        ``404`` if the team or the manifest id is unknown (roster unchanged).
     """
     from agent_registry import get_registry
 
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    registry = get_registry()
-    manifest = registry.get(req.manifest_id)
+    manifest = get_registry().get(req.manifest_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent manifest: {req.manifest_id}")
     agent = _roster_agent_from_manifest(manifest)
-
-    def _cleanup(prior: Optional[AgenticTeamAgent]) -> None:
-        # Runs under the team lock with the row actually replaced. If it was a
-        # generated agent, drop its stale manifest so catalog/invoke stop resolving
-        # it (the new entry is registry-source).
-        if prior is not None and prior.source == SOURCE_GENERATED:
-            _unregister_generated_manifest(team_id, prior)
-
-    _store.add_or_replace_team_agent(team_id, agent, on_replaced=_cleanup)
+    _store.add_or_replace_team_agent(
+        team_id, agent, on_replaced=_generated_manifest_cleanup(team_id)
+    )
     return agent
 
 
@@ -387,28 +400,24 @@ def remove_agent_from_roster(team_id: str, agent_name: str):
     """Remove a single agent from the team roster by name (§5.3).
 
     The ``:path`` converter lets roster names that contain ``/`` (e.g.
-    "Backend — API/OpenAPI Specialist") match instead of 404-ing on the slash.
+    "Backend — API/OpenAPI Specialist") match instead of 404-ing on the slash. If the
+    removed agent was **generated** (installed into the live registry via the LLM save
+    path's ``register_team_manifests``), its in-process manifest is also unregistered
+    so catalog/invoke consumers stop resolving it — run under the team lock before the
+    delete commits, so a concurrent chat-save can't re-add+register the same
+    deterministic id in the gap. Registry-source agents are left in the registry, since
+    they exist there independently of this team.
 
-    ``204`` on success; ``404`` when the team is unknown or no roster entry has
-    that name. If the removed agent was **generated** (installed into the live
-    registry via the LLM save path's ``register_team_manifests``), its in-process
-    manifest is also unregistered so catalog/invoke consumers stop resolving it —
-    mirroring the stale-cleanup the full-roster save already does. Registry-source
-    agents are left in the registry, since they exist there independently of this
-    team.
+    Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
+    Postconditions: ``204`` and the named agent removed from the roster; ``404`` when
+        the team is unknown or no roster entry has that name (roster unchanged).
     """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-
-    def _cleanup(deleted: AgenticTeamAgent) -> None:
-        # Runs under the team lock, before the delete commits, so a concurrent
-        # chat-save can't re-add+register the same deterministic id between the
-        # delete and this cleanup. Registry-source agents are left registered.
-        if deleted.source == SOURCE_GENERATED:
-            _unregister_generated_manifest(team_id, deleted)
-
-    deleted = _store.delete_team_agent(team_id, agent_name, on_deleted=_cleanup)
+    deleted = _store.delete_team_agent(
+        team_id, agent_name, on_deleted=_generated_manifest_cleanup(team_id)
+    )
     if deleted is None:
         raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
     return Response(status_code=204)

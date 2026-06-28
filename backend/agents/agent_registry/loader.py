@@ -119,6 +119,20 @@ class AgentRegistry:
     def all(self) -> list[AgentManifest]:
         return list(self._by_id.values())
 
+    def manifests_with_id_prefix(self, prefix: str) -> list[AgentManifest]:
+        """Return registered manifests whose ``id`` starts with ``prefix``.
+
+        Materializes only the matching subset in one pass, unlike :meth:`all`, which
+        copies the whole registry before the caller filters — useful for a caller that
+        wants just one namespace's entries (e.g. a single team's generated wrappers)
+        and runs the scan while holding a lock.
+
+        Preconditions: ``prefix`` is a string.
+        Postconditions: returns every registered manifest ``m`` with
+            ``m.id.startswith(prefix)`` (empty list when none match); read-only.
+        """
+        return [m for m in self._by_id.values() if m.id.startswith(prefix)]
+
     def get(self, agent_id: str) -> AgentManifest | None:
         return self._by_id.get(agent_id)
 

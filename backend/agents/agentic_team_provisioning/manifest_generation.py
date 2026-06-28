@@ -189,12 +189,14 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
         # Drop stale entries from a prior roster (removed/renamed agents) before
         # registering the replacement set. Scope strictly to this team's generated
         # ids (prefix + the "generated" tag) so a hand-authored disk manifest is
-        # never touched.
+        # never touched. ``manifests_with_id_prefix`` materializes only this team's
+        # entries (not a copy of the whole registry) — this runs under the team lock
+        # on the chat-save path, so keeping the scan's allocation small matters.
         prefix = team_id_prefix(team_id)
         stale = [
             m.id
-            for m in registry.all()
-            if m.id.startswith(prefix) and "generated" in m.tags and m.id not in new_ids
+            for m in registry.manifests_with_id_prefix(prefix)
+            if "generated" in m.tags and m.id not in new_ids
         ]
         for agent_id in stale:
             registry.unregister(agent_id)

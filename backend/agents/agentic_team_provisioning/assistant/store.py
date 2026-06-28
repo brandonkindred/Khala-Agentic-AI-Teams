@@ -279,14 +279,21 @@ class AgenticTeamStore:
         non-raising (best-effort); a raising callback would roll back the roster write.
 
         Preconditions: ``team_id`` should name an existing team (callers validate).
-        Postconditions: returns the merged roster actually written. If ``team_id`` is
-            unknown the roster is left untouched, ``on_merged`` is not called, and
-            ``[]`` is returned.
+        Postconditions: returns the merged roster actually written (``[]`` if the team
+            is unknown — the roster is left untouched in that case). ``on_merged`` (when
+            given) is **always** invoked once with the final roster, including the empty
+            list for an unknown team, so a caller can still reconcile external state
+            (e.g. drop a vanished team's stale registry manifests) — restoring the
+            cleanup the pre-callback ``register_team_manifests(team_id, merged)`` did.
         """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
             if cur.fetchone() is None:
+                # Unknown team: nothing to write, but still let the caller reconcile
+                # external state for the (now-absent) team with the empty roster.
+                if on_merged is not None:
+                    on_merged([])
                 return []
             existing = self._load_team_agents(cur, team_id)
             preserved = [a for a in existing if a.source == SOURCE_REGISTRY]

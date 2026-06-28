@@ -408,14 +408,20 @@ def test_full_save_preserves_created_at_and_prunes(monkeypatch: pytest.MonkeyPat
 
 
 def test_merge_generated_agents_unknown_team_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The locked merge no-ops (returns []) when the team row doesn't exist."""
+    """For an unknown team the roster is untouched and [] is returned, but on_merged is
+    still invoked once with [] so the caller can reconcile a vanished team's external
+    state (e.g. unregister its stale manifests)."""
     install_fake_postgres(monkeypatch)
     store = AgenticTeamStore()
+    seen: list[list[str]] = []
     result = store.merge_generated_agents(
-        "missing", [AgenticTeamAgent(agent_name="X", role="x", skills=["y"])]
+        "missing",
+        [AgenticTeamAgent(agent_name="X", role="x", skills=["y"])],
+        on_merged=lambda ms: seen.append([m.agent_name for m in ms]),
     )
     assert result == []
     assert store.list_team_agents("missing") == []
+    assert seen == [[]]  # on_merged called once with the empty roster
 
 
 def test_manifests_endpoint_returns_original_for_registry_agent(client: TestClient) -> None:
