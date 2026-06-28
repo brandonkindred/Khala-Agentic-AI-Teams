@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
+from ...output_templates import parse_files_and_summary_template
 from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 from ..static_agents import FileGeneratorToolAgent
 
@@ -40,6 +41,7 @@ class DataEngineeringToolAgent(FileGeneratorToolAgent):
 
     log_label = "DataEngineering"
     generation_prompt = DATA_ENGINEERING_PROMPT
+    _parse_files_and_summary = staticmethod(parse_files_and_summary_template)
 
     plan_recommendations = [
         "Consider data models and integrity checks. Only add migrations if modifying existing schema."

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
+from ...output_templates import parse_files_and_summary_template
 from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 from ..static_agents import FileGeneratorToolAgent
 
@@ -32,6 +33,7 @@ class ApiOpenApiToolAgent(FileGeneratorToolAgent):
 
     log_label = "ApiOpenApi"
     generation_prompt = API_OPENAPI_PROMPT
+    _parse_files_and_summary = staticmethod(parse_files_and_summary_template)
 
     plan_recommendations = ["Include API contract and OpenAPI spec in the microtask plan."]
     plan_summary = "API/OpenAPI planning input provided."

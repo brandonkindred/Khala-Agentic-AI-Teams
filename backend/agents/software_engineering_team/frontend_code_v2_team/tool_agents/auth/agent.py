@@ -1,32 +1,21 @@
-"""Auth tool agent stub for frontend-code-v2."""
+"""Auth tool agent stub for frontend-code-v2.
+
+Declarative :class:`StubToolAgent` profile — frontend auth is not yet implemented,
+so every phase returns a static advisory message via the shared static base.
+"""
 
 from __future__ import annotations
 
-import logging
-
-from ...models import ToolAgentInput, ToolAgentOutput, ToolAgentPhaseInput, ToolAgentPhaseOutput
-
-logger = logging.getLogger(__name__)
+from software_engineering_team.shared.tool_agent_static import StubToolAgent
 
 
-class AuthToolAgent:
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
+class AuthToolAgent(StubToolAgent):
+    """Frontend auth adapter stub (no changes applied)."""
 
-    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        logger.info("Auth stub: microtask %s", inp.microtask.id)
-        return ToolAgentOutput(summary="Auth stub — no changes applied.")
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(
-            recommendations=["Consider login UI and auth guards."], summary="Auth planning stub."
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Auth review stub.")
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Auth problem-solving stub.")
-
-    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Auth deliver stub.")
+    label = "Auth"
+    execute_summary = "Auth stub — no changes applied."
+    plan_recommendations = ["Consider login UI and auth guards."]
+    plan_summary = "Auth planning stub."
+    review_summary = "Auth review stub."
+    problem_solve_summary = "Auth problem-solving stub."
+    deliver_summary = "Auth deliver stub."
