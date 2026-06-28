@@ -85,7 +85,7 @@ app = create_team_app(
     service_name="coding-team",
     team_key="coding_team",
     title="Coding Team API",
-    description="Tech Lead and Senior SWEs with Task Graph. POST /run to start a job; poll GET /status/{job_id}.",
+    description="Tech Lead with frontend_v2/backend_v2 implementation teams and Task Graph. POST /run to start a job; poll GET /status/{job_id}.",
     version="0.1.0",
     postgres_schema=CODE_REVIEW_SCHEMA,
 )
@@ -209,7 +209,7 @@ class StatusResponse(BaseModel):
     agent_task_map: Dict[str, str] = Field(default_factory=dict)
     agents: List[AgentStatusEntry] = Field(
         default_factory=list,
-        description="Per-agent status roster (Tech Lead + one Senior SWE per stack): who is "
+        description="Per-agent status roster (Tech Lead + implementation workers): who is "
         "working, each agent's status, and the task each is on. Derived from stack_specs, "
         "agent_task_map, the task graph, and current_activity.",
     )
@@ -280,7 +280,7 @@ class RunFromGitHubRequest(BaseModel):
 
     owner: str = Field(..., description="GitHub repository owner (user or org)")
     repo: str = Field(..., description="GitHub repository name")
-    repo_path: str = Field(..., description="Local checkout the SWEs work in")
+    repo_path: str = Field(..., description="Local checkout the implementation teams work in")
     label: Optional[str] = Field(default=None, description="Optional label filter")
     issue_number: Optional[int] = Field(
         default=None,

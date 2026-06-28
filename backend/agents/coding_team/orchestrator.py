@@ -2,7 +2,7 @@
 Coding team orchestrator: plan → Task Graph → assign → implement → review → merge.
 
 Uses a swarm pattern: a Coordinator (Tech Lead) assigns tasks from the graph
-to Workers (Senior SWEs). Quality gate tools run after each implementation.
+to frontend_v2/backend_v2 implementation workers. Quality gate tools run after each implementation.
 Exposes run_coding_team_orchestrator for in-process call from software_engineering_team.
 """
 
@@ -12,6 +12,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -30,7 +31,6 @@ from coding_team.models import (
     Task,
     TaskStatus,
 )
-from coding_team.senior_software_engineer_agent import SeniorSWEAgent
 from coding_team.task_graph import TaskGraphService, create_task_graph
 from coding_team.tech_lead_agent import TechLeadAgent
 
@@ -296,14 +296,417 @@ _CONTEXT_EXTRA_EXTENSIONS: frozenset[str] = frozenset(
     {".js", ".html", ".json", ".md", ".txt", ".rst"}
 )
 
-# Fallback stack when planning/snapshot provide none (one Senior SWE on a generic stack).
-_DEFAULT_STACK_SPECS: List[Dict[str, Any]] = [{"name": "default", "tools_services": []}]
+# Default coding-team roster when planning/snapshot provide no stacks.
+_DEFAULT_STACK_SPECS: List[Dict[str, Any]] = [
+    {
+        "name": "frontend_v2",
+        "tools_services": ["Angular", "TypeScript", "React", "CSS", "HTML"],
+    },
+    {
+        "name": "backend_v2",
+        "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
+    },
+]
+
+_FRONTEND_V2_EXPLICIT = {
+    "frontend_v2",
+    "frontend-v2",
+    "frontend v2",
+    "frontend_code_v2",
+    "frontend-code-v2",
+    "frontend code v2",
+}
+_BACKEND_V2_EXPLICIT = {
+    "backend_v2",
+    "backend-v2",
+    "backend v2",
+    "backend_code_v2",
+    "backend-code-v2",
+    "backend code v2",
+}
+_FRONTEND_HINTS = {
+    "angular",
+    "react",
+    "vue",
+    "typescript",
+    "javascript",
+    "html",
+    "css",
+    "scss",
+    "ui",
+    "ux",
+    "frontend",
+}
+_BACKEND_HINTS = {
+    "api",
+    "apis",
+    "backend",
+    "build",
+    "ci",
+    "ci_cd",
+    "cicd",
+    "database",
+    "databases",
+    "devops",
+    "django",
+    "express",
+    "fastapi",
+    "flask",
+    "infrastructure",
+    "java",
+    "node",
+    "postgres",
+    "python",
+    "server",
+    "servers",
+    "service",
+    "services",
+    "spring",
+}
+_BACKEND_TEAM_ALIASES = {
+    # Compact separator-less form of the canonical team name. The token-exact frontend/
+    # backend check below only matches when "backend" is its own token (so "backendv2"
+    # collapses to a single token); this alias preserves the old substring behavior for
+    # the v2 label without re-introducing matches on unrelated words like "mybackend".
+    "backendv2",
+    "api",
+    "apis",
+    "backend_api",
+    "ci",
+    "ci_cd",
+    "cicd",
+    "database",
+    "databases",
+    "data",
+    "db",
+    "devops",
+    "infra",
+    "infrastructure",
+    "node",
+    "platform",
+    "server",
+    "servers",
+    "service",
+    "services",
+    # The entries above are legacy generic aliases (e.g. "service", "data") kept for
+    # backward compatibility. The entries below are concrete backend languages/frameworks
+    # a Tech Lead may name as the target_team instead of the canonical "backend_v2"; new
+    # additions should stay unambiguous tech tokens (never generic words like "build").
+    "python",
+    "java",
+    "nodejs",
+    "node_js",
+    "golang",
+    "rust",
+    "ruby",
+    "php",
+    "dotnet",
+    # .NET spellings: "_team_key" normalizes ".NET" -> "net" and ".NET Core" -> "net_core",
+    # so alias those normalized forms (not just "dotnet") or they fail to route.
+    "net",
+    "netcore",
+    "net_core",
+    "aspnet",
+    "asp_net",
+    "django",
+    "flask",
+    "fastapi",
+    "spring",
+    "springboot",
+    "spring_boot",
+    "express",
+    "express_js",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "mongodb",
+}
+# Frontend-owned target_team/stack aliases. Mirrors _BACKEND_TEAM_ALIASES so common
+# UI/UX target labels a Tech Lead may emit (or copy from a "UI" stack name) canonicalize
+# to frontend_v2 rather than failing to match the available frontend worker. Compared by
+# exact normalized-label equality in _team_key (``text in _FRONTEND_TEAM_ALIASES``), so
+# unrelated words containing these as a substring (e.g. "build", "guides") are unaffected.
+_FRONTEND_TEAM_ALIASES = {
+    # Compact separator-less form of the canonical team name (see _BACKEND_TEAM_ALIASES).
+    "frontendv2",
+    "ui",
+    "ux",
+    "ui_ux",
+    "ux_ui",
+    "web",
+    "webapp",
+    "web_app",
+    "client",
+    # The entries above are legacy generic aliases (e.g. "client", "webapp") kept for
+    # backward compatibility. The entries below are concrete frontend languages/frameworks
+    # a Tech Lead may name as the target_team instead of the canonical "frontend_v2"; new
+    # additions should stay unambiguous tech tokens only.
+    "angular",
+    "angularjs",
+    "angular_js",
+    "react",
+    "reactjs",
+    "react_js",
+    "vue",
+    "vuejs",
+    "vue_js",
+    "svelte",
+    "html",
+    "css",
+    "scss",
+    "sass",
+    "tailwind",
+    "nextjs",
+    "next_js",
+    # NOTE: bare "typescript"/"javascript" are intentionally NOT aliased here. They are
+    # ambiguous — this team's backend_v2 stack includes Node.js — so a "TypeScript"/
+    # "JavaScript" target_team must not be hard-routed to frontend. The Tech Lead should
+    # emit the canonical frontend_v2/backend_v2 (or a specific framework) for those.
+}
+_LEGACY_BACKEND_STACK_ALIASES = {
+    "default",
+    "senior_software_engineer",
+    "senior_software_engineer_legacy",
+    "software_engineer",
+}
+_BACKEND_V2_STACK_SPEC = {
+    "name": "backend_v2",
+    "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
+}
 
 # Full file-selection sets for repo-context scanning, built once from the shared repo_utils
 # constants + the extras above and cached (the import lives below to keep the SE dependency
 # function-level; the sets are static so there is no need to rebuild them on every call).
 _CONTEXT_EXTENSIONS: Optional[frozenset[str]] = None
 _CONTEXT_EXCLUDE_DIRS: Optional[frozenset[str]] = None
+
+
+def _team_key(value: Optional[str]) -> str:
+    """Normalize a stack/team label for routing comparisons."""
+    # Collapse every run of non-alphanumeric characters (dots, hyphens, spaces, repeats)
+    # to a single underscore, so "Node.js", "Node. JS" and "node-js" all normalize to the
+    # same token sequence; strip leading/trailing separators.
+    raw_text = (value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", raw_text).strip("_")
+    stripped = re.sub(r"[^a-z0-9]+", "", raw_text)
+    if stripped == "frontend":
+        return "frontend_v2"
+    if stripped == "backend":
+        return "backend_v2"
+    # Exact-token membership (not substring) so unrelated labels that merely contain
+    # "frontend"/"backend" as a substring (e.g. "myfrontend") are not misclassified.
+    tokens = set(text.split("_"))
+    has_frontend = "frontend" in tokens
+    has_backend = "backend" in tokens
+    if has_frontend and has_backend:
+        logger.warning(
+            "Ambiguous team label %r contains both frontend and backend; "
+            "using existing frontend_v2 precedence",
+            value,
+        )
+    # Heuristic: frontend takes precedence when a raw label contains multiple stack names.
+    if has_frontend:
+        return "frontend_v2"
+    if has_backend:
+        return "backend_v2"
+    if text in _FRONTEND_TEAM_ALIASES:
+        return "frontend_v2"
+    if text in _BACKEND_TEAM_ALIASES:
+        return "backend_v2"
+    return text
+
+
+def _legacy_stack_key(value: Optional[str]) -> str:
+    """Normalize legacy stack labels that predate frontend/backend v2 routing."""
+    return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _stack_hint_tokens(spec: StackSpec) -> set[str]:
+    """Return normalized stack hint tokens without substring false positives."""
+    tokens: set[str] = set()
+    for raw_part in [spec.name, *(spec.tools_services or [])]:
+        part = str(raw_part or "").strip().lower()
+        if not part:
+            continue
+        normalized = re.sub(r"[^a-z0-9]+", "_", part).strip("_")
+        if normalized:
+            tokens.add(normalized)
+        for token in re.findall(r"[a-z0-9]+", part):
+            tokens.add(token)
+            if token.endswith("s") and len(token) > 3:
+                tokens.add(token[:-1])
+    return tokens
+
+
+def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
+    """Return 'frontend'/'backend' when this stack should be backed by a v2 team."""
+    raw_name = (spec.name or "").strip().lower()
+    normalized_name = raw_name.replace("_", " ").replace("-", " ")
+    exactish = {raw_name, normalized_name}
+    hint_tokens = _stack_hint_tokens(spec)
+    if exactish & _FRONTEND_V2_EXPLICIT:
+        return "frontend"
+    if exactish & _BACKEND_V2_EXPLICIT:
+        return "backend"
+    canonical_key = _team_key(spec.name)
+    if canonical_key == "frontend_v2":
+        return "frontend"
+    if canonical_key == "backend_v2":
+        return "backend"
+    if _legacy_stack_key(spec.name) in _LEGACY_BACKEND_STACK_ALIASES:
+        return "backend"
+    if hint_tokens & _FRONTEND_HINTS:
+        return "frontend"
+    if hint_tokens & _BACKEND_HINTS:
+        return "backend"
+    return None
+
+
+def _quality_gate_agent_type(stack_name: Optional[str]) -> str:
+    """Map coding-team/v2 stack names to quality-gate agent types."""
+    key = _team_key(stack_name)
+    if key == "frontend_v2":
+        return "frontend"
+    if key == "backend_v2":
+        return "backend"
+    inferred = _v2_team_kind_for_stack(
+        StackSpec(name=(stack_name or "").strip(), tools_services=[])
+    )
+    if inferred in {"frontend", "backend"}:
+        return inferred
+    return (stack_name or "backend").strip() or "backend"
+
+
+def _target_matches_agent(target_team: Optional[str], agent_id: str) -> bool:
+    """Whether an agent can execute a task with the target_team hint."""
+    target = _team_key(target_team)
+    if not target:
+        return True
+    return target == _team_key(agent_id)
+
+
+def _worker_team_key(worker: Any) -> str:
+    """Return the scheduler team key for a worker instance."""
+    kind = getattr(worker, "team_kind", None)
+    if kind == "frontend":
+        return "frontend_v2"
+    if kind == "backend":
+        return "backend_v2"
+    spec = getattr(worker, "stack_spec", None)
+    raw_name = (getattr(spec, "name", "") or "").strip().lower()
+    normalized_name = raw_name.replace("_", " ").replace("-", " ")
+    exactish = {raw_name, normalized_name}
+    if exactish & _FRONTEND_V2_EXPLICIT:
+        return "frontend_v2"
+    if exactish & _BACKEND_V2_EXPLICIT:
+        return "backend_v2"
+    return raw_name.replace("-", "_").replace(" ", "_")
+
+
+def _stack_spec_from_raw(entry: Any) -> StackSpec:
+    """Build a StackSpec from a persisted/raw stack entry without raising."""
+    spec = entry if isinstance(entry, dict) else {}
+    name = str(spec.get("name") or "")
+    tools = spec.get("tools_services")
+    return StackSpec(name=name, tools_services=list(tools) if isinstance(tools, list) else [])
+
+
+def _ensure_target_team_stack_specs(
+    stacks_raw: Any,
+    tasks: List[Task],
+) -> List[Dict[str, Any]]:
+    """Ensure targeted frontend/backend tasks have matching v2 team workers in the roster."""
+    stacks = []
+    for entry in list(stacks_raw) if isinstance(stacks_raw, list) else []:
+        if not isinstance(entry, dict):
+            stacks.append(entry)
+            continue
+        if _legacy_stack_key(entry.get("name")) in _LEGACY_BACKEND_STACK_ALIASES:
+            stacks.append(dict(_BACKEND_V2_STACK_SPEC))
+        else:
+            stacks.append(entry)
+    present = {_v2_team_kind_for_stack(_stack_spec_from_raw(entry)) for entry in stacks}
+    target_keys = {_team_key(task.target_team) for task in tasks if task.target_team}
+
+    if "frontend_v2" in target_keys and "frontend" not in present:
+        stacks.append(
+            {
+                "name": "frontend_v2",
+                "tools_services": ["Angular", "TypeScript", "React", "CSS", "HTML"],
+            }
+        )
+    if "backend_v2" in target_keys and "backend" not in present:
+        stacks.append(dict(_BACKEND_V2_STACK_SPEC))
+    return stacks
+
+
+def _v2_text_mode_llm(llm: Any) -> Any:
+    """Return an LLM handle suitable for v2 phases that parse text templates."""
+    # Function-level imports (not module-level) keep the optional Strands SDK and the
+    # LLMClient off the orchestrator's import path, matching shared.strands_model's own
+    # convention; resolved once here so all branches below share a single import.
+    from llm_service import LLMClient
+    from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+
+    clone = getattr(llm, "clone", None)
+    if callable(clone):
+        try:
+            config_getter = getattr(llm, "get_config", None)
+            config = config_getter() if callable(config_getter) else {}
+            if isinstance(config, dict) and config.get("response_format") == "text":
+                return llm
+            return clone(response_format="text")
+        except Exception as exc:  # noqa: BLE001 - resolve explicitly when clone fails
+            # clone() raised, so we cannot reconfigure this handle in place. Returning it
+            # as-is (or passing it back to the resolver) would risk leaking a JSON/structured-
+            # mode model to the text template parsers — resolve_strands_model passes pre-built
+            # Strands Models through unchanged. Re-resolve from the wrapped LLMClient when the
+            # handle exposes one (LLMClientModel stores it as ``_client``), which yields a
+            # genuine text-mode wrapper; otherwise fall through to a fresh default text model.
+            # Either way, never return the original non-text handle.
+            logger.warning("Could not clone v2 LLM into text mode: %s", exc)
+            # Prefer a public ``client`` accessor if the model exposes one; fall back to the
+            # ``_client`` attribute LLMClientModel currently stores it under. This couples to a
+            # private name by necessity (no public accessor today) — guarded with getattr so a
+            # future rename degrades to the default text model rather than raising.
+            underlying_client = getattr(llm, "client", None) or getattr(llm, "_client", None)
+            return resolve_text_mode_strands_model(underlying_client)
+
+    if llm is None or isinstance(llm, LLMClient):
+        return resolve_text_mode_strands_model(llm)
+    # A non-None, non-LLMClient handle without a clone() is an opaque caller-injected model
+    # (e.g. a pre-built Strands model already in the right mode); pass it through unchanged.
+    return llm
+
+
+def _build_implementation_worker(
+    agent_id: str,
+    spec: StackSpec,
+    llm_getter: Callable[[str], Any],
+) -> Any:
+    """Build a v2 specialist worker for a stack."""
+    kind = _v2_team_kind_for_stack(spec)
+    if not kind:
+        raise ValueError(
+            f"Unsupported coding-team stack {spec.name!r}. "
+            "Only frontend_v2 and backend_v2 implementation teams are available."
+        )
+    from coding_team.v2_team_worker import V2TeamWorker
+
+    if kind == "frontend":
+        from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
+
+        team_lead = FrontendCodeV2TeamLead(_v2_text_mode_llm(llm_getter("frontend")))
+    else:
+        from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
+
+        team_lead = BackendCodeV2TeamLead(_v2_text_mode_llm(llm_getter("backend")))
+    return V2TeamWorker(
+        agent_id=agent_id,
+        stack_spec=spec,
+        team_kind=kind,
+        team_lead=team_lead,
+    )
 
 
 def _context_file_filters() -> tuple[frozenset[str], frozenset[str]]:
@@ -325,7 +728,7 @@ def _context_file_filters() -> tuple[frozenset[str], frozenset[str]]:
 
 
 def _read_repo_context(repo_path: Path) -> str:
-    """Read the repo structure/code briefing for Senior SWE context.
+    """Read the repo structure/code briefing for implementation-worker context.
 
     Every file the briefing includes is rendered with its FULL contents — the
     engineer reasons over this to implement a task, and clipping a file would
@@ -801,29 +1204,47 @@ def run_coding_team_orchestrator(
             return
         tasks_raw = out.get("tasks") or []
         stacks_raw = out.get("stacks") or _DEFAULT_STACK_SPECS
-        for t in tasks_raw:
+        for idx, t in enumerate(tasks_raw, start=1):
+            if not isinstance(t, dict):
+                logger.warning("Skipping malformed task graph entry at index %s: %r", idx, t)
+                continue
+            task_id = str(t.get("id") or f"task_{idx}")
             graph.add_task(
-                task_id=t["id"],
-                title=t.get("title", t["id"]),
+                task_id=task_id,
+                title=t.get("title") or task_id,
                 description=t.get("description", ""),
                 dependencies=t.get("dependencies", []),
+                target_team=t.get("target_team") or None,
             )
-        # Persist the stacks so a later retry can rebuild the workers without re-planning.
+    original_stacks_raw = stacks_raw
+    stacks_raw = _ensure_target_team_stack_specs(stacks_raw, graph.get_tasks())
+    if not snapshot_tasks or stacks_raw != original_stacks_raw:
+        # Persist the stacks so a later retry can rebuild the workers without re-planning. On
+        # resume, only write when we repaired an old/incomplete roster from target_team hints.
         _update(stack_specs=stacks_raw)
     _persist_graph()
 
-    # Build Senior SWE agents (one per stack). derive_stack_roster is the single source of
-    # truth for agent-id naming, shared with the status endpoint's roster builder so the two
+    # Build v2 implementation workers. derive_stack_roster is the single source of
+    # truth for worker-id naming, shared with the status endpoint's roster builder so the two
     # cannot drift — a mismatch would make per-agent status lookups silently miss.
     roster = derive_stack_roster(stacks_raw)
     stack_specs: List[StackSpec] = [
         StackSpec(name=name, tools_services=tools) for (_aid, name, tools) in roster
     ]
     agent_ids = [aid for (aid, _name, _tools) in roster]
-    senior_swes: List[SeniorSWEAgent] = []
-    for aid, spec in zip(agent_ids, stack_specs):
-        llm_swe = llm_getter("coding_team")
-        senior_swes.append(SeniorSWEAgent(agent_id=aid, stack_spec=spec, llm=llm_swe))
+    implementation_workers: List[Any] = []
+    try:
+        for aid, spec in zip(agent_ids, stack_specs):
+            implementation_workers.append(_build_implementation_worker(aid, spec, llm_getter))
+    except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
+        logger.error("Failed to build coding-team implementation workers: %s", exc)
+        _update(
+            status="failed",
+            phase="completed",
+            status_text="Could not build coding-team implementation workers",
+            error=str(exc),
+        )
+        return
 
     phase = "coding"
     status_text = "Assigning and implementing tasks"
@@ -832,10 +1253,10 @@ def run_coding_team_orchestrator(
     # an unconditional base write would regress the bar (e.g. 52 → 10 → 52).
     _update(phase=phase, status_text=status_text, status="running")
 
-    # Run the swarm: coordinator (Tech Lead) + workers (Senior SWEs)
+    # Run the swarm: coordinator (Tech Lead) + v2 implementation workers.
     swarm = CodingTeamSwarm(
         tech_lead=tech_lead,
-        workers=senior_swes,
+        workers=implementation_workers,
         graph=graph,
         path=path,
         agent_ids=agent_ids,
@@ -914,7 +1335,7 @@ def run_coding_team_orchestrator(
 
 
 class CodingTeamSwarm:
-    """Coordinator (Tech Lead) + Workers (Senior SWEs) swarm pattern.
+    """Coordinator (Tech Lead) + frontend/backend v2 implementation-worker swarm pattern.
 
     The coordinator assigns ready tasks to free workers. Each worker implements
     the task, runs quality gates (build, lint, code review), and signals
@@ -924,7 +1345,7 @@ class CodingTeamSwarm:
     def __init__(
         self,
         tech_lead: TechLeadAgent,
-        workers: List[SeniorSWEAgent],
+        workers: List[Any],
         graph: TaskGraphService,
         path: Path,
         agent_ids: List[str],
@@ -936,6 +1357,7 @@ class CodingTeamSwarm:
         self.graph = graph
         self.path = path
         self.agent_ids = agent_ids
+        self.agent_team_keys = {w.agent_id: _worker_team_key(w) for w in workers}
         self.llm_getter = llm_getter
         # Plan-level decisions the user already answered (entry gate + Tech Lead planning), folded
         # into plan_input.resolved_questions before the swarm is built. Surfaced to both review
@@ -964,14 +1386,40 @@ class CodingTeamSwarm:
     def _find_free_agents(self) -> List[str]:
         return [aid for aid in self.agent_ids if self.graph.get_task_for_agent(aid) is None]
 
+    def _has_worker_for_target(self, target_team: Optional[str]) -> bool:
+        """Whether any worker in this swarm can ever satisfy the target team hint."""
+        if not target_team:
+            return True
+        return any(
+            _target_matches_agent(target_team, self.agent_team_keys.get(agent_id, agent_id))
+            for agent_id in self.agent_ids
+        )
+
+    def _try_assign(self, task_id: str, agent_id: str) -> bool:
+        """Assign a task to an agent, swallowing transient errors so one bad assignment
+        cannot abort the whole assignment round. Returns True only on a real placement."""
+        try:
+            return bool(self.graph.assign_task_to_agent(task_id, agent_id))
+        except Exception as exc:  # noqa: BLE001 - keep assigning the remaining ready tasks
+            logger.warning("Failed to assign task %s to agent %s: %s", task_id, agent_id, exc)
+            return False
+
     def _assign_tasks(self, ready: List[Task], free_agents: List[str]) -> None:
         """Coordinator decides which tasks go to which workers."""
         if not free_agents or not ready:
             return
+        ready_by_id = {t.id: t for t in ready}
+        used_agents: set[str] = set()
+        assigned_tasks: set[str] = set()
         assignments = self.tech_lead.run_assignments(
             agent_ids=self.agent_ids,
             ready_tasks=[
-                {"id": t.id, "title": t.title, "assignee": t.assigned_agent_id or "unassigned"}
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "target_team": t.target_team or "",
+                    "assignee": t.assigned_agent_id or "unassigned",
+                }
                 for t in ready
             ],
             free_agents=free_agents,
@@ -979,10 +1427,62 @@ class CodingTeamSwarm:
         for a in assignments.get("assignments") or []:
             agent_id = a.get("agent_id")
             task_id = a.get("task_id")
-            if agent_id and task_id:
-                self.graph.assign_task_to_agent(task_id, agent_id)
+            task = ready_by_id.get(task_id)
+            if not agent_id or not task or agent_id not in free_agents or agent_id in used_agents:
+                continue
+            if not _target_matches_agent(
+                task.target_team,
+                self.agent_team_keys.get(agent_id, agent_id),
+            ):
+                logger.warning(
+                    "Ignoring assignment of task %s target_team=%s to mismatched agent %s",
+                    task.id,
+                    task.target_team,
+                    agent_id,
+                )
+                continue
+            if self._try_assign(task.id, agent_id):
+                used_agents.add(agent_id)
+                assigned_tasks.add(task.id)
 
-    def _implement_and_verify(self, swe: SeniorSWEAgent, update_fn: Callable) -> None:
+        # Deterministic guardrail: if the Tech Lead already labeled a ready task for a v2 team but
+        # the assignment call omitted it, assign it to a matching free worker rather than leaving it
+        # idle or routing it to the wrong specialist.
+        for task in ready:
+            if not task.target_team or task.id in assigned_tasks:
+                continue
+            for agent_id in free_agents:
+                if agent_id in used_agents:
+                    continue
+                if not _target_matches_agent(
+                    task.target_team, self.agent_team_keys.get(agent_id, agent_id)
+                ):
+                    continue
+                # Only stop once the task is actually placed. If assignment fails (e.g. the
+                # agent's prior task isn't merged yet, or a transient error), keep trying the
+                # remaining matching free workers instead of leaving the task idle for the round.
+                if self._try_assign(task.id, agent_id):
+                    used_agents.add(agent_id)
+                    assigned_tasks.add(task.id)
+                    break
+
+        for task in ready:
+            if task.id in assigned_tasks or not task.target_team:
+                continue
+            if self._has_worker_for_target(task.target_team):
+                continue
+            reason = f"No implementation worker is available for target_team {task.target_team!r}."
+            logger.warning("Failing task %s: %s", task.id, reason)
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.FAILED,
+                changes_summary=reason,
+                revision_feedback=list(task.revision_feedback or [])
+                + [{"source": "system", "reason": reason}],
+            )
+            self._cascade_fail_dependents(task.id)
+
+    def _implement_and_verify(self, swe: Any, update_fn: Callable) -> None:
         """Worker implements its assigned task, then runs quality gate tools."""
         task = self.graph.get_task_for_agent(swe.agent_id)
         if not task:
@@ -1348,7 +1848,7 @@ class CodingTeamSwarm:
         )
 
     def _run_quality_gates(
-        self, swe: SeniorSWEAgent, task: Task, result: Dict[str, Any], update_fn: Callable
+        self, swe: Any, task: Task, result: Dict[str, Any], update_fn: Callable
     ) -> bool:
         """Run build, lint, code review. Returns True if passed, False if returned for revision."""
         # The gate *tools* (build/lint/review) run inside the try so a tool crash
@@ -1365,7 +1865,7 @@ class CodingTeamSwarm:
                 run_linting,
             )
 
-            agent_type = swe.stack_spec.name or "backend"
+            agent_type = _quality_gate_agent_type(swe.stack_spec.name)
 
             # Build verification
             update_fn(status_text=f"Build verification: {task.title}")
@@ -1606,16 +2106,16 @@ class CodingTeamSwarm:
     def _request_revision(
         self, task: Task, review: Dict[str, Any], diff: Optional[str] = None
     ) -> None:
-        """Send a Tech-Lead-rejected task back to the SAME engineer for revision.
+        """Send a Tech-Lead-rejected task back to the same implementation worker for revision.
 
         Unlike the quality-gate path (_return_for_revision, which demotes to TO_DO and clears the
-        assignment), a Tech Lead rejection keeps the task with its current engineer: status goes
-        back to IN_PROGRESS so the same SWE re-runs run_implement next round with the reviewer's
+        assignment), a Tech Lead rejection keeps the task with its current worker: status goes
+        back to IN_PROGRESS so the same worker re-runs run_implement next round with the reviewer's
         reasons threaded into the prompt. On exhausting MAX_TASK_REVISIONS the task is marked
         FAILED (terminal) rather than merging code the Tech Lead rejected.
 
         Preconditions:
-            - task is currently IN_REVIEW and assigned to an engineer.
+            - task is currently IN_REVIEW and assigned to a worker.
         Postconditions:
             - task.status is IN_PROGRESS (revision pending) or FAILED (exhausted); never left
               IN_REVIEW with no state change, so the swarm loop cannot deadlock on it.

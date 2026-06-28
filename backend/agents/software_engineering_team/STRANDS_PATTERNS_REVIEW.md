@@ -173,7 +173,7 @@ Applied: #1 #2 #3 are flowcharts with typed outcomes → **Graph**. #4 is author
 - `run_code_review_phase`, `run_batch_coding_fixes`, `run_qa_phase`, `run_security_phase` in `backend_code_v2_team/phases/` — wrap as Graph nodes for #1 without rewriting them.
 - `IaCAgent`, `CICDPipelineAgent`, `DeploymentStrategyAgent`, validation tools, `InfraDebugAgent`, `InfraPatchAgent` in `devops_team/` — already encapsulated; drop into Graph nodes for #2 and #3 unchanged.
 - `IntegrationAgent` for #4 — reused as the triage/verifier node; only the resolver specialists are new.
-- `TechLeadAgent`, `SeniorSWEAgent`, `TaskGraphService` in `coding_team/` — reused as Swarm participants for #5; the hand-rolled while loop is deleted.
+- `TechLeadAgent`, `V2TeamWorker`, `TaskGraphService` in `coding_team/` — reused as Swarm participants for #5; the hand-rolled while loop is deleted.
 
 ## Verification
 

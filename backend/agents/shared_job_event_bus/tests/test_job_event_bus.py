@@ -84,6 +84,9 @@ def test_cleanup_job_wakes_all_and_drops() -> None:
     cleanup_job(state, "j4")
     assert "j4" not in state.subscribers and "j4" not in state.job_created_at
     assert a.notify.is_set() and b.notify.is_set()
+    # Detaching marks subs closed so a consumer that drained no terminal event
+    # still ends its stream (uniform end-of-stream signal with reap_once).
+    assert a.closed is True and b.closed is True
     cleanup_job(state, "unknown")  # no-op
 
 
@@ -107,6 +110,20 @@ def test_reap_keeps_active_and_enforces_job_cap() -> None:
     assert jobs == 1 and subs == 1
     # Oldest ("a") evicted first.
     assert "a" not in state.subscribers
+
+
+def test_reap_marks_evicted_subscriptions_closed() -> None:
+    # Both eviction passes must flag the detached subscription as closed (and
+    # wake it) so a streaming consumer can end its stream instead of hanging.
+    state = BusState()
+    idle = subscribe(state, "idle")
+    idle.last_activity -= 1e9  # ancient → TTL pass
+    capped = subscribe(state, "capped")  # newest, but cap=1 with idle evicted...
+    reap_once(state, ttl_seconds=3600, max_jobs=1)
+    assert idle.closed is True and idle.notify.is_set()
+    # "capped" survives here (idle freed the only slot); force the cap pass.
+    reap_once(state, ttl_seconds=3600, max_jobs=0)
+    assert capped.closed is True and capped.notify.is_set()
 
 
 def test_reap_logs_when_evicting(caplog) -> None:
