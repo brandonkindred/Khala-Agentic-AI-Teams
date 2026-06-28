@@ -728,6 +728,22 @@ class TestDevOpsTestValidationAgent:
         agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
         assert isinstance(agent._qa, QAExpertAgent)
 
+    def test_preserves_devops_model_routing_key(self, monkeypatch) -> None:
+        """A non-Strands client resolves the model under the 'devops' routing
+        key (the pre-refactor key), not the QA agent's default 'qa'."""
+        from devops_team.test_validation_agent import DevOpsTestValidationAgent
+        from devops_team.test_validation_agent import agent as agent_mod
+
+        captured: Dict[str, Any] = {}
+
+        def _fake_get_strands_model(key: str) -> Any:
+            captured["key"] = key
+            return DummyLLMClient()  # a Strands Model — used directly downstream
+
+        monkeypatch.setattr(agent_mod, "get_strands_model", _fake_get_strands_model)
+        DevOpsTestValidationAgent(object())  # non-None, non-Strands -> resolves via key
+        assert captured["key"] == "devops"
+
     def test_maps_evidence_and_trace_through(self) -> None:
         from devops_team.test_validation_agent import (
             DevOpsTestValidationAgent,

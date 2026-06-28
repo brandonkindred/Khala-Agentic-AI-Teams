@@ -14,7 +14,7 @@ from typing import get_args
 from devops_team.models import GateStatus
 from qa_agent import QAExpertAgent, QAInput
 
-from llm_service import LLMClient
+from llm_service import LLMClient, get_strands_model
 
 from .models import (
     DevOpsTestValidationInput,
@@ -49,11 +49,23 @@ class DevOpsTestValidationAgent:
         """Build the shim.
 
         Preconditions: ``llm_client`` is not ``None``.
-        Postconditions: holds a ``QAExpertAgent`` constructed from the same client.
+        Postconditions: holds a ``QAExpertAgent`` whose model is resolved under
+        the ``"devops"`` routing key — preserving the pre-refactor model
+        selection rather than the QA agent's default ``"qa"`` key — or the
+        supplied Strands model directly (e.g. the dummy client in tests).
         """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
-        self._qa = QAExpertAgent(llm_client)
+        from strands.models.model import Model as _StrandsModel
+
+        # Preserve the pre-refactor model-routing key: this validation call
+        # resolves under "devops", not the QA agent's default "qa". A directly
+        # supplied Strands model (tests/dummy) is passed through unchanged.
+        if isinstance(llm_client, _StrandsModel):
+            self._model = llm_client
+        else:
+            self._model = get_strands_model("devops")
+        self._qa = QAExpertAgent(self._model)
 
     def run(self, input_data: DevOpsTestValidationInput) -> DevOpsTestValidationOutput:
         """Map tool/test evidence to acceptance criteria.
