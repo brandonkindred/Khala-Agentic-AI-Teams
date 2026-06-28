@@ -88,7 +88,7 @@ class UiDesignToolAgent:
             )
         prompt = UI_DESIGNER_PLAN_PROMPT.format(
             task_description=inp.task_description or "N/A",
-            spec_content=(inp.task_description or "")[],
+            spec_content=inp.task_description or "",
         )
         try:
             raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()

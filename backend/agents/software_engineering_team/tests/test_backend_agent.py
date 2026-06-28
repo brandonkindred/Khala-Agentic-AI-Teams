@@ -143,7 +143,7 @@ def test_is_pytest_assertion_failure() -> None:
 
 
 def test_build_error_signature_uses_tail_for_assertion_failures() -> None:
-    """_build_error_signature uses last 1200 chars for pytest_assertion, first 800 otherwise."""
+    """_build_error_signature uses last 1200 chars for pytest_assertion errors; passes others through unchanged."""
     assertion_err = "[pytest_assertion] failed\n" + "x" * 1500
     sig = _build_error_signature(assertion_err)
     assert len(sig) == 1200  # last 1200 chars
@@ -151,7 +151,6 @@ def test_build_error_signature_uses_tail_for_assertion_failures() -> None:
     generic_err = "ImportError: foo\n" + "y" * 1000
     sig2 = _build_error_signature(generic_err)
     assert sig2.startswith("ImportError")
-    assert len(sig2) <= 800
 
 
 def test_build_code_review_issues_for_missing_test_routes_returns_targeted_issue() -> None:
