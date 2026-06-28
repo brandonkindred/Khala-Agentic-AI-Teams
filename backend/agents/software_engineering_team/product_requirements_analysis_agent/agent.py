@@ -3228,8 +3228,13 @@ Previously Answered Questions:
         Strands ``Model``.
         Postconditions: returns the model's response coerced to ``str`` and
         whitespace-stripped (possibly empty).
+
+        Raises:
+            ValueError: if ``prompt`` is not a non-empty string. (An explicit
+            raise rather than ``assert`` so the precondition holds under ``-O``.)
         """
-        assert isinstance(prompt, str) and prompt, "prompt must be a non-empty string"
+        if not isinstance(prompt, str) or not prompt:
+            raise ValueError("prompt must be a non-empty string")
         return str(Agent(model=self._model, callback_handler=None)(prompt)).strip()
 
     def _call_llm_json(self, prompt: str) -> Optional[dict]:

@@ -14,6 +14,7 @@ from product_requirements_analysis_agent.agent import (
     _sop_phase1_fallback_questions,
 )
 from product_requirements_analysis_agent.models import (
+    AnalysisWorkflowResult,
     AnsweredQuestion,
     ArchitectureAnalysisResult,
     OpenQuestion,
@@ -1854,3 +1855,139 @@ def test_max_gap_rounds_constant() -> None:
     from product_requirements_analysis_agent.agent import MAX_SOP_ROUNDS
 
     assert MAX_GAP_ROUNDS <= MAX_SOP_ROUNDS
+
+
+# ---------------------------------------------------------------------------
+# Dedicated unit tests for the helpers extracted during the run_workflow
+# decomposition: _call_llm_text, _call_llm_json, _run_phase,
+# _run_consistency_loops.
+# ---------------------------------------------------------------------------
+
+
+def test_call_llm_text_returns_stripped_model_text() -> None:
+    """_call_llm_text returns the model's response coerced to str and stripped."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient("  # Spec body  "))
+    assert agent._call_llm_text("prompt") == "# Spec body"
+
+
+def test_call_llm_text_rejects_empty_or_non_string_prompt() -> None:
+    """_call_llm_text raises ValueError (not assert) on an invalid prompt."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient("ok"))
+    with pytest.raises(ValueError):
+        agent._call_llm_text("")
+    with pytest.raises(ValueError):
+        agent._call_llm_text(None)  # type: ignore[arg-type]
+
+
+def test_call_llm_json_parses_object() -> None:
+    """_call_llm_json returns the parsed dict when the model emits a JSON object."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient({"consolidated_questions": []}))
+    assert agent._call_llm_json("prompt") == {"consolidated_questions": []}
+
+
+def test_call_llm_json_returns_none_on_unparseable_output() -> None:
+    """_call_llm_json returns None (never raises) when the response is not JSON."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient("not valid json {"))
+    assert agent._call_llm_json("prompt") is None
+
+
+def test_run_phase_returns_value_on_success() -> None:
+    """_run_phase returns (True, fn()) and leaves failure_reason unset on success."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient({}))
+    result = AnalysisWorkflowResult()
+    ok, value = agent._run_phase(result, "Spec review", lambda: 42)
+    assert ok is True
+    assert value == 42
+    assert not result.failure_reason
+
+
+def test_run_phase_captures_failure_with_name_prefix() -> None:
+    """_run_phase swallows the exception, sets a name-prefixed failure_reason, returns (False, None)."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient({}))
+    result = AnalysisWorkflowResult()
+
+    def _boom() -> None:
+        raise ValueError("nope")
+
+    ok, value = agent._run_phase(result, "Spec update", _boom)
+    assert ok is False
+    assert value is None
+    assert result.failure_reason == "Spec update failed: nope"
+
+
+def _single_open_question() -> OpenQuestion:
+    return OpenQuestion(
+        id="q1",
+        question_text="Which auth?",
+        options=[
+            QuestionOption(id="o1", label="OAuth", is_default=True, rationale="", confidence=0.5)
+        ],
+    )
+
+
+def test_run_consistency_loops_noop_below_threshold(tmp_path: Path) -> None:
+    """When reduction_ratio is below the threshold, no pass runs and inputs are returned unchanged."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient({}))
+    result = AnalysisWorkflowResult()
+    sr = SpecReviewResult(issues=[], gaps=[], open_questions=[_single_open_question()], summary="")
+    with patch.object(agent, "_update_spec_for_consistency_and_clarity") as upd:
+        out_sr, out_spec, out_count = agent._run_consistency_loops(
+            result=result,
+            current_spec="# Spec",
+            spec_review_result=sr,
+            open_count=1,
+            reduction_ratio=0.0,  # below DEDUP_REDUCTION_THRESHOLD → loop body never runs
+            count_before_dedup=1,
+            deduped_questions=[_single_open_question()],
+            repo_path=tmp_path,
+            iteration=1,
+            base_version=1,
+            all_answered_questions=[],
+            update_job=lambda **_k: None,
+            on_chunk_progress=lambda _a, _b: None,
+        )
+    upd.assert_not_called()
+    assert out_sr is sr
+    assert out_spec == "# Spec"
+    assert out_count == 1
+
+
+def test_run_consistency_loops_runs_one_pass_then_exits(tmp_path: Path) -> None:
+    """A single consistency pass re-reviews, re-dedupes to empty, and exits with open_count 0."""
+    agent = ProductRequirementsAnalysisAgent(_StubClient({}))
+    result = AnalysisWorkflowResult()
+    sr_initial = SpecReviewResult(
+        issues=[], gaps=[], open_questions=[_single_open_question()], summary=""
+    )
+    sr_after = SpecReviewResult(
+        issues=[], gaps=[], open_questions=[_single_open_question()], summary=""
+    )
+    with (
+        patch.object(agent, "_read_qa_history", return_value="qa"),
+        patch.object(
+            agent, "_update_spec_for_consistency_and_clarity", return_value="# Spec v2"
+        ) as upd,
+        patch.object(agent, "_run_spec_review", return_value=(sr_after, "# Spec v2")),
+        patch.object(agent, "_consolidate_open_questions", side_effect=lambda qs: list(qs)),
+        patch.object(agent, "_dedupe_questions_by_answer_similarity", return_value=[]),
+    ):
+        out_sr, out_spec, out_count = agent._run_consistency_loops(
+            result=result,
+            current_spec="# Spec",
+            spec_review_result=sr_initial,
+            open_count=1,
+            reduction_ratio=1.0,  # at/above threshold → enter the loop
+            count_before_dedup=1,
+            deduped_questions=[],
+            repo_path=tmp_path,
+            iteration=1,
+            base_version=1,
+            all_answered_questions=[],
+            update_job=lambda **_k: None,
+            on_chunk_progress=lambda _a, _b: None,
+        )
+    upd.assert_called_once()
+    assert out_spec == "# Spec v2"
+    assert out_count == 0
+    assert out_sr.open_questions == []
+    assert result.spec_review_result is not None

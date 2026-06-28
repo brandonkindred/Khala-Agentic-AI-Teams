@@ -2857,6 +2857,14 @@ class TradingService:
         Matches the legacy engine's behaviour of not fabricating a terminal
         fill bar.
 
+        Args:
+            pending_for_prev: orders the strategy queued against a next bar that
+                never arrived; dropped (not filled).
+            prev_bar: the last processed bar, used to timestamp the diagnostics
+                (``None`` if the stream produced no bars).
+            result: the in-progress service result whose execution diagnostics
+                are updated in place.
+
         Postconditions: each still-pending order is recorded as an
         ``end_of_stream`` unfilled diagnostic.
         """
@@ -2891,6 +2899,15 @@ class TradingService:
 
         When ``fill_sim`` is supplied (the success path), also records the entry
         reasons of any still-open positions.
+
+        Args:
+            result: the in-progress service result, mutated in place.
+            eod_buffer: end-of-day equity buffer materialized into
+                ``result.streaming_equity_curve``.
+            harness: streaming harness whose ``probe_events`` are copied onto
+                the result.
+            fill_sim: supplied only on the success path; its open positions'
+                entry reasons are recorded. ``None`` on the abort path.
         """
         result.streaming_equity_curve = eod_buffer.materialize()
         result.probe_events = harness.probe_events
@@ -2914,6 +2931,13 @@ class TradingService:
         Classifies look-ahead violations the same way whether they surface as a
         parent-side ``LookAheadError`` or a subprocess-side ``StrategyRuntimeError``
         with ``etype == "lookahead_violation"``, then materializes and finalizes.
+
+        Args:
+            result: the in-progress service result, mutated in place.
+            exc: the exception that aborted the run; its message and type drive
+                ``result.error`` / ``result.lookahead_violation``.
+            eod_buffer: end-of-day equity buffer (see :meth:`_finalize_result`).
+            harness: streaming harness (see :meth:`_finalize_result`).
         """
         result.error = str(exc)
         result.lookahead_violation = isinstance(exc, LookAheadError) or (
