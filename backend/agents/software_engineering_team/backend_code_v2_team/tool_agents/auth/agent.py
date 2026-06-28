@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
+from ...output_templates import parse_files_and_summary_template
 from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 from ..static_agents import FileGeneratorToolAgent
 
@@ -31,6 +32,7 @@ class AuthToolAgent(FileGeneratorToolAgent):
 
     log_label = "Auth"
     generation_prompt = AUTH_PROMPT
+    _parse_files_and_summary = staticmethod(parse_files_and_summary_template)
 
     plan_recommendations = ["Include auth middleware and permission checks in the microtask plan."]
     plan_summary = "Auth planning input provided."
