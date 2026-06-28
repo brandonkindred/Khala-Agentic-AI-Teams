@@ -924,6 +924,54 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert result.completion_package is not None
         assert result.completion_package.status == "blocked"
 
+    def test_security_gate_not_masked_by_stale_validation_pass(self) -> None:
+        """A validation-agent-supplied ``security_review: "pass"`` must not mask
+        a blocking DevSecOps review: the gate is force-assigned from the
+        DevSecOps + policy result, not preserved via setdefault."""
+        mock_llm = _ScriptedClient(
+            [
+                {"approved_for_execution": True},
+                {"artifacts": {}, "summary": "iac"},
+                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
+                {
+                    "artifacts": {},
+                    "summary": "deploy",
+                    "strategy": "rolling",
+                    "rollback_plan": ["rb"],
+                },
+                {
+                    "approved": False,
+                    "findings": [
+                        {
+                            "finding_id": "F1",
+                            "severity": "high",
+                            "blocking": True,
+                            "issue": "bad iam",
+                        }
+                    ],
+                    "summary": "blocked",
+                },
+                {"approved": True, "findings": [], "summary": "ok"},
+                # Validation agent wrongly reports the security gate as passing.
+                {
+                    "approved": True,
+                    "quality_gates": {"iac_validate": "pass", "security_review": "pass"},
+                    "summary": "ok",
+                },
+            ]
+        )
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = agent.run_workflow(
+                repo_path=Path(tmp),
+                task_description="Deploy service",
+                requirements="Include prod approval gate and rollback plan",
+                task_id="devops-sec-mask",
+            )
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.quality_gates["security_review"] == "fail"
+
     def test_completion_package_has_acceptance_trace(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)

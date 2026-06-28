@@ -534,10 +534,12 @@ class DevOpsTeamLeadAgent:
 
         quality_gates = dict(val.quality_gates)
         # The infra security gate routes both the DevSecOps LLM review and the
-        # policy-as-code (checkov) scan through the unified infra decision.
-        quality_gates.setdefault(
-            "security_review",
-            "pass" if infra_gate_passed(devsec.approved, policy_checks.success) else "fail",
+        # policy-as-code (checkov) scan through the unified infra decision. This
+        # is force-assigned (not setdefault) so the authoritative DevSecOps +
+        # policy result always wins — a validation-agent-supplied "pass" must
+        # never mask a failing review or checkov scan.
+        quality_gates["security_review"] = (
+            "pass" if infra_gate_passed(devsec.approved, policy_checks.success) else "fail"
         )
         quality_gates.setdefault("change_review", "pass" if change_review.approved else "fail")
 
