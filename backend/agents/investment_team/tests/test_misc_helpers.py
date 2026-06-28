@@ -558,6 +558,20 @@ def _close_cross_ema_entry():
     )
 
 
+def _ema_cross_sma_entry():
+    # Two DIFFERENT indicators in one predicate (ema crosses sma) — exercises the
+    # within-predicate '+' join.
+    from investment_team.strategy_lab.spec_dsl import EntryRule, IndicatorRef, Predicate
+
+    return EntryRule(
+        when=Predicate(
+            lhs=IndicatorRef(name="ema", params={"period": 20}),
+            op="cross_above",
+            rhs=IndicatorRef(name="sma", params={"period": 50}),
+        )
+    )
+
+
 def _trailing_stop():
     from investment_team.strategy_lab.spec_dsl import StopLossRule
 
@@ -597,8 +611,17 @@ def test_entry_archetype_rhs_indicator_in_crossover() -> None:
 
 def test_entry_archetype_multi_signal_joins_distinct_sorted() -> None:
     multi = _attr_record(entry_rules=[_sma_crossover_entry(), _rsi_entry()]).strategy
-    # Distinct archetypes, sorted, joined with '+'.
-    assert _entry_archetype(multi) == "rsi+sma_crossover"
+    # Distinct per-rule archetypes, sorted, joined with ',' (the inter-rule
+    # separator); each rule here has a single archetype.
+    assert _entry_archetype(multi) == "rsi,sma_crossover"
+
+
+def test_entry_archetype_two_separators_disambiguate_predicate_grouping() -> None:
+    # An EMA/SMA cross (two indicators in ONE predicate → '+') alongside a
+    # separate RSI rule (',' between rules) must stay unambiguous: the '+' binds
+    # ema/sma into the crossover, the ',' separates the RSI rule.
+    multi = _attr_record(entry_rules=[_ema_cross_sma_entry(), _rsi_entry()]).strategy
+    assert _entry_archetype(multi) == "ema+sma_crossover,rsi"
 
 
 def test_exit_archetypes_maps_each_kind_and_basis() -> None:
@@ -764,11 +787,40 @@ def test_format_prior_attribution_shows_sample_size_and_groups() -> None:
     out = format_prior_attribution(recs)
     # Every rendered bucket line carries its sample size.
     assert "n=" in out
-    # Dimension group headers are present.
+    # All four dimension group headers are present (records have entry/exit/sizing
+    # populated, so no dimension is empty).
     assert "Asset class" in out
     assert "Entry archetype" in out
+    assert "Exit type" in out
+    assert "Position sizing" in out
     # Thin (n=1) buckets are flagged so the model discounts them.
     assert "(thin sample)" in out
+
+
+def test_format_prior_attribution_all_redesign_pending_renders_asset_class_only() -> None:
+    # When every executed record is redesign-pending, the structured design
+    # dimensions are suppressed and only the genuine asset_class section renders.
+    recs = [
+        _attr_record(
+            i=0,
+            asset_class="crypto",
+            annual_return=12.0,
+            requires_redesign=True,
+            unparsed_rules=["buy when it looks cheap"],
+        ),
+    ]
+    out = format_prior_attribution(recs)
+    assert "Asset class" in out
+    assert "crypto" in out
+    assert "Entry archetype" not in out
+    assert "Exit type" not in out
+    assert "Position sizing" not in out
+
+
+def test_format_prior_attribution_rejects_non_positive_thin_n() -> None:
+    rec = _attr_record(entry_rules=[_rsi_entry()])
+    with pytest.raises(AssertionError):
+        format_prior_attribution([rec], thin_n=0)
 
 
 def test_asset_class_mix_hint_empty_records() -> None:

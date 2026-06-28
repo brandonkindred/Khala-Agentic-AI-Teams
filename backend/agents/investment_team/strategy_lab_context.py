@@ -252,9 +252,13 @@ def _entry_archetype(strategy: object) -> str:
 
     The label names the signal family the entry keys on (the indicator(s) named
     in the predicate, or ``"price_level"`` for a pure price/threshold compare),
-    suffixed ``_crossover`` when the comparison is a cross. Multiple entry rules
-    collapse to the sorted, ``+``-joined set of their distinct archetypes so a
-    multi-signal entry (e.g. ``"macd+rsi"``) forms its own bucket.
+    suffixed ``_crossover`` when the comparison is a cross. Within one predicate
+    the two sides' indicators are ``+``-joined (e.g. ``"ema+sma_crossover"`` for
+    an EMA/SMA cross); multiple entry rules are ``,``-joined into the sorted set
+    of their distinct archetypes (e.g. ``"macd,rsi"``). Using two separators
+    keeps the per-predicate grouping unambiguous when rules are combined — e.g.
+    ``"ema+sma_crossover,rsi"`` reads as one EMA/SMA cross plus a separate RSI
+    rule, not three loose tokens.
 
     The signal family can sit on *either* side of the predicate: ``rsi < 30``
     keys on the left-hand side, while the prompt-recommended
@@ -289,7 +293,10 @@ def _entry_archetype(strategy: object) -> str:
         if str(getattr(when, "op", "")) in ("cross_above", "cross_below"):
             base = f"{base}_crossover"
         tokens.add(base)
-    return "+".join(sorted(tokens))
+    # ``,`` between rules, ``+`` within a predicate (set above) — distinct
+    # separators so a combined label stays unambiguous about which indicators
+    # share a predicate.
+    return ",".join(sorted(tokens))
 
 
 def _exit_archetypes(strategy: object) -> List[str]:
@@ -458,13 +465,20 @@ def format_prior_attribution(
         "not enough history" sentinel.
       - Every rendered bucket line contains its ``n=`` sample size.
     """
+    assert thin_n >= 1, f"thin_n must be >= 1, got {thin_n}"
     agg = aggregate_prior_results(records, max_records=max_records)
     if not agg:
         return "Not enough executed history yet to attribute performance."
 
+    # Group buckets by dimension in a single pass over ``agg`` rather than
+    # re-scanning it once per dimension.
+    by_dim: dict[str, list[tuple[str, dict]]] = {}
+    for (dim, value), stats in agg.items():
+        by_dim.setdefault(dim, []).append((value, stats))
+
     sections: List[str] = []
     for dim_key, dim_label in _ATTRIBUTION_DIMENSIONS:
-        rows = [(value, stats) for (dim, value), stats in agg.items() if dim == dim_key]
+        rows = by_dim.get(dim_key)
         if not rows:
             continue
         rows.sort(key=lambda kv: kv[1]["annual_return"], reverse=True)
