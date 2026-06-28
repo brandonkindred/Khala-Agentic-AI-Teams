@@ -116,7 +116,8 @@ def _run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
 class BuildSpecialistAdapterAgent(BackendReviewToolAgent):
     """Identifies all build/test issues in review and fixes them one at a time in problem_solve.
 
-    ``execute``/``review``/``deliver`` are bespoke for the backend build flow;
+    ``review`` runs the backend build via the shared ``build_runner`` path;
+    ``execute``/``deliver`` are bespoke stubs for the backend build flow;
     ``problem_solve`` (with python/java conventions) is inherited.
     """
 
@@ -130,6 +131,8 @@ class BuildSpecialistAdapterAgent(BackendReviewToolAgent):
     default_recommendation = "Fix the build error."
     plan_recommendations = ["Ensure build configuration and dependencies are in scope."]
     plan_summary = "Build Specialist planning."
+    build_runner = staticmethod(_run_backend_build_and_parse)
+    build_review_noun = "build/test issue(s)"
     _parse_single_issue = staticmethod(parse_problem_solving_single_issue_template)
 
     def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
@@ -137,21 +140,6 @@ class BuildSpecialistAdapterAgent(BackendReviewToolAgent):
         return ToolAgentOutput(
             summary="Build Specialist execute — no changes applied.",
             recommendations=["Integrate with build verifier or build-fix flow for full support."],
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Run backend build (syntax + pytest) and return one issue per parsed failure (identify all issues)."""
-        if not inp.repo_path:
-            return ToolAgentPhaseOutput(summary="Build Specialist review skipped (no repo_path).")
-        path = Path(inp.repo_path).resolve()
-        if not path.exists():
-            return ToolAgentPhaseOutput(
-                summary="Build Specialist review skipped (repo path missing)."
-            )
-        issues = _run_backend_build_and_parse(path)
-        return ToolAgentPhaseOutput(
-            issues=issues,
-            summary=f"Build Specialist review: {len(issues)} build/test issue(s) found.",
         )
 
     def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
