@@ -483,19 +483,45 @@ def test_wait_for_answers_survives_transient_get_job_failure():
 
 
 def test_wait_for_answers_sustained_failure_times_out():
-    """If the read keeps failing past the timeout, the loop ends like any other
-    timeout (returns False) instead of propagating the exception."""
+    """If the read keeps failing, the loop must actually enter, hit the except path
+    each iteration, and end via the timeout bound (returns False) instead of
+    propagating the exception. The clock advances slowly enough (1s/check vs a 5s
+    timeout) that the loop body runs several times and ``get_job`` is exercised —
+    otherwise the test would be a false positive (loop never entered)."""
     clock = {"t": 0.0}
+    calls = {"get_job": 0}
 
     def now():
-        clock["t"] += 10.0
-        return clock["t"]
+        t = clock["t"]
+        clock["t"] += 1.0
+        return t
 
     def get_job(jid):
+        calls["get_job"] += 1
         raise httpx.ReadError("[Errno 104] Connection reset by peer")
 
     out = hitl.wait_for_answers("j", get_job, timeout_s=5.0, sleep=lambda s: None, now=now)
     assert out is False
+    assert calls["get_job"] >= 3  # the loop entered and exercised the except path repeatedly
+
+
+def test_wait_for_answers_renews_heartbeat_on_transient_read_failure():
+    """While reads keep failing, the loop must keep the liveness heartbeat fresh so a
+    second worker doesn't treat this still-alive loop as dead (stale
+    ``answer_wait_heartbeat_at``) and auto-resume the job elsewhere, double-driving it."""
+    state = {"polls": 0}
+    beats: list = []
+
+    def get_job(jid):
+        state["polls"] += 1
+        if state["polls"] <= 3:
+            raise httpx.ReadError("[Errno 104] Connection reset by peer")
+        return {"waiting_for_answers": False}  # outage clears -> flag down -> loop returns
+
+    assert hitl.wait_for_answers("j", get_job, sleep=lambda s: None, heartbeat_fn=beats.append) is True
+    assert len(beats) == 3  # one heartbeat per failed read; the 4th poll cleared and returned
+    for ts in beats:
+        assert "T" in ts  # ISO-8601 timestamps
 
 
 def test_wait_for_answers_times_out():
