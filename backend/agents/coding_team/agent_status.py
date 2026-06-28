@@ -26,6 +26,7 @@ TECH_LEAD_AGENT_ID = "tech_lead"
 # The ``current_activity.agent`` literal the Tech Lead's merge review reports under. The other
 # literal in the system is ``"code_review"`` (a quality gate that runs on an engineer's task).
 _TECH_LEAD_ACTIVITY_AGENT = "tech_lead_review"
+_REVIEWING_STEP = "reviewing"
 
 
 class StackRosterEntry(NamedTuple):
@@ -211,7 +212,7 @@ def build_agent_statuses(
     if phase == "task_graph":
         tl_status = "planning"
     elif activity_agent == _TECH_LEAD_ACTIVITY_AGENT or any_in_review:
-        tl_status = "reviewing"
+        tl_status = _REVIEWING_STEP
     else:
         tl_status = "idle"
     tl_fields = overlay if activity_agent == _TECH_LEAD_ACTIVITY_AGENT else {}

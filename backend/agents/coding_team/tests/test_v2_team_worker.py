@@ -6,6 +6,8 @@ import subprocess
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
+import pytest
+
 from coding_team import v2_team_worker as worker_mod
 from coding_team.models import StackSpec, Task
 from coding_team.v2_team_worker import V2TeamWorker
@@ -78,6 +80,17 @@ def _init_main_repo(path) -> None:
     subprocess.run(["git", "add", "."], cwd=path, capture_output=True, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=path, capture_output=True, check=True)
     subprocess.run(["git", "branch", "-M", "main"], cwd=path, capture_output=True, check=True)
+
+
+def test_v2_worker_rejects_unknown_team_kind() -> None:
+    """Unknown team kinds fail fast instead of silently routing as backend."""
+    with pytest.raises(ValueError, match="team_kind must be one of"):
+        V2TeamWorker(
+            agent_id="qa_v2",
+            stack_spec=StackSpec(name="qa_v2", tools_services=["pytest"]),
+            team_kind="qa",
+            team_lead=_FakeV2Lead(),
+        )
 
 
 def test_v2_worker_requests_branch_handoff_and_threads_feedback(tmp_path, monkeypatch) -> None:

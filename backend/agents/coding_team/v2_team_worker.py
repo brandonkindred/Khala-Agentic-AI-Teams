@@ -22,6 +22,8 @@ from software_engineering_team.shared.models import TaskType
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_TEAM_KINDS = frozenset({"backend", "frontend"})
+
 
 def _feedback_lines(feedback: List[Dict[str, Any]]) -> List[str]:
     """Render prior Tech Lead/team feedback as concise actionable lines.
@@ -251,7 +253,19 @@ def _ensure_development_ready(path: Path) -> tuple[bool, str]:
 
 
 class V2TeamWorker:
-    """Coding-team worker facade for backend_code_v2_team/frontend_code_v2_team."""
+    """Coding-team worker facade for backend_code_v2_team/frontend_code_v2_team.
+
+    The adapter implements the coding-team worker interface while delegating the
+    actual implementation workflow to one of the software-engineering v2 team
+    leads. ``team_kind`` selects the target v2 team (``backend`` or
+    ``frontend``), which controls the shared task type and canonical assignee
+    label used during handoff. Coding-team tasks are expected to expose ``id``,
+    ``title``, ``description``, ``dependencies``, ``acceptance_criteria``, and
+    ``revision_feedback`` fields. When invoked by the coding-team orchestrator,
+    the worker prepares or reuses a feature branch, calls the v2 workflow with
+    ``merge_to_development=False``, and returns that branch to the Tech Lead for
+    review instead of merging it directly.
+    """
 
     def __init__(
         self,
@@ -262,6 +276,9 @@ class V2TeamWorker:
         team_lead: Any,
     ) -> None:
         """Store the coding-team worker identity and delegated v2 team lead."""
+        if team_kind not in _ALLOWED_TEAM_KINDS:
+            allowed = ", ".join(sorted(_ALLOWED_TEAM_KINDS))
+            raise ValueError(f"team_kind must be one of: {allowed}")
         self.agent_id = agent_id
         self.stack_spec = stack_spec
         self.team_kind = team_kind

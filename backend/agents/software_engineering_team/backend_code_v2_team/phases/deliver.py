@@ -90,23 +90,25 @@ def run_deliver(
             except Exception as exc:
                 logger.warning("[%s] Tool agent %s deliver() failed: %s", task_id, kind.value, exc)
 
-        if not deliver_files:
-            result.summary = "No files to deliver."
-            return result
+    if not deliver_files:
+        result.summary = "No files to deliver."
+        return result
+    result.delivered_files = sorted(deliver_files)
 
-        if not merge_to_development:
-            return prepare_handoff_branch(
-                task_id=task_id,
-                repo_path=repo_path,
-                deliver_files=deliver_files,
-                summary=summary,
-                task_title=task_title,
-                feature_branch_name=feature_branch_name,
-                commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
-                ops=_git_ops(),
-                logger=logger,
-            )
+    if not merge_to_development:
+        return prepare_handoff_branch(
+            task_id=task_id,
+            repo_path=repo_path,
+            deliver_files=deliver_files,
+            summary=summary,
+            task_title=task_title,
+            feature_branch_name=feature_branch_name,
+            commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
+            ops=_git_ops(),
+            logger=logger,
+        )
 
+    if tool_agents:  # pragma: no cover  # integration-only: dispatches tool agents that run real git/build/deploy
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
         if git_agent is not None and hasattr(git_agent, "deliver"):
             phase_inp = ToolAgentPhaseInput(
@@ -133,24 +135,6 @@ def run_deliver(
                 logger.warning(
                     "[%s] Git agent deliver() failed, falling back to inline: %s", task_id, exc
                 )
-
-    if not deliver_files:
-        result.summary = "No files to deliver."
-        return result
-    result.delivered_files = sorted(deliver_files)
-
-    if not merge_to_development:
-        return prepare_handoff_branch(
-            task_id=task_id,
-            repo_path=repo_path,
-            deliver_files=deliver_files,
-            summary=summary,
-            task_title=task_title,
-            feature_branch_name=feature_branch_name,
-            commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
-            ops=_git_ops(),
-            logger=logger,
-        )
 
     return deliver_inline_merge(
         task_id=task_id,
