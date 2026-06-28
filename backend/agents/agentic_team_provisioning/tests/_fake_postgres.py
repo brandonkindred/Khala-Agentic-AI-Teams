@@ -94,6 +94,14 @@ class _FakeCursor:
             self._last_fetch_one = self._db["teams"].get(team_id)
             return
 
+        # Team-row lock probe used by merge_generated_agents (FOR UPDATE is a no-op
+        # in the fake — it only checks existence). Distinct prefix from the full
+        # column select above ("select team_id from" vs "select team_id, ...").
+        if norm.startswith("select team_id from agentic_teams where team_id"):
+            (team_id,) = params
+            self._last_fetch_one = (team_id,) if team_id in self._db["teams"] else None
+            return
+
         if "from agentic_teams t" in norm and "order by t.created_at desc" in norm:
             rows = []
             for t in sorted(
@@ -152,6 +160,17 @@ class _FakeCursor:
             return
 
         # -- team_agents --------------------------------------------------
+        # Full-roster prune used by _write_team_agents: delete rows whose agent_name
+        # is not in the kept set. Must precede the single-row delete (it also matches
+        # "agent_name in norm") and the team-wide delete.
+        if norm.startswith("delete from agentic_team_agents where team_id") and "<> all" in norm:
+            team_id, names = params
+            keep = set(names)
+            for k in list(self._db["team_agents"].keys()):
+                if k[0] == team_id and k[1] not in keep:
+                    del self._db["team_agents"][k]
+            return
+
         # Single-row targeted delete (RETURNING the deleted row) — must precede the
         # team-wide delete handler, whose prefix this also matches.
         if (

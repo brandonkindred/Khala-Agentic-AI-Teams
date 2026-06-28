@@ -141,13 +141,10 @@ def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
     by name with a preserved registry agent is dropped, so the explicitly-added
     registry agent wins.
 
-    Concurrency: the merge reads the roster then does a full-roster ``save_team_agents``
-    in a separate transaction, so it assumes **serial execution per team** — which the
-    process-design chat guarantees (a conversation's turns are sequential). Two
-    concurrent saves for the *same* team could still interleave; making that window
-    atomic (a team-row lock around read+merge+write) is the broader full-roster
-    concurrency follow-up, not part of this bridge. The single-agent roster endpoints
-    are already atomic.
+    Concurrency: the read-merge-write is delegated to ``merge_generated_agents``,
+    which runs it in a single transaction under a ``SELECT ... FOR UPDATE`` lock on
+    the team row, so concurrent saves for the *same* team serialize rather than
+    racing — neither can rewrite from a stale snapshot and drop the other's writes.
     """
     if not agents_data:
         return
@@ -168,13 +165,11 @@ def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
         )
     if not generated:
         return
-    # Keep user-added registry agents (the chat can't see them); registry wins on
-    # a name collision so a generated agent never silently overwrites one.
-    preserved = [a for a in _store.list_team_agents(team_id) if a.source == SOURCE_REGISTRY]
-    preserved_names = {a.agent_name for a in preserved}
-    merged = preserved + [g for g in generated if g.agent_name not in preserved_names]
-
-    _store.save_team_agents(team_id, merged)
+    # Merge under a team-row lock so the read (preserve registry agents) and the
+    # write happen in one atomic transaction — concurrent same-team saves serialize
+    # instead of racing. Registry agents (the chat can't see them) are kept, and a
+    # generated agent never silently overwrites one (registry wins on name collision).
+    merged = _store.merge_generated_agents(team_id, generated)
     # Install the generated agents into the live registry so the Agent Console
     # catalog and /api/agents/{id}/invoke resolve them (best-effort).
     # register_team_manifests skips registry-source entries internally.
@@ -284,6 +279,10 @@ def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
         manifest with no cognition tools — the common catalog shape — still passes.
         ``tools`` carries ``cognition.tools`` when present.
     """
+    # Enforce the precondition (the registry is the source of truth, but fail fast
+    # rather than project a malformed manifest into the roster).
+    assert manifest.name and manifest.name.strip(), "manifest.name must be non-empty"
+    assert manifest.id, "manifest.id must be set"
     return AgenticTeamAgent(
         agent_name=manifest.name,
         role=manifest.summary or manifest.name,

@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from agentic_team_provisioning.models import (
+    SOURCE_REGISTRY,
     AgenticTeam,
     AgenticTeamAgent,
     ConversationMessage,
@@ -177,28 +178,39 @@ class AgenticTeamStore:
     def _write_team_agents(
         self, cur, team_id: str, agents: list[AgenticTeamAgent], now: datetime
     ) -> None:
-        """Replace all roster rows for a team on an open cursor (DELETE-all + INSERT-all).
+        """Redefine a team's roster on an open cursor to exactly ``agents``.
 
-        Used only by the **full-roster** save (``save_team_agents`` /
-        ``_save_agents_from_llm``), which redefines the whole roster at once. As a
-        deliberate consequence of the replace, every row's ``created_at`` is reset to
-        ``now`` — a full save does not carry forward per-agent creation times. (The
-        single-agent helpers ``add_or_replace_team_agent`` / ``delete_team_agent``
-        preserve ``created_at`` via ``ON CONFLICT``.) ``created_at`` is an internal
-        column not surfaced on :class:`AgenticTeamAgent`, so this is invisible to
-        API/UI today; preserving it across full saves is a follow-up if it ever is.
+        Used by the **full-roster** save (``save_team_agents`` /
+        ``merge_generated_agents``), which redefines the whole roster at once. The
+        rewrite upserts each surviving row via ``ON CONFLICT`` (so its original
+        ``created_at`` is preserved, matching the single-agent helpers) and deletes
+        only the rows no longer present, rather than wiping and re-inserting
+        everything. A roster that re-includes an existing agent therefore keeps that
+        agent's creation time.
 
         Preconditions: ``cur`` is an open cursor in a live transaction; ``agents``
             have unique ``agent_name`` within the team.
         Postconditions: the team's ``agentic_team_agents`` rows are exactly
-            ``agents`` and the team's ``updated_at`` is bumped to ``now``.
+            ``agents``; surviving rows retain their ``created_at``; the team's
+            ``updated_at`` is bumped to ``now``.
         """
-        cur.execute("DELETE FROM agentic_team_agents WHERE team_id = %s", (team_id,))
+        names = [a.agent_name for a in agents]
+        if names:
+            # Drop only rows that are no longer on the roster; survivors are upserted
+            # below (preserving their created_at) rather than deleted and recreated.
+            cur.execute(
+                "DELETE FROM agentic_team_agents WHERE team_id = %s AND agent_name <> ALL(%s)",
+                (team_id, names),
+            )
+        else:
+            cur.execute("DELETE FROM agentic_team_agents WHERE team_id = %s", (team_id,))
         for a in agents:
             cur.execute(
                 "INSERT INTO agentic_team_agents "
                 "(team_id, agent_name, data_json, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s)",
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
+                "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
                 (team_id, a.agent_name, Json(a.model_dump(mode="json")), now, now),
             )
         cur.execute(
@@ -212,6 +224,43 @@ class AgenticTeamStore:
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
             self._write_team_agents(cur, team_id, agents, now)
+
+    @timed_query(store=_STORE, op="merge_generated_agents")
+    def merge_generated_agents(
+        self, team_id: str, generated: list[AgenticTeamAgent]
+    ) -> list[AgenticTeamAgent]:
+        """Atomically merge LLM-generated agents into the roster, preserving registry entries.
+
+        The process-design chat round-trips only generated agents, so a naive full
+        replace would drop the registry agents a user added via the from-registry
+        endpoint (Agent Studio §5.3). This keeps every existing ``source ==
+        "registry"`` entry, layers the generated agents on top (a generated agent
+        colliding by name with a preserved registry agent is dropped — the
+        explicitly-added registry agent wins), and rewrites the roster to the result.
+
+        Concurrency: the read-merge-write runs in a single transaction that first
+        takes a ``SELECT ... FOR UPDATE`` row lock on the team, so two concurrent
+        merges for the *same* team serialize instead of racing — neither can rewrite
+        from a stale snapshot and drop the other's writes.
+
+        Preconditions: ``team_id`` should name an existing team (callers validate).
+        Postconditions: returns the merged roster actually written. If ``team_id`` is
+            unknown the roster is left untouched and ``[]`` is returned.
+        """
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
+                (team_id,),
+            )
+            if cur.fetchone() is None:
+                return []
+            existing = self._load_team_agents(cur, team_id)
+            preserved = [a for a in existing if a.source == SOURCE_REGISTRY]
+            preserved_names = {a.agent_name for a in preserved}
+            merged = preserved + [g for g in generated if g.agent_name not in preserved_names]
+            self._write_team_agents(cur, team_id, merged, now)
+        return merged
 
     @timed_query(store=_STORE, op="add_or_replace_team_agent")
     def add_or_replace_team_agent(self, team_id: str, agent: AgenticTeamAgent) -> None:

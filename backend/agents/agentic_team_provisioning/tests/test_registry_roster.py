@@ -355,3 +355,64 @@ def test_from_registry_replace_unregister_failure_still_returns_201(
     )
     assert resp.status_code == 201  # primary op still succeeds
     assert resp.json()["source"] == "registry"
+
+
+@pytest.mark.parametrize("bad_name", ["", "   "])
+def test_roster_agent_from_manifest_rejects_blank_name(bad_name: str) -> None:
+    """DbC precondition: a manifest with a blank name fails fast rather than being
+    projected into the roster (constructed via model_construct to bypass Pydantic)."""
+    from agentic_team_provisioning.api.main import _roster_agent_from_manifest
+
+    manifest = AgentManifest.model_construct(
+        id="x.y", team="t", name=bad_name, summary="", tags=[], cognition=None
+    )
+    with pytest.raises(AssertionError):
+        _roster_agent_from_manifest(manifest)
+
+
+def test_roster_agent_from_manifest_rejects_missing_id() -> None:
+    """DbC precondition: a manifest with no id fails fast."""
+    from agentic_team_provisioning.api.main import _roster_agent_from_manifest
+
+    manifest = AgentManifest.model_construct(
+        id="", team="t", name="ok", summary="", tags=[], cognition=None
+    )
+    with pytest.raises(AssertionError):
+        _roster_agent_from_manifest(manifest)
+
+
+def test_full_save_preserves_created_at_and_prunes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full-roster save upserts survivors (keeping their original ``created_at``)
+    and deletes only the agents no longer present."""
+    db = install_fake_postgres(monkeypatch)
+    store = AgenticTeamStore()
+    team_id = store.create_team(name="Pod", description="").team_id
+
+    keep = AgenticTeamAgent(agent_name="Keep", role="k", skills=["x"])
+    drop = AgenticTeamAgent(agent_name="Drop", role="d", skills=["x"])
+    store.save_team_agents(team_id, [keep, drop])
+    original_created = db["team_agents"][(team_id, "Keep")]["created_at"]
+
+    # Re-save: Keep survives, Drop is removed, Add is new.
+    add = AgenticTeamAgent(agent_name="Add", role="a", skills=["x"])
+    store.save_team_agents(team_id, [keep, add])
+
+    names = {name for (_, name) in db["team_agents"] if _ == team_id}
+    assert names == {"Keep", "Add"}  # Drop pruned, Add inserted
+    # Keep's creation time is carried forward (upsert, not delete+reinsert).
+    assert db["team_agents"][(team_id, "Keep")]["created_at"] == original_created
+
+    # Saving an empty roster clears every row (the no-names branch).
+    store.save_team_agents(team_id, [])
+    assert store.list_team_agents(team_id) == []
+
+
+def test_merge_generated_agents_unknown_team_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The locked merge no-ops (returns []) when the team row doesn't exist."""
+    install_fake_postgres(monkeypatch)
+    store = AgenticTeamStore()
+    result = store.merge_generated_agents(
+        "missing", [AgenticTeamAgent(agent_name="X", role="x", skills=["y"])]
+    )
+    assert result == []
+    assert store.list_team_agents("missing") == []
