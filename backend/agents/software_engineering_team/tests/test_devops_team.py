@@ -678,6 +678,26 @@ class TestDevSecOpsReviewAgent:
         out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
         assert out.approved
 
+    def test_explicit_null_approved_fails_closed(self) -> None:
+        """A present-but-null ``approved`` is an explicit non-approval (fail
+        closed), even with no blocking findings — matching legacy semantics."""
+        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+
+        client = _StubClient({"approved": None, "findings": [], "summary": "unsure"})
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert not out.approved
+
+    def test_absent_approved_defers_to_findings(self) -> None:
+        """An absent ``approved`` key defers to the finding-derived default:
+        no blocking findings -> approved."""
+        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+
+        client = _StubClient({"findings": [], "summary": "no opinion"})
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved
+
 
 class TestDevOpsTestValidationAgent:
     def test_aggregates_gates(self) -> None:

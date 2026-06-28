@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from llm_service import LLMClient
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
-from software_engineering_team.shared.security_service import infra_gate_passed
+from software_engineering_team.shared.security_service import infra_gate_passed, run_policy_scan
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
 from .cicd_pipeline_agent import CICDPipelineAgent
@@ -82,7 +82,6 @@ from .tool_agents import (  # noqa: E402
     HelmExecutionToolAgent,
     IaCValidationInput,
     IaCValidationToolAgent,
-    PolicyAsCodeInput,
     PolicyAsCodeToolAgent,
     RepoNavigatorInput,
     RepoNavigatorToolAgent,
@@ -413,7 +412,7 @@ class DevOpsTeamLeadAgent:
         # Phase 4: tool validation + independent reviews
         logger.info("DevOps team pipeline: phase 4 - validation and review")
         iac_checks = self.iac_validation_tool.run(IaCValidationInput(repo_path=str(repo_path)))
-        policy_checks = self.policy_tool.run(PolicyAsCodeInput(repo_path=str(repo_path)))
+        policy_checks = run_policy_scan(str(repo_path), runner=self.policy_tool)
         cicd_checks = self.cicd_lint_tool.run(CICDLintInput(repo_path=str(repo_path)))
         dry_run_checks = self.deploy_dry_run_tool.run(
             DeploymentDryRunInput(repo_path=str(repo_path))

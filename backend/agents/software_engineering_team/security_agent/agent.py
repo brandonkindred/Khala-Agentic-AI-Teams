@@ -29,13 +29,26 @@ class CybersecurityExpertAgent:
 
     def __init__(self, llm_client=None) -> None:
         from strands.models.model import Model as _StrandsModel
+
         if llm_client is not None and isinstance(llm_client, _StrandsModel):
             self._model = llm_client
         else:
             self._model = get_strands_model("security")
 
     def run(self, input_data: SecurityInput) -> SecurityOutput:
-        """Review code for security issues and produce fixed code."""
+        """Review code for security vulnerabilities.
+
+        Preconditions:
+            ``input_data`` is a ``SecurityInput`` (``code`` may be empty); the
+            configured model supports forced structured output.
+        Postconditions:
+            Returns a ``SecurityOutput`` whose ``approved`` is re-derived by the
+            unified rule (:func:`derive_approved`): ``approved`` is ``False`` iff
+            any vulnerability is critical/high severity (severity comparison is
+            case-insensitive), regardless of any ``approved`` flag the model
+            returned. On any model/validation failure, returns a safe fallback
+            with ``approved=False`` and no vulnerabilities.
+        """
         logger.info("Security: reviewing %s chars of code", len(input_data.code or ""))
 
         user_prompt = self._build_user_prompt(input_data)

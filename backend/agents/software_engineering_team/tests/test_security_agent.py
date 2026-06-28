@@ -136,3 +136,30 @@ def test_security_agent_only_critical_high_flip_approved() -> None:
     result = agent.run(_input())
     assert result.approved is True
     assert len(result.vulnerabilities) == 2
+
+
+def test_security_agent_blocks_on_capitalized_severity() -> None:
+    """Severity gating is case-insensitive: a capitalized ``"High"`` (the field
+    is free-form text, not a validated lowercase Literal) still blocks."""
+
+    class _CapitalizedClient(DummyLLMClient):
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            return {
+                "vulnerabilities": [
+                    {
+                        "severity": "High",
+                        "category": "auth",
+                        "description": "missing authz check",
+                        "recommendation": "enforce authorization",
+                    },
+                ],
+                "summary": "One high finding (capitalized)",
+                "remediations": [],
+                "suggested_commit_message": "",
+            }
+
+    agent = CybersecurityExpertAgent(_CapitalizedClient())
+    result = agent.run(_input())
+    assert result.approved is False
