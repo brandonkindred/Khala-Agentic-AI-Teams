@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
+from agentic_team_provisioning.models import AgenticTeamAgent
 from agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
 
 _SOURCE = SourceInfo(entrypoint="pkg.mod:Agent")
@@ -40,7 +41,7 @@ _BARE = AgentManifest(
 
 
 class _FakeRegistry:
-    """The slice of ``AgentRegistry`` the from-registry route uses."""
+    """The slice of ``AgentRegistry`` the from-registry / delete routes use."""
 
     def __init__(self, manifests: list[AgentManifest]) -> None:
         self._by_id = {m.id: m for m in manifests}
@@ -48,13 +49,26 @@ class _FakeRegistry:
     def get(self, agent_id: str) -> AgentManifest | None:
         return self._by_id.get(agent_id)
 
+    def register(self, manifest: AgentManifest, source_path=None) -> None:
+        self._by_id[manifest.id] = manifest
+
+    def unregister(self, agent_id: str) -> bool:
+        return self._by_id.pop(agent_id, None) is not None
+
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def registry() -> _FakeRegistry:
+    """One fake registry instance shared by the route and the test (so register/
+    unregister side effects are observable)."""
+    return _FakeRegistry([_PLANNER, _BARE])
+
+
+@pytest.fixture
+def client(monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry) -> TestClient:
     install_fake_postgres(monkeypatch)
     # The route resolves the registry via ``from agent_registry import get_registry``;
-    # patch the package attribute so the call picks up the fake.
-    monkeypatch.setattr("agent_registry.get_registry", lambda: _FakeRegistry([_PLANNER, _BARE]))
+    # patch the package attribute so the call picks up the shared fake.
+    monkeypatch.setattr("agent_registry.get_registry", lambda: registry)
     from agentic_team_provisioning.api.main import app
 
     return TestClient(app)
@@ -76,6 +90,7 @@ def test_from_registry_projects_and_persists(client: TestClient) -> None:
     assert body["role"] == "Plans SEO-aware blog outlines"
     assert body["skills"] == ["studio", "seo"]  # from manifest tags
     assert body["tools"] == ["web.search", "draft"]  # from cognition.tools
+    assert body["expertise"] == ["blogging"]  # from the home team
     assert body["source"] == "registry"
     assert body["manifest_id"] == "blogging.planner"
 
@@ -94,12 +109,15 @@ def test_from_registry_bare_manifest_falls_back(client: TestClient) -> None:
     assert body["role"] == "misc.bare"
     assert body["tools"] == []
     assert body["skills"] == ["studio"]
+    assert body["expertise"] == ["misc"]
 
 
-def test_from_registry_agent_passes_roster_validation(client: TestClient) -> None:
-    """A projected registry agent fills enough fields to pass depth validation."""
+def test_from_registry_no_cognition_tools_passes_validation(client: TestClient) -> None:
+    """Regression: a tagged manifest with NO cognition tools (the common catalog
+    shape) must still pass roster validation — skills (tags) + expertise (team)
+    give two populated fields, so it isn't flagged ``sparse_profile``."""
     team_id = _new_team()
-    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "misc.bare"})
 
     validation = client.get(f"/teams/{team_id}/roster/validation").json()
     assert validation["is_fully_staffed"] is True
@@ -158,3 +176,50 @@ def test_delete_only_removes_the_named_agent(client: TestClient) -> None:
     client.delete(f"/teams/{team_id}/agents/blogging.planner")
     roster = client.get(f"/teams/{team_id}/agents").json()
     assert [a["agent_name"] for a in roster] == ["misc.bare"]
+
+
+def test_delete_generated_agent_unregisters_its_manifest(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Deleting a generated roster agent also unregisters its in-process manifest,
+    so catalog/invoke consumers stop resolving it (mirrors the full-save cleanup)."""
+    from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+    team_id = _new_team()
+    gen = AgenticTeamAgent(
+        agent_name="Writer Agent", role="Writes", skills=["seo"], source="generated"
+    )
+    AgenticTeamStore().save_team_agents(team_id, [gen])
+    manifest = build_agent_manifest(team_id, gen)
+    registry.register(manifest)  # simulate the LLM save path's install
+    assert registry.get(manifest.id) is not None
+
+    resp = client.delete(f"/teams/{team_id}/agents/Writer Agent")
+    assert resp.status_code == 204
+    assert registry.get(manifest.id) is None  # unregistered
+
+
+def test_delete_registry_agent_keeps_global_manifest(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """A registry-source agent exists in the registry independently of the team;
+    removing it from the roster must NOT unregister it globally."""
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+
+    client.delete(f"/teams/{team_id}/agents/blogging.planner")
+    assert registry.get("blogging.planner") is not None  # still globally registered
+
+
+def test_delete_agent_name_with_slash(client: TestClient) -> None:
+    """Roster names containing '/' (e.g. 'Backend — API/OpenAPI Specialist') must be
+    deletable — the :path converter matches the slash instead of 404-ing."""
+    team_id = _new_team()
+    name = "Backend — API/OpenAPI Specialist"
+    AgenticTeamStore().save_team_agents(
+        team_id, [AgenticTeamAgent(agent_name=name, role="Specs", skills=["openapi"])]
+    )
+
+    resp = client.delete(f"/teams/{team_id}/agents/{name}")
+    assert resp.status_code == 204
+    assert client.get(f"/teams/{team_id}/agents").json() == []

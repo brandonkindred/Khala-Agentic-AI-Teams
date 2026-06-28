@@ -250,16 +250,20 @@ def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
 
     Preconditions: ``manifest`` is a registered manifest.
     Postconditions: returns an ``AgenticTeamAgent`` with ``source == "registry"``
-        and ``manifest_id == manifest.id``. ``skills`` come from the manifest tags
-        and ``tools`` from ``cognition.tools``, so the projected agent satisfies
-        ``roster_validation`` depth checks for any tagged manifest (Studio-saved
-        manifests always carry the ``"studio"`` tag, so ``skills`` is non-empty).
+        and ``manifest_id == manifest.id``. To satisfy ``roster_validation``'s depth
+        check (which flags an agent missing ≥3 of skills/capabilities/tools/expertise
+        as ``sparse_profile``), the projection fills **two** persona fields that don't
+        both depend on the optional ``cognition.tools``: ``skills`` from the manifest
+        tags and ``expertise`` from the home ``team`` (always present). So a tagged
+        manifest with no cognition tools — the common catalog shape — still passes.
+        ``tools`` carries ``cognition.tools`` when present.
     """
     return AgenticTeamAgent(
         agent_name=manifest.name,
         role=manifest.summary or manifest.name,
         skills=list(manifest.tags),
         tools=list(manifest.cognition.tools) if manifest.cognition else [],
+        expertise=[manifest.team],
         source="registry",
         manifest_id=manifest.id,
     )
@@ -285,18 +289,32 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     return agent
 
 
-@app.delete("/teams/{team_id}/agents/{agent_name}", status_code=204)
+@app.delete("/teams/{team_id}/agents/{agent_name:path}", status_code=204)
 def remove_agent_from_roster(team_id: str, agent_name: str):
     """Remove a single agent from the team roster by name (§5.3).
 
+    The ``:path`` converter lets roster names that contain ``/`` (e.g.
+    "Backend — API/OpenAPI Specialist") match instead of 404-ing on the slash.
+
     ``204`` on success; ``404`` when the team is unknown or no roster entry has
-    that name.
+    that name. If the removed agent was **generated** (installed into the live
+    registry via the LLM save path's ``register_team_manifests``), its in-process
+    manifest is also unregistered so catalog/invoke consumers stop resolving it —
+    mirroring the stale-cleanup the full-roster save already does. Registry-source
+    agents are left in the registry, since they exist there independently of this
+    team.
     """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
+    agent = next((a for a in team.agents if a.agent_name == agent_name), None)
     if not _store.delete_team_agent(team_id, agent_name):
         raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
+    if agent is not None and agent.source == "generated":
+        from agent_registry import get_registry
+        from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+        get_registry().unregister(build_agent_manifest(team_id, agent).id)
     return Response(status_code=204)
 
 
