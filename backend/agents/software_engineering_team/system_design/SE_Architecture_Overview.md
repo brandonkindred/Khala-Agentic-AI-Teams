@@ -96,7 +96,7 @@ flowchart LR
 
     subgraph CodingTeam["Coding Team (Primary Path)"]
         CTL["TechLeadAgent\n(Coordinator)"]
-        SWE["SeniorSWEAgent(s)\n(Workers)"]
+        V2W["frontend_v2/backend_v2\n(Workers)"]
         TGS["TaskGraphService"]
     end
 

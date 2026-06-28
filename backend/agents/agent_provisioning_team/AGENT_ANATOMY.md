@@ -62,7 +62,7 @@ For any agent that operates on a **known local Git repository** (orchestrator-re
 
 The executor delegates to **`software_engineering_team.shared.git_utils`** so subprocess Git behavior stays consistent. Models must not supply `repo_path` in tool arguments; the runtime ignores it.
 
-**Rollout:** `coding_team` `SeniorSWEAgent` enables Git tools by default. Other repo-backed teams can import the same definitions and bind a `GitToolContext` for their workspace.
+**Rollout:** repo-backed agents can import the shared Git definitions, convert them with `agent_llm_tools_service.strands_bridge.build_strands_tools`, and bind a `GitToolContext` for their workspace.
 
 ### 3.2 Agent Cognition Core (batteries-included)
 
