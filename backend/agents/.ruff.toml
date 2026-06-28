@@ -23,7 +23,6 @@ max-statements = 130
 "**/agent_implementations/**" = ["C901", "PLR0915"]
 # Complexity debt: pre-existing functions above the thresholds above. Exempted
 # per-rule (paths are relative to agents/); refactor and remove to ratchet down.
-"software_engineering_team/frontend_team_deprecated/**" = ["C901", "PLR0915"]
 "software_engineering_team/orchestrator.py" = ["C901", "PLR0915"]
 "llm_service/clients/ollama.py" = ["C901", "PLR0915"]
 "software_engineering_team/backend_agent/agent.py" = ["C901", "PLR0915"]

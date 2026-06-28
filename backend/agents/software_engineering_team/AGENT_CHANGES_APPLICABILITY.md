@@ -2,6 +2,12 @@
 
 This document details which of the 7 backend agent fixes should be applied to other software engineering agents.
 
+> **Note:** The deprecated frontend pipeline (`frontend_team_deprecated/` and its
+> `frontend_team/` shim) has been removed; the live frontend path is now
+> `frontend_code_v2_team/`. The "Frontend Feature Agent" and "Frontend Orchestrator"
+> sections below are retained for historical context only and refer to code no longer
+> in the tree.
+
 ---
 
 ## Backend Agent Max Cycles Fix (2025)

@@ -27,7 +27,7 @@ pythonpath = [".", "architect-agents"]
 addopts = "-v"
 
 [tool.coverage.run]
-source = ["shared", "frontend_team"]
+source = ["shared"]
 # Paths use both forms: bare module paths for `cd software_engineering_team && pytest`
 # (legacy local workflow), and `software_engineering_team/...` paths for the CI
 # `--cov=software_engineering_team` invocation from `backend/agents/`. Each omit
@@ -46,7 +46,6 @@ omit = [
     # prefix matching what coverage records when pytest runs from
     # backend/agents/ (i.e. starting with `software_engineering_team/`).
     # See that file for the per-entry rationale.
-    "software_engineering_team/frontend_team_deprecated/*",
     "software_engineering_team/temporal/start_workflow.py",
     "software_engineering_team/temporal/activities.py",
     "software_engineering_team/temporal/worker.py",
@@ -112,7 +111,6 @@ include = [
     "devops_agent*",
     "security_agent*",
     "backend_agent*",
-    "frontend_team*",
     "qa_agent*",
 ]
 namespaces = false

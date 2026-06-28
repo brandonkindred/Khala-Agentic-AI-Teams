@@ -2,7 +2,7 @@
 
 Consolidates ``_read_repo_code``, ``_truncate_for_context``, and ``_int_env``
 that were previously duplicated across backend_agent, orchestrator,
-documentation_agent, and frontend_team modules.
+and documentation_agent modules.
 """
 
 from __future__ import annotations
