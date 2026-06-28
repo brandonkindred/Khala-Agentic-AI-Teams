@@ -721,6 +721,57 @@ class TestDevOpsTestValidationAgent:
         out = agent.run(DevOpsTestValidationInput(acceptance_criteria=[], tool_results={}))
         assert not out.approved
 
+    def test_delegates_to_unified_qa_agent(self) -> None:
+        from devops_team.test_validation_agent import DevOpsTestValidationAgent
+        from qa_agent import QAExpertAgent
+
+        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
+        assert isinstance(agent._qa, QAExpertAgent)
+
+    def test_maps_evidence_and_trace_through(self) -> None:
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"unit_tests": "pass"},
+                "acceptance_trace": [
+                    {"criterion": "c1", "implementation_refs": ["app.py"], "tests": []}
+                ],
+                "validation_evidence": [
+                    {"gate": "unit_tests", "status": "pass", "detail": "12 passed"}
+                ],
+                "summary": "ok",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
+        )
+        assert out.acceptance_trace and out.acceptance_trace[0]["criterion"] == "c1"
+        assert out.evidence and out.evidence[0].gate == "unit_tests"
+        assert out.evidence[0].status == "pass"
+
+    def test_unknown_gate_status_coerced_to_not_run(self) -> None:
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"unit_tests": "flaky"},  # not a valid GateStatus
+                "summary": "ok",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=[], tool_results={})
+        )
+        assert out.quality_gates["unit_tests"] == "not_run"
+
 
 class TestChangeReviewAgent:
     def test_approves(self) -> None:

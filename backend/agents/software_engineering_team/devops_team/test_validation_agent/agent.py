@@ -1,49 +1,90 @@
-"""DevOps test and validation agent."""
+"""DevOps test and validation agent.
+
+This is now a thin delegating shim over the unified QA agent
+(:class:`qa_agent.QAExpertAgent`). The distinctive *evidence -> acceptance-
+criteria mapping* logic lives in that agent's ``acceptance_evidence`` mode; this
+class preserves the DevOps-facing name, constructor signature, and I/O models so
+the DevOps orchestrator and existing tests are unaffected.
+"""
 
 from __future__ import annotations
 
-import json
+from typing import get_args
 
-from strands import Agent
+from devops_team.models import GateStatus
+from qa_agent import QAExpertAgent, QAInput
 
-from llm_service import LLMClient, get_strands_model
+from llm_service import LLMClient
 
 from .models import (
     DevOpsTestValidationInput,
     DevOpsTestValidationOutput,
     ValidationEvidence,
 )
-from .prompts import DEVOPS_TEST_VALIDATION_PROMPT
+
+_VALID_GATE_STATUSES = frozenset(get_args(GateStatus))
+
+
+def _coerce_gate_status(value: object) -> GateStatus:
+    """Map an arbitrary status string onto the ``GateStatus`` literal.
+
+    Preconditions: ``value`` is any object (typically a str from the QA agent).
+    Postconditions: returns a member of ``GateStatus``; unrecognized values
+    collapse to ``"not_run"`` so the output never violates the literal contract.
+    """
+    text = str(value).strip().lower()
+    return text if text in _VALID_GATE_STATUSES else "not_run"  # type: ignore[return-value]
 
 
 class DevOpsTestValidationAgent:
+    """Validate tool results against acceptance criteria via the unified QA agent.
+
+    Invariants:
+        - Delegates all reasoning to a single wrapped :class:`QAExpertAgent`.
+        - The output shape (:class:`DevOpsTestValidationOutput`) and the
+          gate-fail blocking rule are identical to the pre-refactor agent.
+    """
+
     def __init__(self, llm_client: LLMClient) -> None:
+        """Build the shim.
+
+        Preconditions: ``llm_client`` is not ``None``.
+        Postconditions: holds a ``QAExpertAgent`` constructed from the same client.
+        """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
-        from strands.models.model import Model as _StrandsModel
-        if isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("devops")
+        self._qa = QAExpertAgent(llm_client)
 
     def run(self, input_data: DevOpsTestValidationInput) -> DevOpsTestValidationOutput:
-        context = (
-            f"acceptance_criteria={input_data.acceptance_criteria}\n"
-            f"tool_results={input_data.tool_results}\n"
+        """Map tool/test evidence to acceptance criteria.
+
+        Preconditions: ``input_data`` is a valid ``DevOpsTestValidationInput``.
+        Postconditions: returns a ``DevOpsTestValidationOutput`` whose
+        ``quality_gates`` values are valid ``GateStatus`` members and whose
+        ``approved`` is ``False`` whenever any gate failed (the unified QA agent
+        already applies this rule in ``acceptance_evidence`` mode).
+        """
+        qa_out = self._qa.run(
+            QAInput(
+                code="",
+                request_mode="acceptance_evidence",
+                acceptance_criteria=input_data.acceptance_criteria,
+                tool_results=input_data.tool_results,
+            )
         )
-        data = json.loads(str(Agent(model=self._model)(
-            DEVOPS_TEST_VALIDATION_PROMPT + "\n\n---\n\n" + context, temperature=0.0, think=True
-        )).strip())
-        gates = data.get("quality_gates") or {}
-        approved = bool(data.get("approved", False))
-        if any(v == "fail" for v in gates.values()):
-            approved = False
+        gates = {k: _coerce_gate_status(v) for k, v in qa_out.quality_gates.items()}
         return DevOpsTestValidationOutput(
-            approved=approved,
+            approved=qa_out.approved,
             quality_gates=gates,
-            acceptance_trace=data.get("acceptance_trace") or [],
+            acceptance_trace=list(qa_out.acceptance_trace),
             evidence=[
-                ValidationEvidence(**e) for e in (data.get("evidence") or []) if isinstance(e, dict)
+                ValidationEvidence(
+                    gate=str(e.get("gate", "")),
+                    status=_coerce_gate_status(e.get("status", "")),
+                    detail=str(e.get("detail", "")),
+                )
+                for e in qa_out.validation_evidence
+                if isinstance(e, dict)
             ],
-            summary=data.get("summary", ""),
+            summary=qa_out.summary,
         )

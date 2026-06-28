@@ -96,6 +96,24 @@ Your task: Analyze the build errors and produce bug reports with clear "recommen
 - If multiple errors, list each with its fix. The coding agent will implement them.
 """
 
+QA_PROMPT_ACCEPTANCE_EVIDENCE = """
+**MODE: acceptance_evidence** – Do NOT review source code for bugs in this mode.
+Instead, interpret the provided tool/test results (IaC, pipeline, deploy, unit,
+integration, etc.) and map that evidence back to the acceptance criteria.
+
+Produce the following JSON fields (leave bugs_found empty):
+- "approved": boolean — overall pass/fail judgement.
+- "quality_gates": object mapping each gate name to one of "pass" | "fail" | "skipped" | "not_run".
+- "acceptance_trace": list of objects, each {criterion, implementation_refs, tests}.
+- "validation_evidence": list of objects, each {gate, status, detail}.
+- "summary": string — concise verdict.
+
+Rules:
+- If any gate is "fail", overall approval MUST be false.
+- Only report gates and evidence that the tool_results actually support; mark
+  missing checks as "not_run" rather than inventing a pass.
+"""
+
 QA_PROMPT_WRITE_TESTS = """
 **MODE: write_tests** – Focus on producing unit_tests and integration_tests for the code below.
 - For React/TypeScript: use Jest/React Testing Library for unit tests (*.test.tsx), Cypress or Playwright for e2e.
