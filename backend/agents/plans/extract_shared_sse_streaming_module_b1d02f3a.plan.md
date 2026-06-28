@@ -4,31 +4,31 @@ overview: Single-source the per-job SSE endpoint helper into a shared module and
 todos:
   - id: reaper-1
     content: Extract a reusable reaper-equipped bus binding into shared_job_event_bus (factory or ReaperHandle) so a team gets subscribe/publish/cleanup/shutdown plus the lazy background reaper with one call
-    status: pending
+    status: completed
   - id: reaper-2
     content: Rebind blogging's job_event_bus onto the shared reaper helper (no behavioural change; keeps BLOGGING_EVENT_BUS_* knobs)
-    status: pending
+    status: completed
   - id: reaper-3
     content: Rebind investment's job_event_bus onto the shared reaper helper with INVESTMENT_EVENT_BUS_* knobs — closes the unbounded-subscription leak
-    status: pending
+    status: completed
   - id: reaper-4
     content: Wire investment's app on_shutdown to stop its reaper (create_team_app currently passes no on_shutdown)
-    status: pending
+    status: completed
   - id: sse-1
     content: Add shared_sse module exposing _sse_line framing + sse_job_stream core with sync and async wrappers (snapshot, terminal-status set, to_event, keepalive, 4h deadline, touch-for-liveness)
-    status: pending
+    status: completed
   - id: sse-2
     content: Migrate blogging's stream_job_status (sync) onto sse_job_stream
-    status: pending
+    status: completed
   - id: sse-3
     content: Migrate investment's stream_strategy_lab_run (async) onto sse_job_stream; this adds the missing sub.touch() liveness call so the now-present reaper won't evict an active consumer
-    status: pending
+    status: completed
   - id: sse-4
     content: Point deepthought's SSE endpoint at the shared _sse_line framing helper (cosmetic single-sourcing; deepthought does not use the job bus)
-    status: pending
+    status: completed
   - id: test-1
     content: Tests — reaper now runs for investment; terminal-event delivery + keepalive unchanged for blogging and investment; shared-module unit tests for both sync and async paths; 90% line coverage
-    status: pending
+    status: completed
 isProject: false
 ---
 

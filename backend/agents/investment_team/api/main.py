@@ -176,9 +176,22 @@ def _clamp_max_parallel(requested: int) -> int:
     return effective
 
 
+def _run_investment_service_shutdown() -> (
+    None
+):  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; the meaningful exercise needs a live server. The body is a defensive try/except around the event-bus reaper teardown.
+    """Stop the per-job event-bus reaper thread before process exit."""
+    try:
+        from investment_team.api.job_event_bus import shutdown as _shutdown_event_bus
+
+        _shutdown_event_bus()
+    except Exception:
+        logger.debug("Investment event-bus reaper shutdown skipped", exc_info=True)
+
+
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
 # The Postgres schema registers the market-data cache snapshot index DDL on
-# startup (no-op when POSTGRES_HOST is unset).
+# startup (no-op when POSTGRES_HOST is unset); the on_shutdown hook stops the
+# event-bus reaper thread before the pool is closed.
 app = create_team_app(
     service_name="investment-team",
     team_key="investment",
@@ -186,6 +199,7 @@ app = create_team_app(
     description="Investment profile management, portfolio proposals, strategy validation, and promotion gates.",
     version="1.0.0",
     postgres_schema=MD_CACHE_SCHEMA,
+    on_shutdown=_run_investment_service_shutdown,
 )
 
 _workflow_state = WorkflowState()
@@ -2508,11 +2522,8 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
 )
 async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     """SSE endpoint — async generator so it doesn't block Uvicorn worker threads."""
-    import asyncio
-    import json as json_module
-    import time as time_mod
-
     from investment_team.api.job_event_bus import subscribe, unsubscribe
+    from shared_sse import sse_job_stream_async, sse_line
 
     with _lock:
         state = _active_runs.get(run_id)
@@ -2521,56 +2532,35 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
     if not state:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
-    def _sse_line(data: dict) -> str:
-        return f"data: {json_module.dumps(data, default=str)}\n\n"
-
     # If the run is already terminal, send snapshot + done immediately.
     if state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
 
         async def _terminal_gen():
-            yield _sse_line(
+            yield sse_line(
                 {"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")}
             )
-            yield _sse_line({"type": "done"})
+            yield sse_line({"type": "done"})
 
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
-    async def event_generator():
-        sub = subscribe(run_id)
-        try:
-            # Initial snapshot
-            with _lock:
-                current = _active_runs.get(run_id, {})
-            if current:
-                yield _sse_line(
-                    {"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")}
-                )
+    def _snapshot_event() -> Optional[dict]:
+        # Skip the snapshot when there's no current in-memory state to send.
+        with _lock:
+            current = _active_runs.get(run_id, {})
+        if not current:
+            return None
+        return {"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")}
 
-            deadline = time_mod.monotonic() + 4 * 3600  # 4-hour max
-            while time_mod.monotonic() < deadline:
-                sent_terminal = False
-                while sub.events:
-                    event = sub.events.popleft()
-                    yield _sse_line(event)
-                    if event.get("type") in ("complete", "error"):
-                        sent_terminal = True
-                if sent_terminal:
-                    yield _sse_line({"type": "done"})
-                    return
-
-                # No buffered events on this pass — emit a comment-only SSE
-                # keepalive line and yield control back to the event loop
-                # for the 1-second poll interval. Unit tests drive
-                # termination via pre-loaded events so they exit the inner
-                # ``while sub.events:`` drain with ``sent_terminal=True``
-                # and never reach the keepalive/sleep pair (which is a
-                # production timing knob, not behaviour to verify).
-                yield ": keepalive\n\n"  # pragma: no cover
-                await asyncio.sleep(1.0)  # pragma: no cover
-        finally:
-            unsubscribe(run_id, sub)
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        sse_job_stream_async(
+            subscribe=subscribe,
+            unsubscribe=unsubscribe,
+            job_id=run_id,
+            snapshot=_snapshot_event,
+            terminal_types=("complete", "error"),
+        ),
+        media_type="text/event-stream",
+    )
 
 
 class ClearStrategyLabStorageResponse(BaseModel):
