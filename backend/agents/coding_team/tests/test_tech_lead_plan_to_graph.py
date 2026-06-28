@@ -96,6 +96,33 @@ def test_tech_lead_plan_to_task_graph_preserves_target_team(monkeypatch) -> None
     assert out["tasks"][1]["target_team"] == "backend_v2"
 
 
+def test_tech_lead_plan_to_task_graph_falls_back_to_legacy_team_fields(monkeypatch) -> None:
+    """Legacy team/stack fields are preserved as target_team routing hints."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: {
+            "tasks": [
+                {"id": "ui", "title": "UI", "team": "frontend_v2"},
+                {"id": "api", "title": "API", "stack": "backend_v2"},
+                {"id": "deploy", "title": "Deploy", "assignee_stack": "devops"},
+            ],
+            "stacks": [],
+        },
+    )
+
+    out = TechLeadAgent(model=object()).run_plan_to_task_graph(
+        CodingTeamPlanInput(requirements_title="X", repo_path="/tmp")
+    )
+
+    assert [task["target_team"] for task in out["tasks"]] == [
+        "frontend_v2",
+        "backend_v2",
+        "devops",
+    ]
+
+
 def test_tech_lead_run_groom_task(monkeypatch) -> None:
     """run_groom_task returns the enriched grooming fields parsed from the LLM JSON."""
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())

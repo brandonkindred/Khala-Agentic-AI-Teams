@@ -43,21 +43,21 @@ def _ensure_linting_configured(path: Path, written: set[str]) -> bool:
     # Angular projects can use ng lint
     if (path / "angular.json").exists():
         logger.info("Setup: Angular project detected; creating eslint.config.js for ng lint")
-        from software_engineering_team.shared.command_runner import _MINIMAL_ANGULAR_ESLINT_CONFIG
+        from software_engineering_team.shared.command_runner import MINIMAL_ANGULAR_ESLINT_CONFIG
 
         config_file = path / "eslint.config.js"
         if not config_file.exists():
-            config_file.write_text(_MINIMAL_ANGULAR_ESLINT_CONFIG, encoding="utf-8")
+            config_file.write_text(MINIMAL_ANGULAR_ESLINT_CONFIG, encoding="utf-8")
             written.add("eslint.config.js")
         return True
 
     # React/generic project — create ESLint flat config
     logger.info("Setup: no linting configuration found; creating eslint.config.mjs")
-    from software_engineering_team.shared.command_runner import _MINIMAL_REACT_ESLINT_CONFIG
+    from software_engineering_team.shared.command_runner import MINIMAL_REACT_ESLINT_CONFIG
 
     config_file = path / "eslint.config.mjs"
     if not config_file.exists():
-        config_file.write_text(_MINIMAL_REACT_ESLINT_CONFIG, encoding="utf-8")
+        config_file.write_text(MINIMAL_REACT_ESLINT_CONFIG, encoding="utf-8")
         written.add("eslint.config.mjs")
 
     # Ensure lint script exists in package.json
@@ -103,28 +103,28 @@ def _ensure_testing_configured(path: Path, written: set[str]) -> bool:
     if is_angular:
         logger.info("Setup: creating vitest.config.mts for Angular project")
         from software_engineering_team.shared.command_runner import (
-            _MINIMAL_ANGULAR_TEST_SETUP,
-            _MINIMAL_ANGULAR_VITEST_CONFIG,
+            MINIMAL_ANGULAR_TEST_SETUP,
+            MINIMAL_ANGULAR_VITEST_CONFIG,
         )
 
         config_file = path / "vitest.config.mts"
         if not config_file.exists():
-            config_file.write_text(_MINIMAL_ANGULAR_VITEST_CONFIG, encoding="utf-8")
+            config_file.write_text(MINIMAL_ANGULAR_VITEST_CONFIG, encoding="utf-8")
             written.add("vitest.config.mts")
         # Ensure test setup file
         src = path / "src"
         src.mkdir(parents=True, exist_ok=True)
         setup_file = src / "test-setup.ts"
         if not setup_file.exists():
-            setup_file.write_text(_MINIMAL_ANGULAR_TEST_SETUP, encoding="utf-8")
+            setup_file.write_text(MINIMAL_ANGULAR_TEST_SETUP, encoding="utf-8")
             written.add("src/test-setup.ts")
     else:
         logger.info("Setup: creating vitest.config.ts for React project")
-        from software_engineering_team.shared.command_runner import _MINIMAL_REACT_VITEST_CONFIG
+        from software_engineering_team.shared.command_runner import MINIMAL_REACT_VITEST_CONFIG
 
         config_file = path / "vitest.config.ts"
         if not config_file.exists():
-            config_file.write_text(_MINIMAL_REACT_VITEST_CONFIG, encoding="utf-8")
+            config_file.write_text(MINIMAL_REACT_VITEST_CONFIG, encoding="utf-8")
             written.add("vitest.config.ts")
 
     if _ensure_package_script(path, "test", "vitest run"):

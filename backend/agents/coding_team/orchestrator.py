@@ -486,7 +486,13 @@ def _team_key(value: Optional[str]) -> str:
     # Collapse every run of non-alphanumeric characters (dots, hyphens, spaces, repeats)
     # to a single underscore, so "Node.js", "Node. JS" and "node-js" all normalize to the
     # same token sequence; strip leading/trailing separators.
-    text = re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower()).strip("_")
+    raw_text = (value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", raw_text).strip("_")
+    stripped = re.sub(r"[^a-z0-9]+", "", raw_text)
+    if stripped == "frontend":
+        return "frontend_v2"
+    if stripped == "backend":
+        return "backend_v2"
     # Exact-token membership (not substring) so unrelated labels that merely contain
     # "frontend"/"backend" as a substring (e.g. "myfrontend") are not misclassified.
     tokens = set(text.split("_"))
@@ -1198,10 +1204,14 @@ def run_coding_team_orchestrator(
             return
         tasks_raw = out.get("tasks") or []
         stacks_raw = out.get("stacks") or _DEFAULT_STACK_SPECS
-        for t in tasks_raw:
+        for idx, t in enumerate(tasks_raw, start=1):
+            if not isinstance(t, dict):
+                logger.warning("Skipping malformed task graph entry at index %s: %r", idx, t)
+                continue
+            task_id = str(t.get("id") or f"task_{idx}")
             graph.add_task(
-                task_id=t["id"],
-                title=t.get("title", t["id"]),
+                task_id=task_id,
+                title=t.get("title") or task_id,
                 description=t.get("description", ""),
                 dependencies=t.get("dependencies", []),
                 target_team=t.get("target_team") or None,

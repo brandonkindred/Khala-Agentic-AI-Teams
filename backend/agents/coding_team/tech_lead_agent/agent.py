@@ -156,6 +156,8 @@ class TechLeadAgent:
         Orchestrator will add tasks to Task Graph and create v2 implementation workers from stacks. A non-empty
         ``open_questions`` means the Tech Lead needs a product/design decision it must not make
         itself; the orchestrator pauses the job for the user rather than building tasks.
+        If ``target_team`` is missing from a task, legacy routing fields are
+        checked in order: ``team``, ``stack``, then ``assignee_stack``.
 
         Postconditions:
             - Returns a dict with "tasks" (possibly empty), a non-empty "stacks" (defaulted),

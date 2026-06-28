@@ -889,6 +889,22 @@ def test_team_key_warns_on_ambiguous_frontend_backend_label(caplog) -> None:
     assert "contains both frontend and backend" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("front-end", "frontend_v2"),
+        ("front end", "frontend_v2"),
+        ("back-end", "backend_v2"),
+        ("back end", "backend_v2"),
+    ],
+)
+def test_team_key_normalizes_separated_frontend_backend_labels(
+    label: str, expected: str
+) -> None:
+    """Common separated frontend/backend labels route to canonical v2 teams."""
+    assert orch_mod._team_key(label) == expected
+
+
 def test_quality_gate_type_uses_v2_stack_inference_for_hint_stack_names() -> None:
     """Hint-only stack names still map to canonical quality gate agent types."""
     assert orch_mod._quality_gate_agent_type("Angular") == "frontend"
@@ -1402,6 +1418,52 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
     stack_updates = [u for u in updates if "stack_specs" in u]
     assert stack_updates, "fresh run must persist stack_specs for resume"
     assert stack_updates[0]["stack_specs"] == [{"name": "backend", "tools_services": ["pytest"]}]
+
+
+def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
+    """Malformed Tech Lead task output without an id becomes a stable fallback task."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"title": "Untitled task"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    captured: Dict[str, TaskGraphService] = {}
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            captured["graph"] = self.graph
+
+        def run(self, **kw):
+            self.graph.mark_branch_merged("task_1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(
+        orch_mod,
+        "_build_implementation_worker",
+        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+    )
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    task = captured["graph"].get_task("task_1")
+    assert task.title == "Untitled task"
+    assert task.status == TaskStatus.MERGED
 
 
 # ----------------------------------------------------- task graph helpers (direct)

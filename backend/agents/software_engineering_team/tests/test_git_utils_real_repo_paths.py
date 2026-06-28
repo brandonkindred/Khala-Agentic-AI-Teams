@@ -1,4 +1,4 @@
-"""Extra coverage for shared.git_utils."""
+"""Real-repository coverage for shared.git_utils path and branch helpers."""
 
 from __future__ import annotations
 

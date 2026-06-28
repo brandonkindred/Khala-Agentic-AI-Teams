@@ -1,4 +1,4 @@
-"""Extra tests for ``software_engineering_team.shared.git_utils``.
+"""Mocked-operation tests for ``software_engineering_team.shared.git_utils``.
 
 Patches ``_run_git`` and ``subprocess.run`` to avoid touching real repos.
 """

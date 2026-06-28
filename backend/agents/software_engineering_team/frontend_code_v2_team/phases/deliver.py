@@ -10,7 +10,11 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from software_engineering_team.shared.branch_utils import make_branch_suffix, make_slug
+from software_engineering_team.shared.deliver_utils import (
+    DeliverGitOps,
+    deliver_inline_merge,
+    prepare_handoff_branch,
+)
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
@@ -26,90 +30,20 @@ from ..models import DeliverResult, Phase, ToolAgentKind, ToolAgentPhaseInput
 from ..prompts import DELIVER_COMMIT_MSG_TEMPLATE
 
 logger = logging.getLogger(__name__)
+__all__ = ["DEVELOPMENT_BRANCH", "run_deliver"]
 
 
-class _FilesPayload:
-    def __init__(self, files: Dict[str, str], summary: str, commit_msg: str) -> None:
-        self.files = files
-        self.summary = summary
-        self.suggested_commit_message = commit_msg
-        self.gitignore_entries: list[str] = []
-
-
-def _cleanup_handoff_failure(repo_path: Path, branch_name: str, *, created_branch: bool) -> None:
-    """Return to development and remove a newly-created failed handoff branch."""
-    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-    if created_branch and branch_name:
-        delete_branch(repo_path, branch_name)
-
-
-def _prepare_handoff_branch(
-    *,
-    task_id: str,
-    repo_path: Path,
-    deliver_files: Dict[str, str],
-    summary: str,
-    task_title: str,
-    feature_branch_name: Optional[str],
-) -> DeliverResult:
-    """Commit a feature branch and leave it ready for external Tech Lead review."""
-    result = DeliverResult()
-    if not deliver_files:
-        result.summary = "No files to deliver."
-        return result
-    result.delivered_files = sorted(deliver_files)
-    slug = make_slug(task_id, task_title)
-    branch_suffix = make_branch_suffix(task_id, task_title)
-    branch_name = feature_branch_name
-    created_branch = False
-    if branch_name:
-        ok, checkout_msg = checkout_branch(repo_path, branch_name)
-        if not ok:
-            result.summary = f"Feature branch checkout failed: {checkout_msg}"
-            logger.error("[%s] Deliver: %s", task_id, result.summary)
-            # Restore development so the shared workspace is not left on an arbitrary
-            # branch for the next task (symmetric with the create/write/commit failures).
-            restore_ok, restore_msg = checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-            if not restore_ok:
-                logger.error(
-                    "[%s] Deliver: failed to restore %s after checkout failure: %s",
-                    task_id,
-                    DEVELOPMENT_BRANCH,
-                    restore_msg,
-                )
-            return result
-    else:
-        ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, branch_suffix)
-        if not ok:
-            result.summary = f"Feature branch creation failed: {branch_msg}"
-            logger.error("[%s] Deliver: %s", task_id, result.summary)
-            checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-            return result
-        branch_name = branch_msg or f"feature/{branch_suffix}"
-        created_branch = True
-
-    result.branch_name = branch_name or ""
-    commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=slug[:20], summary=summary[:72])
-    payload = _FilesPayload(deliver_files, summary, commit_msg)
-    write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
-    if not write_ok:
-        result.summary = f"Write failed: {write_msg}"
-        logger.error("[%s] Deliver: %s", task_id, result.summary)
-        _cleanup_handoff_failure(repo_path, result.branch_name, created_branch=created_branch)
-        return result
-
-    commit_ok, commit_msg_out = commit_working_tree(repo_path, commit_msg)
-    if not commit_ok:
-        result.summary = f"Commit failed: {commit_msg_out}"
-        logger.error("[%s] Deliver: %s", task_id, result.summary)
-        _cleanup_handoff_failure(repo_path, result.branch_name, created_branch=created_branch)
-        return result
-
-    result.commit_messages.append(commit_msg)
-    result.branch_ready = True
-    result.summary = f"Prepared {result.branch_name} for Tech Lead review."
-    logger.info("[%s] Deliver: %s", task_id, result.summary)
-    return result
+def _git_ops() -> DeliverGitOps:
+    """Return current module git functions so tests can monkeypatch this boundary."""
+    return DeliverGitOps(
+        abort_merge=abort_merge,
+        checkout_branch=checkout_branch,
+        commit_working_tree=commit_working_tree,
+        create_feature_branch=create_feature_branch,
+        delete_branch=delete_branch,
+        merge_branch=merge_branch,
+        write_agent_output=write_agent_output,
+    )
 
 
 def run_deliver(
@@ -159,13 +93,16 @@ def run_deliver(
             return result
 
         if not merge_to_development:
-            return _prepare_handoff_branch(
+            return prepare_handoff_branch(
                 task_id=task_id,
                 repo_path=repo_path,
                 deliver_files=deliver_files,
                 summary=summary,
                 task_title=task_title,
                 feature_branch_name=feature_branch_name,
+                commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
+                ops=_git_ops(),
+                logger=logger,
             )
 
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
@@ -201,48 +138,25 @@ def run_deliver(
     result.delivered_files = sorted(deliver_files)
 
     if not merge_to_development:
-        return _prepare_handoff_branch(
+        return prepare_handoff_branch(
             task_id=task_id,
             repo_path=repo_path,
             deliver_files=deliver_files,
             summary=summary,
             task_title=task_title,
             feature_branch_name=feature_branch_name,
+            commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
+            ops=_git_ops(),
+            logger=logger,
         )
 
-    slug = make_slug(task_id, task_title)
-    branch_suffix = make_branch_suffix(task_id, task_title)
-    ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, branch_suffix)
-    if not ok:
-        result.summary = f"Feature branch creation failed: {branch_msg}"
-        logger.error("[%s] Deliver: %s", task_id, result.summary)
-        checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-        return result
-    result.branch_name = branch_msg or f"feature/{branch_suffix}"
-
-    scope = slug[:20]
-    commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=scope, summary=summary[:72])
-    payload = _FilesPayload(deliver_files, summary, commit_msg)
-    write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
-    if not write_ok:
-        result.summary = f"Write failed: {write_msg}"
-        logger.error("[%s] Deliver: %s", task_id, result.summary)
-        checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-        return result
-    result.commit_messages.append(commit_msg)
-
-    merge_ok, merge_msg = merge_branch(repo_path, result.branch_name, DEVELOPMENT_BRANCH)
-    if not merge_ok:
-        result.summary = f"Merge failed: {merge_msg}"
-        logger.error("[%s] Deliver: %s", task_id, result.summary)
-        abort_merge(repo_path)
-        checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-        return result
-
-    result.merged = True
-    result.branch_ready = True
-    delete_branch(repo_path, result.branch_name)
-    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-    result.summary = f"Merged {result.branch_name} → {DEVELOPMENT_BRANCH}."
-    logger.info("[%s] Deliver: %s", task_id, result.summary)
-    return result
+    return deliver_inline_merge(
+        task_id=task_id,
+        repo_path=repo_path,
+        deliver_files=deliver_files,
+        summary=summary,
+        task_title=task_title,
+        commit_msg_template=DELIVER_COMMIT_MSG_TEMPLATE,
+        ops=_git_ops(),
+        logger=logger,
+    )

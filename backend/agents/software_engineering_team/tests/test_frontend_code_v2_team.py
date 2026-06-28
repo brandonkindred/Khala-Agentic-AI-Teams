@@ -97,6 +97,7 @@ class TestModels:
 
 class TestSetupPhase:
     def test_run_setup_on_existing_repo(self, tmp_path):
+        """Verify setup on an existing repo stays on development without creating a branch."""
         from frontend_code_v2_team.phases.setup import run_setup
 
         init_repo_with_existing_development(tmp_path)
@@ -115,6 +116,7 @@ class TestSetupPhase:
         assert branch.stdout.strip() == "development"
 
     def test_run_setup_creates_repo_when_missing(self, tmp_path):
+        """Verify setup initializes a new git repository when none exists."""
         from frontend_code_v2_team.phases.setup import run_setup
 
         assert not (tmp_path / ".git").exists()
@@ -567,6 +569,75 @@ class TestFrontendDevelopmentAgent:
         runners = agent._build_tool_runners(tool_agents)
         assert ToolAgentKind.STATE_MANAGEMENT in runners
         assert ToolAgentKind.GIT_BRANCH_MANAGEMENT in runners
+
+
+class TestFrontendCodeV2TeamLead:
+    def test_team_lead_propagates_development_handoff_fields(self, tmp_path, monkeypatch):
+        """Team-lead result preserves the inner development handoff fields."""
+        from frontend_code_v2_team import orchestrator as orch
+        from frontend_code_v2_team.models import (
+            DeliverResult,
+            FrontendCodeV2WorkflowResult,
+            Phase,
+            SetupResult,
+        )
+
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+
+        deliver = DeliverResult(
+            branch_name="feature/ui",
+            branch_ready=True,
+            delivered_files=["src/app.component.ts"],
+            summary="handoff ready",
+        )
+        inner = FrontendCodeV2WorkflowResult(
+            task_id="ui",
+            success=True,
+            current_phase=Phase.DELIVER,
+            iterations_used=2,
+            deliver_result=deliver,
+            final_files={"src/app.component.ts": "export class AppComponent {}\n"},
+            summary="implemented and ready",
+            failure_reason="",
+            needs_followup=True,
+        )
+
+        class _DevelopmentAgent:
+            def __init__(self, _llm):
+                pass
+
+            def run_workflow(self, **_kwargs):
+                return inner
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=True, testing_configured=True),
+        )
+        monkeypatch.setattr(orch, "FrontendDevelopmentAgent", _DevelopmentAgent)
+
+        task = Task(
+            id="ui",
+            type=TaskType.FRONTEND,
+            assignee="frontend-code-v2",
+            status=TaskStatus.PENDING,
+            title="UI",
+            description="Build UI",
+        )
+
+        result = orch.FrontendCodeV2TeamLead(MagicMock()).run_workflow(
+            repo_path=tmp_path,
+            task=task,
+            merge_to_development=False,
+        )
+
+        assert result.success is True
+        assert result.current_phase == Phase.DELIVER
+        assert result.iterations_used == 2
+        assert result.deliver_result is deliver
+        assert result.final_files == {"src/app.component.ts": "export class AppComponent {}\n"}
+        assert result.summary == "implemented and ready"
+        assert result.needs_followup is True
 
 
 # ---------------------------------------------------------------------------

@@ -51,7 +51,13 @@ class TaskGraphService:
         subtasks: Optional[List[Any]] = None,
         target_team: Optional[str] = None,
     ) -> Task:
-        """Add a task. Id must be unique."""
+        """Add a task.
+
+        Args:
+            task_id: Unique task identifier.
+            target_team: Optional implementation-team routing hint, for example
+                ``frontend_v2`` or ``backend_v2``.
+        """
         if task_id in self._tasks:
             raise ValueError(f"Task {task_id} already exists")
         task = Task(
