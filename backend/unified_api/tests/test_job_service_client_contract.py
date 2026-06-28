@@ -204,6 +204,85 @@ def test_post_retried_on_connect_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls["n"] == 2
 
 
+def test_real_client_retries_on_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pooled keep-alive socket reset by the server/proxy raises ``ReadError``
+    ("[Errno 104] Connection reset by peer") while reading the response. Like the
+    sibling ``RemoteProtocolError``, ``_request`` must treat it as transient and
+    retry an idempotent GET on a fresh attempt rather than surfacing a 500."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadError("[Errno 104] Connection reset by peer")
+        return httpx.Response(200, json={"job": {"job_id": "j1", "status": "running"}})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.get_job("j1") == {"job_id": "j1", "status": "running"}
+    assert calls["n"] == 2  # one failure + one successful retry
+
+
+def test_real_client_reraises_read_error_after_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When every attempt hits the connection reset, the ``ReadError`` is re-raised
+    after the retry budget (``max_retries`` defaults to 3 -> 4 total attempts)."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadError("[Errno 104] Connection reset by peer")
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    with pytest.raises(httpx.ReadError):
+        client.get_job("j1")
+    assert calls["n"] == 4  # max_retries (3) + 1 initial attempt
+
+
+def test_post_not_retried_on_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ReadError`` on a non-idempotent POST (the request may already have reached
+    the server before the socket reset) must NOT be retried — replaying it could
+    duplicate the operation. The error propagates after a single attempt."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        assert request.method == "POST"
+        raise httpx.ReadError("[Errno 104] Connection reset by peer")
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    with pytest.raises(httpx.ReadError):
+        client.create_job("j1")
+    assert calls["n"] == 1  # non-idempotent POST is not retried
+
+
+def test_real_client_retries_on_write_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``WriteError`` is the write-side analog of ``ReadError`` (a stale keep-alive
+    socket reset while sending the request). It is retried for idempotent methods
+    just like ``ReadError`` — here an idempotent GET succeeds on the retry."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    monkeypatch.setattr("job_service_client.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.WriteError("[Errno 104] Connection reset by peer")
+        return httpx.Response(200, json={"job": {"job_id": "j1", "status": "running"}})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.get_job("j1") == {"job_id": "j1", "status": "running"}
+    assert calls["n"] == 2  # one failure + one successful retry
+
+
 def test_real_client_mark_all_active_jobs_failed_hits_bulk_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
