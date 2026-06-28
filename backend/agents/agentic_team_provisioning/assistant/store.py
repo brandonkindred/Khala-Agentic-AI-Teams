@@ -175,6 +175,26 @@ class AgenticTeamStore:
     # Team agents pool
     # ------------------------------------------------------------------
 
+    def _lock_team(self, cur, team_id: str) -> None:
+        """Take the team-row (roster parent) lock on an open cursor, ``FOR UPDATE``.
+
+        Every roster write — full-roster save, merge, single-agent add/delete — calls
+        this FIRST, before touching child ``agentic_team_agents`` rows, so all paths
+        acquire locks in the same parent→child order and can't deadlock by
+        interleaving (a child-first writer racing a parent-first writer would
+        otherwise cycle).
+
+        Preconditions: ``cur`` is an open cursor in a live transaction.
+        Postconditions: holds a row-level ``FOR UPDATE`` lock on ``team_id``'s
+            ``agentic_teams`` row for the rest of the transaction (no-op if the team
+            row doesn't exist). Leaves the lock result in the cursor so a caller that
+            needs to test existence (e.g. ``merge_generated_agents``) can ``fetchone``.
+        """
+        cur.execute(
+            "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
+            (team_id,),
+        )
+
     def _write_team_agents(
         self, cur, team_id: str, agents: list[AgenticTeamAgent], now: datetime
     ) -> None:
@@ -229,11 +249,7 @@ class AgenticTeamStore:
         """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
-            # Parent-first lock (see merge_generated_agents) — uniform lock order.
-            cur.execute(
-                "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
-                (team_id,),
-            )
+            self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
             self._write_team_agents(cur, team_id, agents, now)
 
     @timed_query(store=_STORE, op="merge_generated_agents")
@@ -260,10 +276,7 @@ class AgenticTeamStore:
         """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
-                (team_id,),
-            )
+            self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
             if cur.fetchone() is None:
                 return []
             existing = self._load_team_agents(cur, team_id)
@@ -293,11 +306,7 @@ class AgenticTeamStore:
         """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
-            # Parent-first lock (see merge_generated_agents) — uniform lock order.
-            cur.execute(
-                "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
-                (team_id,),
-            )
+            self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
             cur.execute(
                 "INSERT INTO agentic_team_agents "
                 "(team_id, agent_name, data_json, created_at, updated_at) "
@@ -315,6 +324,7 @@ class AgenticTeamStore:
     def delete_team_agent(self, team_id: str, agent_name: str) -> Optional[AgenticTeamAgent]:
         """Remove a single roster agent by name and return it.
 
+        Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
         Postconditions: returns the deleted :class:`AgenticTeamAgent` when an entry
             named ``agent_name`` existed (removing only that row); returns ``None``
             and leaves the roster unchanged otherwise.
@@ -329,13 +339,10 @@ class AgenticTeamStore:
         """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            # Parent-first lock (see merge_generated_agents) — uniform lock order.
-            # This sets _last_fetch_one, immediately overwritten by the DELETE's
-            # RETURNING below, so the fetchone() still reads the delete result.
-            cur.execute(
-                "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
-                (team_id,),
-            )
+            # Parent-first lock (see _lock_team) — uniform lock order. This sets
+            # _last_fetch_one, immediately overwritten by the DELETE's RETURNING
+            # below, so the fetchone() still reads the delete result.
+            self._lock_team(cur, team_id)
             cur.execute(
                 "DELETE FROM agentic_team_agents WHERE team_id = %s AND agent_name = %s "
                 "RETURNING data_json",

@@ -310,6 +310,33 @@ def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
     )
 
 
+def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> None:
+    """Best-effort: drop a generated agent's stale in-process manifest from the registry.
+
+    Called after a *generated* roster agent is removed or replaced so the Agent
+    Console catalog / ``/api/agents/{id}/invoke`` route stop resolving it.
+
+    Preconditions: ``agent.source == SOURCE_GENERATED`` (caller checks); the roster
+        row has already been removed/replaced, so this cleanup is non-critical.
+    Postconditions: the agent's generated manifest is unregistered if present. A
+        registry failure is logged, never raised — the primary roster mutation has
+        already committed, so cleanup must not turn it into a 500 (mirrors
+        ``register_team_manifests``, which logs registry errors rather than raising).
+    """
+    try:
+        from agent_registry import get_registry
+        from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+        get_registry().unregister(build_agent_manifest(team_id, agent).id)
+    except Exception:
+        logger.warning(
+            "Failed to unregister stale generated manifest for agent %s in team %s",
+            agent.agent_name,
+            team_id,
+            exc_info=True,
+        )
+
+
 @app.post("/teams/{team_id}/agents/from-registry", response_model=AgenticTeamAgent, status_code=201)
 def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     """Add a registered agent to the team roster, projected from its manifest (§5.3).
@@ -332,21 +359,10 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     agent = _roster_agent_from_manifest(manifest)
     prior = next((a for a in team.agents if a.agent_name == agent.agent_name), None)
     _store.add_or_replace_team_agent(team_id, agent)
+    # If this replaced a same-named generated agent, drop its stale manifest so
+    # catalog/invoke stop resolving it (the new entry is registry-source).
     if prior is not None and prior.source == SOURCE_GENERATED:
-        # Best-effort cleanup: the roster row is already replaced, so a registry
-        # failure here must not 500 the request (mirrors register_team_manifests,
-        # which logs registry errors rather than raising).
-        try:
-            from agentic_team_provisioning.manifest_generation import build_agent_manifest
-
-            registry.unregister(build_agent_manifest(team_id, prior).id)
-        except Exception:
-            logger.warning(
-                "Failed to unregister stale manifest for replaced agent %s in team %s",
-                prior.agent_name,
-                team_id,
-                exc_info=True,
-            )
+        _unregister_generated_manifest(team_id, prior)
     return agent
 
 
@@ -371,23 +387,10 @@ def remove_agent_from_roster(team_id: str, agent_name: str):
     deleted = _store.delete_team_agent(team_id, agent_name)
     if deleted is None:
         raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
+    # If the removed agent was generated, drop its stale in-process manifest so
+    # catalog/invoke consumers stop resolving it (registry-source agents are left).
     if deleted.source == SOURCE_GENERATED:
-        # Best-effort cleanup: the agent is already deleted, so a registry failure
-        # must not 500 the request (mirrors register_team_manifests, which logs
-        # registry errors rather than raising). Lazy imports: ``manifest_generation``
-        # pulls the cognition/runtime stack and is only needed on this branch.
-        try:
-            from agent_registry import get_registry
-            from agentic_team_provisioning.manifest_generation import build_agent_manifest
-
-            get_registry().unregister(build_agent_manifest(team_id, deleted).id)
-        except Exception:
-            logger.warning(
-                "Failed to unregister manifest for deleted agent %s in team %s",
-                deleted.agent_name,
-                team_id,
-                exc_info=True,
-            )
+        _unregister_generated_manifest(team_id, deleted)
     return Response(status_code=204)
 
 
