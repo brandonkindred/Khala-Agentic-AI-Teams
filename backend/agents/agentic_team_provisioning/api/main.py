@@ -242,16 +242,30 @@ def list_team_agents(team_id: str):
 def list_team_agent_manifests(team_id: str):
     """Generated agent_registry manifests (with the cognition core stamped) for the roster.
 
-    Every roster agent is rendered into a validated ``AgentManifest`` carrying the
-    batteries-included ``cognition`` block; nothing is written to the registry's
-    manifest discovery paths.
+    Each **generated** roster agent is rendered into a validated ``AgentManifest``
+    carrying the batteries-included ``cognition`` block; nothing is written to the
+    registry's manifest discovery paths. A **registry-source** agent (added via Agent
+    Studio's from-registry endpoint) instead returns its *original* registry manifest
+    when that manifest resolves in this process — so the advertised id is the one that
+    actually resolves for the Agent Console / ``/api/agents/{id}/invoke``, rather than a
+    synthetic generated id this team never registered for it.
     """
+    from agent_registry import get_registry
     from agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    manifests = [build_agent_manifest(team_id, a) for a in team.agents]
+    registry = get_registry()
+    manifests = []
+    for a in team.agents:
+        original = (
+            registry.get(a.manifest_id) if a.source == SOURCE_REGISTRY and a.manifest_id else None
+        )
+        # Registry agents advertise their own resolvable id; generated agents (and any
+        # registry agent not resolvable in this process) get the stamped wrapper so the
+        # endpoint still returns an entry rather than omitting the agent.
+        manifests.append(original or build_agent_manifest(team_id, a))
     return GeneratedManifestsResponse(team_id=team_id, manifests=manifests)
 
 

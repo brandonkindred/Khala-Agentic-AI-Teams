@@ -416,3 +416,41 @@ def test_merge_generated_agents_unknown_team_is_noop(monkeypatch: pytest.MonkeyP
     )
     assert result == []
     assert store.list_team_agents("missing") == []
+
+
+def test_manifests_endpoint_returns_original_for_registry_agent(client: TestClient) -> None:
+    """A registry-source roster agent advertises its *original* resolvable manifest id,
+    while a generated agent still gets the synthetic stamped wrapper."""
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+    # A generated agent alongside it (saved directly; chat path isn't exercised here).
+    gen = AgenticTeamAgent(agent_name="Writer", role="Writes", skills=["seo"], source="generated")
+    AgenticTeamStore().add_or_replace_team_agent(team_id, gen)
+
+    manifests = {
+        m["name"]: m for m in client.get(f"/teams/{team_id}/agents/manifests").json()["manifests"]
+    }
+
+    # Registry agent → original registry id (resolvable via /api/agents/{id}/invoke).
+    assert manifests["blogging.planner"]["id"] == "blogging.planner"
+    # Generated agent → synthetic team-namespaced id (the stamped wrapper).
+    assert manifests["Writer"]["id"].startswith("agentic_team_provisioning.")
+
+
+def test_manifests_endpoint_falls_back_when_registry_missing(client: TestClient) -> None:
+    """A registry-source agent whose manifest_id doesn't resolve in this process's
+    registry falls back to the generated wrapper rather than being omitted."""
+    team_id = _new_team()
+    orphan = AgenticTeamAgent(
+        agent_name="Orphan",
+        role="r",
+        skills=["x"],
+        source="registry",
+        manifest_id="not.in.registry",
+    )
+    AgenticTeamStore().add_or_replace_team_agent(team_id, orphan)
+
+    manifests = client.get(f"/teams/{team_id}/agents/manifests").json()["manifests"]
+    assert len(manifests) == 1
+    # Unresolvable original → stamped wrapper (still returned, not dropped).
+    assert manifests[0]["id"].startswith("agentic_team_provisioning.")
