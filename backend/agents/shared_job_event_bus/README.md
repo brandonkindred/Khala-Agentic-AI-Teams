@@ -38,11 +38,29 @@ tune it in `bus.py` if a team needs deeper buffering.
 
 `reap_once(state, *, ttl_seconds, max_jobs, logger=None, label=...)` is a single
 eviction pass: it drops subscriptions whose `last_activity` is older than
-`ttl_seconds`, then enforces a hard cap of `max_jobs` (oldest-first). A team that
-keeps long-lived streams drives it on an interval (e.g. via
-`shared_concurrency.BackgroundHeartbeat`); a team with short, explicitly
-cleaned-up streams simply never calls it and gets unbounded-until-`cleanup_job`
-behaviour.
+`ttl_seconds`, then enforces a hard cap of `max_jobs` (oldest-first).
+
+A team that keeps long-lived streams drives it on an interval. Rather than
+re-hand-roll the daemon-thread lifecycle, construct a **`ReaperHandle`** over the
+`BusState` and call `ensure_started()` from `subscribe` (idempotent, lazy) and
+`shutdown()` from the app's `on_shutdown` hook:
+
+```python
+from shared_job_event_bus import BusState, ReaperHandle
+
+_state = BusState()
+_reaper = ReaperHandle(
+    _state,
+    ttl_seconds=lambda: _SUB_TTL_SECONDS,   # callables → retuned live each pass
+    max_jobs=lambda: _MAX_JOBS_TRACKED,
+    interval_seconds=_REAPER_INTERVAL_SECONDS,
+    name="<team>-event-bus-reaper",
+    label="<team> event-bus",
+)
+```
+
+A team with short, explicitly cleaned-up streams can simply never start a reaper
+and get unbounded-until-`cleanup_job` behaviour.
 
 **Liveness contract:** when reaping is enabled, consumers MUST call
 `Subscription.touch()` at least once per `ttl_seconds` while their stream is
@@ -59,4 +77,7 @@ or use sticky sessions until a cross-process bus (Postgres `LISTEN/NOTIFY` or
 ## Current consumers
 
 - `blogging/shared/job_event_bus.py` — reaper enabled (`BLOGGING_EVENT_BUS_*`).
-- `investment_team/api/job_event_bus.py` — no reaper (short-lived streams).
+- `investment_team/api/job_event_bus.py` — reaper enabled (`INVESTMENT_EVENT_BUS_*`).
+
+Both bind their SSE endpoints to `shared_sse` for the streaming generator (see
+`shared_sse/`).

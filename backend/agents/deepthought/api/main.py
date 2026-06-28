@@ -32,6 +32,7 @@ from deepthought.shared.job_store import (
     update_job,
 )
 from shared_app import create_team_app
+from shared_sse import SSE_KEEPALIVE
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +242,7 @@ async def ask_stream(request: DeepthoughtRequest) -> StreamingResponse:
                 event = event_queue.get_nowait()
             except queue.Empty:
                 if loop.time() - last_byte_time >= heartbeat_interval:
-                    yield ": keepalive\n\n"
+                    yield SSE_KEEPALIVE
                     last_byte_time = loop.time()
                 await asyncio.sleep(0.1)
                 continue
