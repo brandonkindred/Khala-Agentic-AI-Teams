@@ -1,32 +1,22 @@
-"""API/OpenAPI tool agent stub for frontend-code-v2."""
+"""API/OpenAPI tool agent stub for frontend-code-v2.
+
+Declarative :class:`StubToolAgent` profile — frontend API/OpenAPI work is not yet
+implemented, so every phase returns a static advisory message via the shared
+static base.
+"""
 
 from __future__ import annotations
 
-import logging
-
-from ...models import ToolAgentInput, ToolAgentOutput, ToolAgentPhaseInput, ToolAgentPhaseOutput
-
-logger = logging.getLogger(__name__)
+from software_engineering_team.shared.tool_agent_static import StubToolAgent
 
 
-class ApiOpenApiToolAgent:
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        return self.execute(inp)
+class ApiOpenApiToolAgent(StubToolAgent):
+    """Frontend API/OpenAPI adapter stub (no changes applied)."""
 
-    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        logger.info("API/OpenAPI stub: microtask %s", inp.microtask.id)
-        return ToolAgentOutput(summary="API/OpenAPI stub — no changes applied.")
-
-    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(
-            recommendations=["Consider API client and service layer."], summary="API planning stub."
-        )
-
-    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="API review stub.")
-
-    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="API problem-solving stub.")
-
-    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="API deliver stub.")
+    label = "API/OpenAPI"
+    execute_summary = "API/OpenAPI stub — no changes applied."
+    plan_recommendations = ["Consider API client and service layer."]
+    plan_summary = "API planning stub."
+    review_summary = "API review stub."
+    problem_solve_summary = "API problem-solving stub."
+    deliver_summary = "API deliver stub."
