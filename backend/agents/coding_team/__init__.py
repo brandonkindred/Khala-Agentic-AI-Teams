@@ -1,11 +1,9 @@
-"""
-Coding team (Software Engineering sub-team): Tech Lead and stack-specialist Senior Software
-Engineers with Task Graph.
+"""Coding team: Tech Lead plus frontend_v2/backend_v2 implementation teams.
 
-Receives the plan from the Planning team (Planning V3); Tech Lead generates the Task Graph
-from that plan, defines stacks, creates one Senior SWE per stack, and runs the
-assign → implement → review → merge loop. One task per agent at a time; next task only
-after the agent's current task's feature branch is merged.
+Receives the plan from Planning V3; the Tech Lead generates the Task Graph,
+routes each task to the proper v2 team, reviews returned branches, and merges
+approved work. One task per implementation worker at a time; next task only
+after the worker's current task branch is merged.
 """
 
 __all__ = []

@@ -4,6 +4,7 @@ Unit tests for the backend-code-v2 team: models, phases, tool agents, orchestrat
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -14,6 +15,9 @@ if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
 from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
+from software_engineering_team.tests.test_helpers import (  # noqa: E402
+    init_repo_with_existing_development,
+)
 
 
 class _TextStubClient(DummyLLMClient):
@@ -122,20 +126,210 @@ class TestModels:
 
 class TestSetupPhase:
     def test_run_setup_on_existing_repo(self, tmp_path):
+        """Verify setup on an existing repo stays on development without creating a branch."""
         from backend_code_v2_team.phases.setup import run_setup
 
-        (tmp_path / ".git").mkdir()
+        init_repo_with_existing_development(tmp_path)
         result = run_setup(repo_path=tmp_path, task_title="My Project")
         assert isinstance(result, SetupResult)
         assert result.summary is not None
+        assert "Setup failed" not in result.summary
+        assert result.branch_created is False
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert branch.stdout.strip() == "development"
 
     def test_run_setup_creates_repo_when_missing(self, tmp_path):
+        """Verify setup initializes a new git repository when none exists."""
         from backend_code_v2_team.phases.setup import run_setup
 
         assert not (tmp_path / ".git").exists()
         result = run_setup(repo_path=tmp_path, task_title="New Project")
         assert result.repo_initialized or (tmp_path / ".git").exists()
         assert result.summary
+
+    def test_run_setup_commits_scaffolding_leaving_clean_tree(self, tmp_path):
+        """Setup must commit its lint/test scaffolding so the tree stays clean.
+
+        Uncommitted scaffolding on ``development`` is regenerated as untracked
+        files on a later pass and blocks the development agent's checkout of the
+        review feature branch.
+        """
+        from backend_code_v2_team.phases.setup import run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        run_setup(repo_path=tmp_path, task_title="My Project")
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert status.stdout.strip() == ""
+
+    def test_revision_branch_checkout_survives_setup_regeneration(self, tmp_path):
+        """A feature branch tracking the scaffolding must remain checkout-able.
+
+        Reproduces the rejected-task revision flow: pass 1 leaves the scaffolding
+        committed (on development and inherited by the feature branch); a second
+        ``run_setup`` on development must not strand untracked copies that abort
+        the feature-branch checkout.
+        """
+        from backend_code_v2_team.phases.setup import run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        # Pass 1: configure + commit scaffolding on development.
+        run_setup(repo_path=tmp_path, task_title="My Project")
+        # Simulate the pass-1 review branch carrying the committed scaffolding.
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/task-1"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+        (tmp_path / "feature_change.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "feat: pass 1"], cwd=tmp_path, capture_output=True, check=True
+        )
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        # Pass 2: setup regenerates nothing (idempotent) and leaves a clean tree.
+        run_setup(repo_path=tmp_path, task_title="My Project")
+        checkout = subprocess.run(
+            ["git", "checkout", "feature/task-1"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        assert checkout.returncode == 0, checkout.stderr
+
+    def test_setup_does_not_sweep_unrelated_work_into_commit(self, tmp_path):
+        """The scaffolding commit must include only what setup wrote.
+
+        Pre-existing uncommitted/untracked work must not be swept onto
+        ``development`` under the scaffolding commit.
+        """
+        from backend_code_v2_team.phases.setup import run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        # Unrelated work present before setup runs.
+        (tmp_path / "unrelated.py").write_text("y = 2\n", encoding="utf-8")
+        run_setup(repo_path=tmp_path, task_title="My Project")
+        # The unrelated file is still untracked (not committed by setup).
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "unrelated.py"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert status.stdout.strip() == "?? unrelated.py"
+        committed = subprocess.run(
+            ["git", "ls-files", "unrelated.py"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert committed.stdout.strip() == ""
+
+    def test_setup_logs_when_scaffolding_commit_fails(self, tmp_path, monkeypatch, caplog):
+        """A non-raising commit failure (e.g. a rejecting hook) must be logged.
+
+        Otherwise setup reports success while the scaffolding stays uncommitted,
+        silently reintroducing the feature-branch checkout conflict.
+        """
+        from backend_code_v2_team.phases import setup as setup_mod
+
+        init_repo_with_existing_development(tmp_path)
+        monkeypatch.setattr(
+            setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook")
+        )
+        with caplog.at_level("WARNING"):
+            setup_mod.run_setup(repo_path=tmp_path, task_title="My Project")
+        assert "not committed" in caplog.text.lower()
+
+    def test_setup_commits_its_edit_to_already_dirty_config(self, tmp_path):
+        """Setup's edit to a pre-existing dirty config file must be committed.
+
+        If pyproject.toml was already dirty before setup, a dirty-delta approach
+        would drop setup's appended ruff/pytest config, leaving the file dirty
+        and re-blocking the later feature-branch checkout. The committed file
+        must be clean afterward.
+        """
+        from backend_code_v2_team.phases.setup import run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        # pyproject.toml present and dirty (no ruff config yet) before setup runs.
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+        run_setup(repo_path=tmp_path, task_title="My Project")
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "pyproject.toml"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert status.stdout.strip() == ""  # setup's edit committed, not left dirty
+        content = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+        assert "[tool.ruff]" in content
+
+    def test_configure_quality_tooling_adds_config_to_handoff_branch(self, tmp_path):
+        """A feature branch created before setup must get lint/test config on demand.
+
+        Reproduces the coding-team handoff: the adapter creates the review branch
+        from development *before* setup commits scaffolding there, so the branch
+        lacks the config until the dev-agent calls configure_quality_tooling on
+        it. Without that, pre-flight (and later quality gates) fail on a
+        config-less branch.
+        """
+        from backend_code_v2_team.phases.setup import configure_quality_tooling, run_setup
+
+        init_repo_with_existing_development(tmp_path)
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        # Adapter pre-creates the review branch from development (pre-scaffolding).
+        subprocess.run(
+            ["git", "checkout", "-b", "feature/task-1"], cwd=tmp_path, capture_output=True, check=True
+        )
+        subprocess.run(
+            ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
+        # Setup commits scaffolding to development; the feature branch lacks it.
+        run_setup(repo_path=tmp_path, task_title="My Project")
+        subprocess.run(
+            ["git", "checkout", "feature/task-1"], cwd=tmp_path, capture_output=True, check=True
+        )
+        assert not (tmp_path / "pyproject.toml").exists()  # branch has no ruff config yet
+
+        lint_ok, test_ok = configure_quality_tooling(tmp_path)
+
+        assert lint_ok and test_ok
+        assert "[tool.ruff]" in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+        assert (tmp_path / "tests").is_dir()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        assert status.stdout.strip() == ""  # config committed to the feature branch, tree clean
 
 
 # ---------------------------------------------------------------------------
@@ -648,7 +842,7 @@ class TestBackendDevelopmentAgent:
 
 class TestBackendCodeV2TeamLead:
     def test_team_lead_runs_setup_then_delegates(self, tmp_path):
-        """BackendCodeV2TeamLead runs Setup then delegates to BackendDevelopmentAgent."""
+        """BackendCodeV2TeamLead reports a concrete setup-readiness failure."""
         from backend_code_v2_team.orchestrator import BackendCodeV2TeamLead
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
@@ -675,7 +869,177 @@ class TestBackendCodeV2TeamLead:
         result = lead.run_workflow(repo_path=tmp_path, task=task)
         assert result.setup_result is not None
         assert not result.success
-        assert "no files" in result.failure_reason.lower() or result.failure_reason != ""
+        assert "linting is not configured" in result.failure_reason.lower()
+
+    def test_team_lead_propagates_development_handoff_fields(self, tmp_path, monkeypatch):
+        """Team-lead result preserves the inner development handoff fields."""
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.models import (
+            BackendCodeV2WorkflowResult,
+            DeliverResult,
+            Phase,
+            SetupResult,
+        )
+
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+
+        deliver = DeliverResult(
+            branch_name="feature/api",
+            branch_ready=True,
+            delivered_files=["app.py"],
+            summary="handoff ready",
+        )
+        inner = BackendCodeV2WorkflowResult(
+            task_id="api",
+            success=True,
+            current_phase=Phase.DELIVER,
+            iterations_used=2,
+            deliver_result=deliver,
+            final_files={"app.py": "print('ok')\n"},
+            summary="implemented and ready",
+            failure_reason="",
+            needs_followup=True,
+        )
+
+        class _DevelopmentAgent:
+            def __init__(self, _llm):
+                pass
+
+            def run_workflow(self, **_kwargs):
+                return inner
+
+        monkeypatch.setattr(
+            orch,
+            "run_setup",
+            lambda **_kwargs: SetupResult(linting_configured=True, testing_configured=True),
+        )
+        monkeypatch.setattr(orch, "BackendDevelopmentAgent", _DevelopmentAgent)
+
+        task = Task(
+            id="api",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            title="API",
+            description="Build API",
+        )
+
+        result = orch.BackendCodeV2TeamLead(MagicMock()).run_workflow(
+            repo_path=tmp_path,
+            task=task,
+            merge_to_development=False,
+        )
+
+        assert result.success is True
+        assert result.current_phase == Phase.DELIVER
+        assert result.iterations_used == 2
+        assert result.deliver_result is deliver
+        assert result.final_files == {"app.py": "print('ok')\n"}
+        assert result.summary == "implemented and ready"
+        assert result.needs_followup is True
+
+
+class TestBackendDevelopmentAgentBranchReuse:
+    def test_existing_feature_branch_is_reused_without_recreation(self, tmp_path, monkeypatch):
+        """Revision workflows keep the reviewed branch instead of recreating it from development."""
+        from backend_code_v2_team import orchestrator as orch
+        from backend_code_v2_team.models import (
+            DeliverResult,
+            DocumentationPhaseResult,
+            ExecutionResult,
+            PlanningResult,
+        )
+
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+
+        (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
+        (tmp_path / "tests").mkdir()
+
+        captured: dict[str, str] = {}
+        events: list[str] = []
+
+        class _GitAgent:
+            def __init__(self) -> None:
+                self.create_called = False
+
+            def create_feature_branch(self, *_args, **_kwargs):
+                self.create_called = True
+                raise AssertionError("existing review branch must not be recreated")
+
+            def commit_current_changes(self, *_args, **_kwargs):
+                return True, "committed"
+
+        git_agent = _GitAgent()
+
+        def _checkout_branch(_repo_path, branch):
+            events.append("checkout")
+            captured["checkout"] = branch
+            return True, "checked out"
+
+        def _read_repo_code(_self, _repo_path):
+            events.append("read_repo")
+            return "existing branch code"
+
+        def _run_planning(**kwargs):
+            events.append("planning")
+            captured["existing_code"] = kwargs["existing_code"]
+            return PlanningResult(microtasks=[Microtask(id="mt-1")], summary="planned")
+
+        def _run_execution_with_review_gates(**_kwargs):
+            return ExecutionResult(
+                files={"app.py": "print('ok')\n"},
+                microtasks=[Microtask(id="mt-1", status=MicrotaskStatus.COMPLETED)],
+                summary="implemented",
+            )
+
+        def _run_deliver(**kwargs):
+            captured["deliver_branch"] = kwargs["feature_branch_name"]
+            return DeliverResult(
+                branch_name=kwargs["feature_branch_name"],
+                branch_ready=True,
+                summary="ready",
+            )
+
+        from backend_code_v2_team.phases import documentation as doc_phase
+
+        monkeypatch.setattr(orch, "checkout_branch", _checkout_branch)
+        monkeypatch.setattr(
+            orch,
+            "_build_tool_agents",
+            lambda _llm: {ToolAgentKind.GIT_BRANCH_MANAGEMENT: git_agent},
+        )
+        monkeypatch.setattr(orch.BackendDevelopmentAgent, "_read_repo_code", _read_repo_code)
+        monkeypatch.setattr(orch, "run_planning", _run_planning)
+        monkeypatch.setattr(orch, "run_execution_with_review_gates", _run_execution_with_review_gates)
+        monkeypatch.setattr(
+            doc_phase,
+            "run_documentation_phase",
+            lambda **_kwargs: DocumentationPhaseResult(summary="docs"),
+        )
+        monkeypatch.setattr(orch, "run_deliver", _run_deliver)
+
+        task = Task(
+            id="api",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            title="API",
+            description="Build API",
+            feature_branch_name="feature/review-api",
+        )
+
+        result = orch.BackendDevelopmentAgent(MagicMock()).run_workflow(
+            repo_path=tmp_path,
+            task=task,
+            merge_to_development=False,
+        )
+
+        assert result.success is True
+        assert git_agent.create_called is False
+        assert captured["checkout"] == "feature/review-api"
+        assert captured["existing_code"] == "existing branch code"
+        assert events.index("checkout") < events.index("read_repo") < events.index("planning")
+        assert captured["deliver_branch"] == "feature/review-api"
 
 
 # ---------------------------------------------------------------------------
