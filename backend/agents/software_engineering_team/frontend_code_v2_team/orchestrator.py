@@ -7,6 +7,7 @@ No code from frontend_team or feature_agent is imported or reused.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -29,7 +30,7 @@ from .models import (
 from .phases.deliver import run_deliver
 from .phases.execution import ReviewDependencies, run_execution_with_review_gates
 from .phases.planning import run_planning
-from .phases.setup import run_setup
+from .phases.setup import configure_quality_tooling, run_setup
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,24 @@ class FrontendDevelopmentAgent:
             "[%s] WORKFLOW START: Frontend Development Agent (per-microtask review gates)", task_id
         )
 
+        # ── Check out the review feature branch FIRST, then ensure tooling ──
+        # Setup commits lint/test scaffolding to ``development``, but a handoff
+        # feature branch created before setup does not inherit it. Configure the
+        # tooling on the branch we will actually edit so the pre-flight check and
+        # later quality gates see the config (idempotent when already present).
+        feature_branch_name = (task.feature_branch_name or "").strip() or None
+        if feature_branch_name:
+            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
+            if not ok:
+                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
+                logger.error("[%s] %s", task_id, result.failure_reason)
+                return result
+            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
+            configure_quality_tooling(repo_path)
+
         # ── Pre-flight: verify linting & testing are configured ───────
+        # Runs after the feature-branch checkout so it validates the branch that
+        # will actually be edited, not whatever branch setup last left checked out.
         _has_lint = bool(
             list(repo_path.glob("eslint.config.*"))
             or list(repo_path.glob(".eslintrc*"))
@@ -195,8 +213,6 @@ class FrontendDevelopmentAgent:
             _has_test = True
         elif pkg_json.exists():
             try:
-                import json
-
                 pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
                 test_script = pkg.get("scripts", {}).get("test", "")
                 if test_script and "no test" not in test_script and "exit 1" not in test_script:
@@ -222,15 +238,6 @@ class FrontendDevelopmentAgent:
             )
             return result
         logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
-
-        feature_branch_name = (task.feature_branch_name or "").strip() or None
-        if feature_branch_name:
-            ok, checkout_msg = checkout_branch(repo_path, feature_branch_name)
-            if not ok:
-                result.failure_reason = f"Feature branch checkout failed: {checkout_msg}"
-                logger.error("[%s] %s", task_id, result.failure_reason)
-                return result
-            logger.info("[%s] Reusing existing feature branch: %s", task_id, feature_branch_name)
 
         existing_code = self._read_repo_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)

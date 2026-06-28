@@ -201,6 +201,32 @@ def _commit_scaffolding(path: Path, scaffolding_paths: set[str]) -> None:
         )
 
 
+def configure_quality_tooling(repo_path: Path) -> tuple[bool, bool]:
+    """Ensure lint/test scaffolding exists on the CURRENT branch and commit it.
+
+    Setup commits the scaffolding to ``development``, but the coding-team handoff
+    creates the review feature branch *before* setup runs, so that branch does
+    not inherit the committed scaffolding. The development agent calls this after
+    checking out the feature branch so the branch it actually edits carries the
+    lint/test config — otherwise the pre-flight check (and later quality gates)
+    fail on a config-less branch. Idempotent: a branch that already has the
+    config produces no writes and no commit.
+
+    Preconditions:
+        - ``repo_path`` is a git repository checked out on the branch to configure.
+
+    Postconditions:
+        - Linting and testing are configured on the current branch and any newly
+          written scaffolding is committed to it. Returns ``(lint_ok, test_ok)``.
+    """
+    path = Path(repo_path).resolve()
+    scaffolding: set[str] = set()
+    lint_ok = _ensure_linting_configured(path, scaffolding)
+    test_ok = _ensure_testing_configured(path, scaffolding)
+    _commit_scaffolding(path, scaffolding)
+    return lint_ok, test_ok
+
+
 def run_setup(
     *,
     repo_path: Path,
@@ -236,10 +262,7 @@ def run_setup(
             _ensure_readme_with_title(path, task_title)
 
         # Ensure linting and testing are configured before any coding begins
-        scaffolding: set[str] = set()
-        result.linting_configured = _ensure_linting_configured(path, scaffolding)
-        result.testing_configured = _ensure_testing_configured(path, scaffolding)
-        _commit_scaffolding(path, scaffolding)
+        result.linting_configured, result.testing_configured = configure_quality_tooling(path)
 
         result.summary = f"Initialized repo: {msg}"
         logger.info("Setup: %s", result.summary)
@@ -258,10 +281,7 @@ def run_setup(
         result.readme_created = True
 
     # Ensure linting and testing are configured before any coding begins
-    scaffolding: set[str] = set()
-    result.linting_configured = _ensure_linting_configured(path, scaffolding)
-    result.testing_configured = _ensure_testing_configured(path, scaffolding)
-    _commit_scaffolding(path, scaffolding)
+    result.linting_configured, result.testing_configured = configure_quality_tooling(path)
 
     result.summary = msg or "Repo ready; on development branch."
     logger.info(
