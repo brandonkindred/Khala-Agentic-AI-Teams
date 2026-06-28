@@ -146,7 +146,7 @@ class UxUsabilityToolAgent(BaseReviewToolAgent):
             )
         prompt = UX_DESIGNER_PLAN_PROMPT.format(
             task_description=inp.task_description or "N/A",
-            spec_content=(inp.task_description or "")[:6000],
+            spec_content=(inp.task_description or ""),
         )
         try:
             raw = self._run_agent(self._model_json, prompt)
@@ -164,13 +164,13 @@ class UxUsabilityToolAgent(BaseReviewToolAgent):
         )
         recommendations: List[str] = []
         if data.get("user_journeys"):
-            recommendations.append(f"User Journeys: {data['user_journeys'][:500]}")
+            recommendations.append(f"User Journeys: {data['user_journeys']}")
         if data.get("wireframes_summary"):
-            recommendations.append(f"Wireframes: {data['wireframes_summary'][:500]}")
+            recommendations.append(f"Wireframes: {data['wireframes_summary']}")
         if data.get("interaction_rules"):
-            recommendations.append(f"Interaction Rules: {data['interaction_rules'][:500]}")
+            recommendations.append(f"Interaction Rules: {data['interaction_rules']}")
         if data.get("microcopy_guidelines"):
-            recommendations.append(f"Microcopy: {data['microcopy_guidelines'][:500]}")
+            recommendations.append(f"Microcopy: {data['microcopy_guidelines']}")
         return ToolAgentPhaseOutput(
             recommendations=recommendations
             if recommendations

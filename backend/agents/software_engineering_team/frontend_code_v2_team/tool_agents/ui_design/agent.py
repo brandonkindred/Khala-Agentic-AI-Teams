@@ -88,7 +88,7 @@ class UiDesignToolAgent:
             )
         prompt = UI_DESIGNER_PLAN_PROMPT.format(
             task_description=inp.task_description or "N/A",
-            spec_content=(inp.task_description or "")[:5000],
+            spec_content=(inp.task_description or "")[],
         )
         try:
             raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
@@ -112,13 +112,13 @@ class UiDesignToolAgent:
                 data = {}
         recommendations: List[str] = []
         if data.get("component_specs"):
-            recommendations.append(f"Component Specs: {data['component_specs'][:500]}")
+            recommendations.append(f"Component Specs: {data['component_specs']}")
         if data.get("design_tokens"):
-            recommendations.append(f"Design Tokens: {data['design_tokens'][:500]}")
+            recommendations.append(f"Design Tokens: {data['design_tokens']}")
         if data.get("motion_guidelines"):
-            recommendations.append(f"Motion Guidelines: {data['motion_guidelines'][:500]}")
+            recommendations.append(f"Motion Guidelines: {data['motion_guidelines']}")
         if data.get("high_fidelity_summary"):
-            recommendations.append(f"Layout: {data['high_fidelity_summary'][:500]}")
+            recommendations.append(f"Layout: {data['high_fidelity_summary']}")
         return ToolAgentPhaseOutput(
             recommendations=recommendations
             if recommendations

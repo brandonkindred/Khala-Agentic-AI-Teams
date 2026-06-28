@@ -84,7 +84,7 @@ class GitBranchManagementToolAgent:
             logger.warning("Git branch management: not a git repository at %s", path)
             return False, None
         slug = (
-            re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
+            re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-") or "task"
         )
         ok, branch_msg = git_create_feature_branch(path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
         if not ok:
@@ -105,7 +105,7 @@ class GitBranchManagementToolAgent:
         task_id = phase_inp.task_id or "task"
         task_title = phase_inp.task_title or ""
         slug = (
-            re.sub(r"[^a-z0-9-]+", "-", task_title.lower()).strip("-")[:40]
+            re.sub(r"[^a-z0-9-]+", "-", task_title.lower()).strip("-")
             if task_title
             else "task"
         )
@@ -131,10 +131,9 @@ class GitBranchManagementToolAgent:
                 )
             from software_engineering_team.shared.repo_writer import write_agent_output
 
-            scope = slug[:20]
-            summary = (phase_inp.task_description or "")[:72]
+            summary = (phase_inp.task_description or "")
             commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(
-                scope=scope, summary=summary or "deliver"
+                scope=slug, summary=summary or "deliver"
             )
             payload = _FilesPayload(phase_inp.current_files, summary, commit_msg)
             write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
