@@ -179,6 +179,15 @@ class AgenticTeamStore:
     ) -> None:
         """Replace all roster rows for a team on an open cursor (DELETE-all + INSERT-all).
 
+        Used only by the **full-roster** save (``save_team_agents`` /
+        ``_save_agents_from_llm``), which redefines the whole roster at once. As a
+        deliberate consequence of the replace, every row's ``created_at`` is reset to
+        ``now`` — a full save does not carry forward per-agent creation times. (The
+        single-agent helpers ``add_or_replace_team_agent`` / ``delete_team_agent``
+        preserve ``created_at`` via ``ON CONFLICT``.) ``created_at`` is an internal
+        column not surfaced on :class:`AgenticTeamAgent`, so this is invisible to
+        API/UI today; preserving it across full saves is a follow-up if it ever is.
+
         Preconditions: ``cur`` is an open cursor in a live transaction; ``agents``
             have unique ``agent_name`` within the team.
         Postconditions: the team's ``agentic_team_agents`` rows are exactly

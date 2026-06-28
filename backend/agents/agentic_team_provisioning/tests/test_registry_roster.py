@@ -243,7 +243,13 @@ def test_from_registry_replacing_generated_unregisters_old_manifest(
 
 def test_llm_save_preserves_registry_agents(client: TestClient, registry: _FakeRegistry) -> None:
     """A chat-driven roster save must not drop a user-added registry agent, and a
-    generated agent can't overwrite one by name (registry wins the collision)."""
+    generated agent can't overwrite one by name (registry wins the collision).
+
+    The merge is exercised by calling ``_save_agents_from_llm`` directly: it is the
+    seam the conversation handler funnels every assistant ``agents`` block through,
+    and driving it via the full chat API would require mocking the LLM agent — far
+    heavier and less targeted than pinning this one invariant here.
+    """
     from agentic_team_provisioning.api.main import _save_agents_from_llm
 
     team_id = _new_team()

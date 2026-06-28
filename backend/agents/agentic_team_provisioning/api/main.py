@@ -140,6 +140,14 @@ def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
     the LLM's generated agents are layered on top — a generated agent that collides
     by name with a preserved registry agent is dropped, so the explicitly-added
     registry agent wins.
+
+    Concurrency: the merge reads the roster then does a full-roster ``save_team_agents``
+    in a separate transaction, so it assumes **serial execution per team** — which the
+    process-design chat guarantees (a conversation's turns are sequential). Two
+    concurrent saves for the *same* team could still interleave; making that window
+    atomic (a team-row lock around read+merge+write) is the broader full-roster
+    concurrency follow-up, not part of this bridge. The single-agent roster endpoints
+    are already atomic.
     """
     if not agents_data:
         return

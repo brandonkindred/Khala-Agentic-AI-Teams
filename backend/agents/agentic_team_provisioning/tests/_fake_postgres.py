@@ -38,6 +38,14 @@ class _FakeCursor:
 
     Handles the narrow subset of SQL that the agentic_team_provisioning
     stores issue, plus no-op fallbacks for DDL we don't care about.
+
+    ⚠️ Routing is **tightly coupled to the store's exact query strings**: each
+    handler matches on a normalized ``startswith`` / substring of the SQL. Reordering
+    clauses, renaming columns, or adding comments in a store query can silently break
+    the match — an unmatched statement raises ``AssertionError`` (see the bottom of
+    :meth:`execute`), so a drift surfaces as a hard test failure, not a silent pass.
+    When you change a store query, update the matching handler here. (A real fix is a
+    repository abstraction the store could mock without faking SQL — out of scope.)
     """
 
     def __init__(self, db: dict[str, Any], ids: itertools.count) -> None:
