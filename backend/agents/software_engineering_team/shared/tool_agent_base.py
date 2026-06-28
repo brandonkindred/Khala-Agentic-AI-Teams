@@ -144,6 +144,22 @@ class BaseReviewToolAgent:
     default_severity: str = "medium"
     default_recommendation: str = "Fix the issue."
 
+    # --- Stack/discipline profile ----------------------------------------
+    # Maps lowercased language name (plus optional ``"_default"``) to a
+    # conventions string injected into the single-issue prompt as
+    # ``language_conventions``. Empty → no injection (e.g. frontend agents whose
+    # single-issue prompt has no ``{language_conventions}`` slot). Backend agents
+    # set ``{"java": JAVA_CONVENTIONS, "_default": PYTHON_CONVENTIONS}``.
+    conventions_by_language: Dict[str, str] = {}
+
+    # When set (as a ``staticmethod``), ``review`` runs this build runner over the
+    # resolved ``repo_path`` instead of the LLM review path. The runner takes a
+    # ``pathlib.Path`` and returns a list of :class:`ReviewIssue`.
+    build_runner: Optional[Callable[[Any], List["ReviewIssue"]]] = None
+    # Noun used in the build-review summary, e.g. "build/test issue(s)" (backend)
+    # vs "build issue(s)" (frontend).
+    build_review_noun: str = "issue(s)"
+
     # --- Static plan output ----------------------------------------------
     plan_recommendations: List[str] = []
     plan_summary: str = ""
@@ -187,11 +203,22 @@ class BaseReviewToolAgent:
         ]
 
     def _problem_solving_kwargs(self, inp) -> Dict[str, Any]:
-        """Extra ``.format`` kwargs for the single-issue prompt (default: none).
+        """Extra ``.format`` kwargs for the single-issue prompt.
 
-        Backend agents override this to inject ``language_conventions``.
+        Driven by :attr:`conventions_by_language`: when it is non-empty, inject
+        ``language_conventions`` selected by ``inp.language`` (falling back to the
+        ``"_default"`` entry); when empty, inject nothing — preserving frontend
+        agents whose single-issue prompt has no ``{language_conventions}`` slot.
+
+        Preconditions: when set, ``conventions_by_language`` maps lowercased
+        language names (plus optional ``"_default"``) to convention strings.
+        Postconditions: returns ``{}`` or ``{"language_conventions": <str>}``.
         """
-        return {}
+        conv = self.conventions_by_language
+        if not conv:
+            return {}
+        lang = (getattr(inp, "language", None) or "").strip().lower()
+        return {"language_conventions": conv.get(lang, conv.get("_default", ""))}
 
     # ------------------------------------------------------------------
     # Lifecycle methods
@@ -210,7 +237,31 @@ class BaseReviewToolAgent:
             summary=self.plan_summary,
         )
 
+    def _build_review(self, inp) -> ToolAgentPhaseOutput:
+        """Run :attr:`build_runner` over ``inp.repo_path`` and report one issue per failure.
+
+        Preconditions: :attr:`build_runner` is set (a ``staticmethod`` taking a
+        ``pathlib.Path`` and returning a list of :class:`ReviewIssue`).
+        Postconditions: returns a :class:`ToolAgentPhaseOutput`; when ``repo_path``
+        is unset/missing the issue list is empty and the summary says "skipped".
+        """
+        from pathlib import Path
+
+        review_label = f"{self.name} review"
+        if not inp.repo_path:
+            return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no repo_path).")
+        path = Path(inp.repo_path).resolve()
+        if not path.exists():
+            return ToolAgentPhaseOutput(summary=f"{review_label} skipped (repo path missing).")
+        issues = self.build_runner(path)
+        return ToolAgentPhaseOutput(
+            issues=issues,
+            summary=f"{review_label}: {len(issues)} {self.build_review_noun} found.",
+        )
+
     def review(self, inp) -> ToolAgentPhaseOutput:
+        if self.build_runner is not None:
+            return self._build_review(inp)
         review_label = f"{self.name} review"
         if not self._model:
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no LLM).")
@@ -297,3 +348,9 @@ class BaseReviewToolAgent:
 
     def deliver(self, inp) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(summary=f"{self.name} deliver.")
+
+
+# Preferred name for the generalized review + single-issue-fix base. The historical
+# ``BaseReviewToolAgent`` name is retained above and aliased here so both stacks
+# (and their tests) can import either.
+ReviewToolAgent = BaseReviewToolAgent
