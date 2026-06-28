@@ -45,15 +45,20 @@ PROMPT_ASSET_CLASSES: tuple[str, ...] = _PROMPT_ASSET_CLASSES
 # ``_build_short_circuit_record`` (the pre-backtest exit path). Keep it in sync
 # with the ``short_circuit_status`` values in ``strategy_lab/orchestrator.py``:
 # spec_unimplementable, spec_validation, code_synthesis, design_not_ready,
-# budget_exhausted. The in-memory ``ConvergenceTracker`` skips all of these via
-# ``count_asset_class=False`` at the call site; this set is the persisted-record
-# equivalent for ``prior_records`` rebuilt after a restart.
+# design_stalled, budget_exhausted. The in-memory ``ConvergenceTracker`` skips
+# all of these via ``count_asset_class=False`` at the call site; this set is the
+# persisted-record equivalent for ``prior_records`` rebuilt after a restart.
+# ``design_stalled`` matters as much as the rest: a stalled cycle persists
+# ``compute_metrics([], ...)`` placeholder metrics (0% return/win rate), so
+# counting it as executed would drag down both the asset-class steering and the
+# performance-attribution buckets below.
 _NON_EXECUTED_BACKTEST_STATUSES: frozenset[str] = frozenset(
     {
         "failed: spec_unimplementable",
         "failed: spec_validation",
         "failed: code_synthesis",
         "failed: design_not_ready",
+        "failed: design_stalled",
         "failed: budget_exhausted",
     }
 )

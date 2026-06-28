@@ -641,14 +641,26 @@ def test_aggregate_prior_results_exit_multi_membership() -> None:
     assert agg[("exit", "take_profit")]["n"] == 1
 
 
-def test_aggregate_prior_results_excludes_non_executed_status() -> None:
+@pytest.mark.parametrize(
+    "non_executed_status",
+    [
+        "failed: spec_unimplementable",
+        "failed: spec_validation",
+        "failed: code_synthesis",
+        "failed: design_not_ready",
+        "failed: design_stalled",
+        "failed: budget_exhausted",
+    ],
+)
+def test_aggregate_prior_results_excludes_non_executed_status(non_executed_status: str) -> None:
+    # Pre-backtest short-circuit records persist placeholder zero-trade metrics
+    # (and a possibly-coerced asset class); none of them must reach attribution.
     recs = [
         _attr_record(i=0, entry_rules=[_rsi_entry()], status="completed"),
-        _attr_record(i=1, entry_rules=[_sma_crossover_entry()], status="failed: spec_validation"),
+        _attr_record(i=1, entry_rules=[_sma_crossover_entry()], status=non_executed_status),
     ]
     agg = aggregate_prior_results(recs)
     assert ("entry", "rsi") in agg
-    # The pre-backtest short-circuit record never reaches attribution.
     assert ("entry", "sma_crossover") not in agg
 
 
