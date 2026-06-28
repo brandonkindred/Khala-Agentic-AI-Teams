@@ -62,15 +62,17 @@ _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
 # endpoint's staleness window.
 ANSWER_WAIT_POLL_INTERVAL_S = _ANSWER_WAIT_POLL_INTERVAL_S
 
-# The job-service transport failures that ``JobServiceClient._request`` itself classifies as
-# transient and retries before giving up (its ``_RETRY_ANY_METHOD_ERRORS`` +
-# ``_RETRY_IDEMPOTENT_ONLY_ERRORS``). The wait loop extends that same tolerance: when the client
-# exhausts its own retry budget on a blip — e.g. a connection reset together with the brief connect
-# failures that accompany a job-service restart — re-poll instead of crashing a long HITL wait.
-# Permanent transport faults (``UnsupportedProtocol``, ``LocalProtocolError``, ``ProxyError``) and
-# HTTP status errors are deliberately excluded so a real misconfiguration surfaces immediately
-# rather than spinning to the timeout. ``ConnectTimeout`` is excluded for the same reason (the
-# client does not retry it either).
+# The exact set of job-service transport failures that ``JobServiceClient._request`` itself
+# classifies as transient and retries before giving up (its ``_RETRY_ANY_METHOD_ERRORS`` +
+# ``_RETRY_IDEMPOTENT_ONLY_ERRORS``); kept in lockstep with that classification. The wait loop
+# extends the same tolerance — when the client exhausts its own retry budget on a blip (e.g. a
+# connection reset, or the brief connect failures during a job-service restart), it re-polls
+# instead of crashing a long HITL wait. Everything the client does NOT retry is deliberately left
+# to propagate rather than be swallowed and spun to the timeout: permanent transport faults
+# (``UnsupportedProtocol``, ``LocalProtocolError``, ``ProxyError``) and HTTP status errors. Note
+# ``ConnectTimeout`` is also NOT in this set and is NOT matched by ``ConnectError`` below: it is an
+# ``httpx.TimeoutException``, a different branch from ``ConnectError`` (a ``NetworkError``) and not
+# a subclass of it (MRO: ConnectTimeout -> TimeoutException -> TransportError), so it propagates.
 _TRANSIENT_JOB_READ_ERRORS = (
     httpx.ConnectError,
     httpx.PoolTimeout,
