@@ -212,7 +212,14 @@ def _can_compact(llm: Any) -> bool:
 
 
 def parse_json_response(response: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Parse an LLM JSON response, tolerating ```json fences. ``None`` on failure."""
+    """Parse an LLM JSON response, tolerating ```json fences.
+
+    Postconditions:
+        - Returns a ``dict`` on success, or ``None`` for empty/invalid input OR any
+          top-level JSON value that is not an object (e.g. a bare array or string).
+          Returning only dicts means callers' reducers can rely on ``.get`` without a
+          type guard on the parsed value itself.
+    """
     text = (response or "").strip()
     if not text:
         return None
@@ -222,6 +229,7 @@ def parse_json_response(response: Optional[str]) -> Optional[Dict[str, Any]]:
             text = text[4:]
         text = text.strip()
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return None
+    return parsed if isinstance(parsed, dict) else None

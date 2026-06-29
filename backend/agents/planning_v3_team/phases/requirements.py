@@ -111,7 +111,12 @@ def _requirements_reduce(parts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     seen_ids: set = set()
     seen_text: set = set()
     for p in parts:
-        for q in p.get("questions") or []:
+        raw = p.get("questions")
+        if not isinstance(raw, list):
+            continue
+        for q in raw:
+            if not isinstance(q, dict):
+                continue  # skip malformed entries (e.g. bare strings) instead of crashing
             qid = (q.get("id") or "").strip()
             qtext = (q.get("question_text") or "").strip().lower()
             if (qid and qid in seen_ids) or (qtext and qtext in seen_text):
@@ -158,13 +163,15 @@ def run_requirements(
 
     open_questions: List[OpenQuestion] = []
     for q in data.get("questions", []):
+        raw_opts = q.get("options")
         opts = [
             OpenQuestionOption(
                 id=o.get("id", ""),
                 label=o.get("label", ""),
                 is_default=o.get("is_default", False),
             )
-            for o in q.get("options", [])
+            for o in (raw_opts if isinstance(raw_opts, list) else [])
+            if isinstance(o, dict)
         ]
         open_questions.append(
             OpenQuestion(

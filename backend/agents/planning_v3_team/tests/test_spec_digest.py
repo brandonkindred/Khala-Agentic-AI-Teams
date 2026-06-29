@@ -105,6 +105,14 @@ def test_parse_json_empty_and_invalid():
     assert parse_json_response("not json") is None
 
 
+def test_parse_json_non_object_returns_none():
+    # Valid JSON that is not an object (array / scalar) must be rejected so reducers
+    # can rely on a dict-or-None contract.
+    assert parse_json_response('["a", "b"]') is None
+    assert parse_json_response('"a string"') is None
+    assert parse_json_response("42") is None
+
+
 # --- map_reduce ------------------------------------------------------------
 
 

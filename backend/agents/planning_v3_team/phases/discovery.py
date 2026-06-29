@@ -63,14 +63,25 @@ def _discovery_reduce(parts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         return dict(parts[0])
 
     def first_str(key: str) -> str:
-        return next((p.get(key) for p in parts if (p.get(key) or "").strip()), "")
+        # Only consider string values; a malformed non-str scalar is ignored rather
+        # than crashing the reduce (the LLM occasionally returns wrong-typed fields).
+        for p in parts:
+            v = p.get(key)
+            if isinstance(v, str) and v.strip():
+                return v
+        return ""
 
     def union(key: str) -> list:
         seen: set = set()
         out: list = []
         for p in parts:
-            for v in p.get(key) or []:
-                k = v.strip().lower() if isinstance(v, str) else v
+            raw = p.get(key)
+            if not isinstance(raw, list):
+                continue
+            for v in raw:
+                if not isinstance(v, str):
+                    continue  # these fields are lists of strings; skip malformed items
+                k = v.strip().lower()
                 if k not in seen:
                     seen.add(k)
                     out.append(v)

@@ -79,6 +79,65 @@ def test_run_requirements_empty_falls_back_to_defaults():
     assert "req_rpo_rto" in ids
 
 
+def test_run_requirements_malformed_questions_entries_fall_back():
+    # Syntactically valid JSON but schema-malformed entries must not crash; with no
+    # valid questions extracted, the phase falls back to the default question set.
+    context = {"client_context": ClientContext(problem_summary="P"), "spec_content": "S"}
+    llm = make_llm('{"questions": ["RPO?", 42, null]}')  # all non-dict entries
+    ctx_update, _ = run_requirements(context, llm=llm)
+    ids = {q.id for q in ctx_update["open_questions"]}
+    assert "req_rpo_rto" in ids  # default fallback, no AttributeError
+
+
+def test_run_requirements_questions_not_a_list_falls_back():
+    context = {"client_context": ClientContext(problem_summary="P"), "spec_content": "S"}
+    llm = make_llm('{"questions": "RPO?"}')  # questions is a string, not a list
+    ctx_update, _ = run_requirements(context, llm=llm)
+    assert len(ctx_update["open_questions"]) >= 1
+
+
+def test_run_requirements_skips_malformed_options():
+    # A well-formed question with malformed option entries keeps the question, drops options.
+    context = {"client_context": ClientContext(problem_summary="P"), "spec_content": "S"}
+    payload = (
+        '{"questions": [{"id": "q1", "question_text": "Where?", "category": "tech",'
+        ' "priority": "low", "options": ["bad", {"id": "ok", "label": "OK"}]}]}'
+    )
+    llm = make_llm(payload)
+    ctx_update, _ = run_requirements(context, llm=llm)
+    q = next(q for q in ctx_update["open_questions"] if q.id == "q1")
+    assert [o.id for o in q.options] == ["ok"]  # non-dict option dropped, no crash
+
+
+def test_run_discovery_multi_section_tolerates_malformed_fields():
+    # Two sections; one has non-str scalars, a non-list field, and a non-str list item.
+    # The reducer must skip the malformed bits without crashing.
+    payloads = iter(
+        [
+            '{"problem_summary": "", "opportunity_statement": "",'
+            ' "target_users": "notalist", "success_criteria": [123, "good"], "assumptions": []}',
+            '{"problem_summary": "", "opportunity_statement": "",'
+            ' "target_users": ["u1"], "success_criteria": ["good"], "assumptions": []}',
+        ]
+    )
+    context = {"client_context": ClientContext(), "spec_content": _multi_heading_doc(2, 5000)}
+    llm = make_llm(lambda *a, **k: next(payloads), max_ctx=1000)
+    ctx_update, _ = run_discovery(context, llm=llm)
+    cc = ctx_update["client_context"]
+    assert cc.problem_summary == ""  # no valid str scalar in either section
+    assert cc.target_users == ["u1"]  # non-list field skipped
+    assert cc.success_criteria == ["good"]  # non-str item skipped, deduped
+
+
+def test_run_discovery_non_object_json_falls_back():
+    # A top-level JSON array (not an object) must be treated as no result -> fallback.
+    context = {"client_context": ClientContext(), "spec_content": "Material"}
+    llm = make_llm('["not", "an", "object"]')
+    ctx_update, _ = run_discovery(context, llm=llm)
+    # Fallback uses the raw material as problem_summary; no crash.
+    assert ctx_update["client_context"].problem_summary == "Material"
+
+
 def test_run_requirements_dedupes_across_sections():
     # Force multi-section via a tiny context; both sections return the same question id.
     context = {
