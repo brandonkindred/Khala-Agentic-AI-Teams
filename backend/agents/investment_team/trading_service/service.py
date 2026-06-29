@@ -1679,6 +1679,16 @@ class _EngineEntryDispatcher:
         else:
             stop_price = ref_price * (1.0 + stop_pct)
             limit_price = ref_price * (1.0 - tp_pct)
+        # Defense-in-depth postcondition: both resolved prices must be strictly
+        # positive. The leg field bounds (stop ``pct < 1.0``, take-profit
+        # ``pct < 1.0``) already guarantee this for a positive ``ref_price``, so
+        # a violation here means a field bound was loosened without updating this
+        # math — fail loudly at emit rather than materialize a never-filling /
+        # negative-price child.
+        assert stop_price > 0 and limit_price > 0, (
+            f"bracket resolved non-positive price (stop={stop_price!r}, limit={limit_price!r}) "
+            f"from ref={ref_price!r}, stop_pct={stop_pct!r}, tp_pct={tp_pct!r}"
+        )
         limit_offset: Optional[float] = None
         if bracket.stop_loss.style == "limit":
             # ``limit_offset_pct`` is a fraction of the stop level; the bracket

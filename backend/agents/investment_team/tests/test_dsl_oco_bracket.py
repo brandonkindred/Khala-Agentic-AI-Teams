@@ -105,9 +105,29 @@ def test_bracket_stop_leg_offset_requires_limit_style() -> None:
         BracketStopLeg(pct=0.03, limit_offset_pct=0.01)
 
 
-def test_bracket_stop_leg_pct_must_be_below_one() -> None:
+@pytest.mark.parametrize("pct", [0.0, -0.1, 1.0, 1.5])
+def test_bracket_stop_leg_pct_must_be_in_open_unit_interval(pct: float) -> None:
+    # ``pct`` must be strictly in (0, 1): gt=0 rejects 0 / negatives, lt=1.0
+    # rejects 1.0 and above (a long's resolved level stays positive only for
+    # pct < 1.0).
     with pytest.raises(ValueError):
-        BracketStopLeg(pct=1.0)
+        BracketStopLeg(pct=pct)
+
+
+@pytest.mark.parametrize("pct", [0.0, -0.1, 1.0, 1.5])
+def test_bracket_take_profit_leg_pct_must_be_in_open_unit_interval(pct: float) -> None:
+    # The take-profit leg is bounded the same way: a short's resolved target
+    # ``ref * (1 - pct)`` is positive only for pct < 1.0.
+    with pytest.raises(ValueError):
+        BracketTakeProfitLeg(pct=pct)
+
+
+def test_short_bracket_high_take_profit_yields_positive_limit() -> None:
+    # A valid high take-profit (just under the 1.0 bound) still resolves to a
+    # strictly-positive short-side limit.
+    req = _emit_with_bracket("short", _bracket(stop_pct=0.03, tp_pct=0.5), close=100.0)
+    assert req.attached_take_profit.limit_price == pytest.approx(50.0)
+    assert req.attached_take_profit.limit_price > 0
 
 
 def test_format_rule_renders_bracket() -> None:

@@ -598,13 +598,20 @@ class BracketTakeProfitLeg(_SpecNode):
     """Take-profit leg of an :class:`OcoBracketRule`.
 
     ``pct`` is the favourable-move target off the entry reference price as a
-    positive fraction; the direction is implied by the position side (``+pct``
-    for a long, ``−pct`` for a short). Materializes a resting LIMIT child that
-    fills at its exact limit price (the OCO bracket's defining advantage over the
-    bar-by-bar ``take_profit`` market close).
+    positive fraction in ``(0, 1)``; the direction is implied by the position
+    side (``+pct`` for a long, ``−pct`` for a short). Materializes a resting LIMIT
+    child that fills at its exact limit price (the OCO bracket's defining
+    advantage over the bar-by-bar ``take_profit`` market close).
+
+    ``pct`` is bounded ``< 1.0`` for the same side-agnostic reason as
+    :class:`BracketStopLeg` / :class:`StopLossRule`: a short's resolved target is
+    ``ref * (1 - pct)``, which is strictly positive only when ``pct < 1.0`` (at
+    ``pct >= 1.0`` it collapses to a non-positive, never-filling limit). A
+    long-only strategy wanting a >100% target can still author it via the
+    standalone ``take_profit`` rule, which is not side-agnostic.
     """
 
-    pct: float = Field(gt=0)
+    pct: float = Field(gt=0, lt=1.0)
     note: str = ""
 
 
