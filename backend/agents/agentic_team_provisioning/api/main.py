@@ -6,16 +6,24 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 
 from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 
+from agent_registry.models import AgentManifest
 from agentic_team_provisioning.agent_env_provisioning import schedule_provision_step_agents
 from agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
+from agentic_team_provisioning.manifest_generation import (
+    build_agent_manifest,
+    register_team_manifests,
+)
 from agentic_team_provisioning.models import (
+    SOURCE_GENERATED,
+    SOURCE_REGISTRY,
+    AddAgentFromRegistryRequest,
     AgentEnvProvisionSummary,
     AgenticTeamAgent,
     AgentQualityScore,
@@ -94,8 +102,6 @@ _pipeline_runner = get_pipeline_runner(_test_store)
 # are decoupled — a transient infrastructure failure must not hide an otherwise
 # usable roster from the registry for the lifetime of the process.
 try:
-    from agentic_team_provisioning.manifest_generation import register_team_manifests
-
     _existing_teams = _store.list_teams()
 except Exception as _e:
     logger.warning("Could not list existing teams for retroactive provisioning: %s", _e)
@@ -127,16 +133,33 @@ DEFAULT_SUGGESTIONS = [
 ]
 
 
-def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
-    """Persist agents roster from the LLM ``agents`` block (if present)."""
+def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None) -> None:
+    """Persist the LLM ``agents`` block, preserving any registry-source roster entries.
+
+    The chat round-trips only generated agents, so a naive full replace would drop
+    the registry agents a user added via the from-registry endpoint (Agent Studio
+    §5.3). We therefore merge: existing ``source == "registry"`` entries are kept, and
+    the LLM's generated agents are layered on top — a generated agent that collides
+    by name with a preserved registry agent is dropped, so the explicitly-added
+    registry agent wins.
+
+    Concurrency: the read-merge-write is delegated to ``merge_generated_agents``,
+    which runs it in a single transaction under a ``SELECT ... FOR UPDATE`` lock on
+    the team row, so concurrent saves for the *same* team serialize rather than
+    racing — neither can rewrite from a stale snapshot and drop the other's writes.
+    The registry registration runs in the same locked transaction (via the
+    ``on_merged`` hook), so all registry mutations for a team are serialized with the
+    single-agent routes' registry cleanup — a chat-save register can't interleave
+    with a concurrent add/delete cleanup.
+    """
     if not agents_data:
         return
-    agents: list[AgenticTeamAgent] = []
+    generated: list[AgenticTeamAgent] = []
     for a in agents_data:
         name = a.get("agent_name", "")
         if not name:
             continue
-        agents.append(
+        generated.append(
             AgenticTeamAgent(
                 agent_name=name,
                 role=a.get("role", ""),
@@ -146,13 +169,19 @@ def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
                 expertise=a.get("expertise", []),
             )
         )
-    if agents:
-        _store.save_team_agents(team_id, agents)
-        # Install the generated agents into the live registry so the Agent Console
-        # catalog and /api/agents/{id}/invoke resolve them (best-effort).
-        from agentic_team_provisioning.manifest_generation import register_team_manifests
+    if not generated:
+        return
 
-        register_team_manifests(team_id, agents)
+    def _register(merged: list[AgenticTeamAgent]) -> None:
+        # Install the generated agents into the live registry so the Agent Console
+        # catalog and /api/agents/{id}/invoke resolve them (best-effort; skips
+        # registry-source entries internally). Runs under the team lock so it's
+        # serialized with the single-agent routes' registry cleanup.
+        register_team_manifests(team_id, merged)
+
+    # Merge under a team-row lock so the read (preserve registry agents), the write,
+    # and the registry register all happen in one atomic, serialized transaction.
+    _store.merge_generated_agents(team_id, generated, on_merged=_register)
 
 
 def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
@@ -219,16 +248,41 @@ def list_team_agents(team_id: str):
 def list_team_agent_manifests(team_id: str):
     """Generated agent_registry manifests (with the cognition core stamped) for the roster.
 
-    Every roster agent is rendered into a validated ``AgentManifest`` carrying the
-    batteries-included ``cognition`` block; nothing is written to the registry's
-    manifest discovery paths.
+    Each **generated** roster agent is rendered into a validated ``AgentManifest``
+    carrying the batteries-included ``cognition`` block; nothing is written to the
+    registry's manifest discovery paths. A **registry-source** agent (added via Agent
+    Studio's from-registry endpoint) instead returns its *original* registry manifest
+    so the advertised id is the one that actually resolves for the Agent Console /
+    ``/api/agents/{id}/invoke``.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with one manifest per roster agent — a generated agent's
+        stamped wrapper, or a registry-source agent's *original* registry manifest;
+        a registry-source agent whose manifest no longer resolves in this process is
+        **omitted** rather than advertised with a synthetic generated id this team
+        never registered (which would 404 on invoke). ``404`` if the team is unknown.
     """
-    from agentic_team_provisioning.manifest_generation import build_agent_manifest
+    # ``get_registry`` is imported inline (not at module top) so the test suite's
+    # ``monkeypatch.setattr("agent_registry.get_registry", …)`` is resolved at call
+    # time — a top-level ``from agent_registry import get_registry`` would bind the
+    # name before the patch and bypass the fake registry.
+    from agent_registry import get_registry
 
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    manifests = [build_agent_manifest(team_id, a) for a in team.agents]
+    registry = get_registry()
+    manifests = []
+    for a in team.agents:
+        if a.source == SOURCE_REGISTRY:
+            # Advertise only the original, resolvable registry manifest; if it no
+            # longer resolves here, omit the agent rather than fabricate an
+            # unresolvable wrapper id.
+            original = registry.get(a.manifest_id) if a.manifest_id else None
+            if original is not None:
+                manifests.append(original)
+            continue
+        manifests.append(build_agent_manifest(team_id, a))
     return GeneratedManifestsResponse(team_id=team_id, manifests=manifests)
 
 
@@ -241,6 +295,160 @@ def validate_team_roster(team_id: str):
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
     return validate_roster(team)
+
+
+def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
+    """Project a registry ``AgentManifest`` into a roster agent (Agent Studio §5.3).
+
+    Preconditions: ``manifest`` is a registered manifest.
+    Postconditions: returns an ``AgenticTeamAgent`` with ``source == "registry"``
+        and ``manifest_id == manifest.id``. To satisfy ``roster_validation``'s depth
+        check (which flags an agent missing ≥3 of skills/capabilities/tools/expertise
+        as ``sparse_profile``), the projection fills **two** persona fields that don't
+        both depend on the optional ``cognition.tools``: ``skills`` from the manifest
+        tags and ``expertise`` from the home ``team`` (always present). So a tagged
+        manifest with no cognition tools — the common catalog shape — still passes.
+        ``tools`` carries ``cognition.tools`` when present.
+    """
+    # Enforce the precondition with explicit validation rather than ``assert`` (which
+    # ``python -O`` strips): ``AgentManifest.id``/``name`` are required but not
+    # length-constrained, so an empty string passes Pydantic — fail fast here rather
+    # than project a malformed manifest into the roster.
+    if not (manifest.name and manifest.name.strip()):
+        raise ValueError("manifest.name must be non-empty")
+    if not manifest.id:
+        raise ValueError("manifest.id must be set")
+    return AgenticTeamAgent(
+        agent_name=manifest.name,
+        role=manifest.summary or manifest.name,
+        # ``tags``/``cognition.tools`` are non-Optional ``list[str]`` on a validated
+        # manifest, but guard ``or []`` / ``and`` defensively at this projection
+        # boundary so a degenerate (e.g. ``model_construct``-built) manifest can't
+        # pass ``None`` into ``list(...)`` or the model field.
+        skills=manifest.tags or [],
+        tools=list(manifest.cognition.tools)
+        if manifest.cognition and manifest.cognition.tools
+        else [],
+        # ``team`` is a required, non-empty str on AgentManifest; the guard is
+        # belt-and-suspenders so a degenerate empty team can never inject ``[""]``.
+        expertise=[manifest.team] if manifest.team else [],
+        source=SOURCE_REGISTRY,
+        manifest_id=manifest.id,
+    )
+
+
+def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> None:
+    """Best-effort: drop a generated agent's stale in-process manifest from the registry.
+
+    Called (as an ``on_replaced`` / ``on_deleted`` hook) under the store's team-row
+    lock when a *generated* roster agent is removed or replaced, so the Agent Console
+    catalog / ``/api/agents/{id}/invoke`` route stop resolving it. Running under the
+    lock serializes it with the chat-save register, closing the re-add/replace races.
+
+    Preconditions: ``agent.source == SOURCE_GENERATED`` (caller checks); invoked
+        within the locked roster mutation that removes/replaces the row.
+    Postconditions: the agent's generated manifest is unregistered if present. A
+        registry failure is logged, **never raised** — so this best-effort cleanup
+        can neither 500 the request nor roll back the committed roster mutation
+        (mirrors ``register_team_manifests``, which logs registry errors not raises).
+    """
+    try:
+        # ``get_registry`` stays inline so tests' ``monkeypatch`` of
+        # ``agent_registry.get_registry`` resolves at call time (see
+        # ``list_team_agent_manifests``).
+        from agent_registry import get_registry
+
+        get_registry().unregister(build_agent_manifest(team_id, agent).id)
+    except Exception:
+        logger.warning(
+            "Failed to unregister stale generated manifest for agent %s in team %s",
+            agent.agent_name,
+            team_id,
+            exc_info=True,
+        )
+
+
+def _generated_manifest_cleanup(team_id: str) -> Callable[[Optional[AgenticTeamAgent]], None]:
+    """Build the registry-cleanup hook shared by the add (``on_replaced``) and delete
+    (``on_deleted``) routes.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: returns a callback that, run under the store's team lock with the
+        row a roster mutation removed/replaced (``None`` for a plain insert),
+        unregisters that row's stale manifest **iff** it was generated. Registry-source
+        rows and ``None`` are left untouched. The callback is best-effort (non-raising).
+    """
+
+    def _cleanup(prior: Optional[AgenticTeamAgent]) -> None:
+        if prior is not None and prior.source == SOURCE_GENERATED:
+            _unregister_generated_manifest(team_id, prior)
+
+    return _cleanup
+
+
+@app.post("/teams/{team_id}/agents/from-registry", response_model=AgenticTeamAgent, status_code=201)
+def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
+    """Add a registered agent to the team roster, projected from its manifest (§5.3).
+
+    Re-adding the same manifest updates that roster entry in place. If this replaces a
+    *generated* agent of the same name, that generated agent's stale in-process
+    manifest is unregistered (the new entry is registry-source and resolves on its
+    own) — the cleanup runs in the store's locked transaction against the row actually
+    replaced, so it can't race a concurrent chat-save's register.
+
+    Preconditions: ``req.manifest_id`` is non-empty (enforced by the request model).
+    Postconditions: ``201`` with the projected roster agent persisted on the roster;
+        ``404`` if the team or the manifest id is unknown (roster unchanged); ``422``
+        if the resolved manifest is too malformed to project (e.g. blank name/id), so
+        a bad registry entry surfaces as a client error rather than an unhandled 500.
+    """
+    from agent_registry import get_registry
+
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    manifest = get_registry().get(req.manifest_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent manifest: {req.manifest_id}")
+    try:
+        agent = _roster_agent_from_manifest(manifest)
+    except ValueError as e:
+        logger.warning(
+            "Malformed registered manifest %s for team %s: %s", req.manifest_id, team_id, e
+        )
+        raise HTTPException(status_code=422, detail=f"Malformed agent manifest: {e}")
+    _store.add_or_replace_team_agent(
+        team_id, agent, on_replaced=_generated_manifest_cleanup(team_id)
+    )
+    return agent
+
+
+@app.delete("/teams/{team_id}/agents/{agent_name:path}", status_code=204)
+def remove_agent_from_roster(team_id: str, agent_name: str):
+    """Remove a single agent from the team roster by name (§5.3).
+
+    The ``:path`` converter lets roster names that contain ``/`` (e.g.
+    "Backend — API/OpenAPI Specialist") match instead of 404-ing on the slash. If the
+    removed agent was **generated** (installed into the live registry via the LLM save
+    path's ``register_team_manifests``), its in-process manifest is also unregistered
+    so catalog/invoke consumers stop resolving it — run under the team lock before the
+    delete commits, so a concurrent chat-save can't re-add+register the same
+    deterministic id in the gap. Registry-source agents are left in the registry, since
+    they exist there independently of this team.
+
+    Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
+    Postconditions: ``204`` and the named agent removed from the roster; ``404`` when
+        the team is unknown or no roster entry has that name (roster unchanged).
+    """
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    deleted = _store.delete_team_agent(
+        team_id, agent_name, on_deleted=_generated_manifest_cleanup(team_id)
+    )
+    if deleted is None:
+        raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------
