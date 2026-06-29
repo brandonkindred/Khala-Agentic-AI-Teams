@@ -1754,19 +1754,23 @@ class _EngineEntryDispatcher:
         spec's configured period. Falls back to default ATR(14) when no
         ATR appears in any rule.
         """
-        from ..strategy_lab.spec_dsl import IndicatorRef, SignalExitRule
+        from ..strategy_lab.spec_dsl import (
+            IndicatorRef,
+            SignalExitRule,
+            iter_tree_indicator_refs,
+        )
 
         for rule in self.entry_rules:
             if not isinstance(rule, EntryRule):
                 continue
-            for side in (rule.when.lhs, rule.when.rhs):
-                if isinstance(side, IndicatorRef) and side.name == "atr":
+            for side in iter_tree_indicator_refs(rule.when):
+                if side.name == "atr":
                     return side
         for rule in self.exit_rules:
             if not isinstance(rule, SignalExitRule):
                 continue
-            for side in (rule.when.lhs, rule.when.rhs):
-                if isinstance(side, IndicatorRef) and side.name == "atr":
+            for side in iter_tree_indicator_refs(rule.when):
+                if side.name == "atr":
                     return side
         return IndicatorRef(name="atr")
 

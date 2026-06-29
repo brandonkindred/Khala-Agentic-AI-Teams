@@ -91,7 +91,7 @@ Behavior:
 
    > *"Your previous reply was rejected. Error: `{error_message}`. Required JSON schema: `{schema.model_json_schema()}`. Re-emit ONLY a JSON object satisfying this schema — no prose, no markdown, no code fences. The previous reply (truncated) was: `{response_preview_or_repr_data}`."*
 
-   For an `LLMJsonParseError`, the helper uses `exc.response_preview`. For a `ValidationError`, it uses `json.dumps(data)[:500]`. Either way the model gets enough signal to self-correct rather than regenerate from scratch.
+   For an `LLMJsonParseError`, the helper uses `exc.response_preview`. For a `ValidationError`, it uses `json.dumps(data)`. Either way the model gets enough signal to self-correct rather than regenerate from scratch.
 4. If every corrective call also fails, re-raises the **last** error (`LLMJsonParseError` or `ValidationError`) with a `correction_attempts_used` attribute populated (added to `LLMJsonParseError`; for `ValidationError` we wrap into a new `LLMSchemaValidationError(LLMPermanentError)` declared in `interface.py`).
 
 `correction_attempts` defaults to `1` — one auto-correction is the documented contract. Higher values are allowed but discouraged (cost / latency). `0` opts out (matches today's behavior).

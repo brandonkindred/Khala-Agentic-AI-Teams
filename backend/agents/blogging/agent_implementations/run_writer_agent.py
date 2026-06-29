@@ -63,10 +63,8 @@ Recap and one practical next step.
     )
 
     result = agent.run(draft_input)
-    print("\n--- Draft (first 2000 chars) ---\n")
-    print(result.draft[:2000])
-    if len(result.draft) > 2000:
-        print("\n... [truncated] ...")
+    print("\n--- Draft ---\n")
+    print(result.draft)
 
 
 if __name__ == "__main__":

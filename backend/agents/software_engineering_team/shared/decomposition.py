@@ -334,7 +334,7 @@ class RecursiveProcessor(Generic[T]):
 
         if context is None:
             context = DecompositionContext(
-                original_task=prompt[:200],
+                original_task=prompt,
                 original_content=content,
                 max_depth=self.max_depth,
             )
@@ -441,7 +441,7 @@ class RecursiveProcessor(Generic[T]):
                     agent_name,
                     i + 1,
                     len(chunks),
-                    str(e)[:100],
+                    str(e),
                 )
 
         if results:

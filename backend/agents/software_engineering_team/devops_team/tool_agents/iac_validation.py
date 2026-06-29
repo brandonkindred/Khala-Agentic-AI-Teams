@@ -33,11 +33,11 @@ class IaCValidationToolAgent:
             fmt = run_command(["terraform", "fmt", "-check"], cwd=path, timeout=120)
             checks["iac_validate_fmt"] = "pass" if fmt.success else "fail"
             if not fmt.success:
-                findings.append(fmt.error_summary or fmt.stderr[:500])
+                findings.append(fmt.error_summary or fmt.stderr)
             validate = run_command(["terraform", "validate"], cwd=path, timeout=120)
             checks["iac_validate"] = "pass" if validate.success else "fail"
             if not validate.success:
-                findings.append(validate.error_summary or validate.stderr[:500])
+                findings.append(validate.error_summary or validate.stderr)
         else:
             checks["iac_validate_fmt"] = "skipped"
             checks["iac_validate"] = "skipped"

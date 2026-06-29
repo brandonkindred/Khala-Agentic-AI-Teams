@@ -12,6 +12,7 @@ from investment_team.strategy_lab.quality_gates.predicate_conformance_fixtures i
     generate_conformance_fixtures,
 )
 from investment_team.strategy_lab.spec_dsl import (
+    AllOf,
     EntryRule,
     IndicatorRef,
     Predicate,
@@ -74,6 +75,18 @@ class TestGenerateConformanceFixtures:
         fixtures = generate_conformance_fixtures(spec)
         assert len(fixtures) == 1
         assert fixtures[0].rule_kind == "signal_exit"
+
+    def test_all_of_tree_entry_marked_unsynthesizable(self):
+        """A tree (``all_of``) ``when`` has no single-comparison oscillating-bar
+        recipe, so its fixture is marked unsynthesizable (and the gate skips it)
+        rather than crashing on ``pred.lhs``. The common multi-confirmation case
+        is compilable and never reaches this custom-code-only gate."""
+        tree = AllOf(of=[_pred_close_gt_50(), _pred_rsi_lt_30()])
+        spec = _spec(entry_rules=[EntryRule(when=tree, side="long")])
+        fixtures = generate_conformance_fixtures(spec)
+        assert len(fixtures) == 1
+        assert fixtures[0].synthesizable is False
+        assert fixtures[0].unsynthesizable_reason == "tree_predicate"
 
     def test_stop_loss_excluded(self):
         spec = _spec(exit_rules=[StopLossRule(pct=0.05)])

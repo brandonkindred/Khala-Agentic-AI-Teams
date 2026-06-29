@@ -395,7 +395,7 @@ class ZeroTradeRepairer:
                 new_gates=safety_gates,
                 extra_event={
                     "reason": "unsafe_code",
-                    "details": "; ".join(g.details for g in critical_safety)[:400],
+                    "details": "; ".join(g.details for g in critical_safety),
                 },
             )
         return safety_gates
@@ -472,7 +472,7 @@ class ZeroTradeRepairer:
                 new_gates=safety_gates + dropped_keys_gates,
                 extra_event={
                     "reason": "invalid_spec_updates",
-                    "details": str(exc).splitlines()[0][:400],
+                    "details": str(exc).splitlines()[0],
                 },
             )
 
@@ -522,7 +522,7 @@ class ZeroTradeRepairer:
                 new_gates=safety_gates + post_repair_spec_gates,
                 extra_event={
                     "reason": "invalid_spec_after_repair",
-                    "details": "; ".join(g.details for g in spec_criticals)[:400],
+                    "details": "; ".join(g.details for g in spec_criticals),
                 },
             )
         return post_repair_spec_gates
@@ -552,7 +552,7 @@ class ZeroTradeRepairer:
                 phase="synthesis",
                 details=(
                     f"Re-execution after zero-trade repair failed "
-                    f"({repair_exec.error_type}): {repair_exec.stderr[:400]}"
+                    f"({repair_exec.error_type}): {repair_exec.stderr}"
                 ),
                 refinement_round=ctx.round_num,
             )
@@ -629,7 +629,7 @@ class ZeroTradeRepairer:
                 new_gates=safety_gates + post_repair_spec_gates + new_anomaly_gates,
                 extra_event={
                     "reason": "anomaly_after_repair",
-                    "details": "; ".join(g.details for g in new_critical)[:400],
+                    "details": "; ".join(g.details for g in new_critical),
                 },
             )
         return new_anomaly_gates

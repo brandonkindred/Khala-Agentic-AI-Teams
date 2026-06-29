@@ -114,6 +114,21 @@ def _build_fixture_for_predicate(
     symbol: str,
 ) -> ConformanceFixture:
     """Dispatch to the appropriate fixture recipe based on predicate shape."""
+    # Tree predicates (``all_of`` / ``any_of``) are not single-comparison shapes
+    # the oscillating-bar recipes can drive true⇄false on one indicator, so they
+    # are marked unsynthesizable and the gate skips them. The common
+    # multi-confirmation case is compilable (``requires_custom_code=False``) and
+    # never reaches this custom-code-only gate; this guard just keeps a tree
+    # ``when`` under custom code from crashing on ``pred.lhs``.
+    if not isinstance(pred, Predicate):
+        return ConformanceFixture(
+            rule_id=rule_id,
+            rule_kind=rule_kind,
+            side=side,
+            symbol=symbol,
+            synthesizable=False,
+            unsynthesizable_reason="tree_predicate",
+        )
     bars = _synthesise_oscillating_bars(pred)
     if bars is None:
         return ConformanceFixture(

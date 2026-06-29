@@ -56,7 +56,7 @@ class HelmExecutionToolAgent:
 
         findings: List[str] = []
         if not result.success:
-            findings.append(result.error_summary or result.stderr[:500])
+            findings.append(result.error_summary or result.stderr)
 
         template_output = ""
         if input_data.command == "template" and result.success:

@@ -169,7 +169,7 @@ def parse_json_with_recovery(
                     "%s: Chunk %d JSON failed: %s",
                     agent_name,
                     i,
-                    str(e)[:200],
+                    str(e),
                 )
                 return None
         return merge_fn(results) if results else None

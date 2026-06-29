@@ -122,10 +122,10 @@ def extract_posts_from_html(
             if len(raw) > 12:
                 break
             cell = cell.parent
-        title = el.get_text(separator=" ", strip=True).split("\n")[0][:500]
+        title = el.get_text(separator=" ", strip=True).split("\n")[0]
         if not title:
             title = seg.replace("-", " ")
-        posts[path_key] = {"url": path_key, "title": title, "raw_row_text": raw[:2000]}
+        posts[path_key] = {"url": path_key, "title": title, "raw_row_text": raw}
     return list(posts.values())
 
 

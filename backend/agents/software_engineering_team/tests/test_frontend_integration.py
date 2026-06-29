@@ -57,5 +57,5 @@ export class AppComponent {
     build_result = run_ng_build_with_nvm_fallback(tmp_path)
     assert build_result.success, (
         f"ng build failed: exit={build_result.exit_code} "
-        f"stderr={build_result.stderr[:1500]} stdout={build_result.stdout[:500]}"
+        f"stderr={build_result.stderr} stdout={build_result.stdout}"
     )

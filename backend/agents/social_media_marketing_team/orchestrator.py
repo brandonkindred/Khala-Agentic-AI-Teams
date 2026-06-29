@@ -130,7 +130,7 @@ class SocialMediaMarketingOrchestrator:
         )
         if goals.brand_objectives:
             objective = (
-                f"{objective} Ground strategy in brand objectives: {goals.brand_objectives[:400]}"
+                f"{objective} Ground strategy in brand objectives: {goals.brand_objectives}"
             )
 
         proposal = CampaignProposal(

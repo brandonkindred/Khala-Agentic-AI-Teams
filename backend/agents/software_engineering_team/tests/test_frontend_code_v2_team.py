@@ -219,9 +219,7 @@ class TestSetupPhase:
         from frontend_code_v2_team.phases import setup as setup_mod
 
         init_repo_with_existing_development(tmp_path)
-        monkeypatch.setattr(
-            setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook")
-        )
+        monkeypatch.setattr(setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook"))
         with caplog.at_level("WARNING"):
             setup_mod.run_setup(repo_path=tmp_path, task_title="My App")
         assert "not committed" in caplog.text.lower()
@@ -272,7 +270,10 @@ class TestSetupPhase:
             ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
         )
         subprocess.run(
-            ["git", "checkout", "-b", "feature/task-1"], cwd=tmp_path, capture_output=True, check=True
+            ["git", "checkout", "-b", "feature/task-1"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
         )
         subprocess.run(
             ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
@@ -393,7 +394,7 @@ class TestToolAgents:
     def test_git_agent_create_feature_branch(self, tmp_path):
         import subprocess
 
-        from frontend_code_v2_team.tool_agents.git_branch_management import (
+        from software_engineering_team.shared.tool_agent_git_branch import (
             GitBranchManagementToolAgent,
         )
 
@@ -427,7 +428,7 @@ class TestToolAgents:
         assert name
 
     def test_git_agent_commit_current_changes(self, tmp_path):
-        from frontend_code_v2_team.tool_agents.git_branch_management import (
+        from software_engineering_team.shared.tool_agent_git_branch import (
             GitBranchManagementToolAgent,
         )
 
@@ -520,7 +521,9 @@ class TestFrontendDevelopmentAgentBranchReuse:
         )
         monkeypatch.setattr(orch.FrontendDevelopmentAgent, "_read_repo_code", _read_repo_code)
         monkeypatch.setattr(orch, "run_planning", _run_planning)
-        monkeypatch.setattr(orch, "run_execution_with_review_gates", _run_execution_with_review_gates)
+        monkeypatch.setattr(
+            orch, "run_execution_with_review_gates", _run_execution_with_review_gates
+        )
         monkeypatch.setattr(
             doc_phase,
             "run_documentation_phase",
@@ -556,10 +559,11 @@ class TestFrontendDevelopmentAgent:
     def test_build_tool_runners(self):
         from frontend_code_v2_team.models import ToolAgentKind
         from frontend_code_v2_team.orchestrator import FrontendDevelopmentAgent
-        from frontend_code_v2_team.tool_agents.git_branch_management import (
+        from frontend_code_v2_team.tool_agents.state_management import StateManagementToolAgent
+
+        from software_engineering_team.shared.tool_agent_git_branch import (
             GitBranchManagementToolAgent,
         )
-        from frontend_code_v2_team.tool_agents.state_management import StateManagementToolAgent
 
         agent = FrontendDevelopmentAgent(MagicMock())
         tool_agents = {

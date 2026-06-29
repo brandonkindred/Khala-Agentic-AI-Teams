@@ -39,7 +39,7 @@ def _ollama_web_search_impl(query: str, max_results: int = 10) -> str:
     for idx, item in enumerate(raw_results, start=1):
         title = item.get("title") or "Untitled"
         url_str = item.get("url") or ""
-        content = (item.get("content") or "")[:500]
+        content = (item.get("content") or "")
         lines.append(f"{idx}. {title}\n   URL: {url_str}\n   {content}")
     return "\n\n".join(lines)
 

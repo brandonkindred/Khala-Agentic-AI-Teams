@@ -54,7 +54,7 @@ class InfraDebugAgent:
                     file_path=err_data.get("file_path"),
                     line_number=err_data.get("line_number"),
                     error_message=err_data.get("error_message", ""),
-                    raw_output=input_data.execution_output[:500],
+                    raw_output=input_data.execution_output,
                 )
             )
 

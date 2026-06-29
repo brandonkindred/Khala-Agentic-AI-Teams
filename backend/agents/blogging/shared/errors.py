@@ -83,7 +83,7 @@ class LLMJsonParseError(LLMError):
         cause: Optional[Exception] = None,
     ):
         super().__init__(message, phase=phase, cause=cause)
-        self.response_preview = response_preview[:500] if response_preview else ""
+        self.response_preview = response_preview if response_preview else ""
 
 
 class ResearchError(BloggingError):

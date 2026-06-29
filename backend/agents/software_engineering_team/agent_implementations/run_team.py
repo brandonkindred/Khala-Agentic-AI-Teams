@@ -199,9 +199,7 @@ def main() -> None:
     print("\n--- Team pipeline complete ---")
     print(
         "Architecture:",
-        architecture.overview[:300] + "..."
-        if len(architecture.overview) > 300
-        else architecture.overview,
+        architecture.overview,
     )
     print("\nTasks executed:", assignment.execution_order)
 

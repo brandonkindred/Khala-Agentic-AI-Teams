@@ -300,7 +300,7 @@ class StreamingHarness:
         except BrokenPipeError as exc:  # pragma: no cover — broken-pipe-during-write rare; exercised via crash-fixture only
             stderr = _drain(self._proc.stderr)
             raise StrategyRuntimeError(
-                f"strategy subprocess exited unexpectedly: {stderr[:500]}",
+                f"strategy subprocess exited unexpectedly: {stderr}",
                 etype="crash",
             ) from exc
 
@@ -322,7 +322,7 @@ class StreamingHarness:
                 # EOF — subprocess died.
                 stderr = _drain(self._proc.stderr)
                 raise StrategyRuntimeError(
-                    f"strategy subprocess closed stdout unexpectedly: {stderr[:1000]}",
+                    f"strategy subprocess closed stdout unexpectedly: {stderr}",
                     etype="crash",
                 )
             try:
@@ -330,7 +330,7 @@ class StreamingHarness:
             except json.JSONDecodeError as exc:  # pragma: no cover — malformed-JSON-from-child requires a corrupted child fixture
                 self._proc.kill()
                 raise StrategyRuntimeError(
-                    f"invalid JSON from strategy: {raw[:200]!r}",
+                    f"invalid JSON from strategy: {raw!r}",
                     etype="protocol_error",
                 ) from exc
 

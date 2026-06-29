@@ -59,7 +59,7 @@ class DockerError(RuntimeError):
 
 
 def _fail(argv: list[str], rc: int, stderr: str) -> DockerError:
-    return DockerError(f"docker failed (exit {rc}): {' '.join(argv)}\n{stderr[:500]}")
+    return DockerError(f"docker failed (exit {rc}): {' '.join(argv)}\n{stderr}")
 
 
 def _secrets_host_path(project_name: str) -> Path:

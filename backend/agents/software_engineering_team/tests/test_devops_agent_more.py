@@ -66,10 +66,21 @@ def git_repo(tmp_path: Path) -> Path:
 
 
 def test_build_error_signature() -> None:
-    assert _build_error_signature("error abc\nmore") == "error abc\nmore"
+    # Stable text is preserved; only whitespace collapses (newline -> space).
+    assert _build_error_signature("error abc\nmore") == "error abc more"
+    # No length truncation: long stable bodies survive in full.
     long = "x" * 1000
-    sig = _build_error_signature(long)
-    assert len(sig) == 800
+    assert _build_error_signature(long) == long
+    # Volatile fragments (temp paths, timestamps, durations, hex addrs, ports)
+    # normalize so the same underlying failure collapses to one signature.
+    a = "Boom at /var/folders/ab/cd/T/x.log 12:00:01 in 0.50s 0xdeadbeef host localhost:5432"
+    b = "Boom at /var/folders/zz/yy/T/x.log 23:59:59 in 9.99s 0xcafef00d host localhost:5433"
+    assert _build_error_signature(a) == _build_error_signature(b)
+    assert "Boom at" in _build_error_signature(a)
+    # A DIFFERENT file under the temp tree must NOT collapse: the distinguishing
+    # trailing component (basename) is preserved.
+    c = "Boom at /var/folders/zz/yy/T/y.log 23:59:59 in 9.99s 0xcafef00d host localhost:5433"
+    assert _build_error_signature(a) != _build_error_signature(c)
 
 
 def test_validate_devops_output_no_outputs() -> None:

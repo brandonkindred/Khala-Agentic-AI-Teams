@@ -17,6 +17,63 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+# --- Build-error signature normalization ---
+# Volatile fragments that vary run-to-run for the SAME underlying failure. They
+# are replaced with stable placeholders so two failures differing only in noise
+# collapse to one signature for repeated-failure (loop) detection, while the real
+# error text is preserved (no length truncation).
+# Random temp-file/dir tokens that vary every run even after the volatile ROOT is
+# stripped: NamedTemporaryFile/mkstemp basenames ("tmpa1b2c3"), pytest's per-run
+# dirs ("pytest-of-<user>", "pytest-7"). Normalized BEFORE the temp-path rule so a
+# random basename is never mistaken for a distinguishing path tail.
+_SIG_TMP_RANDOM_RE = re.compile(r"\bpytest-of-[^/\s:'\"]+|\bpytest-\d+\b|\btmp[a-z0-9_]{6,}\b")
+# Volatile part is the random ROOT (e.g. ``/tmp/pytest-of-x/pytest-7/``); the
+# trailing 1-2 path components (e.g. ``test_a0/conftest.py``) distinguish files
+# and are PRESERVED so two DISTINCT failures don't collapse to one signature.
+_SIG_TMP_PATH_RE = re.compile(
+    r"(?:/private)?(?:/var/folders|/tmp|/var/tmp)(?:/[^/\s:'\"]+)*?"
+    r"((?:/[^/\s:'\"]+){1,2})(?=[\s:'\"]|$)"
+)
+_SIG_ISO_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_SIG_CLOCK_TS_RE = re.compile(r"\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b")
+_SIG_DURATION_RE = re.compile(
+    r"\b(?:in\s+)?\d+(?:\.\d+)?\s*(?:ms|s|secs?|seconds?)\b", re.IGNORECASE
+)
+_SIG_HEX_ADDR_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
+_SIG_PORT_RE = re.compile(r"((?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-fA-F:]+\])):\d{2,5}\b")
+_SIG_WS_RE = re.compile(r"\s+")
+
+
+def normalize_error_signature(build_errors: str) -> str:
+    """Normalize volatile fragments in build/test output into a stable signature.
+
+    Used for repeated-failure (loop) detection: two runs of the SAME underlying
+    failure that differ only in noise -- temp paths (``/tmp``, ``/var/folders``,
+    ``/private/var``, pytest tmp dirs), ISO/clock timestamps, duration markers
+    ("in 1.23s"), object addresses ("0x7f.."), and host port numbers -- collapse to
+    one signature, so the same-error guard fires after the repeat threshold rather
+    than iterating until the larger workflow cap. The real error message is
+    preserved; nothing is truncated by length.
+
+    Preconditions: ``build_errors`` is a str (may be empty).
+    Postconditions: returns a stripped, whitespace-collapsed copy of
+        ``build_errors`` with volatile fragments replaced by stable placeholders.
+        Deterministic: equal-modulo-noise inputs produce equal outputs.
+    """
+    text = build_errors
+    text = _SIG_TMP_RANDOM_RE.sub("<TMPID>", text)
+    text = _SIG_TMP_PATH_RE.sub(r"<TMP>\1", text)
+    text = _SIG_ISO_TS_RE.sub("<TS>", text)
+    text = _SIG_CLOCK_TS_RE.sub("<TS>", text)
+    text = _SIG_DURATION_RE.sub("<DUR>", text)
+    text = _SIG_HEX_ADDR_RE.sub("<ADDR>", text)
+    text = _SIG_PORT_RE.sub(r"\1:<PORT>", text)
+    text = _SIG_WS_RE.sub(" ", text)
+    return text.strip()
+
+
 class FailureClass(str, Enum):
     """Standard failure classes for observability and agent tuning."""
 
@@ -278,7 +335,7 @@ def _parse_pytest_assertion(text: str) -> Optional[ParsedFailure]:
     # AssertionError: assert 200 == 401  or  E       AssertionError: assert 200 == 401
     assert_err_match = re.search(r"AssertionError:\s*(assert\s+[^\n]+)", text)
     if assert_err_match:
-        assertion_line = assert_err_match.group(1).strip()[:200]
+        assertion_line = assert_err_match.group(1).strip()
 
     # E         +200  /  E         -401  (actual vs expected) -> got 401
     expected_match = re.search(r"E\s+[+-]\s*(\d+)\s*\n\s*E\s+[+-]\s*(\d+)", text)
@@ -433,7 +490,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
     if yaml_match or ("yaml" in text.lower() and "parse" in text.lower()) or yamlerror_in_text:
         file_path = yaml_match.group(1).strip() if yaml_match and yaml_match.group(1) else None
         msg = (
-            yaml_match.group(2).strip()[:300]
+            yaml_match.group(2).strip()
             if yaml_match and yaml_match.group(2)
             else "YAML parse error"
         )
@@ -494,7 +551,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
         re.IGNORECASE | re.DOTALL,
     )
     if run_match:
-        detail = run_match.group(1).strip()[:200] if run_match.group(1) else ""
+        detail = run_match.group(1).strip() if run_match.group(1) else ""
         failures.append(
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,

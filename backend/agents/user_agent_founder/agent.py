@@ -271,7 +271,7 @@ class FounderAgent:
                         attempt + 1,
                         max_retries + 1,
                         wait,
-                        str(exc)[:200],
+                        str(exc),
                     )
                     _time.sleep(wait)
                     continue
@@ -327,7 +327,7 @@ class FounderAgent:
                         attempt + 1,
                         max_retries + 1,
                         wait,
-                        str(exc)[:200],
+                        str(exc),
                     )
                     _time.sleep(wait)
                     continue
