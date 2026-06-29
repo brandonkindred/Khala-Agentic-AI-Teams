@@ -460,13 +460,8 @@ def _resolve_failing_test_context(
 
 
 def _build_error_signature(build_errors: str) -> str:
-    """Compute a signature for same-error detection.
-    For pytest assertion failures, use the last 1200 chars (where assertion details
-    usually appear) so assertion changes are detected. Otherwise use first 800 chars.
-    """
-    if _is_pytest_assertion_failure(build_errors):
-        return (build_errors[-1200:] if len(build_errors) > 1200 else build_errors).strip()
-    return (build_errors[:800] if len(build_errors) > 800 else build_errors).strip()
+    """Compute a signature for same-error detection using the full error text."""
+    return build_errors.strip()
 
 
 def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[str, Any]]:

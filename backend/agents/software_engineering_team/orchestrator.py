@@ -1198,7 +1198,7 @@ def _try_build_fix_one_at_a_time(
         rec = issue.get("recommendation") or "Fix the issue."
         # Build relevant code snippet
         if file_path and file_path in current_files:
-            relevant_code = f"--- {file_path} ---\n{current_files[file_path][:8000]}"
+            relevant_code = f"--- {file_path} ---\n{current_files[file_path]}"
         else:
             parts = []
             for p, c in current_files.items():

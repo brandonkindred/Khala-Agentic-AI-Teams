@@ -129,7 +129,7 @@ class PostMortemWriter:
         Returns:
             Formatted markdown string for the entry.
         """
-        prompt_preview = self._truncate_text(original_prompt, max_len=2000)
+        prompt_preview = original_prompt
         error_str = str(error)
 
         partial_excerpts = self._format_partial_responses(partial_responses)

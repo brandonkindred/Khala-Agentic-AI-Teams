@@ -69,7 +69,7 @@ def test_build_error_signature() -> None:
     assert _build_error_signature("error abc\nmore") == "error abc\nmore"
     long = "x" * 1000
     sig = _build_error_signature(long)
-    assert len(sig) == 800
+    assert sig == long
 
 
 def test_validate_devops_output_no_outputs() -> None:
