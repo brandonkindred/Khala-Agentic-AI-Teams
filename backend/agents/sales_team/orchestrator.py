@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import contextvars
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
 from uuid import uuid4
+
+from shared_concurrency import parallel_map
 
 from .agents import (
     CloserAgent,
@@ -510,20 +510,7 @@ class SalesPodOrchestrator:
             attribution/request-id contextvars propagate to the workers (a raw
             ``ThreadPoolExecutor`` does not copy them; see ``llm_service.attribution``).
         """
-        if not prospects:
-            return []
-        results: list = [None] * len(prospects)
-        workers = min(self.config.pipeline_stage_workers, len(prospects))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            # A fresh context copy per task: a single Context can't be entered
-            # concurrently, and each worker must see the parent's attribution.
-            idx_by_future = {
-                pool.submit(contextvars.copy_context().run, fn, p): i
-                for i, p in enumerate(prospects)
-            }
-            for fut in as_completed(idx_by_future):
-                results[idx_by_future[fut]] = fut.result()
-        return [r for r in results if r is not None]
+        return parallel_map(prospects, fn, max_workers=self.config.pipeline_stage_workers)
 
     def _run_outreach(
         self,
@@ -1162,17 +1149,17 @@ class SalesPodOrchestrator:
                 )
                 return []
 
-        # submit (not pool.map) so each call runs inside a fresh copy of this
-        # thread's context — the LLM attribution/request-id contextvars do not
-        # propagate to raw worker threads (see llm_service.attribution). Iterating
-        # the futures in submission order preserves pool.map's input ordering.
-        with ThreadPoolExecutor(max_workers=self.config.decision_maker_workers) as pool:
-            futures = [
-                pool.submit(contextvars.copy_context().run, _map_one, company)
-                for company in companies
-            ]
-            for fut in futures:
-                mapped.extend(fut.result())
+        # parallel_map runs each call inside a fresh copy of this thread's context
+        # so the LLM attribution/request-id contextvars propagate into the workers
+        # (raw threads don't copy them; see llm_service.attribution). Order is
+        # preserved; _map_one returns a list (never None) so skip_none is off.
+        for entries in parallel_map(
+            companies,
+            _map_one,
+            max_workers=self.config.decision_maker_workers,
+            skip_none=False,
+        ):
+            mapped.extend(entries)
 
         if not mapped:
             run_notes.append("No decision-makers identified across the company shortlist.")
@@ -1229,23 +1216,27 @@ class SalesPodOrchestrator:
                 return p, None
 
         dossiers: dict[str, ProspectDossier] = {}
-        # copy_context().run per task so attribution propagates into the workers
-        # (raw ThreadPoolExecutor does not copy contextvars; see llm_service.attribution).
-        with ThreadPoolExecutor(max_workers=self.config.dossier_workers) as pool:
-            futures = [
-                pool.submit(contextvars.copy_context().run, _build_one, p) for p in final_prospects
-            ]
-            for fut in as_completed(futures):
-                p, dossier = fut.result()
-                if dossier is None:
-                    continue
-                # Ensure dossier has IDs before potential persistence.
-                if not dossier.dossier_id:
-                    dossier.dossier_id = f"dsr_{uuid4().hex[:12]}"
-                if not dossier.generated_at:
-                    dossier.generated_at = datetime.now(tz=timezone.utc).isoformat()
-                dossier.prospect_id = p.id
-                dossiers[p.id] = dossier
+        # parallel_map copies this thread's context per task so attribution
+        # propagates into the workers (raw threads don't copy contextvars; see
+        # llm_service.attribution). Completion order is fine here — results feed a
+        # dict keyed by prospect id. _build_one always returns a tuple (so
+        # skip_none is off), though the dossier element may be None on failure.
+        for p, dossier in parallel_map(
+            final_prospects,
+            _build_one,
+            max_workers=self.config.dossier_workers,
+            preserve_order=False,
+            skip_none=False,
+        ):
+            if dossier is None:
+                continue
+            # Ensure dossier has IDs before potential persistence.
+            if not dossier.dossier_id:
+                dossier.dossier_id = f"dsr_{uuid4().hex[:12]}"
+            if not dossier.generated_at:
+                dossier.generated_at = datetime.now(tz=timezone.utc).isoformat()
+            dossier.prospect_id = p.id
+            dossiers[p.id] = dossier
 
         # Stage 5 — persist (best-effort) and assemble the result
         store = None
