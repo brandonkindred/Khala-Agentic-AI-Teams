@@ -1279,15 +1279,19 @@ class SpecReadinessGate(GateResultsMixin):
         ``all_of`` / ``any_of`` tree. ``kind`` is ``"entry"`` or
         ``"signal_exit"``; ``label`` is a stable human-readable locator (e.g.
         ``"entry_rules[0]"``). Malformed rules (non-``EntryRule`` /
-        non-``SignalExitRule``) are skipped — Rule 2 already flags those, so this
-        does not double-report them.
+        non-``SignalExitRule``) and malformed ``when`` values (not a
+        ``Predicate`` / ``AllOf`` / ``AnyOf`` — reachable via ``model_construct``,
+        legacy loading, or post-construction mutation) are skipped: Rule 2
+        already flags those as critical, and yielding them would crash the
+        downstream tree walkers (``.of`` on a non-tree) instead of returning
+        gate results.
         """
         assert isinstance(spec, StrategySpec)
         for idx, rule in enumerate(spec.entry_rules):
-            if isinstance(rule, EntryRule):
+            if isinstance(rule, EntryRule) and isinstance(rule.when, (Predicate, AllOf, AnyOf)):
                 yield rule.when, "entry", f"entry_rules[{idx}]"
         for idx, rule in enumerate(spec.exit_rules):
-            if isinstance(rule, SignalExitRule):
+            if isinstance(rule, SignalExitRule) and isinstance(rule.when, (Predicate, AllOf, AnyOf)):
                 yield rule.when, "signal_exit", f"exit_rules[{idx}]"
 
     @staticmethod

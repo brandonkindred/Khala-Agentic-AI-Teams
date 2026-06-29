@@ -1698,3 +1698,20 @@ def test_any_of_one_reachable_leg_not_flagged() -> None:
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert "predicate:unreachable" not in _rule_ids(results)
+
+
+def test_malformed_when_is_skipped_not_crashed() -> None:
+    """A malformed ``when`` (not a Predicate/AllOf/AnyOf — reachable via
+    model_construct / legacy load / mutation) must be reported by Rule 2 and
+    SKIPPED by the indicator-validity / reachability tree walkers, not crash
+    them. ``validate()`` runs all rules in one pass, so the guard in
+    ``_iter_rule_whens`` is what keeps the later rules from hitting ``.of`` on a
+    non-tree value."""
+    spec = _spec()
+    # Bypass validation to plant a malformed ``when`` on the entry rule.
+    object.__setattr__(spec.entry_rules[0], "when", "garbage")
+
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+
+    # Completed without raising, and Rule 2 flagged the malformed entry rule.
+    assert any(not r.passed and r.severity == "critical" for r in results)

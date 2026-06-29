@@ -625,6 +625,53 @@ def test_entry_archetype_two_separators_disambiguate_predicate_grouping() -> Non
     assert _entry_archetype(multi) == "ema+sma_crossover,rsi"
 
 
+def test_entry_archetype_all_of_tree_names_every_leg() -> None:
+    # A multi-confirmation all_of (trend ∧ pullback) must gather the indicator
+    # families across ALL legs — not collapse to "unknown" for lack of a
+    # top-level lhs/op (the regression Codex flagged).
+    from investment_team.strategy_lab.spec_dsl import AllOf, EntryRule, IndicatorRef, Predicate
+
+    entry = EntryRule(
+        when=AllOf(
+            of=[
+                Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 200})
+                ),
+                Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=40.0),
+            ]
+        )
+    )
+    strat = _attr_record(entry_rules=[entry]).strategy
+    assert _entry_archetype(strat) == "rsi+sma"
+
+
+def test_entry_archetype_any_of_tree_carries_crossover_suffix() -> None:
+    # any_of with one cross leg → families joined, _crossover suffix applied.
+    from investment_team.strategy_lab.spec_dsl import AnyOf, EntryRule, IndicatorRef, Predicate
+
+    entry = EntryRule(
+        when=AnyOf(
+            of=[
+                Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+                Predicate(
+                    lhs="bar.close",
+                    op="cross_above",
+                    rhs=IndicatorRef(name="ema", params={"period": 20}),
+                ),
+            ]
+        )
+    )
+    strat = _attr_record(entry_rules=[entry]).strategy
+    assert _entry_archetype(strat) == "ema+rsi_crossover"
+
+
+def test_entry_archetype_leaf_predicate_unchanged_after_tree_support() -> None:
+    # Regression guard: single-leaf bucketing is byte-identical to the
+    # pre-combinator behaviour.
+    strat = _attr_record(entry_rules=[_rsi_entry()]).strategy
+    assert _entry_archetype(strat) == "rsi"
+
+
 def test_exit_archetypes_maps_each_kind_and_basis() -> None:
     trailing = _attr_record(exit_rules=[_trailing_stop()]).strategy
     fixed = _attr_record(exit_rules=[_fixed_stop()]).strategy
