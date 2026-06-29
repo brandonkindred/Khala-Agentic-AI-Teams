@@ -39,6 +39,11 @@ def test_run_workflow_with_llm_no_pra(tmp_path):
 
     repo = str(tmp_path)
     mock_llm = MagicMock()
+    # Required: the digestion path sizes sections from get_max_context_tokens (int math)
+    # and may call complete() for the compaction fallback. Without these the budget math
+    # raises TypeError, map_reduce swallows it to fallback, and the feature is untested.
+    mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete.return_value = "CONDENSED"
     mock_llm.complete_text.return_value = '{"problem_summary": "Need X", "opportunity_statement": "Y", "target_users": ["u1"], "success_criteria": ["c1"], "assumptions": []}'
     result = run_workflow(
         repo_path=repo,

@@ -74,12 +74,18 @@ class SubmitAnswersRequest(BaseModel):
 
 
 def _get_llm():
-    """Return Strands-compatible model for the planning_v3 team."""
-    from strands import Agent
+    """Return a real LLMClient for the planning_v3 team.
 
-    from llm_service import get_strands_model
+    The discovery/requirements phases call ``llm.complete_text(...)`` and the spec
+    digestion path uses the same client for per-section extraction plus a
+    ``compact_text`` fallback (``.complete`` / ``.get_max_context_tokens``). A Strands
+    ``Agent`` exposes none of these, so returning one made the phases silently fall
+    back to default output. ``get_client`` returns an ``_AttributingClient`` (a
+    virtual ``LLMClient``) that provides all three.
+    """
+    from llm_service import get_client
 
-    return Agent(model=get_strands_model("planning_v3"))
+    return get_client("planning_v3")
 
 
 def _run_workflow_background(
