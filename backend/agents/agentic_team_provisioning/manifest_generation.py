@@ -173,6 +173,7 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
           appearing in the catalog. In-memory and idempotent. Best-effort — a
           registry failure is logged, never raised, so generation still succeeds.
     """
+    assert team_id, "register_team_manifests: team_id must be non-empty"
     # Only *generated* roster agents get a team-namespaced wrapper installed here.
     # Registry-source agents (added via Agent Studio's from-registry endpoint)
     # already exist in the registry on their own, so wrapping them would register a

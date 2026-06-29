@@ -314,8 +314,14 @@ def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
     return AgenticTeamAgent(
         agent_name=manifest.name,
         role=manifest.summary or manifest.name,
-        skills=manifest.tags,
-        tools=list(manifest.cognition.tools) if manifest.cognition else [],
+        # ``tags``/``cognition.tools`` are non-Optional ``list[str]`` on a validated
+        # manifest, but guard ``or []`` / ``and`` defensively at this projection
+        # boundary so a degenerate (e.g. ``model_construct``-built) manifest can't
+        # pass ``None`` into ``list(...)`` or the model field.
+        skills=manifest.tags or [],
+        tools=list(manifest.cognition.tools)
+        if manifest.cognition and manifest.cognition.tools
+        else [],
         # ``team`` is a required, non-empty str on AgentManifest; the guard is
         # belt-and-suspenders so a degenerate empty team can never inject ``[""]``.
         expertise=[manifest.team] if manifest.team else [],

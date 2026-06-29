@@ -132,6 +132,39 @@ def test_from_registry_no_cognition_tools_passes_validation(client: TestClient) 
     assert validation["gaps"] == []
 
 
+def test_from_registry_empty_tags_agent_added_but_flagged_sparse(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """A manifest with NO tags and no cognition projects to a roster agent with only
+    ``expertise`` populated (skills/capabilities/tools all empty) — three missing
+    categories, which ``roster_validation`` correctly flags ``sparse_profile``. The
+    add still succeeds (201); validation honestly reports the team is not fully
+    staffed. (Studio-saved manifests always carry the 'studio' tag, so this
+    degenerate shape only arises for hand-authored / non-Studio catalog manifests —
+    and a tag-less, tool-less, capability-less agent genuinely *is* under-specified.)"""
+    registry.register(
+        AgentManifest(
+            id="empty.tags",
+            team="empty",
+            name="empty.tags",
+            summary="No tags",
+            tags=[],
+            cognition=None,
+            source=_SOURCE,
+        )
+    )
+    team_id = _new_team()
+    resp = client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "empty.tags"})
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["skills"] == []  # empty tags → empty skills
+    assert body["expertise"] == ["empty"]  # only expertise populated
+
+    validation = client.get(f"/teams/{team_id}/roster/validation").json()
+    assert validation["is_fully_staffed"] is False  # sparse_profile: 3 categories missing
+    assert any(g["category"] == "sparse_profile" for g in validation["gaps"])
+
+
 def test_from_registry_is_idempotent_by_name(client: TestClient) -> None:
     """Re-adding the same manifest updates in place rather than duplicating."""
     team_id = _new_team()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal, Optional
+from typing import Final, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -129,8 +129,8 @@ class ProcessDefinition(BaseModel):
 
 # Roster-entry provenance values (the ``AgenticTeamAgent.source`` Literal). Named
 # constants so the projection / registration filters reference one source of truth.
-SOURCE_GENERATED = "generated"
-SOURCE_REGISTRY = "registry"
+SOURCE_GENERATED: Final = "generated"
+SOURCE_REGISTRY: Final = "registry"
 
 
 class AgenticTeamAgent(BaseModel):
@@ -165,7 +165,7 @@ class AgenticTeamAgent(BaseModel):
         default_factory=list,
         description="Domain expertise areas (e.g. 'customer support', 'financial analysis', 'HIPAA compliance')",
     )
-    source: Literal["generated", "registry"] = Field(
+    source: Literal[SOURCE_GENERATED, SOURCE_REGISTRY] = Field(
         default=SOURCE_GENERATED,
         description="Provenance of this roster entry: 'generated' (LLM-authored on this team) "
         "or 'registry' (added from a registered AgentManifest via Agent Studio).",
