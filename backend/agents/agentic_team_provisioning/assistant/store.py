@@ -242,12 +242,15 @@ class AgenticTeamStore:
     def save_team_agents(self, team_id: str, agents: list[AgenticTeamAgent]) -> None:
         """Replace the full agents roster for a team (upsert semantics).
 
-        Preconditions: ``team_id`` is a non-empty string; ``agents`` have unique
-            ``agent_name`` within the team.
+        Preconditions: ``team_id`` is a non-empty string naming an existing team;
+            ``agents`` have unique ``agent_name`` within the team.
         Postconditions: the team's ``agentic_team_agents`` rows are exactly ``agents``
             (rows absent from ``agents`` are removed; surviving rows keep their
             ``created_at`` via ``_write_team_agents``'s upsert); the team's
-            ``updated_at`` is bumped. No-op write if ``team_id`` names no team.
+            ``updated_at`` is bumped. If ``team_id`` names no team the agent INSERT
+            violates the ``agentic_team_agents`` → ``agentic_teams`` foreign key and
+            the transaction raises (only the empty-``agents`` case degrades to a
+            no-op DELETE/UPDATE) — callers must pass an existing team id.
 
         Concurrency: takes the team-row ``FOR UPDATE`` lock before touching child
         ``agentic_team_agents`` rows, so every roster write (this, the single-agent
@@ -388,9 +391,10 @@ class AgenticTeamStore:
         """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            # Parent-first lock (see _lock_team) — uniform lock order. This sets
-            # _last_fetch_one, immediately overwritten by the DELETE's RETURNING
-            # below, so the fetchone() still reads the delete result.
+            # Parent-first lock (see _lock_team) — uniform lock order. The lock
+            # SELECT leaves its own result set on the cursor, but the DELETE ...
+            # RETURNING below re-executes the cursor and replaces it, so the
+            # fetchone() that follows reads the deleted row, not the lock SELECT.
             self._lock_team(cur, team_id)
             cur.execute(
                 "DELETE FROM agentic_team_agents WHERE team_id = %s AND agent_name = %s "

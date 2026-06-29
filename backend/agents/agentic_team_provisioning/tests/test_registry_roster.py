@@ -200,6 +200,30 @@ def test_from_registry_unknown_team_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_from_registry_malformed_manifest_422(client: TestClient, registry: _FakeRegistry) -> None:
+    """A resolvable but too-malformed-to-project manifest is a 422, not a 500.
+
+    ``AgentManifest.name`` is required but not length-constrained, so a blank name
+    passes Pydantic yet can't yield a usable roster agent. The route catches the
+    projection's ``ValueError`` and surfaces it as a client error; the roster is
+    left unchanged."""
+    registry.register(
+        AgentManifest(
+            id="blank.name",
+            team="misc",
+            name="",  # passes Pydantic (no min_length) but unprojectable
+            summary="Blank name",
+            source=_SOURCE,
+        )
+    )
+    team_id = _new_team()
+    resp = client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blank.name"})
+    assert resp.status_code == 422
+    assert "manifest" in resp.json()["detail"].lower()
+    # Roster untouched.
+    assert client.get(f"/teams/{team_id}/agents").json() == []
+
+
 def test_delete_removes_agent(client: TestClient) -> None:
     """Deleting a rostered agent returns 204 and empties the roster."""
     team_id = _new_team()

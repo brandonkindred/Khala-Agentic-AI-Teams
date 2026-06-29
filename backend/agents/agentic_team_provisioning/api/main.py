@@ -393,7 +393,9 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
 
     Preconditions: ``req.manifest_id`` is non-empty (enforced by the request model).
     Postconditions: ``201`` with the projected roster agent persisted on the roster;
-        ``404`` if the team or the manifest id is unknown (roster unchanged).
+        ``404`` if the team or the manifest id is unknown (roster unchanged); ``422``
+        if the resolved manifest is too malformed to project (e.g. blank name/id), so
+        a bad registry entry surfaces as a client error rather than an unhandled 500.
     """
     from agent_registry import get_registry
 
@@ -403,7 +405,13 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     manifest = get_registry().get(req.manifest_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent manifest: {req.manifest_id}")
-    agent = _roster_agent_from_manifest(manifest)
+    try:
+        agent = _roster_agent_from_manifest(manifest)
+    except ValueError as e:
+        logger.warning(
+            "Malformed registered manifest %s for team %s: %s", req.manifest_id, team_id, e
+        )
+        raise HTTPException(status_code=422, detail=f"Malformed agent manifest: {e}")
     _store.add_or_replace_team_agent(
         team_id, agent, on_replaced=_generated_manifest_cleanup(team_id)
     )
