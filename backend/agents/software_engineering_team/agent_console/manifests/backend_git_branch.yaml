@@ -12,4 +12,4 @@ sandbox:
   manifest_path: default.yaml
   access_tier: elevated
 source:
-  entrypoint: software_engineering_team.backend_code_v2_team.tool_agents.git_branch_management.agent:GitBranchManagementToolAgent
+  entrypoint: software_engineering_team.shared.tool_agent_git_branch:GitBranchManagementToolAgent
