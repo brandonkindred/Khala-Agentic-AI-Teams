@@ -1042,6 +1042,16 @@ def _map_chunks(
         with progress_lock:
             abandoned.set()
 
+    workers = min(_map_parallelism(), total)
+    if workers <= 1:
+        # Sequential in the caller's thread (CODE_REVIEW_MAP_PARALLELISM=1, the
+        # documented "run calls sequentially" mode): a failure aborts immediately
+        # and a later chunk is never started — a 1-worker pool could otherwise
+        # dequeue and begin the next chunk's review before the main thread
+        # observes the failure and cancels, firing an extra LLM call past fail-fast.
+        # Context is already the caller's here, so attribution still propagates.
+        return [_run_one(c) for c in chunks]
+
     # parallel_map owns the bounded pool, input-order results, fast-fail on the
     # first exception (pending chunks cancelled, original traceback preserved),
     # and per-task context propagation so LLM attribution reaches the workers.
@@ -1050,7 +1060,7 @@ def _map_chunks(
     return parallel_map(
         chunks,
         _run_one,
-        max_workers=_map_parallelism(),
+        max_workers=workers,
         skip_none=False,
         on_first_exception=_abandon,
     )
