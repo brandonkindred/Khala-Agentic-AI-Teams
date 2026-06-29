@@ -510,6 +510,31 @@ class DummyLLMClient(LLMClient, Model):
                 "requirement_task_mapping": [],
                 "clarification_questions": [],
             }
+        elif (
+            "acceptance_trace" in lowered
+            and "quality_gates" in lowered
+            and "validation_evidence" in lowered
+            and "acceptance criteria" in lowered
+        ):
+            # QA acceptance_evidence mode (absorbs the former DevOps test
+            # validation surface). Kept ABOVE the ``bugs_found`` QA branch
+            # because this prompt maps evidence to criteria rather than
+            # reviewing code. The four anchor tokens (``acceptance_trace`` +
+            # ``quality_gates`` + ``validation_evidence`` from the output schema,
+            # plus the literal "acceptance criteria" from the instruction) make a
+            # false match against another team's prompt effectively impossible.
+            return {
+                "approved": True,
+                "quality_gates": {"unit_tests": "pass", "integration_tests": "pass"},
+                "acceptance_trace": [
+                    {"criterion": "Criterion 1", "implementation_refs": [], "tests": []}
+                ],
+                "validation_evidence": [
+                    {"gate": "unit_tests", "status": "pass", "detail": "Dummy evidence"}
+                ],
+                "bugs_found": [],
+                "summary": "Dummy acceptance evidence",
+            }
         elif "bugs_found" in lowered and (
             "integration_test" in lowered or "readme_content" in lowered or "test_plan" in lowered
         ):

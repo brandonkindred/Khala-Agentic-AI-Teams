@@ -741,6 +741,132 @@ class TestDevOpsTestValidationAgent:
         out = agent.run(DevOpsTestValidationInput(acceptance_criteria=[], tool_results={}))
         assert not out.approved
 
+    def test_delegates_to_unified_qa_agent(self) -> None:
+        from devops_team.test_validation_agent import DevOpsTestValidationAgent
+        from qa_agent import QAExpertAgent
+
+        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
+        assert isinstance(agent._qa, QAExpertAgent)
+
+    def test_preserves_devops_model_routing_key(self, monkeypatch) -> None:
+        """A non-Strands client resolves the model under the 'devops' routing
+        key (the pre-refactor key), not the QA agent's default 'qa'."""
+        from devops_team.test_validation_agent import DevOpsTestValidationAgent
+        from devops_team.test_validation_agent import agent as agent_mod
+
+        captured: Dict[str, Any] = {}
+
+        def _fake_get_strands_model(key: str) -> Any:
+            captured["key"] = key
+            return DummyLLMClient()  # a Strands Model — used directly downstream
+
+        monkeypatch.setattr(agent_mod, "get_strands_model", _fake_get_strands_model)
+        DevOpsTestValidationAgent(object())  # non-None, non-Strands -> resolves via key
+        assert captured["key"] == "devops"
+
+    def test_qa_delegation_exception_fails_closed(self) -> None:
+        """If the delegated QA agent raises, the shim returns a fail-closed
+        result instead of propagating the exception to the orchestrator."""
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
+
+        def _boom(_inp: Any) -> Any:
+            raise RuntimeError("LLM unavailable")
+
+        agent._qa.run = _boom  # type: ignore[assignment]
+        out = agent.run(DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={}))
+        assert out.approved is False
+        assert out.quality_gates.get("test_validation") == "fail"
+        assert "LLM unavailable" in out.summary
+
+    def test_maps_evidence_and_trace_through(self) -> None:
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"unit_tests": "pass"},
+                "acceptance_trace": [
+                    {"criterion": "c1", "implementation_refs": ["app.py"], "tests": []}
+                ],
+                "validation_evidence": [
+                    {"gate": "unit_tests", "status": "pass", "detail": "12 passed"}
+                ],
+                "summary": "ok",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
+        )
+        assert out.acceptance_trace and out.acceptance_trace[0]["criterion"] == "c1"
+        assert out.evidence and out.evidence[0].gate == "unit_tests"
+        assert out.evidence[0].status == "pass"
+
+    def test_unknown_gate_status_coerced_to_not_run(self) -> None:
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"unit_tests": "flaky"},  # not a valid GateStatus
+                "summary": "ok",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=[], tool_results={})
+        )
+        assert out.quality_gates["unit_tests"] == "not_run"
+
+    def test_unapproved_without_fail_gate_fails_closed(self) -> None:
+        """An unapproved validation with no failing gate must synthesize one so
+        the gate-only DevOps pipeline still blocks (fail closed)."""
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": False,  # unapproved but no "fail" gate present
+                "quality_gates": {"unit_tests": "not_run"},
+                "summary": "could not validate",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
+        )
+        assert not out.approved
+        assert any(v == "fail" for v in out.quality_gates.values())
+
+    def test_approved_does_not_synthesize_fail_gate(self) -> None:
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"unit_tests": "pass"},
+                "summary": "ok",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
+        )
+        assert out.approved
+        assert "test_validation" not in out.quality_gates
+
 
 class TestChangeReviewAgent:
     def test_approves(self) -> None:
