@@ -69,6 +69,7 @@ from ..strategy_lab.spec_dsl import (
     StopLossRule,
     VolatilityTargetSizing,
     first_side_stop_factor,
+    is_bracket_exit,
     protective_limit_price,
 )
 from ..strategy_lab_context import is_fractional_asset_class
@@ -1668,7 +1669,10 @@ class _EngineEntryDispatcher:
         """
         if self._bracket is None:
             return None, None
-        assert ref_price > 0, "bracket reference price must be positive"
+        # Explicit raise (not ``assert``, which ``python -O`` strips) so the
+        # precondition stays enforced in optimized production runs.
+        if ref_price <= 0:
+            raise ValueError(f"bracket reference price must be positive, got {ref_price!r}")
         bracket = self._bracket
         is_long = side == OrderSide.LONG
         stop_pct = bracket.stop_loss.pct
@@ -1684,11 +1688,13 @@ class _EngineEntryDispatcher:
         # ``pct < 1.0``) already guarantee this for a positive ``ref_price``, so
         # a violation here means a field bound was loosened without updating this
         # math — fail loudly at emit rather than materialize a never-filling /
-        # negative-price child.
-        assert stop_price > 0 and limit_price > 0, (
-            f"bracket resolved non-positive price (stop={stop_price!r}, limit={limit_price!r}) "
-            f"from ref={ref_price!r}, stop_pct={stop_pct!r}, tp_pct={tp_pct!r}"
-        )
+        # negative-price child. Uses an explicit raise (not ``assert``, which
+        # ``python -O`` strips) so the check stays active in production.
+        if stop_price <= 0 or limit_price <= 0:
+            raise ValueError(
+                f"bracket resolved non-positive price (stop={stop_price!r}, limit={limit_price!r}) "
+                f"from ref={ref_price!r}, stop_pct={stop_pct!r}, tp_pct={tp_pct!r}"
+            )
         limit_offset: Optional[float] = None
         if bracket.stop_loss.style == "limit":
             # ``limit_offset_pct`` is a fraction of the stop level; the bracket
@@ -2296,7 +2302,21 @@ class TradingService:
         shorts_possible = entry_rules is None or any(
             getattr(rule, "side", "long") == "short" for rule in entry_rules
         )
-        if shorts_possible and first_side_stop_factor(self._exit_rules, "short") is None:
+        # An ``oco_bracket`` only protects ENGINE-managed entries: the entry
+        # dispatcher attaches its legs to engine-emitted orders, and on the
+        # custom-code path (``entry_rules is None``) it never fires — the strategy
+        # subprocess submits its own entries with no attachment, and the exit
+        # evaluator also skips the bracket. So a bracket's stop leg must NOT
+        # suppress the short-safety auto-stop on that path, or a custom-code short
+        # under a bracket spec would run with no engine-enforced loss cap. Drop
+        # brackets from the stop check when entries are not engine-managed; a real
+        # ``StopLossRule`` still counts on either path.
+        stop_check_rules = (
+            self._exit_rules
+            if entry_rules is not None
+            else [r for r in self._exit_rules if not is_bracket_exit(r)]
+        )
+        if shorts_possible and first_side_stop_factor(stop_check_rules, "short") is None:
             self._exit_rules.append(StopLossRule(pct=1.0, basis="entry_price"))
         self._entry_rules: List[EntryRule] = list(entry_rules or [])
         self._sizing = sizing

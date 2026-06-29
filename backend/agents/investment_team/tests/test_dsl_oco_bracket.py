@@ -405,3 +405,35 @@ def test_end_to_end_stop_leg_fills_and_cancels_take_profit() -> None:
     assert outcome.closed_trades[0].exit_reason == "engine_exit:bracket_sl"
     assert "AAA" not in portfolio.positions
     assert order_book.children_of(parent.order_id) == []
+
+
+def test_end_to_end_limit_style_stop_materializes_and_fills_stop_limit_child() -> None:
+    # A limit-style bracket stop materializes as a resting STOP_LIMIT child (not a
+    # plain STOP) and, when triggered and able to fill at its limit, closes the
+    # position and cancels the take-profit sibling.
+    sim, order_book, portfolio = _make_simulator()
+    req = _emit_with_bracket(
+        "long",
+        _bracket(stop_pct=0.05, style="limit", limit_offset_pct=0.02, tp_pct=0.10),
+        close=100.0,
+    )
+    parent = order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+
+    # Bar 2: entry fills; the limit-style stop leg materializes as a STOP_LIMIT
+    # child at stop=95 with its limit on the protective side (95 - 0.02*95 = 93.1).
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    children = order_book.children_of(parent.order_id)
+    sl = next(c for c in children if c.request.order_type == OrderType.STOP_LIMIT)
+    assert sl.request.stop_price == pytest.approx(95.0)
+    assert sl.request.limit_price == pytest.approx(93.1)
+
+    # Bar 3: dips through the 95 stop while trading above the 93.1 limit → the
+    # STOP_LIMIT fills at its limit and the take-profit sibling is cancelled.
+    outcome = sim.process_bar(_bar("2024-01-03", open_price=96.0, high=96.0, low=93.0, close=94.0))
+    assert len(outcome.closed_trades) == 1
+    assert outcome.closed_trades[0].exit_reason == "engine_exit:bracket_sl"
+    assert outcome.exit_fills[0].price == pytest.approx(93.1)
+    assert "AAA" not in portfolio.positions
+    assert order_book.children_of(parent.order_id) == []
