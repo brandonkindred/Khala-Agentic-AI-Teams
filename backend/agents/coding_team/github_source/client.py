@@ -597,7 +597,14 @@ class GitHubClient:
             - Returns the created-comment payload (carries ``id`` and
               ``html_url``). Raises ``GitHubAPIError`` on any non-2xx response so
               the caller can catch a 422 and degrade.
+            - Raises ``ValueError`` when the "exactly one anchor" precondition is
+              violated (neither or both of ``line``/``subject_type`` supplied),
+              rather than sending an ambiguous request GitHub would reject.
         """
+        if (line is None) == (subject_type is None):
+            raise ValueError(
+                "create_review_comment requires exactly one of 'line' or 'subject_type'"
+            )
         json_body: dict[str, Any] = {
             "commit_id": commit_id,
             "path": path,

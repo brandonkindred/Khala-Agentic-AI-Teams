@@ -238,6 +238,15 @@ def test_split_review_comments_all_file_level() -> None:
     assert split_review_comments(items) == ([], items)
 
 
+def test_split_review_comments_unexpected_shape_not_dropped() -> None:
+    # A comment that is neither line-anchored nor subject_type=file must still be
+    # conserved (routed to file_level) rather than silently lost.
+    weird = {"path": "a.py", "body": "no anchor"}
+    line_anchored, file_level = split_review_comments([weird])
+    assert line_anchored == []
+    assert file_level == [weird]
+
+
 # ---------------------------------------------------------------------------
 # format_comment_body / format_issue_comment / inline_comment_to_timeline_body
 # ---------------------------------------------------------------------------

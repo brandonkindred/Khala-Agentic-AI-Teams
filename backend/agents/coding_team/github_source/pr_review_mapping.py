@@ -226,13 +226,15 @@ def split_review_comments(
           file-level (carries ``subject_type == "file"``).
     Postconditions:
         - Returns ``(line_anchored, file_level)`` where ``line_anchored`` is every
-          entry carrying a ``line`` key and ``file_level`` is every entry whose
-          ``subject_type`` is ``"file"``. Input order is preserved within each
-          group, and the two groups' lengths sum to ``len(comments)`` (no entry is
-          dropped or duplicated).
+          entry carrying a ``line`` key and ``file_level`` is every other entry.
+          The split is exhaustive: the two groups' lengths always sum to
+          ``len(comments)`` (no entry is dropped or duplicated), so a finding can
+          never be silently lost even if a future producer emits an unexpected
+          shape — it falls into ``file_level`` and is still posted (file-level).
+          Input order is preserved within each group.
     """
     line_anchored = [c for c in comments if "line" in c]
-    file_level = [c for c in comments if c.get("subject_type") == "file"]
+    file_level = [c for c in comments if "line" not in c]
     return line_anchored, file_level
 
 

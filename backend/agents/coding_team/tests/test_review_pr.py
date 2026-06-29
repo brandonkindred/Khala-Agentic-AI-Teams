@@ -255,6 +255,19 @@ class TestCreateReviewComment:
                 body="b", subject_type="file",
             )
 
+    def test_requires_exactly_one_anchor(self) -> None:
+        # Never reaches the network: the precondition is enforced first.
+        client = _client_with(lambda _req: httpx.Response(500, text="should not be hit"))
+        with pytest.raises(ValueError):  # both supplied
+            client.create_review_comment(
+                owner="o", repo="r", number=7, commit_id="s", path="a.py",
+                body="b", line=3, subject_type="file",
+            )
+        with pytest.raises(ValueError):  # neither supplied
+            client.create_review_comment(
+                owner="o", repo="r", number=7, commit_id="s", path="a.py", body="b"
+            )
+
 
 class TestAuthenticatedLogin:
     def test_returns_login(self) -> None:

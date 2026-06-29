@@ -1401,8 +1401,11 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           file-level review comment posted on the dedicated comments endpoint (the
           only one that accepts ``subject_type``); a standalone conversation
           comment is used only as a last resort, when even a file-level post is
-          rejected, so no finding is dropped. Any failure marks the job ``failed``
-          and posts a (token-scrubbed) PR comment — never raises.
+          rejected, so no finding is dropped. A finding that cannot be posted at
+          all marks the job ``failed`` (via ``comments_failed``); any unhandled
+          exception likewise marks it ``failed`` and posts a (token-scrubbed) PR
+          comment — never raises. (A best-effort failure to post the summary body
+          alone does not fail the job, since the findings still post.)
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
