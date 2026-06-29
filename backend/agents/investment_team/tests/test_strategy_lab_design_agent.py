@@ -28,8 +28,10 @@ from investment_team.strategy_lab.agents._parse_helpers import (
     build_json_correction_prompt,
 )
 from investment_team.strategy_lab.agents.design import (
+    _SELF_REVIEW_SYSTEM_PROMPT,
     DesignAgent,
     _build_correction_prompt,
+    _resolve_diversity_mode,
 )
 from investment_team.strategy_lab.agents.design_review import CritiqueIssue, SpecCritique
 from investment_team.strategy_lab.spec_dsl import (
@@ -1437,3 +1439,140 @@ def test_correction_prompt_carries_full_payload_and_cause() -> None:
     assert long_payload in prompt
     assert long_cause in prompt
     assert "…" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Self-review: objective / expectancy sanity check
+# ---------------------------------------------------------------------------
+
+
+def _expectancy_incoherent_critique_payload() -> str:
+    """Self-review verdict flagging an expectancy/objective incoherence.
+
+    Models the tight-take-profit / wide-stop trap: a high claimed win rate
+    that the reward:risk geometry cannot support (negative expectancy). The
+    new third self-review check must surface this as ``critical`` on the
+    ``expectancy_forecast`` field before the external loop ever runs.
+    """
+    return json.dumps(
+        {
+            "ready": False,
+            "rationale": (
+                "forecast_win_rate 0.60 is below the ~0.83 break-even the 1%/5% "
+                "take-profit:stop geometry demands — negative expectancy."
+            ),
+            "issues": [
+                {
+                    "field": "expectancy_forecast",
+                    "severity": "critical",
+                    "description": (
+                        "reward_risk 0.2 needs >83% wins to break even; forecast is 60%."
+                    ),
+                    "suggested_fix": "Widen the take-profit or tighten the stop so reward:risk supports the win rate.",
+                }
+            ],
+        }
+    )
+
+
+def test_self_review_system_prompt_includes_expectancy_check() -> None:
+    """The self-review system prompt must carry the objective/expectancy audit
+    and allow flagging the ``expectancy_forecast`` field."""
+    assert "Expectancy / objective sanity" in _SELF_REVIEW_SYSTEM_PROMPT
+    assert "break-even" in _SELF_REVIEW_SYSTEM_PROMPT
+    assert "expectancy_forecast" in _SELF_REVIEW_SYSTEM_PROMPT
+
+
+def test_run_self_review_flags_expectancy_incoherence_then_self_revises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An incoherent expectancy forecast is a critical self-review finding, so
+    exactly one self-revision fires and the revised spec is re-audited (four
+    LLM calls). The revision prompt must carry the expectancy critique so the
+    model has something concrete to fix."""
+    capture = _patch_design(
+        monkeypatch,
+        [
+            _good_payload(),
+            _expectancy_incoherent_critique_payload(),
+            _good_payload(),
+            _ready_critique_payload(),
+        ],
+        enable_self_review=True,
+    )
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert len(capture.calls) == 4
+    assert parsed["asset_class"] == "stocks"
+    revision_prompt = capture.calls[2]
+    assert "expectancy_forecast" in revision_prompt
+    assert "break even" in revision_prompt or "break-even" in revision_prompt
+
+
+# ---------------------------------------------------------------------------
+# Diversity-steering mode resolution + wiring
+# ---------------------------------------------------------------------------
+
+
+def test_diversity_mode_defaults_to_exploit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STRATEGY_LAB_DIVERSITY_MODE", raising=False)
+    assert _resolve_diversity_mode() == "exploit"
+
+
+def test_diversity_mode_parses_explore_case_insensitively(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "  EXPLORE ")
+    assert _resolve_diversity_mode() == "explore"
+
+
+def test_diversity_mode_unknown_falls_back_to_exploit_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A set-but-unrecognized value resolves to exploit AND logs a warning so a
+    misconfiguration is visible rather than silently masked."""
+    monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "rotate-everything")
+    with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
+        assert _resolve_diversity_mode() == "exploit"
+    assert any("rotate-everything" in rec.message for rec in caplog.records)
+
+
+def test_diversity_mode_empty_value_is_silent_exploit(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An empty value is treated as unset — exploit, with no warning noise."""
+    monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "   ")
+    with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
+        assert _resolve_diversity_mode() == "exploit"
+    assert not caplog.records
+
+
+def test_run_threads_resolved_mode_into_mix_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run`` must pass the env-resolved diversity mode into
+    ``asset_class_mix_hint``. Spy on the hint and stub the other prior-results
+    formatters so the test needs no real lab records — only a non-empty list
+    (the hint is skipped entirely when there are no priors)."""
+    _patch_design(monkeypatch, _good_payload())
+    seen: Dict[str, Any] = {}
+
+    def _spy_hint(records: Any, **kwargs: Any) -> str:
+        seen["mode"] = kwargs.get("mode")
+        return "MIX-HINT"
+
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.asset_class_mix_hint", _spy_hint
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.format_prior_results", lambda _r: "PR"
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.agents.design.format_prior_attribution", lambda _r: "PA"
+    )
+    monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "explore")
+
+    DesignAgent().run(prior_records=[object()])
+
+    assert seen["mode"] == "explore"

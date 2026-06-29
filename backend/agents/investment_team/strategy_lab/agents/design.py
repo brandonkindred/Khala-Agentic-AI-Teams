@@ -52,6 +52,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_DIVERSITY_MODES = ("exploit", "explore")
+
+
+def _resolve_diversity_mode() -> str:
+    """Resolve the asset-class diversity-steering mode for this run.
+
+    Reads ``STRATEGY_LAB_DIVERSITY_MODE``: ``exploit`` (default) steers toward
+    the highest-scoring asset-class buckets — the run's return/win-rate
+    objective — while ``explore`` keeps the portfolio-rotation nudge. An unset /
+    empty value resolves silently to ``exploit``; a *set but unrecognized* value
+    also resolves to ``exploit`` but logs a warning so a misconfiguration is
+    visible rather than silently masked.
+
+    Post: returns a value in :data:`_DIVERSITY_MODES`.
+    """
+    val = os.getenv("STRATEGY_LAB_DIVERSITY_MODE", "").strip().lower()
+    if not val:
+        return "exploit"
+    if val in _DIVERSITY_MODES:
+        return val
+    logger.warning(
+        "Unrecognized STRATEGY_LAB_DIVERSITY_MODE=%r; defaulting to 'exploit' (valid values: %s).",
+        val,
+        ", ".join(_DIVERSITY_MODES),
+    )
+    return "exploit"
+
+
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # Shared stop-order semantics reference (stop-market / stop-limit / trailing
 # stop). Appended to the designer's system prompts so a trailing stop's
@@ -75,10 +103,10 @@ Objective: maximize annualized return AND win rate, subject to positive, robust 
 {prior_results_text}
 
 ## What has worked so far (performance attribution)
-Mean win rate and mean annualized return per design-space bucket, across executed prior runs. Treat this as your edge map: **prefer the historically high-scoring buckets** (high annual return AND win rate) when they fit a coherent thesis. Weigh each bucket by its sample size `n` — a single-record bucket flagged `(thin sample)` is a weak prior, not a mandate — and never let attribution override the mandatory asset-class diversity rule below.
+Mean win rate and mean annualized return per design-space bucket, across executed prior runs. Treat this as your edge map: **prefer the historically high-scoring buckets** (high annual return AND win rate) when they fit a coherent thesis. Weigh each bucket by its sample size `n` — a single-record bucket flagged `(thin sample)` is a weak prior, not a mandate — and read it together with the asset-class guidance below.
 {prior_attribution}
 
-## Asset-class diversity (mandatory)
+## Asset-class selection
 {asset_class_mix_hint}
 
 {signal_section}
@@ -192,22 +220,16 @@ class DesignAgent:
         # ``format_prior_attribution`` returns its own "not enough history"
         # sentinel for an empty / all-non-executed list, so no guard is needed.
         prior_attribution = format_prior_attribution(prior_records)
+        mode = _resolve_diversity_mode()
+        # ``asset_class_mix_hint`` handles the empty-records case itself (a
+        # neutral menu), so a single call covers both the with- and no-priors
+        # paths. When a category restriction is active it already supplies the
+        # positive allowed-class menu; only the hard negative rule is appended.
+        mix_hint = asset_class_mix_hint(prior_records, exclude=exclude_asset_classes, mode=mode)
         if exclude_asset_classes:
-            # The menu-restricted mix hint already supplies the positive
-            # allowed-class menu — even with no priors, since asset_class_mix_hint
-            # handles the empty-records case — so the only thing to add here is the
-            # hard negative rule. Re-listing the allowed classes would just
-            # duplicate the mix-hint menu.
-            mix_hint = asset_class_mix_hint(prior_records, exclude=exclude_asset_classes)
             mix_hint += (
                 "\nMANDATORY EXCLUSION: Do NOT use these asset classes: "
                 f"{', '.join(exclude_asset_classes)}."
-            )
-        else:
-            mix_hint = (
-                asset_class_mix_hint(prior_records)
-                if prior_records
-                else "No history — choose freely."
             )
 
         signal_section = ""

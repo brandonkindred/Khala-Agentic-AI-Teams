@@ -554,6 +554,30 @@ def test_coerce_critique_critical_threshold_still_demotes_critical() -> None:
     assert any("demoting" in i.description for i in critique.issues)
 
 
+def test_coerce_critique_accepts_expectancy_forecast_field() -> None:
+    """``expectancy_forecast`` is a valid critique field (the objective-aware
+    self-review check points at it) and must survive coercion rather than
+    silently collapsing to the ``hypothesis`` fallback."""
+    parsed = {
+        "ready": False,
+        "rationale": "win rate below break-even for the take-profit:stop geometry",
+        "issues": [
+            {
+                "field": "expectancy_forecast",
+                "severity": "critical",
+                "description": "reward_risk 0.2 needs >83% wins; forecast is 60% — negative expectancy.",
+                "suggested_fix": "Widen the take-profit or tighten the stop.",
+            }
+        ],
+    }
+
+    critique = _coerce_critique(parsed, [], demote_min_severity="critical")
+
+    assert critique.ready is False
+    assert any(i.field == "expectancy_forecast" for i in critique.issues)
+    assert all(i.field != "hypothesis" for i in critique.issues)
+
+
 def test_coerce_critique_default_threshold_demotes_warning() -> None:
     """The default threshold (external reviewer path) still demotes on warning."""
     parsed = {
