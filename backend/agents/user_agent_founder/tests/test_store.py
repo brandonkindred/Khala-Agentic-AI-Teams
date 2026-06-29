@@ -49,6 +49,7 @@ class _FakeCursor:
                 target_team_key,
                 persona_id,
                 project_name,
+                process_id,
                 created_at,
                 updated_at,
             ) = params
@@ -62,6 +63,7 @@ class _FakeCursor:
                 "target_team_key": target_team_key,
                 "persona_id": persona_id,
                 "project_name": project_name,
+                "process_id": process_id,
                 "created_at": created_at,
                 "updated_at": updated_at,
                 "error": None,

@@ -33,6 +33,12 @@ SCHEMA = TeamSchema(
             ADD COLUMN IF NOT EXISTS persona_id TEXT""",
         """ALTER TABLE user_agent_founder_runs
             ADD COLUMN IF NOT EXISTS project_name TEXT""",
+        # The agentic-team persona target records the chosen process id here so
+        # the AgenticTeamAdapter can drive that specific process (rather than
+        # overloading repo_path — see targets/agentic_team.py). Nullable: the
+        # software-engineering target leaves it unset.
+        """ALTER TABLE user_agent_founder_runs
+            ADD COLUMN IF NOT EXISTS process_id TEXT""",
         """UPDATE user_agent_founder_runs
             SET persona_id = COALESCE(persona_id, 'startup-founder'),
                 project_name = COALESCE(project_name, 'taskflow-mvp')

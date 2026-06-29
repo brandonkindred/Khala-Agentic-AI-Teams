@@ -44,6 +44,7 @@ _UPDATE_ALLOWED_COLUMNS = frozenset(
         "target_team_key",
         "persona_id",
         "project_name",
+        "process_id",
         "error",
     }
 )
@@ -83,6 +84,7 @@ class StoredRun:
     target_team_key: str
     persona_id: str | None
     project_name: str | None
+    process_id: str | None
     created_at: str
     updated_at: str
     error: str | None
@@ -134,6 +136,7 @@ def _row_to_run(row: dict[str, Any]) -> StoredRun:
         target_team_key=row.get("target_team_key") or DEFAULT_TARGET_TEAM_KEY,
         persona_id=row.get("persona_id"),
         project_name=row.get("project_name"),
+        process_id=row.get("process_id"),
         created_at=_row_ts(row["created_at"]),
         updated_at=_row_ts(row["updated_at"]),
         error=row["error"],
@@ -156,7 +159,7 @@ def _row_to_persona(row: dict[str, Any]) -> StoredPersona:
 
 _RUN_COLUMNS = (
     "run_id, status, se_job_id, analysis_job_id, spec_content, "
-    "repo_path, target_team_key, persona_id, project_name, "
+    "repo_path, target_team_key, persona_id, project_name, process_id, "
     "created_at, updated_at, error"
 )
 
@@ -182,16 +185,35 @@ class FounderRunStore:
         run_id: str | None = None,
         persona_id: str | None = None,
         project_name: str | None = None,
+        process_id: str | None = None,
     ) -> str:
+        """Insert a new run row and return its id.
+
+        Preconditions: ``target_team_key`` is non-empty; ``run_id`` (when given)
+            is unique. ``process_id`` is the agentic-team process the persona will
+            drive (``None`` for the software-engineering target, which has none).
+        Postconditions: a row exists with status ``pending`` and the supplied
+            ids persisted; the returned id equals ``run_id`` when given, else a
+            fresh uuid4 hex.
+        """
         run_id = run_id or str(uuid4())
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO user_agent_founder_runs "
                 "(run_id, status, target_team_key, persona_id, project_name, "
-                "created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (run_id, "pending", target_team_key, persona_id, project_name, now, now),
+                "process_id, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    run_id,
+                    "pending",
+                    target_team_key,
+                    persona_id,
+                    project_name,
+                    process_id,
+                    now,
+                    now,
+                ),
             )
         return run_id
 

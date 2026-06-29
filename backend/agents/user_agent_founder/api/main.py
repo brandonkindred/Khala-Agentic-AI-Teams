@@ -95,6 +95,15 @@ class StartRunRequest(BaseModel):
             "uniqueness across repeat runs."
         ),
     )
+    process_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Process the persona should drive, for agentic-team targets "
+            "(target_team_key='agentic_team:<id>'). The AgenticTeamAdapter runs "
+            "this process via the team's test-pipeline. Ignored by the "
+            "software-engineering target, which has no process concept."
+        ),
+    )
 
 
 class StartRunResponse(BaseModel):
@@ -125,6 +134,7 @@ class RunStatusResponse(BaseModel):
     target_team_key: str = DEFAULT_TARGET_TEAM_KEY
     persona_id: Optional[str] = None
     project_name: Optional[str] = None
+    process_id: Optional[str] = None
     created_at: str
     updated_at: str
     error: Optional[str] = None
@@ -252,11 +262,20 @@ def start_founder_workflow(
 
     req = request or StartRunRequest()
     # Validate up-front so an unknown key returns 400 instead of crashing the
-    # background dispatch thread later.
+    # background dispatch thread later. ``get_adapter`` parses agentic-team keys
+    # ("agentic_team:<id>") as well as the static registry keys.
     try:
-        get_adapter(req.target_team_key)
+        get_adapter(req.target_team_key, process_id=req.process_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # An agentic-team run drives a specific process; without it the adapter has
+    # no pipeline to start, so reject early rather than fail in the worker.
+    if req.target_team_key.startswith("agentic_team:") and not req.process_id:
+        raise HTTPException(
+            status_code=400,
+            detail="process_id is required when target_team_key is an agentic team",
+        )
 
     persona = get_persona_store().get_persona(req.persona_id)
     if persona is None:
@@ -270,6 +289,7 @@ def start_founder_workflow(
         run_id=run_id,
         persona_id=persona.persona_id,
         project_name=project_name,
+        process_id=req.process_id,
     )
 
     job_store.create_job(
@@ -315,6 +335,7 @@ def get_run_status(run_id: str) -> RunStatusResponse:
         target_team_key=run.target_team_key,
         persona_id=run.persona_id,
         project_name=run.project_name,
+        process_id=run.process_id,
         created_at=run.created_at,
         updated_at=run.updated_at,
         error=run.error,
@@ -496,9 +517,63 @@ def delete_persona(persona_id: str) -> Response:
     return Response(status_code=204)
 
 
+def _list_agentic_testable_teams() -> list[TestableTeam]:
+    """Enumerate agentic teams that have at least one ``complete`` process.
+
+    Cross-service, best-effort: queries the agentic-team-provisioning service
+    over the unified API. The "≥1 complete process" filter is applied here,
+    server-side, so the dropdown the frontend consumes is ready to use and the
+    Stage-3 → Stage-4 gate (a complete process is required to test) is honored.
+
+    Postconditions: returns one :class:`TestableTeam` per agentic team with a
+        ``complete`` process, keyed ``"agentic_team:<team_id>"``. Returns ``[]``
+        on any cross-service failure (the provisioning service being down must
+        not break the static-team listing) — failures are logged, never raised.
+    """
+    from user_agent_founder.targets.agentic_team import PROVISIONING_PREFIX, UNIFIED_API_BASE
+
+    base = f"{UNIFIED_API_BASE}{PROVISIONING_PREFIX}"
+    timeout = httpx.Timeout(10.0, connect=5.0)
+    teams: list[TestableTeam] = []
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(f"{base}/teams")
+            if resp.status_code >= 400:
+                logger.warning("Could not list agentic teams: HTTP %s", resp.status_code)
+                return []
+            summaries = resp.json()
+            for summary in summaries:
+                team_id = summary.get("team_id")
+                # No processes ⇒ can't be fully designed; skip the detail fetch.
+                if not team_id or not summary.get("process_count"):
+                    continue
+                detail = client.get(f"{base}/teams/{team_id}")
+                if detail.status_code >= 400:
+                    continue
+                team = (detail.json() or {}).get("team") or {}
+                processes = team.get("processes") or []
+                if any(p.get("status") == "complete" for p in processes):
+                    teams.append(
+                        TestableTeam(
+                            team_key=f"agentic_team:{team_id}",
+                            display_name=team.get("name") or summary.get("name") or team_id,
+                        )
+                    )
+    except Exception:
+        logger.warning("Could not enumerate agentic testable teams", exc_info=True)
+        return []
+    return teams
+
+
 @app.get("/testable-teams", response_model=TestableTeamsResponse)
 def list_testable_teams() -> TestableTeamsResponse:
-    """List the target teams a persona can test, derived from targets.ADAPTERS."""
+    """List the target teams a persona can test.
+
+    Combines the static registry targets (``targets.ADAPTERS``, e.g. Software
+    Engineering) with the dynamic agentic teams that have a ``complete`` process
+    (:func:`_list_agentic_testable_teams`). The agentic-team filter is applied
+    server-side so the frontend does no filtering.
+    """
     try:
         from unified_api.config import TEAM_CONFIGS
     except Exception:
@@ -508,6 +583,7 @@ def list_testable_teams() -> TestableTeamsResponse:
         cfg = TEAM_CONFIGS.get(team_key)
         display_name = cfg.name if cfg is not None else team_key.replace("_", " ").title()
         teams.append(TestableTeam(team_key=team_key, display_name=display_name))
+    teams.extend(_list_agentic_testable_teams())
     return TestableTeamsResponse(teams=teams)
 
 

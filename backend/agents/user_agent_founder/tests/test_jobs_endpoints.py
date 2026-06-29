@@ -204,6 +204,7 @@ def test_start_creates_job_and_dispatches(
         run_id=fixed_run_id,
         persona_id="startup-founder",
         project_name=f"startup-founder-{fixed_run_id[:8]}",
+        process_id=None,
     )
 
 
@@ -225,6 +226,7 @@ def test_start_passes_explicit_persona_and_project_name(
         run_id=fixed_run_id,
         persona_id="startup-founder",
         project_name="my-custom-name",
+        process_id=None,
     )
 
 
@@ -249,6 +251,126 @@ def test_start_rejects_unknown_persona(
         start_founder_workflow(StartRunRequest(persona_id="ghost"))
     assert excinfo.value.status_code == 404
     assert fake_dispatch == []
+
+
+def test_start_agentic_team_requires_process_id(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store
+):
+    """An agentic-team target with no process_id is rejected before dispatch."""
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    with pytest.raises(HTTPException) as excinfo:
+        start_founder_workflow(StartRunRequest(target_team_key="agentic_team:team-1"))
+    assert excinfo.value.status_code == 400
+    assert "process_id" in excinfo.value.detail
+    assert fake_dispatch == []
+    fake_store.create_run.assert_not_called()
+
+
+def test_start_agentic_team_persists_process_id(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store, fixed_run_id
+):
+    """A well-formed agentic-team run threads process_id into create_run."""
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    resp = start_founder_workflow(
+        StartRunRequest(target_team_key="agentic_team:team-1", process_id="proc-9")
+    )
+
+    assert resp.job_id == fixed_run_id
+    assert fake_dispatch == [fixed_run_id]
+    fake_store.create_run.assert_called_once_with(
+        target_team_key="agentic_team:team-1",
+        run_id=fixed_run_id,
+        persona_id="startup-founder",
+        project_name=f"startup-founder-{fixed_run_id[:8]}",
+        process_id="proc-9",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /testable-teams — static targets + agentic teams with a complete process
+# ---------------------------------------------------------------------------
+
+
+class _FakeTeamsClient:
+    """Fake httpx.Client for the cross-service agentic-teams enumeration.
+
+    Returns the teams list for ``/teams`` and a per-team detail for
+    ``/teams/{id}``; ``raise_on_list`` simulates the provisioning service being
+    unreachable.
+    """
+
+    def __init__(self, teams_list, details, raise_on_list=False):
+        self._teams_list = teams_list
+        self._details = details
+        self._raise_on_list = raise_on_list
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url, *, timeout=None):
+        if url.endswith("/teams"):
+            if self._raise_on_list:
+                raise RuntimeError("provisioning down")
+            return _TeamsResp(200, self._teams_list)
+        team_id = url.rsplit("/teams/", 1)[1]
+        return _TeamsResp(200, self._details.get(team_id, {}))
+
+
+class _TeamsResp:
+    def __init__(self, status_code, json_data):
+        self.status_code = status_code
+        self._json = json_data
+
+    def json(self):
+        return self._json
+
+
+def test_testable_teams_includes_agentic_teams_with_complete_process(monkeypatch):
+    from user_agent_founder.api import main as api_main
+
+    teams_list = [
+        {"team_id": "A", "name": "Growth Pod", "process_count": 1},
+        {"team_id": "B", "name": "Draft Pod", "process_count": 1},
+        {"team_id": "C", "name": "Empty Pod", "process_count": 0},
+    ]
+    details = {
+        "A": {"team": {"name": "Growth Pod", "processes": [{"status": "complete"}]}},
+        "B": {"team": {"name": "Draft Pod", "processes": [{"status": "draft"}]}},
+    }
+    monkeypatch.setattr(
+        api_main.httpx, "Client", lambda *a, **kw: _FakeTeamsClient(teams_list, details)
+    )
+
+    resp = api_main.list_testable_teams()
+    keys = {t.team_key for t in resp.teams}
+    # Static SE target is always present.
+    assert "software_engineering" in keys
+    # Only team A (a complete process) is offered; B (draft) and C (no process) are not.
+    assert "agentic_team:A" in keys
+    assert "agentic_team:B" not in keys
+    assert "agentic_team:C" not in keys
+    growth = next(t for t in resp.teams if t.team_key == "agentic_team:A")
+    assert growth.display_name == "Growth Pod"
+
+
+def test_testable_teams_survives_provisioning_outage(monkeypatch):
+    from user_agent_founder.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main.httpx,
+        "Client",
+        lambda *a, **kw: _FakeTeamsClient([], {}, raise_on_list=True),
+    )
+
+    resp = api_main.list_testable_teams()
+    # Cross-service failure must not break the static listing.
+    assert any(t.team_key == "software_engineering" for t in resp.teams)
+    assert not any(t.team_key.startswith("agentic_team:") for t in resp.teams)
 
 
 def test_start_marks_job_failed_when_dispatch_raises(
