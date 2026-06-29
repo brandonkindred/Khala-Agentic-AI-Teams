@@ -253,9 +253,7 @@ class TestSetupPhase:
         from backend_code_v2_team.phases import setup as setup_mod
 
         init_repo_with_existing_development(tmp_path)
-        monkeypatch.setattr(
-            setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook")
-        )
+        monkeypatch.setattr(setup_mod, "commit_paths", lambda *a, **k: (False, "rejected by hook"))
         with caplog.at_level("WARNING"):
             setup_mod.run_setup(repo_path=tmp_path, task_title="My Project")
         assert "not committed" in caplog.text.lower()
@@ -305,7 +303,10 @@ class TestSetupPhase:
         )
         # Adapter pre-creates the review branch from development (pre-scaffolding).
         subprocess.run(
-            ["git", "checkout", "-b", "feature/task-1"], cwd=tmp_path, capture_output=True, check=True
+            ["git", "checkout", "-b", "feature/task-1"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
         )
         subprocess.run(
             ["git", "checkout", "development"], cwd=tmp_path, capture_output=True, check=True
@@ -659,28 +660,8 @@ class TestToolAgents:
         out = agent.run(inp)
         assert "auth.py" in out.files
 
-    def test_cicd_stub(self):
-        from backend_code_v2_team.tool_agents.cicd import CicdAdapterAgent
-
-        agent = CicdAdapterAgent()
-        inp = ToolAgentInput(microtask=Microtask(id="mt-1", description="cicd"), language="python")
-        out = agent.run(inp)
-        assert not out.files
-        assert out.summary
-
-    def test_containerization_stub(self):
-        from backend_code_v2_team.tool_agents.containerization import ContainerizationAdapterAgent
-
-        agent = ContainerizationAdapterAgent()
-        inp = ToolAgentInput(
-            microtask=Microtask(id="mt-1", description="docker"), language="python"
-        )
-        out = agent.run(inp)
-        assert not out.files
-        assert out.summary
-
     def test_git_branch_management_agent(self, tmp_path):
-        from backend_code_v2_team.tool_agents.git_branch_management import (
+        from software_engineering_team.shared.tool_agent_git_branch import (
             GitBranchManagementToolAgent,
         )
 
@@ -714,11 +695,10 @@ class TestToolAgents:
         assert "feature/" in branch
 
     def test_git_agent_commit_current_changes(self, tmp_path):
-        from backend_code_v2_team.tool_agents.git_branch_management import (
+        from software_engineering_team.shared.git_utils import initialize_new_repo
+        from software_engineering_team.shared.tool_agent_git_branch import (
             GitBranchManagementToolAgent,
         )
-
-        from software_engineering_team.shared.git_utils import initialize_new_repo
 
         initialize_new_repo(tmp_path)
         (tmp_path / "foo.txt").write_text("hi")
@@ -727,13 +707,12 @@ class TestToolAgents:
         assert ok
 
     def test_git_agent_deliver_with_feature_branch_name(self, tmp_path):
-        from backend_code_v2_team.tool_agents.git_branch_management import (
-            GitBranchManagementToolAgent,
-        )
-
         from software_engineering_team.shared.git_utils import (
             create_feature_branch,
             initialize_new_repo,
+        )
+        from software_engineering_team.shared.tool_agent_git_branch import (
+            GitBranchManagementToolAgent,
         )
 
         initialize_new_repo(tmp_path)
@@ -767,7 +746,7 @@ class TestToolAgents:
 
     def test_tool_agents_have_plan_review_problem_solve_deliver(self):
         """Tool agents participate in all phases: plan, execute, review, problem_solve, deliver."""
-        from backend_code_v2_team.tool_agents.cicd import CicdAdapterAgent
+        from backend_code_v2_team.tool_agents.build_specialist import BuildSpecialistAdapterAgent
         from backend_code_v2_team.tool_agents.data_engineering import DataEngineeringToolAgent
 
         mock_llm = MagicMock()
@@ -779,12 +758,12 @@ class TestToolAgents:
         assert out.recommendations
         assert out.success
 
-        cicd = CicdAdapterAgent()
-        rev_out = cicd.review(inp)
+        build = BuildSpecialistAdapterAgent()
+        rev_out = build.review(inp)
         assert rev_out.summary
-        ps_out = cicd.problem_solve(inp)
+        ps_out = build.problem_solve(inp)
         assert ps_out.summary
-        del_out = cicd.deliver(inp)
+        del_out = build.deliver(inp)
         assert del_out.summary
 
     def test_data_engineering_execute_via_run(self):
@@ -1010,7 +989,9 @@ class TestBackendDevelopmentAgentBranchReuse:
         )
         monkeypatch.setattr(orch.BackendDevelopmentAgent, "_read_repo_code", _read_repo_code)
         monkeypatch.setattr(orch, "run_planning", _run_planning)
-        monkeypatch.setattr(orch, "run_execution_with_review_gates", _run_execution_with_review_gates)
+        monkeypatch.setattr(
+            orch, "run_execution_with_review_gates", _run_execution_with_review_gates
+        )
         monkeypatch.setattr(
             doc_phase,
             "run_documentation_phase",

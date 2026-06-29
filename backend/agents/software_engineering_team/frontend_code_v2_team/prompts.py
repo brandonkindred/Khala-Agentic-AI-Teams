@@ -54,8 +54,6 @@ PLANNING_PROMPT = """You are an expert Planning Agent for a frontend development
 - state_management — state shape, stores, data flow (e.g. NgRx, Redux, signals)
 - auth — login UI, auth guards, token handling, permissions in UI
 - api_openapi — API client code, service layer, request/response types
-- cicd — CI/CD pipeline for frontend (build, test, deploy)
-- containerization — Dockerfile or container config for frontend app
 - documentation — README, component docs, Storybook
 - testing_qa — unit tests, e2e tests, test utilities
 - security — XSS prevention, CSP, secure forms

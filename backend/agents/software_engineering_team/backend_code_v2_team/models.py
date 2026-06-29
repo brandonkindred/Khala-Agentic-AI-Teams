@@ -83,8 +83,6 @@ class ToolAgentKind(str, Enum):
     DATA_ENGINEERING = "data_engineering"
     API_OPENAPI = "api_openapi"
     AUTH = "auth"
-    CICD = "cicd"
-    CONTAINERIZATION = "containerization"
     DOCUMENTATION = "documentation"
     TESTING_QA = "testing_qa"
     SECURITY = "security"
