@@ -203,6 +203,11 @@ def evaluate_tree(node: Any, view: HistoryView, i: int) -> EvaluationResult:
     """
     if isinstance(node, Predicate):
         return evaluate_predicate(node, view, i)
+    if isinstance(node, (AllOf, AnyOf)) and not node.of:
+        # The DSL's ``Field(min_length=2)`` forbids this on the validated path;
+        # guard the ``model_construct`` / mutation path so a malformed empty tree
+        # fails fast instead of returning a vacuous satisfied (AND) / miss (OR).
+        raise ValueError(f"{type(node).__name__}.of must be non-empty")
     if isinstance(node, AllOf):
         saw_warmup = False
         for child in node.of:

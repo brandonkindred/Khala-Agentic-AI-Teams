@@ -50,7 +50,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Type
 from ..spec_dsl import EntryRule as _EntryRule
 from ..spec_dsl import Predicate as _Predicate
 from ..spec_dsl import SignalExitRule as _SignalExitRule
-from ..spec_dsl import _format_predicate_tree
+from ..spec_dsl import format_predicate_tree
 from .code_safety import _engine_exits_cover_sides
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 from .predicate_conformance_fixtures import ConformanceFixture, generate_conformance_fixtures
@@ -588,7 +588,7 @@ def _build_conformance_detail(
     parts = [f"rule_id={fixture.rule_id}: predicate conformance failed."]
     pred = _predicate_for_rule_id(spec, fixture)  # leaf or all_of/any_of tree
     if pred is not None:
-        parts.append(f"  Predicate: {_format_predicate_tree(pred)}")
+        parts.append(f"  Predicate: {format_predicate_tree(pred)}")
     if false_positives:
         parts.append(
             f"  False positives (order on predicate-false bar): bars {false_positives[:10]}"

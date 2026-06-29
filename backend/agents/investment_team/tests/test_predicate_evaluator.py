@@ -383,6 +383,17 @@ def test_evaluate_tree_rejects_unknown_node():
         evaluate_tree(object(), view, 0)
 
 
+def test_evaluate_tree_rejects_empty_combinator():
+    """A malformed empty combinator (only reachable via ``model_construct``
+    bypassing ``min_length=2``) must fail fast rather than return a vacuous
+    satisfied (AND) / miss (OR)."""
+    view = _pandas_view([100.0])
+    with pytest.raises(ValueError):
+        evaluate_tree(AllOf.model_construct(of=[]), view, 0)
+    with pytest.raises(ValueError):
+        evaluate_tree(AnyOf.model_construct(of=[]), view, 0)
+
+
 def test_evaluate_entry_rules_honours_all_of_when():
     view = _pandas_view([100.0])
     fires = EntryRule(side="long", when=AllOf(of=[_close_gt(50), _close_gt(90)]))

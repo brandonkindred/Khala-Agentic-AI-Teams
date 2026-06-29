@@ -862,17 +862,29 @@ def _format_predicate(p: Predicate) -> str:
     return f"{_format_side(p.lhs)} {_OP_SYMBOL[p.op]} {_format_side(p.rhs)}"
 
 
-def _format_predicate_tree(node: "PredicateTree") -> str:
-    """Render a predicate tree to prose.
+def format_predicate_tree(node: "PredicateTree", *, leaf_formatter=_format_predicate) -> str:
+    """Render a predicate tree, parameterised by the per-leaf renderer.
 
-    A leaf ``Predicate`` renders as ``A op B``; an ``all_of`` / ``any_of`` as a
-    parenthesised ``(c1 and c2 …)`` / ``(c1 or c2 …)`` so the boolean structure
-    is unambiguous when the reviewer reads it back from the prompt.
+    A leaf ``Predicate`` renders via ``leaf_formatter`` (default: the prose
+    ``_format_predicate``); an ``all_of`` / ``any_of`` renders as a parenthesised
+    ``(c1 and c2 …)`` / ``(c1 or c2 …)`` so the boolean structure is unambiguous.
+
+    The single source of the tree-walk: prompt rendering uses the default prose
+    leaf, while the alignment gate passes its own ``repr``-style leaf renderer —
+    so neither re-implements the recursion.
+
+    Preconditions: ``node`` is a ``Predicate`` / ``AllOf`` / ``AnyOf``;
+    ``leaf_formatter`` maps a ``Predicate`` to ``str``.
+    Postconditions: returns a non-empty string.
     """
     if isinstance(node, Predicate):
-        return _format_predicate(node)
+        return leaf_formatter(node)
     joiner = " and " if isinstance(node, AllOf) else " or "
-    return "(" + joiner.join(_format_predicate_tree(child) for child in node.of) + ")"
+    return (
+        "("
+        + joiner.join(format_predicate_tree(child, leaf_formatter=leaf_formatter) for child in node.of)
+        + ")"
+    )
 
 
 _STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
@@ -885,7 +897,7 @@ def _format_rule(
     rule: Union[EntryRule, StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule],
 ) -> str:
     if isinstance(rule, EntryRule):
-        return f"{rule.side} when {_format_predicate_tree(rule.when)}"
+        return f"{rule.side} when {format_predicate_tree(rule.when)}"
     if isinstance(rule, StopLossRule):
         prefix = _STOP_LOSS_BASIS_PREFIX.get(rule.basis, "")
         base = f"{prefix}stop loss {_format_number(rule.pct * 100)}%"
@@ -901,7 +913,7 @@ def _format_rule(
         )
         return f"scaled take profit ({rungs})"
     if isinstance(rule, SignalExitRule):
-        return f"exit when {_format_predicate_tree(rule.when)}"
+        return f"exit when {format_predicate_tree(rule.when)}"
     raise TypeError(f"unknown rule variant: {type(rule).__name__}")
 
 

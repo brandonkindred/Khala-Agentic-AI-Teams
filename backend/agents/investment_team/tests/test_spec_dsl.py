@@ -24,6 +24,7 @@ from investment_team.strategy_lab.spec_dsl import (
     StopLossRule,
     TakeProfitRule,
     VolatilityTargetSizing,
+    format_predicate_tree,
     format_rules_for_prompt,
     format_sizing_rule,
     iter_leaf_predicates,
@@ -719,6 +720,29 @@ def test_signal_exit_rule_accepts_any_of_when() -> None:
 def test_iter_leaf_predicates_on_bare_predicate() -> None:
     leaf = Predicate(lhs="bar.close", op=">", rhs=10.0)
     assert list(iter_leaf_predicates(leaf)) == [leaf]
+
+
+def test_format_predicate_tree_public_and_leaf_formatter() -> None:
+    """The shared ``format_predicate_tree`` renders leaf / all_of / any_of /
+    nested trees, and its ``leaf_formatter`` hook lets a caller (the alignment
+    gate) swap in its own leaf renderer without re-implementing the tree-walk."""
+    leaf = Predicate(lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 200}))
+    rsi = Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=40.0)
+
+    # Default (prose) leaf renderer.
+    assert format_predicate_tree(leaf) == "close > sma(200)"
+    assert format_predicate_tree(AllOf(of=[leaf, rsi])) == "(close > sma(200) and rsi(14) < 40)"
+    assert format_predicate_tree(AnyOf(of=[leaf, rsi])) == "(close > sma(200) or rsi(14) < 40)"
+    # Nested tree.
+    nested = AllOf(of=[leaf, AnyOf(of=[rsi, leaf])])
+    assert format_predicate_tree(nested) == (
+        "(close > sma(200) and (rsi(14) < 40 or close > sma(200)))"
+    )
+
+    # Custom leaf formatter (mirrors the alignment gate's repr-style leaf): the
+    # tree-walk is shared, only the leaf rendering differs.
+    rendered = format_predicate_tree(AllOf(of=[leaf, rsi]), leaf_formatter=lambda p: "LEAF")
+    assert rendered == "(LEAF and LEAF)"
 
 
 def test_format_rules_renders_combinator_tree() -> None:

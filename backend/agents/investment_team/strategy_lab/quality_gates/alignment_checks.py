@@ -63,7 +63,6 @@ from ..executor.predicate_evaluator import (
     relative_miss as _relative_miss_shared,
 )
 from ..spec_dsl import (
-    AllOf,
     EntryRule,
     FixedFractionSizing,
     FixedNotionalSizing,
@@ -72,6 +71,7 @@ from ..spec_dsl import (
     StopLossRule,
     TakeProfitRule,
     VolatilityTargetSizing,
+    format_predicate_tree,
 )
 from .models import GateResultsMixin, QualityGateResult
 
@@ -284,21 +284,14 @@ def _bars_to_frame(bars: List[Any]) -> pd.DataFrame:
 
 
 def _format_predicate(p: Predicate) -> str:
-    """Render a predicate as ``lhs op rhs`` for human-readable details."""
-    return f"{p.lhs!r} {p.op} {p.rhs!r}"
+    """Render a predicate as ``lhs op rhs`` for human-readable details.
 
-
-def _format_predicate_tree(node: Any) -> str:
-    """Render a predicate tree (leaf or ``all_of`` / ``any_of``) for details.
-
-    Leaves use :func:`_format_predicate`; combinators render as a parenthesised
-    ``(c1 and c2 …)`` / ``(c1 or c2 …)`` so a multi-confirmation rule reads back
-    unambiguously in alignment findings.
+    Used as the leaf renderer passed to the shared
+    :func:`spec_dsl.format_predicate_tree`, so an ``all_of`` / ``any_of`` ``when``
+    reads back as ``(lhs op rhs and …)`` in alignment findings without this module
+    re-implementing the tree-walk.
     """
-    if isinstance(node, Predicate):
-        return _format_predicate(node)
-    joiner = " and " if isinstance(node, AllOf) else " or "
-    return "(" + joiner.join(_format_predicate_tree(child) for child in node.of) + ")"
+    return f"{p.lhs!r} {p.op} {p.rhs!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -1203,7 +1196,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 severity="info",
                 details=(
                     f"Trade #{trade.trade_num} signal-exit satisfied by "
-                    f"exit[{rule_idx}]: {_format_predicate_tree(rule.when)}{scalar_tail}"
+                    f"exit[{rule_idx}]: {format_predicate_tree(rule.when, leaf_formatter=_format_predicate)}{scalar_tail}"
                 ),
                 computed_value=result.lhs,
                 expected_value=result.rhs,
@@ -1255,7 +1248,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             ``rhs`` is a numeric anchor; ``None`` otherwise.
         """
         rule_id = f"entry[{rule_idx}]"
-        predicate_repr = _format_predicate_tree(rule.when)
+        predicate_repr = format_predicate_tree(rule.when, leaf_formatter=_format_predicate)
         # One view, reused across every resolve a cross predicate needs (lhs/rhs
         # at i and i-1) so its cached numpy arrays are shared. The shared
         # ``evaluate_tree`` owns leaf evaluation, cross-op previous-bar handling,
