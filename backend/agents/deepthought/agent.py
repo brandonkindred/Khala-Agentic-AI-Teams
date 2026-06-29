@@ -474,7 +474,7 @@ class DeepthoughtAgent:
     def _store_finding(self, answer: str, confidence: float) -> None:
         """Write this agent's finding to the shared knowledge base."""
         # Extract first ~500 chars as the finding summary
-        finding = answer if len(answer) > 500 else answer
+        finding = answer[:500] if len(answer) > 500 else answer
         tags = [w.lower().strip("?.,!;:") for w in self.spec.name.split("_") if len(w) > 2]
         self.knowledge_base.add(
             KnowledgeEntry(

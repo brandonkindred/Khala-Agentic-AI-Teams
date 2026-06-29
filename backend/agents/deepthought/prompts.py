@@ -255,6 +255,6 @@ def format_conversation_history(history: list[dict], max_turns: int = 10) -> str
         role = turn.get("role", "user").capitalize()
         content = turn.get("content", "")
         if len(content) > 500:
-            content = content + "..."
+            content = content[:500] + "..."
         lines.append(f"{role}: {content}")
     return "\n".join(lines)
