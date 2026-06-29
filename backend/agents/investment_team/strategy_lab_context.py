@@ -33,6 +33,10 @@ _PROMPT_ASSET_CLASSES: tuple[str, ...] = tuple(
 # import this rather than the underscore-prefixed internal tuple.
 PROMPT_ASSET_CLASSES: tuple[str, ...] = _PROMPT_ASSET_CLASSES
 
+# Explore-mode diversity steering: the recent-window stocks share above which
+# equities count as "relatively heavy" and the anti-concentration nudge fires.
+_STOCK_CONCENTRATION_THRESHOLD: float = 0.35
+
 # Backtest statuses for cycles that short-circuited *before* running a backtest.
 # Their persisted ``strategy.asset_class`` may be a coerced placeholder (an
 # unsupported class like ``bonds`` is canonicalized to ``stocks`` for schema
@@ -560,6 +564,9 @@ def _edge_exploitation_steer(
     attributable yet (legacy / unparsed history), returns neutral menu text
     rather than fabricating a preference.
     """
+    assert allowed, "allowed must be non-empty"
+    assert menu, "menu must be provided"
+    assert tail >= 1, f"tail must be >= 1, got {tail}"
     agg = aggregate_prior_results(records, max_records=tail)
     buckets = sorted(
         (
@@ -696,7 +703,7 @@ def asset_class_mix_hint(
         stock_share = counts.get("stocks", 0) / n_sample if n_sample else 0.0
         min_n = min(counts.values())
         underrep = [c for c, n in counts.items() if n == min_n]
-        if "stocks" in counts and stock_share > 0.35 and n_sample >= 2:
+        if "stocks" in counts and stock_share > _STOCK_CONCENTRATION_THRESHOLD and n_sample >= 2:
             non_stock = [c for c in allowed if c != "stocks"]
             if non_stock:
                 parts.append(

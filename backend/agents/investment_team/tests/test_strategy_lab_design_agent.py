@@ -1527,11 +1527,25 @@ def test_diversity_mode_parses_explore_case_insensitively(
     assert _diversity_mode() == "explore"
 
 
-def test_diversity_mode_unknown_falls_back_to_exploit(
-    monkeypatch: pytest.MonkeyPatch,
+def test_diversity_mode_unknown_falls_back_to_exploit_and_warns(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """A set-but-unrecognized value resolves to exploit AND logs a warning so a
+    misconfiguration is visible rather than silently masked."""
     monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "rotate-everything")
-    assert _diversity_mode() == "exploit"
+    with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
+        assert _diversity_mode() == "exploit"
+    assert any("rotate-everything" in rec.message for rec in caplog.records)
+
+
+def test_diversity_mode_empty_value_is_silent_exploit(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An empty value is treated as unset — exploit, with no warning noise."""
+    monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "   ")
+    with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
+        assert _diversity_mode() == "exploit"
+    assert not caplog.records
 
 
 def test_run_threads_resolved_mode_into_mix_hint(

@@ -60,13 +60,24 @@ def _diversity_mode() -> str:
 
     Reads ``STRATEGY_LAB_DIVERSITY_MODE``: ``exploit`` (default) steers toward
     the highest-scoring asset-class buckets — the run's return/win-rate
-    objective — while ``explore`` keeps the portfolio-rotation nudge. Any
-    unset / unrecognized value resolves to ``exploit``.
+    objective — while ``explore`` keeps the portfolio-rotation nudge. An unset /
+    empty value resolves silently to ``exploit``; a *set but unrecognized* value
+    also resolves to ``exploit`` but logs a warning so a misconfiguration is
+    visible rather than silently masked.
 
     Post: returns a value in :data:`_DIVERSITY_MODES`.
     """
-    val = os.getenv("STRATEGY_LAB_DIVERSITY_MODE", "exploit").strip().lower()
-    return val if val in _DIVERSITY_MODES else "exploit"
+    val = os.getenv("STRATEGY_LAB_DIVERSITY_MODE", "").strip().lower()
+    if not val:
+        return "exploit"
+    if val in _DIVERSITY_MODES:
+        return val
+    logger.warning(
+        "Unrecognized STRATEGY_LAB_DIVERSITY_MODE=%r; defaulting to 'exploit' (valid values: %s).",
+        val,
+        ", ".join(_DIVERSITY_MODES),
+    )
+    return "exploit"
 
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"

@@ -196,8 +196,9 @@ def test_explore_mode_emits_equities_heavy_nudge() -> None:
 
 
 def test_exploit_mode_drops_equities_nudge() -> None:
-    """``exploit`` (the default) never emits the rotation nudge, even on a
-    stocks-heavy window — concentrating on edge is the point."""
+    """``exploit`` mode never emits the rotation nudge, even on a stocks-heavy
+    window — concentrating on edge is the point. (The helper default is
+    ``explore``; this test passes ``mode="exploit"`` explicitly.)"""
     records = [_record("stocks") for _ in range(5)] + [_record("crypto")]
     out = asset_class_mix_hint(records, mode="exploit")
     assert "Equities are relatively heavy" not in out, out
