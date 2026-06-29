@@ -56,7 +56,13 @@ def _fe_tool_input():
 def _fe_review_issue(**kwargs):
     from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
 
-    base = dict(source="build_specialist", severity="critical", description="d", file_path="", recommendation="")
+    base = dict(
+        source="build_specialist",
+        severity="critical",
+        description="d",
+        file_path="",
+        recommendation="",
+    )
     base.update(kwargs)
     return ReviewIssue(**base)
 
@@ -108,7 +114,13 @@ def _be_tool_input():
 def _be_review_issue(**kwargs):
     from software_engineering_team.backend_code_v2_team.models import ReviewIssue
 
-    base = dict(source="build_specialist", severity="critical", description="d", file_path="", recommendation="")
+    base = dict(
+        source="build_specialist",
+        severity="critical",
+        description="d",
+        file_path="",
+        recommendation="",
+    )
     base.update(kwargs)
     return ReviewIssue(**base)
 
@@ -128,9 +140,7 @@ def git_repo(tmp_path: Path) -> Path:
     # Need an initial commit for branches
     (tmp_path / "README.md").write_text("x")
     subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=False)
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=False
-    )
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=False)
     # Create development branch
     subprocess.run(
         ["git", "checkout", "-b", "development"], cwd=tmp_path, capture_output=True, check=False
@@ -145,7 +155,7 @@ def git_repo(tmp_path: Path) -> Path:
 
 class TestFEGitBranchManagement:
     def _agent(self):
-        from software_engineering_team.frontend_code_v2_team.tool_agents.git_branch_management.agent import (
+        from software_engineering_team.shared.tool_agent_git_branch import (
             GitBranchManagementToolAgent,
         )
 
@@ -195,7 +205,10 @@ class TestFEGitBranchManagement:
     def test_deliver_with_existing_branch(self, git_repo: Path):
         # Create feature branch first
         subprocess.run(
-            ["git", "checkout", "-b", "feature/test"], cwd=git_repo, capture_output=True, check=False
+            ["git", "checkout", "-b", "feature/test"],
+            cwd=git_repo,
+            capture_output=True,
+            check=False,
         )
         out = self._agent().deliver(
             _fe_phase_input(
@@ -286,9 +299,7 @@ class TestFEBuildSpecialist:
     def test_problem_solve_no_build_issues(self):
         a, _ = self._agent()
         a._model = object()
-        out = a.problem_solve(
-            _fe_phase_input(review_issues=[_fe_review_issue(source="security")])
-        )
+        out = a.problem_solve(_fe_phase_input(review_issues=[_fe_review_issue(source="security")]))
         assert "No build issues" in out.summary
 
     def test_problem_solve_fixes_issues(self, monkeypatch):
@@ -385,9 +396,7 @@ class TestBEBuildSpecialist:
     def test_problem_solve_no_build_issues(self):
         a, _ = self._agent()
         a._model = object()
-        out = a.problem_solve(
-            _be_phase_input(review_issues=[_be_review_issue(source="security")])
-        )
+        out = a.problem_solve(_be_phase_input(review_issues=[_be_review_issue(source="security")]))
         assert "No build issues" in out.summary
 
     def test_problem_solve_fixes_issues(self, monkeypatch):

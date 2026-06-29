@@ -38,14 +38,15 @@ MAX_REVIEW_ITERATIONS = 15
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     """Build team-owned tool agent instances (for plan/execute/review/problem_solve/deliver)."""
+    from software_engineering_team.shared.tool_agent_git_branch import (
+        GitBranchManagementToolAgent,
+    )
+
     from .tool_agents.api_openapi import ApiOpenApiToolAgent
     from .tool_agents.auth import AuthToolAgent
     from .tool_agents.build_specialist import BuildSpecialistAdapterAgent
-    from .tool_agents.cicd import CicdAdapterAgent
-    from .tool_agents.containerization import ContainerizationAdapterAgent
     from .tool_agents.data_engineering import DataEngineeringToolAgent
     from .tool_agents.documentation import DocumentationToolAgent
-    from .tool_agents.git_branch_management import GitBranchManagementToolAgent
     from .tool_agents.security import SecurityToolAgent
     from .tool_agents.testing_qa import TestingQAToolAgent
 
@@ -53,8 +54,6 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
         ToolAgentKind.DATA_ENGINEERING: DataEngineeringToolAgent(llm),
         ToolAgentKind.API_OPENAPI: ApiOpenApiToolAgent(llm),
         ToolAgentKind.AUTH: AuthToolAgent(llm),
-        ToolAgentKind.CICD: CicdAdapterAgent(),
-        ToolAgentKind.CONTAINERIZATION: ContainerizationAdapterAgent(),
         ToolAgentKind.GIT_BRANCH_MANAGEMENT: GitBranchManagementToolAgent(),
         ToolAgentKind.BUILD_SPECIALIST: BuildSpecialistAdapterAgent(llm),
         ToolAgentKind.TESTING_QA: TestingQAToolAgent(llm),
@@ -452,7 +451,9 @@ class BackendDevelopmentAgent:
                 merge_to_development=merge_to_development,
             )
             result.deliver_result = deliver_result
-            delivered = deliver_result.merged if merge_to_development else deliver_result.branch_ready
+            delivered = (
+                deliver_result.merged if merge_to_development else deliver_result.branch_ready
+            )
             result.success = delivered and failed_count == 0
             result.summary = f"{exec_result.summary} {deliver_result.summary}"
             if failed_count > 0:
