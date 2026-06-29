@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 
 import pytest
+from code_review_agent.profiles import ReviewProfile
 
+from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.tool_agent_base import (
     DEFAULT_MAX_RELEVANT_CODE_CHARS,
     BaseReviewToolAgent,
@@ -229,11 +231,6 @@ def test_review_llm_exception(monkeypatch):
 # ---------------------------------------------------------------------------
 # review_via_engine: opt-in routing through the shared code-review engine
 # ---------------------------------------------------------------------------
-
-
-from code_review_agent.profiles import ReviewProfile  # noqa: E402
-
-from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
 
 
 class _EngineStubClient(DummyLLMClient):

@@ -92,6 +92,13 @@ class AcceptanceVerifierAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
+        """Store the LLM client the engine will run on.
+
+        Preconditions:
+            ``llm_client`` is not None — the gate fails fast rather than deferring
+            a confusing error to the first ``run`` call (matches ``ChangeReviewAgent``).
+        """
+        assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
 
     def run(self, input_data: AcceptanceVerifierInput) -> AcceptanceVerifierOutput:
@@ -103,6 +110,9 @@ class AcceptanceVerifierAgent:
         Postconditions:
             - With no criteria, returns ``all_satisfied=True`` and an empty list
               without invoking the engine (no LLM round-trip).
+            - With criteria but no code, returns every criterion unsatisfied with
+              ``"No code provided"`` evidence and ``all_satisfied=False``, again
+              without invoking the engine.
             - Otherwise returns one ``CriterionStatus`` per criterion derived from
               the engine's findings, with ``all_satisfied`` true iff all are
               satisfied. A review-engine failure returns
@@ -113,6 +123,19 @@ class AcceptanceVerifierAgent:
         if not input_data.acceptance_criteria:
             return AcceptanceVerifierOutput(
                 all_satisfied=True, per_criterion=[], summary="No criteria to verify"
+            )
+
+        # Short-circuit on missing code — there is nothing to verify the criteria
+        # against, so every criterion is unmet. Reporting this explicitly is
+        # clearer (and cheaper) than letting the engine reject an empty submission.
+        if not (input_data.code or "").strip():
+            return AcceptanceVerifierOutput(
+                all_satisfied=False,
+                per_criterion=[
+                    CriterionStatus(criterion=c, satisfied=False, evidence="No code provided")
+                    for c in input_data.acceptance_criteria
+                ],
+                summary="No code provided to verify against acceptance criteria",
             )
 
         logger.info(

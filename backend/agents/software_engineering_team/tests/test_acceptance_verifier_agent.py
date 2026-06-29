@@ -53,6 +53,31 @@ def test_acceptance_verifier_default_run_returns_output() -> None:
     assert all(c.satisfied for c in result.per_criterion)
 
 
+def test_acceptance_verifier_requires_client() -> None:
+    import pytest
+
+    with pytest.raises(AssertionError):
+        AcceptanceVerifierAgent(None)
+
+
+def test_acceptance_verifier_short_circuits_on_empty_code() -> None:
+    """Criteria but no code → every criterion unsatisfied, no engine call."""
+
+    class _TripWireClient(DummyLLMClient):
+        def complete_json(self, *a, **kw):  # type: ignore[override]
+            raise AssertionError("engine must not be called when code is empty")
+
+        def chat_json_round(self, *a, **kw):  # type: ignore[override]
+            raise AssertionError("engine must not be called when code is empty")
+
+    agent = AcceptanceVerifierAgent(_TripWireClient())
+    result = agent.run(_input(code="   "))
+    assert result.all_satisfied is False
+    assert len(result.per_criterion) == 2
+    assert all(not c.satisfied for c in result.per_criterion)
+    assert all(c.evidence == "No code provided" for c in result.per_criterion)
+
+
 def test_acceptance_verifier_short_circuits_on_empty_criteria() -> None:
     """No criteria → no engine call, always all_satisfied with empty list."""
 
