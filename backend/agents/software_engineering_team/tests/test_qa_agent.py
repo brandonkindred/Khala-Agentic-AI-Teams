@@ -194,3 +194,105 @@ def test_qa_expert_agent_falls_back_on_validation_error() -> None:
     # instead: a well-formed empty QAOutput with approved=True (no bugs).
     assert isinstance(result, QAOutput)
     assert result.bugs_found == []
+
+
+# ---------------------------------------------------------------------------
+# acceptance_evidence mode (absorbs the former DevOps test-validation surface)
+# ---------------------------------------------------------------------------
+
+
+def test_acceptance_evidence_system_prompt_is_standalone() -> None:
+    """The acceptance_evidence persona must not embed the bug-review prompt,
+    whose 'review code for bugs' directions contradict release validation."""
+    from qa_agent.prompts import QA_PROMPT, QA_PROMPT_ACCEPTANCE_EVIDENCE
+
+    agent = QAExpertAgent(DummyLLMClient())
+    sp = agent._system_prompts["acceptance_evidence"]
+    # Structural assertions (independent of the exact wording of either prompt):
+    # the acceptance_evidence system prompt is exactly the standalone persona and
+    # does not embed the bug-review QA_PROMPT.
+    assert sp == QA_PROMPT_ACCEPTANCE_EVIDENCE
+    assert QA_PROMPT not in sp
+    # And it carries acceptance-evidence-specific instructions.
+    assert "acceptance criteria" in sp.lower()
+
+
+def test_qa_expert_agent_acceptance_evidence_mode_maps_evidence() -> None:
+    agent = QAExpertAgent(DummyLLMClient())
+    result = agent.run(
+        _input(
+            request_mode="acceptance_evidence",
+            acceptance_criteria=["Criterion 1"],
+            tool_results={"unit": {"unit_tests": "pass"}},
+        )
+    )
+    assert isinstance(result, QAOutput)
+    assert result.approved is True
+    assert result.quality_gates  # populated by the acceptance-evidence dummy anchor
+    assert result.acceptance_trace
+    assert result.validation_evidence
+    # bug-review fields stay empty in this mode.
+    assert result.bugs_found == []
+
+
+def test_qa_expert_agent_acceptance_evidence_gate_fail_forces_unapproved() -> None:
+    """A failing quality gate blocks approval even when the LLM says approved."""
+
+    class _GateFailClient(DummyLLMClient):
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            return {
+                "approved": True,  # deliberately optimistic
+                "quality_gates": {"unit_tests": "pass", "deploy_dry_run": "fail"},
+                "acceptance_trace": [],
+                "validation_evidence": [],
+                "bugs_found": [],
+                "summary": "one gate failed",
+            }
+
+    agent = QAExpertAgent(_GateFailClient())
+    result = agent.run(_input(request_mode="acceptance_evidence", acceptance_criteria=["c1"]))
+    assert result.approved is False
+
+
+def test_qa_expert_agent_acceptance_evidence_whitespace_fail_forces_unapproved() -> None:
+    """A whitespace-padded ``" fail "`` gate must still block approval, matching
+    the DevOps shim's strip-then-lower normalization."""
+
+    class _PaddedFailClient(DummyLLMClient):
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            return {
+                "approved": True,
+                "quality_gates": {"deploy_dry_run": "  FAIL  "},
+                "acceptance_trace": [],
+                "validation_evidence": [],
+                "bugs_found": [],
+                "summary": "padded fail",
+            }
+
+    agent = QAExpertAgent(_PaddedFailClient())
+    result = agent.run(_input(request_mode="acceptance_evidence", acceptance_criteria=["c1"]))
+    assert result.approved is False
+
+
+def test_qa_expert_agent_acceptance_evidence_all_pass_approves() -> None:
+    class _AllPassClient(DummyLLMClient):
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            return {
+                "approved": True,
+                "quality_gates": {"unit_tests": "pass", "integration_tests": "skipped"},
+                "acceptance_trace": [{"criterion": "c1", "implementation_refs": [], "tests": []}],
+                "validation_evidence": [{"gate": "unit_tests", "status": "pass", "detail": "ok"}],
+                "bugs_found": [],
+                "summary": "all good",
+            }
+
+    agent = QAExpertAgent(_AllPassClient())
+    result = agent.run(_input(request_mode="acceptance_evidence", acceptance_criteria=["c1"]))
+    assert result.approved is True
+    assert result.validation_evidence[0]["gate"] == "unit_tests"
