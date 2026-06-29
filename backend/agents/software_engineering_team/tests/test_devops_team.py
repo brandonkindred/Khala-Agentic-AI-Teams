@@ -620,6 +620,32 @@ class TestCICDPipelineAgent:
         assert ".github/workflows/ci.yml" in out.artifacts
         assert out.required_gates_present
 
+    def test_run_surfaces_frontend_pipeline_artifact(self) -> None:
+        """As the single CI/CD owner, the agent carries frontend workflow artifacts too."""
+        from devops_team.cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
+
+        client = _StubClient(
+            {
+                "artifacts": {".github/workflows/frontend.yml": "on: pull_request"},
+                "pipeline_job_graph_summary": "install -> lint -> build -> test -> preview",
+                "required_gates_present": True,
+                "summary": "frontend pipeline created",
+            }
+        )
+        agent = CICDPipelineAgent(client)
+        out = agent.run(CICDPipelineAgentInput(task_spec=_base_task_spec()))
+        assert ".github/workflows/frontend.yml" in out.artifacts
+
+    def test_prompt_covers_frontend_concerns(self) -> None:
+        """The merged prompt owns frontend CI/CD (preview env, bundle, source maps)."""
+        from devops_team.cicd_pipeline_agent.prompts import CICD_PIPELINE_PROMPT
+
+        lowered = CICD_PIPELINE_PROMPT.lower()
+        assert "preview environment" in lowered
+        assert "bundle-size" in lowered or "bundle size" in lowered
+        assert "source map" in lowered
+        assert "frontend.yml" in lowered
+
 
 class TestDeploymentStrategyAgent:
     def test_run_returns_strategy(self) -> None:

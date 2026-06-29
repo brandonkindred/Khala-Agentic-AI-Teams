@@ -62,8 +62,6 @@ PLANNING_PROMPT = """You are an expert Planning Agent for a backend development 
 - data_engineering — schema design, data models, data integrity, query optimisation (NO migrations unless explicitly requested)
 - api_openapi — API endpoint design, OpenAPI contract, route implementation
 - auth — authentication, authorisation, RBAC, permissions, secure defaults
-- cicd — CI/CD pipeline configuration or updates
-- containerization — Dockerfile, docker-compose, container config
 - documentation — README, API docs, runbooks
 - testing_qa — test plan, test files, coverage improvements
 - security — security hardening, vulnerability fixes

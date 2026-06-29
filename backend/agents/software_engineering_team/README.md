@@ -471,6 +471,20 @@ The `devops_team/` package replaces the legacy monolithic `devops_agent/` with a
 | **DeploymentDryRunPlanToolAgent** | Runs `helm lint/template` for Kubernetes manifests |
 | **GitOperationsToolAgent** | Reused from existing codebase; DevOpsTeamLeadAgent has merge authority |
 
+#### Git ownership (three distinct owners)
+
+Git work is split across three intentionally separate owners — they serve
+different contracts and are **not** merged into one:
+
+- **`git_operations_tool_agent/GitOperationsToolAgent`** — policy-driven
+  branch/commit/merge with approval tokens, scope guard, and branch-name policy.
+  Used by the main SE backend workflow; `DevOpsTeamLeadAgent` holds merge authority.
+- **`shared/tool_agent_git_branch.py::GitBranchManagementToolAgent`** — the
+  code-v2 deliver-phase git tool (duck-typed `ToolAgentPhaseInput` contract). A
+  single shared implementation used by both code-v2 stacks (no per-tree
+  re-export packages).
+- **`git_setup_agent/`** — the one repository-setup path (init/scaffold).
+
 ### Workflow Phases
 
 1. **Intake & Clarification** — Environment policy check, then task clarifier validates spec completeness
