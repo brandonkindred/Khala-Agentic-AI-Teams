@@ -333,8 +333,14 @@ def mfi(
     neg_sum = neg_flow.rolling(window=period).sum()
     ratio = pos_sum / neg_sum.replace(0, np.nan)
     result = 100 - (100 / (1 + ratio))
-    # neg_sum == 0 over a window (no down moves) → MFI = 100, matching rsi().
-    fill_values = pd.Series(np.where(neg_sum == 0, 100.0, np.nan), index=result.index)
+    # neg_sum == 0 over a full window: 100 when there is up-flow (no down moves),
+    # else 50 for a flat window (no flow at all) — matching IndicatorRegistry.mfi
+    # and rsi(). Warm-up rows (neg_sum NaN) keep NaN. ``np.where`` is over Series,
+    # so neg_sum/pos_sum are aligned element-wise.
+    fill_values = pd.Series(
+        np.where(neg_sum == 0, np.where(pos_sum > 0, 100.0, 50.0), np.nan),
+        index=result.index,
+    )
     return result.fillna(fill_values)
 
 
@@ -342,7 +348,10 @@ def roc(series: pd.Series, period: int = 12) -> pd.Series:
     """Rate of Change (percent) over ``period`` bars."""
     series = _coerce_series(series)
     prev = series.shift(period)
-    return (series - prev) / prev.replace(0, np.nan) * 100
+    result = (series - prev) / prev.replace(0, np.nan) * 100
+    # Reference price exactly 0 → 0.0 (matching IndicatorRegistry.roc and the
+    # compiler inline helper); warm-up rows (prev is NaN) keep NaN.
+    return result.where(prev != 0, 0.0)
 
 
 def cci(
@@ -360,7 +369,10 @@ def cci(
     mean_dev = tp.rolling(window=period).apply(
         lambda window: np.abs(window - window.mean()).mean(), raw=True
     )
-    return (tp - sma_tp) / (0.015 * mean_dev.replace(0, np.nan))
+    result = (tp - sma_tp) / (0.015 * mean_dev.replace(0, np.nan))
+    # Flat window (mean deviation 0) → 0.0 (matching IndicatorRegistry.cci);
+    # warm-up rows (mean_dev is NaN) keep NaN.
+    return result.where(mean_dev != 0, 0.0)
 
 
 def williams_r(
@@ -375,8 +387,11 @@ def williams_r(
     close = _coerce_series(close, "close")
     highest_high = high.rolling(window=period).max()
     lowest_low = low.rolling(window=period).min()
-    denom = (highest_high - lowest_low).replace(0, np.nan)
-    return -100 * (highest_high - close) / denom
+    rng = highest_high - lowest_low
+    result = -100 * (highest_high - close) / rng.replace(0, np.nan)
+    # Flat window (zero high-low range) → −50.0 neutral (matching
+    # IndicatorRegistry.williams_r); warm-up rows (rng is NaN) keep NaN.
+    return result.where(rng != 0, -50.0)
 
 
 # ---------------------------------------------------------------------------

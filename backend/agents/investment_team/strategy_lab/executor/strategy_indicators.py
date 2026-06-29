@@ -103,6 +103,29 @@ def _ohlc_bars(high, low, close, volume=None) -> list:
     ]
 
 
+def _hl_bars(high, low) -> list:
+    """Build registry bars from just high/low (Donchian). Other fields default to 0.0.
+
+    Donchian reads only ``bar.high``/``bar.low``; constructing bars with only those
+    fields set avoids feeding a placeholder into an OHLC slot the indicator never
+    reads (vs. reusing ``_ohlc_bars`` with a dummy ``close``).
+    """
+    highs = [float(v) for v in _impl._coerce_series(high, "high")]
+    lows = [float(v) for v in _impl._coerce_series(low, "low")]
+    return [_RegBar(high=h, low=lo) for h, lo in zip(highs, lows)]
+
+
+def _cv_bars(close, volume) -> list:
+    """Build registry bars from just close/volume (OBV). Other fields default to 0.0.
+
+    OBV reads only ``bar.close``/``bar.volume``; this avoids passing ``close`` into
+    the unused high/low slots.
+    """
+    closes = [float(v) for v in _impl._coerce_series(close, "close")]
+    vols = [float(v) for v in _impl._coerce_series(volume, "volume")]
+    return [_RegBar(close=c, volume=vol) for c, vol in zip(closes, vols)]
+
+
 def _ohlc_bars_from_history(history) -> list:
     """Build registry bars from a bar/number ``history`` for OHLC indicators.
 
@@ -201,9 +224,7 @@ def vwap(high, low, close, volume) -> float:
 
 def donchian_channels(high, low, period=20) -> tuple[float, float, float]:
     """Latest (upper, middle, lower) Donchian channel values. See module contract."""
-    # Donchian reads only ``high``/``low``; ``close`` is unused, so we reuse
-    # ``low`` as a harmless placeholder for the required positional slot.
-    bars = _ohlc_bars(high, low, close=low)
+    bars = _hl_bars(high, low)
     reg = IndicatorRegistry()
     p = int(period)
     return (
@@ -229,9 +250,7 @@ def keltner_channels(
 
 def obv(close, volume) -> float:
     """Latest On-Balance Volume value. See module contract."""
-    # OBV reads only ``close`` and ``volume``; ``high``/``low`` are unused, so
-    # ``close`` is passed for those slots as a harmless placeholder.
-    return _scalar(IndicatorRegistry().obv(_ohlc_bars(close, close, close, volume)))
+    return _scalar(IndicatorRegistry().obv(_cv_bars(close, volume)))
 
 
 def mfi(high, low, close, volume, period=14) -> float:

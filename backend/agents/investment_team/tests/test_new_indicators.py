@@ -33,6 +33,9 @@ from investment_team.strategy_lab.executor import indicators as pdi
 from investment_team.strategy_lab.executor import strategy_indicators as si
 from investment_team.strategy_lab.executor.strategy_indicators import indicator_value
 from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+from investment_team.strategy_lab.quality_gates.code_conformance import (
+    CodeConformanceGate,
+)
 from investment_team.strategy_lab.quality_gates.predicate_conformance import (
     PredicateConformanceGate,
 )
@@ -835,3 +838,200 @@ def test_compute_indicator_series_matches_registry_tail(case) -> None:
     series = compute_indicator_series(ref, df)
     expected = expected_call(IndicatorRegistry(), bars)
     assert float(series.iloc[-1]) == pytest.approx(expected, rel=0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Pandas reference — degenerate-window edge cases match the streaming registry
+# (and the documented safe defaults), with warm-up rows left NaN.
+# ---------------------------------------------------------------------------
+
+
+def _flat_bars(n: int = 30, price: float = 50.0, volume: float = 100.0) -> List[_Bar]:
+    return [
+        _Bar(timestamp=f"t{i}", open=price, high=price, low=price, close=price, volume=volume)
+        for i in range(n)
+    ]
+
+
+def test_pandas_flat_window_matches_registry_safe_defaults() -> None:
+    """ROC/CCI/Williams %R/MFI references return safe defaults (not NaN) on a flat window."""
+    flat = _flat_bars()
+    high = pd.Series([b.high for b in flat])
+    low = pd.Series([b.low for b in flat])
+    close = pd.Series([b.close for b in flat])
+    vol = pd.Series([b.volume for b in flat])
+    reg = IndicatorRegistry()
+
+    assert float(pdi.roc(close, 12).iloc[-1]) == pytest.approx(reg.roc(flat, 12)) == 0.0
+    assert float(pdi.cci(high, low, close, 20).iloc[-1]) == pytest.approx(reg.cci(flat, 20)) == 0.0
+    assert (
+        float(pdi.williams_r(high, low, close, 14).iloc[-1])
+        == pytest.approx(reg.williams_r(flat, 14))
+        == -50.0
+    )
+    # Flat typical price → no money flow at all → neutral 50 (not 100).
+    assert (
+        float(pdi.mfi(high, low, close, vol, 14).iloc[-1])
+        == pytest.approx(reg.mfi(flat, 14))
+        == 50.0
+    )
+
+
+def test_pandas_warmup_rows_stay_nan() -> None:
+    """The safe-default substitution must not overwrite warm-up NaNs."""
+    flat = _flat_bars()
+    high = pd.Series([b.high for b in flat])
+    low = pd.Series([b.low for b in flat])
+    close = pd.Series([b.close for b in flat])
+    vol = pd.Series([b.volume for b in flat])
+    assert pd.isna(pdi.roc(close, 12).iloc[0])
+    assert pd.isna(pdi.cci(high, low, close, 20).iloc[0])
+    assert pd.isna(pdi.williams_r(high, low, close, 14).iloc[0])
+    assert pd.isna(pdi.mfi(high, low, close, vol, 14).iloc[0])
+
+
+def test_pandas_roc_zero_reference_price_returns_zero() -> None:
+    """A zero reference price yields 0.0, not inf/NaN — matching the registry."""
+    series = pd.Series([0.0] * 13 + [5.0])
+    assert float(pdi.roc(series, 12).iloc[-1]) == 0.0
+
+
+def test_pandas_mfi_up_only_window_returns_100() -> None:
+    """A window with only up-moves (neg flow 0, pos flow > 0) still returns 100."""
+    rising = [
+        _Bar(timestamp=f"t{i}", open=50 + i, high=51 + i, low=49 + i, close=50 + i, volume=100)
+        for i in range(20)
+    ]
+    high = pd.Series([b.high for b in rising])
+    low = pd.Series([b.low for b in rising])
+    close = pd.Series([b.close for b in rising])
+    vol = pd.Series([b.volume for b in rising])
+    assert float(pdi.mfi(high, low, close, vol, 14).iloc[-1]) == pytest.approx(
+        IndicatorRegistry().mfi(rising, 14)
+    )
+    assert float(pdi.mfi(high, low, close, vol, 14).iloc[-1]) == 100.0
+
+
+# ---------------------------------------------------------------------------
+# ROC accessor honours a non-close source (the _value_bars projection pattern).
+# ---------------------------------------------------------------------------
+
+
+def test_accessor_roc_honours_non_close_source() -> None:
+    bars = _series(60, seed=9)
+    reg = IndicatorRegistry()
+    # ctx.indicator projects the requested source into the registry's close slot,
+    # so roc over ``high`` equals a registry roc whose source is ``high`` — and
+    # differs from the close-sourced value, proving the source threads through.
+    # (The synthetic bars are symmetric, so hl2 == close; ``high`` is distinct.)
+    got = indicator_value("roc", bars, period=10, source="high")
+    assert got == pytest.approx(reg.roc(bars, 10, source="high"))
+    assert got != pytest.approx(reg.roc(bars, 10, source="close"))
+
+
+# ---------------------------------------------------------------------------
+# Conformance warm-up sizing — cumulative indicators (OBV/VWAP) get the longer
+# margin rather than the bare default, so the synthetic fixture is long enough.
+# ---------------------------------------------------------------------------
+
+
+def test_conformance_warmup_for_cumulative_indicators() -> None:
+    from investment_team.strategy_lab.quality_gates.predicate_conformance_fixtures import (
+        _warmup_for_indicator,
+    )
+
+    # OBV/VWAP have no rolling period; they get the explicit cumulative margin (50),
+    # not the bare 20 fallback a missing branch would hit.
+    assert _warmup_for_indicator(IndicatorRef(name="obv")) == 50
+    assert _warmup_for_indicator(IndicatorRef(name="vwap")) == 50
+    # A rolling indicator still sizes off its own default period.
+    assert _warmup_for_indicator(IndicatorRef(name="donchian")) == 25  # period 20 + 5
+
+
+# ---------------------------------------------------------------------------
+# Code-conformance: the DSL name is credited via ctx.indicator, but a bare
+# channel-helper call (donchian/keltner — not exported by the sandbox) is NOT.
+# ---------------------------------------------------------------------------
+
+
+def _donchian_spec() -> StrategySpec:
+    return StrategySpec(
+        strategy_id="cc-donchian",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ Donchian breakout.",
+        signal_definition="close > donchian upper",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close",
+                    op=">",
+                    rhs=IndicatorRef(name="donchian", params={"band": "upper", "period": 20}),
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+        requires_custom_code=True,
+    )
+
+
+_CC_CTX_INDICATOR = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            upper = ctx.indicator("donchian", period=20, band="upper")
+            if upper is None:
+                return
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and bar.close > upper:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+# A bare ``donchian(...)`` call: the sandbox exports ``donchian_channels``, not
+# ``donchian``, so this would NameError at runtime and must NOT satisfy check #1.
+_CC_BARE_DONCHIAN_CALL = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            upper = donchian(bars, 20)
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and bar.close > upper:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def _crit(results) -> list:
+    return [r.details for r in results if r.severity == "critical" and not r.passed]
+
+
+def test_conformance_credits_donchian_via_ctx_indicator() -> None:
+    results = CodeConformanceGate().check(_CC_CTX_INDICATOR, _donchian_spec())
+    assert not any("donchian" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def test_conformance_rejects_bare_donchian_call() -> None:
+    results = CodeConformanceGate().check(_CC_BARE_DONCHIAN_CALL, _donchian_spec())
+    # The bare, non-exported ``donchian(...)`` name must not credit the indicator.
+    assert any("donchian" in d.lower() for d in _crit(results)), _crit(results)

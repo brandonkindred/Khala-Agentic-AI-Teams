@@ -76,21 +76,27 @@ GATE = "code_conformance"
 _ALLOWED_HOOK_NAMES: frozenset[str] = frozenset({"on_bar", "on_fill", "on_end"})
 
 # DSL → set of acceptable AST call-name(s) for the indicator's named
-# implementation. Most map 1:1 with the indicator name; ``bollinger``
-# accepts the ``bollinger_bands`` helper name from
-# ``strategy_lab/executor/indicators.py``.
+# implementation. These are the REAL callable helper names a named call must
+# resolve to — only names the sandbox ``indicators`` module actually exports.
+# Most map 1:1 with the indicator name; the channel/band indicators map to their
+# helper (``bollinger`` → ``bollinger_bands``, ``donchian`` → ``donchian_channels``,
+# ``keltner`` → ``keltner_channels``). The bare DSL name is intentionally NOT an
+# alias here: ``donchian``/``keltner``/``bollinger`` are not exported callables, so a
+# bare ``donchian(...)`` call would ``NameError``/``ImportError`` at runtime and must
+# not satisfy the gate. The DSL name is credited separately via the
+# ``ctx.indicator('<name>', ...)`` accessor in :meth:`_check_indicator_presence`.
 _INDICATOR_ALLOWED_CALL_NAMES: dict[str, frozenset[str]] = {
     "sma": frozenset({"sma"}),
     "ema": frozenset({"ema"}),
     "rsi": frozenset({"rsi"}),
     "macd": frozenset({"macd"}),
-    "bollinger": frozenset({"bollinger_bands", "bollinger"}),
+    "bollinger": frozenset({"bollinger_bands"}),
     "atr": frozenset({"atr"}),
     "adx": frozenset({"adx"}),
     "stochastic": frozenset({"stochastic"}),
     "vwap": frozenset({"vwap"}),
-    "donchian": frozenset({"donchian_channels", "donchian"}),
-    "keltner": frozenset({"keltner_channels", "keltner"}),
+    "donchian": frozenset({"donchian_channels"}),
+    "keltner": frozenset({"keltner_channels"}),
     "obv": frozenset({"obv"}),
     "mfi": frozenset({"mfi"}),
     "roc": frozenset({"roc"}),
@@ -905,16 +911,18 @@ class CodeConformanceGate(GateResultsMixin):
             # recognised forms — the engine-backed ``ctx.indicator('<name>', ...)``
             # accessor (preferred) and the legacy named call (e.g. ``sma(...)``,
             # which the deterministic compiler still emits).
-            called = _collect_called_names_in_methods(cctx.cls, cctx.reachable)
-            called |= _collect_ctx_indicator_names(cctx.cls, cctx.reachable)
+            call_names = _collect_called_names_in_methods(cctx.cls, cctx.reachable)
+            ctx_names = _collect_ctx_indicator_names(cctx.cls, cctx.reachable)
             missing: List[str] = []
             for name in sorted(required):
-                # The named-call allow-list always contains the DSL name itself,
-                # and ``_collect_ctx_indicator_names`` keys ``ctx.indicator``
-                # reads by that same DSL name, so one intersection test covers
-                # both forms.
-                allowed = _INDICATOR_ALLOWED_CALL_NAMES.get(name, frozenset({name}))
-                if not (called & allowed):
+                # Two independent credit paths, kept separate so a bare DSL-name
+                # call (e.g. ``donchian(...)``) is NOT mistaken for a real read:
+                #  * ``ctx.indicator('<name>', ...)`` — keyed by the DSL name.
+                #  * a legacy named call — must resolve to a REAL exported helper
+                #    name in the allow-list (``sma``, ``donchian_channels``, …),
+                #    never the bare DSL alias (which isn't an exported callable).
+                call_aliases = _INDICATOR_ALLOWED_CALL_NAMES.get(name, frozenset({name}))
+                if name not in ctx_names and not (call_names & call_aliases):
                     missing.append(name)
             if missing:
                 results.append(

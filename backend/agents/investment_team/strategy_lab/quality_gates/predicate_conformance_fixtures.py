@@ -607,4 +607,9 @@ def _warmup_for_indicator(ref: IndicatorRef) -> int:
         period = int(ref.param("period"))
         atr_period = int(ref.param("atr_period"))
         return max(period, atr_period + 1) + 5
+    if ref.name in ("obv", "vwap"):
+        # Cumulative indicators have no rolling warm-up, but they need enough
+        # history to swing through a threshold; give the fixture a longer margin
+        # (the compiler requests _VWAP_HISTORY at runtime for the same reason).
+        return 50
     return 20
