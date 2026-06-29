@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 from agentic_team_provisioning.models import (
+    SOURCE_REGISTRY,
     AgenticTeam,
     AgenticTeamAgent,
     ConversationMessage,
@@ -59,7 +60,9 @@ class AgenticTeamStore:
             )
         # Best-effort: link the team to the default profile. record_association_safe
         # never raises, so a link failure can't break team creation.
-        record_association_safe(ArtifactType.AGENTIC_TEAM, "agentic_team_provisioning", team_id, label=name)
+        record_association_safe(
+            ArtifactType.AGENTIC_TEAM, "agentic_team_provisioning", team_id, label=name
+        )
         return AgenticTeam(
             team_id=team_id,
             name=name,
@@ -172,24 +175,243 @@ class AgenticTeamStore:
     # Team agents pool
     # ------------------------------------------------------------------
 
+    def _lock_team(self, cur, team_id: str) -> None:
+        """Take the team-row (roster parent) lock on an open cursor, ``FOR UPDATE``.
+
+        Every roster write — full-roster save, merge, single-agent add/delete — calls
+        this FIRST, before touching child ``agentic_team_agents`` rows, so all paths
+        acquire locks in the same parent→child order and can't deadlock by
+        interleaving (a child-first writer racing a parent-first writer would
+        otherwise cycle).
+
+        Preconditions: ``cur`` is an open cursor in a live transaction.
+        Postconditions: holds a row-level ``FOR UPDATE`` lock on ``team_id``'s
+            ``agentic_teams`` row for the rest of the transaction (no-op if the team
+            row doesn't exist). Leaves the lock result in the cursor so a caller that
+            needs to test existence (e.g. ``merge_generated_agents``) can ``fetchone``.
+        """
+        cur.execute(
+            "SELECT team_id FROM agentic_teams WHERE team_id = %s FOR UPDATE",
+            (team_id,),
+        )
+
+    def _write_team_agents(
+        self, cur, team_id: str, agents: list[AgenticTeamAgent], now: datetime
+    ) -> None:
+        """Redefine a team's roster on an open cursor to exactly ``agents``.
+
+        Used by the **full-roster** save (``save_team_agents`` /
+        ``merge_generated_agents``), which redefines the whole roster at once. The
+        rewrite upserts each surviving row via ``ON CONFLICT`` (so its original
+        ``created_at`` is preserved, matching the single-agent helpers) and deletes
+        only the rows no longer present, rather than wiping and re-inserting
+        everything. A roster that re-includes an existing agent therefore keeps that
+        agent's creation time.
+
+        Preconditions: ``cur`` is an open cursor in a live transaction; ``agents``
+            have unique ``agent_name`` within the team.
+        Postconditions: the team's ``agentic_team_agents`` rows are exactly
+            ``agents``; surviving rows retain their ``created_at``; the team's
+            ``updated_at`` is bumped to ``now``.
+        """
+        names = [a.agent_name for a in agents]
+        if names:
+            # Drop only rows that are no longer on the roster; survivors are upserted
+            # below (preserving their created_at) rather than deleted and recreated.
+            cur.execute(
+                "DELETE FROM agentic_team_agents WHERE team_id = %s AND agent_name <> ALL(%s)",
+                (team_id, names),
+            )
+        else:
+            cur.execute("DELETE FROM agentic_team_agents WHERE team_id = %s", (team_id,))
+        for a in agents:
+            cur.execute(
+                "INSERT INTO agentic_team_agents "
+                "(team_id, agent_name, data_json, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
+                "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
+                (team_id, a.agent_name, Json(a.model_dump(mode="json")), now, now),
+            )
+        cur.execute(
+            "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
+            (now, team_id),
+        )
+
     @timed_query(store=_STORE, op="save_team_agents")
     def save_team_agents(self, team_id: str, agents: list[AgenticTeamAgent]) -> None:
-        """Replace the full agents roster for a team (upsert semantics)."""
+        """Replace the full agents roster for a team (upsert semantics).
+
+        Preconditions: ``team_id`` is a non-empty string naming an existing team;
+            ``agents`` have unique ``agent_name`` within the team.
+        Postconditions: the team's ``agentic_team_agents`` rows are exactly ``agents``
+            (rows absent from ``agents`` are removed; surviving rows keep their
+            ``created_at`` via ``_write_team_agents``'s upsert); the team's
+            ``updated_at`` is bumped. If ``team_id`` names no team the agent INSERT
+            violates the ``agentic_team_agents`` → ``agentic_teams`` foreign key and
+            the transaction raises (only the empty-``agents`` case degrades to a
+            no-op DELETE/UPDATE) — callers must pass an existing team id.
+
+        Concurrency: takes the team-row ``FOR UPDATE`` lock before touching child
+        ``agentic_team_agents`` rows, so every roster write (this, the single-agent
+        helpers, and ``merge_generated_agents``) acquires locks in the same
+        parent→child order and they can't deadlock by interleaving.
+        """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("DELETE FROM agentic_team_agents WHERE team_id = %s", (team_id,))
-            for a in agents:
-                data = a.model_dump(mode="json")
-                cur.execute(
-                    "INSERT INTO agentic_team_agents "
-                    "(team_id, agent_name, data_json, created_at, updated_at) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (team_id, a.agent_name, Json(data), now, now),
-                )
+            self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
+            self._write_team_agents(cur, team_id, agents, now)
+
+    @timed_query(store=_STORE, op="merge_generated_agents")
+    def merge_generated_agents(
+        self,
+        team_id: str,
+        generated: list[AgenticTeamAgent],
+        on_merged: Optional[Callable[[list[AgenticTeamAgent]], None]] = None,
+    ) -> list[AgenticTeamAgent]:
+        """Atomically merge LLM-generated agents into the roster, preserving registry entries.
+
+        The process-design chat round-trips only generated agents, so a naive full
+        replace would drop the registry agents a user added via the from-registry
+        endpoint (Agent Studio §5.3). This keeps every existing ``source ==
+        "registry"`` entry, layers the generated agents on top (a generated agent
+        colliding by name with a preserved registry agent is dropped — the
+        explicitly-added registry agent wins), and rewrites the roster to the result.
+
+        Concurrency: the read-merge-write runs in a single transaction that first
+        takes a ``SELECT ... FOR UPDATE`` row lock on the team, so two concurrent
+        merges for the *same* team serialize instead of racing — neither can rewrite
+        from a stale snapshot and drop the other's writes. ``on_merged`` (if given) is
+        invoked with the merged roster **under that lock**, before commit, so a
+        caller's dependent registry registration is serialized with the roster write
+        (and with the single-agent helpers' registry cleanup) — closing the gap where
+        a chat-save register could race a concurrent add/delete cleanup. It must be
+        non-raising (best-effort); a raising callback would roll back the roster write.
+
+        Preconditions: ``team_id`` should name an existing team (callers validate).
+        Postconditions: returns the merged roster actually written (``[]`` if the team
+            is unknown — the roster is left untouched in that case). ``on_merged`` (when
+            given) is **always** invoked once with the final roster, including the empty
+            list for an unknown team, so a caller can still reconcile external state
+            (e.g. drop a vanished team's stale registry manifests) — restoring the
+            cleanup the pre-callback ``register_team_manifests(team_id, merged)`` did.
+        """
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
+            if cur.fetchone() is None:
+                # Unknown team: nothing to write, but still let the caller reconcile
+                # external state for the (now-absent) team with the empty roster.
+                if on_merged is not None:
+                    on_merged([])
+                return []
+            existing = self._load_team_agents(cur, team_id)
+            preserved = [a for a in existing if a.source == SOURCE_REGISTRY]
+            preserved_names = {a.agent_name for a in preserved}
+            merged = preserved + [g for g in generated if g.agent_name not in preserved_names]
+            self._write_team_agents(cur, team_id, merged, now)
+            if on_merged is not None:
+                on_merged(merged)
+        return merged
+
+    @timed_query(store=_STORE, op="add_or_replace_team_agent")
+    def add_or_replace_team_agent(
+        self,
+        team_id: str,
+        agent: AgenticTeamAgent,
+        on_replaced: Optional[Callable[[Optional[AgenticTeamAgent]], None]] = None,
+    ) -> None:
+        """Add (or replace, by name) a single roster agent without disturbing the rest.
+
+        Preconditions: ``team_id`` names an existing team.
+        Postconditions: the roster contains exactly one entry named
+            ``agent.agent_name`` (the supplied ``agent``); all other entries are
+            unchanged. Re-adding an existing name overwrites it in place, preserving
+            that row's original ``created_at``.
+
+        Concurrency: a single ``INSERT ... ON CONFLICT`` touches only this agent's
+            row (no read-modify-write of the whole roster), so concurrent
+            single-agent adds on the same team cannot drop one another's writes. The
+            team-row ``FOR UPDATE`` lock is taken first so this shares the
+            parent→child lock order of ``merge_generated_agents`` — a chat-save merge
+            and a single-agent write can't deadlock by locking the rows in opposite
+            order. ``on_replaced`` (if given) is invoked **under that lock** with the
+            row this call replaced (read under the lock, or ``None`` for an insert),
+            before commit, so a caller's dependent registry cleanup decides on the
+            row actually overwritten and is serialized with the chat-save register —
+            closing the read-prior-then-act race. It must be non-raising (best-effort);
+            a raising callback would roll back the roster write.
+        """
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
+            # Read the row we're about to replace under the lock, so a caller's
+            # cleanup acts on the truly-replaced row (not a pre-lock snapshot).
+            prior = self._get_team_agent(cur, team_id, agent.agent_name)
+            cur.execute(
+                "INSERT INTO agentic_team_agents "
+                "(team_id, agent_name, data_json, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
+                "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
+                (team_id, agent.agent_name, Json(agent.model_dump(mode="json")), now, now),
+            )
             cur.execute(
                 "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
                 (now, team_id),
             )
+            if on_replaced is not None:
+                on_replaced(prior)
+
+    @timed_query(store=_STORE, op="delete_team_agent")
+    def delete_team_agent(
+        self,
+        team_id: str,
+        agent_name: str,
+        on_deleted: Optional[Callable[[AgenticTeamAgent], None]] = None,
+    ) -> Optional[AgenticTeamAgent]:
+        """Remove a single roster agent by name and return it.
+
+        Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
+        Postconditions: returns the deleted :class:`AgenticTeamAgent` when an entry
+            named ``agent_name`` existed (removing only that row); returns ``None``
+            and leaves the roster unchanged otherwise.
+
+        Concurrency: a single ``DELETE ... RETURNING`` removes only this agent's row
+            and reports its data atomically — no read-modify-write of the roster, and
+            the caller's source check sees the row that was actually deleted. The
+            team-row ``FOR UPDATE`` lock is taken first so this shares the
+            parent→child lock order of ``merge_generated_agents`` — a chat-save merge
+            and a concurrent delete can't deadlock by locking the parent and child
+            rows in opposite order. ``on_deleted`` (if given) is invoked **under that
+            lock** with the deleted row, before commit, so a caller's dependent
+            registry cleanup is serialized with the chat-save register — a concurrent
+            re-add+register can't slip between the delete and the cleanup. It must be
+            non-raising (best-effort); a raising callback would roll back the delete.
+        """
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            # Parent-first lock (see _lock_team) — uniform lock order. The lock
+            # SELECT leaves its own result set on the cursor, but the DELETE ...
+            # RETURNING below re-executes the cursor and replaces it, so the
+            # fetchone() that follows reads the deleted row, not the lock SELECT.
+            self._lock_team(cur, team_id)
+            cur.execute(
+                "DELETE FROM agentic_team_agents WHERE team_id = %s AND agent_name = %s "
+                "RETURNING data_json",
+                (team_id, agent_name),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cur.execute(
+                "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
+                (now, team_id),
+            )
+            deleted = AgenticTeamAgent.model_validate(row["data_json"])
+            if on_deleted is not None:
+                on_deleted(deleted)
+            return deleted
 
     @timed_query(store=_STORE, op="list_team_agents")
     def list_team_agents(self, team_id: str) -> list[AgenticTeamAgent]:
@@ -202,6 +424,20 @@ class AgenticTeamStore:
             (team_id,),
         )
         return [AgenticTeamAgent.model_validate(r["data_json"]) for r in cur.fetchall()]
+
+    def _get_team_agent(self, cur, team_id: str, agent_name: str) -> Optional[AgenticTeamAgent]:
+        """Read one roster agent by name on an open cursor (under the caller's lock).
+
+        Preconditions: ``cur`` is an open cursor in a live transaction.
+        Postconditions: returns the :class:`AgenticTeamAgent` named ``agent_name`` for
+            ``team_id`` if present, else ``None``. Reads only — no mutation.
+        """
+        cur.execute(
+            "SELECT data_json FROM agentic_team_agents WHERE team_id = %s AND agent_name = %s",
+            (team_id, agent_name),
+        )
+        row = cur.fetchone()
+        return AgenticTeamAgent.model_validate(row["data_json"]) if row else None
 
     # ------------------------------------------------------------------
     # Conversations

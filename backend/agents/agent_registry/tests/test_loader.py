@@ -123,6 +123,30 @@ def test_register_installs_and_overwrites() -> None:
     assert reg.get("gen.a").name == "Second"
 
 
+def test_manifests_with_id_prefix_returns_only_matching() -> None:
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("team-a.one", "A1"))
+    reg.register(_manifest("team-a.two", "A2"))
+    reg.register(_manifest("team-b.one", "B1"))
+
+    matched = reg.manifests_with_id_prefix("team-a.")
+    assert {m.id for m in matched} == {"team-a.one", "team-a.two"}
+    assert reg.manifests_with_id_prefix("nope.") == []
+
+
+def test_manifests_with_id_prefix_empty_registry_returns_empty() -> None:
+    reg = AgentRegistry([], {})
+    assert reg.manifests_with_id_prefix("anything.") == []
+
+
+def test_manifests_with_id_prefix_empty_prefix_matches_all() -> None:
+    # Every string startswith("") — an empty prefix returns the whole registry.
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("team-a.one", "A1"))
+    reg.register(_manifest("team-b.one", "B1"))
+    assert {m.id for m in reg.manifests_with_id_prefix("")} == {"team-a.one", "team-b.one"}
+
+
 def test_register_tracks_source_path(tmp_path: Path) -> None:
     reg = AgentRegistry([], {})
     reg.register(_manifest("gen.b", "B"), source_path=tmp_path / "b.yaml")

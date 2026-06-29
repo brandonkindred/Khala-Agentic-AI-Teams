@@ -62,6 +62,26 @@ def test_build_agent_manifest_summary_falls_back_without_role():
     assert manifest.summary == "Generated agent Nameless"
 
 
+def test_build_agent_manifest_rejects_empty_team_id():
+    # Explicit ValueError (not assert) so the precondition survives ``python -O``.
+    agent = AgenticTeamAgent(agent_name="Triage", role="r")
+    with pytest.raises(ValueError, match="team_id must be non-empty"):
+        build_agent_manifest("", agent)
+
+
+def test_build_agent_manifest_rejects_empty_agent_name():
+    # ``model_construct`` bypasses the model's min_length to exercise the projection
+    # boundary guard directly (a hand-built/degenerate agent must still fail loud).
+    agent = AgenticTeamAgent.model_construct(agent_name="", role="r")
+    with pytest.raises(ValueError, match="agent_name must be non-empty"):
+        build_agent_manifest("team-1", agent)
+
+
+def test_register_team_manifests_rejects_empty_team_id():
+    with pytest.raises(ValueError, match="team_id must be non-empty"):
+        register_team_manifests("", [])
+
+
 def test_build_agent_manifest_id_stable_and_unique():
     a = AgenticTeamAgent(agent_name="Router Agent", role="r")
     b = AgenticTeamAgent(agent_name="Resolution Agent", role="r")
