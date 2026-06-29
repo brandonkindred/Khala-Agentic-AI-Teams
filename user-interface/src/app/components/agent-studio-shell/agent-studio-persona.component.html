@@ -1,0 +1,175 @@
+@if (!teamId()) {
+  <!-- Empty: Stage 4 reached with no team composed (e.g. resumed mid-journey). -->
+  <div class="persona-empty">
+    <mat-icon aria-hidden="true">groups</mat-icon>
+    <p>Compose a team in Stage 3 before testing it with personas.</p>
+    <button mat-flat-button type="button" (click)="finishInCompose()">
+      <mat-icon aria-hidden="true">arrow_back</mat-icon> Go to Compose Team
+    </button>
+  </div>
+} @else {
+  <section class="persona">
+    <!-- Sub-mode switch + back-loops (spec Stage 4 toolbar). -->
+    <header class="persona__toolbar">
+      <div class="persona__modes" role="tablist" aria-label="Team testing mode">
+        <button
+          type="button"
+          role="tab"
+          class="persona__mode"
+          [class.is-active]="mode() === 'manual'"
+          [attr.aria-selected]="mode() === 'manual'"
+          (click)="setMode('manual')"
+        >
+          Manual testing
+        </button>
+        <button
+          type="button"
+          role="tab"
+          class="persona__mode"
+          [class.is-active]="mode() === 'persona'"
+          [attr.aria-selected]="mode() === 'persona'"
+          (click)="setMode('persona')"
+        >
+          Persona-driven
+        </button>
+      </div>
+      <div class="persona__backloops">
+        <button mat-stroked-button type="button" (click)="iterateRoster()">
+          <mat-icon aria-hidden="true">arrow_back</mat-icon> iterate roster
+        </button>
+        <button
+          mat-stroked-button
+          type="button"
+          [disabled]="!canFixAgent()"
+          [matTooltip]="
+            canFixAgent()
+              ? 'Open the in-focus agent in the Stage 2 sandbox'
+              : 'No registry agent in focus — use Browse agents to pick one'
+          "
+          (click)="fixAgent()"
+        >
+          <mat-icon aria-hidden="true">build</mat-icon> fix an agent
+        </button>
+      </div>
+    </header>
+
+    @if (teamError()) {
+      <p class="persona__error" role="alert">{{ teamError() }}</p>
+    }
+
+    @switch (mode()) {
+      @case ('manual') {
+        @if (team()) {
+          <app-agentic-team-test-panel [team]="team()!" />
+        } @else if (!teamError()) {
+          <p class="persona__loading">Loading team…</p>
+        }
+      }
+
+      @case ('persona') {
+        @if (testable() === false) {
+          <!-- Safety net: process status changed after the Stage-3 jump. -->
+          <div class="persona-empty">
+            <mat-icon aria-hidden="true">report_problem</mat-icon>
+            <p>This team has no complete process yet.</p>
+            <button mat-flat-button type="button" (click)="finishInCompose()">
+              <mat-icon aria-hidden="true">arrow_back</mat-icon> Finish in Stage 3
+            </button>
+          </div>
+        } @else {
+          <div class="persona__launcher">
+            <div class="persona__library">
+              <div class="persona__library-head">
+                <h3>Persona</h3>
+                <button mat-stroked-button type="button" (click)="newPersona()">
+                  <mat-icon aria-hidden="true">add</mat-icon> New persona
+                </button>
+              </div>
+              @if (personas().length === 0) {
+                <p class="persona__loading">No personas — create one to begin.</p>
+              } @else {
+                <ul class="persona__list" role="listbox" aria-label="Testing personas">
+                  @for (p of personas(); track p.id) {
+                    <li
+                      class="persona__item"
+                      role="option"
+                      tabindex="0"
+                      [class.is-selected]="selectedPersonaId() === p.id"
+                      [attr.aria-selected]="selectedPersonaId() === p.id"
+                      (click)="selectPersona(p.id)"
+                      (keydown.enter)="selectPersona(p.id)"
+                      (keydown.space)="selectPersona(p.id)"
+                    >
+                      <mat-icon aria-hidden="true">{{ p.icon || 'person' }}</mat-icon>
+                      <span class="persona__item-name">{{ p.name }}</span>
+                      @if (p.is_builtin) {
+                        <span class="persona__badge">built-in</span>
+                      }
+                    </li>
+                  }
+                </ul>
+              }
+            </div>
+
+            <div class="persona__run-config">
+              <label class="persona__field">
+                <span>Target process</span>
+                <select
+                  [value]="selectedProcessId() ?? ''"
+                  (change)="selectProcess($any($event.target).value)"
+                >
+                  <option value="" disabled>Select a process…</option>
+                  @for (proc of completeProcesses(); track proc.process_id) {
+                    <option [value]="proc.process_id">{{ proc.name || proc.process_id }}</option>
+                  }
+                </select>
+              </label>
+              <button
+                mat-flat-button
+                color="primary"
+                type="button"
+                class="persona__run-btn"
+                [disabled]="!selectedPersonaId() || !selectedProcessId() || launching()"
+                (click)="launch()"
+              >
+                <mat-icon aria-hidden="true">play_arrow</mat-icon>
+                {{ launching() ? 'Starting…' : 'Run persona test' }}
+              </button>
+              @if (error()) {
+                <p class="persona__error" role="alert">{{ error() }}</p>
+              }
+            </div>
+          </div>
+
+          @if (run(); as r) {
+            <div class="persona__run">
+              <div class="persona__run-head">
+                <span class="persona__run-id">run {{ r.run_id }}</span>
+                <span class="persona__run-status">status: {{ r.status }}</span>
+                <span class="persona__run-elapsed">{{ elapsedSec() }}s</span>
+                @if (!runTerminal()) {
+                  <span class="persona__thinking" aria-live="polite">persona is thinking…</span>
+                }
+              </div>
+              @if (r.decisions.length > 0) {
+                <ul class="persona__decisions">
+                  @for (d of r.decisions; track d.decision_id) {
+                    <li class="persona__decision">
+                      <span class="persona__q">Q: {{ d.question_text }}</span>
+                      <span class="persona__a">→ {{ d.answer_text }}</span>
+                      @if (d.rationale) {
+                        <span class="persona__rationale">{{ d.rationale }}</span>
+                      }
+                    </li>
+                  }
+                </ul>
+              } @else {
+                <p class="persona__loading">Waiting for the first decision…</p>
+              }
+            </div>
+          }
+        }
+      }
+    }
+  </section>
+}

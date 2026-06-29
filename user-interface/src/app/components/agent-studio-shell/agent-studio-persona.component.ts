@@ -1,0 +1,331 @@
+import {
+  ChangeDetectionStrategy,
+  ChangeDetectorRef,
+  Component,
+  DestroyRef,
+  OnInit,
+  computed,
+  inject,
+  signal,
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { MatButtonModule } from '@angular/material/button';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatIconModule } from '@angular/material/icon';
+import { MatTooltipModule } from '@angular/material/tooltip';
+import { Subscription, interval, switchMap } from 'rxjs';
+import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
+import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
+import { AgentStudioStateService } from '../../services/agent-studio-state.service';
+import type { AgenticTeam, ProcessDefinition } from '../../models/agentic-team.model';
+import type { PersonaInfo, PersonaTestRunDetail } from '../../models/persona-testing.model';
+import { AgenticTeamTestPanelComponent } from '../agentic-team-test-panel/agentic-team-test-panel.component';
+import {
+  PersonaEditorDialogComponent,
+  type PersonaEditorDialogData,
+  type PersonaEditorDialogResult,
+} from '../persona-testing-dashboard/persona-editor-dialog.component';
+
+/** Persona-test run statuses that are terminal (polling stops). */
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+/** Live-run poll cadence (ms). Matches the founder run's coarse 15–30s ticks. */
+const POLL_MS = 10_000;
+
+type StudioPersonaMode = 'manual' | 'persona';
+
+/**
+ * Agent Studio — Stage 4 "Test Team with Personas" (spec §3, Stage 4).
+ *
+ * Validates the team assembled in Stage 3 two ways:
+ *   - **Manual:** reuses `app-agentic-team-test-panel` (chat + pipeline) as-is.
+ *   - **Persona-driven:** picks a testing persona + a target process and launches
+ *     an autonomous run via `POST /start` with
+ *     `target_team_key = "agentic_team:<teamId>"`, then renders a live run view
+ *     (elapsed counter, "persona is thinking…", decision transcript).
+ *
+ * Back-loops (spec §2.1): "iterate roster" → Stage 3, "fix an agent" → Stage 2
+ * (disabled when no registry agent is in focus). A team that isn't testable yet
+ * (no `complete` process) shows the §Stage-3 safety net rather than an empty
+ * dropdown. Reads the handoff `teamId`/`processId`; never navigates backward via
+ * the stepper itself.
+ */
+@Component({
+  selector: 'app-agent-studio-persona',
+  standalone: true,
+  imports: [
+    MatButtonModule,
+    MatIconModule,
+    MatTooltipModule,
+    MatDialogModule,
+    AgenticTeamTestPanelComponent,
+  ],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  templateUrl: './agent-studio-persona.component.html',
+  styleUrl: './agent-studio-persona.component.scss',
+})
+export class AgentStudioPersonaComponent implements OnInit {
+  private readonly state = inject(AgentStudioStateService);
+  private readonly agenticApi = inject(AgenticTeamApiService);
+  private readonly personaApi = inject(PersonaTestingApiService);
+  private readonly dialog = inject(MatDialog);
+  private readonly cdr = inject(ChangeDetectorRef);
+  private readonly destroyRef = inject(DestroyRef);
+
+  readonly mode = signal<StudioPersonaMode>('persona');
+
+  readonly team = signal<AgenticTeam | null>(null);
+  readonly teamError = signal<string | null>(null);
+  readonly personas = signal<PersonaInfo[]>([]);
+  /** null while unknown/loading; true/false once `/testable-teams` resolves. */
+  readonly testable = signal<boolean | null>(null);
+  readonly selectedProcessId = signal<string | null>(null);
+  readonly launching = signal(false);
+  readonly error = signal<string | null>(null);
+
+  // ── Live run ────────────────────────────────────────────────────────────
+  readonly run = signal<PersonaTestRunDetail | null>(null);
+  readonly elapsedSec = signal(0);
+  private pollSub: Subscription | null = null;
+  private elapsedSub: Subscription | null = null;
+
+  readonly teamId = computed(() => this.state.teamId());
+  readonly selectedPersonaId = computed(() => this.state.personaId());
+
+  /** Only `complete` processes can be driven end-to-end (spec Stage 3 gate). */
+  readonly completeProcesses = computed<ProcessDefinition[]>(() =>
+    (this.team()?.processes ?? []).filter((p) => p.status === 'complete'),
+  );
+
+  /** A registry agent must be in focus to "fix an agent" in the sandbox (Stage 2). */
+  readonly canFixAgent = computed(() => !!this.state.registryAgentId());
+
+  readonly runTerminal = computed(() => {
+    const r = this.run();
+    return r ? TERMINAL_STATUSES.has(r.status) : false;
+  });
+
+  ngOnInit(): void {
+    const teamId = this.teamId();
+    if (!teamId) {
+      return; // empty state: no team composed yet (handled in template)
+    }
+    // Pre-seed the target process from the Stage-3 handoff *before* loading the
+    // team, so loadTeam's "default to the single complete process" only fires
+    // when the handoff carried none (it must not clobber a seeded selection).
+    this.selectedProcessId.set(this.state.processId());
+    this.loadTeam(teamId);
+    this.loadPersonas();
+    this.refreshTestable(teamId);
+  }
+
+  setMode(mode: StudioPersonaMode): void {
+    this.mode.set(mode);
+  }
+
+  selectPersona(id: string): void {
+    this.state.setPersonaId(id);
+  }
+
+  selectProcess(id: string): void {
+    this.selectedProcessId.set(id);
+  }
+
+  // ── Data loads ────────────────────────────────────────────────────────────
+
+  private loadTeam(teamId: string): void {
+    this.teamError.set(null);
+    this.agenticApi
+      .getTeam(teamId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          this.team.set(resp.team);
+          // Default the process selection to the only complete process, if one.
+          if (!this.selectedProcessId()) {
+            const complete = resp.team.processes.filter((p) => p.status === 'complete');
+            if (complete.length === 1) {
+              this.selectedProcessId.set(complete[0].process_id);
+            }
+          }
+          this.cdr.markForCheck();
+        },
+        error: () => {
+          this.teamError.set('Could not load this team.');
+          this.cdr.markForCheck();
+        },
+      });
+  }
+
+  private loadPersonas(): void {
+    this.personaApi
+      .getPersonas()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          this.personas.set(resp.personas);
+          // Default the persona selection when none carried from the handoff.
+          if (!this.selectedPersonaId() && resp.personas.length > 0) {
+            this.state.setPersonaId(resp.personas[0].id);
+          }
+          this.cdr.markForCheck();
+        },
+        error: () => {
+          this.error.set('Could not load personas.');
+          this.cdr.markForCheck();
+        },
+      });
+  }
+
+  /** Stage-4 safety net: confirm this team is in the testable list (≥1 complete process). */
+  private refreshTestable(teamId: string): void {
+    const key = `agentic_team:${teamId}`;
+    this.personaApi
+      .getTestableTeams()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          this.testable.set(resp.teams.some((t) => t.team_key === key));
+          this.cdr.markForCheck();
+        },
+        // A lookup failure shouldn't hard-block the user; treat as unknown and
+        // let the launch attempt surface any real error.
+        error: () => {
+          this.testable.set(null);
+          this.cdr.markForCheck();
+        },
+      });
+  }
+
+  // ── Launch + live run ───────────────────────────────────────────────────
+
+  launch(): void {
+    const teamId = this.teamId();
+    const personaId = this.selectedPersonaId();
+    const processId = this.selectedProcessId();
+    if (!teamId || !personaId || !processId || this.launching()) {
+      return;
+    }
+    this.launching.set(true);
+    this.error.set(null);
+    this.personaApi
+      .startTest({
+        persona_id: personaId,
+        target_team_key: `agentic_team:${teamId}`,
+        process_id: processId,
+      })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          this.launching.set(false);
+          this.startPolling(resp.job_id);
+          this.cdr.markForCheck();
+        },
+        error: () => {
+          this.launching.set(false);
+          this.error.set('Could not start the persona test.');
+          this.cdr.markForCheck();
+        },
+      });
+  }
+
+  private startPolling(runId: string): void {
+    this.stopPolling();
+    this.elapsedSec.set(0);
+    this.elapsedSub = interval(1000)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        if (!this.runTerminal()) {
+          this.elapsedSec.update((s) => s + 1);
+          this.cdr.markForCheck();
+        }
+      });
+    this.pollSub = interval(POLL_MS)
+      .pipe(
+        switchMap(() => this.personaApi.getRunStatus(runId)),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe({
+        next: (detail) => this.handleStatus(detail),
+        error: () => {
+          this.error.set('Lost contact with the run; retrying…');
+          this.cdr.markForCheck();
+        },
+      });
+    // Fetch once immediately so the panel isn't blank for a full poll interval.
+    this.personaApi
+      .getRunStatus(runId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (detail) => this.handleStatus(detail),
+        error: () => {
+          // The interval poll will retry; surface a transient banner meanwhile.
+          this.error.set('Lost contact with the run; retrying…');
+          this.cdr.markForCheck();
+        },
+      });
+  }
+
+  /** Apply a polled status; stop polling once the run reaches a terminal state. */
+  private handleStatus(detail: PersonaTestRunDetail): void {
+    this.run.set(detail);
+    if (TERMINAL_STATUSES.has(detail.status)) {
+      this.stopPolling();
+    }
+    this.cdr.markForCheck();
+  }
+
+  private stopPolling(): void {
+    this.pollSub?.unsubscribe();
+    this.elapsedSub?.unsubscribe();
+    this.pollSub = null;
+    this.elapsedSub = null;
+  }
+
+  // ── Persona authoring ─────────────────────────────────────────────────────
+
+  newPersona(): void {
+    const ref = this.dialog.open<
+      PersonaEditorDialogComponent,
+      PersonaEditorDialogData,
+      PersonaEditorDialogResult
+    >(PersonaEditorDialogComponent, { data: { mode: 'create' }, width: '560px' });
+    ref
+      .afterClosed()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((result) => {
+        if (!result) {
+          return;
+        }
+        this.personaApi
+          .createPersona(result)
+          .pipe(takeUntilDestroyed(this.destroyRef))
+          .subscribe({
+            next: (created) => {
+              this.personas.update((list) => [...list, created]);
+              this.state.setPersonaId(created.id);
+              this.cdr.markForCheck();
+            },
+            error: () => {
+              this.error.set('Could not create the persona.');
+              this.cdr.markForCheck();
+            },
+          });
+      });
+  }
+
+  // ── Back-loops (programmatic; the stepper stays forward-only) ─────────────
+
+  iterateRoster(): void {
+    this.state.navigateToStage(2); // Stage 3 — Compose Team
+  }
+
+  fixAgent(): void {
+    if (this.canFixAgent()) {
+      this.state.navigateToStage(1); // Stage 2 — Test Agent
+    }
+  }
+
+  finishInCompose(): void {
+    this.state.navigateToStage(2);
+  }
+}

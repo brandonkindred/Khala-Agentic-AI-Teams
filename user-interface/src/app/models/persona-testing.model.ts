@@ -71,6 +71,12 @@ export interface StartTestRequest {
   persona_id: string;
   target_team_key: string;
   project_name?: string;
+  /**
+   * Process the persona should drive, for agentic-team targets
+   * (`target_team_key === 'agentic_team:<id>'`). Required by the backend for
+   * those targets; ignored by the software-engineering target.
+   */
+  process_id?: string;
 }
 
 /** Artifacts produced during a persona test run (from GET /runs/{run_id}/artifacts). */
