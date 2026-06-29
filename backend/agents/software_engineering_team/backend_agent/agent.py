@@ -466,7 +466,7 @@ def _build_error_signature(build_errors: str) -> str:
     """
     if _is_pytest_assertion_failure(build_errors):
         return (build_errors[-1200:] if len(build_errors) > 1200 else build_errors).strip()
-    return (build_errors or build_errors).strip()
+    return (build_errors[:800] if len(build_errors) > 800 else build_errors).strip()
 
 
 def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[str, Any]]:

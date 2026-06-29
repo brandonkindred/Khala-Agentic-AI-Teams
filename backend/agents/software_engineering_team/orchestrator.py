@@ -1031,9 +1031,7 @@ def _try_build_fix_one_at_a_time(
                 {
                     "description": (f.message or f.raw_excerpt or ""),
                     "file_path": (f.file_path or ""),
-                    "recommendation": (f.suggestion or f.playbook_hint or "Fix the build error.")[
-                        :500
-                    ],
+                    "recommendation": (f.suggestion or f.playbook_hint or "Fix the build error."),
                 }
             )
         if not issues:

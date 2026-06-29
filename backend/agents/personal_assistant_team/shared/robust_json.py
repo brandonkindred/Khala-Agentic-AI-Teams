@@ -45,9 +45,9 @@ class JSONExtractionError(Exception):
             f"  - Task decompositions: {self.decomposition_attempts}\n\n"
             f"Suggestions to resolve:\n{suggestions}\n\n"
             f"Original prompt (first 500 chars):\n"
-            f"  {self.original_prompt}{'...' if len(self.original_prompt) > 500 else ''}\n\n"
+            f"  {self.original_prompt[:500]}{'...' if len(self.original_prompt) > 500 else ''}\n\n"
             f"Last raw response (first 500 chars):\n"
-            f"  {self.raw_responses[-1] if self.raw_responses else 'No responses captured'}\n"
+            f"  {(self.raw_responses[-1] if self.raw_responses else 'No responses captured')[:500]}\n"
             f"{'=' * 80}\n"
         )
 

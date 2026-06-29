@@ -319,7 +319,7 @@ def _build_brand_summary(brand_ctx: BrandContext) -> str:
         header += f" -- '{brand_ctx.tagline}'"
     detail_parts = []
     if brand_ctx.voice_and_tone:
-        detail_parts.append(f"Voice: {brand_ctx.voice_and_tone[:80]}")
+        detail_parts.append(f"Voice: {brand_ctx.voice_and_tone}")
     if brand_ctx.target_audience:
         detail_parts.append(f"Audience: {brand_ctx.target_audience}")
     if detail_parts:

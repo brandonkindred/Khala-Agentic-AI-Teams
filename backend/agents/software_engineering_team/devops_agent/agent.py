@@ -26,7 +26,7 @@ MAX_SAME_BUILD_FAILURES = _int_env("SW_MAX_SAME_BUILD_FAILURES", 6)
 
 def _build_error_signature(build_errors: str) -> str:
     """Compute a signature for same-error detection. Uses first 800 chars."""
-    return (build_errors or build_errors).strip()
+    return (build_errors[:800] if len(build_errors) > 800 else build_errors).strip()
 
 
 def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:

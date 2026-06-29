@@ -435,7 +435,7 @@ class BrandingAssistantAgent:
         try:
             raw_reply = str(self._conversation_agent(conversation_prompt)).strip()
             logger.info(
-                "BrandingAssistant conversation stage raw response (first 300 chars): %r",
+                "BrandingAssistant conversation stage raw response: %r",
                 raw_reply,
             )
         except Exception:

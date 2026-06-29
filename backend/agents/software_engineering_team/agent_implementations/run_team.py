@@ -70,7 +70,7 @@ def main() -> None:
     architecture = arch_output.architecture
     logger.info(
         "Architecture: %s",
-        architecture.overview + "..."
+        architecture.overview[:200] + "..."
         if len(architecture.overview) > 200
         else architecture.overview,
     )

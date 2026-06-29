@@ -1253,7 +1253,7 @@ def _build_issue_item(raw: dict[str, Any], raw_deps: list[dict[str, Any]]) -> Gi
     return GitHubIssueItem(
         number=raw["number"],
         title=raw.get("title") or "",
-        body_preview=(raw.get("body") or ""),
+        body_preview=(raw.get("body") or "")[:500],
         labels=[lbl["name"] for lbl in (raw.get("labels") or []) if isinstance(lbl, dict) and lbl.get("name")],
         html_url=raw.get("html_url") or "",
         dependencies=refs,
@@ -1421,7 +1421,7 @@ def _build_pull_request_item(raw: dict[str, Any]) -> GitHubPullRequestItem:
     return GitHubPullRequestItem(
         number=detail.number,
         title=detail.title,
-        body_preview=detail.body,
+        body_preview=detail.body[:500] if detail.body else "",
         author=detail.author,
         html_url=detail.html_url,
         head=detail.head,

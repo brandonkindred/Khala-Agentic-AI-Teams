@@ -69,9 +69,9 @@ class JSONExtractionFailure(LLMJsonParseError):
             f"  - Task decompositions: {self.decomposition_attempts}\n\n"
             f"HOW TO RESOLVE:\n{suggestions}\n\n"
             f"Original prompt (first 500 chars):\n"
-            f"  {self.original_prompt}{'...' if len(self.original_prompt) > 500 else ''}\n\n"
+            f"  {self.original_prompt[:500]}{'...' if len(self.original_prompt) > 500 else ''}\n\n"
             f"Last raw response (first 500 chars):\n"
-            f"  {last_response}\n"
+            f"  {last_response[:500]}{'...' if len(last_response) > 500 else ''}\n"
             f"{'=' * 80}\n"
         )
 

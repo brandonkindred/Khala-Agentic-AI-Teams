@@ -118,11 +118,9 @@ def main() -> None:
             print(f"--- Iteration {iteration}: Revised draft ({len(draft_result.draft)} chars) ---")
 
     print("\n" + "=" * 60)
-    print("FINAL DRAFT (first 800 chars):")
+    print("FINAL DRAFT:")
     print("=" * 60)
     print(draft_result.draft)
-    if len(draft_result.draft) > 800:
-        print("\n... [truncated] ...")
     print("\n✓ Draft-editor loop completed successfully!")
 
 

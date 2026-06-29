@@ -63,7 +63,7 @@ Recap and one practical next step.
     )
 
     result = agent.run(draft_input)
-    print("\n--- Draft (first 2000 chars) ---\n")
+    print("\n--- Draft ---\n")
     print(result.draft)
 
 
