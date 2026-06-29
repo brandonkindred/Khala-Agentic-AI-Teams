@@ -60,6 +60,7 @@ _CRITIQUE_FIELDS: tuple[str, ...] = (
     "timeframe",
     "hypothesis",
     "signal_definition",
+    "expectancy_forecast",
 )
 
 
@@ -177,7 +178,8 @@ class CritiqueIssue(BaseModel):
         description=(
             "Spec field the issue applies to: one of "
             "'entry_rules' | 'exit_rules' | 'sizing' | 'target_symbols' | "
-            "'risk_limits' | 'timeframe' | 'hypothesis' | 'signal_definition'."
+            "'risk_limits' | 'timeframe' | 'hypothesis' | 'signal_definition' | "
+            "'expectancy_forecast'."
         )
     )
     severity: Literal["info", "warning", "critical"] = "warning"
@@ -409,7 +411,7 @@ Return ONLY a JSON object — no markdown — with this shape:
   "rationale": "1-3 sentences",
   "issues": [
     {{
-      "field": "entry_rules | exit_rules | sizing | target_symbols | risk_limits | timeframe | hypothesis | signal_definition",
+      "field": "entry_rules | exit_rules | sizing | target_symbols | risk_limits | timeframe | hypothesis | signal_definition | expectancy_forecast",
       "severity": "info | warning | critical",
       "description": "what's wrong",
       "suggested_fix": "concrete revision the designer should apply"
