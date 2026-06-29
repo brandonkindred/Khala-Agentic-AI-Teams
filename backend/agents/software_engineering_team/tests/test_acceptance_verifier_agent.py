@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import pytest
 from acceptance_verifier_agent import AcceptanceVerifierAgent
 from acceptance_verifier_agent.agent import derive_per_criterion
 from acceptance_verifier_agent.models import (
     AcceptanceVerifierInput,
     AcceptanceVerifierOutput,
 )
+from code_review_agent import CodeReviewUnavailableError
 from code_review_agent.models import CodeReviewIssue
 
 from llm_service.clients.dummy import DummyLLMClient
@@ -54,8 +56,6 @@ def test_acceptance_verifier_default_run_returns_output() -> None:
 
 
 def test_acceptance_verifier_requires_client() -> None:
-    import pytest
-
     with pytest.raises(AssertionError):
         AcceptanceVerifierAgent(None)
 
@@ -125,21 +125,41 @@ def test_acceptance_verifier_marks_unmet_criterion_from_tagged_issue() -> None:
     assert "returns 0" in by_criterion["add(0, 0) returns 0"].evidence
 
 
-def test_acceptance_verifier_failure_returns_fallback() -> None:
-    """A review-engine failure degrades to all_satisfied=False, never raises."""
+class _RaisingEngine:
+    """Stand-in for ``CodeReviewAgent`` whose ``run`` raises a given exception."""
 
-    class _BoomClient(DummyLLMClient):
-        def complete_json(self, *a, **kw):  # type: ignore[override]
-            raise RuntimeError("engine down")
+    def __init__(self, exc):
+        self._exc = exc
 
-        def chat_json_round(self, *a, **kw):  # type: ignore[override]
-            raise RuntimeError("engine down")
+    def __call__(self, _llm):
+        return self
 
-    agent = AcceptanceVerifierAgent(_BoomClient())
+    def run(self, _input):
+        raise self._exc
+
+
+def test_acceptance_verifier_unavailable_returns_fallback(monkeypatch) -> None:
+    """A CodeReviewUnavailableError degrades to all_satisfied=False, never raises."""
+    monkeypatch.setattr(
+        "acceptance_verifier_agent.agent.CodeReviewAgent",
+        _RaisingEngine(CodeReviewUnavailableError("engine down")),
+    )
+    agent = AcceptanceVerifierAgent(DummyLLMClient())
     result = agent.run(_input())
     assert result.all_satisfied is False
     assert result.per_criterion == []
     assert "failed" in result.summary.lower()
+
+
+def test_acceptance_verifier_propagates_unexpected_error(monkeypatch) -> None:
+    """A non-engine defect (e.g. TypeError) is not masked — it propagates."""
+    monkeypatch.setattr(
+        "acceptance_verifier_agent.agent.CodeReviewAgent",
+        _RaisingEngine(TypeError("boom")),
+    )
+    agent = AcceptanceVerifierAgent(DummyLLMClient())
+    with pytest.raises(TypeError):
+        agent.run(_input())
 
 
 def test_multiple_run_calls_on_same_instance_succeed() -> None:
@@ -165,17 +185,41 @@ def test_derive_per_criterion_all_satisfied_when_no_issues() -> None:
     assert all(c.evidence == "Satisfied" for c in out)
 
 
-def test_derive_per_criterion_matches_by_category_and_substring() -> None:
+def test_derive_per_criterion_matches_by_exact_category_only() -> None:
     issues = [
         CodeReviewIssue(severity="high", category="b", description="b is unmet"),
+        # 'c' appears only in the free-form description, not the category tag —
+        # it must NOT match (no broad substring/description scanning).
         CodeReviewIssue(severity="high", category="other", description="mentions c here"),
     ]
     out = derive_per_criterion(["a", "b", "c"], issues)
     by = {c.criterion: c for c in out}
     assert by["a"].satisfied is True
     assert by["b"].satisfied is False and by["b"].evidence == "b is unmet"
-    # matched by substring in the description rather than an exact category tag
-    assert by["c"].satisfied is False
+    assert by["c"].satisfied is True
+
+
+def test_derive_per_criterion_substring_collision_not_falsely_unmet() -> None:
+    # One criterion is a substring of another; an issue tagged with the LONGER
+    # criterion must not also mark the shorter one unmet.
+    criteria = ["add(1,2) returns 3", "add(1,2) returns 3 and 4"]
+    issues = [
+        CodeReviewIssue(
+            severity="high",
+            category="add(1,2) returns 3 and 4",
+            description="the 'and 4' part is missing",
+        )
+    ]
+    out = derive_per_criterion(criteria, issues)
+    by = {c.criterion: c for c in out}
+    assert by["add(1,2) returns 3"].satisfied is True
+    assert by["add(1,2) returns 3 and 4"].satisfied is False
+
+
+def test_derive_per_criterion_category_match_ignores_whitespace_and_case() -> None:
+    issues = [CodeReviewIssue(severity="high", category="  Returns  ZERO ", description="d")]
+    out = derive_per_criterion(["returns zero"], issues)
+    assert out[0].satisfied is False
 
 
 def test_derive_per_criterion_all_unmet() -> None:

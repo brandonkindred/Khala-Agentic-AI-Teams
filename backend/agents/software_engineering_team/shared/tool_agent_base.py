@@ -280,11 +280,16 @@ class BaseReviewToolAgent:
         Preconditions: :attr:`review_via_engine` is set; ``inp.current_files``
         maps path -> content.
         Postconditions: returns a :class:`ToolAgentPhaseOutput` whose ``issues``
-        carry this agent's :attr:`issue_source`; an engine failure degrades to a
-        "(LLM error)" summary with no issues, never raising. Each engine
+        carry this agent's :attr:`issue_source`. A ``CodeReviewUnavailableError``
+        (the review could not be run) degrades to a "(LLM error)" summary with no
+        issues; any other exception is a defect and propagates. Each engine
         ``CodeReviewIssue.suggestion`` becomes the ``ReviewIssue.recommendation``.
         """
-        from code_review_agent import CodeReviewAgent, CodeReviewInput
+        from code_review_agent import (
+            CodeReviewAgent,
+            CodeReviewInput,
+            CodeReviewUnavailableError,
+        )
 
         review_label = f"{self.name} review"
         if not inp.current_files:
@@ -298,8 +303,8 @@ class BaseReviewToolAgent:
                     profile=self.review_profile,
                 )
             )
-        except Exception as e:  # noqa: BLE001 — a review failure must not break the phase
-            self._logger.warning("%s engine review failed: %s", review_label, e)
+        except CodeReviewUnavailableError as e:
+            self._logger.warning("%s engine review unavailable: %s", review_label, e)
             return ToolAgentPhaseOutput(summary=f"{review_label} failed (LLM error).")
         issues = [
             ReviewIssue(

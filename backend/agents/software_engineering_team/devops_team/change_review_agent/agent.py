@@ -11,7 +11,12 @@ public class, ``run`` signature, output model, and blocking semantics.
 
 from __future__ import annotations
 
-from code_review_agent import CodeReviewAgent, CodeReviewInput, ReviewProfile
+from code_review_agent import (
+    CodeReviewAgent,
+    CodeReviewInput,
+    CodeReviewUnavailableError,
+    ReviewProfile,
+)
 from code_review_agent.models import CodeReviewIssue
 from devops_team.models import ReviewFinding
 
@@ -91,8 +96,10 @@ class ChangeReviewAgent:
             - Otherwise returns the engine's findings mapped to ``ReviewFinding``
               and ``approved = derive_approved(findings, llm_approved=engine_approved)``,
               so approval is False iff a blocking finding exists or the engine
-              rejected. A review-engine failure degrades to ``approved=True`` with
-              an explanatory summary rather than crashing the DevOps pipeline.
+              rejected. A ``CodeReviewUnavailableError`` (the review could not be
+              run) degrades to ``approved=True`` with an explanatory summary
+              rather than crashing the DevOps pipeline; any other exception is a
+              defect and propagates unchanged.
         """
         if not input_data.artifacts:
             return ChangeReviewOutput(approved=True, findings=[], summary="No artifacts to review.")
@@ -105,7 +112,7 @@ class ChangeReviewAgent:
                     profile=ReviewProfile.DEVOPS_MAINTAINABILITY,
                 )
             )
-        except Exception as exc:  # noqa: BLE001 — a review failure must not crash the gate
+        except CodeReviewUnavailableError as exc:
             return ChangeReviewOutput(
                 approved=True,
                 findings=[],

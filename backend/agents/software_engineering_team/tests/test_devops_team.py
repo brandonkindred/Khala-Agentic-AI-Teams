@@ -949,20 +949,50 @@ class TestChangeReviewAgent:
         assert out.findings[0].blocking
         assert out.findings[0].severity == "high"
 
-    def test_engine_failure_degrades_to_approved(self) -> None:
+    def test_engine_unavailable_degrades_to_approved(self, monkeypatch) -> None:
+        from code_review_agent import CodeReviewUnavailableError
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
-        class _BoomClient(_StubClient):
-            def complete_json(self, *a, **kw):
-                raise RuntimeError("engine down")
+        class _RaisingEngine:
+            def __init__(self, exc):
+                self._exc = exc
 
-        agent = ChangeReviewAgent(_BoomClient({}))
+            def __call__(self, _llm):
+                return self
+
+            def run(self, _input):
+                raise self._exc
+
+        monkeypatch.setattr(
+            "devops_team.change_review_agent.agent.CodeReviewAgent",
+            _RaisingEngine(CodeReviewUnavailableError("engine down")),
+        )
+        agent = ChangeReviewAgent(_StubClient({}))
         out = agent.run(
             ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
         )
         assert out.approved
         assert out.findings == []
         assert "unavailable" in out.summary.lower()
+
+    def test_engine_programming_error_propagates(self, monkeypatch) -> None:
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        class _RaisingEngine:
+            def __call__(self, _llm):
+                return self
+
+            def run(self, _input):
+                raise TypeError("boom")
+
+        monkeypatch.setattr(
+            "devops_team.change_review_agent.agent.CodeReviewAgent", _RaisingEngine()
+        )
+        agent = ChangeReviewAgent(_StubClient({}))
+        with pytest.raises(TypeError):
+            agent.run(
+                ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
+            )
 
     def test_info_severity_maps_to_low_and_does_not_block(self) -> None:
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput

@@ -298,16 +298,40 @@ def test_engine_review_skips_without_code():
     assert "skipped (no code)" in out.summary
 
 
-def test_engine_review_degrades_on_failure():
-    class _BoomClient(DummyLLMClient):
-        def complete_json(self, prompt, **kwargs):
-            raise RuntimeError("engine down")
+class _RaisingEngine:
+    """Stand-in for ``CodeReviewAgent`` whose ``run`` raises a given exception."""
 
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __call__(self, _llm):
+        return self
+
+    def run(self, _input):
+        raise self._exc
+
+
+def test_engine_review_degrades_on_unavailable(monkeypatch):
+    from code_review_agent import CodeReviewUnavailableError
+
+    monkeypatch.setattr(
+        "code_review_agent.CodeReviewAgent",
+        _RaisingEngine(CodeReviewUnavailableError("engine down")),
+    )
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
-    agent.llm = _BoomClient()
+    agent.llm = None
     out = agent.review(_Input(current_files={"a.ts": "code"}))
     assert "failed (LLM error)" in out.summary
+
+
+def test_engine_review_propagates_unexpected_error(monkeypatch):
+    monkeypatch.setattr("code_review_agent.CodeReviewAgent", _RaisingEngine(TypeError("boom")))
+    agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
+    agent._model = object()
+    agent.llm = None
+    with pytest.raises(TypeError):
+        agent.review(_Input(current_files={"a.ts": "code"}))
 
 
 def test_engine_review_problem_solve_unchanged(monkeypatch):

@@ -17,7 +17,12 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from code_review_agent import CodeReviewAgent, CodeReviewInput, ReviewProfile
+from code_review_agent import (
+    CodeReviewAgent,
+    CodeReviewInput,
+    CodeReviewUnavailableError,
+    ReviewProfile,
+)
 from code_review_agent.models import CodeReviewIssue
 
 from .models import AcceptanceVerifierInput, AcceptanceVerifierOutput, CriterionStatus
@@ -25,26 +30,37 @@ from .models import AcceptanceVerifierInput, AcceptanceVerifierOutput, Criterion
 logger = logging.getLogger(__name__)
 
 
+def _normalize(text: str) -> str:
+    """Whitespace-collapsed, lower-cased form for exact-match comparison.
+
+    Postconditions: returns ``text`` with runs of whitespace collapsed to single
+    spaces, trimmed, and lower-cased. Pure; no side effects.
+    """
+    return " ".join((text or "").split()).lower()
+
+
 def _matches_criterion(criterion: str, issue: CodeReviewIssue) -> bool:
     """Return whether ``issue`` reports ``criterion`` as unmet.
 
+    Matching is a normalized *exact* comparison of the issue's ``category``
+    against the criterion. The ``acceptance`` profile instructs the model to set
+    ``category`` to the verbatim criterion text, so exact match is the reliable
+    signal. Substring matching is deliberately NOT used: it mis-fires when one
+    criterion is a substring of another (an issue tagged with the longer
+    criterion would also match the shorter one), which would mark a satisfied
+    criterion as unmet and falsely reject a valid change.
+
     Preconditions:
-        ``criterion`` is a non-empty acceptance-criterion string; ``issue`` is an
-        engine finding produced under the ``acceptance`` profile (which tags
-        ``category`` with the verbatim criterion).
+        ``criterion`` is an acceptance-criterion string; ``issue`` is an engine
+        finding produced under the ``acceptance`` profile.
     Postconditions:
-        Returns True when the issue's ``category`` equals the criterion
-        (case-insensitively) or the criterion text appears in the issue's
-        ``category``/``description`` — so a criterion is matched whether the model
-        tagged it exactly or only referenced it. Pure; no side effects.
+        Returns True iff the normalized ``issue.category`` equals the normalized
+        ``criterion`` (a blank criterion never matches). Pure; no side effects.
     """
-    target = criterion.strip().lower()
+    target = _normalize(criterion)
     if not target:
         return False
-    category = (issue.category or "").strip().lower()
-    if category == target:
-        return True
-    return target in category or target in (issue.description or "").strip().lower()
+    return _normalize(issue.category) == target
 
 
 def derive_per_criterion(
@@ -115,9 +131,10 @@ class AcceptanceVerifierAgent:
               without invoking the engine.
             - Otherwise returns one ``CriterionStatus`` per criterion derived from
               the engine's findings, with ``all_satisfied`` true iff all are
-              satisfied. A review-engine failure returns
-              ``all_satisfied=False`` with an explanatory summary rather than
-              raising.
+              satisfied. A ``CodeReviewUnavailableError`` from the engine (the
+              review could not be run) returns ``all_satisfied=False`` with an
+              explanatory summary; any other exception is a defect and
+              propagates unchanged rather than being masked as "unsatisfied".
         """
         # Short-circuit on empty criteria — avoids an unnecessary engine round-trip.
         if not input_data.acceptance_criteria:
@@ -156,8 +173,10 @@ class AcceptanceVerifierAgent:
                     profile=ReviewProfile.ACCEPTANCE,
                 )
             )
-        except Exception as exc:  # noqa: BLE001 — engine failures must not crash the run
-            logger.warning("AcceptanceVerifier: review engine failed (%s); returning fallback", exc)
+        except CodeReviewUnavailableError as exc:
+            logger.warning(
+                "AcceptanceVerifier: review engine unavailable (%s); returning fallback", exc
+            )
             return AcceptanceVerifierOutput(
                 all_satisfied=False,
                 per_criterion=[],
