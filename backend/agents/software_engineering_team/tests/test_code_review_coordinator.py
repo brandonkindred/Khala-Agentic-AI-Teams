@@ -1158,6 +1158,41 @@ def test_parallel_map_failure_does_not_wait_for_inflight_reviews(fail_first: boo
         release.set()
 
 
+def test_sequential_map_failure_does_not_start_later_chunk(monkeypatch) -> None:
+    """Under CODE_REVIEW_MAP_PARALLELISM=1 (the documented sequential mode), a
+    first-chunk infrastructure failure aborts immediately and the later chunk's
+    review is never started — no extra LLM call fires past fail-fast (a 1-worker
+    pool could otherwise dequeue the next chunk before cancellation)."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+
+    class _FailFirstRecordLater(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.saw_second = False
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if "FAILME" in prompt:
+                raise LLMRateLimitError("429")
+            if "SECONDCHUNK" in prompt:
+                self.saw_second = True
+            return super().complete_json(prompt, **kwargs)
+
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    # One ~full chunk per file, in insertion order, so the failing chunk is first.
+    files = {
+        "a_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
+        "b_second.py": "SECONDCHUNK = 1\n".ljust(cap - 2_000, "#"),
+    }
+    client = _FailFirstRecordLater()
+    with pytest.raises(CodeReviewUnavailableError):
+        run_coordinator(
+            client,
+            CodeReviewInput(files=files, task_description="t", language="python"),
+        )
+    assert client.saw_second is False, "later chunk must not be reviewed after fail-fast"
+
+
 def test_headerless_code_reviews_as_single_unnamed_block() -> None:
     client = _ScriptedClient([{"approved": True, "issues": [], "summary": "fine"}])
     result = run_coordinator(

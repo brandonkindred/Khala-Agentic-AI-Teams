@@ -58,3 +58,57 @@ running; `stop()` is safe to call before `start()` or twice.
 relies on the background beater as the *sole* liveness mechanism for the whole
 run; the orchestrator's update callback only persists progress and does **not**
 also heartbeat. This keeps "who keeps the activity alive" unambiguous.
+
+## `parallel_map`
+
+One driver for the "fan a per-item function across a bounded `ThreadPoolExecutor`"
+pattern that several teams had each hand-rolled with subtly different ordering,
+error, and **context-propagation** semantics. The decisive correctness issue is
+the last one: a raw `ThreadPoolExecutor` does **not** copy contextvars into its
+workers, so every fan-out site has to remember to wrap submissions in
+`contextvars.copy_context().run(...)` or it silently drops the LLM attribution /
+request-id contextvars (see `llm_service.attribution`). Routing all fan-out
+through this helper fixes worker bounds, exception propagation, and context
+propagation once — and new sites get context propagation for free.
+
+```python
+from shared_concurrency import parallel_map
+
+# Common case — bounded, order-preserving, context propagated, None skipped:
+results = parallel_map(prospects, run_one, max_workers=8)
+
+# Each task gets its own copy_context(), so this propagates by default. Opt out
+# only for CPU-only work that explicitly wants no propagation:
+sums = parallel_map(rows, crunch, max_workers=4, propagate_context=False)
+
+# Completion order + a failure hook (e.g. flip an "abandoned" progress flag
+# before pending tasks are cancelled):
+outcomes = parallel_map(
+    chunks, review_one, max_workers=4, preserve_order=False,
+    skip_none=False, on_first_exception=mark_abandoned,
+)
+```
+
+Parameters cover the axes the original copies differed on:
+
+- `max_workers` — the pool is sized at `min(max_workers, len(items))`, so a small
+  batch never spins up idle threads. Empty input short-circuits to `[]`.
+- `preserve_order` — return results aligned to input order (default) or in
+  completion order.
+- `skip_none` — filter `None` results out (the "return `None` to skip this item"
+  convention, default) or keep them positionally.
+- `propagate_context` — run each task inside a fresh `contextvars.copy_context()`
+  (default) so the caller's attribution/request-id reach the worker.
+- `on_first_exception` — optional zero-arg callback fired exactly once, on the
+  first worker exception, **before** pending tasks are cancelled and the
+  exception re-raises.
+
+Error policy is a single, documented **fast-fail**: the first worker exception is
+observed in completion order (never delayed behind a slower earlier task),
+pending tasks are cancelled (`cancel_futures=True`), and the exception propagates
+with its original traceback while already-running tasks finish in the background.
+
+Migrated callers: the sales pod's per-prospect / decision-maker / dossier
+fan-outs (`sales_team/orchestrator.py`), the blog research agent's document
+scoring and summarization (`blogging/blog_research_agent/agent.py`), and the SE
+code-review coordinator's per-chunk map (`code_review_agent/coordinator.py`).
