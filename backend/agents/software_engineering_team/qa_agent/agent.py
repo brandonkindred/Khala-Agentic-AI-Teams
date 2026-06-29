@@ -168,7 +168,8 @@ class QAExpertAgent:
             )
             tool_results_text = (
                 "\n".join(
-                    f"- {group}: {results}" for group, results in input_data.tool_results.items()
+                    f"- {group}: " + ", ".join(f"{k}={v}" for k, v in results.items())
+                    for group, results in input_data.tool_results.items()
                 )
                 or "(none provided)"
             )
