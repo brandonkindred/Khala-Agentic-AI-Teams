@@ -135,7 +135,7 @@ Respond with valid JSON only. No explanatory text."""
         )
     reqs = ProductRequirements(
         title=data.get("title") or "Software Project",
-        description=data.get("description") or spec_content[:2000],
+        description=data.get("description") or spec_content,
         acceptance_criteria=data["acceptance_criteria"],
         constraints=data["constraints"],
         priority=data.get("priority") or "medium",

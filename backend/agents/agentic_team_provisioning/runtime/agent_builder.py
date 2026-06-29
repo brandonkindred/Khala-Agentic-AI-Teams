@@ -200,7 +200,7 @@ def _build_writeback(agent_id: str, text: str) -> dict[str, Any] | None:
         id=str(uuid.uuid4()),
         agent_id=agent_id,
         kind=EventKind.OUTCOME,
-        content=text[:2000],
+        content=text,
         occurred_at=datetime.now(tz=timezone.utc),
         source_run_id=f"{agent_id}#local",
         source_seq=0,

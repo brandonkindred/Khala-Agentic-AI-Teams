@@ -294,7 +294,7 @@ def test_review_propagates_upstream_error(mock_cfg, mock_cred, mock_path, monkey
     with patch(f"{_M}._ensure_repo_clone"), patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_REVIEW, json={"pr_number": 7})
     assert resp.status_code == 502
-    assert resp.json()["detail"] == "github api error"
+    assert resp.json()["detail"] == "Failed to start the review."
 
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")

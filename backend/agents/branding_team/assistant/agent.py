@@ -228,7 +228,7 @@ def _strip_accidental_json(reply: str) -> str:
                 logger.warning(
                     "Branding conversation LLM returned raw JSON instead of prose; suppressing. "
                     "Raw response: %r",
-                    stripped[:500],
+                    stripped,
                 )
                 return ""
         except (json.JSONDecodeError, TypeError):
@@ -244,7 +244,7 @@ def _strip_accidental_json(reply: str) -> str:
             logger.warning(
                 "Branding conversation LLM embedded mission JSON inside prose; suppressing. "
                 "Raw response: %r",
-                stripped[:500],
+                stripped,
             )
             return ""
 
@@ -435,8 +435,8 @@ class BrandingAssistantAgent:
         try:
             raw_reply = str(self._conversation_agent(conversation_prompt)).strip()
             logger.info(
-                "BrandingAssistant conversation stage raw response (first 300 chars): %r",
-                raw_reply[:300],
+                "BrandingAssistant conversation stage raw response: %r",
+                raw_reply,
             )
         except Exception:
             logger.exception("Branding conversation LLM failed")

@@ -384,7 +384,7 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
             for tc in plan.title_candidates
         ],
         outline=outline,
-        draft_preview=draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else ""),
+        draft_preview=draft_result.draft[:2000],
         content_plan_summary=content_plan_summary_text(plan),
     )
 
@@ -760,9 +760,7 @@ def _run_pipeline_with_tracking(
                 {"title": tc.title, "probability_of_success": tc.probability_of_success}
                 for tc in plan.title_candidates
             ]
-            draft_preview = draft_result.draft[:2000] + (
-                "..." if len(draft_result.draft) > 2000 else ""
-            )
+            draft_preview = draft_result.draft[:2000]
 
             final_status = JOB_STATUS_COMPLETED if status == "PASS" else JOB_STATUS_NEEDS_REVIEW
             if complete_blog_job is not None:
@@ -826,7 +824,7 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
     # Create job record (store full request payload for resume/restart)
     create_blog_job(
         job_id,
-        brief=request.brief[:500],
+        brief=request.brief,
         audience=audience_str or None,
         tone_or_purpose=request.tone_or_purpose,
     )

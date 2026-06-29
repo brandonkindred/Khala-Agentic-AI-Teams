@@ -47,7 +47,7 @@ class JSONExtractionError(Exception):
             f"Original prompt (first 500 chars):\n"
             f"  {self.original_prompt[:500]}{'...' if len(self.original_prompt) > 500 else ''}\n\n"
             f"Last raw response (first 500 chars):\n"
-            f"  {self.raw_responses[-1][:500] if self.raw_responses else 'No responses captured'}\n"
+            f"  {(self.raw_responses[-1] if self.raw_responses else 'No responses captured')[:500]}\n"
             f"{'=' * 80}\n"
         )
 
@@ -287,8 +287,8 @@ class RobustJSONExtractor:
             attempt = ExtractionAttempt(
                 attempt_number=result.total_attempts,
                 strategy=f"decomposition_{depth + 1}_{subtask_idx + 1}_{subtask['key']}",
-                prompt_used=subtask["prompt"][:500],
-                raw_response=response[:500],
+                prompt_used=subtask["prompt"],
+                raw_response=response,
                 success=False,
             )
 
@@ -319,7 +319,7 @@ class RobustJSONExtractor:
                         "Subtask %d (%s) decomposition failed: %s",
                         subtask_idx + 1,
                         subtask["key"],
-                        str(e)[:100],
+                        str(e),
                     )
 
             if parsed is not None:

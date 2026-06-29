@@ -126,14 +126,14 @@ def parse_files_and_summary_template(
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
     if summary_section:
-        summary = summary_section.split("\n")[0].strip()[:2000]
+        summary = summary_section.split("\n")[0].strip()
     elif MARKER_SUMMARY in text:
         idx = text.find(MARKER_SUMMARY) + len(MARKER_SUMMARY)
         rest = text[idx:].strip()
         if MARKER_END_SUMMARY in rest:
-            summary = rest.split(MARKER_END_SUMMARY)[0].strip().split("\n")[0].strip()[:2000]
+            summary = rest.split(MARKER_END_SUMMARY)[0].strip().split("\n")[0].strip()
         else:
-            summary = rest.split("\n")[0].strip()[:2000]
+            summary = rest.split("\n")[0].strip()
 
     return {"files": files, "summary": summary}
 
@@ -229,10 +229,10 @@ def parse_planning_template(
 
     summary_section = _section(text, MARKER_PLAN_SUMMARY, MARKER_END_PLAN_SUMMARY)
     if summary_section:
-        summary = summary_section.strip().split("\n")[0].strip()[:1000]
+        summary = summary_section.strip().split("\n")[0].strip()
     elif MARKER_PLAN_SUMMARY in text:
         idx = text.find(MARKER_PLAN_SUMMARY) + len(MARKER_PLAN_SUMMARY)
-        summary = text[idx:].strip().split("\n")[0].strip()[:1000]
+        summary = text[idx:].strip().split("\n")[0].strip()
 
     return {"microtasks": microtasks, "language": language, "summary": summary}
 
@@ -289,10 +289,10 @@ def parse_review_template(text: str) -> Dict[str, Any]:
 
     summary_section = _section(text, MARKER_REVIEW_SUMMARY, MARKER_END_REVIEW_SUMMARY)
     if summary_section:
-        summary = summary_section.strip().split("\n")[0].strip()[:1000]
+        summary = summary_section.strip().split("\n")[0].strip()
     elif MARKER_REVIEW_SUMMARY in text:
         idx = text.find(MARKER_REVIEW_SUMMARY) + len(MARKER_REVIEW_SUMMARY)
-        summary = text[idx:].strip().split("\n")[0].strip()[:1000]
+        summary = text[idx:].strip().split("\n")[0].strip()
 
     return {"passed": passed, "issues": issues, "summary": summary}
 
@@ -350,7 +350,7 @@ def parse_problem_solving_template(
 
     summary_sec = _section(text, MARKER_PS_SUMMARY, MARKER_END_PS_SUMMARY)
     if summary_sec:
-        summary = summary_sec.strip().split("\n")[0].strip()[:1000]
+        summary = summary_sec.strip().split("\n")[0].strip()
 
     return {
         "files": files,
@@ -374,7 +374,7 @@ def parse_problem_solving_single_issue_template(
 
     root_cause = _section(text, "## ROOT_CAUSE ##", "## END ROOT_CAUSE ##")
     if root_cause:
-        root_cause = root_cause.strip().split("\n")[0].strip()[:500]
+        root_cause = root_cause.strip().split("\n")[0].strip()
 
     resolved = True
     resolved_section = _section(text, MARKER_RESOLVED, MARKER_END_RESOLVED)
@@ -384,7 +384,7 @@ def parse_problem_solving_single_issue_template(
 
     summary_sec = _section(text, MARKER_PS_SUMMARY, MARKER_END_PS_SUMMARY)
     if summary_sec:
-        summary = summary_sec.strip().split("\n")[0].strip()[:1000]
+        summary = summary_sec.strip().split("\n")[0].strip()
 
     return {
         "files": files,
@@ -440,7 +440,7 @@ def parse_batch_fix_template(
 
     summary_sec = _section(text, MARKER_PS_SUMMARY, MARKER_END_PS_SUMMARY)
     if summary_sec:
-        summary = summary_sec.strip()[:2000]
+        summary = summary_sec.strip()
 
     return {
         "files": files,

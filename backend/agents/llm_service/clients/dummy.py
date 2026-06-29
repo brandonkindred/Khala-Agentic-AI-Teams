@@ -246,8 +246,8 @@ class DummyLLMClient(LLMClient, Model):
         for line in prompt.split("\n"):
             stripped = line.strip()
             if stripped.startswith("**Task:**"):
-                return stripped.replace("**Task:**", "").strip()[:80]
-        return hashlib.md5(prompt[:500].encode()).hexdigest()[:12]
+                return stripped.replace("**Task:**", "").strip()
+        return hashlib.md5(prompt.encode()).hexdigest()[:12]
 
     def get_max_context_tokens(self) -> int:
         return 16384

@@ -29,7 +29,7 @@ def _cmd_result(success: bool = True, exit_code: int = 0, stdout: str = "", stde
         exit_code=exit_code,
         stdout=stdout,
         stderr=stderr,
-        error_summary=stderr[:500] if stderr else "",
+        error_summary=stderr if stderr else "",
     )
 
 

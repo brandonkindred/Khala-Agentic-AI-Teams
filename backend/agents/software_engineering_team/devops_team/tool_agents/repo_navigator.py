@@ -43,8 +43,8 @@ class RepoNavigatorToolAgent:
             if "/helm/" in low or "/k8s/" in low or "docker-compose" in low:
                 deploy_paths.append(rel)
         return RepoNavigatorOutput(
-            detected_iac_paths=sorted(set(iac_paths))[:200],
-            detected_pipeline_paths=sorted(set(pipeline_paths))[:200],
-            detected_deploy_paths=sorted(set(deploy_paths))[:200],
+            detected_iac_paths=sorted(set(iac_paths)),
+            detected_pipeline_paths=sorted(set(pipeline_paths)),
+            detected_deploy_paths=sorted(set(deploy_paths)),
             summary="Repository DevOps paths discovered",
         )

@@ -24,7 +24,7 @@ class StartFailed(RuntimeError):
     """
 
     def __init__(self, status_code: int, body: str) -> None:
-        super().__init__(f"{status_code} {body[:500]}")
+        super().__init__(f"{status_code} {body}")
         self.status_code = status_code
         self.body = body
 

@@ -162,7 +162,7 @@ async def test_smoke_invoke(agent_id: str, team: str, payload: dict[str, Any]) -
         cold_start = time.perf_counter()
         cold = await _invoke(client, agent_id, payload)
         cold_total_ms = int((time.perf_counter() - cold_start) * 1000)
-        assert cold.status_code == 200, f"cold invoke failed: {cold.status_code} {cold.text[:300]}"
+        assert cold.status_code == 200, f"cold invoke failed: {cold.status_code} {cold.text}"
         cold_envelope = cold.json()
         assert isinstance(cold_envelope, dict)
         assert cold_envelope.get("sandbox", {}).get("agent_id") == agent_id
@@ -184,7 +184,7 @@ async def test_smoke_invoke(agent_id: str, team: str, payload: dict[str, Any]) -
         )
 
         runs = await client.get(f"{API_BASE}/api/agents/{agent_id}/runs", params={"limit": 5})
-    assert runs.status_code == 200, f"runs lookup failed: {runs.status_code} {runs.text[:200]}"
+    assert runs.status_code == 200, f"runs lookup failed: {runs.status_code} {runs.text}"
     assert any(row.get("status") == "ok" for row in runs.json()), (
         f"no ok runs persisted for {agent_id}"
     )

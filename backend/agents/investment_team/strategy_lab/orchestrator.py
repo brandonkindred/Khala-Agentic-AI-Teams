@@ -1961,7 +1961,7 @@ class StrategyLabOrchestrator:
                     self.build_orchestrator_gate(
                         "code_execution",
                         phase="synthesis",
-                        details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr[:500]}",
+                        details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr}",
                         refinement_round=round_num,
                     )
                 )
@@ -2932,7 +2932,7 @@ class StrategyLabOrchestrator:
                 {
                     "sub_phase": "rejected_unsafe_code",
                     "alignment_round": align_round,
-                    "details": "; ".join(g.details for g in critical_safety)[:400],
+                    "details": "; ".join(g.details for g in critical_safety),
                 },
             )
             logger.warning("Alignment-proposed code failed safety gate for %s", spec.strategy_id)
@@ -2956,7 +2956,7 @@ class StrategyLabOrchestrator:
                     phase="verification",
                     details=(
                         f"Re-execution after alignment fix failed "
-                        f"({align_exec.error_type}): {align_exec.stderr[:400]}"
+                        f"({align_exec.error_type}): {align_exec.stderr}"
                     ),
                     refinement_round=align_round,
                 )
@@ -3038,7 +3038,7 @@ class StrategyLabOrchestrator:
             emit_payload: Dict[str, Any] = {
                 "sub_phase": "anomaly_detected",
                 "alignment_round": align_round,
-                "details": "; ".join(g.details for g in critical_anomalies)[:400],
+                "details": "; ".join(g.details for g in critical_anomalies),
             }
             if diagnostics_block:
                 emit_payload["execution_diagnostics"] = diagnostics_block

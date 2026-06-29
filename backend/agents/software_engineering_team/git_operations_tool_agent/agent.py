@@ -212,7 +212,7 @@ class GitOperationsToolAgent:
                 if rc != 0:
                     out.status = "blocked"
                     out.checks["rebase_sync"] = "fail"
-                    out.policy_findings.append(f"Rebase failed: {msg[:200]}")
+                    out.policy_findings.append(f"Rebase failed: {msg}")
                     return out
                 out.checks["rebase_sync"] = "pass"
 
@@ -221,7 +221,7 @@ class GitOperationsToolAgent:
                 rc, msg = _run_git(repo, ["git", "merge", "--squash", out.branch_name])
                 if rc != 0:
                     out.status = "blocked"
-                    out.policy_findings.append(f"Merge conflict: {msg[:200]}")
+                    out.policy_findings.append(f"Merge conflict: {msg}")
                     out.checks["merge_conflicts"] = "conflicts"
                     return out
                 commit_msg = f"chore(backend): merge {out.branch_name} [{input_data.task_id}]"
@@ -237,14 +237,14 @@ class GitOperationsToolAgent:
                 )
                 if rc != 0:
                     out.status = "blocked"
-                    out.policy_findings.append(f"Merge conflict: {msg[:200]}")
+                    out.policy_findings.append(f"Merge conflict: {msg}")
                     out.checks["merge_conflicts"] = "conflicts"
                     return out
             else:
                 rc, msg = _run_git(repo, ["git", "merge", "--ff-only", out.branch_name])
                 if rc != 0:
                     out.status = "blocked"
-                    out.policy_findings.append(f"FF merge failed: {msg[:200]}")
+                    out.policy_findings.append(f"FF merge failed: {msg}")
                     out.checks["merge_conflicts"] = "conflicts"
                     return out
 
