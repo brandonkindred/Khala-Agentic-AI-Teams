@@ -26,6 +26,7 @@ from ..spec_dsl import (
     EntryRule,
     IndicatorRef,
     Predicate,
+    PredicateTree,
     SignalExitRule,
 )
 
@@ -180,7 +181,7 @@ def evaluate_predicate(
     return EvaluationResult(status="miss", lhs=lhs_val, rhs=rhs_val, rel_miss=rm)
 
 
-def evaluate_tree(node: Any, view: HistoryView, i: int) -> EvaluationResult:
+def evaluate_tree(node: PredicateTree, view: HistoryView, i: int) -> EvaluationResult:
     """Evaluate a predicate tree (leaf ``Predicate`` or ``all_of`` / ``any_of``).
 
     Pre: ``node`` is a ``Predicate`` / ``AllOf`` / ``AnyOf``; ``i`` is in
@@ -203,11 +204,13 @@ def evaluate_tree(node: Any, view: HistoryView, i: int) -> EvaluationResult:
     """
     if isinstance(node, Predicate):
         return evaluate_predicate(node, view, i)
-    if isinstance(node, (AllOf, AnyOf)) and not node.of:
+    if isinstance(node, (AllOf, AnyOf)) and len(node.of) < 2:
         # The DSL's ``Field(min_length=2)`` forbids this on the validated path;
-        # guard the ``model_construct`` / mutation path so a malformed empty tree
-        # fails fast instead of returning a vacuous satisfied (AND) / miss (OR).
-        raise ValueError(f"{type(node).__name__}.of must be non-empty")
+        # guard the ``model_construct`` / mutation path so a malformed tree fails
+        # fast. An empty tree would otherwise return a vacuous satisfied (AND) /
+        # miss (OR); a 1-child tree would silently violate the ≥2-children
+        # canonical-shape invariant in the AllOf/AnyOf docstrings.
+        raise ValueError(f"{type(node).__name__}.of must have at least 2 children")
     if isinstance(node, AllOf):
         saw_warmup = False
         for child in node.of:

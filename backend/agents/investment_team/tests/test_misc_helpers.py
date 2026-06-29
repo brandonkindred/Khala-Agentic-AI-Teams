@@ -672,6 +672,16 @@ def test_entry_archetype_leaf_predicate_unchanged_after_tree_support() -> None:
     assert _entry_archetype(strat) == "rsi"
 
 
+def test_entry_archetype_none_or_malformed_when_returns_unknown() -> None:
+    # The docstring promises graceful degradation for odd shapes: a rule whose
+    # ``when`` is ``None`` or a bare dict (neither a Predicate nor a tree) must
+    # bucket as "unknown" without raising — guards the robustness contract.
+    none_when = type("Rule", (), {"when": None})()
+    dict_when = type("Rule", (), {"when": {}})()
+    assert _entry_archetype(type("S", (), {"entry_rules": [none_when]})()) == "unknown"
+    assert _entry_archetype(type("S", (), {"entry_rules": [dict_when]})()) == "unknown"
+
+
 def test_exit_archetypes_maps_each_kind_and_basis() -> None:
     trailing = _attr_record(exit_rules=[_trailing_stop()]).strategy
     fixed = _attr_record(exit_rules=[_fixed_stop()]).strategy

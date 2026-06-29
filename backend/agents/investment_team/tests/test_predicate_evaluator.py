@@ -383,15 +383,19 @@ def test_evaluate_tree_rejects_unknown_node():
         evaluate_tree(object(), view, 0)
 
 
-def test_evaluate_tree_rejects_empty_combinator():
-    """A malformed empty combinator (only reachable via ``model_construct``
-    bypassing ``min_length=2``) must fail fast rather than return a vacuous
-    satisfied (AND) / miss (OR)."""
+def test_evaluate_tree_rejects_under_two_children():
+    """A malformed combinator with <2 children (only reachable via
+    ``model_construct`` bypassing ``min_length=2``) must fail fast: an empty tree
+    would return a vacuous satisfied (AND) / miss (OR), and a 1-child tree would
+    silently violate the ≥2-children canonical-shape invariant."""
     view = _pandas_view([100.0])
-    with pytest.raises(ValueError):
-        evaluate_tree(AllOf.model_construct(of=[]), view, 0)
-    with pytest.raises(ValueError):
-        evaluate_tree(AnyOf.model_construct(of=[]), view, 0)
+    one = Predicate(lhs="bar.close", op=">", rhs=50.0)
+    for empty in (AllOf.model_construct(of=[]), AnyOf.model_construct(of=[])):
+        with pytest.raises(ValueError):
+            evaluate_tree(empty, view, 0)
+    for single in (AllOf.model_construct(of=[one]), AnyOf.model_construct(of=[one])):
+        with pytest.raises(ValueError):
+            evaluate_tree(single, view, 0)
 
 
 def test_evaluate_entry_rules_honours_all_of_when():
