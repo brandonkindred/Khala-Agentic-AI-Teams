@@ -142,14 +142,28 @@ def test_is_pytest_assertion_failure() -> None:
     assert not _is_pytest_assertion_failure("ImportError: cannot import")
 
 
-def test_build_error_signature_returns_full_error_text() -> None:
-    """_build_error_signature returns the full stripped error text without truncation."""
-    assertion_err = "[pytest_assertion] failed\n" + "x" * 1500
-    sig = _build_error_signature(assertion_err)
-    assert sig == assertion_err.strip()
-    generic_err = "ImportError: foo\n" + "y" * 1000
-    sig2 = _build_error_signature(generic_err)
-    assert sig2 == generic_err.strip()
+def test_build_error_signature_normalizes_volatile_lines() -> None:
+    """Two failures differing only in volatile noise collapse to one signature,
+    and the real error message is preserved (no length truncation)."""
+    err_a = (
+        "AssertionError: assert 200 == 401\n"
+        "tmp file /tmp/pytest-of-alice/pytest-12/test_a0/conftest.py\n"
+        "at 2026-06-28T10:11:12.345Z connected to localhost:8080\n"
+        "<object at 0x7f3a1c2d4e50> finished in 1.23s\n"
+    )
+    err_b = (
+        "AssertionError: assert 200 == 401\n"
+        "tmp file /tmp/pytest-of-bob/pytest-99/test_a0/conftest.py\n"
+        "at 2026-06-28T22:33:44.999Z connected to localhost:8081\n"
+        "<object at 0x55ffaa00bb11> finished in 9.87s\n"
+    )
+    # Same underlying failure, only volatile lines differ -> identical signature.
+    assert _build_error_signature(err_a) == _build_error_signature(err_b)
+    # The real, stable error text survives normalization.
+    assert "AssertionError: assert 200 == 401" in _build_error_signature(err_a)
+    # No length truncation: a long stable body is retained in full.
+    long_err = "ImportError: cannot import name 'X' " + "details " * 300
+    assert "details details" in _build_error_signature(long_err)
 
 
 def test_build_code_review_issues_for_missing_test_routes_returns_targeted_issue() -> None:

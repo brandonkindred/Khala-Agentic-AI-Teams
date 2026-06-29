@@ -1525,7 +1525,7 @@ def _run_one_strategy_lab_cycle(
         except Exception as exc:
             logger.warning("Paper trading step failed (non-fatal): %s", exc)
             record.paper_trading_status = "failed"
-            record.paper_trading_error = str(exc)
+            record.paper_trading_error = str(exc)[:500]
             _emit("paper_trading_failed", {"detail": record.paper_trading_error})
 
     # Persist to in-memory stores

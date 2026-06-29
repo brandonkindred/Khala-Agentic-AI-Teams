@@ -16,6 +16,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_existing_code_chars,
     compute_spec_content_chars,
 )
+from software_engineering_team.shared.error_parsing import normalize_error_signature
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
 from software_engineering_team.shared.prompt_utils import (
     build_problem_solving_header,
@@ -460,8 +461,13 @@ def _resolve_failing_test_context(
 
 
 def _build_error_signature(build_errors: str) -> str:
-    """Compute a signature for same-error detection using the full error text."""
-    return build_errors.strip()
+    """Compute a stable signature for same-error (loop) detection.
+
+    Delegates to the shared normalizer so volatile fragments (temp paths,
+    timestamps, durations, ports, object addresses) collapse to one signature
+    while the full error message is preserved (no length truncation).
+    """
+    return normalize_error_signature(build_errors)
 
 
 def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[str, Any]]:

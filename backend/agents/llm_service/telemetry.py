@@ -218,8 +218,8 @@ def record_llm_call(
     prompt_preview = None
     response_preview = None
     if _CAPTURE_PROMPTS:
-        prompt_preview = (prompt_text or "") if prompt_text else None
-        response_preview = (response_text or "") if response_text else None
+        prompt_preview = (prompt_text or "")[:2000] if prompt_text else None
+        response_preview = (response_text or "")[:2000] if response_text else None
 
     if cost_usd is None:
         try:

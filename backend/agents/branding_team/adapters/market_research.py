@@ -174,7 +174,7 @@ def _map_to_competitive_snapshot(data: dict) -> CompetitiveSnapshot:
             similar_brands.append(sig["signal"])
     return CompetitiveSnapshot(
         summary=summary if summary else "Competitive context requested.",
-        similar_brands=similar_brands,
-        insights=insights_list,
+        similar_brands=similar_brands[:20],
+        insights=insights_list[:30],
         source="market_research_team",
     )

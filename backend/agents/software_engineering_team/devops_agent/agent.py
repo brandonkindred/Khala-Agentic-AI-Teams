@@ -10,6 +10,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import compact_text, get_client, get_strands_model
+from software_engineering_team.shared.error_parsing import normalize_error_signature
 from software_engineering_team.shared.prompt_utils import log_llm_prompt
 from software_engineering_team.shared.repo_utils import int_env as _int_env
 from software_engineering_team.shared.task_plan import TaskPlan
@@ -25,8 +26,13 @@ MAX_SAME_BUILD_FAILURES = _int_env("SW_MAX_SAME_BUILD_FAILURES", 6)
 
 
 def _build_error_signature(build_errors: str) -> str:
-    """Compute a signature for same-error detection using the full error text."""
-    return build_errors.strip()
+    """Compute a stable signature for same-error (loop) detection.
+
+    Delegates to the shared normalizer so volatile fragments (temp paths,
+    timestamps, durations, ports, object addresses) collapse to one signature
+    while the full error message is preserved (no length truncation).
+    """
+    return normalize_error_signature(build_errors)
 
 
 def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
@@ -45,7 +51,7 @@ def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
         if f.exists() and f.is_file():
             try:
                 content = f.read_text(encoding="utf-8", errors="replace")
-                parts.append(f"**{name}:**\n```\n{content}\n```")
+                parts.append(f"**{name}:**\n```\n{content[:2000]}\n```")
             except (OSError, UnicodeDecodeError) as e:
                 logger.debug("Could not read %s: %s", f, e)
 
@@ -54,7 +60,7 @@ def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
     if pkg.exists() and pkg.is_file():
         try:
             content = pkg.read_text(encoding="utf-8", errors="replace")
-            parts.append(f"**package.json:**\n```\n{content}\n```")
+            parts.append(f"**package.json:**\n```\n{content[:2000]}\n```")
         except (OSError, UnicodeDecodeError) as e:
             logger.debug("Could not read %s: %s", pkg, e)
 
@@ -65,14 +71,14 @@ def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
             if wf.is_file():
                 try:
                     content = wf.read_text(encoding="utf-8", errors="replace")
-                    parts.append(f"**Existing {wf.name}:**\n```yaml\n{content}\n```")
+                    parts.append(f"**Existing {wf.name}:**\n```yaml\n{content[:1500]}\n```")
                 except (OSError, UnicodeDecodeError) as e:
                     logger.debug("Could not read workflow %s: %s", wf, e)
         for wf in workflows_dir.glob("*.yaml"):
             if wf.is_file():
                 try:
                     content = wf.read_text(encoding="utf-8", errors="replace")
-                    parts.append(f"**Existing {wf.name}:**\n```yaml\n{content}\n```")
+                    parts.append(f"**Existing {wf.name}:**\n```yaml\n{content[:1500]}\n```")
                 except (OSError, UnicodeDecodeError) as e:
                     logger.debug("Could not read workflow %s: %s", wf, e)
 
@@ -82,7 +88,7 @@ def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
         if m.exists() and m.is_file():
             try:
                 content = m.read_text(encoding="utf-8", errors="replace")
-                parts.append(f"**{main} (entry):**\n```\n{content}\n```")
+                parts.append(f"**{main} (entry):**\n```\n{content[:800]}\n```")
             except (OSError, UnicodeDecodeError) as e:
                 logger.debug("Could not read %s: %s", m, e)
             break

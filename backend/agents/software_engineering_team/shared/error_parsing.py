@@ -17,6 +17,51 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+# --- Build-error signature normalization ---
+# Volatile fragments that vary run-to-run for the SAME underlying failure. They
+# are replaced with stable placeholders so two failures differing only in noise
+# collapse to one signature for repeated-failure (loop) detection, while the real
+# error text is preserved (no length truncation).
+_SIG_TMP_PATH_RE = re.compile(r"(?:/private)?(?:/var/folders|/tmp|/var/tmp)/[^\s:'\"]+")
+_SIG_ISO_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+_SIG_CLOCK_TS_RE = re.compile(r"\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b")
+_SIG_DURATION_RE = re.compile(
+    r"\b(?:in\s+)?\d+(?:\.\d+)?\s*(?:ms|s|secs?|seconds?)\b", re.IGNORECASE
+)
+_SIG_HEX_ADDR_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
+_SIG_PORT_RE = re.compile(r"((?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-fA-F:]+\])):\d{2,5}\b")
+_SIG_WS_RE = re.compile(r"\s+")
+
+
+def normalize_error_signature(build_errors: str) -> str:
+    """Normalize volatile fragments in build/test output into a stable signature.
+
+    Used for repeated-failure (loop) detection: two runs of the SAME underlying
+    failure that differ only in noise -- temp paths (``/tmp``, ``/var/folders``,
+    ``/private/var``, pytest tmp dirs), ISO/clock timestamps, duration markers
+    ("in 1.23s"), object addresses ("0x7f.."), and host port numbers -- collapse to
+    one signature, so the same-error guard fires after the repeat threshold rather
+    than iterating until the larger workflow cap. The real error message is
+    preserved; nothing is truncated by length.
+
+    Preconditions: ``build_errors`` is a str (may be empty).
+    Postconditions: returns a stripped, whitespace-collapsed copy of
+        ``build_errors`` with volatile fragments replaced by stable placeholders.
+        Deterministic: equal-modulo-noise inputs produce equal outputs.
+    """
+    text = build_errors
+    text = _SIG_TMP_PATH_RE.sub("<TMP>", text)
+    text = _SIG_ISO_TS_RE.sub("<TS>", text)
+    text = _SIG_CLOCK_TS_RE.sub("<TS>", text)
+    text = _SIG_DURATION_RE.sub("<DUR>", text)
+    text = _SIG_HEX_ADDR_RE.sub("<ADDR>", text)
+    text = _SIG_PORT_RE.sub(r"\1:<PORT>", text)
+    text = _SIG_WS_RE.sub(" ", text)
+    return text.strip()
+
+
 class FailureClass(str, Enum):
     """Standard failure classes for observability and agent tuning."""
 
@@ -442,7 +487,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
                 failure_class=FailureClass.YAML_PARSE_ERROR,
                 file_path=file_path,
                 message=msg,
-                raw_excerpt=text,
+                raw_excerpt=text[:2000],
                 suggestion="Fix YAML syntax: indentation, colons, and quoting.",
                 playbook_hint=PLAYBOOK_YAML_SYNTAX,
             )
@@ -461,7 +506,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message=f"COPY failed: {src} - {err}",
-                raw_excerpt=text,
+                raw_excerpt=text[:2000],
                 suggestion=f"Ensure '{src}' exists in the build context. Check path and .dockerignore.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -480,7 +525,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message=f"Docker build failed: {msg}",
-                raw_excerpt=text,
+                raw_excerpt=text[:2000],
                 suggestion="Fix the Dockerfile: valid base image, correct paths, working RUN commands.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -499,7 +544,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message=f"RUN command failed: {detail}",
-                raw_excerpt=text,
+                raw_excerpt=text[:2000],
                 suggestion="Fix the failing RUN step: check package names, install commands, and paths.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -512,7 +557,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.DOCKER_BUILD_ERROR,
                 message="Docker build failed",
-                raw_excerpt=text,
+                raw_excerpt=text[:2000],
                 suggestion="Fix the Dockerfile and build context. Check COPY paths and RUN commands.",
                 playbook_hint=PLAYBOOK_DOCKER_BUILD,
             )
@@ -524,7 +569,7 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
             ParsedFailure(
                 failure_class=FailureClass.UNKNOWN,
                 message="Unrecognized DevOps failure",
-                raw_excerpt=text if text else "",
+                raw_excerpt=text[:2000] if text else "",
             )
         )
     return failures
