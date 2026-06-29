@@ -208,6 +208,36 @@ def test_trailing_stop_loss_compiles_without_inline_emission() -> None:
     assert "StopAttachment" not in code
 
 
+def test_scaled_take_profit_with_trailing_runner_compiles() -> None:
+    """The win-rate-tuned exit pattern the design prompt recommends — bank
+    partials early with a ``ScaledTakeProfitRule`` summing to < 1.0, then let
+    the remainder ride a trailing stop — must be valid, compilable DSL (no
+    ``CompilerError``, no inline emission). Guards the prompt guidance against
+    drift: the recommended shape stays expressible end-to-end.
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.10, "qty_fraction": 0.3},
+                ]
+            ),
+            # Remainder (0.2) rides this trailing-high runner.
+            StopLossRule(pct=0.05, basis="trailing_high"),
+        ],
+    )
+    code = compile_strategy(spec)
+    assert _strategy_subclass_count(code) == 1
+    assert "ctx.submit_order" not in code
+    # Engine owns both the ladder and the trailing stop — no inline emission.
+    assert 'reason="compiled_stop_loss"' not in code
+    assert "StopAttachment" not in code
+    # The safety gate must not veto the combined engine-handled exit set.
+    assert not _critical_details(CodeSafetyChecker().check(code, spec))
+
+
 def test_fixed_fraction_sizing() -> None:
     """Sizing is engine-managed — compiled code does NOT inline qty math."""
     spec = _spec(

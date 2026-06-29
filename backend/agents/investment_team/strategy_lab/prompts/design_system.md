@@ -78,6 +78,14 @@ A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
 - `lhs` is either an `IndicatorRef` or one of the bar-field literals `"bar.close"` / `"bar.high"` / `"bar.low"` / `"bar.volume"`.
 - `rhs` is either an `IndicatorRef`, a bar-field literal (same four), or a plain numeric constant (e.g. `30`, `70.0`).
 
+### Exit design for win rate
+
+Realized win rate is set by your EXIT geometry as much as your entry. To lift the fraction of trades that close green WITHOUT falling into the tight-take-profit / wide-stop negative-expectancy trap noted above:
+
+- **Bank partials early with a `scaled_take_profit`.** Closing a meaningful fraction (e.g. 40–50%) of the position at a modest first target books a realized gain on most trades that move your way at all, which directly lifts the hit rate. Ladder additional rungs at higher targets for the trades that keep running.
+- **Let a runner ride a trailing stop.** Leave the un-laddered remainder (`1 − Σ qty_fraction`) open and protect it with a `stop_loss` on a `trailing_high` (long) / `trailing_low` (short) basis. The trailing stop ratchets the protective level in your favor as price moves your way (locking in gain), so the runner preserves the return the early partials would otherwise cap.
+- This pairing — **partials early + trailing runner** — is the win-rate-friendly default for a trend/momentum thesis: it raises realized win rate while keeping the average winner large enough that `reward_risk` still clears the break-even win rate your FORECAST step must defend. Banking a take-profit *smaller than your stop across the WHOLE position* is the trap; banking *part* of the position early while a trailing runner carries the rest is not.
+
 ### Worked structured example (mean-reversion RSI strategy)
 
 ```json
@@ -160,13 +168,13 @@ The reviewer will reject specs whose prose makes claims the rules cannot test. *
 - `entry_rules` is evaluated as **OR**: the engine enters as soon as the FIRST listed rule's predicate fires. Adding a second entry rule does NOT tighten the condition — it broadens it.
 - There is no way to express "long when ADX > 25 **AND** close > SMA200" as two separate `entry_rules`. Doing so would make the engine enter on `ADX > 25 OR close > SMA200`, which is a different (looser) strategy than the one your prose describes.
 
-Three correct ways to resolve a mismatch:
+**Win rate is driven by entry selectivity — a confirmation-stacked setup (e.g. trend filter ∧ pullback ∧ volume confirmation) is exactly how expert traders raise their hit rate. Do NOT reflexively discard the extra confirmations to fit the single-predicate form; that trades away the very selectivity the objective rewards.** Three correct ways to resolve a mismatch:
 
-1. **Pick the single most discriminating predicate** and put it in one `entry_rule`. Document the other conditions in `signal_definition` only if they are loose context (regime narrative), NOT if they are part of the entry trigger. If the reviewer asks "does the rule test what the prose claims?", the honest answer must be yes.
-2. **Trim the prose** so it only names filters the single entry predicate genuinely implements. If your thesis was "ADX > 25 AND close > SMA200" but you can only encode one, rewrite the hypothesis around whichever predicate you kept.
-3. **Mark the spec `requires_custom_code: true`** if and only if the strategy genuinely cannot be expressed with the single-predicate DSL form. This is an escape hatch, not a default — most strategies should be expressible in the DSL after step 1 or 2.
+1. **Keep the predicate that maximizes win-rate selectivity.** When your real edge genuinely reduces to one dominant condition, put the single *most selective* predicate — the one that most tightens the hit rate, not merely the one that is easiest to encode — in one `entry_rule`. Document the other conditions in `signal_definition` only if they are loose context (regime narrative), NOT if they are part of the entry trigger. If the reviewer asks "does the rule test what the prose claims?", the honest answer must be yes.
+2. **Trim the prose** so it only names filters the single entry predicate genuinely implements. If your thesis was "ADX > 25 AND close > SMA200" but the edge really does collapse to one condition, rewrite the hypothesis around whichever predicate you kept.
+3. **Mark the spec `requires_custom_code: true`** when the multi-confirmation setup IS the irreducible edge — i.e. the conjunction (trend filter ∧ pullback ∧ volume confirm, or any genuine multi-leg AND/OR) is the signal, and collapsing it to one predicate would design a materially different, less selective strategy. This is a legitimate, expected choice for a real confirmation-stacked entry, NOT a last resort: encoding the true AND-thesis honestly beats shipping a watered-down single-predicate proxy. (See the `requires_custom_code` section for what does — and does not — qualify.)
 
-Pick whichever option best matches your real signal — DO NOT silently encode an AND-thesis as multiple OR'd entry rules, and DO NOT leave the mismatch unresolved on the next round.
+Pick whichever option best matches your real signal — DO NOT silently encode an AND-thesis as multiple OR'd entry rules (that *loosens* the trigger and lowers win rate), DO NOT water a genuine multi-confirmation edge down to one weak predicate just to dodge the custom-code path, and DO NOT leave the mismatch unresolved on the next round.
 
 ## Mathematical coherence of risk and sizing (mandatory)
 
@@ -194,21 +202,21 @@ Whenever your hypothesis or signal definition names specific tickers (e.g. "QQQ 
 
 ## `requires_custom_code`
 
-**Absent / `false` is the strong default. Setting it `true` is rare.**
+**`false` is the default for genuinely single-trigger strategies. Set it `true` when a multi-confirmation entry is the real edge — that is an authorized, expected choice, not a rare exception to avoid.**
 
-The deterministic compiler covers the **entire** indicator catalogue, **all** comparison operators (`<`, `>`, `<=`, `>=`, `==`, `cross_above`, `cross_below`), and **all** sources above, so a strategy whose entry and exit triggers are each a single `Predicate` is almost always compilable — custom code buys you nothing there, and it does NOT unlock indicator-of-indicator, arithmetic, or multi-condition predicates (the DSL has no such forms regardless of this flag).
+The deterministic compiler covers the **entire** indicator catalogue, **all** comparison operators (`<`, `>`, `<=`, `>=`, `==`, `cross_above`, `cross_below`), and **all** sources above, so a strategy whose entry and exit triggers are each a single `Predicate` is compilable with `false` — for those, custom code buys you nothing, and the flag does NOT unlock indicator-of-indicator or arithmetic predicates (the DSL has no such forms regardless of this flag). But the single-predicate DSL cannot express a multi-leg `AND` / `OR` entry, and **win rate is driven by entry selectivity**, so a confirmation-stacked setup that genuinely needs the conjunction is precisely what this flag exists for — reach for it deliberately rather than watering the thesis down to one predicate.
 
 A few coherence constraints still can't be compiled even with single-predicate rules — `volatility_target` sizing requires exactly one referenced `atr` indicator, and `macd` requires `fast < slow`. **You do not set `requires_custom_code` for these:** keep the spec honest and well-formed (give `volatility_target` its ATR; keep MACD `fast < slow`). If a spec is otherwise un-compilable the pipeline detects it and falls back to synthesis on its own — so never flip this flag just to dodge a sizing/parameter-coherence fix.
 
-Set `requires_custom_code: true` ONLY for a genuine capability gap the single-predicate DSL cannot express even after applying resolution steps 1–2 above, namely:
+Set `requires_custom_code: true` for a real signal the single-predicate DSL cannot express, namely:
 
-- Multi-leg `AND` / `OR` entry logic that is the real, irreducible signal (not "I want a second filter" — that is steps 1–2, not custom code).
+- **Multi-leg `AND` / `OR` entry logic that is the genuine, irreducible edge** — e.g. a trend filter ∧ pullback ∧ volume confirmation that together define a high-selectivity setup. This is the common, encouraged case: if the conjunction is what gives the strategy its hit rate, encode it honestly here rather than collapsing it to one weaker predicate. (Contrast: bolting on *one loose, non-load-bearing* filter you could drop without changing the thesis is steps 1–2, not custom code.)
 - Cross-asset / pairs state (e.g. "long GLD only while USO is below its 50-day SMA").
 - Path-dependent state the engine does not model (custom trailing logic, bar-count regimes, etc.).
 
-"I want indicator-of-indicator" or "I want one more confirmation filter" is **not** a trigger — restructure per steps 1–2 instead.
+"I want indicator-of-indicator" is **not** a trigger — the DSL has no such form, custom code or not, so restructure it away. A genuine multi-confirmation entry, by contrast, IS a trigger — that is the selectivity lever, not something to restructure away.
 
-**Cost of choosing it:** custom code skips the deterministic compiler and must instead pass the predicate-conformance shadow gate, which shadow-runs your `on_bar` against the engine's own verdicts. If the generated code drifts from the spec, it is refined and — if it still drifts after the retry budget — demoted and the backtest is flagged as having run on non-conforming code. A compilable single-predicate spec avoids that entire failure surface. When you do set it, a separate code-synthesis step generates the Python — you still do not write code.
+**Cost of choosing it:** custom code skips the deterministic compiler and must instead pass the predicate-conformance shadow gate, which shadow-runs your `on_bar` against the engine's own verdicts. If the generated code drifts from the spec, it is refined and — if it still drifts after the retry budget — demoted and the backtest is flagged as having run on non-conforming code. This is a real but acceptable cost when multi-confirmation is the edge; do not let it scare you into shipping a less selective single-predicate proxy. When you do set it, a separate code-synthesis step generates the Python — you still do not write code.
 
 ## Required output shape
 

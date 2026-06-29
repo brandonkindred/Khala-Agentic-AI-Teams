@@ -322,6 +322,66 @@ def test_design_system_prompt_states_dual_objective_and_forecast() -> None:
     assert "expectancy_forecast" in text  # the machine-readable forecast field
 
 
+def test_design_system_prompt_encourages_selective_multi_confirmation_entries() -> None:
+    """The design system prompt must aim entry selection at win-rate
+    *selectivity* and authorize ``requires_custom_code: true`` for a genuine
+    multi-confirmation setup — the structural win-rate lever the prompt
+    previously suppressed by framing custom code as 'rare'."""
+    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+
+    text = _SYSTEM_PROMPT
+    lowered = text.lower()
+    # Entry selection is reframed around win-rate selectivity, not "most
+    # discriminating in the abstract".
+    assert "selectivity" in lowered
+    assert "win-rate selectivity" in lowered
+    # Multi-confirmation is named as the win-rate lever and custom code is
+    # authorized for it (no longer "setting it true is rare").
+    assert "multi-confirmation" in lowered or "confirmation-stacked" in lowered
+    assert "requires_custom_code" in text
+    assert "rare" not in lowered or "not a rare exception" in lowered
+    # The prohibition on faking an AND-thesis via OR'd entry rules survives.
+    assert "loosens" in lowered
+
+
+def test_design_system_prompt_states_win_rate_tuned_exit_guidance() -> None:
+    """The design system prompt must carry the win-rate-tuned exit guidance:
+    bank partials early via a scaled take-profit, with a trailing-stop runner
+    on the remainder to preserve return."""
+    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+
+    lowered = _SYSTEM_PROMPT.lower()
+    assert "scaled_take_profit" in lowered
+    assert "partials early" in lowered
+    assert "trailing" in lowered and "runner" in lowered
+    # Tied back to the existing reward:risk / break-even win-rate self-check.
+    assert "reward_risk" in lowered or "break-even win rate" in lowered
+
+
+def test_run_preserves_requires_custom_code_for_multi_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A designer that declares a genuine multi-confirmation edge sets
+    ``requires_custom_code: true``; the flag must ride through the parse path
+    onto the returned spec (it is neither a rule slot nor popped like
+    ``rationale``), so the prompt's newly-encouraged path is representable
+    end-to-end."""
+    payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+        extra={
+            "requires_custom_code": True,
+            "hypothesis": "Long only when trend filter AND pullback AND volume confirmation align.",
+        },
+    )
+    _patch_design(monkeypatch, payload)
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert parsed["requires_custom_code"] is True
+
+
 def test_run_includes_exclude_directives_in_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
