@@ -40,11 +40,12 @@ PROVISIONING_PREFIX = "/api/agentic-team-provisioning"
 
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
-# A team id is a server-minted uuid (hex + hyphens). It is **user-controlled**
-# (parsed from ``target_team_key`` on ``/start``) and goes into a URL path, so it
-# is validated against this safe charset to block path traversal (``..``, ``/``,
-# ``\``) into other provisioning endpoints. Mirrors ``shared_postgres``-style id
-# expectations; reject anything else at construction.
+# A team id is a server-minted opaque slug — alphanumerics plus hyphen and
+# underscore (it is *not* strictly a bare UUID: provisioning ids may carry an
+# underscore-bearing prefix). It is **user-controlled** (parsed from
+# ``target_team_key`` on ``/start``) and goes into a URL path, so it is validated
+# against this safe charset to block path traversal (``..``, ``/``, ``\``) into
+# other provisioning endpoints. Reject anything else at construction.
 _TEAM_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Sentinel job id returned by the collapsed (no-op) analysis phase. The
@@ -163,6 +164,8 @@ class AgenticTeamAdapter:
             body = resp.json()
         except ValueError as exc:  # non-JSON 2xx (e.g. an HTML proxy page)
             raise StartFailed(502, f"Invalid JSON from pipeline create: {exc}") from exc
+        if not isinstance(body, dict):  # valid JSON but a list/scalar ⇒ no .get()
+            raise StartFailed(502, "Provisioning create response is not a JSON object")
         run_id = body.get("run_id")
         if not run_id:
             raise StartFailed(502, "Provisioning response missing run_id")
@@ -190,6 +193,8 @@ class AgenticTeamAdapter:
         try:
             run = resp.json()
         except ValueError:  # non-JSON 2xx ⇒ treat as a transient poll error
+            return {"_poll_error": 502}
+        if not isinstance(run, dict):  # valid JSON but a list/scalar ⇒ no .get()
             return {"_poll_error": 502}
         status = run.get("status", "")
 

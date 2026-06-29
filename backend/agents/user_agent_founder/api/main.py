@@ -544,6 +544,16 @@ def delete_persona(persona_id: str) -> Response:
     return Response(status_code=204)
 
 
+# These cross-service checks run **inline** on ``/start`` and ``/testable-teams``,
+# so they block the request thread. They are best-effort (a slow/unresponsive
+# provisioning service must not hard-block), so the timeout is kept tight to bound
+# the worst-case added latency rather than the 30s used on the founder's own build
+# calls. 5s total / 3s connect: long enough to ride out a brief hiccup, short
+# enough that a dead provisioning service degrades the endpoint by seconds, not
+# tens of seconds.
+_BEST_EFFORT_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
+
+
 def _provisioning_base() -> str:
     """Base URL for the agentic-team-provisioning service over the unified API."""
     # rstrip so a trailing-slash env value can't produce ``//api/...``.
@@ -580,7 +590,7 @@ def _agentic_process_status(team_id: str, process_id: str) -> Optional[str]:
         violation. Never raises.
     """
     try:
-        with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+        with httpx.Client(timeout=_BEST_EFFORT_TIMEOUT) as client:
             code, team = _fetch_agentic_team(client, team_id)
         if code == 404:
             return "not_found"  # definitively not found ⇒ a real gate rejection
@@ -618,10 +628,9 @@ def _list_agentic_testable_teams() -> list[TestableTeam]:
         top-level failure (e.g. the list call itself) returns whatever was
         gathered so far. Failures are logged, never raised.
     """
-    timeout = httpx.Timeout(10.0, connect=5.0)
     teams: list[TestableTeam] = []
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=_BEST_EFFORT_TIMEOUT) as client:
             resp = client.get(f"{_provisioning_base()}/teams")
             if resp.status_code >= 400:
                 logger.warning("Could not list agentic teams: HTTP %s", resp.status_code)

@@ -94,7 +94,9 @@
                   <mat-icon aria-hidden="true">add</mat-icon> New persona
                 </button>
               </div>
-              @if (personas().length === 0) {
+              @if (personasLoading()) {
+                <p class="persona__loading">Loading personas…</p>
+              } @else if (personas().length === 0) {
                 <p class="persona__loading">No personas — create one to begin.</p>
               } @else {
                 <ul class="persona__list" aria-label="Testing personas">
@@ -170,13 +172,15 @@
                   @for (d of r.decisions; track d.decision_id) {
                     <li class="persona__decision">
                       <span class="persona__q">Q: {{ d.question_text }}</span>
-                      <span class="persona__a">→ {{ d.answer_text }}</span>
+                      <span class="persona__decision-action">→ {{ d.answer_text }}</span>
                       @if (d.rationale) {
                         <span class="persona__rationale">{{ d.rationale }}</span>
                       }
                     </li>
                   }
                 </ul>
+              } @else if (runTerminal()) {
+                <p class="persona__loading">No decisions recorded.</p>
               } @else {
                 <p class="persona__loading">Waiting for the first decision…</p>
               }

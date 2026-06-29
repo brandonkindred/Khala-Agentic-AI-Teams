@@ -4,7 +4,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
 import { of, throwError, Subject } from 'rxjs';
 import { vi } from 'vitest';
-import type { PersonaTestRunDetail } from '../../models/persona-testing.model';
+import type { PersonaInfo, PersonaTestRunDetail } from '../../models/persona-testing.model';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
@@ -349,5 +349,53 @@ describe('AgentStudioPersonaComponent', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('shows a loading indicator (not the empty state) while personas load', () => {
+    build();
+    // Hold the personas response pending so the loading branch is observable.
+    const pending = new Subject<{ personas: PersonaInfo[] }>();
+    personaApi.getPersonas.mockReturnValue(pending);
+    fixture.detectChanges();
+    expect(component.personasLoading()).toBe(true);
+    expect(fixture.nativeElement.textContent).toContain('Loading personas');
+    expect(fixture.nativeElement.textContent).not.toContain('No personas');
+
+    pending.next({ personas: [] });
+    fixture.detectChanges();
+    expect(component.personasLoading()).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('No personas');
+  });
+
+  it('shows "No decisions recorded." when a terminal run has no decisions', () => {
+    build();
+    fixture.detectChanges();
+    // The default getRunStatus resolves to a completed run with empty decisions.
+    component.launch();
+    expect(component.runTerminal()).toBe(true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('No decisions recorded');
+    expect(fixture.nativeElement.textContent).not.toContain('Waiting for the first decision');
+  });
+
+  it('does not banner a superseded run when a stale immediate fetch errors', () => {
+    build();
+    fixture.detectChanges();
+    // First launch: hold the immediate fetch pending so it can error *after* a
+    // second run starts.
+    const stale = new Subject<PersonaTestRunDetail>();
+    personaApi.startTest.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
+    personaApi.getRunStatus.mockReturnValueOnce(stale).mockReturnValue(new Subject());
+    component.launch();
+
+    // Second launch supersedes run-1 (activeRunId becomes run-2).
+    personaApi.startTest.mockReturnValue(of({ job_id: 'run-2', status: 'running', message: '' }));
+    personaApi.getRunStatus.mockReturnValueOnce(new Subject()).mockReturnValue(new Subject());
+    component.launch();
+
+    // The stale run-1 immediate fetch now errors — it must NOT stamp run-2 with
+    // the lost-contact banner.
+    stale.error(new Error('blip'));
+    expect(component.error()).toBeNull();
   });
 });

@@ -76,6 +76,8 @@ export class AgentStudioPersonaComponent implements OnInit {
   readonly team = signal<AgenticTeam | null>(null);
   readonly teamError = signal<string | null>(null);
   readonly personas = signal<PersonaInfo[]>([]);
+  /** True while the persona library is being fetched (distinguishes "loading" from "empty"). */
+  readonly personasLoading = signal(false);
   readonly selectedProcessId = signal<string | null>(null);
   readonly launching = signal(false);
   readonly error = signal<string | null>(null);
@@ -133,14 +135,21 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.loadPersonas();
   }
 
+  /** Switch the Stage-4 sub-mode between 'manual' (chat/pipeline) and 'persona'. */
   setMode(mode: StudioPersonaMode): void {
     this.mode.set(mode);
   }
 
+  /**
+   * Select the testing persona to drive the run. Persona selection is owned by
+   * the shared studio state (so it survives a back-loop to Stage 2/3), hence the
+   * write goes through the state service rather than a local signal.
+   */
   selectPersona(id: string): void {
     this.state.setPersonaId(id);
   }
 
+  /** Select the target process for the run (must be a `complete` process). */
   selectProcess(id: string): void {
     this.selectedProcessId.set(id);
   }
@@ -175,13 +184,17 @@ export class AgentStudioPersonaComponent implements OnInit {
   }
 
   private loadPersonas(): void {
-    // Reset any prior error before the request (consistent with loadTeam).
+    // Reset any prior error before the request (consistent with loadTeam). Safe
+    // because loadPersonas runs only from ngOnInit, before any run/launch error
+    // could exist; it is not a general-purpose reload.
     this.error.set(null);
+    this.personasLoading.set(true);
     this.personaApi
       .getPersonas()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {
+          this.personasLoading.set(false);
           const personas = resp.personas ?? [];
           this.personas.set(personas);
           // Default the persona selection when none carried from the handoff.
@@ -190,6 +203,7 @@ export class AgentStudioPersonaComponent implements OnInit {
           }
         },
         error: () => {
+          this.personasLoading.set(false);
           this.error.set('Could not load personas.');
         },
       });
@@ -197,6 +211,13 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   // ── Launch + live run ───────────────────────────────────────────────────
 
+  /**
+   * Start an autonomous persona-driven run against the selected complete process
+   * via `POST /start` (`target_team_key = "agentic_team:<teamId>"`), then begin
+   * polling its status. No-ops unless a persona, a process, and a team are all
+   * selected and no launch is already in flight (the button is disabled in the
+   * same conditions; this guard makes the precondition explicit for direct calls).
+   */
   launch(): void {
     const teamId = this.teamId();
     const personaId = this.selectedPersonaId();
@@ -262,8 +283,13 @@ export class AgentStudioPersonaComponent implements OnInit {
       .subscribe({
         next: (detail) => this.handleStatus(detail),
         error: () => {
-          // The interval poll will retry; surface a transient banner meanwhile.
-          this.error.set('Lost contact with the run; retrying…');
+          // Guard against a stale fetch landing after a newer run was launched:
+          // only banner the run that is still active. Use the LOST_CONTACT
+          // constant so handleStatus clears it on the next good poll (it matches
+          // by value). The interval poll will retry meanwhile.
+          if (this.activeRunId === runId) {
+            this.error.set(LOST_CONTACT);
+          }
         },
       });
   }
@@ -296,6 +322,11 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   // ── Persona authoring ─────────────────────────────────────────────────────
 
+  /**
+   * Open the persona editor dialog in 'create' mode; on a non-null result, POST
+   * the new persona, append it to the library, and select it. The dialog is
+   * closed on component destroy so it can't be orphaned in the overlay.
+   */
   newPersona(): void {
     const ref = this.dialog.open<
       PersonaEditorDialogComponent,
@@ -329,16 +360,23 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   // ── Back-loops (programmatic; the stepper stays forward-only) ─────────────
 
+  /** Back-loop to Stage 3 (Compose Team) to revise the roster. */
   iterateRoster(): void {
     this.state.navigateToStage(2); // Stage 3 — Compose Team
   }
 
+  /**
+   * Back-loop to Stage 2 (Test Agent) to fix the in-focus registry agent. No-ops
+   * when no registry agent is in focus (`canFixAgent()` is false), matching the
+   * disabled toolbar button.
+   */
   fixAgent(): void {
     if (this.canFixAgent()) {
       this.state.navigateToStage(1); // Stage 2 — Test Agent
     }
   }
 
+  /** Jump to Stage 3 (Compose Team) from an empty/safety-net state. */
   finishInCompose(): void {
     this.state.navigateToStage(2);
   }
