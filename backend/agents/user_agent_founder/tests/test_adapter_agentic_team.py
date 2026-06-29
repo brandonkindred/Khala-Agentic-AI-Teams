@@ -211,6 +211,23 @@ def test_analysis_is_noop_passthrough():
     assert adapter.submit_analysis_answers(fake, job_id, [{"x": 1}]) is None
 
 
+def test_constructor_spec_seed_survives_resume_without_start_from_spec():
+    """Resume window: the analysis sentinel was stored but repo_path wasn't, so a
+    fresh adapter never sees start_from_spec — the constructor seed (from the
+    persisted run row) must still carry the spec to the build phase."""
+    from user_agent_founder.targets import AgenticTeamAdapter, get_adapter
+
+    adapter = AgenticTeamAdapter("t1", process_id="p1", spec="# PERSISTED SPEC")
+    # poll_analysis is reached directly (start_from_spec skipped on resume).
+    assert adapter.poll_analysis(_FakeHttpxClient(), "noop") == {
+        "status": "completed",
+        "repo_path": "# PERSISTED SPEC",
+    }
+    # get_adapter threads the seed through too.
+    seeded = get_adapter("agentic_team:t1", process_id="p1", spec="# VIA FACTORY")
+    assert seeded.poll_analysis(_FakeHttpxClient(), "noop")["repo_path"] == "# VIA FACTORY"
+
+
 # ---------------------------------------------------------------------------
 # Build: start / poll-status mapping / answer submission
 # ---------------------------------------------------------------------------

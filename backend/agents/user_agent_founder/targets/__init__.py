@@ -24,14 +24,18 @@ ADAPTERS: dict[str, type[TargetTeamAdapter]] = {
 AGENTIC_TEAM_PREFIX = "agentic_team:"
 
 
-def get_adapter(team_key: str, *, process_id: str | None = None) -> TargetTeamAdapter:
+def get_adapter(
+    team_key: str, *, process_id: str | None = None, spec: str | None = None
+) -> TargetTeamAdapter:
     """Return a fresh adapter instance for ``team_key``.
 
     Handles both static registry keys (e.g. ``"software_engineering"``) and the
     dynamic ``"agentic_team:<team_id>"`` form, which builds an
     :class:`AgenticTeamAdapter` for that team. ``process_id`` is the process the
-    persona should drive; it is required for agentic-team keys and ignored for
-    the static targets (which have no process concept).
+    persona should drive; ``spec`` seeds the adapter's analysis→build pass-through
+    for the resume path (see ``AgenticTeamAdapter``). Both are required only for
+    agentic-team keys and ignored for the static targets (which have neither a
+    process nor a collapsed analysis phase).
 
     Preconditions: ``team_key`` is non-empty; for an agentic-team key the id
         after the prefix is non-empty.
@@ -44,7 +48,7 @@ def get_adapter(team_key: str, *, process_id: str | None = None) -> TargetTeamAd
         team_id = team_key[len(AGENTIC_TEAM_PREFIX) :]
         if not team_id:
             raise ValueError(f"Malformed agentic-team key {team_key!r}: missing team id")
-        return AgenticTeamAdapter(team_id, process_id=process_id)
+        return AgenticTeamAdapter(team_id, process_id=process_id, spec=spec)
     if team_key not in ADAPTERS:
         raise ValueError(f"Team {team_key!r} does not support persona testing")
     return ADAPTERS[team_key]()

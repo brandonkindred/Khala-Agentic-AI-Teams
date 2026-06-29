@@ -207,7 +207,15 @@ def _dispatch_founder_run(run_id: str) -> str:
     agent = _build_agent_for_run(run_id)
     run = store.get_run(run_id)
     team_key = (run.target_team_key if run is not None else None) or DEFAULT_TARGET_TEAM_KEY
-    adapter = get_adapter(team_key)
+    # Thread the run's process_id (and spec, for the resume window) into the
+    # adapter: this path passes a non-None adapter to run_workflow, so its own
+    # construction fallback never runs — an agentic run would otherwise reach
+    # start_build with process_id=None.
+    adapter = get_adapter(
+        team_key,
+        process_id=run.process_id if run is not None else None,
+        spec=run.spec_content if run is not None else None,
+    )
     thread = threading.Thread(
         target=run_workflow,
         args=(run_id, store, agent, adapter),

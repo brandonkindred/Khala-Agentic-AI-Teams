@@ -60,13 +60,22 @@ class AgenticTeamAdapter:
           but MUST be set before ``start_build`` (enforced there with a
           ``StartFailed`` so the orchestrator marks the run failed cleanly rather
           than crashing the worker thread).
+        * ``spec`` is the persona spec for the run when already known (resume
+          path — see :meth:`poll_analysis`); ``None`` on a fresh start, where
+          :meth:`start_from_spec` supplies it live.
     """
 
-    def __init__(self, team_id: str, process_id: str | None = None) -> None:
+    def __init__(
+        self, team_id: str, process_id: str | None = None, spec: str | None = None
+    ) -> None:
         if not team_id:
             raise ValueError("AgenticTeamAdapter: team_id must be non-empty")
         self._team_id = team_id
         self._process_id = process_id
+        # Carries the spec from analysis → build. Seeded at construction so a
+        # resumed run (where start_from_spec is skipped) still has it from the
+        # persisted run row; start_from_spec overwrites it on the live path.
+        self._spec = spec or ""
         self.team_key = f"agentic_team:{team_id}"
         self.display_name = f"Agentic Team {team_id}"
 
@@ -82,10 +91,9 @@ class AgenticTeamAdapter:
             spec is surfaced to the build phase via :meth:`poll_analysis`'s
             ``repo_path``.
         """
-        # Stash the spec so poll_analysis can hand it to the build phase. On the
-        # live path start_from_spec always runs immediately before poll_analysis
-        # on the same instance; on resume the orchestrator skips analysis because
-        # repo_path is already persisted, so instance state isn't relied upon.
+        # Live path: capture the spec so poll_analysis hands it to the build
+        # phase. (On resume start_from_spec is skipped — the spec instead comes
+        # from the constructor seed, fed from the persisted run row.)
         self._spec = spec
         return _ANALYSIS_NOOP_JOB_ID
 
@@ -94,9 +102,12 @@ class AgenticTeamAdapter:
 
         Postconditions: returns ``{"status": "completed", "repo_path": <spec>}``;
             performs no HTTP call. The orchestrator persists ``repo_path`` and
-            feeds it to :meth:`start_build`.
+            feeds it to :meth:`start_build`. The spec comes from
+            :meth:`start_from_spec` (live) or the constructor seed (resume), so a
+            run resumed in the window between the sentinel ``analysis_job_id``
+            being stored and ``repo_path`` being written still carries it.
         """
-        return {"status": "completed", "repo_path": getattr(self, "_spec", "")}
+        return {"status": "completed", "repo_path": self._spec}
 
     def submit_analysis_answers(
         self, client: httpx.Client, job_id: str, answers: list[dict[str, Any]]

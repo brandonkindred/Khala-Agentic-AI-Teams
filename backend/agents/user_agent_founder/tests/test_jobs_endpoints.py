@@ -373,6 +373,42 @@ def test_testable_teams_survives_provisioning_outage(monkeypatch):
     assert not any(t.team_key.startswith("agentic_team:") for t in resp.teams)
 
 
+def test_dispatch_thread_mode_threads_process_id_and_spec(fake_store, monkeypatch):
+    """Regression: the thread path builds the adapter itself (bypassing
+    run_workflow's fallback), so it must thread the run's process_id (and the
+    spec seed) — otherwise an agentic run hits start_build with process_id=None."""
+    from user_agent_founder.api import main as api_main
+
+    class _Run:
+        target_team_key = "agentic_team:t1"
+        process_id = "proc-9"
+        spec_content = "# spec"
+        persona_id = None
+
+    fake_store.get_run.return_value = _Run()
+
+    captured: dict = {}
+
+    def fake_get_adapter(team_key, *, process_id=None, spec=None):
+        captured.update(team_key=team_key, process_id=process_id, spec=spec)
+        return object()
+
+    class _FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(api_main, "get_adapter", fake_get_adapter)
+    monkeypatch.setattr(api_main, "_build_agent_for_run", lambda _rid: object())
+    monkeypatch.setattr(api_main.threading, "Thread", _FakeThread)
+
+    mode = api_main._dispatch_founder_run("run-x")
+    assert mode == "thread"
+    assert captured == {"team_key": "agentic_team:t1", "process_id": "proc-9", "spec": "# spec"}
+
+
 def test_start_marks_job_failed_when_dispatch_raises(
     fake_job_store, fake_store, fake_persona_store, fixed_run_id, monkeypatch
 ):
