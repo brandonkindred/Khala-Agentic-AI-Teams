@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Final, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -127,12 +127,24 @@ class ProcessDefinition(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# Roster-entry provenance values (the ``AgenticTeamAgent.source`` Literal). Named
+# constants so the projection / registration filters reference one source of truth.
+SOURCE_GENERATED: Final = "generated"
+SOURCE_REGISTRY: Final = "registry"
+
+
 class AgenticTeamAgent(BaseModel):
     """A named agent in the team's roster.
 
     The roster captures enough detail to validate that the team is fully
     staffed: every process need (skill, capability, tool, expertise) must be
     covered by at least one agent on the roster.
+
+    Invariants:
+        * ``source == "registry"`` implies ``manifest_id`` is set (enforced by the
+          from-registry projection, not the model, so a hand-built roster still
+          round-trips). ``source`` defaults to ``"generated"`` so roster rows
+          persisted before this field existed deserialize unchanged.
     """
 
     agent_name: str = Field(..., description="Stable, unique name within the team")
@@ -152,6 +164,27 @@ class AgenticTeamAgent(BaseModel):
     expertise: list[str] = Field(
         default_factory=list,
         description="Domain expertise areas (e.g. 'customer support', 'financial analysis', 'HIPAA compliance')",
+    )
+    source: Literal[SOURCE_GENERATED, SOURCE_REGISTRY] = Field(
+        default=SOURCE_GENERATED,
+        description="Provenance of this roster entry: 'generated' (LLM-authored on this team) "
+        "or 'registry' (added from a registered AgentManifest via Agent Studio).",
+    )
+    manifest_id: Optional[str] = Field(
+        default=None,
+        description="Source AgentManifest id when source == 'registry'; None otherwise.",
+    )
+
+
+class AddAgentFromRegistryRequest(BaseModel):
+    """Request body for ``POST /teams/{team_id}/agents/from-registry``.
+
+    Adds a registered agent (by manifest id) to the team roster, projecting the
+    manifest's name/summary/tags/tools into the roster fields (Agent Studio §5.3).
+    """
+
+    manifest_id: str = Field(
+        ..., min_length=1, description="Registered AgentManifest id to add to the roster."
     )
 
 

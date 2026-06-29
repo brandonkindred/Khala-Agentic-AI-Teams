@@ -19,7 +19,7 @@ import logging
 
 from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
 from agentic_team_provisioning.agent_env_provisioning import _slug
-from agentic_team_provisioning.models import AgenticTeamAgent
+from agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +119,13 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
           ``source.entrypoint`` points at the roster-agent factory, and ``id`` is
           the stable, collision-free :func:`manifest_agent_id`.
     """
-    assert team_id, "build_agent_manifest: team_id must be non-empty"
-    assert agent.agent_name, "build_agent_manifest: agent.agent_name must be non-empty"
+    # Explicit validation rather than ``assert`` (which ``python -O`` strips): these
+    # are real boundary preconditions — silently skipping them under ``-O`` would
+    # build an id from an empty key and could mis-scope the stale-cleanup prefix.
+    if not team_id:
+        raise ValueError("build_agent_manifest: team_id must be non-empty")
+    if not agent.agent_name:
+        raise ValueError("build_agent_manifest: agent.agent_name must be non-empty")
 
     manifest_id = manifest_agent_id(team_id, agent.agent_name)
     summary = agent.role or f"Generated agent {agent.agent_name}"
@@ -164,13 +169,27 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     Preconditions:
         * ``team_id`` is non-empty.
     Postconditions:
-        * Returns one validated manifest per roster agent, each registered
-          (``get_registry().get(m.id)`` returns it). Acts as a full replace for the
+        * Returns one validated manifest per **generated** roster agent (registry-
+          source agents are skipped — they're already in the registry), each
+          registered (``get_registry().get(m.id)`` returns it). Acts as a full
+          replace for the
           team: previously-registered generated manifests for ``team_id`` that are
           absent from this roster are unregistered, so removed/renamed agents stop
           appearing in the catalog. In-memory and idempotent. Best-effort — a
           registry failure is logged, never raised, so generation still succeeds.
     """
+    # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
+    # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
+    # in optimized builds too instead of silently scanning the wrong id space.
+    if not team_id:
+        raise ValueError("register_team_manifests: team_id must be non-empty")
+    # Only *generated* roster agents get a team-namespaced wrapper installed here.
+    # Registry-source agents (added via Agent Studio's from-registry endpoint)
+    # already exist in the registry on their own, so wrapping them would register a
+    # duplicate "generated"-tagged entry — e.g. on every restart via the retroactive
+    # recovery path, which passes the whole roster. The stale-cleanup below then also
+    # drops any such wrapper left behind by an older build.
+    agents = [a for a in agents if a.source == SOURCE_GENERATED]
     manifests = [build_agent_manifest(team_id, a) for a in agents]
     new_ids = {m.id for m in manifests}
     try:
@@ -180,12 +199,14 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
         # Drop stale entries from a prior roster (removed/renamed agents) before
         # registering the replacement set. Scope strictly to this team's generated
         # ids (prefix + the "generated" tag) so a hand-authored disk manifest is
-        # never touched.
+        # never touched. ``manifests_with_id_prefix`` materializes only this team's
+        # entries (not a copy of the whole registry) — this runs under the team lock
+        # on the chat-save path, so keeping the scan's allocation small matters.
         prefix = team_id_prefix(team_id)
         stale = [
             m.id
-            for m in registry.all()
-            if m.id.startswith(prefix) and "generated" in m.tags and m.id not in new_ids
+            for m in registry.manifests_with_id_prefix(prefix)
+            if "generated" in m.tags and m.id not in new_ids
         ]
         for agent_id in stale:
             registry.unregister(agent_id)
