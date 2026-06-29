@@ -45,6 +45,11 @@ def parallel_map(
     propagate the caller's context into every worker — so most call sites read as
     ``parallel_map(items, fn, max_workers=N)``.
 
+    Scope note: all tasks are submitted up front (one future per item, plus an
+    ``n``-sized result list), so memory is ``O(len(items))``. This is intended for
+    bounded fan-out over modest collections — the existing callers pass at most a
+    few dozen items — not for streaming over very large or unbounded inputs.
+
     Args:
         items: The inputs to map over (any sized iterable). Empty input
             short-circuits to ``[]``.
