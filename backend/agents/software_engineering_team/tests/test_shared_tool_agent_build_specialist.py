@@ -244,6 +244,39 @@ def test_frontend_build_failure_maps_parsed_failures(tmp_path: Path, monkeypatch
     assert issues[0].recommendation == "import the symbol"
 
 
+def _capture_parse_kind(tmp_path: Path, monkeypatch, framework: str) -> str:
+    """Run the frontend runner for ``framework`` and return the parse kind it used."""
+    from software_engineering_team.shared import error_parsing
+
+    (tmp_path / "package.json").write_text('{"name": "x"}\n')
+    monkeypatch.setattr(cr, "detect_frontend_framework", lambda p: framework)
+    monkeypatch.setattr(
+        cr,
+        "run_frontend_build",
+        lambda p: CommandResult(success=False, exit_code=1, stdout="", stderr="build error"),
+    )
+    captured = {}
+
+    def _capture(command_kind, stdout, stderr):
+        captured["kind"] = command_kind
+        return []
+
+    monkeypatch.setattr(error_parsing, "parse_command_failure", _capture)
+    run_frontend_build_and_parse(tmp_path)
+    return captured["kind"]
+
+
+def test_frontend_angular_uses_ng_build_parser(tmp_path: Path, monkeypatch):
+    assert _capture_parse_kind(tmp_path, monkeypatch, "angular") == "ng_build"
+
+
+def test_frontend_react_uses_generic_parser_not_ng_build(tmp_path: Path, monkeypatch):
+    """React/Vue must NOT be parsed with the Angular parser (regression guard)."""
+    kind = _capture_parse_kind(tmp_path, monkeypatch, "react")
+    assert kind == "generic"
+    assert kind != "ng_build"
+
+
 def test_frontend_build_success_returns_empty(tmp_path: Path, monkeypatch):
     (tmp_path / "package.json").write_text('{"name": "x"}\n')
     monkeypatch.setattr(cr, "detect_frontend_framework", lambda p: "react")

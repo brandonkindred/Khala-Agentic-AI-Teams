@@ -153,10 +153,11 @@ def run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     result = run_frontend_build(frontend_dir)
     if result.success:
         return []
-    # Detect framework and use appropriate error parsing
+    # Detect framework and use appropriate error parsing. The Angular-specific
+    # parser only understands ng build output; React/Vue (and anything else) use
+    # the generic fallback so their errors aren't mis-parsed by the ng parser.
     detected_framework = detect_frontend_framework(frontend_dir)
-    # ng_build parser works for Angular; for React/Vue, use the generic fallback
-    parse_kind = "ng_build" if detected_framework == "angular" else "ng_build"
+    parse_kind = "ng_build" if detected_framework == "angular" else "generic"
     failures = result.parsed_failures(parse_kind)
     issues: List[ReviewIssue] = []
     for f in failures:
