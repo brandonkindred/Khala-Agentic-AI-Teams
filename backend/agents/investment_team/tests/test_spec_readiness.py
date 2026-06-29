@@ -1583,3 +1583,118 @@ def test_sizing_coherence_rel_tol_default_and_overrides(monkeypatch) -> None:
     assert _sizing_coherence_rel_tol() == 0.05
     monkeypatch.setenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", "-1")
     assert _sizing_coherence_rel_tol() == 0.05
+
+
+# ---------------------------------------------------------------------------
+# all_of / any_of combinators — multi-confirmation entries (issue #990).
+# ---------------------------------------------------------------------------
+
+
+def test_all_of_multi_confirmation_entry_is_accepted() -> None:
+    """A well-formed multi-confirmation ``all_of`` entry passes Rule 2 (the
+    entry ``when`` may now be a combinator, not only a single Predicate) and
+    raises no critical."""
+    from investment_team.strategy_lab.spec_dsl import AllOf
+
+    entry = [
+        EntryRule(
+            side="long",
+            when=AllOf(
+                of=[
+                    Predicate(
+                        lhs="bar.close",
+                        op=">",
+                        rhs=IndicatorRef(name="sma", params={"period": 200}),
+                    ),
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=40.0
+                    ),
+                ]
+            ),
+        )
+    ]
+    spec = _spec(
+        hypothesis="Long when price is above the 200-SMA trend AND RSI(14) shows a pullback.",
+        entry=entry,
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not _critical(results)
+
+
+def test_all_of_with_unreachable_leg_flagged_unreachable() -> None:
+    """An ``all_of`` entry with an always-false leg (RSI > 100, a bounded
+    oscillator) can never fire — the conjunction is unreachable, so the entry
+    is flagged critical (same routing as a single always-false entry predicate)."""
+    from investment_team.strategy_lab.spec_dsl import AllOf
+
+    entry = [
+        EntryRule(
+            side="long",
+            when=AllOf(
+                of=[
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=100.0
+                    ),
+                    Predicate(
+                        lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 50})
+                    ),
+                ]
+            ),
+        )
+    ]
+    spec = _spec(
+        hypothesis="Long on AAPL when RSI is impossibly high and trend confirms.", entry=entry
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert "predicate:unreachable" in _rule_ids(results)
+
+
+def test_any_of_all_legs_unreachable_flagged() -> None:
+    """An ``any_of`` entry whose every leg is always-false is unreachable."""
+    from investment_team.strategy_lab.spec_dsl import AnyOf
+
+    entry = [
+        EntryRule(
+            side="long",
+            when=AnyOf(
+                of=[
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=100.0
+                    ),
+                    Predicate(
+                        lhs=IndicatorRef(name="adx", params={"period": 14}), op=">", rhs=100.0
+                    ),
+                ]
+            ),
+        )
+    ]
+    spec = _spec(hypothesis="Long on AAPL when either oscillator is impossibly high.", entry=entry)
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert "predicate:unreachable" in _rule_ids(results)
+
+
+def test_any_of_one_reachable_leg_not_flagged() -> None:
+    """An ``any_of`` with one always-false and one reachable leg is reachable
+    (the OR can still fire), so it is NOT flagged unreachable."""
+    from investment_team.strategy_lab.spec_dsl import AnyOf
+
+    entry = [
+        EntryRule(
+            side="long",
+            when=AnyOf(
+                of=[
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=100.0
+                    ),
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0
+                    ),
+                ]
+            ),
+        )
+    ]
+    spec = _spec(
+        hypothesis="Long on AAPL when RSI is impossibly high OR shows a real pullback.", entry=entry
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert "predicate:unreachable" not in _rule_ids(results)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import pandas as pd
+import pytest
 
 from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
@@ -14,9 +15,12 @@ from investment_team.strategy_lab.executor.predicate_evaluator import (
     evaluate_entry_rules,
     evaluate_predicate,
     evaluate_signal_exit_rules,
+    evaluate_tree,
     relative_miss,
 )
 from investment_team.strategy_lab.spec_dsl import (
+    AllOf,
+    AnyOf,
     EntryRule,
     IndicatorRef,
     Predicate,
@@ -294,3 +298,100 @@ def test_streaming_view_cache_invalidation():
     v2 = view.indicator(ref, 3)
     assert v1 is not None and v2 is not None
     assert v1 != v2
+
+
+# ---------------------------------------------------------------------------
+# evaluate_tree() — all_of / any_of combinators (multi-confirmation entries)
+# ---------------------------------------------------------------------------
+
+
+def _close_gt(thr: float) -> Predicate:
+    """Leaf predicate ``bar.close > thr`` (truth set by the view's close)."""
+    return Predicate(lhs="bar.close", op=">", rhs=thr)
+
+
+def _sma5_gt0() -> Predicate:
+    """Leaf that is in warmup at bar 0 of a 1-bar view (SMA(5) needs 5 bars)."""
+    return Predicate(lhs=IndicatorRef(name="sma", params={"period": 5}), op=">", rhs=0.0)
+
+
+def test_evaluate_tree_leaf_delegates_to_predicate():
+    view = _pandas_view([100.0])
+    assert evaluate_tree(_close_gt(50), view, 0).status == "satisfied"
+    assert evaluate_tree(_close_gt(150), view, 0).status == "miss"
+
+
+def test_all_of_satisfied_only_when_every_child_true():
+    view = _pandas_view([100.0])
+    assert evaluate_tree(AllOf(of=[_close_gt(50), _close_gt(90)]), view, 0).status == "satisfied"
+
+
+def test_all_of_misses_when_any_child_false():
+    view = _pandas_view([100.0])
+    # second leg false (close=100 is not > 150) → conjunction is a definite miss
+    assert evaluate_tree(AllOf(of=[_close_gt(50), _close_gt(150)]), view, 0).status == "miss"
+
+
+def test_any_of_satisfied_when_any_child_true():
+    view = _pandas_view([100.0])
+    assert evaluate_tree(AnyOf(of=[_close_gt(150), _close_gt(50)]), view, 0).status == "satisfied"
+
+
+def test_any_of_misses_when_every_child_false():
+    view = _pandas_view([100.0])
+    assert evaluate_tree(AnyOf(of=[_close_gt(150), _close_gt(200)]), view, 0).status == "miss"
+
+
+def test_all_of_warmup_propagates_not_miss():
+    """An AND with one warming-up leg (and no false leg) must read warmup, not
+    miss — else the engine would enter a bar early before the indicator is ready."""
+    view = _pandas_view([100.0])  # SMA(5) is warmup at bar 0
+    assert evaluate_tree(AllOf(of=[_close_gt(50), _sma5_gt0()]), view, 0).status == "warmup"
+
+
+def test_all_of_false_short_circuits_over_warmup():
+    view = _pandas_view([100.0])
+    # first leg is a definite miss → conjunction is miss regardless of the warmup leg
+    assert evaluate_tree(AllOf(of=[_close_gt(150), _sma5_gt0()]), view, 0).status == "miss"
+
+
+def test_any_of_warmup_when_no_true_but_a_leg_warming():
+    view = _pandas_view([100.0])
+    assert evaluate_tree(AnyOf(of=[_close_gt(150), _sma5_gt0()]), view, 0).status == "warmup"
+
+
+def test_any_of_true_short_circuits_over_warmup():
+    view = _pandas_view([100.0])
+    assert evaluate_tree(AnyOf(of=[_close_gt(50), _sma5_gt0()]), view, 0).status == "satisfied"
+
+
+def test_nested_tree_evaluates():
+    view = _pandas_view([100.0])
+    tree = AllOf(of=[_close_gt(50), AnyOf(of=[_close_gt(200), _close_gt(90)])])
+    assert evaluate_tree(tree, view, 0).status == "satisfied"
+
+
+def test_composite_result_has_no_scalar_sides():
+    view = _pandas_view([100.0])
+    res = evaluate_tree(AllOf(of=[_close_gt(50), _close_gt(90)]), view, 0)
+    assert res.lhs is None and res.rhs is None and res.rel_miss is None
+
+
+def test_evaluate_tree_rejects_unknown_node():
+    view = _pandas_view([100.0])
+    with pytest.raises(TypeError):
+        evaluate_tree(object(), view, 0)
+
+
+def test_evaluate_entry_rules_honours_all_of_when():
+    view = _pandas_view([100.0])
+    fires = EntryRule(side="long", when=AllOf(of=[_close_gt(50), _close_gt(90)]))
+    assert evaluate_entry_rules([fires], view, 0) == (fires, 0)
+    blocked = EntryRule(side="long", when=AllOf(of=[_close_gt(50), _close_gt(150)]))
+    assert evaluate_entry_rules([blocked], view, 0) is None
+
+
+def test_evaluate_signal_exit_rules_honours_any_of_when():
+    view = _pandas_view([100.0])
+    rule = SignalExitRule(when=AnyOf(of=[_close_gt(150), _close_gt(50)]))
+    assert evaluate_signal_exit_rules([rule], view, 0) == (rule, 0)

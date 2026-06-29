@@ -21,6 +21,8 @@ import pandas as pd
 
 from ..indicators.streaming import IndicatorRegistry
 from ..spec_dsl import (
+    AllOf,
+    AnyOf,
     EntryRule,
     IndicatorRef,
     Predicate,
@@ -178,6 +180,50 @@ def evaluate_predicate(
     return EvaluationResult(status="miss", lhs=lhs_val, rhs=rhs_val, rel_miss=rm)
 
 
+def evaluate_tree(node: Any, view: HistoryView, i: int) -> EvaluationResult:
+    """Evaluate a predicate tree (leaf ``Predicate`` or ``all_of`` / ``any_of``).
+
+    Pre: ``node`` is a ``Predicate`` / ``AllOf`` / ``AnyOf``; ``i`` is in
+    ``[0, view.length())``.
+    Post: ``status`` is ``"satisfied"`` / ``"miss"`` / ``"warmup"`` with the
+    boolean semantics below. ``lhs`` / ``rhs`` / ``rel_miss`` are populated only
+    for a leaf predicate (a combinator has no single pair of scalars), so a
+    composite node returns them as ``None``.
+
+      * ``all_of`` — ``satisfied`` iff every child is satisfied; ``miss`` as
+        soon as any child misses (the conjunction is then definitively false);
+        otherwise ``warmup`` (a child is still warming up, so the verdict is
+        not yet decidable).
+      * ``any_of`` — ``satisfied`` as soon as any child is satisfied;
+        ``warmup`` if no child is satisfied but one is still warming up;
+        otherwise ``miss`` (every child is a definite miss).
+
+    Warmup propagation is the load-bearing subtlety: an AND with one warming-up
+    leg must NOT read as a miss, or the engine would enter/exit a bar early.
+    """
+    if isinstance(node, Predicate):
+        return evaluate_predicate(node, view, i)
+    if isinstance(node, AllOf):
+        saw_warmup = False
+        for child in node.of:
+            res = evaluate_tree(child, view, i)
+            if res.status == "miss":
+                return EvaluationResult(status="miss")
+            if res.status == "warmup":
+                saw_warmup = True
+        return EvaluationResult(status="warmup" if saw_warmup else "satisfied")
+    if isinstance(node, AnyOf):
+        saw_warmup = False
+        for child in node.of:
+            res = evaluate_tree(child, view, i)
+            if res.status == "satisfied":
+                return EvaluationResult(status="satisfied")
+            if res.status == "warmup":
+                saw_warmup = True
+        return EvaluationResult(status="warmup" if saw_warmup else "miss")
+    raise TypeError(f"unsupported predicate-tree node: {type(node).__name__}")
+
+
 def evaluate_entry_rules(
     rules: Sequence[EntryRule],
     view: HistoryView,
@@ -185,7 +231,7 @@ def evaluate_entry_rules(
     *,
     side_filter: Optional[str] = None,
 ) -> Optional[Tuple[EntryRule, int]]:
-    """Return the first entry rule whose predicate fires at bar ``i``.
+    """Return the first entry rule whose predicate tree fires at bar ``i``.
 
     Pre: ``rules`` is the spec's ``entry_rules`` list.
     Post: returns ``(rule, original_index)`` or ``None``.
@@ -195,7 +241,7 @@ def evaluate_entry_rules(
             continue
         if side_filter is not None and rule.side != side_filter:
             continue
-        result = evaluate_predicate(rule.when, view, i)
+        result = evaluate_tree(rule.when, view, i)
         if result.status == "satisfied":
             return rule, idx
     return None
@@ -215,7 +261,7 @@ def evaluate_signal_exit_rules(
     for idx, rule in enumerate(rules):
         if not isinstance(rule, SignalExitRule):
             continue
-        result = evaluate_predicate(rule.when, view, i)
+        result = evaluate_tree(rule.when, view, i)
         if result.status == "satisfied":
             return rule, idx
     return None

@@ -50,7 +50,7 @@ from typing import Any, ClassVar, Dict, List, Optional, Type
 from ..spec_dsl import EntryRule as _EntryRule
 from ..spec_dsl import Predicate as _Predicate
 from ..spec_dsl import SignalExitRule as _SignalExitRule
-from ..spec_dsl import _format_predicate
+from ..spec_dsl import _format_predicate_tree
 from .code_safety import _engine_exits_cover_sides
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 from .predicate_conformance_fixtures import ConformanceFixture, generate_conformance_fixtures
@@ -586,9 +586,9 @@ def _build_conformance_detail(
       the index-only form when the predicate cannot be recovered.
     """
     parts = [f"rule_id={fixture.rule_id}: predicate conformance failed."]
-    pred = _predicate_for_rule_id(spec, fixture)
+    pred = _predicate_for_rule_id(spec, fixture)  # leaf or all_of/any_of tree
     if pred is not None:
-        parts.append(f"  Predicate: {_format_predicate(pred)}")
+        parts.append(f"  Predicate: {_format_predicate_tree(pred)}")
     if false_positives:
         parts.append(
             f"  False positives (order on predicate-false bar): bars {false_positives[:10]}"
@@ -635,7 +635,7 @@ def _compute_other_rule_verdicts(
     if len(entry_rules) <= 1:
         return None
 
-    from ..executor.predicate_evaluator import PandasHistoryView, evaluate_predicate
+    from ..executor.predicate_evaluator import PandasHistoryView, evaluate_tree
     from .conformance_bars import _bars_to_df
 
     df = _bars_to_df(fixture.bars)
@@ -649,7 +649,10 @@ def _compute_other_rule_verdicts(
                 continue
             if fixture.side is not None and rule.side != fixture.side:
                 continue
-            result = evaluate_predicate(rule.when, view, i)
+            # ``evaluate_tree`` handles a leaf predicate or an ``all_of`` /
+            # ``any_of`` tree uniformly, so a multi-confirmation sibling rule is
+            # evaluated correctly here too.
+            result = evaluate_tree(rule.when, view, i)
             if result.status == "satisfied":
                 other_fires[i] = True
                 break

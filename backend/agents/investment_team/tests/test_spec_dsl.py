@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from investment_team.strategy_lab.spec_dsl import (
     DEFAULT_SIZING_PAYLOAD,
     INDICATOR_OUTPUT_RANGES,
+    AllOf,
+    AnyOf,
     EntryRule,
     EntryRuleAdapter,
     ExitRuleAdapter,
@@ -16,6 +18,7 @@ from investment_team.strategy_lab.spec_dsl import (
     IndicatorRef,
     IndicatorRefAdapter,
     Predicate,
+    PredicateTreeAdapter,
     SignalExitRule,
     SizingRuleAdapter,
     StopLossRule,
@@ -23,6 +26,8 @@ from investment_team.strategy_lab.spec_dsl import (
     VolatilityTargetSizing,
     format_rules_for_prompt,
     format_sizing_rule,
+    iter_leaf_predicates,
+    iter_tree_indicator_refs,
 )
 
 # ---------------------------------------------------------------------------
@@ -41,6 +46,7 @@ def test_indicator_output_ranges_covers_bounded_indicators() -> None:
     }
     for unbounded in ("sma", "ema", "macd", "atr", "vwap", "bollinger"):
         assert unbounded not in INDICATOR_OUTPUT_RANGES
+
 
 # ---------------------------------------------------------------------------
 # Round-trip serialisation per indicator name.
@@ -622,3 +628,110 @@ def test_strategy_spec_rejects_unknown_timeframe():
 
 def test_default_sizing_payload_is_two_pct():
     assert DEFAULT_SIZING_PAYLOAD == {"kind": "fixed_fraction", "fraction": 0.02}
+
+
+# ---------------------------------------------------------------------------
+# all_of / any_of combinators — multi-confirmation entries (issue #990).
+# ---------------------------------------------------------------------------
+
+
+def _leaf_dict(rhs: float = 30) -> dict:
+    return {"lhs": {"name": "rsi", "params": {"period": 14}}, "op": "<", "rhs": rhs}
+
+
+def test_leaf_predicate_dict_still_validates_as_predicate() -> None:
+    """Back-compat: a bare leaf-predicate dict (no ``kind``) must still dispatch
+    to ``Predicate`` through the tree union, unchanged by the combinator add."""
+    parsed = PredicateTreeAdapter.validate_python(_leaf_dict())
+    assert isinstance(parsed, Predicate)
+
+
+def test_all_of_dispatch_and_round_trip() -> None:
+    payload = {
+        "kind": "all_of",
+        "of": [
+            {"lhs": "bar.close", "op": ">", "rhs": {"name": "sma", "params": {"period": 200}}},
+            _leaf_dict(40),
+        ],
+    }
+    parsed = PredicateTreeAdapter.validate_python(payload)
+    assert isinstance(parsed, AllOf)
+    assert len(parsed.of) == 2
+    rebuilt = PredicateTreeAdapter.validate_json(parsed.model_dump_json())
+    assert rebuilt == parsed
+
+
+def test_any_of_dispatch() -> None:
+    payload = {"kind": "any_of", "of": [_leaf_dict(30), _leaf_dict(40)]}
+    parsed = PredicateTreeAdapter.validate_python(payload)
+    assert isinstance(parsed, AnyOf)
+
+
+def test_combinator_requires_at_least_two_children() -> None:
+    with pytest.raises(ValidationError):
+        PredicateTreeAdapter.validate_python({"kind": "all_of", "of": [_leaf_dict()]})
+    with pytest.raises(ValidationError):
+        PredicateTreeAdapter.validate_python({"kind": "any_of", "of": []})
+
+
+def test_nested_tree_validates_and_iterates_leaves() -> None:
+    payload = {
+        "kind": "all_of",
+        "of": [
+            _leaf_dict(40),
+            {"kind": "any_of", "of": [_leaf_dict(20), _leaf_dict(25)]},
+        ],
+    }
+    tree = PredicateTreeAdapter.validate_python(payload)
+    assert isinstance(tree, AllOf)
+    assert len(list(iter_leaf_predicates(tree))) == 3
+    # All three leaves reference rsi.
+    assert [r.name for r in iter_tree_indicator_refs(tree)] == ["rsi", "rsi", "rsi"]
+
+
+def test_entry_rule_accepts_all_of_when() -> None:
+    payload = {
+        "kind": "entry",
+        "side": "long",
+        "when": {
+            "kind": "all_of",
+            "of": [
+                {"lhs": "bar.close", "op": ">", "rhs": {"name": "sma", "params": {"period": 200}}},
+                _leaf_dict(40),
+            ],
+        },
+    }
+    rule = EntryRuleAdapter.validate_python(payload)
+    assert isinstance(rule, EntryRule)
+    assert isinstance(rule.when, AllOf)
+
+
+def test_signal_exit_rule_accepts_any_of_when() -> None:
+    payload = {
+        "kind": "signal_exit",
+        "when": {"kind": "any_of", "of": [_leaf_dict(70), _leaf_dict(80)]},
+    }
+    rule = ExitRuleAdapter.validate_python(payload)
+    assert isinstance(rule, SignalExitRule)
+    assert isinstance(rule.when, AnyOf)
+
+
+def test_iter_leaf_predicates_on_bare_predicate() -> None:
+    leaf = Predicate(lhs="bar.close", op=">", rhs=10.0)
+    assert list(iter_leaf_predicates(leaf)) == [leaf]
+
+
+def test_format_rules_renders_combinator_tree() -> None:
+    rule = EntryRule(
+        side="long",
+        when=AllOf(
+            of=[
+                Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 200})
+                ),
+                Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=40.0),
+            ]
+        ),
+    )
+    rendered = format_rules_for_prompt([rule])
+    assert "(close > sma(200) and rsi(14) < 40)" in rendered

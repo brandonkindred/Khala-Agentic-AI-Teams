@@ -26,6 +26,8 @@ from investment_team.models import StrategySpec
 from investment_team.strategy_lab.quality_gates.code_conformance import CodeConformanceGate
 from investment_team.strategy_lab.quality_gates.code_safety import CodeSafetyChecker
 from investment_team.strategy_lab.spec_dsl import (
+    AllOf,
+    AnyOf,
     EntryRule,
     FixedFractionSizing,
     FixedNotionalSizing,
@@ -206,6 +208,76 @@ def test_trailing_stop_loss_compiles_without_inline_emission() -> None:
     # No inline emission, no bracket attachment — engine handles it.
     assert 'reason="compiled_stop_loss"' not in code
     assert "StopAttachment" not in code
+
+
+def _multi_confirmation_entry() -> EntryRule:
+    """trend ∧ pullback ∧ volume — three indicators across one all_of tree."""
+    return EntryRule(
+        side="long",
+        when=AllOf(
+            of=[
+                Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 200})
+                ),
+                Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=40.0),
+                Predicate(
+                    lhs="bar.volume",
+                    op=">",
+                    rhs=IndicatorRef(name="sma", params={"period": 20}, source="volume"),
+                ),
+            ]
+        ),
+    )
+
+
+def test_all_of_multi_confirmation_entry_compiles_without_custom_code() -> None:
+    """A multi-confirmation ``all_of`` entry compiles deterministically — no
+    ``CompilerError``, no custom-code path. The compiler collects EVERY leaf
+    indicator across the tree (two distinct SMAs + RSI) so the engine can
+    evaluate the conjunction; the compiled code emits no orders."""
+    spec = _spec(entry_rules=[_multi_confirmation_entry()])
+    code = compile_strategy(spec)
+    assert _strategy_subclass_count(code) == 1
+    assert "ctx.submit_order" not in code
+    # Every leg's indicator is bound: SMA(200), RSI(14), and volume-sourced SMA(20).
+    assert code.count("self.sma(") >= 2
+    assert "self.rsi(" in code
+    # The spec stays on the compiled (engine-managed) path.
+    assert getattr(spec, "requires_custom_code", False) is False
+
+
+def test_all_of_entry_compile_is_deterministic() -> None:
+    """Byte-identical output across repeated compiles of the same all_of spec."""
+    a = compile_strategy(_spec(entry_rules=[_multi_confirmation_entry()]))
+    b = compile_strategy(_spec(entry_rules=[_multi_confirmation_entry()]))
+    assert a == b
+
+
+def test_any_of_entry_compiles() -> None:
+    """An ``any_of`` (OR) entry compiles and binds both legs' indicators."""
+    spec = _spec(
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=AnyOf(
+                    of=[
+                        Predicate(
+                            lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0
+                        ),
+                        Predicate(
+                            lhs="bar.close",
+                            op="cross_above",
+                            rhs=IndicatorRef(name="ema", params={"period": 20}),
+                        ),
+                    ]
+                ),
+            )
+        ]
+    )
+    code = compile_strategy(spec)
+    assert _strategy_subclass_count(code) == 1
+    assert "self.rsi(" in code
+    assert "self.ema(" in code
 
 
 def test_scaled_take_profit_with_trailing_runner_compiles() -> None:
