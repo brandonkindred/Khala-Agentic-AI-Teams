@@ -61,11 +61,14 @@ def parallel_map(
             attribution / request-id) are visible in the worker. Set False only
             for CPU-only callers that explicitly want no propagation.
         on_first_exception: Optional zero-arg callback invoked exactly once, on
-            the first worker exception, **before** pending tasks are cancelled and
-            the exception is re-raised. Lets a caller flip its own "abandoned"
-            flag (e.g. under a progress lock) before any cancellation lands. If the
-            hook itself raises, that error is logged and discarded so the original
-            worker exception is the one that propagates.
+            the first worker **``Exception``**, **before** pending tasks are
+            cancelled and the exception is re-raised. It is *not* called for a
+            main-thread interrupt (``KeyboardInterrupt``/``SystemExit``) that lands
+            while waiting — those still cancel and propagate, just without the hook.
+            Lets a caller flip its own "abandoned" flag (e.g. under a progress
+            lock) before any cancellation lands. If the hook itself raises, that
+            error is logged and discarded so the original worker exception is the
+            one that propagates.
 
     Returns:
         The list of results — element type ``R``, plus ``None`` entries when
@@ -80,7 +83,7 @@ def parallel_map(
           from worker threads.
         - ``max_workers`` is an ``int`` (else ``TypeError``) and >= 1 (else
           ``ValueError``).
-        - ``items`` is a sized sequence (else ``TypeError``).
+        - ``items`` is a sized, iterable sequence (else ``TypeError``).
         - When ``propagate_context`` is True, this function is called on the
           thread whose context should be snapshotted into the workers.
 
@@ -110,8 +113,8 @@ def parallel_map(
         raise TypeError("max_workers must be an int")
     if max_workers < 1:
         raise ValueError("max_workers must be >= 1")
-    if not hasattr(items, "__len__"):
-        raise TypeError("items must be a sized sequence")
+    if not (hasattr(items, "__len__") and hasattr(items, "__iter__")):
+        raise TypeError("items must be a sized, iterable sequence")
 
     n = len(items)
     if n == 0:
@@ -139,8 +142,13 @@ def parallel_map(
             value = fut.result()  # re-raises the worker's exception with its traceback
             ordered[index_of[fut]] = value
             completion.append(value)
-    except BaseException:
-        if on_first_exception is not None:
+    except BaseException as exc:
+        # Fire the caller's hook only for an actual worker failure (an
+        # ``Exception``), never for a main-thread interrupt — ``KeyboardInterrupt``
+        # / ``SystemExit`` are ``BaseException`` but not ``Exception`` — that
+        # merely landed while we were waiting; the contract is "first worker
+        # exception". Cleanup (cancel pending, re-raise) still runs for any exit.
+        if on_first_exception is not None and isinstance(exc, Exception):
             # A raising hook must not replace the worker exception we are about to
             # propagate, or the original error context is lost; log and discard it.
             try:

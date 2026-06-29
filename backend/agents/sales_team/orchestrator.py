@@ -1219,7 +1219,8 @@ class SalesPodOrchestrator:
         # parallel_map copies this thread's context per task so attribution
         # propagates into the workers (raw threads don't copy contextvars; see
         # llm_service.attribution). Completion order is fine here — results feed a
-        # dict keyed by prospect id — and _build_one returns a tuple (never None).
+        # dict keyed by prospect id. _build_one always returns a tuple (so
+        # skip_none is off), though the dossier element may be None on failure.
         for p, dossier in parallel_map(
             final_prospects,
             _build_one,

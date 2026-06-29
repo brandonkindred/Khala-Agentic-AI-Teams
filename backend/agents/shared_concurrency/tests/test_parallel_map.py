@@ -9,6 +9,7 @@ fast-fail error policy with the ``on_first_exception`` hook.
 from __future__ import annotations
 
 import contextvars
+import logging
 import threading
 import time
 
@@ -59,26 +60,30 @@ def test_not_preserving_order_returns_every_result_once() -> None:
 
 
 def test_worker_bound_is_min_of_max_workers_and_len() -> None:
-    """At most min(max_workers, len(items)) workers run concurrently."""
+    """The pool is sized at min(max_workers, len(items)). With 6 items and
+    max_workers=3, exactly 3 workers run at once.
+
+    A ``threading.Barrier(3)`` makes this deterministic with no sleep: it only
+    trips when 3 workers are simultaneously inside ``fn`` — so if the pool ran
+    fewer than 3, the barrier would time out and the test would fail loudly —
+    while the live counter confirms it never exceeds 3.
+    """
     live = {"now": 0, "peak": 0}
     lock = threading.Lock()
-    barrier_release = threading.Event()
+    gate = threading.Barrier(3, timeout=5)
 
-    def fn(_x: int) -> int:
+    def fn(x: int) -> int:
         with lock:
             live["now"] += 1
             live["peak"] = max(live["peak"], live["now"])
-        barrier_release.wait(timeout=2)
+        gate.wait()  # blocks until 3 workers are here together
         with lock:
             live["now"] -= 1
-        return _x
+        return x
 
-    # 6 items but max_workers=3 → never more than 3 concurrent.
-    t = threading.Thread(target=lambda: parallel_map(list(range(6)), fn, max_workers=3))
-    t.start()
-    time.sleep(0.2)
-    barrier_release.set()
-    t.join(timeout=5)
+    # 6 items but max_workers=3 → exactly 3 run concurrently (two batches).
+    out = parallel_map(list(range(6)), fn, max_workers=3)
+    assert sorted(out) == list(range(6))
     assert live["peak"] == 3
 
 
@@ -211,7 +216,7 @@ def test_fast_fail_does_not_wait_for_inflight_tasks() -> None:
         release.set()
 
 
-def test_on_first_exception_hook_raising_does_not_mask_worker_error() -> None:
+def test_on_first_exception_hook_raising_does_not_mask_worker_error(caplog) -> None:
     """A raising hook is logged and discarded — the original worker exception
     still propagates rather than being replaced by the hook's error."""
 
@@ -224,8 +229,14 @@ def test_on_first_exception_hook_raising_does_not_mask_worker_error() -> None:
     def fn(_x: int) -> int:
         raise _Worker("real failure")
 
-    with pytest.raises(_Worker, match="real failure"):
-        parallel_map([1], fn, max_workers=1, on_first_exception=hook)
+    with caplog.at_level(logging.ERROR, logger="shared_concurrency.parallel_map"):
+        with pytest.raises(_Worker, match="real failure"):
+            parallel_map([1], fn, max_workers=1, on_first_exception=hook)
+
+    # The hook's failure is recorded (so it isn't silently swallowed) but does
+    # not replace the worker exception that propagates.
+    assert "on_first_exception hook raised" in caplog.text
+    assert "hook blew up" in caplog.text
 
 
 def test_invalid_max_workers_rejected() -> None:
@@ -255,3 +266,15 @@ def test_non_sized_items_rejected() -> None:
     failing obscurely inside the helper."""
     with pytest.raises(TypeError):
         parallel_map((x for x in range(3)), lambda x: x, max_workers=2)
+
+
+def test_sized_but_not_iterable_items_rejected() -> None:
+    """An object with ``__len__`` but no ``__iter__`` is rejected up front, rather
+    than passing the length check and then failing inside the fan-out loop."""
+
+    class _SizedNotIterable:
+        def __len__(self) -> int:
+            return 3
+
+    with pytest.raises(TypeError):
+        parallel_map(_SizedNotIterable(), lambda x: x, max_workers=2)

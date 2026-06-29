@@ -38,6 +38,11 @@ from .tools.arxiv_search import search_arxiv  # noqa: E402
 from .tools.web_fetch import SimpleWebFetcher  # noqa: E402
 from .tools.web_search import OllamaWebSearch  # noqa: E402
 
+# Upper bound on concurrent per-document LLM calls in the scoring and
+# summarization fan-outs. Named here (rather than inline at each call site) so
+# the two stages stay in lockstep and the cap can be tuned in one place.
+_DOC_PARALLEL_WORKERS = 8
+
 
 class ResearchAgent:
     """
@@ -499,7 +504,7 @@ class ResearchAgent:
         scored = parallel_map(
             documents,
             lambda doc: self._score_one_document(doc, brief_input),
-            max_workers=8,
+            max_workers=_DOC_PARALLEL_WORKERS,
             skip_none=False,
         )
 
@@ -587,7 +592,7 @@ class ResearchAgent:
         references = parallel_map(
             items,
             lambda item: self._summarize_one_document(item, brief_input),
-            max_workers=8,
+            max_workers=_DOC_PARALLEL_WORKERS,
             skip_none=False,
         )
 
