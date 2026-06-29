@@ -76,7 +76,9 @@
       }
 
       @case ('persona') {
-        @if (noCompleteProcess()) {
+        @if (teamLoading()) {
+          <p class="persona__loading">Loading team…</p>
+        } @else if (noCompleteProcess()) {
           <!-- Safety net: the loaded team has no complete process to drive. -->
           <div class="persona-empty">
             <mat-icon aria-hidden="true">report_problem</mat-icon>
@@ -145,7 +147,9 @@
                 color="primary"
                 type="button"
                 class="persona__run-btn"
-                [disabled]="!selectedPersonaId() || !selectedProcessId() || launching()"
+                [disabled]="
+                  !selectedPersonaId() || !selectedProcessId() || launching() || !team() || !!teamError()
+                "
                 (click)="launch()"
               >
                 <mat-icon aria-hidden="true">play_arrow</mat-icon>

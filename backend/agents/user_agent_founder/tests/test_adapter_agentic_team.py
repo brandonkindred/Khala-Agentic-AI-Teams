@@ -403,13 +403,16 @@ def test_poll_build_terminal_and_error_mapping():
         get_responses={
             "/runs/done": [_FakeResponse(200, {"status": "completed"})],
             "/runs/boom": [_FakeResponse(200, {"status": "failed", "error": "kaboom"})],
-            "/runs/gone": [_FakeResponse(503, {})],
+            "/runs/gone": [_FakeResponse(503, {}, text="upstream exploded")],
             "/runs/going": [_FakeResponse(200, {"status": "running"})],
         }
     )
     assert adapter.poll_build(fake, "done") == {"status": "completed", "error": None}
     assert adapter.poll_build(fake, "boom") == {"status": "failed", "error": "kaboom"}
-    assert adapter.poll_build(fake, "gone") == {"_poll_error": 503}
+    # HTTP error carries the code plus a truncated body for diagnostics.
+    gone = adapter.poll_build(fake, "gone")
+    assert gone["_poll_error"] == 503
+    assert gone["detail"] == "upstream exploded"
     assert adapter.poll_build(fake, "going") == {"status": "running"}
 
 

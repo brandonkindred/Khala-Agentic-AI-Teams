@@ -398,4 +398,33 @@ describe('AgentStudioPersonaComponent', () => {
     stale.error(new Error('blip'));
     expect(component.error()).toBeNull();
   });
+
+  it('shows "Loading team…" in persona mode while the team is being fetched', () => {
+    build();
+    // Hold the team response pending so the loading branch is observable.
+    const pending = new Subject<{ team: unknown }>();
+    agenticApi.getTeam.mockReturnValue(pending);
+    fixture.detectChanges();
+    expect(component.teamLoading()).toBe(true);
+    expect(fixture.nativeElement.textContent).toContain('Loading team');
+    // The launcher (process dropdown) is not shown yet.
+    expect(fixture.nativeElement.querySelector('.persona__launcher')).toBeNull();
+
+    pending.next({ team: TEAM });
+    fixture.detectChanges();
+    expect(component.teamLoading()).toBe(false);
+    expect(fixture.nativeElement.querySelector('.persona__launcher')).toBeTruthy();
+  });
+
+  it('does not launch before the team has loaded', () => {
+    build();
+    const pending = new Subject<{ team: unknown }>();
+    agenticApi.getTeam.mockReturnValue(pending);
+    fixture.detectChanges();
+    // Seed a persona + process as if from a handoff, but the team never resolved.
+    state.setPersonaId('startup-founder');
+    component.selectProcess('p1');
+    component.launch();
+    expect(personaApi.startTest).not.toHaveBeenCalled();
+  });
 });

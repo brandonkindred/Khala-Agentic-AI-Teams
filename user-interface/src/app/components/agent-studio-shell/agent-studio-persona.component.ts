@@ -117,6 +117,13 @@ export class AgentStudioPersonaComponent implements OnInit {
   /** A registry agent must be in focus to "fix an agent" in the sandbox (Stage 2). */
   readonly canFixAgent = computed(() => !!this.state.registryAgentId());
 
+  /**
+   * True while the team fetch is in flight: no team yet and no load error. Drives
+   * a "Loading team…" indicator in persona mode (matching manual mode) so the
+   * launcher isn't shown with an empty process dropdown before data arrives.
+   */
+  readonly teamLoading = computed(() => !this.team() && !this.teamError());
+
   readonly runTerminal = computed(() => {
     const r = this.run();
     return r ? TERMINAL_STATUSES.has(r.status) : false;
@@ -222,7 +229,10 @@ export class AgentStudioPersonaComponent implements OnInit {
     const teamId = this.teamId();
     const personaId = this.selectedPersonaId();
     const processId = this.selectedProcessId();
-    if (!teamId || !personaId || !processId || this.launching()) {
+    // Also require the team to have loaded: a programmatic call (or a stale
+    // handoff-seeded processId after a failed load) must not fire a request that
+    // would certainly fail.
+    if (!teamId || !personaId || !processId || this.launching() || !this.team()) {
       return;
     }
     this.launching.set(true);

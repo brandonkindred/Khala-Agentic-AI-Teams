@@ -175,7 +175,8 @@ class AgenticTeamAdapter:
         """Poll the pipeline run, mapping its status onto the founder contract.
 
         Postconditions: returns one of —
-            * ``{"_poll_error": <code>}`` on HTTP error **or a non-JSON body**
+            * ``{"_poll_error": <code>, "detail": <truncated body>}`` on HTTP
+              error, or ``{"_poll_error": 502}`` on a non-JSON/non-object body
               (orchestrator retries — a transient proxy page shouldn't fail the run);
             * ``{"status": "completed"|"failed"|"cancelled", ...}`` at a terminal
               state (``error`` carried through on failure);
@@ -189,7 +190,9 @@ class AgenticTeamAdapter:
             timeout=HTTP_TIMEOUT,
         )
         if resp.status_code >= 400:
-            return {"_poll_error": resp.status_code}
+            # Carry a truncated body for diagnostics; the orchestrator keys off
+            # ``_poll_error`` and ignores extra keys.
+            return {"_poll_error": resp.status_code, "detail": (resp.text or "")[:200]}
         try:
             run = resp.json()
         except ValueError:  # non-JSON 2xx ⇒ treat as a transient poll error
