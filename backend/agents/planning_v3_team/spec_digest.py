@@ -168,12 +168,22 @@ def map_reduce(
     for idx, section in enumerate(sections):
         chunk = section
         if len(chunk) > section_chars and _can_compact(llm):
-            chunk = compact_text(
-                chunk,
-                max_chars=section_chars,
-                llm=llm,
-                content_description=f"{content_description} (section {idx + 1}/{total})",
-            )
+            try:
+                chunk = compact_text(
+                    chunk,
+                    max_chars=section_chars,
+                    llm=llm,
+                    content_description=f"{content_description} (section {idx + 1}/{total})",
+                )
+            except Exception:  # compact_text should never raise, but keep the fallback safety net
+                logger.warning(
+                    "compact_text failed for %s section %d/%d; using uncompacted section",
+                    content_description,
+                    idx + 1,
+                    total,
+                    exc_info=True,
+                )
+                chunk = section
         try:
             parsed = map_fn(chunk, llm, idx, total)
         except Exception:  # never let one section kill the whole digest

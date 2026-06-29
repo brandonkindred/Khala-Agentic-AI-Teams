@@ -210,7 +210,10 @@ def run_document_production(
                 repo_path=repo_path,
                 client_context=cc_dict,
             )
-            if architecture_overview and len(architecture_overview) > 8000:
+            if (
+                architecture_overview
+                and len(architecture_overview) > ARCHITECTURE_OVERVIEW_MAX_CHARS
+            ):
                 architecture_overview = _compact_architecture_overview(architecture_overview)
         except Exception as e:
             logger.warning("Architecture step failed: %s", e)

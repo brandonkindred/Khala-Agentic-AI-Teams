@@ -276,3 +276,33 @@ def test_map_reduce_no_compact_when_client_lacks_surface():
     )
     # Section passed through untruncated (no compaction, full 9000 chars in one section).
     assert mapped == [9000]
+
+
+def test_map_reduce_compact_failure_uses_uncompacted_section(monkeypatch):
+    """A raising compact_text must not bubble out; the section is mapped uncompacted."""
+    llm = MagicMock()
+    llm.get_max_context_tokens.return_value = 1000  # floor 8000 chars
+
+    def boom(*a, **k):
+        raise RuntimeError("transient LLM error")
+
+    monkeypatch.setattr(spec_digest, "compact_text", boom)
+
+    text = "q" * 9000  # one oversized section
+    mapped = []
+
+    def _map(section, _llm, idx, total):
+        mapped.append(len(section))
+        return {"ok": 1}
+
+    out = map_reduce(
+        text,
+        llm,
+        content_description="spec",
+        map_fn=_map,
+        reduce_fn=_identity_reduce,
+        fallback={"fb": True},
+    )
+    # compact_text raised -> fell back to the original chunk, still mapped (no exception).
+    assert mapped == [9000]
+    assert out == {"parts": [{"ok": 1}]}

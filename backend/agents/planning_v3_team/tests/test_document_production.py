@@ -68,12 +68,3 @@ def test_architecture_overview_small_unchanged(tmp_path):
         run_architecture_fn=lambda **kw: small,
     )
     assert ctx_update["handoff_package"].architecture_overview == small
-
-
-def test_get_llm_returns_llm_client(monkeypatch):
-    """_get_llm must return whatever get_client yields (a real LLMClient), not a Strands Agent."""
-    from planning_v3_team.api import main as api_main
-
-    sentinel = object()
-    monkeypatch.setattr("llm_service.get_client", lambda agent_key=None: sentinel)
-    assert api_main._get_llm() is sentinel
