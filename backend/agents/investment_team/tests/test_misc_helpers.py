@@ -33,6 +33,7 @@ from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab_context import (
     _entry_archetype,
     _exit_archetypes,
+    _is_executed_record,
     aggregate_prior_results,
     asset_class_mix_hint,
     format_prior_attribution,
@@ -634,6 +635,22 @@ def test_exit_archetypes_maps_each_kind_and_basis() -> None:
     assert _exit_archetypes(fixed) == ["fixed_stop"]
     assert _exit_archetypes(tp) == ["take_profit"]
     assert _exit_archetypes(none) == ["none"]
+
+
+def test_is_executed_record_defaults_to_completed_for_legacy() -> None:
+    import types
+
+    # A normal record persists status="completed" and counts as executed.
+    assert _is_executed_record(_attr_record(status="completed")) is True
+
+    # Legacy records persisted before BacktestRecord.status existed have no
+    # status attribute at all; the getattr(..., "completed") fallback must still
+    # treat them as executed (backward compatibility).
+    legacy = types.SimpleNamespace(backtest=types.SimpleNamespace())
+    assert _is_executed_record(legacy) is True
+
+    # A short-circuit status is still correctly excluded.
+    assert _is_executed_record(_attr_record(status="failed: design_stalled")) is False
 
 
 def test_aggregate_prior_results_empty() -> None:
