@@ -56,7 +56,7 @@ class JSONExtractionFailure(LLMJsonParseError):
     def __str__(self) -> str:
         suggestions = "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(self.recovery_suggestions))
         last_response = (
-            self.raw_responses[-1][:500] if self.raw_responses else "No responses captured"
+            self.raw_responses[-1] if self.raw_responses else "No responses captured"
         )
         return (
             f"\n{'=' * 80}\n"
@@ -71,7 +71,7 @@ class JSONExtractionFailure(LLMJsonParseError):
             f"Original prompt (first 500 chars):\n"
             f"  {self.original_prompt[:500]}{'...' if len(self.original_prompt) > 500 else ''}\n\n"
             f"Last raw response (first 500 chars):\n"
-            f"  {last_response}\n"
+            f"  {last_response[:500]}{'...' if len(last_response) > 500 else ''}\n"
             f"{'=' * 80}\n"
         )
 
@@ -375,7 +375,7 @@ class _PAStrandsWrapper(LLMClient):
                 original_prompt=prompt,
                 attempts_made=1,
                 raw_responses=[raw],
-                response_preview=raw[:200],
+                response_preview=raw,
             )
         except JSONExtractionFailure:
             raise

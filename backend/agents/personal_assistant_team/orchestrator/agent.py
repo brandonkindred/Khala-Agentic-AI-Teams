@@ -597,7 +597,7 @@ class PersonalAssistantOrchestrator:
             message=request.message,
             intent=intent.primary,
             actions=actions_text,
-            results=str(results)[:2000],
+            results=str(results),
             profile_summary=profile_summary,
         )
 

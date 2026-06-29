@@ -79,7 +79,7 @@ def _format_snippets(results: List[CandidateResult]) -> str:
     lines = []
     for r in results:
         url = str(r.url)
-        snippet = (r.snippet or "").strip()[:400]
+        snippet = (r.snippet or "").strip()
         lines.append(f"[{r.title}] ({url})\n{snippet}")
     return "\n\n".join(lines)
 

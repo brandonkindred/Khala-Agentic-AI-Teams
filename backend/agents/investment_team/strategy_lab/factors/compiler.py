@@ -805,7 +805,7 @@ class _Compiler:
         sizing_indented = textwrap.indent(sizing_src.rstrip("\n"), "    ")
 
         genome_hash = self._nid(self.genome)
-        hypothesis = (self.genome.hypothesis or "").replace('"""', "'''")[:300]
+        hypothesis = (self.genome.hypothesis or "").replace('"""', "'''")
 
         # Build the class body at column 0, then indent the whole thing 4
         # spaces in one shot.  Module-level statements (docstring, imports,

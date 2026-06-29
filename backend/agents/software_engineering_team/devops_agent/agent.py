@@ -10,6 +10,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import compact_text, get_client, get_strands_model
+from software_engineering_team.shared.error_parsing import normalize_error_signature
 from software_engineering_team.shared.prompt_utils import log_llm_prompt
 from software_engineering_team.shared.repo_utils import int_env as _int_env
 from software_engineering_team.shared.task_plan import TaskPlan
@@ -25,8 +26,13 @@ MAX_SAME_BUILD_FAILURES = _int_env("SW_MAX_SAME_BUILD_FAILURES", 6)
 
 
 def _build_error_signature(build_errors: str) -> str:
-    """Compute a signature for same-error detection. Uses first 800 chars."""
-    return (build_errors[:800] or build_errors).strip()
+    """Compute a stable signature for same-error (loop) detection.
+
+    Delegates to the shared normalizer so volatile fragments (temp paths,
+    timestamps, durations, ports, object addresses) collapse to one signature
+    while the full error message is preserved (no length truncation).
+    """
+    return normalize_error_signature(build_errors)
 
 
 def _gather_codebase_context(repo_path: Path, subdir: str = "") -> str:
@@ -420,7 +426,7 @@ class DevOpsExpertAgent:
             if result.needs_clarification and result.clarification_requests:
                 return DevOpsWorkflowResult(
                     success=False,
-                    failure_reason=f"Clarification requested: {result.clarification_requests[0][:200]}",
+                    failure_reason=f"Clarification requested: {result.clarification_requests[0]}",
                     iterations=iteration,
                 )
 
@@ -448,7 +454,7 @@ class DevOpsExpertAgent:
                     )
                     return DevOpsWorkflowResult(
                         success=False,
-                        failure_reason=repeated_reason + " " + build_errors[:500],
+                        failure_reason=repeated_reason + " " + build_errors,
                         iterations=iteration,
                     )
                 logger.warning(
@@ -505,7 +511,7 @@ class DevOpsExpertAgent:
                             logger.error("DevOps WORKFLOW: %s", repeated_reason)
                             return DevOpsWorkflowResult(
                                 success=False,
-                                failure_reason=repeated_reason + " " + build_errors[:500],
+                                failure_reason=repeated_reason + " " + build_errors,
                                 iterations=iteration,
                             )
                         logger.warning(
@@ -531,9 +537,9 @@ class DevOpsExpertAgent:
             if consecutive_same_build_failures >= MAX_SAME_BUILD_FAILURES:
                 repeated_reason = (
                     f"Build failed {MAX_SAME_BUILD_FAILURES} times with the same error; "
-                    "stopping to avoid loop. Last error: " + build_errors[:800]
+                    "stopping to avoid loop. Last error: " + build_errors
                 )
-                logger.error("DevOps WORKFLOW: %s", repeated_reason[:800])
+                logger.error("DevOps WORKFLOW: %s", repeated_reason)
                 return DevOpsWorkflowResult(
                     success=False,
                     failure_reason=repeated_reason,

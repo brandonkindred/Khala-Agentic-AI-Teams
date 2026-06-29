@@ -284,10 +284,12 @@ def start_founder_workflow(
     except Exception as exc:
         logger.exception("Failed to dispatch founder workflow for %s", run_id)
         job_store.update_job(
-            run_id, status=job_store.JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}"[:500]
+            run_id, status=job_store.JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}"
         )
-        store.update_run(run_id, status="failed", error=f"Dispatch failed: {exc}"[:1000])
-        raise HTTPException(status_code=500, detail=f"Failed to start workflow: {exc}") from exc
+        store.update_run(run_id, status="failed", error=f"Dispatch failed: {exc}")
+        # Full exception logged above; return a generic detail so internal
+        # exception text isn't disclosed to the API client.
+        raise HTTPException(status_code=500, detail="Failed to start workflow.") from exc
 
     return StartRunResponse(
         job_id=run_id,
@@ -606,9 +608,10 @@ def send_chat_message(run_id: str, request: SendChatRequest) -> ChatHistoryRespo
     agent = _build_agent_for_run(run_id)
     try:
         response = agent.chat(request.message, context)
-    except Exception as exc:
+    except Exception:
         logger.exception("Chat LLM call failed for run %s", run_id)
-        response = f"Sorry, I'm having trouble responding right now. ({str(exc)[:100]})"
+        # Full exception logged above; don't surface internal exception text to the user.
+        response = "Sorry, I'm having trouble responding right now. Please try again."
 
     store.add_chat_message(run_id, "assistant", response, "chat")
 
@@ -729,10 +732,11 @@ def resume_job(job_id: str) -> StartRunResponse:
         job_store.update_job(
             job_id,
             status=job_store.JOB_STATUS_FAILED,
-            error=f"Resume dispatch failed: {exc}"[:500],
+            error=f"Resume dispatch failed: {exc}",
         )
-        store.update_run(job_id, status="failed", error=f"Resume dispatch failed: {exc}"[:1000])
-        raise HTTPException(status_code=500, detail=f"Failed to resume workflow: {exc}") from exc
+        store.update_run(job_id, status="failed", error=f"Resume dispatch failed: {exc}")
+        # Full exception logged above; return a generic detail (no internal text).
+        raise HTTPException(status_code=500, detail="Failed to resume workflow.") from exc
 
     return StartRunResponse(
         job_id=job_id,
@@ -781,10 +785,11 @@ def restart_job(job_id: str) -> StartRunResponse:
         job_store.update_job(
             job_id,
             status=job_store.JOB_STATUS_FAILED,
-            error=f"Restart dispatch failed: {exc}"[:500],
+            error=f"Restart dispatch failed: {exc}",
         )
-        store.update_run(job_id, status="failed", error=f"Restart dispatch failed: {exc}"[:1000])
-        raise HTTPException(status_code=500, detail=f"Failed to restart workflow: {exc}") from exc
+        store.update_run(job_id, status="failed", error=f"Restart dispatch failed: {exc}")
+        # Full exception logged above; return a generic detail (no internal text).
+        raise HTTPException(status_code=500, detail="Failed to restart workflow.") from exc
 
     return StartRunResponse(
         job_id=job_id,

@@ -16,7 +16,7 @@ import math
 import os
 import re
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Iterable, Iterator, List, Optional
+from typing import Any, Callable, ClassVar, Iterable, Iterator, List, Optional
 
 from ...market_data_service import _max_universe_symbols
 from ...models import BacktestConfig, StrategySpec
@@ -38,6 +38,8 @@ from ...symbols import (
 from ..executor.predicate_evaluator import compare
 from ..spec_dsl import (
     INDICATOR_OUTPUT_RANGES,
+    AllOf,
+    AnyOf,
     EntryRule,
     IndicatorName,
     IndicatorRef,
@@ -47,6 +49,7 @@ from ..spec_dsl import (
     StopLossRule,
     TakeProfitRule,
     is_full_position_exit,
+    iter_tree_indicator_refs,
     ladder_closes_full_position,
     stop_caps_side,
 )
@@ -481,6 +484,41 @@ def _classify_predicate(pred: Predicate) -> Optional[tuple[str, str]]:
     return _bounded_indicator_verdict(pred)
 
 
+def _classify_tree(node: Any) -> Optional[tuple[str, str]]:
+    """Compose :func:`_classify_predicate` over an ``all_of`` / ``any_of`` tree.
+
+    Pre: ``node`` is a ``Predicate`` / ``AllOf`` / ``AnyOf``.
+    Post: ``("false", reason)`` when the tree is provably always-false,
+    ``("true", reason)`` when provably always-true, else ``None`` (undecidable —
+    the gate abstains rather than risk a false reject). Composition:
+
+      * ``all_of`` — always-false if ANY child is (the conjunction can never
+        hold); always-true only if EVERY child is.
+      * ``any_of`` — always-true if ANY child is; always-false only if EVERY
+        child is.
+
+    A single undecidable child collapses the parent to ``None`` unless a
+    short-circuit verdict (a false conjunct / a true disjunct) already applies.
+    """
+    if isinstance(node, Predicate):
+        return _classify_predicate(node)
+    child_verdicts = [_classify_tree(child) for child in node.of]
+    if isinstance(node, AllOf):
+        for v in child_verdicts:
+            if v is not None and v[0] == "false":
+                return ("false", f"a conjunct is always false ({v[1]})")
+        if all(v is not None and v[0] == "true" for v in child_verdicts):
+            return ("true", "every conjunct is always true")
+        return None
+    # AnyOf
+    for v in child_verdicts:
+        if v is not None and v[0] == "true":
+            return ("true", f"a disjunct is always true ({v[1]})")
+    if all(v is not None and v[0] == "false" for v in child_verdicts):
+        return ("false", "every disjunct is always false")
+    return None
+
+
 class SpecReadinessGate(GateResultsMixin):
     """Deterministic implementability checks on a constructed ``StrategySpec``.
 
@@ -620,11 +658,11 @@ class SpecReadinessGate(GateResultsMixin):
                         f"(got {type(rule).__name__})."
                     ),
                 )
-            if not isinstance(rule.when, Predicate):
+            if not isinstance(rule.when, (Predicate, AllOf, AnyOf)):
                 return (
                     self._critical(
-                        f"entry_rules[{idx}].when is not a Predicate "
-                        f"(got {type(rule.when).__name__})."
+                        f"entry_rules[{idx}].when is not a Predicate or "
+                        f"all_of/any_of combinator (got {type(rule.when).__name__})."
                     ),
                 )
         return ()
@@ -1186,8 +1224,8 @@ class SpecReadinessGate(GateResultsMixin):
     def _check_predicate_reachability(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         assert isinstance(ctx.spec, StrategySpec)
         out: List[QualityGateResult] = []
-        for pred, kind, label in self._iter_predicates(ctx.spec):
-            verdict = _classify_predicate(pred)
+        for when, kind, label in self._iter_rule_whens(ctx.spec):
+            verdict = _classify_tree(when)
             if verdict is None:
                 continue
             always, reason = verdict
@@ -1234,35 +1272,33 @@ class SpecReadinessGate(GateResultsMixin):
     # Helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _iter_predicates(spec: StrategySpec) -> Iterator[tuple[Predicate, str, str]]:
-        """Yield ``(predicate, kind, label)`` for every rule predicate in ``spec``.
+    def _iter_rule_whens(spec: StrategySpec) -> Iterator[tuple[Any, str, str]]:
+        """Yield ``(when, kind, label)`` for every entry/signal-exit rule in ``spec``.
 
-        ``kind`` is ``"entry"`` or ``"signal_exit"``; ``label`` is a stable
-        human-readable locator (e.g. ``"entry_rules[0]"``). Malformed rules
-        (non-``EntryRule`` / non-``Predicate``) are skipped — Rule 2 already
-        flags those as critical, so this rule does not double-report them.
+        ``when`` is the rule's predicate position — a single ``Predicate`` or an
+        ``all_of`` / ``any_of`` tree. ``kind`` is ``"entry"`` or
+        ``"signal_exit"``; ``label`` is a stable human-readable locator (e.g.
+        ``"entry_rules[0]"``). Malformed rules (non-``EntryRule`` /
+        non-``SignalExitRule``) and malformed ``when`` values (not a
+        ``Predicate`` / ``AllOf`` / ``AnyOf`` — reachable via ``model_construct``,
+        legacy loading, or post-construction mutation) are skipped: Rule 2
+        already flags those as critical, and yielding them would crash the
+        downstream tree walkers (``.of`` on a non-tree) instead of returning
+        gate results.
         """
         assert isinstance(spec, StrategySpec)
         for idx, rule in enumerate(spec.entry_rules):
-            if isinstance(rule, EntryRule) and isinstance(rule.when, Predicate):
+            if isinstance(rule, EntryRule) and isinstance(rule.when, (Predicate, AllOf, AnyOf)):
                 yield rule.when, "entry", f"entry_rules[{idx}]"
         for idx, rule in enumerate(spec.exit_rules):
-            if isinstance(rule, SignalExitRule) and isinstance(rule.when, Predicate):
+            if isinstance(rule, SignalExitRule) and isinstance(rule.when, (Predicate, AllOf, AnyOf)):
                 yield rule.when, "signal_exit", f"exit_rules[{idx}]"
 
     @staticmethod
     def _iter_indicator_refs(spec: StrategySpec) -> Iterator[IndicatorRef]:
         assert isinstance(spec, StrategySpec)
-        # Reuses ``_iter_predicates`` so the entry/signal-exit rule traversal
-        # lives in exactly one place; this helper only projects each predicate
-        # down to its indicator references.
-        for pred, _kind, _label in SpecReadinessGate._iter_predicates(spec):
-            yield from SpecReadinessGate._predicate_indicator_refs(pred)
-
-    @staticmethod
-    def _predicate_indicator_refs(pred: Predicate) -> Iterator[IndicatorRef]:
-        assert isinstance(pred, Predicate)
-        if isinstance(pred.lhs, IndicatorRef):
-            yield pred.lhs
-        if isinstance(pred.rhs, IndicatorRef):
-            yield pred.rhs
+        # Reuses ``_iter_rule_whens`` so the entry/signal-exit rule traversal
+        # lives in exactly one place; ``iter_tree_indicator_refs`` then projects
+        # each ``when`` (leaf or tree) down to its indicator references.
+        for when, _kind, _label in SpecReadinessGate._iter_rule_whens(spec):
+            yield from iter_tree_indicator_refs(when)

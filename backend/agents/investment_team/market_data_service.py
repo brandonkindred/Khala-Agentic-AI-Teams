@@ -824,7 +824,7 @@ class MarketDataService:
 
             if "Error Message" in data or "Note" in data:
                 msg = data.get("Error Message") or data.get("Note", "")
-                logger.warning("Alpha Vantage error for %s: %s", symbol, msg[:200])
+                logger.warning("Alpha Vantage error for %s: %s", symbol, msg)
                 return []
 
             ts = data.get(ts_key)

@@ -34,7 +34,7 @@ class PolicyAsCodeToolAgent:
         else:
             checks["policy_checks"] = "pass" if checkov.success else "fail"
             if not checkov.success:
-                findings.append((checkov.stderr or checkov.stdout)[:1000])
+                findings.append((checkov.stderr or checkov.stdout))
 
         return PolicyAsCodeOutput(
             success=not any(v == "fail" for v in checks.values()),

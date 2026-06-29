@@ -547,12 +547,8 @@ class ResearchAgent:
                 doc.url,
                 type(e).__name__,
             )
-            raw = (doc.content or "").strip()[:1200].replace("\n", " ")
-            summary = (
-                (raw[:600] + "…")
-                if len(raw) > 600
-                else (raw or f"(Source: {doc.title or doc.url})")
-            )
+            raw = (doc.content or "").strip().replace("\n", " ")
+            summary = (raw[:500] if len(raw) > 500 else raw) or f"(Source: {doc.title or doc.url})"
             key_points = []
         return ResearchReference(
             title=doc.title or str(doc.url),
@@ -640,7 +636,7 @@ class ResearchAgent:
         ) as e:  # pragma: no cover - parse-failure fallback in overview synthesis; covered by integration tests with a flaky model.
             logger.warning(
                 "Overview synthesis: LLM returned invalid or empty JSON (%s). Using fallback.",
-                str(e)[:200],
+                str(e),
             )
             return None
         except ValueError as e:  # pragma: no cover - Ollama-specific "could not parse JSON" prefix repair path; reached only with a real Ollama backend.
@@ -778,7 +774,7 @@ class ResearchAgent:
         ]
         # Summary of the sources that were found
         if notes:
-            summary_line = notes.replace("\n", " ").strip()[:2000]
+            summary_line = notes.replace("\n", " ").strip()
             lines.append("- " + summary_line)
         else:
             lines.append(

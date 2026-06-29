@@ -149,7 +149,7 @@ def _answer_pending_questions(
                 ANSWER_POST_RETRIES,
                 job_id,
                 exc.response.status_code,
-                exc.response.text[:500],
+                exc.response.text,
             )
         except Exception:
             logger.exception(
@@ -504,8 +504,8 @@ def run_workflow(
 
     except Exception as exc:
         logger.exception("Founder workflow crashed: run_id=%s", run_id)
-        store.update_run(run_id, status="failed", error=str(exc)[:1000])
-        _sync_job_status(run_id, "failed", error=str(exc)[:500])
+        store.update_run(run_id, status="failed", error=str(exc))
+        _sync_job_status(run_id, "failed", error=str(exc))
         store.add_chat_message(
-            run_id, "system", f"Workflow failed: {str(exc)[:500]}", "status_update"
+            run_id, "system", f"Workflow failed: {str(exc)}", "status_update"
         )

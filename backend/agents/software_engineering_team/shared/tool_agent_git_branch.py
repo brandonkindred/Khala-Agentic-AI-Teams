@@ -13,10 +13,10 @@ expose ``repo_path``/``task_id``/``task_title``/``task_description``/
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+from software_engineering_team.shared.branch_utils import make_branch_suffix, make_slug
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
@@ -109,13 +109,11 @@ class GitBranchManagementToolAgent:
         if not (path / ".git").exists():
             logger.warning("Git branch management: not a git repository at %s", path)
             return False, None
-        slug = (
-            re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
-        )
-        ok, branch_msg = git_create_feature_branch(path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
+        branch_suffix = make_branch_suffix(task_id, task_title)
+        ok, branch_msg = git_create_feature_branch(path, DEVELOPMENT_BRANCH, branch_suffix)
         if not ok:
             return False, None
-        branch_name = branch_msg or f"feature/{task_id}-{slug}"
+        branch_name = branch_msg or f"feature/{branch_suffix}"
         return True, branch_name
 
     def commit_current_changes(self, repo_path: str | Path, message: str) -> Tuple[bool, str]:
@@ -141,11 +139,7 @@ class GitBranchManagementToolAgent:
 
         task_id = phase_inp.task_id or "task"
         task_title = phase_inp.task_title or ""
-        slug = (
-            re.sub(r"[^a-z0-9-]+", "-", task_title.lower()).strip("-")[:40]
-            if task_title
-            else "task"
-        )
+        slug = make_slug(task_id, task_title)
         branch_name: Optional[str] = phase_inp.feature_branch_name
 
         if branch_name:

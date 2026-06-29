@@ -73,7 +73,7 @@ def run_sub_agent_provisioning(
     job_id = start_build_fn(
         project_name=project_name,
         spec_path=str(spec_path),
-        constraints={"source": "planning_v3", "capability_gap": capability_gap[:500]},
+        constraints={"source": "planning_v3", "capability_gap": capability_gap},
         output_dir=str(path / "plan" / "sub_agent_output"),
     )
     if not job_id:

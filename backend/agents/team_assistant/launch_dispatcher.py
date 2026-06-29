@@ -36,7 +36,7 @@ def _safe_json(resp: httpx.Response) -> dict[str, Any]:
     try:
         data = resp.json()
     except ValueError:
-        return {"_raw_text": resp.text[:2000]}
+        return {"_raw_text": resp.text}
     if isinstance(data, dict):
         return data
     return {"_value": data}

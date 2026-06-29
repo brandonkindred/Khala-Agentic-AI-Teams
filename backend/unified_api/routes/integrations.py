@@ -1421,7 +1421,7 @@ def _build_pull_request_item(raw: dict[str, Any]) -> GitHubPullRequestItem:
     return GitHubPullRequestItem(
         number=detail.number,
         title=detail.title,
-        body_preview=detail.body[:200],
+        body_preview=detail.body[:200] if detail.body else "",
         author=detail.author,
         html_url=detail.html_url,
         head=detail.head,
@@ -1681,7 +1681,7 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
                     env=env,
                 )
                 if result.returncode != 0:
-                    return f"git fetch failed: {_scrub_git_secret(result.stderr, token)[:300]}"
+                    return f"git fetch failed: {_scrub_git_secret(result.stderr, token)}"
                 return None
 
             clone_url = f"https://github.com/{owner}/{repo}.git"
@@ -1693,7 +1693,7 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
                 env=env,
             )
             if result.returncode != 0:
-                safe_err = _scrub_git_secret(result.stderr, token)[:300]
+                safe_err = _scrub_git_secret(result.stderr, token)
                 return f"git clone failed: {safe_err}"
             return None
         except FileNotFoundError:
@@ -1806,11 +1806,18 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         ) from e
 
     if resp.status_code != 200:
+        # The upstream body can carry internal detail (a stack trace on an unhandled
+        # 5xx, an HTML error page). Always log it server-side. For 4xx the detail is
+        # client-actionable (e.g. "issue blocked by sub-issues", "no ready issues"),
+        # so return a bounded copy; for 5xx return a generic message so internal
+        # traces aren't exposed.
         try:
-            detail = resp.json().get("detail", resp.text[:300])
+            upstream_detail = resp.json().get("detail", resp.text)
         except Exception:
-            detail = resp.text[:300]
-        raise HTTPException(status_code=resp.status_code, detail=detail)
+            upstream_detail = resp.text
+        logger.warning("github run-issue: coding team service returned %s: %s", resp.status_code, upstream_detail)
+        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to start the coding job."
+        raise HTTPException(status_code=resp.status_code, detail=client_detail)
 
     try:
         data = resp.json()
@@ -1882,11 +1889,17 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
         ) from e
 
     if resp.status_code != 200:
+        # The upstream body can carry internal detail (a stack trace on an unhandled
+        # 5xx). Always log it server-side. For 4xx the detail is client-actionable
+        # (e.g. "PR not found"), so return a bounded copy; for 5xx return a generic
+        # message so internal traces aren't exposed.
         try:
-            detail = resp.json().get("detail", resp.text[:300])
+            upstream_detail = resp.json().get("detail", resp.text)
         except Exception:
-            detail = resp.text[:300]
-        raise HTTPException(status_code=resp.status_code, detail=detail)
+            upstream_detail = resp.text
+        logger.warning("github review-pr: coding team service returned %s: %s", resp.status_code, upstream_detail)
+        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to start the review."
+        raise HTTPException(status_code=resp.status_code, detail=client_detail)
 
     try:
         data = resp.json()
@@ -1957,9 +1970,9 @@ async def list_github_reviews(
         # on an unhandled 500, etc.). Log it server-side and return a generic
         # message to the client, preserving the upstream status code.
         try:
-            upstream_detail = resp.json().get("detail", resp.text[:300])
+            upstream_detail = resp.json().get("detail", resp.text)
         except Exception:
-            upstream_detail = resp.text[:300]
+            upstream_detail = resp.text
         logger.warning("github reviews: coding team service returned %s: %s", resp.status_code, upstream_detail)
         raise HTTPException(status_code=resp.status_code, detail="Failed to retrieve review history.")
 

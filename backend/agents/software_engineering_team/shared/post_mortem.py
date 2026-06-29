@@ -129,8 +129,10 @@ class PostMortemWriter:
         Returns:
             Formatted markdown string for the entry.
         """
-        prompt_preview = self._truncate_text(original_prompt, max_len=500)
-        error_str = str(error)[:500]
+        prompt_truncated = len(original_prompt) > 2000
+        prompt_preview = self._truncate_text(original_prompt, max_len=2000)
+        prompt_label = "Original Prompt (truncated)" if prompt_truncated else "Original Prompt"
+        error_str = str(error)
 
         partial_excerpts = self._format_partial_responses(partial_responses)
         suggestions = self._generate_suggestions(
@@ -153,7 +155,7 @@ class PostMortemWriter:
 - **Decomposition depth**: {decomposition_depth}/{max_decomposition_depth} levels reached
 - **Final error**: `{error_str}`
 
-### Original Prompt (truncated)
+### {prompt_label}
 
 ```
 {prompt_preview}

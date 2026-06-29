@@ -137,7 +137,7 @@ class UserProfileAgent:
                         field=item.get("field", ""),
                         value=item.get("value"),
                         confidence=float(item.get("confidence", 0.0)),
-                        source_text=text[:200],
+                        source_text=text,
                     )
                 )
             except Exception as e:

@@ -218,11 +218,11 @@ class PaperTradingAgent:
         if service_result.lookahead_violation:
             logger.warning(
                 "Paper trading aborted: strategy accessed look-ahead data — %s",
-                (service_result.error or "")[:500],
+                (service_result.error or ""),
             )
             session.status = PaperTradingStatus.FAILED
             session.divergence_analysis = (
-                f"Strategy code attempted to read future data: {(service_result.error or '')[:500]}"
+                f"Strategy code attempted to read future data: {(service_result.error or '')}"
             )
             session.completed_at = datetime.now(tz=timezone.utc).isoformat()
             return session
@@ -234,14 +234,14 @@ class PaperTradingAgent:
             logger.warning(
                 "Paper trading strategy execution failed with %d partial trade(s): %s",
                 len(run.trades),
-                service_result.error[:500],
+                service_result.error,
             )
             session.status = PaperTradingStatus.FAILED
             # Carry the partial trades through on the failed session so
             # humans can diagnose what happened before the crash.
             session.trades = run.trades
             session.divergence_analysis = (
-                f"Strategy code execution failed: {service_result.error[:500]}"
+                f"Strategy code execution failed: {service_result.error}"
             )
             session.completed_at = datetime.now(tz=timezone.utc).isoformat()
             return session

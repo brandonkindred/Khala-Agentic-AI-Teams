@@ -80,7 +80,7 @@ def run_discovery(
     except (json.JSONDecodeError, TypeError, AttributeError) as e:
         logger.warning("Discovery LLM parse failed: %s", e)
         data = {
-            "problem_summary": input_text[:500] if input_text else "See brief/spec.",
+            "problem_summary": input_text if input_text else "See brief/spec.",
             "opportunity_statement": "",
             "target_users": [],
             "success_criteria": [],

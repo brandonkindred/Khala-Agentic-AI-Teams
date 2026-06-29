@@ -121,21 +121,21 @@ class ArchitectureToolAgent:
                 data = {}
         recommendations = []
         if data.get("folder_structure"):
-            recommendations.append(f"Folder structure: {data['folder_structure'][:500]}")
+            recommendations.append(f"Folder structure: {data['folder_structure']}")
         if data.get("routing_strategy"):
-            recommendations.append(f"Routing: {data['routing_strategy'][:500]}")
+            recommendations.append(f"Routing: {data['routing_strategy']}")
         if data.get("state_management"):
-            recommendations.append(f"State management: {data['state_management'][:500]}")
+            recommendations.append(f"State management: {data['state_management']}")
         if data.get("error_handling"):
-            recommendations.append(f"Error handling: {data['error_handling'][:500]}")
+            recommendations.append(f"Error handling: {data['error_handling']}")
         if data.get("api_client_patterns"):
-            recommendations.append(f"API patterns: {data['api_client_patterns'][:500]}")
+            recommendations.append(f"API patterns: {data['api_client_patterns']}")
         summary = data.get("summary", "Architecture artifacts generated.")
         return ToolAgentPhaseOutput(
             recommendations=recommendations
             if recommendations
             else ["Architecture artifacts generated."],
-            summary=summary[:500] if summary else "Architecture planning complete.",
+            summary=summary if summary else "Architecture planning complete.",
         )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:

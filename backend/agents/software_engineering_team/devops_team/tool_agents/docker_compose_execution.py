@@ -52,7 +52,7 @@ class DockerComposeExecutionToolAgent:
 
         findings: List[str] = []
         if not result.success:
-            findings.append(result.error_summary or result.stderr[:500])
+            findings.append(result.error_summary or result.stderr)
 
         return DockerComposeExecutionOutput(
             success=result.success,

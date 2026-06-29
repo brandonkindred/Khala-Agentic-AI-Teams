@@ -142,9 +142,9 @@ class CommandResult:
             idx = text.find(marker)
             if idx != -1:
                 excerpt = text[idx:].strip()
-                return excerpt
+                return excerpt[:max_chars]
         # No marker: return full output
-        return text.strip()
+        return text.strip()[:max_chars]
 
     def parsed_failures(self, command_kind: str = "pytest") -> list:
         """
@@ -389,7 +389,7 @@ def ensure_nvm_installed() -> NvmInstallResult:  # pragma: no cover
             "NVM install failed. Recovery summary: 1) Tried curl, 2) Tried wget, "
             "both failed. exit_code=%s stderr=%s",
             result.returncode,
-            stderr[:200],
+            stderr,
         )
         return NvmInstallResult(success=False, stderr=stderr)
 
