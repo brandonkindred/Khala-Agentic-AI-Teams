@@ -94,6 +94,7 @@ def _series(n: int, seed: int = 0) -> List[_Bar]:
 
 
 def _wema(vals: List[float], period: int) -> float:
+    """Windowed EMA over ``vals`` seeded from the first element (the registry's basis)."""
     alpha = 2.0 / (period + 1.0)
     v = vals[0]
     for x in vals[1:]:
@@ -102,6 +103,7 @@ def _wema(vals: List[float], period: int) -> float:
 
 
 def _ref_donchian(bars, period: int, select: str) -> Optional[float]:
+    """Donchian band: highest high / lowest low (and midpoint) over ``period`` bars."""
     if len(bars) < period:
         return None
     w = bars[-period:]
@@ -111,6 +113,7 @@ def _ref_donchian(bars, period: int, select: str) -> Optional[float]:
 
 
 def _ref_keltner(bars, period: int, atr_period: int, mult: float, select: str) -> Optional[float]:
+    """Keltner band: close-EMA basis ± ``mult`` × simple-average ATR(``atr_period``)."""
     if len(bars) < max(period, atr_period + 1):
         return None
     middle = _wema([b.close for b in bars[-period:]], period)
@@ -127,6 +130,7 @@ def _ref_keltner(bars, period: int, atr_period: int, mult: float, select: str) -
 
 
 def _ref_obv(bars) -> Optional[float]:
+    """On-Balance Volume: cumulative volume signed by the close-to-close direction."""
     if not bars:
         return None
     val = 0.0
@@ -139,6 +143,7 @@ def _ref_obv(bars) -> Optional[float]:
 
 
 def _ref_mfi(bars, period: int) -> Optional[float]:
+    """Money Flow Index: volume-weighted RSI of typical price (no-flow window → 50)."""
     if len(bars) < period + 1:
         return None
     pos = neg = 0.0
@@ -156,6 +161,7 @@ def _ref_mfi(bars, period: int) -> Optional[float]:
 
 
 def _ref_roc(bars, period: int) -> Optional[float]:
+    """Rate of Change (percent) over ``period`` bars; zero reference price → 0.0."""
     if len(bars) < period + 1:
         return None
     cur, prev = bars[-1].close, bars[-1 - period].close
@@ -163,6 +169,7 @@ def _ref_roc(bars, period: int) -> Optional[float]:
 
 
 def _ref_cci(bars, period: int) -> Optional[float]:
+    """Commodity Channel Index: typical-price deviation / (0.015 × mean deviation)."""
     if len(bars) < period:
         return None
     tps = [(b.high + b.low + b.close) / 3.0 for b in bars[-period:]]
@@ -172,6 +179,7 @@ def _ref_cci(bars, period: int) -> Optional[float]:
 
 
 def _ref_williams(bars, period: int) -> Optional[float]:
+    """Williams %R: close position within the trailing high/low range (flat → −50)."""
     if len(bars) < period:
         return None
     w = bars[-period:]
@@ -182,6 +190,7 @@ def _ref_williams(bars, period: int) -> Optional[float]:
 
 
 def _ref_bb(bars, period: int, num_std: float, select: str) -> Optional[float]:
+    """Bollinger derived outputs: %B = (price−lower)/(upper−lower); bandwidth = width/mean."""
     if len(bars) < period:
         return None
     vals = [b.close for b in bars[-period:]]

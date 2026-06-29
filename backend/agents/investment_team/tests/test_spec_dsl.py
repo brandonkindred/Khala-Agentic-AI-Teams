@@ -40,13 +40,16 @@ def test_indicator_output_ranges_covers_bounded_indicators() -> None:
     # The deterministic spec-readiness reachability check relies on exactly the
     # 0–100 oscillators being declared bounded. Price-scaled indicators must be
     # absent so the check abstains on them.
-    assert INDICATOR_OUTPUT_RANGES == {
+    # ``expected`` is a separate local literal compared against the imported
+    # module constant ``INDICATOR_OUTPUT_RANGES`` — it does not shadow it.
+    expected = {
         "rsi": (0.0, 100.0),
         "adx": (0.0, 100.0),
         "stochastic": (0.0, 100.0),
         "mfi": (0.0, 100.0),
         "williams_r": (-100.0, 0.0),
     }
+    assert INDICATOR_OUTPUT_RANGES == expected
     # Validate each bounded indicator's actual range values explicitly (not just
     # that the key is present) so a wrong bound is caught here, not downstream.
     assert INDICATOR_OUTPUT_RANGES["rsi"] == (0.0, 100.0)
