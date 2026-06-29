@@ -1,41 +1,115 @@
 """Acceptance Criteria Verifier agent.
 
-Built on the AWS Strands Agents SDK via ``llm_service.get_strands_model``. The
-model returned by ``get_strands_model`` is passed to a Strands ``Agent`` so the
-agent inherits retries, per-agent model routing, telemetry, and the
-dummy-client path for tests.
+A thin adapter over the shared code-review engine
+(``code_review_agent.CodeReviewAgent``): it routes acceptance verification
+through the engine with the ``acceptance`` profile, which instructs the reviewer
+to emit exactly one issue per *unmet* acceptance criterion (tagging each issue's
+``category`` with the verbatim criterion). The adapter then derives the
+per-criterion status from those issues. The engine supplies chunking,
+false-positive filtering (which runs here, so a criterion whose evidence exists
+elsewhere in the codebase is correctly treated as satisfied), and synthesis,
+while this module keeps the gate's public class, ``run`` signature, output model,
+empty-criteria short-circuit, and failure fallback.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import List
 
-from strands import Agent
+from code_review_agent import CodeReviewAgent, CodeReviewInput, ReviewProfile
+from code_review_agent.models import CodeReviewIssue
 
-from llm_service import get_strands_model
-
-from .models import AcceptanceVerifierInput, AcceptanceVerifierOutput
-from .prompts import ACCEPTANCE_VERIFIER_PROMPT
+from .models import AcceptanceVerifierInput, AcceptanceVerifierOutput, CriterionStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _matches_criterion(criterion: str, issue: CodeReviewIssue) -> bool:
+    """Return whether ``issue`` reports ``criterion`` as unmet.
+
+    Preconditions:
+        ``criterion`` is a non-empty acceptance-criterion string; ``issue`` is an
+        engine finding produced under the ``acceptance`` profile (which tags
+        ``category`` with the verbatim criterion).
+    Postconditions:
+        Returns True when the issue's ``category`` equals the criterion
+        (case-insensitively) or the criterion text appears in the issue's
+        ``category``/``description`` — so a criterion is matched whether the model
+        tagged it exactly or only referenced it. Pure; no side effects.
+    """
+    target = criterion.strip().lower()
+    if not target:
+        return False
+    category = (issue.category or "").strip().lower()
+    if category == target:
+        return True
+    return target in category or target in (issue.description or "").strip().lower()
+
+
+def derive_per_criterion(
+    criteria: List[str], issues: List[CodeReviewIssue]
+) -> List[CriterionStatus]:
+    """Reconstruct per-criterion status from the engine's flat issue list.
+
+    Preconditions:
+        ``criteria`` is the list of acceptance criteria that were verified;
+        ``issues`` are the engine findings (one per unmet criterion under the
+        ``acceptance`` profile).
+    Postconditions:
+        Returns one :class:`CriterionStatus` per input criterion in order. A
+        criterion is ``satisfied`` iff no issue matches it (see
+        :func:`_matches_criterion`); when unmet, its ``evidence`` is the matching
+        issue's description, otherwise ``"Satisfied"``. Pure; no side effects.
+    """
+    statuses: List[CriterionStatus] = []
+    for criterion in criteria:
+        match = next((i for i in issues if _matches_criterion(criterion, i)), None)
+        if match is None:
+            statuses.append(
+                CriterionStatus(criterion=criterion, satisfied=True, evidence="Satisfied")
+            )
+        else:
+            statuses.append(
+                CriterionStatus(
+                    criterion=criterion,
+                    satisfied=False,
+                    evidence=match.description or "Unmet",
+                )
+            )
+    return statuses
 
 
 class AcceptanceVerifierAgent:
     """
     Verifies that delivered code satisfies each acceptance criterion.
     Returns per-criterion status with evidence.
+
+    Invariants:
+        - ``run`` returns ``all_satisfied`` iff every criterion's derived status
+          is satisfied, preserving the gate's "block unless all criteria are
+          met" contract.
     """
 
     def __init__(self, llm_client=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("acceptance_verifier")
+        self.llm = llm_client
 
     def run(self, input_data: AcceptanceVerifierInput) -> AcceptanceVerifierOutput:
-        """Verify each acceptance criterion against the code."""
-        # Short-circuit on empty criteria — avoids an unnecessary LLM round-trip.
+        """Verify each acceptance criterion against the code.
+
+        Preconditions:
+            ``input_data`` is an ``AcceptanceVerifierInput``; ``acceptance_criteria``
+            may be empty.
+        Postconditions:
+            - With no criteria, returns ``all_satisfied=True`` and an empty list
+              without invoking the engine (no LLM round-trip).
+            - Otherwise returns one ``CriterionStatus`` per criterion derived from
+              the engine's findings, with ``all_satisfied`` true iff all are
+              satisfied. A review-engine failure returns
+              ``all_satisfied=False`` with an explanatory summary rather than
+              raising.
+        """
+        # Short-circuit on empty criteria — avoids an unnecessary engine round-trip.
         if not input_data.acceptance_criteria:
             return AcceptanceVerifierOutput(
                 all_satisfied=True, per_criterion=[], summary="No criteria to verify"
@@ -47,77 +121,37 @@ class AcceptanceVerifierAgent:
             len(input_data.code or ""),
         )
 
-        user_prompt = self._build_user_prompt(input_data)
-
-        # A fresh Strands Agent per call — reusing the same instance across
-        # calls breaks structured_output forced-tool-choice on the second
-        # call (Strands accumulates message history).
-        agent = Agent(model=self._model, system_prompt=ACCEPTANCE_VERIFIER_PROMPT)
-
         try:
-            agent_result = agent(user_prompt, structured_output_model=AcceptanceVerifierOutput)
-            result = agent_result.structured_output
-            if not isinstance(result, AcceptanceVerifierOutput):
-                raise TypeError(
-                    f"Expected AcceptanceVerifierOutput, "
-                    f"got {type(result).__name__ if result else 'None'}"
+            result = CodeReviewAgent(self.llm).run(
+                CodeReviewInput(
+                    code=input_data.code or "",
+                    task_description=input_data.task_description,
+                    acceptance_criteria=input_data.acceptance_criteria,
+                    spec_content=input_data.spec_content,
+                    architecture=input_data.architecture,
+                    language=input_data.language,
+                    profile=ReviewProfile.ACCEPTANCE,
                 )
-        except Exception as exc:  # noqa: BLE001 — LLM/validation failures must not crash the run
-            logger.warning(
-                "AcceptanceVerifier: structured_output failed (%s); returning fallback", exc
             )
+        except Exception as exc:  # noqa: BLE001 — engine failures must not crash the run
+            logger.warning("AcceptanceVerifier: review engine failed (%s); returning fallback", exc)
             return AcceptanceVerifierOutput(
                 all_satisfied=False,
                 per_criterion=[],
                 summary=f"Acceptance verification failed: {exc}",
             )
 
-        # Re-derive ``all_satisfied`` from the per-criterion list when present,
-        # so a disagreement between the LLM's top-level flag and the detailed
-        # statuses is resolved in favor of the detailed statuses.
-        if result.per_criterion:
-            result.all_satisfied = all(c.satisfied for c in result.per_criterion)
+        per_criterion = derive_per_criterion(input_data.acceptance_criteria, result.issues)
+        all_satisfied = all(c.satisfied for c in per_criterion)
 
         logger.info(
             "AcceptanceVerifier: %s/%s satisfied, all_satisfied=%s",
-            sum(1 for c in result.per_criterion if c.satisfied),
-            len(result.per_criterion),
-            result.all_satisfied,
+            sum(1 for c in per_criterion if c.satisfied),
+            len(per_criterion),
+            all_satisfied,
         )
-        return result
-
-    @staticmethod
-    def _build_user_prompt(input_data: AcceptanceVerifierInput) -> str:
-        """Assemble the user-facing prompt.
-
-        The persona (``ACCEPTANCE_VERIFIER_PROMPT``) lives on the Strands
-        ``Agent``'s system prompt. The user prompt carries the code and
-        the criteria to verify, plus an explicit schema hint. The phrases
-        "acceptance criteria verifier" and "per_criterion" MUST appear
-        here because ``DummyLLMClient.complete_json`` pattern-matches on
-        them to return a deterministic stub in tests — see
-        llm_service/README.md "Migration rule: keep pattern anchors in
-        the user prompt".
-        """
-        parts = [
-            "Acting as an acceptance criteria verifier, evaluate whether the "
-            "delivered code satisfies each acceptance criterion below. Produce "
-            "structured JSON with fields: all_satisfied, per_criterion, summary. "
-            "Each per_criterion entry must include criterion, satisfied, and "
-            "evidence.",
-            "",
-            f"**Language:** {input_data.language}",
-            f"**Task description:** {input_data.task_description}",
-            "**Acceptance criteria:**",
-            *[f"- {c}" for c in input_data.acceptance_criteria],
-            "**Code to verify:**",
-            "```",
-            input_data.code or "# No code",
-            "```",
-        ]
-        if input_data.spec_content:
-            parts.extend(["", "**Spec (excerpt):**", input_data.spec_content[:4000]])
-        if input_data.architecture:
-            parts.append(f"**Architecture:** {input_data.architecture.overview}")
-
-        return "\n".join(parts)
+        return AcceptanceVerifierOutput(
+            all_satisfied=all_satisfied,
+            per_criterion=per_criterion,
+            summary=result.summary or "Acceptance verification complete",
+        )

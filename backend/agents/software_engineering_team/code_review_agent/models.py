@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from software_engineering_team.shared.models import SystemArchitecture
 
+from .profiles import ReviewProfile
+
 ReviewProgressCallback = Callable[[str, str, float], None]
 """Progress callback signature: (step, detail, fraction in [0.0, 1.0]).
 
@@ -230,6 +232,11 @@ class ChunkReviewInput(BaseModel):
         description="Product/design questions the user has already answered ('question → answer' "
         "lines); the reviewer treats them as settled, not as open issues to flag.",
     )
+    profile: ReviewProfile = Field(
+        default=ReviewProfile.CODE_REVIEW,
+        description="Role/criteria profile selecting which reviewer persona and checklist the "
+        "chunk is judged against. Defaults to the standard code review.",
+    )
 
 
 class ChunkReviewOutput(BaseModel):
@@ -340,6 +347,19 @@ class CodeReviewInput(BaseModel):
         default=None,
         description="Product/design questions the user has already answered ('question → answer' "
         "lines); the reviewer treats them as settled facts, not as open issues to flag.",
+    )
+    profile: ReviewProfile = Field(
+        default=ReviewProfile.CODE_REVIEW,
+        description="Role/criteria profile selecting which reviewer persona and checklist the "
+        "engine applies (the gate calling the engine sets this). Defaults to the standard code "
+        "review, reproducing today's behavior for every existing caller.",
+    )
+    skip_false_positive_filter: bool = Field(
+        default=False,
+        description="When True, the coordinator skips the whole-codebase false-positive "
+        "re-check and stands behind the per-chunk findings as-is. Default False keeps the "
+        "filter on for every existing caller; an escape hatch for gates whose findings must "
+        "not be silently dropped.",
     )
 
     @model_validator(mode="after")

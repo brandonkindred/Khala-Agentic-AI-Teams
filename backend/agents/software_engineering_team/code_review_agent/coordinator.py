@@ -1162,6 +1162,7 @@ def run_coordinator(
         "architecture_overview": arch_overview,
         "existing_codebase_excerpt": existing_codebase or None,
         "user_decisions": input_data.user_decisions or None,
+        "profile": input_data.profile,
     }
 
     chunk_reviewer = ChunkReviewAgent(llm)
@@ -1195,7 +1196,14 @@ def run_coordinator(
         f"verifying {len(genuine_issues)} findings against the full codebase",
         0.92,
     )
-    verified = filter_false_positives(llm, input_data, genuine_issues)
+    if input_data.skip_false_positive_filter:
+        # The calling gate opted out of the whole-codebase re-check and stands
+        # behind its per-chunk findings as-is (e.g. a gate whose findings must
+        # never be silently dropped). Skipping is purely a removal of the
+        # drop-false-positives step, so it can only ever keep more findings.
+        verified = genuine_issues
+    else:
+        verified = filter_false_positives(llm, input_data, genuine_issues)
 
     notify_review_progress(
         progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
