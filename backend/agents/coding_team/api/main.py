@@ -49,6 +49,7 @@ from coding_team.github_source import (  # noqa: E402
     pick_ready_issue,
     render_annotated_hunks,
     scrub_token_from_text,
+    split_review_comments,
 )
 from coding_team.github_source.client import _is_safe_ref  # noqa: E402
 from coding_team.job_store import (  # noqa: E402
@@ -1394,12 +1395,14 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           bot did not author, else COMMENT) whose body carries only the summary.
           Every finding produces exactly one comment and no comment lists more than
           one finding: a finding tied to a changed line becomes an individual
-          line-anchored inline comment; a finding whose file changed but whose
-          cited line is off-diff becomes an individual file-level review comment;
-          only a finding naming a file absent from the diff is posted as a
-          standalone conversation comment, so no finding is dropped. Any failure
-          marks the job ``failed`` and posts a (token-scrubbed) PR comment — never
-          raises.
+          line-anchored inline comment carried in the single review (a stray
+          off-diff line is bisected out so the rest stay anchored); a finding whose
+          file changed but whose cited line is off-diff becomes an individual
+          file-level review comment posted on the dedicated comments endpoint (the
+          only one that accepts ``subject_type``); a standalone conversation
+          comment is used only as a last resort, when even a file-level post is
+          rejected, so no finding is dropped. Any failure marks the job ``failed``
+          and posts a (token-scrubbed) PR comment — never raises.
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
@@ -1490,7 +1493,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
 
-            # Re-anchor leftover findings (file not in diff) as file-level inline
+            # Re-anchor leftover findings (file not in diff) as file-level
             # comments on the first changed file in the diff, so they travel as
             # review comments rather than standalone top-level PR conversation
             # comments.  anchor_to_first_file returns None only when valid_by_path
@@ -1500,76 +1503,62 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 anchor_to_first_file(issue, valid_by_path) for issue in leftovers
             ]
             comments = comments + [c for c in anchored_leftovers if c is not None]
-            leftovers = []  # all leftovers re-anchored as file-level inline comments
+
+            # Two GitHub endpoints, two shapes. Line-anchored comments ride the
+            # single review; file-level comments (subject_type="file") go on the
+            # dedicated review-comments endpoint, which the reviews array rejects
+            # (it does not accept subject_type). Splitting them keeps one bad
+            # file-level entry from collapsing the whole review to the fallback.
+            line_comments, file_comments = split_review_comments(comments)
 
             body = build_review_body(
                 output.summary, output.spec_compliance_notes, issue_count=len(output.issues)
             )
             event = choose_event(output.issues, author=pr.author, reviewer=reviewer_login)
 
-            dropped = _submit_review(
-                client, owner, repo, pr_number, pr.head_sha, body, event, comments
+            # Submit line-anchored comments in the review, bisecting out any
+            # off-diff line so the rest stay anchored. Whatever GitHub still
+            # rejects is demoted to a file-level comment below.
+            dropped_lines = _submit_review(
+                client, owner, repo, pr_number, pr.head_sha, body, event, line_comments
             )
+            inline_count = len(line_comments) - len(dropped_lines)
 
-            # When the body-only fallback dropped inline comments, attempt a
-            # follow-up review that re-anchors each dropped comment as a file-level
-            # inline comment (subject_type="file") rather than posting them as
-            # standalone top-level PR conversation comments.
-            if dropped:
-                reanchored_file_comments: list[dict[str, Any]] = []
-                original_by_reanchored: dict[tuple[str, str], list[dict[str, Any]]] = {}
-                skipped_reanchor: list[dict[str, Any]] = []
-                for comment in dropped:
-                    path = comment.get("path")
-                    body_text = comment.get("body")
-                    if path and body_text:
-                        reanchored = {
-                            "path": path,
-                            "subject_type": "file",
-                            "body": body_text,
-                        }
-                        reanchored_file_comments.append(reanchored)
-                        original_by_reanchored.setdefault((path, body_text), []).append(comment)
-                    else:
-                        skipped_reanchor.append(comment)
-
-                if reanchored_file_comments:
+            # File-level comments (mapped + re-anchored leftovers) and any
+            # bisected-out line comments (demoted, keeping the file anchor) each
+            # go on the dedicated endpoint. A rejected line comment falls through
+            # as its original entry, so the standalone fallback still names
+            # ``path:line``.
+            file_comment_count = 0
+            standalone: list[dict[str, Any]] = []
+            for comment in file_comments + dropped_lines:
+                path = comment.get("path")
+                if path:
                     try:
-                        still_dropped = _submit_review(
-                            client,
-                            owner,
-                            repo,
-                            pr_number,
-                            pr.head_sha,
-                            "*(continued — additional findings)*",
-                            "COMMENT",
-                            reanchored_file_comments,
+                        client.create_review_comment(
+                            owner=owner,
+                            repo=repo,
+                            number=pr_number,
+                            commit_id=pr.head_sha,
+                            path=path,
+                            body=scrub_token_from_text(comment.get("body", "")),
+                            subject_type="file",
                         )
-                        dropped = list(skipped_reanchor)
-                        for comment in still_dropped:
-                            originals = original_by_reanchored.get(
-                                (comment.get("path", ""), comment.get("body", "") or "")
-                            )
-                            dropped.append(originals.pop(0) if originals else comment)
+                        file_comment_count += 1
+                        continue
                     except GitHubAPIError:
-                        # Last resort: fall through to standalone posting (extremely rare).
+                        # Last resort: fall through to standalone posting (rare).
                         pass
+                standalone.append(comment)
 
-            # Only truly-unpostable dropped findings fall through to standalone comments.
-            standalone_bodies = [inline_comment_to_timeline_body(c) for c in dropped]
+            # Only truly-unpostable findings fall through to standalone comments.
+            standalone_bodies = [inline_comment_to_timeline_body(c) for c in standalone]
             comments_failed = sum(
                 0 if _safe_comment(client, owner, repo, pr_number, body) else 1
                 for body in standalone_bodies
             )
 
-            # `comments` carries both line-anchored and file-level review
-            # comments; count them by shape (file-level entries carry
-            # "subject_type"). `dropped` is non-empty only on the rare body-only
-            # fallback, where every review comment was dropped and re-posted.
-            posted = comments if not dropped else []
-            inline_count = sum(1 for c in posted if "line" in c)
-            file_comment_count = sum(1 for c in posted if "subject_type" in c)
-            comment_findings = len(leftovers) + len(dropped)
+            comment_findings = len(standalone)
             review_summary = {
                 "total_issues": len(output.issues),
                 "inline_comments": inline_count,
@@ -1668,38 +1657,43 @@ def _submit_review(
     event: str,
     comments: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Submit the PR review, degrading gracefully on GitHub rejections.
+    """Submit the line-anchored review, bisecting out any off-diff comment.
 
     GitHub rejects the whole review (422) if it requests changes on the bot's own
     PR, or if any single inline comment lands off the diff. So: try the chosen
-    event with inline comments; on failure retry as COMMENT keeping the comments
-    (handles the self-PR case without losing inline feedback); on a further failure
-    retry as COMMENT with no inline comments (handles a stray bad line -- the caller
-    re-anchors dropped findings and only uses standalone comments as the last resort).
+    event with all comments; on failure retry as COMMENT keeping them (handles the
+    self-PR case without losing inline feedback). If the full batch still 422s, a
+    stray bad line is poisoning it — post the summary on its own so it is not lost,
+    then bisect the comments so only the genuinely-bad lines are dropped while the
+    rest stay anchored in (smaller) COMMENT reviews.
 
+    Preconditions:
+        - Every entry in ``comments`` is line-anchored (carries ``line``);
+          file-level comments are posted by the caller on the dedicated endpoint.
     Postconditions:
-        - Exactly one review is submitted on success; raises ``GitHubAPIError`` only
-          if every attempt fails. The review body and every inline-comment body are
-          token-scrubbed before submission (LLM output may echo a secret from the
-          reviewed code). Returns the inline comments that were *not* posted: ``[]``
-          when the successful attempt carried the inline comments, or the original
-          ``comments`` when it succeeded only by dropping them.
+        - Every comment GitHub accepts is submitted inline (in one review on the
+          happy path, or across bisected COMMENT reviews when a bad line forced a
+          split). The review body and every comment body are token-scrubbed before
+          submission (LLM output may echo a secret from the reviewed code). Returns
+          the original comments GitHub rejected even when submitted alone (``[]``
+          when all were posted); the caller demotes those to file-level comments.
     """
     # Scrub before anything leaves for GitHub: the body (LLM summary) and each
     # inline-comment body (LLM description/suggestion) can echo a token from the
-    # reviewed code, just like the standalone comments _safe_comment scrubs. Build
-    # scrubbed copies so the caller's ``comments`` (used for the dropped-set return
-    # and standalone re-posting) keep their original identity.
+    # reviewed code, just like the standalone comments _safe_comment scrubs. Pair
+    # each scrubbed comment with its original so the dropped set returned to the
+    # caller keeps the original identity (with its ``line``).
     body = scrub_token_from_text(body)
-    scrubbed = [{**c, "body": scrub_token_from_text(c.get("body", ""))} for c in comments]
-    attempts = [(event, scrubbed), ("COMMENT", scrubbed), ("COMMENT", [])]
+    pairs = [
+        ({**c, "body": scrub_token_from_text(c.get("body", ""))}, c) for c in comments
+    ]
+
+    # Happy path: one review carrying the summary body + every inline comment.
+    # REQUEST_CHANGES degrades to COMMENT for the bot's own PR without losing the
+    # comments.
+    events = [event] if event == "COMMENT" else [event, "COMMENT"]
     last_exc: Optional[GitHubAPIError] = None
-    seen: set[tuple[str, int]] = set()
-    for ev, cs in attempts:
-        key = (ev, len(cs))
-        if key in seen:
-            continue  # skip a redundant attempt (e.g. event already COMMENT)
-        seen.add(key)
+    for ev in events:
         try:
             client.create_pull_request_review(
                 owner=owner,
@@ -1708,17 +1702,78 @@ def _submit_review(
                 commit_id=head_sha,
                 body=body,
                 event=ev,
-                comments=cs,
+                comments=[p[0] for p in pairs],
             )
-            # When the successful attempt carried no inline comments (the final
-            # body-only fallback), every finding was dropped and the caller re-posts
-            # them as standalone comments; otherwise none were dropped.
-            return [] if cs else list(comments)
+            return []
         except GitHubAPIError as e:
-            logger.warning("PR review submit failed (event=%s, comments=%d): %s", ev, len(cs), e)
+            logger.warning("PR review submit failed (event=%s, comments=%d): %s", ev, len(pairs), e)
             last_exc = e
-    assert last_exc is not None
-    raise last_exc
+
+    if not pairs:
+        # No inline comments to bisect: the body-only review itself failed.
+        assert last_exc is not None
+        raise last_exc
+
+    # The full batch was rejected by a bad line. Post the summary on its own so it
+    # is not lost, then bisect the comments to drop only the offending ones.
+    try:
+        client.create_pull_request_review(
+            owner=owner,
+            repo=repo,
+            number=pr_number,
+            commit_id=head_sha,
+            body=body,
+            event="COMMENT",
+            comments=[],
+        )
+    except GitHubAPIError as e:
+        # Best effort — the bisected comments below still carry the findings.
+        logger.warning("PR review summary-only submit failed: %s", e)
+
+    return _bisect_submit(client, owner, repo, pr_number, head_sha, pairs)
+
+
+def _bisect_submit(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    pairs: List[tuple[Dict[str, Any], Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Post line-anchored comments as COMMENT reviews, bisecting on a 422.
+
+    Used only after the full-batch review failed and the summary was posted
+    separately, so each sub-review carries a continuation body rather than
+    repeating the summary.
+
+    Preconditions:
+        - ``pairs`` is a non-empty list of ``(scrubbed_comment, original_comment)``
+          tuples; both bodies are already token-scrubbed.
+    Postconditions:
+        - Submits one or more COMMENT reviews; every comment GitHub accepts is
+          posted inline. Returns the original comments GitHub still rejects when a
+          single comment is submitted on its own (``[]`` when all were posted).
+    """
+    try:
+        client.create_pull_request_review(
+            owner=owner,
+            repo=repo,
+            number=pr_number,
+            commit_id=head_sha,
+            body="*(continued — additional findings)*",
+            event="COMMENT",
+            comments=[p[0] for p in pairs],
+        )
+        return []
+    except GitHubAPIError as e:
+        logger.warning("PR review submit failed (event=COMMENT, comments=%d): %s", len(pairs), e)
+        if len(pairs) <= 1:
+            return [p[1] for p in pairs]
+        mid = len(pairs) // 2
+        return _bisect_submit(
+            client, owner, repo, pr_number, head_sha, pairs[:mid]
+        ) + _bisect_submit(client, owner, repo, pr_number, head_sha, pairs[mid:])
 
 
 # ---------------------------------------------------------------------------

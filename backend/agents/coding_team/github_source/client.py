@@ -537,12 +537,13 @@ class GitHubClient:
 
         Preconditions:
             - ``event`` is one of ``COMMENT``/``REQUEST_CHANGES``/``APPROVE``.
-            - Each entry in ``comments`` is either a line-anchored
+            - Each entry in ``comments`` is a **line-anchored**
               ``{"path", "line", "side", "body"}`` whose ``line`` falls on a line
-              present in the diff for ``commit_id``, or a file-level
-              ``{"path", "subject_type": "file", "body"}`` whose ``path`` is a file
-              the PR changes. GitHub rejects the *entire* review (422) if any
-              comment's line is invalid or its path is not in the diff.
+              present in the diff for ``commit_id``. The Reviews API's embedded
+              ``comments`` array does not accept ``subject_type``; file-level
+              comments must be posted via ``create_review_comment`` instead.
+              GitHub rejects the *entire* review (422) if any comment's line is
+              invalid or its path is not in the diff.
         Postconditions:
             - Returns the created review payload (carries ``id`` and ``html_url``).
               Raises ``GitHubAPIError`` on any non-2xx response.
@@ -558,6 +559,59 @@ class GitHubClient:
             self._request(
                 "POST",
                 f"/repos/{owner}/{repo}/pulls/{number}/reviews",
+                json=json_body,
+            )
+        )
+        return r.json()
+
+    def create_review_comment(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        number: int,
+        commit_id: str,
+        path: str,
+        body: str,
+        line: Optional[int] = None,
+        side: str = "RIGHT",
+        subject_type: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Post a single pull-request review comment on the dedicated endpoint.
+
+        Unlike the embedded ``comments`` array of ``create_pull_request_review``,
+        ``POST /pulls/{number}/comments`` accepts ``subject_type``, so it is the
+        only way to attach a finding to a file as a whole (``subject_type="file"``)
+        rather than to a specific diff line. Posting one comment at a time also
+        isolates failures: a single off-diff comment 422s on its own without
+        sinking a whole review's worth of inline feedback.
+
+        Preconditions:
+            - Exactly one anchor is supplied: either ``line`` (a 1-based line
+              present in the diff for ``commit_id``) or ``subject_type="file"``.
+            - ``path`` names a file the PR changes; ``commit_id`` is the PR head
+              SHA.
+            - ``body`` is already token-scrubbed by the caller (this method does
+              not scrub, matching ``create_pull_request_review``).
+        Postconditions:
+            - Returns the created-comment payload (carries ``id`` and
+              ``html_url``). Raises ``GitHubAPIError`` on any non-2xx response so
+              the caller can catch a 422 and degrade.
+        """
+        json_body: dict[str, Any] = {
+            "commit_id": commit_id,
+            "path": path,
+            "body": body,
+        }
+        if line is not None:
+            json_body["line"] = line
+            json_body["side"] = side
+        if subject_type is not None:
+            json_body["subject_type"] = subject_type
+        r = self._check(
+            self._request(
+                "POST",
+                f"/repos/{owner}/{repo}/pulls/{number}/comments",
                 json=json_body,
             )
         )

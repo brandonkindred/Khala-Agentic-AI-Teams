@@ -16,6 +16,7 @@ from coding_team.github_source.pr_review_mapping import (
     map_issues_to_comments,
     parse_valid_lines,
     render_annotated_hunks,
+    split_review_comments,
 )
 
 
@@ -205,6 +206,36 @@ def test_map_mixed_findings_split_three_ways() -> None:
         "body": format_comment_body(off_diff),
     } in comments
     assert len(comments) == 2
+
+
+# ---------------------------------------------------------------------------
+# split_review_comments
+# ---------------------------------------------------------------------------
+
+
+def test_split_review_comments_partitions_by_shape() -> None:
+    line_a = {"path": "a.py", "line": 2, "side": "RIGHT", "body": "x"}
+    file_b = {"path": "b.py", "subject_type": "file", "body": "y"}
+    line_c = {"path": "c.py", "line": 9, "side": "RIGHT", "body": "z"}
+    line_anchored, file_level = split_review_comments([line_a, file_b, line_c])
+    assert line_anchored == [line_a, line_c]  # order preserved
+    assert file_level == [file_b]
+    # No entry is dropped or duplicated.
+    assert len(line_anchored) + len(file_level) == 3
+
+
+def test_split_review_comments_empty() -> None:
+    assert split_review_comments([]) == ([], [])
+
+
+def test_split_review_comments_all_line_anchored() -> None:
+    items = [{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}]
+    assert split_review_comments(items) == (items, [])
+
+
+def test_split_review_comments_all_file_level() -> None:
+    items = [{"path": "a.py", "subject_type": "file", "body": "x"}]
+    assert split_review_comments(items) == ([], items)
 
 
 # ---------------------------------------------------------------------------

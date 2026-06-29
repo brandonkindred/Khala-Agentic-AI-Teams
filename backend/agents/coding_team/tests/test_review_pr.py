@@ -206,6 +206,56 @@ class TestCreatePullRequestReview:
             )
 
 
+class TestCreateReviewComment:
+    def test_line_comment_posts_line_and_side(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            import json as _json
+
+            captured["url"] = str(req.url)
+            captured["body"] = _json.loads(req.content)
+            return httpx.Response(201, json={"id": 9, "html_url": "https://example/comment/9"})
+
+        client = _client_with(handler)
+        out = client.create_review_comment(
+            owner="o", repo="r", number=7, commit_id="abc", path="a.py", body="fix", line=3
+        )
+        assert out["id"] == 9
+        assert captured["url"].endswith("/pulls/7/comments")
+        assert captured["body"]["commit_id"] == "abc"
+        assert captured["body"]["path"] == "a.py"
+        assert captured["body"]["line"] == 3
+        assert captured["body"]["side"] == "RIGHT"
+        assert "subject_type" not in captured["body"]
+
+    def test_file_comment_posts_subject_type_no_line(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            import json as _json
+
+            captured["body"] = _json.loads(req.content)
+            return httpx.Response(201, json={"id": 10})
+
+        client = _client_with(handler)
+        client.create_review_comment(
+            owner="o", repo="r", number=7, commit_id="abc", path="a.py",
+            body="fix", subject_type="file",
+        )
+        assert captured["body"]["subject_type"] == "file"
+        assert "line" not in captured["body"]
+        assert "side" not in captured["body"]
+
+    def test_422_raises(self) -> None:
+        client = _client_with(lambda _req: httpx.Response(422, text="bad file comment"))
+        with pytest.raises(GitHubAPIError):
+            client.create_review_comment(
+                owner="o", repo="r", number=7, commit_id="s", path="a.py",
+                body="b", subject_type="file",
+            )
+
+
 class TestAuthenticatedLogin:
     def test_returns_login(self) -> None:
         client = _client_with(lambda _req: httpx.Response(200, json={"login": "khala-bot"}))
@@ -255,12 +305,22 @@ class _FakeReviewClient:
         - ``fail_get_pr``: ``get_pull_request`` raises a 404 ``GitHubAPIError``.
         - ``review_fail_times``: the first N ``create_pull_request_review`` calls
           raise a 422, exercising the submit-degradation retry ladder.
+        - ``bad_lines``: any review whose comments include one of these line
+          numbers 422s, modelling a stray off-diff line and driving bisection.
+        - ``review_comment_fail_paths``: ``create_review_comment`` 422s for these
+          paths, exercising the file-level → standalone fallback.
         - ``review_exc``: a non-API exception raised on every review submit (to
           test the broad outer error handler).
         - ``comment_fail_times``: the first N ``add_issue_comment`` calls raise a
           403, exercising the per-finding comment failure path.
-    Captured side effects: ``reviews`` (each submitted review's kwargs) and
-    ``comments`` (each posted ``(issue_number, body)``).
+    Captured side effects: ``reviews`` (each submitted review's kwargs),
+    ``review_comments`` (each ``create_review_comment`` kwargs — the dedicated
+    review-comments endpoint that carries file-level comments), and ``comments``
+    (each posted standalone ``(issue_number, body)``).
+
+    Models the real GitHub constraint that the Reviews API's embedded ``comments``
+    array does not accept ``subject_type``: any such entry 422s the whole review,
+    so file-level comments must travel via ``create_review_comment``.
     """
 
     def __init__(self) -> None:
@@ -276,10 +336,14 @@ class _FakeReviewClient:
         ]
         self.login = "khala-bot"
         self.author = "alice"
-        self.reviews: list[dict[str, Any]] = []
+        self.reviews: list[dict[str, Any]] = []  # every attempt (success or 422)
+        self.submitted_reviews: list[dict[str, Any]] = []  # successful submits only
+        self.review_comments: list[dict[str, Any]] = []
         self.comments: list[tuple[int, str]] = []
         self.fail_get_pr = False
         self.review_fail_times = 0  # number of leading create_review calls that 422
+        self.bad_lines: set[int] = set()  # lines whose review 422s (drives bisection)
+        self.review_comment_fail_paths: set[str] = set()  # paths that 422 as file comments
         self.review_exc: Optional[Exception] = None  # non-API error to raise on submit
         self.comment_fail_times = 0  # number of leading add_issue_comment calls that 422
         self._comment_calls = 0
@@ -323,11 +387,26 @@ class _FakeReviewClient:
     def create_pull_request_review(self, **kwargs: Any) -> dict[str, Any]:
         if self.review_exc is not None:
             raise self.review_exc
+        comments = kwargs.get("comments") or []
+        # Real GitHub constraint: the reviews array rejects subject_type.
+        if any("subject_type" in c for c in comments):
+            self.reviews.append(kwargs)
+            raise GitHubAPIError(422, "subject_type not allowed in review comments")
+        if self.bad_lines and any(c.get("line") in self.bad_lines for c in comments):
+            self.reviews.append(kwargs)
+            raise GitHubAPIError(422, "bad line")
         if len(self.reviews) < self.review_fail_times:
             self.reviews.append(kwargs)
             raise GitHubAPIError(422, "bad line")
         self.reviews.append(kwargs)
+        self.submitted_reviews.append(kwargs)
         return {"id": 1, "html_url": "https://example/review/1"}
+
+    def create_review_comment(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs.get("path") in self.review_comment_fail_paths:
+            raise GitHubAPIError(422, "bad file comment")
+        self.review_comments.append(kwargs)
+        return {"id": 2, "html_url": "https://example/comment/2"}
 
 
 @pytest.fixture
@@ -403,18 +482,20 @@ class TestReviewEndpoint:
         assert len(gh.reviews) == 1
         review = gh.reviews[0]
         assert review["event"] == "REQUEST_CHANGES"
-        # The in-diff line (2) is a line-anchored comment; the out-of-diff line
-        # (999) on the same changed file attaches to the review as a file-level
-        # comment — both ride on the single review, neither in the body.
+        # The in-diff line (2) is a line-anchored comment carried in the review.
         line_comments = [c for c in review["comments"] if "line" in c]
-        file_comments = [c for c in review["comments"] if c.get("subject_type") == "file"]
         assert len(line_comments) == 1 and line_comments[0]["line"] == 2
-        assert len(file_comments) == 1 and file_comments[0]["path"] == "a.py"
-        assert "line" not in file_comments[0]
-        assert len(review["comments"]) == 2
+        assert len(review["comments"]) == 1
+        # The out-of-diff line (999) on the same changed file is a file-level
+        # comment posted on the dedicated endpoint (subject_type="file"),
+        # not in the review's comments array.
+        assert len(gh.review_comments) == 1
+        assert gh.review_comments[0]["path"] == "a.py"
+        assert gh.review_comments[0]["subject_type"] == "file"
+        assert "line" not in gh.review_comments[0]
         # The body is summary-only — no finding is batched into it.
         assert "General findings" not in review["body"]
-        # No loose conversation comments: every finding rode on the review.
+        # No loose conversation comments: every finding rode on the review/endpoint.
         assert gh.comments == []
         # Job completed with the PR url + review summary.
         job = review_app["jobs"].get_job(data["job_id"])
@@ -454,9 +535,9 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         gh = review_app["github"]["client"]
-        # One review carrying two file-level comments; no loose conversation comments.
-        assert len(gh.reviews) == 1
-        review_comments = gh.reviews[0]["comments"]
+        # Two file-level comments posted on the dedicated endpoint; the summary
+        # review carries no inline comments; no loose conversation comments.
+        review_comments = gh.review_comments
         assert all(c.get("subject_type") == "file" for c in review_comments)
         assert len(review_comments) == 2
         assert gh.comments == []
@@ -482,12 +563,12 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         gh = review_app["github"]["client"]
-        # The finding is re-anchored as a file-level inline comment on "a.py" —
-        # no standalone conversation comments for findings.
+        # The finding is re-anchored as a file-level comment on "a.py", posted via
+        # the dedicated endpoint — no standalone conversation comments for findings.
         assert gh.comments == []
-        review_comments = gh.reviews[0]["comments"]
-        file_comments = [c for c in review_comments if c.get("subject_type") == "file"]
+        file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
         assert len(file_comments) >= 1
+        assert file_comments[0]["path"] == "a.py"
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
         assert job["review_summary"]["file_comments"] >= 1
@@ -536,57 +617,66 @@ class TestReviewEndpoint:
         assert job["status"] == "completed"
         assert len(gh.reviews) == 2
         assert gh.reviews[-1]["event"] == "COMMENT"
-        # The retry kept both review comments (the in-diff inline + the off-diff
-        # file-level one), so nothing degraded to a loose conversation comment.
+        # The retry kept the line-anchored comment (in-diff inline), so nothing
+        # degraded to a loose conversation comment.
         assert gh.reviews[-1]["comments"] == gh.reviews[0]["comments"]
-        assert len(gh.reviews[-1]["comments"]) == 2
+        assert len(gh.reviews[-1]["comments"]) == 1
+        # The off-diff finding rode on the dedicated file-comment endpoint.
+        assert len(gh.review_comments) == 1
+        assert gh.review_comments[0]["subject_type"] == "file"
         assert gh.comments == []
 
-    def test_dropped_inline_findings_reanchored_as_file_level(self, review_app) -> None:
-        # When every attempt that carries comments 422s, the review degrades to a
-        # body-only COMMENT. The dropped findings are then re-anchored as file-level
-        # inline review comments in a follow-up review — no standalone comments.
+    def test_forced_degradation_still_posts_line_comment_via_bisection(self, review_app) -> None:
+        # When the full-batch review 422s on both the event and the COMMENT retry,
+        # the summary is posted on its own and the line-anchored comments are
+        # re-submitted (here, via the bisection path) so they stay inline — no
+        # standalone conversation comments.
         gh = review_app["github"]["client"]
-        gh.review_fail_times = 2  # both comment-carrying attempts 422; body-only wins
+        gh.review_fail_times = 2  # both full-batch attempts 422; bisection then succeeds
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        # At least 4 reviews: REQUEST_CHANGES (422) + COMMENT (422) + body-only +
-        # re-anchor follow-up with file-level inline comments.
-        assert len(gh.reviews) >= 4
-        # No standalone comments — dropped findings are re-anchored inline.
+        # No standalone comments — the line comment is re-posted inline.
         assert gh.comments == []
-        # The last review (re-anchor) carries file-level inline comments for dropped findings.
-        last_review = gh.reviews[-1]
-        file_comments = [c for c in last_review["comments"] if c.get("subject_type") == "file"]
-        assert len(file_comments) >= 1
+        # The in-diff line (2) survives as a line-anchored comment in a posted review.
+        posted_line_comments = [
+            c for rev in gh.submitted_reviews for c in rev.get("comments", []) if "line" in c
+        ]
+        assert any(c["line"] == 2 for c in posted_line_comments)
+        # The off-diff finding rode on the dedicated file-comment endpoint.
+        assert any(c.get("subject_type") == "file" for c in gh.review_comments)
+        assert job["review_summary"]["inline_comments"] == 1
         assert job["review_summary"]["comment_findings"] == 0
 
-    def test_multiple_dropped_inline_findings_each_reanchored_as_file_level(self, review_app) -> None:
-        # Several inline findings dropped by the body-only fallback are each
-        # re-anchored as file-level inline review comments (never posted standalone).
+    def test_bad_line_is_bisected_out_keeping_other_lines_inline(self, review_app) -> None:
+        # A single off-diff line must not collapse the whole review: the good lines
+        # stay inline and only the bad one is demoted to a file-level comment.
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("high", line=2, description="inline one"),
-                _FakeReviewIssue("high", line=3, description="inline two"),
+                _FakeReviewIssue("high", line=2, description="good line"),
+                _FakeReviewIssue("high", line=3, description="bad line"),
             ]
         )
         gh = review_app["github"]["client"]
-        gh.review_fail_times = 2  # both comment-carrying attempts 422; body-only wins
+        gh.bad_lines = {3}  # line 3 is rejected inline by GitHub
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        # No standalone comments — both dropped findings are re-anchored inline.
+        # The good line (2) is posted inline; the bad line (3) never lands in a
+        # successfully-submitted review.
+        posted_line_comments = [
+            c for rev in gh.submitted_reviews for c in rev.get("comments", []) if "line" in c
+        ]
+        assert any(c["line"] == 2 for c in posted_line_comments)
+        assert all(c["line"] != 3 for c in posted_line_comments)
+        # The bad line (3) is demoted to a file-level comment on its file.
+        demoted = [c for c in gh.review_comments if "bad line" in c.get("body", "")]
+        assert len(demoted) == 1 and demoted[0]["subject_type"] == "file"
         assert gh.comments == []
-        # The re-anchor follow-up review carries file-level inline comments for both.
-        last_review = gh.reviews[-1]
-        file_comments = [c for c in last_review["comments"] if c.get("subject_type") == "file"]
-        assert len(file_comments) == 2
-        bodies = [c["body"] for c in file_comments]
-        assert any("inline one" in b for b in bodies)
-        assert any("inline two" in b for b in bodies)
+        assert job["review_summary"]["inline_comments"] == 1
+        assert job["review_summary"]["file_comments"] == 1
         assert job["review_summary"]["comment_findings"] == 0
 
     def test_leftover_finding_posted_as_inline_not_standalone(self, review_app) -> None:
@@ -604,15 +694,15 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        # The review carries both: the line-anchored inline for "inline" and the
-        # file-level inline for "leftover" (re-anchored to "a.py").
+        # The review carries the line-anchored inline for "inline"; the leftover
+        # is a file-level comment (re-anchored to "a.py") on the dedicated endpoint.
         assert len(gh.reviews) == 1
-        review_comments = gh.reviews[0]["comments"]
-        line_comments = [c for c in review_comments if c.get("side") == "RIGHT"]
-        file_comments = [c for c in review_comments if c.get("subject_type") == "file"]
+        line_comments = [c for c in gh.reviews[0]["comments"] if c.get("side") == "RIGHT"]
+        file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
         assert len(line_comments) == 1  # the in-diff finding
         assert len(file_comments) == 1  # the re-anchored leftover
-        # No standalone comments — the leftover is inline now.
+        assert file_comments[0]["path"] == "a.py"
+        # No standalone comments — the leftover is a file-level review comment now.
         assert gh.comments == []
         assert job["review_summary"]["comment_findings"] == 0
 
@@ -632,10 +722,8 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        # All three leftovers became file-level inline comments in one review.
-        assert len(gh.reviews) == 1
-        review_comments = gh.reviews[0]["comments"]
-        file_comments = [c for c in review_comments if c.get("subject_type") == "file"]
+        # All three leftovers became file-level comments on the dedicated endpoint.
+        file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
         assert len(file_comments) == 3
         bodies = [c["body"] for c in file_comments]
         assert any("leftover one" in b for b in bodies)
@@ -655,93 +743,44 @@ class TestReviewEndpoint:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
 
-    def test_reanchor_follow_up_422_falls_back_to_standalone(self, review_app) -> None:
-        # Last-resort path: body-only review succeeds but the re-anchor follow-up
-        # also fails with a GitHubAPIError.  In that extreme case the dropped
-        # findings are posted as standalone top-level comments so they are not
-        # silently lost.
-        #
-        # Sequence:
-        #   attempt 1 — REQUEST_CHANGES + comments  → 422  (review_fail_times=2)
-        #   attempt 2 — COMMENT + comments          → 422
-        #   attempt 3 — body-only COMMENT           → succeeds (comments dropped)
-        #   re-anchor _submit_review call            → GitHubAPIError (patched)
-        #   last resort → _safe_comment for each dropped finding (standalone)
+    def test_file_comment_422_falls_back_to_standalone(self, review_app) -> None:
+        # Last-resort path: a file-level finding whose dedicated-endpoint post is
+        # rejected (422) falls through to a standalone conversation comment so it
+        # is not silently lost. The job still completes (the standalone succeeded).
         gh = review_app["github"]["client"]
-        gh.review_fail_times = 2  # first two comment-carrying attempts 422; body-only wins
-
-        # Patch _submit_review in api_main so the re-anchor follow-up call raises,
-        # triggering the last-resort standalone path.
-        api_main = review_app["api"]
-        original_submit = api_main._submit_review
-        call_count = {"n": 0}
-
-        def _submit_failing_on_second_call(*args: Any, **kwargs: Any) -> list:
-            call_count["n"] += 1
-            if call_count["n"] >= 2:
-                # This is the re-anchor follow-up call — make it fail.
-                raise GitHubAPIError(422, "re-anchor also failed")
-            return original_submit(*args, **kwargs)
-
-        import unittest.mock as _mock
-        with _mock.patch.object(api_main, "_submit_review", side_effect=_submit_failing_on_second_call):
-            # Use a HIGH finding so event=REQUEST_CHANGES, giving 3 distinct
-            # _submit_review attempts (REQUEST_CHANGES+inline, COMMENT+inline,
-            # body-only). review_fail_times=2 makes the first two fail, body-only
-            # succeeds and returns the dropped comments for re-anchoring.
-            review_app["github"]["agent_output"] = _FakeOutput(
-                issues=[_FakeReviewIssue("high", line=2, description="dropped finding")]
-            )
-            resp = review_app["client"].post("/review-pr", json=_review_body())
-
+        gh.review_comment_fail_paths = {"a.py"}  # every file-level post 422s
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[_FakeReviewIssue("low", line=999, file_path="a.py", description="dropped finding")]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-
-        # The re-anchor attempt also failed, so the finding falls through to
-        # add_issue_comment as the absolute last resort.
+        # No file-level comment landed; the finding fell through to add_issue_comment.
+        assert gh.review_comments == []
         assert len(gh.comments) >= 1, (
             f"Expected at least one standalone fallback comment, got gh.comments={gh.comments}"
         )
-        # Confirm the fallback comment body contains the finding text.
         assert any("dropped finding" in body for _n, body in gh.comments), (
             f"Fallback comment missing finding text: gh.comments={gh.comments}"
         )
+        assert job["review_summary"]["comment_findings"] == 1
 
-    def test_reanchor_follow_up_partial_drop_falls_back_to_standalone(self, review_app) -> None:
-        # Last-resort path: the re-anchor follow-up returns comments that still
-        # could not be posted without raising. Those findings must remain in the
-        # dropped set so the standalone fallback can preserve them.
+    def test_standalone_fallback_failure_marks_job_failed(self, review_app) -> None:
+        # When even the standalone last-resort comment cannot be posted, the
+        # "one comment per finding" contract is broken: the job is marked failed
+        # and a (best-effort) notice is posted on the PR.
         gh = review_app["github"]["client"]
-        gh.review_fail_times = 2  # first two comment-carrying attempts 422; body-only wins
-
-        api_main = review_app["api"]
-        original_submit = api_main._submit_review
-        call_count = {"n": 0}
-
-        def _submit_dropping_reanchor_comments(*args: Any, **kwargs: Any) -> list:
-            call_count["n"] += 1
-            if call_count["n"] >= 2:
-                return list(args[7])
-            return original_submit(*args, **kwargs)
-
-        import unittest.mock as _mock
-
-        with _mock.patch.object(
-            api_main, "_submit_review", side_effect=_submit_dropping_reanchor_comments
-        ):
-            review_app["github"]["agent_output"] = _FakeOutput(
-                issues=[_FakeReviewIssue("high", line=2, description="partially dropped finding")]
-            )
-            resp = review_app["client"].post("/review-pr", json=_review_body())
-
-        assert resp.status_code == 200
-        assert call_count["n"] == 2
-        job = review_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["status"] == "completed"
-        assert any("partially dropped finding" in body for _n, body in gh.comments), (
-            f"Fallback comment missing finding text: gh.comments={gh.comments}"
+        gh.review_comment_fail_paths = {"a.py"}  # file-level post 422s → standalone
+        gh.comment_fail_times = 1  # ...and the first standalone comment also fails
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[_FakeReviewIssue("low", line=999, file_path="a.py", description="lost finding")]
         )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert job["review_summary"]["comments_failed"] == 1
 
     def test_all_changed_files_are_reviewed_without_cap(self, review_app) -> None:
         gh = review_app["github"]["client"]
@@ -956,12 +995,10 @@ class TestBugConditionExploration:
             f"BUG CONFIRMED — finding posted as standalone comment: gh.comments = {gh.comments}"
         )
 
-        # The submitted review must carry a file-level inline comment for the finding.
-        assert len(gh.reviews) >= 1
-        review_comments = gh.reviews[-1].get("comments", [])
-        file_level = [c for c in review_comments if c.get("subject_type") == "file"]
+        # The finding must be posted as a file-level comment on the dedicated endpoint.
+        file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
         assert len(file_level) >= 1, (
-            f"BUG CONFIRMED — no file-level inline comment in review: review_comments = {review_comments}"
+            f"BUG CONFIRMED — no file-level review comment: review_comments = {gh.review_comments}"
         )
 
         # comment_findings must be 0: the finding was NOT posted as a standalone comment.
@@ -1002,11 +1039,10 @@ class TestBugConditionExploration:
             f"BUG CONFIRMED — finding with empty file_path posted as standalone: gh.comments = {gh.comments}"
         )
 
-        # The finding should appear in the review as a file-level inline comment.
-        review_comments = gh.reviews[-1].get("comments", []) if gh.reviews else []
-        file_level = [c for c in review_comments if c.get("subject_type") == "file"]
+        # The finding should be posted as a file-level comment on the dedicated endpoint.
+        file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
         assert len(file_level) >= 1, (
-            f"BUG CONFIRMED — no file-level inline comment for empty-path finding: review_comments = {review_comments}"
+            f"BUG CONFIRMED — no file-level comment for empty-path finding: review_comments = {gh.review_comments}"
         )
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
@@ -1043,12 +1079,11 @@ class TestBugConditionExploration:
             f"gh.comments = {gh.comments}"
         )
 
-        # Both findings must appear as file-level inline comments in the review.
-        review_comments = gh.reviews[-1].get("comments", []) if gh.reviews else []
-        file_level = [c for c in review_comments if c.get("subject_type") == "file"]
+        # Both findings must appear as file-level comments on the dedicated endpoint.
+        file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
         assert len(file_level) == 2, (
-            f"BUG CONFIRMED — expected 2 file-level inline comments, got {len(file_level)}: "
-            f"review_comments = {review_comments}"
+            f"BUG CONFIRMED — expected 2 file-level comments, got {len(file_level)}: "
+            f"review_comments = {gh.review_comments}"
         )
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
@@ -1057,41 +1092,35 @@ class TestBugConditionExploration:
         )
 
     def test_422_dropped_comments_reanchored_not_standalone(self, review_app) -> None:
-        """When a review submission 422s and falls back to body-only, the dropped inline
-        comments MUST NOT be reposted via add_issue_comment as standalone top-level
-        comments.  They must be re-anchored as file-level inline comments in a follow-up
-        review submission.
+        """When the full-batch review 422s on both the event and COMMENT attempts,
+        the line-anchored comments MUST NOT be reposted via add_issue_comment as
+        standalone top-level comments.  They must be re-submitted inline (via the
+        summary-only + bisection path) so every finding keeps a review anchor.
 
-        On UNFIXED code this test FAILS:
-          - gh.comments has entries for the dropped inline findings
+        On UNFIXED code this test FAILED:
+          - gh.comments had entries for the dropped inline findings
           - review_summary["comment_findings"] == 2  (not 0)
-
-        Counterexample:
-          gh.comments = [(7, '`a.py:2` — **[HIGH] logic** — desc'),
-                         (7, '`a.py` — **[LOW] logic** — desc')]
-          (Both dropped findings reposted as standalone conversation comments.)
         """
         gh = review_app["github"]["client"]
-        # Trigger both comment-carrying attempts to 422, forcing the body-only fallback
-        # where the inline comments are "dropped" and currently reposted as standalone.
+        # Trigger both full-batch attempts to 422, forcing the summary-only +
+        # bisection path where the inline comments are re-posted, not dropped.
         gh.review_fail_times = 2
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
 
-        # EXPECTED: no standalone comments for the dropped findings.
-        # The dropped comments should be re-anchored as file-level inline comments
-        # in an additional review submission.
+        # EXPECTED: no standalone comments for the findings.
         assert gh.comments == [], (
-            f"BUG CONFIRMED — dropped inline findings reposted as standalone comments: "
+            f"BUG CONFIRMED — findings reposted as standalone comments: "
             f"gh.comments = {gh.comments}"
         )
 
-        # After the body-only review, a follow-up review must carry the re-anchored comments.
-        # At minimum: ≥3 reviews total (REQUEST_CHANGES attempt, COMMENT attempt, body-only +
-        # follow-up re-anchor attempt).
-        assert len(gh.reviews) >= 3, (
-            f"Expected ≥3 review submissions (retry + body-only + re-anchor), got {len(gh.reviews)}"
+        # The in-diff line survives as a line-anchored comment in a posted review.
+        posted_line_comments = [
+            c for rev in gh.submitted_reviews for c in rev.get("comments", []) if "line" in c
+        ]
+        assert any(c["line"] == 2 for c in posted_line_comments), (
+            f"Expected the in-diff line to be re-posted inline, got reviews={gh.submitted_reviews}"
         )
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
@@ -1291,18 +1320,16 @@ class TestPreservationProperties:
         )
 
         assert len(gh.reviews) >= 1, "Expected at least one review submission"
-        all_comments = []
-        for rev in gh.reviews:
-            all_comments.extend(rev.get("comments", []))
-
+        # File-level comments are posted on the dedicated endpoint, not in the
+        # review's comments array.
         file_level = [
-            c for c in all_comments
+            c for c in gh.review_comments
             if c.get("subject_type") == "file" and c.get("path") == "a.py"
         ]
         assert len(file_level) == 1, (
             f"PRESERVATION BROKEN — expected exactly 1 file-level comment "
             f"(subject_type=file, path=a.py) for severity={severity}, line={line}, "
-            f"but found {len(file_level)}. all_comments={all_comments}"
+            f"but found {len(file_level)}. review_comments={gh.review_comments}"
         )
         assert "line" not in file_level[0], (
             f"PRESERVATION BROKEN — file-level comment must not have 'line' key. "
@@ -1494,9 +1521,14 @@ class TestPreservationProperties:
         solo_issues = [_FakeReviewIssue(in_sev, line=in_line, file_path=in_path, description=in_desc)]
         _r1, gh1, _j1 = self._post_review(review_app, solo_issues)
 
+        # A finding is routed to either the review (line-anchored) or the dedicated
+        # file-comment endpoint (file-level); aggregate both to see its routing.
+        # Line-anchored (review) comments come first so a line match wins over a
+        # same-path file-level re-anchor of an unrelated finding.
         all_comments_solo: list = []
         for rev in gh1.reviews:
             all_comments_solo.extend(rev.get("comments", []))
+        all_comments_solo.extend(gh1.review_comments)
 
         # Find the in-diff finding's comment in the solo run.
         in_diff_solo = [
@@ -1533,6 +1565,7 @@ class TestPreservationProperties:
         all_comments_mixed: list = []
         for rev in gh2.reviews:
             all_comments_mixed.extend(rev.get("comments", []))
+        all_comments_mixed.extend(gh2.review_comments)
 
         # Find the in-diff finding's comment in the mixed run.
         in_diff_mixed = [
@@ -1703,13 +1736,11 @@ class TestFixedRunPrReview:
             f"add_issue_comment was called for the leftover finding: gh.comments = {gh.comments}"
         )
 
-        # The submitted review must carry a file-level inline comment.
-        assert len(gh.reviews) >= 1
-        review_comments = gh.reviews[-1].get("comments", [])
-        file_level = [c for c in review_comments if c.get("subject_type") == "file"]
+        # The finding must be posted as a file-level comment on the dedicated endpoint.
+        file_level = [c for c in gh.review_comments if c.get("subject_type") == "file"]
         assert len(file_level) >= 1, (
-            f"Expected at least 1 file-level inline comment in the review, "
-            f"got 0. review_comments = {review_comments}"
+            f"Expected at least 1 file-level review comment, got 0. "
+            f"review_comments = {gh.review_comments}"
         )
         # The anchor path must be the first changed file ("a.py").
         assert file_level[0]["path"] == "a.py", (
@@ -1753,24 +1784,23 @@ class TestFixedRunPrReview:
             f"but got {gh.comments}"
         )
 
-        # All three findings must be present in the submitted review.
+        # All three findings must be present: one inline on the review, two on the
+        # dedicated file-comment endpoint.
         assert len(gh.reviews) >= 1
-        review_comments = gh.reviews[0].get("comments", [])
-
-        line_comments = [c for c in review_comments if c.get("side") == "RIGHT"]
-        file_comments = [c for c in review_comments if c.get("subject_type") == "file"]
+        line_comments = [c for c in gh.reviews[0].get("comments", []) if c.get("side") == "RIGHT"]
+        file_comments = [c for c in gh.review_comments if c.get("subject_type") == "file"]
 
         # on-diff finding → line-anchored
         assert len(line_comments) == 1, (
             f"Expected 1 line-anchored comment (on-diff), got {len(line_comments)}. "
-            f"review_comments = {review_comments}"
+            f"review comments = {gh.reviews[0].get('comments', [])}"
         )
         assert line_comments[0]["line"] == 2
 
-        # off-diff-line + off-diff-file → both file-level
+        # off-diff-line + off-diff-file → both file-level on the dedicated endpoint
         assert len(file_comments) == 2, (
             f"Expected 2 file-level comments (off-diff-line + off-diff-file), "
-            f"got {len(file_comments)}. review_comments = {review_comments}"
+            f"got {len(file_comments)}. review_comments = {gh.review_comments}"
         )
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
