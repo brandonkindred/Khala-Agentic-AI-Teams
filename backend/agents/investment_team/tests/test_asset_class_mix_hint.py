@@ -245,6 +245,24 @@ def test_exploit_mode_no_attributable_edge_falls_back_to_neutral() -> None:
     assert "crypto" in out.lower(), out
 
 
+def test_exploit_edge_steer_is_bounded_to_the_tail_window() -> None:
+    """The exploit edge map must use the same ``tail`` window as the recent
+    counts. An old, strong-scoring class that has dropped out of the recent
+    ``tail`` strategies must NOT be named as the edge — otherwise the prompt
+    would steer to a class its own counts line reports as absent."""
+    # Oldest three are high-scoring stocks; the most recent three are crypto.
+    records = [_record("stocks", annual=40.0, win=70.0) for _ in range(3)] + [
+        _record("crypto", annual=8.0, win=51.0) for _ in range(3)
+    ]
+    out = asset_class_mix_hint(records, tail=3, mode="exploit")
+    # Counts only see the recent window: crypto present, stocks absent.
+    assert "crypto=3" in out, out
+    assert "stocks=0" in out, out
+    # Steering must agree with the window — the stale stocks edge is excluded.
+    assert "crypto scores best" in out, out
+    assert "stocks scores best" not in out, out
+
+
 def test_invalid_mode_is_a_precondition_violation() -> None:
     """``mode`` outside the known set is a caller bug — fail loudly per DbC."""
     with pytest.raises(AssertionError):

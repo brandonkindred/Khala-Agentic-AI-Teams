@@ -540,7 +540,7 @@ def _or_join(items: List[str]) -> str:
 
 
 def _edge_exploitation_steer(
-    records: List[StrategyLabRecord], allowed: List[str], menu: str
+    records: List[StrategyLabRecord], allowed: List[str], menu: str, *, tail: int
 ) -> str:
     """Steer toward the allowed asset class with the best demonstrated edge.
 
@@ -550,12 +550,17 @@ def _edge_exploitation_steer(
     the dual-objective tie-break, and names the leader so the designer leans into
     its edge rather than rotating away from it.
 
-    Preconditions: ``allowed`` is non-empty; ``menu`` is its rendered list.
+    The edge map is bounded to the same ``tail`` window of executed records that
+    the caller's recent-counts line uses, so the steering can never name a class
+    that has dropped out of the recent window the counts report.
+
+    Preconditions: ``allowed`` is non-empty; ``menu`` is its rendered list;
+    ``tail >= 1``.
     Postconditions: returns a non-empty string. When no per-class edge is
     attributable yet (legacy / unparsed history), returns neutral menu text
     rather than fabricating a preference.
     """
-    agg = aggregate_prior_results(records)
+    agg = aggregate_prior_results(records, max_records=tail)
     buckets = sorted(
         (
             (value, stats)
@@ -705,6 +710,8 @@ def asset_class_mix_hint(
         return " ".join(parts)
 
     # mode == "exploit": objective is return/win-rate, so steer toward the
-    # class with the best demonstrated edge instead of forcing rotation.
-    parts.append(_edge_exploitation_steer(records, allowed, menu))
+    # class with the best demonstrated edge instead of forcing rotation. Bound
+    # the edge map to the same ``tail`` window as the recent-counts line above
+    # so the steering can never name a class that has dropped out of it.
+    parts.append(_edge_exploitation_steer(records, allowed, menu, tail=tail))
     return " ".join(parts)
