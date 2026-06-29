@@ -6,7 +6,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -16,6 +16,10 @@ from agentic_team_provisioning.agent_env_provisioning import schedule_provision_
 from agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
+from agentic_team_provisioning.manifest_generation import (
+    build_agent_manifest,
+    register_team_manifests,
+)
 from agentic_team_provisioning.models import (
     SOURCE_GENERATED,
     SOURCE_REGISTRY,
@@ -98,8 +102,6 @@ _pipeline_runner = get_pipeline_runner(_test_store)
 # are decoupled — a transient infrastructure failure must not hide an otherwise
 # usable roster from the registry for the lifetime of the process.
 try:
-    from agentic_team_provisioning.manifest_generation import register_team_manifests
-
     _existing_teams = _store.list_teams()
 except Exception as _e:
     logger.warning("Could not list existing teams for retroactive provisioning: %s", _e)
@@ -131,7 +133,7 @@ DEFAULT_SUGGESTIONS = [
 ]
 
 
-def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
+def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None) -> None:
     """Persist the LLM ``agents`` block, preserving any registry-source roster entries.
 
     The chat round-trips only generated agents, so a naive full replace would drop
@@ -175,8 +177,6 @@ def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
         # catalog and /api/agents/{id}/invoke resolve them (best-effort; skips
         # registry-source entries internally). Runs under the team lock so it's
         # serialized with the single-agent routes' registry cleanup.
-        from agentic_team_provisioning.manifest_generation import register_team_manifests
-
         register_team_manifests(team_id, merged)
 
     # Merge under a team-row lock so the read (preserve registry agents), the write,
@@ -262,8 +262,11 @@ def list_team_agent_manifests(team_id: str):
         **omitted** rather than advertised with a synthetic generated id this team
         never registered (which would 404 on invoke). ``404`` if the team is unknown.
     """
+    # ``get_registry`` is imported inline (not at module top) so the test suite's
+    # ``monkeypatch.setattr("agent_registry.get_registry", …)`` is resolved at call
+    # time — a top-level ``from agent_registry import get_registry`` would bind the
+    # name before the patch and bypass the fake registry.
     from agent_registry import get_registry
-    from agentic_team_provisioning.manifest_generation import build_agent_manifest
 
     team = _store.get_team(team_id)
     if not team:
@@ -350,8 +353,10 @@ def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> Non
         (mirrors ``register_team_manifests``, which logs registry errors not raises).
     """
     try:
+        # ``get_registry`` stays inline so tests' ``monkeypatch`` of
+        # ``agent_registry.get_registry`` resolves at call time (see
+        # ``list_team_agent_manifests``).
         from agent_registry import get_registry
-        from agentic_team_provisioning.manifest_generation import build_agent_manifest
 
         get_registry().unregister(build_agent_manifest(team_id, agent).id)
     except Exception:

@@ -119,8 +119,13 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
           ``source.entrypoint`` points at the roster-agent factory, and ``id`` is
           the stable, collision-free :func:`manifest_agent_id`.
     """
-    assert team_id, "build_agent_manifest: team_id must be non-empty"
-    assert agent.agent_name, "build_agent_manifest: agent.agent_name must be non-empty"
+    # Explicit validation rather than ``assert`` (which ``python -O`` strips): these
+    # are real boundary preconditions — silently skipping them under ``-O`` would
+    # build an id from an empty key and could mis-scope the stale-cleanup prefix.
+    if not team_id:
+        raise ValueError("build_agent_manifest: team_id must be non-empty")
+    if not agent.agent_name:
+        raise ValueError("build_agent_manifest: agent.agent_name must be non-empty")
 
     manifest_id = manifest_agent_id(team_id, agent.agent_name)
     summary = agent.role or f"Generated agent {agent.agent_name}"
@@ -173,7 +178,11 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
           appearing in the catalog. In-memory and idempotent. Best-effort — a
           registry failure is logged, never raised, so generation still succeeds.
     """
-    assert team_id, "register_team_manifests: team_id must be non-empty"
+    # Explicit validation rather than ``assert`` (``python -O`` strips asserts): an
+    # empty ``team_id`` would compute a degenerate cleanup prefix, so fail loud here
+    # in optimized builds too instead of silently scanning the wrong id space.
+    if not team_id:
+        raise ValueError("register_team_manifests: team_id must be non-empty")
     # Only *generated* roster agents get a team-namespaced wrapper installed here.
     # Registry-source agents (added via Agent Studio's from-registry endpoint)
     # already exist in the registry on their own, so wrapping them would register a
