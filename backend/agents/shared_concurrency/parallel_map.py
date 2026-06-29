@@ -41,7 +41,7 @@ def parallel_map(
     skip_none: bool = True,
     propagate_context: bool = True,
     on_first_exception: Optional[Callable[[], None]] = None,
-) -> list:
+) -> list[Optional[R]]:
     """Run ``fn(item)`` concurrently across *items* in a bounded thread pool.
 
     This is the single, correct home for the bounded-fan-out pattern. The
@@ -83,11 +83,14 @@ def parallel_map(
             swallowed.
 
     Returns:
-        The list of results — element type ``R``, plus ``None`` entries when
-        ``skip_none`` is False (the annotation is a bare ``list`` because the
-        element type depends on the ``skip_none`` flag). Length equals
-        ``len(items)`` unless ``skip_none`` dropped some (or a worker raised, in
-        which case nothing is returned).
+        ``list[Optional[R]]`` — results in input (or completion) order. With the
+        default ``skip_none=True`` every element is an ``R`` (the ``None``\\ s are
+        filtered out); with ``skip_none=False`` a ``None`` element marks a task
+        whose ``fn`` returned ``None``. The annotation is ``Optional[R]`` rather
+        than ``R`` because it must stay sound for the ``skip_none=False`` path;
+        callers on that path should treat elements as possibly ``None``. Length
+        equals ``len(items)`` unless ``skip_none`` dropped some (or a worker
+        raised, in which case nothing is returned).
 
     Preconditions (enforced — invalid input raises at the boundary, and the
     checks survive ``python -O`` which strips ``assert``):
