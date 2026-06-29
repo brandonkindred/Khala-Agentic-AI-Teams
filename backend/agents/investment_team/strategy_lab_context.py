@@ -539,24 +539,93 @@ def _or_join(items: List[str]) -> str:
     return ", ".join(items[:-1]) + ", or " + items[-1]
 
 
+def _edge_exploitation_steer(
+    records: List[StrategyLabRecord], allowed: List[str], menu: str
+) -> str:
+    """Steer toward the allowed asset class with the best demonstrated edge.
+
+    The objective-aware counterpart to the diversity nudge. Ranks the marginal
+    ``asset_class`` attribution buckets from :func:`aggregate_prior_results`
+    (restricted to ``allowed``) by mean annualized return, then mean win rate as
+    the dual-objective tie-break, and names the leader so the designer leans into
+    its edge rather than rotating away from it.
+
+    Preconditions: ``allowed`` is non-empty; ``menu`` is its rendered list.
+    Postconditions: returns a non-empty string. When no per-class edge is
+    attributable yet (legacy / unparsed history), returns neutral menu text
+    rather than fabricating a preference.
+    """
+    agg = aggregate_prior_results(records)
+    buckets = sorted(
+        (
+            (value, stats)
+            for (dim, value), stats in agg.items()
+            if dim == "asset_class" and value in allowed
+        ),
+        key=lambda kv: (kv[1]["annual_return"], kv[1]["win_rate"]),
+        reverse=True,
+    )
+    if not buckets:
+        return (
+            f"No per-class edge attributable yet — choose **asset_class** from {menu}: "
+            "pick the class that best fits your strongest multi-signal edge."
+        )
+    top_value, top_stats = buckets[0]
+    return (
+        "Objective is return/win-rate — **lean into your demonstrated edge**: "
+        f"{top_value} scores best so far (annual {top_stats['annual_return']:.1f}%, "
+        f"win {top_stats['win_rate']:.1f}%, n={top_stats['n']}). Prefer the "
+        "highest-scoring class when a coherent thesis fits rather than rotating away "
+        "from it; pick another class only when your edge there is clearly stronger."
+    )
+
+
 def asset_class_mix_hint(
     records: List[StrategyLabRecord],
     *,
     tail: int = 24,
     exclude: Optional[List[str]] = None,
+    mode: str = "explore",
 ) -> str:
-    """Steer the LLM toward a balanced mix of asset classes across lab runs.
+    """Steer the LLM's asset-class choice, objective-aware.
+
+    ``mode`` selects how the hint steers once executed history exists:
+
+    - ``"exploit"`` — the run's objective is to maximize return/win rate, so
+      steer **toward** the asset class with the best demonstrated edge (highest
+      mean annualized return, win rate as the dual-objective tie-break) drawn
+      from :func:`aggregate_prior_results`, rather than rotating away from a
+      class the agent is winning in.
+    - ``"explore"`` (default) — portfolio-diversity steering: nudge **away**
+      from an over-represented class (the anti-equities concentration nudge) and
+      toward the least-used / underrepresented classes. The default preserves
+      the historical hint for callers that have not opted into objective-aware
+      steering; the design agent passes ``exploit`` explicitly via its own
+      ``STRATEGY_LAB_DIVERSITY_MODE`` resolution.
 
     ``exclude`` (optional) names asset classes the design agent is forbidden to
     pick this run — the complement of a user's allowed-category selection. It is
     typed ``List[str]`` (not ``Iterable[str]``) deliberately: ``str`` is itself
     iterable, so an ``Iterable[str]`` annotation would silently accept a bare
     string and iterate its characters. When provided, the menu, recent-class
-    counts, and underrepresented-class steering are all restricted to the
-    still-allowed classes so the hint never nudges the model toward a class the
-    run is not permitted to use. When ``exclude`` is ``None`` / empty the output
-    is identical to the unconstrained hint.
+    counts, and all steering (both modes) are restricted to the still-allowed
+    classes so the hint never nudges the model toward a class the run is not
+    permitted to use. When ``exclude`` is ``None`` / empty the output spans the
+    full ideation-valid set.
+
+    Preconditions:
+      - ``mode in {"exploit", "explore"}`` (callers resolve unknown values to a
+        default before calling).
+    Postconditions:
+      - Returns a non-empty string. With no records / no executed backtests the
+        output is the neutral menu text, identical across modes (no edge or
+        concentration to steer on yet).
+      - ``explore`` output is identical to the historical diversity hint.
+      - ``exploit`` output never emits the anti-equities rotation nudge; it
+        names the highest-scoring allowed class when an attributable per-class
+        edge exists, else stays neutral.
     """
+    assert mode in ("exploit", "explore"), f"mode must be 'exploit' or 'explore', got {mode!r}"
     allowed = [c for c in PROMPT_ASSET_CLASSES if c not in set(exclude or ())]
     if not allowed:
         # Defensive: an exclusion covering every class would leave nothing to
@@ -612,23 +681,30 @@ def asset_class_mix_hint(
             counts["stocks"] += 1
 
     n_sample = len(sample)
-    stock_share = counts.get("stocks", 0) / n_sample if n_sample else 0.0
-    min_n = min(counts.values())
-    underrep = [c for c, n in counts.items() if n == min_n]
-
     parts: List[str] = [
         "Recent asset-class counts (last "
         f"{n_sample} strategies): " + ", ".join(f"{k}={v}" for k, v in counts.items()) + "."
     ]
-    if "stocks" in counts and stock_share > 0.35 and n_sample >= 2:
-        non_stock = [c for c in allowed if c != "stocks"]
-        if non_stock:
-            parts.append(
-                "Equities are relatively heavy in this window — **strongly prefer** "
-                f"{_or_join(non_stock)} for this run if you can state coherent rules."
-            )
-    parts.append(
-        "Underrepresented line(s) to favor when ties: "
-        f"{', '.join(underrep)} — use one of these **unless** your thesis clearly requires a different class."
-    )
+    if mode == "explore":
+        # Portfolio-diversity steering: push away from an over-represented class
+        # and toward the least-used ones.
+        stock_share = counts.get("stocks", 0) / n_sample if n_sample else 0.0
+        min_n = min(counts.values())
+        underrep = [c for c, n in counts.items() if n == min_n]
+        if "stocks" in counts and stock_share > 0.35 and n_sample >= 2:
+            non_stock = [c for c in allowed if c != "stocks"]
+            if non_stock:
+                parts.append(
+                    "Equities are relatively heavy in this window — **strongly prefer** "
+                    f"{_or_join(non_stock)} for this run if you can state coherent rules."
+                )
+        parts.append(
+            "Underrepresented line(s) to favor when ties: "
+            f"{', '.join(underrep)} — use one of these **unless** your thesis clearly requires a different class."
+        )
+        return " ".join(parts)
+
+    # mode == "exploit": objective is return/win-rate, so steer toward the
+    # class with the best demonstrated edge instead of forcing rotation.
+    parts.append(_edge_exploitation_steer(records, allowed, menu))
     return " ".join(parts)
