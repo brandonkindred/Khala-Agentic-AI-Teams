@@ -153,7 +153,7 @@ class PostMortemWriter:
 - **Decomposition depth**: {decomposition_depth}/{max_decomposition_depth} levels reached
 - **Final error**: `{error_str}`
 
-### Original Prompt (truncated)
+### Original Prompt
 
 ```
 {prompt_preview}

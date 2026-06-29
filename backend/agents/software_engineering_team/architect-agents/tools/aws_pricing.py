@@ -103,7 +103,7 @@ def aws_pricing_tool(
         result["assumptions"].append("Parsed from AWS Pricing API")
         # Full parsing of PriceList would go here
         result["estimated_monthly_usd"] = "See raw response"
-        result["raw"] = str(api_result)
+        result["raw"] = str(api_result)[:2000]
         return json.dumps(result, indent=2)
 
     # Fallback to static estimates

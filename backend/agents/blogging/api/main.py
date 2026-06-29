@@ -384,7 +384,7 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
             for tc in plan.title_candidates
         ],
         outline=outline,
-        draft_preview=draft_result.draft,
+        draft_preview=draft_result.draft[:2000],
         content_plan_summary=content_plan_summary_text(plan),
     )
 
@@ -1561,7 +1561,7 @@ def list_jobs(running_only: bool = False) -> List[BlogJobListItem]:
         BlogJobListItem(
             job_id=job.get("job_id", ""),
             status=job.get("status", "pending"),
-            brief=job.get("brief", ""),
+            brief=job.get("brief", "")[:100],
             phase=job.get("phase"),
             progress=job.get("progress", 0),
             created_at=job.get("created_at"),

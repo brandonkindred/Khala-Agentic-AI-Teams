@@ -233,7 +233,7 @@ def run_dbc_comments(
             except Exception:
                 continue
             code_parts.append(f"--- {f.relative_to(repo_path)} ---\n{content}")
-        code = "\n".join(code_parts)
+        code = "\n".join(code_parts)[:100_000]
         if not code:
             return DbcResult(compliant=True)
 

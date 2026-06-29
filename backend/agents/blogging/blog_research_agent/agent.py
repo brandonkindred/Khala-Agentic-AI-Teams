@@ -539,7 +539,7 @@ class ResearchAgent:
                 type(e).__name__,
             )
             raw = (doc.content or "").strip().replace("\n", " ")
-            summary = ( raw or f"(Source: {doc.title or doc.url})")
+            summary = (raw[:500] if len(raw) > 500 else raw) or f"(Source: {doc.title or doc.url})"
             key_points = []
         return ResearchReference(
             title=doc.title or str(doc.url),

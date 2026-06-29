@@ -212,7 +212,7 @@ def notify_pa_response(
     if not cfg.get("enabled") or not bool(cfg.get("notify_pa_responses", True)):
         return
 
-    text = f"*User ({user_id}):* {user_message}\n*Assistant:* {response_message}"
+    text = f"*User ({user_id}):* {user_message[:500]}\n*Assistant:* {response_message[:1500]}"
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",

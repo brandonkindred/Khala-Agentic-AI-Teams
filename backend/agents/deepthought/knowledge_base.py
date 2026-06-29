@@ -87,7 +87,7 @@ class SharedKnowledgeBase:
             parts: list[str] = []
             total = 0
             for e in self._entries:
-                line = f"- [{e.agent_name}] {e.finding}"
+                line = f"- [{e.agent_name}] {e.finding[:200]}"
                 if total + len(line) > max_chars:
                     parts.append(
                         f"... and {len(self._entries) - len(parts)} more entries (truncated)"
