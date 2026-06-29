@@ -96,6 +96,33 @@ Your task: Analyze the build errors and produce bug reports with clear "recommen
 - If multiple errors, list each with its fix. The coding agent will implement them.
 """
 
+# Standalone persona for acceptance_evidence mode. Unlike fix_build/write_tests
+# (which extend the bug-review task), this mode performs release validation and
+# must NOT inherit the bug-review instructions in ``QA_PROMPT`` — concatenating
+# the two gives the model contradictory directions ("review code for bugs" vs
+# "do NOT review source code"). It is therefore used on its own.
+QA_PROMPT_ACCEPTANCE_EVIDENCE = (
+    """You are a Software Quality Assurance Expert performing release validation.
+
+In this mode you do NOT review source code for bugs. Instead, interpret the
+provided tool/test results (IaC, pipeline, deploy, unit, integration, etc.) and
+map that evidence back to the acceptance criteria.
+
+Produce a single JSON object with these fields (leave bugs_found empty):
+- "approved": boolean — overall pass/fail judgement.
+- "quality_gates": object mapping each gate name to one of "pass" | "fail" | "skipped" | "not_run".
+- "acceptance_trace": list of objects, each {criterion, implementation_refs, tests}.
+- "validation_evidence": list of objects, each {gate, status, detail}.
+- "summary": string — concise verdict.
+
+Rules:
+- If any gate is "fail", overall approval MUST be false.
+- Only report gates and evidence that the tool_results actually support; mark
+  missing checks as "not_run" rather than inventing a pass.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+)
+
 QA_PROMPT_WRITE_TESTS = """
 **MODE: write_tests** – Focus on producing unit_tests and integration_tests for the code below.
 - For React/TypeScript: use Jest/React Testing Library for unit tests (*.test.tsx), Cypress or Playwright for e2e.

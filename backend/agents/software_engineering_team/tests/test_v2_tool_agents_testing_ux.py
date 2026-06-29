@@ -254,3 +254,64 @@ class TestFEUxUsability:
         _patch(monkeypatch, mod, "not json")
         out = a.review(_fe_phase_input(current_files={"a.tsx": "x"}))
         assert out.issues == []
+
+
+# ---------------------------------------------------------------------------
+# Collapse onto SharedTestingQAToolAgent: per-team parity preserved
+# ---------------------------------------------------------------------------
+
+
+class TestTestingQACollapse:
+    # These tests assert class-level attributes and MRO only, so they use
+    # ``__new__`` to skip ``__init__`` (which would resolve a Strands model and
+    # need an LLM). This mirrors the other tool-agent tests in this module.
+    def _be_agent(self):
+        from software_engineering_team.backend_code_v2_team.tool_agents.testing_qa.agent import (
+            TestingQAToolAgent,
+        )
+
+        return TestingQAToolAgent.__new__(TestingQAToolAgent)
+
+    def _fe_agent(self):
+        from software_engineering_team.frontend_code_v2_team.tool_agents.testing_qa.agent import (
+            TestingQAToolAgent,
+        )
+
+        return TestingQAToolAgent.__new__(TestingQAToolAgent)
+
+    def test_both_subclass_shared_base(self):
+        from software_engineering_team.shared.testing_qa_tool_agent import (
+            SharedTestingQAToolAgent,
+        )
+
+        assert isinstance(self._be_agent(), SharedTestingQAToolAgent)
+        assert isinstance(self._fe_agent(), SharedTestingQAToolAgent)
+
+    def test_shared_attributes_are_identical(self):
+        be, fe = self._be_agent(), self._fe_agent()
+        for attr in (
+            "name",
+            "empty_label",
+            "issue_source",
+            "problem_solve_sources",
+            "max_code_chars",
+            "max_relevant_code_chars",
+            "review_parse_mode",
+            "plan_summary",
+        ):
+            assert getattr(be, attr) == getattr(fe, attr)
+        assert be.issue_source == "qa"
+        assert be.problem_solve_sources == ("qa", "testing_qa", "tool_testing_qa")
+
+    def test_per_team_plan_recommendations_differ(self):
+        be_plan = self._be_agent().plan(_be_phase_input())
+        fe_plan = self._fe_agent().plan(_fe_phase_input())
+        assert "integration tests" in be_plan.recommendations[0]
+        assert "e2e tests" in fe_plan.recommendations[0]
+
+    def test_backend_injects_language_conventions_via_mro(self):
+        # Backend MRO must still pick up BackendReviewToolAgent._problem_solving_kwargs.
+        kwargs = self._be_agent()._problem_solving_kwargs(_be_phase_input(language="python"))
+        assert "language_conventions" in kwargs
+        # Frontend has no such injection.
+        assert self._fe_agent()._problem_solving_kwargs(_fe_phase_input()) == {}

@@ -5,10 +5,18 @@ model returned by ``get_strands_model`` is passed to a Strands ``Agent`` so the
 agent inherits retries, per-agent model routing, telemetry, and the
 dummy-client path for tests.
 
-The agent supports three request modes — ``default``, ``fix_build``, and
-``write_tests`` — each with a distinct system prompt. Because Strands
-``Agent`` fixes its ``system_prompt`` at construction time, we build one
-``Agent`` per mode up front and dispatch to the right one at call time.
+The agent supports four request modes — ``default``, ``fix_build``,
+``write_tests``, and ``acceptance_evidence`` — each with a distinct system
+prompt. Because Strands ``Agent`` fixes its ``system_prompt`` at construction
+time, we hold one system prompt per mode and build a fresh ``Agent`` with the
+selected persona at call time.
+
+The ``acceptance_evidence`` mode absorbs the former DevOps test-validation
+surface: it maps tool/test results to acceptance criteria and emits
+``quality_gates``/``acceptance_trace``/``validation_evidence``. It runs through
+the same ``structured_output_model`` path as the other modes (the previous
+raw-JSON + ``think=True`` implementation is an internal detail, not part of the
+output contract).
 """
 
 from __future__ import annotations
@@ -21,7 +29,12 @@ from strands import Agent
 from llm_service import get_strands_model
 
 from .models import QAInput, QAOutput
-from .prompts import QA_PROMPT, QA_PROMPT_FIX_BUILD, QA_PROMPT_WRITE_TESTS
+from .prompts import (
+    QA_PROMPT,
+    QA_PROMPT_ACCEPTANCE_EVIDENCE,
+    QA_PROMPT_FIX_BUILD,
+    QA_PROMPT_WRITE_TESTS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +43,19 @@ class QAExpertAgent:
     """
     QA expert that reviews code for bugs, fixes them, runs live testing,
     and ensures adequate integration tests.
+
+    Approval semantics (note for consumers of ``QAOutput.approved``): the agent
+    re-derives ``approved`` rather than trusting the LLM's raw flag, and the rule
+    is mode-dependent. In the bug-review modes (``default``/``fix_build``/
+    ``write_tests``) ``approved`` means **"no critical/high bugs"** — a
+    long-standing behavior, not a holistic LLM verdict, so code with only
+    medium/low issues can still be approved. In ``acceptance_evidence`` mode
+    ``approved`` is the LLM verdict AND the absence of any failing quality gate.
     """
 
     def __init__(self, llm_client=None) -> None:
         from strands.models.model import Model as _StrandsModel
+
         if llm_client is not None and isinstance(llm_client, _StrandsModel):
             self._model = llm_client
         else:
@@ -45,6 +67,10 @@ class QAExpertAgent:
             "default": QA_PROMPT,
             "fix_build": QA_PROMPT + "\n\n" + QA_PROMPT_FIX_BUILD,
             "write_tests": QA_PROMPT + "\n\n" + QA_PROMPT_WRITE_TESTS,
+            # Standalone persona: acceptance_evidence is release validation, not
+            # bug review, so it must NOT inherit QA_PROMPT's bug-review directions
+            # (which would contradict "do NOT review source code for bugs").
+            "acceptance_evidence": QA_PROMPT_ACCEPTANCE_EVIDENCE,
         }
 
     def run(self, input_data: QAInput) -> QAOutput:
@@ -86,11 +112,19 @@ class QAExpertAgent:
                 suggested_commit_message="",
             )
 
-        # Re-derive ``approved`` from severities so a disagreement between the
-        # LLM's ``approved`` flag and the reported bug list is resolved in
-        # favor of the bug list.
-        critical_or_high = [b for b in result.bugs_found if b.severity in ("critical", "high")]
-        result.approved = len(critical_or_high) == 0
+        # Re-derive ``approved``. The rule differs by mode and the two must not
+        # be unified: in acceptance_evidence mode a failing quality gate is the
+        # blocking signal (mirroring the former DevOpsTestValidationAgent),
+        # whereas the bug-review modes block on critical/high bug severities.
+        if mode == "acceptance_evidence":
+            # ``.strip().lower()`` mirrors ``DevOpsTestValidationAgent._coerce_gate_status``
+            # so a whitespace-padded ``" fail "`` from the model still blocks approval.
+            result.approved = bool(result.approved) and not any(
+                (v or "").strip().lower() == "fail" for v in result.quality_gates.values()
+            )
+        else:
+            critical_or_high = [b for b in result.bugs_found if b.severity in ("critical", "high")]
+            result.approved = len(critical_or_high) == 0
 
         logger.info(
             "QA: done, %s issues found, approved=%s",
@@ -105,6 +139,8 @@ class QAExpertAgent:
             return "fix_build"
         if input_data.request_mode == "write_tests":
             return "write_tests"
+        if input_data.request_mode == "acceptance_evidence":
+            return "acceptance_evidence"
         return "default"
 
     @staticmethod
@@ -116,7 +152,35 @@ class QAExpertAgent:
         carries the code under review and its context. An explicit schema
         hint (``bugs_found``, ``test_plan``, ...) makes the expected output
         shape unambiguous for the LLM.
+
+        Preconditions: ``input_data`` is a valid :class:`QAInput`.
+        Postconditions: returns a non-empty str. In ``acceptance_evidence`` mode
+        the prompt names the acceptance-evidence output fields
+        (``quality_gates``/``acceptance_trace``/``validation_evidence``) and
+        carries the criteria and tool results instead of the code under review.
         """
+        if input_data.request_mode == "acceptance_evidence":
+            # Render the criteria/results as readable structured text rather than
+            # Python's list/dict ``repr`` so the model parses them cleanly.
+            criteria_text = (
+                "\n".join(f"{i + 1}. {c}" for i, c in enumerate(input_data.acceptance_criteria))
+                or "(none provided)"
+            )
+            tool_results_text = (
+                "\n".join(
+                    f"- {group}: " + ", ".join(f"{k}={v}" for k, v in results.items())
+                    for group, results in input_data.tool_results.items()
+                )
+                or "(none provided)"
+            )
+            return (
+                "Interpret the tool/test results below and map the evidence back to the "
+                "acceptance criteria. Produce structured JSON with fields: approved, "
+                "quality_gates, acceptance_trace, validation_evidence, summary.\n\n"
+                f"**Acceptance criteria:**\n{criteria_text}\n\n"
+                f"**Tool results:**\n{tool_results_text}"
+            )
+
         parts = [
             "Review the following code for bugs and produce structured JSON with "
             "fields: bugs_found, test_plan, unit_tests, integration_tests, "
