@@ -253,9 +253,14 @@ def list_team_agent_manifests(team_id: str):
     registry's manifest discovery paths. A **registry-source** agent (added via Agent
     Studio's from-registry endpoint) instead returns its *original* registry manifest
     so the advertised id is the one that actually resolves for the Agent Console /
-    ``/api/agents/{id}/invoke``. A registry-source agent whose manifest no longer
-    resolves in this process is **omitted** rather than advertised with a synthetic
-    generated id this team never registered (which would 404 on invoke).
+    ``/api/agents/{id}/invoke``.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with one manifest per roster agent — a generated agent's
+        stamped wrapper, or a registry-source agent's *original* registry manifest;
+        a registry-source agent whose manifest no longer resolves in this process is
+        **omitted** rather than advertised with a synthetic generated id this team
+        never registered (which would 404 on invoke). ``404`` if the team is unknown.
     """
     from agent_registry import get_registry
     from agentic_team_provisioning.manifest_generation import build_agent_manifest
