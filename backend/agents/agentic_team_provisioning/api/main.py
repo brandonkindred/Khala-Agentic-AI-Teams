@@ -314,7 +314,7 @@ def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
     return AgenticTeamAgent(
         agent_name=manifest.name,
         role=manifest.summary or manifest.name,
-        skills=list(manifest.tags),
+        skills=manifest.tags,
         tools=list(manifest.cognition.tools) if manifest.cognition else [],
         # ``team`` is a required, non-empty str on AgentManifest; the guard is
         # belt-and-suspenders so a degenerate empty team can never inject ``[""]``.

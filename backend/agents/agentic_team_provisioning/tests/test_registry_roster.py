@@ -49,6 +49,13 @@ class _FakeRegistry:
     def get(self, agent_id: str) -> AgentManifest | None:
         return self._by_id.get(agent_id)
 
+    def manifests_with_id_prefix(self, prefix: str) -> list[AgentManifest]:
+        # Mirror AgentRegistry.manifests_with_id_prefix so register_team_manifests'
+        # stale-cleanup scan runs against the fake instead of AttributeError-ing
+        # into register_team_manifests' best-effort try/except (which would silently
+        # skip the register/unregister path in every test using this fake).
+        return [m for m in self._by_id.values() if m.id.startswith(prefix)]
+
     def register(self, manifest: AgentManifest, source_path=None) -> None:
         self._by_id[manifest.id] = manifest
 
@@ -273,10 +280,24 @@ def test_register_team_manifests_skips_registry_agents(
     client: TestClient, registry: _FakeRegistry
 ) -> None:
     """register_team_manifests must not install a generated wrapper for a
-    registry-source agent (which would duplicate it on every restart)."""
-    from agentic_team_provisioning.manifest_generation import register_team_manifests
+    registry-source agent (which would duplicate it on every restart), while it DOES
+    register the generated wrapper and unregister this team's stale generated entries
+    — the register/unregister path that silently no-ops if the fake registry lacks
+    ``manifests_with_id_prefix`` (register_team_manifests swallows the AttributeError)."""
+    from agentic_team_provisioning.manifest_generation import (
+        build_agent_manifest,
+        register_team_manifests,
+    )
 
     team_id = _new_team()
+    # A stale generated wrapper from a prior roster (agent no longer present) must be
+    # unregistered by the prefix-scoped stale-cleanup.
+    stale = build_agent_manifest(
+        team_id, AgenticTeamAgent(agent_name="OldGen", role="o", skills=["x"], source="generated")
+    )
+    registry.register(stale)
+    assert registry.get(stale.id) is not None
+
     gen = AgenticTeamAgent(agent_name="Writer", role="w", skills=["x"], source="generated")
     reg = AgenticTeamAgent(
         agent_name="blogging.planner",
@@ -288,6 +309,10 @@ def test_register_team_manifests_skips_registry_agents(
 
     manifests = register_team_manifests(team_id, [gen, reg])
     assert len(manifests) == 1  # only the generated agent is wrapped
+    # The generated wrapper is actually installed (path exercised, not swallowed).
+    assert registry.get(manifests[0].id) is manifests[0]
+    # The stale generated wrapper was unregistered by the prefix scan.
+    assert registry.get(stale.id) is None
     # The original registry manifest is untouched; no generated wrapper was added.
     assert registry.get("blogging.planner") is _PLANNER
 
