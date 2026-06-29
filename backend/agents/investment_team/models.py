@@ -15,10 +15,8 @@ from .strategy_lab.spec_dsl import (
     ExitRule,
     FixedFractionSizing,
     OcoBracketRule,
-    ScaledTakeProfitRule,
+    SignalExitRule,
     SizingRule,
-    StopLossRule,
-    TakeProfitRule,
 )
 
 # S&P 500 amortized average annual return (%). A backtested strategy is
@@ -494,8 +492,8 @@ class StrategySpec(BaseModel):
 
         Preconditions: ``exit_rules`` is the validated rule list.
         Postconditions: returns ``self`` when at most one bracket is present and,
-        if one is, no ``stop_loss`` / ``take_profit`` / ``scaled_take_profit``
-        accompanies it; raises ``ValueError`` otherwise.
+        if one is, the only other exits are ``signal_exit`` rules; raises
+        ``ValueError`` otherwise.
         """
         brackets = [r for r in self.exit_rules if isinstance(r, OcoBracketRule)]
         if not brackets:
@@ -504,10 +502,14 @@ class StrategySpec(BaseModel):
             raise ValueError(
                 f"at most one oco_bracket exit rule is allowed per spec; got {len(brackets)}"
             )
+        # Allowlist (not a hardcoded conflict denylist): a bracket may coexist
+        # ONLY with the bracket itself and ``signal_exit`` (a non-price,
+        # indicator-based trigger). Every other exit kind — current or
+        # future — is a conflicting engine-handled price exit by default, so a
+        # new price-exit kind added to the union is rejected with a bracket
+        # without needing this validator to be updated.
         conflicting = [
-            r
-            for r in self.exit_rules
-            if isinstance(r, (StopLossRule, TakeProfitRule, ScaledTakeProfitRule))
+            r for r in self.exit_rules if not isinstance(r, (OcoBracketRule, SignalExitRule))
         ]
         if conflicting:
             kinds = sorted({r.kind for r in conflicting})

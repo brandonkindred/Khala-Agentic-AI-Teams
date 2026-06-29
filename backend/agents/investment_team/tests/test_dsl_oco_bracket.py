@@ -16,8 +16,6 @@ Covers the new :class:`OcoBracketRule` ExitRule member end-to-end:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import pytest
 
 from investment_team.execution.bar_safety import BarSafetyAssertion
@@ -205,23 +203,26 @@ def test_spec_rejects_two_brackets() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_bar(symbol="AAA", close=100.0, timestamp="2024-01-10"):
-    bar = MagicMock()
-    bar.symbol = symbol
-    bar.close = close
-    bar.high = close + 1.0
-    bar.low = close - 1.0
-    bar.open = close
-    bar.volume = 1000.0
-    bar.timestamp = timestamp
-    return bar
+def _make_bar(symbol="AAA", close=100.0, timestamp="2024-01-10") -> Bar:
+    # A real ``Bar`` (not a permissive mock) so an interface change to the fields
+    # the dispatcher reads surfaces here instead of being silently absorbed.
+    return Bar(
+        symbol=symbol,
+        timestamp=timestamp,
+        timeframe="1d",
+        open=close,
+        high=close + 1.0,
+        low=close - 1.0,
+        close=close,
+        volume=1000.0,
+    )
 
 
-def _make_portfolio(capital=10_000_000.0):
-    port = MagicMock()
-    port.positions = {}
-    port.mark_to_market.return_value = capital
-    return port
+def _make_portfolio(capital=10_000_000.0) -> Portfolio:
+    # A real ``Portfolio``: fresh, no positions, so ``mark_to_market()`` returns
+    # ``capital`` and ``positions`` is an empty dict — exactly what the dispatcher
+    # and ``_compute_qty`` consume, with no mocked interface to drift.
+    return Portfolio(initial_capital=capital)
 
 
 def _build_view(closes: list[float]) -> StreamingHistoryView:
