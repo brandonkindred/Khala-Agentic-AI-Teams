@@ -46,7 +46,8 @@ def parallel_map(
     ``parallel_map(items, fn, max_workers=N)``.
 
     Args:
-        items: The inputs to map over. An empty sequence short-circuits to ``[]``.
+        items: The inputs to map over (any sized iterable). Empty input
+            short-circuits to ``[]``.
         fn: The per-item function, invoked once per item in a worker thread.
         max_workers: Upper bound on concurrent workers. The pool is sized at
             ``min(max_workers, len(items))`` so a small batch never spins up idle
@@ -66,9 +67,11 @@ def parallel_map(
             main-thread interrupt (``KeyboardInterrupt``/``SystemExit``) that lands
             while waiting — those still cancel and propagate, just without the hook.
             Lets a caller flip its own "abandoned" flag (e.g. under a progress
-            lock) before any cancellation lands. If the hook itself raises, that
-            error is logged and discarded so the original worker exception is the
-            one that propagates.
+            lock) before any cancellation lands. If the hook itself raises an
+            ``Exception``, that error is logged and discarded so the original
+            worker exception is the one that propagates; a ``BaseException`` from
+            the hook (e.g. ``KeyboardInterrupt``) is left to propagate, never
+            swallowed.
 
     Returns:
         The list of results — element type ``R``, plus ``None`` entries when
@@ -83,7 +86,9 @@ def parallel_map(
           from worker threads.
         - ``max_workers`` is an ``int`` (else ``TypeError``) and >= 1 (else
           ``ValueError``).
-        - ``items`` is a sized, iterable sequence (else ``TypeError``).
+        - ``items`` is a sized iterable — ``__len__`` and ``__iter__`` (else
+          ``TypeError``). Any sized iterable is accepted, not only a ``Sequence``;
+          the helper only needs to size and iterate the input.
         - When ``propagate_context`` is True, this function is called on the
           thread whose context should be snapshotted into the workers.
 
@@ -114,7 +119,7 @@ def parallel_map(
     if max_workers < 1:
         raise ValueError("max_workers must be >= 1")
     if not (hasattr(items, "__len__") and hasattr(items, "__iter__")):
-        raise TypeError("items must be a sized, iterable sequence")
+        raise TypeError("items must be a sized iterable")
 
     n = len(items)
     if n == 0:
