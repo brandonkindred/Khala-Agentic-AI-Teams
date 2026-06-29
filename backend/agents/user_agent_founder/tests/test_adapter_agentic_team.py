@@ -471,6 +471,17 @@ def test_submit_build_answers_never_posts_literal_other():
     assert fake.posts[0]["json"] == {"input": "(no answer provided)"}
 
 
+def test_submit_build_answers_coerces_non_string_other_text():
+    """A malformed answer with a non-string other_text (e.g. a number) is coerced
+    to str rather than crashing the worker thread on ``.strip()``."""
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(post_responses={"/input": _FakeResponse(200, {})})
+    adapter.submit_build_answers(fake, "run-9", [{"other_text": 42}])
+    assert fake.posts[0]["json"] == {"input": "42"}
+
+
 # ---------------------------------------------------------------------------
 # End-to-end: persona drives a collapsed agentic run through the orchestrator
 # ---------------------------------------------------------------------------

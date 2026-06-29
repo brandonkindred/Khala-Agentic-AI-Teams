@@ -152,6 +152,34 @@ export class AgentStudioPersonaComponent implements OnInit {
   }
 
   /**
+   * ARIA tab-pattern keyboard navigation for the sub-mode tablist: Left/Right
+   * move to the adjacent tab, Home/End to the first/last. Activates the target
+   * tab (this is an automatic-activation tablist) and moves focus to it, which —
+   * combined with the roving `tabindex` in the template (only the active tab is
+   * `tabindex=0`) — satisfies the APG tab keyboard contract.
+   */
+  onTabKeydown(event: KeyboardEvent): void {
+    const navKeys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
+    if (!navKeys.includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    // Two tabs: Left/Right toggle, Home→manual, End→persona.
+    const target: StudioPersonaMode =
+      event.key === 'Home'
+        ? 'manual'
+        : event.key === 'End'
+          ? 'persona'
+          : this.mode() === 'manual'
+            ? 'persona'
+            : 'manual';
+    this.setMode(target);
+    // currentTarget is the focused tab button; its tablist parent owns both tabs.
+    const list = (event.currentTarget as HTMLElement).closest('[role="tablist"]');
+    list?.querySelector<HTMLElement>(`#studio-tab-${target}`)?.focus();
+  }
+
+  /**
    * Select the testing persona to drive the run. Persona selection is owned by
    * the shared studio state (so it survives a back-loop to Stage 2/3), hence the
    * write goes through the state service rather than a local signal.
@@ -208,8 +236,12 @@ export class AgentStudioPersonaComponent implements OnInit {
           this.personasLoading.set(false);
           const personas = resp.personas ?? [];
           this.personas.set(personas);
-          // Default the persona selection when none carried from the handoff.
-          if (!this.selectedPersonaId() && personas.length > 0) {
+          // Default the persona selection when none carried from the handoff, OR
+          // when the handoff-seeded id isn't in the loaded list (e.g. it was
+          // deleted) — otherwise nothing would be highlighted and Run could be
+          // enabled for a persona that no longer exists.
+          const current = this.selectedPersonaId();
+          if ((!current || !personas.some((p) => p.id === current)) && personas.length > 0) {
             this.state.setPersonaId(personas[0].id);
           }
         },

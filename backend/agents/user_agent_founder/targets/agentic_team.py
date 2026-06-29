@@ -255,7 +255,10 @@ class AgenticTeamAdapter:
         # answer. Never fall back to ``selected_option_id`` (that would post the
         # literal "other"); use the placeholder when the free text is absent so
         # the run still advances and the /input min-length check is satisfied.
-        text = (first.get("other_text") or "").strip()
+        # Coerce to str before stripping: a malformed answer object could carry a
+        # non-string ``other_text`` (number/list), and ``.strip()`` on that would
+        # raise an AttributeError that crashes the worker thread.
+        text = str(first.get("other_text") or "").strip()
         if not text:
             text = "(no answer provided)"
         resp = client.post(

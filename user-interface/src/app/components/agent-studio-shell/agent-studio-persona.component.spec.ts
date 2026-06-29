@@ -468,4 +468,38 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.runTerminal()).toBe(false);
     expect(fixture.nativeElement.textContent).toContain('Waiting for the first decision');
   });
+
+  it('navigates the sub-mode tabs with arrow / Home / End keys', () => {
+    build();
+    fixture.detectChanges();
+    component.setMode('manual');
+    fixture.detectChanges();
+    // The keydown handler lives on the focusable (active) tab button.
+    const fire = (key: string) => {
+      const active = fixture.nativeElement.querySelector('.persona__mode.is-active');
+      active.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+      fixture.detectChanges();
+    };
+    fire('ArrowRight');
+    expect(component.mode()).toBe('persona');
+    fire('Home');
+    expect(component.mode()).toBe('manual');
+    fire('End');
+    expect(component.mode()).toBe('persona');
+    // Only the active tab is in the tab order (roving tabindex).
+    const manualTab = fixture.nativeElement.querySelector('#studio-tab-manual');
+    const personaTab = fixture.nativeElement.querySelector('#studio-tab-persona');
+    expect(personaTab.getAttribute('tabindex')).toBe('0');
+    expect(manualTab.getAttribute('tabindex')).toBe('-1');
+    // A non-navigation key is ignored.
+    fire('a');
+    expect(component.mode()).toBe('persona');
+  });
+
+  it('defaults the persona when the handoff id is not in the loaded list', () => {
+    build();
+    state.setPersonaId('ghost-persona'); // not present in the loaded PERSONAS
+    fixture.detectChanges();
+    expect(component.selectedPersonaId()).toBe('startup-founder');
+  });
 });

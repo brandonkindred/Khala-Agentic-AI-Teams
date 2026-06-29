@@ -20,7 +20,9 @@
           class="persona__mode"
           [class.is-active]="mode() === 'manual'"
           [attr.aria-selected]="mode() === 'manual'"
+          [attr.tabindex]="mode() === 'manual' ? 0 : -1"
           (click)="setMode('manual')"
+          (keydown)="onTabKeydown($event)"
         >
           Manual testing
         </button>
@@ -32,7 +34,9 @@
           class="persona__mode"
           [class.is-active]="mode() === 'persona'"
           [attr.aria-selected]="mode() === 'persona'"
+          [attr.tabindex]="mode() === 'persona' ? 0 : -1"
           (click)="setMode('persona')"
+          (keydown)="onTabKeydown($event)"
         >
           Persona-driven
         </button>
@@ -135,10 +139,11 @@
             </div>
 
             <div class="persona__run-config">
-              <label class="persona__field">
+              <label class="persona__field" for="persona-process-select">
                 <span>Target process</span>
                 <select
                   #processSelect
+                  id="persona-process-select"
                   [value]="selectedProcessId() ?? ''"
                   (change)="selectProcess(processSelect.value)"
                 >
