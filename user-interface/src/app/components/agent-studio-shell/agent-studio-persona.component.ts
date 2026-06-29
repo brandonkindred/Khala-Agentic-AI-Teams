@@ -1,6 +1,5 @@
 import {
   ChangeDetectionStrategy,
-  ChangeDetectorRef,
   Component,
   DestroyRef,
   OnInit,
@@ -68,7 +67,6 @@ export class AgentStudioPersonaComponent implements OnInit {
   private readonly agenticApi = inject(AgenticTeamApiService);
   private readonly personaApi = inject(PersonaTestingApiService);
   private readonly dialog = inject(MatDialog);
-  private readonly cdr = inject(ChangeDetectorRef);
   private readonly destroyRef = inject(DestroyRef);
 
   readonly mode = signal<StudioPersonaMode>('persona');
@@ -167,11 +165,9 @@ export class AgentStudioPersonaComponent implements OnInit {
           if (!this.selectedProcessId() && complete.length === 1) {
             this.selectedProcessId.set(complete[0].process_id);
           }
-          this.cdr.markForCheck();
         },
         error: () => {
           this.teamError.set('Could not load this team.');
-          this.cdr.markForCheck();
         },
       });
   }
@@ -187,11 +183,9 @@ export class AgentStudioPersonaComponent implements OnInit {
           if (!this.selectedPersonaId() && resp.personas.length > 0) {
             this.state.setPersonaId(resp.personas[0].id);
           }
-          this.cdr.markForCheck();
         },
         error: () => {
           this.error.set('Could not load personas.');
-          this.cdr.markForCheck();
         },
       });
   }
@@ -218,12 +212,10 @@ export class AgentStudioPersonaComponent implements OnInit {
         next: (resp) => {
           this.launching.set(false);
           this.startPolling(resp.job_id);
-          this.cdr.markForCheck();
         },
         error: () => {
           this.launching.set(false);
           this.error.set('Could not start the persona test.');
-          this.cdr.markForCheck();
         },
       });
   }
@@ -238,7 +230,6 @@ export class AgentStudioPersonaComponent implements OnInit {
       .subscribe(() => {
         if (!this.runTerminal()) {
           this.elapsedSec.update((s) => s + 1);
-          this.cdr.markForCheck();
         }
       });
     this.pollSub = interval(POLL_MS)
@@ -252,7 +243,6 @@ export class AgentStudioPersonaComponent implements OnInit {
           this.personaApi.getRunStatus(runId).pipe(
             catchError(() => {
               this.error.set('Lost contact with the run; retrying…');
-              this.cdr.markForCheck();
               return EMPTY;
             }),
           ),
@@ -269,7 +259,6 @@ export class AgentStudioPersonaComponent implements OnInit {
         error: () => {
           // The interval poll will retry; surface a transient banner meanwhile.
           this.error.set('Lost contact with the run; retrying…');
-          this.cdr.markForCheck();
         },
       });
   }
@@ -289,7 +278,6 @@ export class AgentStudioPersonaComponent implements OnInit {
     if (TERMINAL_STATUSES.has(detail.status)) {
       this.stopPolling();
     }
-    this.cdr.markForCheck();
   }
 
   private stopPolling(): void {
@@ -324,11 +312,9 @@ export class AgentStudioPersonaComponent implements OnInit {
             next: (created) => {
               this.personas.update((list) => [...list, created]);
               this.state.setPersonaId(created.id);
-              this.cdr.markForCheck();
             },
             error: () => {
               this.error.set('Could not create the persona.');
-              this.cdr.markForCheck();
             },
           });
       });

@@ -425,11 +425,12 @@ def run_workflow(
             # ``process_id``/``spec`` are set only for agentic-team targets;
             # ``get_adapter`` ignores them for the software-engineering target.
             # ``spec`` seeds the analysis→build pass-through so a run resumed
-            # before ``repo_path`` is persisted still carries it.
+            # before ``repo_path`` is persisted still carries it. ``run`` may be
+            # ``None`` (``get_run`` returns ``Optional``), hence the explicit guard.
             adapter = get_adapter(
                 team_key,
-                process_id=getattr(run, "process_id", None),
-                spec=getattr(run, "spec_content", None),
+                process_id=run.process_id if run is not None else None,
+                spec=run.spec_content if run is not None else None,
             )
 
         project_name = getattr(run, "project_name", None) or f"user-agent-founder-{run_id}"

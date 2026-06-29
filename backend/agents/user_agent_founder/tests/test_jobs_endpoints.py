@@ -352,7 +352,7 @@ def test_agentic_process_status_maps_team_detail(monkeypatch):
     )
     # Reuse the _FakeTeamsClient: it returns the detail for /teams/{id}.
     assert api_main._agentic_process_status("t1", "p1") == "complete"
-    assert api_main._agentic_process_status("t1", "nope") == "missing"
+    assert api_main._agentic_process_status("t1", "nope") == "not_found"
 
     # Outage → None (never raises).
     class _BoomClient:
@@ -428,13 +428,13 @@ class _StatusClient:
         return _TeamsResp(self._code, self._body)
 
 
-def test_agentic_process_status_404_is_missing_but_5xx_is_none(monkeypatch):
-    """A definitive 404 (team not found) is a gate rejection ('missing'); a 5xx
+def test_agentic_process_status_404_is_not_found_but_5xx_is_none(monkeypatch):
+    """A definitive 404 (team not found) is a gate rejection ('not_found'); a 5xx
     or other non-404 HTTP error is an outage ('None') and must not hard-block."""
     from user_agent_founder.api import main as api_main
 
     monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _StatusClient(404))
-    assert api_main._agentic_process_status("t1", "p1") == "missing"
+    assert api_main._agentic_process_status("t1", "p1") == "not_found"
 
     monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _StatusClient(503))
     assert api_main._agentic_process_status("t1", "p1") is None

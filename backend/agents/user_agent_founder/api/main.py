@@ -566,25 +566,26 @@ def _agentic_process_status(team_id: str, process_id: str) -> Optional[str]:
     """Return the status of ``process_id`` on an agentic team, cross-service.
 
     Postconditions: returns the process's ``status`` string (e.g. ``"complete"``,
-        ``"draft"``, ``"archived"``) when the team+process resolve; ``"missing"``
-        when the team is definitively **not found** (``404``) or the process
-        isn't on it; and ``None`` when the status can't be determined — a
-        transport failure **or** a non-404 HTTP error (``5xx``, auth ``401/403``,
-        rate-limit) — which the caller treats as "cannot determine" and must not
-        hard-block on (best-effort). A transient ``503`` is thus an outage, not a
-        gate violation. Never raises.
+        ``"draft"``, ``"archived"``) when the team+process resolve; the synthetic
+        ``"not_found"`` (distinct from any real ``process_status`` value) when the
+        team is definitively **not found** (``404``) or the process isn't on it;
+        and ``None`` when the status can't be determined — a transport failure
+        **or** a non-404 HTTP error (``5xx``, auth ``401/403``, rate-limit) —
+        which the caller treats as "cannot determine" and must not hard-block on
+        (best-effort). A transient ``503`` is thus an outage, not a gate
+        violation. Never raises.
     """
     try:
         with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
             code, team = _fetch_agentic_team(client, team_id)
         if code == 404:
-            return "missing"  # definitively not found ⇒ a real gate rejection
+            return "not_found"  # definitively not found ⇒ a real gate rejection
         if code >= 400:
             return None  # 5xx/auth/transient ⇒ undeterminable, don't hard-block
         for proc in team.get("processes") or []:
             if proc.get("process_id") == process_id:
                 return proc.get("status") or "unknown"
-        return "missing"
+        return "not_found"
     except Exception:
         logger.warning(
             "Could not verify agentic process status for team %s / process %s",
