@@ -24,6 +24,7 @@ import types
 from dataclasses import dataclass
 from typing import List, Optional
 
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 
@@ -360,6 +361,7 @@ def test_flat_window_neutral_conventions() -> None:
         ("williams_r", {"period": 1}),
         ("williams_r", {"period": 201}),
         ("obv", {"period": 5}),  # OBV takes no params
+        ("bollinger", {"band": "invalid_band"}),  # unknown derived-output selector
     ],
 )
 def test_param_validation_rejects(name, params) -> None:
@@ -469,6 +471,9 @@ def test_accessor_matches_registry() -> None:
     )
     assert indicator_value("bollinger", bars, band="percent_b", period=20) == pytest.approx(
         reg.bollinger_bands(bars, 20, 2.0, select="percent_b")
+    )
+    assert indicator_value("bollinger", bars, band="bandwidth", period=20) == pytest.approx(
+        reg.bollinger_bands(bars, 20, 2.0, select="bandwidth")
     )
 
 
@@ -685,8 +690,6 @@ def test_conformance_gate_fails_drifted_williams() -> None:
 
 
 def _frame():
-    import pandas as pd
-
     bars = _series(80, seed=14)
     return (
         pd.Series([b.high for b in bars]),
@@ -775,32 +778,50 @@ def test_indicators_registry_has_new_specs(name, arity) -> None:
 # ---------------------------------------------------------------------------
 
 
-_SERIES_REFS = [
-    IndicatorRef(name="donchian", params={"band": "upper", "period": 20}),
-    IndicatorRef(name="donchian", params={"band": "middle", "period": 20}),
-    IndicatorRef(
-        name="keltner", params={"band": "lower", "period": 20, "atr_period": 10, "multiplier": 1.5}
+# (IndicatorRef, expected-value via the PUBLIC IndicatorRegistry API). Building
+# the expected value from the public registry — rather than the engine's private
+# dispatch helper — keeps the test a public-vs-public cross-check: the public
+# ``compute_indicator_series`` (engine path) must agree with a fresh registry call.
+_SERIES_CASES = [
+    (
+        IndicatorRef(name="donchian", params={"band": "upper", "period": 20}),
+        lambda r, b: r.donchian(b, 20, "upper"),
     ),
-    IndicatorRef(name="obv"),
-    IndicatorRef(name="mfi", params={"period": 14}),
-    IndicatorRef(name="roc", params={"period": 12}),
-    IndicatorRef(name="cci", params={"period": 20}),
-    IndicatorRef(name="williams_r", params={"period": 14}),
-    IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20}),
-    IndicatorRef(name="bollinger", params={"band": "bandwidth", "period": 20}),
+    (
+        IndicatorRef(name="donchian", params={"band": "middle", "period": 20}),
+        lambda r, b: r.donchian(b, 20, "middle"),
+    ),
+    (
+        IndicatorRef(
+            name="keltner",
+            params={"band": "lower", "period": 20, "atr_period": 10, "multiplier": 1.5},
+        ),
+        lambda r, b: r.keltner(b, 20, 10, 1.5, "lower"),
+    ),
+    (IndicatorRef(name="obv"), lambda r, b: r.obv(b)),
+    (IndicatorRef(name="mfi", params={"period": 14}), lambda r, b: r.mfi(b, 14)),
+    (IndicatorRef(name="roc", params={"period": 12}), lambda r, b: r.roc(b, 12)),
+    (IndicatorRef(name="cci", params={"period": 20}), lambda r, b: r.cci(b, 20)),
+    (IndicatorRef(name="williams_r", params={"period": 14}), lambda r, b: r.williams_r(b, 14)),
+    (
+        IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20}),
+        lambda r, b: r.bollinger_bands(b, 20, 2.0, select="percent_b"),
+    ),
+    (
+        IndicatorRef(name="bollinger", params={"band": "bandwidth", "period": 20}),
+        lambda r, b: r.bollinger_bands(b, 20, 2.0, select="bandwidth"),
+    ),
 ]
 
 
-@pytest.mark.parametrize("ref", _SERIES_REFS, ids=[r.sig_id for r in _SERIES_REFS])
-def test_compute_indicator_series_matches_registry_tail(ref) -> None:
-    """compute_indicator_series' trailing value equals a fresh registry's value."""
-    import pandas as pd
-
+@pytest.mark.parametrize("case", _SERIES_CASES, ids=[c[0].sig_id for c in _SERIES_CASES])
+def test_compute_indicator_series_matches_registry_tail(case) -> None:
+    """The public engine series path agrees with a fresh public registry call."""
     from investment_team.strategy_lab.executor.predicate_evaluator import (
-        _registry_indicator,
         compute_indicator_series,
     )
 
+    ref, expected_call = case
     bars = _series(80, seed=23)
     df = pd.DataFrame(
         {
@@ -812,5 +833,5 @@ def test_compute_indicator_series_matches_registry_tail(ref) -> None:
         }
     )
     series = compute_indicator_series(ref, df)
-    expected = _registry_indicator(IndicatorRegistry(), ref, bars)
+    expected = expected_call(IndicatorRegistry(), bars)
     assert float(series.iloc[-1]) == pytest.approx(expected, rel=0, abs=1e-9)

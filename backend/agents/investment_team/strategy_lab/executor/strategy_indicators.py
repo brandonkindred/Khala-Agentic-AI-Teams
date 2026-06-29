@@ -201,6 +201,8 @@ def vwap(high, low, close, volume) -> float:
 
 def donchian_channels(high, low, period=20) -> tuple[float, float, float]:
     """Latest (upper, middle, lower) Donchian channel values. See module contract."""
+    # Donchian reads only ``high``/``low``; ``close`` is unused, so we reuse
+    # ``low`` as a harmless placeholder for the required positional slot.
     bars = _ohlc_bars(high, low, close=low)
     reg = IndicatorRegistry()
     p = int(period)
@@ -227,6 +229,8 @@ def keltner_channels(
 
 def obv(close, volume) -> float:
     """Latest On-Balance Volume value. See module contract."""
+    # OBV reads only ``close`` and ``volume``; ``high``/``low`` are unused, so
+    # ``close`` is passed for those slots as a harmless placeholder.
     return _scalar(IndicatorRegistry().obv(_ohlc_bars(close, close, close, volume)))
 
 

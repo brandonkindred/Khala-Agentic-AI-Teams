@@ -810,6 +810,8 @@ _HELPER_BODIES: dict[str, str] = {
             middle = history[-period].close
             for b in history[-period + 1:]:
                 middle = alpha * b.close + (1.0 - alpha) * middle
+            # Simple average of true range (matches IndicatorRegistry.atr and
+            # the streaming keltner — atr is an SMA of TR, not Wilder-smoothed).
             total = 0.0
             for i in range(len(history) - atr_period, len(history)):
                 h = history[i].high

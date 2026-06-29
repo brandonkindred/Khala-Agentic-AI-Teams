@@ -1103,8 +1103,11 @@ class IndicatorRegistry:
         close).
         Post: ``middle`` is the windowed close-EMA over ``period`` bars; the
         bands are ``middle ± multiplier × ATR(atr_period)``. Reuses
-        :func:`windowed_ema` for the basis and the same true-range recurrence as
-        :meth:`atr` for the width, so engine and sandbox agree bit-for-bit.
+        :func:`windowed_ema` for the basis and a **simple average of true range**
+        for the width — identical to :meth:`atr` above, which is itself an SMA of
+        true range (``total / period``), NOT a Wilder/EMA smoothing — so the
+        Keltner ATR leg and a standalone ``atr`` indicator return the same value
+        and the compiler's inline helper agrees bit-for-bit.
         """
         if not bars or len(bars) < max(period, atr_period + 1):
             return None
@@ -1143,6 +1146,14 @@ class IndicatorRegistry:
         close falls, leave it unchanged on an equal close. Cumulative over the
         whole supplied window (like :meth:`vwap`), so a bounded sliding window
         re-bases OBV to the window start.
+
+        Cost: O(window) per non-same-bar call, matching :meth:`vwap`. An
+        incremental update is deliberately NOT used: under the engine's bounded
+        ``StreamingHistoryView`` (≤500 bars) every steady-state call is a
+        slide whose oldest bar drops, which re-bases the cumulative sum to the
+        new window start — so an incremental form would have to recompute anyway,
+        exactly as ``vwap`` does. Keeping the two cumulative indicators identical
+        outweighs a micro-optimisation that the slide path defeats.
         """
         if not bars:
             return None

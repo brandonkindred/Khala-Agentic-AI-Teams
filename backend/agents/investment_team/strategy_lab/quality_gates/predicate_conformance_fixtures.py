@@ -599,10 +599,12 @@ def _warmup_for_indicator(ref: IndicatorRef) -> int:
         d = int(ref.param("d_period")) if "d_period" in ref.params else 3
         return k + d + 5
     if ref.name in ("donchian", "cci", "williams_r", "mfi", "roc"):
-        period = int(ref.param("period")) if "period" in ref.params else 14
-        return period + 5
+        # ``ref.param`` resolves the registry's per-indicator default when the
+        # param is absent (donchian=20, roc=12, mfi/williams_r=14, cci=20), so no
+        # hardcoded fallback — which would otherwise mis-size a missing-period ref.
+        return int(ref.param("period")) + 5
     if ref.name == "keltner":
-        period = int(ref.param("period")) if "period" in ref.params else 20
-        atr_period = int(ref.param("atr_period")) if "atr_period" in ref.params else 10
+        period = int(ref.param("period"))
+        atr_period = int(ref.param("atr_period"))
         return max(period, atr_period + 1) + 5
     return 20
