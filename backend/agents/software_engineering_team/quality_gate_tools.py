@@ -219,8 +219,9 @@ def run_dbc_comments(
 
         from software_engineering_team.shared.git_utils import write_files_and_commit
 
-        # Read code from repo
+        # Read code from repo, stopping once the prompt budget (100k chars) is filled
         code_parts: list[str] = []
+        total_chars = 0
         for f in sorted(repo_path.rglob("*")):
             if not f.is_file():
                 continue
@@ -232,7 +233,11 @@ def run_dbc_comments(
                 content = f.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            code_parts.append(f"--- {f.relative_to(repo_path)} ---\n{content}")
+            part = f"--- {f.relative_to(repo_path)} ---\n{content}"
+            code_parts.append(part)
+            total_chars += len(part) + 1  # +1 for the join separator
+            if total_chars >= 100_000:
+                break
         code = "\n".join(code_parts)[:100_000]
         if not code:
             return DbcResult(compliant=True)

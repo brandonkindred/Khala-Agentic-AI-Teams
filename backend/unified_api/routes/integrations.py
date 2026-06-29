@@ -1806,11 +1806,15 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         ) from e
 
     if resp.status_code != 200:
+        # Sanitize: the upstream body could carry internal detail (a stack trace
+        # on an unhandled 500, an HTML error page, etc.). Log it server-side and
+        # return a generic message to the client, preserving the upstream status.
         try:
-            detail = resp.json().get("detail", resp.text)
+            upstream_detail = resp.json().get("detail", resp.text)
         except Exception:
-            detail = resp.text
-        raise HTTPException(status_code=resp.status_code, detail=detail)
+            upstream_detail = resp.text
+        logger.warning("github run-issue: coding team service returned %s: %s", resp.status_code, upstream_detail)
+        raise HTTPException(status_code=resp.status_code, detail="Failed to start the coding job.")
 
     try:
         data = resp.json()
@@ -1882,11 +1886,15 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
         ) from e
 
     if resp.status_code != 200:
+        # Sanitize: the upstream body could carry internal detail (a stack trace
+        # on an unhandled 500, etc.). Log it server-side and return a generic
+        # message to the client, preserving the upstream status code.
         try:
-            detail = resp.json().get("detail", resp.text)
+            upstream_detail = resp.json().get("detail", resp.text)
         except Exception:
-            detail = resp.text
-        raise HTTPException(status_code=resp.status_code, detail=detail)
+            upstream_detail = resp.text
+        logger.warning("github review-pr: coding team service returned %s: %s", resp.status_code, upstream_detail)
+        raise HTTPException(status_code=resp.status_code, detail="Failed to start the review.")
 
     try:
         data = resp.json()

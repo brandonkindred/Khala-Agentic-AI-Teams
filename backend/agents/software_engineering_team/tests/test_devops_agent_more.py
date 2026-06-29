@@ -77,6 +77,10 @@ def test_build_error_signature() -> None:
     b = "Boom at /var/folders/zz/yy/T/x.log 23:59:59 in 9.99s 0xcafef00d host localhost:5433"
     assert _build_error_signature(a) == _build_error_signature(b)
     assert "Boom at" in _build_error_signature(a)
+    # A DIFFERENT file under the temp tree must NOT collapse: the distinguishing
+    # trailing component (basename) is preserved.
+    c = "Boom at /var/folders/zz/yy/T/y.log 23:59:59 in 9.99s 0xcafef00d host localhost:5433"
+    assert _build_error_signature(a) != _build_error_signature(c)
 
 
 def test_validate_devops_output_no_outputs() -> None:

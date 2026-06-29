@@ -307,7 +307,7 @@ def test_run_issue_propagates_upstream_error_detail(mock_cfg, mock_cred, mock_cl
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 409
-    assert resp.json()["detail"] == "issue blocked by sub-issues"
+    assert resp.json()["detail"] == "Failed to start the coding job."
 
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
@@ -320,7 +320,7 @@ def test_run_issue_upstream_error_with_non_json_body(mock_cfg, mock_cred, mock_c
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 500
-    assert "internal boom" in resp.json()["detail"]
+    assert resp.json()["detail"] == "Failed to start the coding job."
 
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")

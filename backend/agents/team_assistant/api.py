@@ -132,7 +132,7 @@ def _build_state_response(
 
 def _extract_brief(context: dict[str, Any]) -> str:
     """Extract a short description from conversation context for listing."""
-    return str(context.get("brief", ""))
+    return str(context.get("brief", ""))[:200]
 
 
 # ---------------------------------------------------------------------------

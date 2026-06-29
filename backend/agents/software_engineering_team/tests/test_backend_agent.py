@@ -159,6 +159,15 @@ def test_build_error_signature_normalizes_volatile_lines() -> None:
     )
     # Same underlying failure, only volatile lines differ -> identical signature.
     assert _build_error_signature(err_a) == _build_error_signature(err_b)
+    # A DIFFERENT failing file under a temp tree must NOT collapse: the trailing
+    # path components (e.g. test_b0/other.py) are preserved as a distinguishing tail.
+    err_c = (
+        "AssertionError: assert 200 == 401\n"
+        "tmp file /tmp/pytest-of-carol/pytest-7/test_b0/other.py\n"
+        "at 2026-06-28T01:02:03.000Z connected to localhost:8082\n"
+        "<object at 0x12345678> finished in 0.01s\n"
+    )
+    assert _build_error_signature(err_a) != _build_error_signature(err_c)
     # The real, stable error text survives normalization.
     assert "AssertionError: assert 200 == 401" in _build_error_signature(err_a)
     # No length truncation: a long stable body is retained in full.

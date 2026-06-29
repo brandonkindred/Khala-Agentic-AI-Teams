@@ -22,7 +22,13 @@ logger = logging.getLogger(__name__)
 # are replaced with stable placeholders so two failures differing only in noise
 # collapse to one signature for repeated-failure (loop) detection, while the real
 # error text is preserved (no length truncation).
-_SIG_TMP_PATH_RE = re.compile(r"(?:/private)?(?:/var/folders|/tmp|/var/tmp)/[^\s:'\"]+")
+# Volatile part is the random ROOT (e.g. ``/tmp/pytest-of-x/pytest-7/``); the
+# trailing 1-2 path components (e.g. ``test_a0/conftest.py``) distinguish files
+# and are PRESERVED so two DISTINCT failures don't collapse to one signature.
+_SIG_TMP_PATH_RE = re.compile(
+    r"(?:/private)?(?:/var/folders|/tmp|/var/tmp)(?:/[^/\s:'\"]+)*?"
+    r"((?:/[^/\s:'\"]+){1,2})(?=[\s:'\"]|$)"
+)
 _SIG_ISO_TS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
 )
@@ -52,7 +58,7 @@ def normalize_error_signature(build_errors: str) -> str:
         Deterministic: equal-modulo-noise inputs produce equal outputs.
     """
     text = build_errors
-    text = _SIG_TMP_PATH_RE.sub("<TMP>", text)
+    text = _SIG_TMP_PATH_RE.sub(r"<TMP>\1", text)
     text = _SIG_ISO_TS_RE.sub("<TS>", text)
     text = _SIG_CLOCK_TS_RE.sub("<TS>", text)
     text = _SIG_DURATION_RE.sub("<DUR>", text)

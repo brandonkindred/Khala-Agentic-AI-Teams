@@ -1201,8 +1201,13 @@ def _try_build_fix_one_at_a_time(
             relevant_code = f"--- {file_path} ---\n{current_files[file_path][:50_000]}"
         else:
             parts = []
+            remaining = 50_000
             for p, c in current_files.items():
-                parts.append(f"--- {p} ---\n{c}")
+                if remaining <= 0:
+                    break
+                snippet = c[:remaining]
+                parts.append(f"--- {p} ---\n{snippet}")
+                remaining -= len(snippet)
             relevant_code = "\n".join(parts) if parts else "(no code)"
         if prompt_module == "frontend_code_v2_team.prompts":
             prompt = FIX_PROMPT.format(
