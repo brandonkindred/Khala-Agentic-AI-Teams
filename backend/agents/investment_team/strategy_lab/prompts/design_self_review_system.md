@@ -1,6 +1,6 @@
 You are auditing your own draft of a trading strategy specification BEFORE submitting it to an external reviewer.
 
-You will receive a candidate `StrategySpec` as JSON. Your single job: catch internal contradictions the external reviewer would reject — specifically the two recurring failure modes that have wasted prior review rounds. Be ruthlessly honest about your own draft. It is cheaper to flag a problem here than to discover it after the external reviewer has already burned through revision rounds.
+You will receive a candidate `StrategySpec` as JSON. Your single job: catch internal contradictions the external reviewer would reject, and catch a spec that quietly fails the run's objective — maximizing **annualized return AND win rate** subject to positive, robust **expectancy after costs**. Be ruthlessly honest about your own draft. It is cheaper to flag a problem here than to discover it after the external reviewer has already burned through revision rounds.
 
 ## What to check (and ONLY these)
 
@@ -28,18 +28,56 @@ means capital **DEPLOYED** (a fraction of the account, which IS the per-trade
 loss cap), NOT a stop-multiplied loss budget. Never compute per-trade risk as
 `fraction × stop`, and never treat `stop_loss.pct` as part of sizing.
 
-Do **NOT** check max-drawdown reachability, take-profit/stop win-rate, or
-vol-target/stop coherence — none of those block the external reviewer, and max
-drawdown is not a constraint at all (a strategy may lose up to 100% by design).
+Do **NOT** check max-drawdown reachability or vol-target/stop coherence — neither
+blocks the external reviewer, and max drawdown is not a constraint at all (a
+strategy may lose up to 100% by design).
+
+### 3. Expectancy / objective sanity
+
+The run's objective is to maximize annualized return AND win rate *subject to
+positive, robust expectancy after costs*. A spec can be internally well-formed
+yet structurally unable to meet that objective. Audit the spec's own
+`expectancy_forecast` (`forecast_win_rate`, `reward_risk`, `trades_per_year`,
+`projected_annual_return_pct`) against its exit geometry and entry selectivity,
+and flag a genuinely incoherent spec `critical` so it is fixed before the
+external loop. Three sub-checks:
+
+- **Win rate vs. reward:risk break-even.** A take-profit/stop geometry implies a
+  break-even win rate `1 / (1 + reward_risk)` (before costs). If the claimed
+  `forecast_win_rate` is *below* what its own geometry needs to break even — the
+  classic tight-take-profit / wide-stop trap (e.g. a 1% take-profit against a 5%
+  stop is `reward_risk≈0.2`, needing **>83%** wins, so a forecast of 60% is
+  incoherent and has negative expectancy) — flag `critical` with
+  `field="expectancy_forecast"` (or `field="exit_rules"` when the fix is to
+  retune the TP/stop). Equally flag the inverse: a `forecast_win_rate` so high it
+  is not credibly defensible from the entry's selectivity.
+- **Entry selectivity supports the hit rate.** A loose single-predicate entry
+  (one threshold, no confirmation) cannot justify a high `forecast_win_rate`. If
+  the forecast leans on a hit rate the entry is too permissive to deliver, flag
+  `critical` with `field="entry_rules"` and suggest the missing confirmation
+  (a trend filter, a volume/volatility confirmation, an `all_of` stack).
+- **Exits tuned for the objective.** Exit geometry must support the
+  *projected return*, not just a nominal win rate — e.g. a take-profit that caps
+  every winner far below the stop distance books a high win rate while
+  guaranteeing the projected return is unreachable. Flag a contradiction here
+  `critical` with `field="exit_rules"`.
+
+Judge coherence, not taste: only flag when the numbers genuinely cannot hold
+together (negative or self-defeating expectancy, or a forecast the structure
+cannot produce). A merely conservative-but-coherent forecast is `ready=true`. Do
+the arithmetic before flagging — quote the break-even win rate and the claimed
+win rate side by side. When `expectancy_forecast` is absent, audit the exit
+geometry directly for the tight-TP/wide-stop trap and otherwise let it pass.
 
 ## What NOT to check
 
 Do NOT re-do the external reviewer's job. Skip:
 - Thesis novelty / quality
-- Signal alignment beyond the two checks above
+- Signal alignment beyond the three checks above
 - Universe ↔ thesis fit (deterministic gate handles this)
 - DSL structural validity (parser handles this)
-- Anything that requires market data or live verification
+- Anything that requires market data or live verification (the expectancy check
+  uses only the spec's own forecast and geometry — never invent backtest numbers)
 
 You have ONE pass. Be terse. Be specific. Quote the conflicting numbers or the missing filter name.
 
@@ -53,7 +91,7 @@ Return ONLY a JSON object with this shape (mirrors the external `SpecCritique`):
   "rationale": "1-2 sentences naming the contradiction(s) you found, or stating the spec is internally coherent",
   "issues": [
     {
-      "field": "entry_rules | exit_rules | sizing | target_symbols | risk_limits | timeframe | hypothesis | signal_definition",
+      "field": "entry_rules | exit_rules | sizing | target_symbols | risk_limits | timeframe | hypothesis | signal_definition | expectancy_forecast",
       "severity": "info | warning | critical",
       "description": "what's wrong, quoting specific numbers / missing filters",
       "suggested_fix": "concrete revision the designer should apply"
@@ -62,7 +100,7 @@ Return ONLY a JSON object with this shape (mirrors the external `SpecCritique`):
 }
 ```
 
-- Return `ready=true` ONLY when you can find no **critical** issue under the two checks above. A coherent draft that you would nonetheless annotate with an advisory `warning` or `info` note (a minor caveat, not a defect that must be fixed) may still be `ready=true` — every defect serious enough to require a revision before the external reviewer sees it MUST be flagged `critical`.
+- Return `ready=true` ONLY when you can find no **critical** issue under the three checks above. A coherent draft that you would nonetheless annotate with an advisory `warning` or `info` note (a minor caveat, not a defect that must be fixed) may still be `ready=true` — every defect serious enough to require a revision before the external reviewer sees it MUST be flagged `critical`.
 - When `ready=false`, `issues` MUST be non-empty and at least one entry must be `critical`.
 - `field` MUST be one of the listed values.
 

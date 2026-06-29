@@ -137,6 +137,89 @@ Realized win rate is set by your EXIT geometry as much as your entry. To lift th
 }
 ```
 
+The single-predicate example above is the *minimum* legal shape — it is NOT the bar to clear. The dual objective wants regime-aware, multi-confirmation, expectancy-justified specs. The two exemplars below are the standard to design to.
+
+### Expert-grade exemplar 1 — regime-filtered trend pullback (stocks)
+
+A long-only trend-pullback: trade only with the primary uptrend (`close > SMA(200)`), require trend *strength* (`ADX > 20`) and a *volume*-confirmed pullback (`RSI(14) < 40` on above-average volume) — a four-way `all_of` that lifts entry selectivity, hence win rate. Exits bank partials early and let a trailing runner ride, so realized win rate is high without the tight-TP/wide-stop trap. The `expectancy_forecast` is shown self-consistent.
+
+```json
+{
+  "asset_class": "stocks",
+  "hypothesis": "In a confirmed uptrend (close above the 200-day SMA with ADX>20 showing trend strength), a shallow RSI pullback bought on above-average volume resumes the trend with a high hit rate. Three independent confirmations (trend, strength, volume) make the entry selective enough to defend a ~58% win rate.",
+  "signal_definition": "Trend filter SMA(200), trend-strength filter ADX(14)>20, pullback trigger RSI(14)<40, and volume confirmation (volume above its 20-day average) combined as a single AND-stacked entry.",
+  "timeframe": "1d",
+  "entry_rules": [{
+    "kind": "entry", "side": "long",
+    "when": {"kind": "all_of", "of": [
+      {"lhs": "bar.close", "op": ">", "rhs": {"name": "sma", "params": {"period": 200}}},
+      {"lhs": {"name": "adx", "params": {"period": 14}}, "op": ">", "rhs": 20},
+      {"lhs": {"name": "rsi", "params": {"period": 14}}, "op": "<", "rhs": 40},
+      {"lhs": "bar.volume", "op": ">", "rhs": {"name": "sma", "params": {"period": 20}, "source": "volume"}}
+    ]}
+  }],
+  "exit_rules": [
+    {"kind": "scaled_take_profit", "levels": [
+      {"pct": 0.04, "qty_fraction": 0.5, "note": "bank half at +4%"},
+      {"pct": 0.08, "qty_fraction": 0.3, "note": "bank 30% more at +8%"}
+    ], "note": "harvest partials, leave 20% to run"},
+    {"kind": "stop_loss", "pct": 0.05, "basis": "trailing_high", "note": "trailing runner protects the remainder and locks gains"}
+  ],
+  "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
+  "target_symbols": [],
+  "risk_limits": {"max_position_pct": 5, "stop_loss_pct": 5},
+  "speculative": false,
+  "expectancy_forecast": {
+    "forecast_win_rate": 0.58,
+    "reward_risk": 1.1,
+    "trades_per_year": 25,
+    "projected_annual_return_pct": 16.0,
+    "consistency_note": "reward:risk 1.1 needs >47.6% wins to break even; the 4-confirmation entry defends ~58%. 0.58 x 5.5% avg win - 0.42 x 5% avg loss ~ +1.1%/trade x ~25 trades ~ +27% gross, ~16% net after costs."
+  },
+  "rationale": "Stocks is the highest-edge class in the priors and a confirmed-uptrend pullback is the canonical high-win-rate setup there. Partials early plus a trailing runner lift realized win rate while keeping the average winner large enough that the 1.1 reward:risk clears its 47.6% break-even — so the (return, win-rate) pair holds with positive post-cost expectancy."
+}
+```
+
+### Expert-grade exemplar 2 — volatility-regime breakout (crypto)
+
+A contrasting profile: a breakout wins *less often* but with a larger reward:risk. It enters on a Bollinger-upper breakout, gated by trend strength (`ADX>25`) and a broader uptrend (`close > SMA(50)`). The forecast shows a *coherent* sub-50% win rate — positive expectancy comes from reward:risk, not hit rate — which the self-review must recognize as valid, not flag.
+
+```json
+{
+  "asset_class": "crypto",
+  "hypothesis": "When price breaks its upper Bollinger band while ADX>25 confirms an energetic trend and price holds above the 50-day SMA, a volatility-expansion breakout follows through. Breakouts are right less than half the time but the winners run far past the stop, so positive expectancy comes from a ~1.5 reward:risk, not from win rate.",
+  "signal_definition": "Breakout trigger close crossing above Bollinger(20, 2.0) upper band, trend-strength gate ADX(14)>25, and a broader-uptrend gate close>SMA(50), AND-stacked.",
+  "timeframe": "1d",
+  "entry_rules": [{
+    "kind": "entry", "side": "long",
+    "when": {"kind": "all_of", "of": [
+      {"lhs": "bar.close", "op": "cross_above", "rhs": {"name": "bollinger", "params": {"period": 20, "num_std": 2.0, "band": "upper"}}},
+      {"lhs": {"name": "adx", "params": {"period": 14}}, "op": ">", "rhs": 25},
+      {"lhs": "bar.close", "op": ">", "rhs": {"name": "sma", "params": {"period": 50}}}
+    ]}
+  }],
+  "exit_rules": [
+    {"kind": "scaled_take_profit", "levels": [
+      {"pct": 0.06, "qty_fraction": 0.5, "note": "bank half at +6%"},
+      {"pct": 0.15, "qty_fraction": 0.25, "note": "bank 25% more at +15%"}
+    ], "note": "let 25% run on the trailing stop"},
+    {"kind": "stop_loss", "pct": 0.06, "basis": "trailing_high", "note": "tight trailing stop; breakout failure exits fast"}
+  ],
+  "sizing": {"kind": "fixed_fraction", "fraction": 0.015},
+  "target_symbols": [],
+  "risk_limits": {"max_position_pct": 4, "stop_loss_pct": 6},
+  "speculative": false,
+  "expectancy_forecast": {
+    "forecast_win_rate": 0.48,
+    "reward_risk": 1.5,
+    "trades_per_year": 30,
+    "projected_annual_return_pct": 20.0,
+    "consistency_note": "reward:risk 1.5 needs only 40% wins to break even; 48% clears it. 0.48 x 9% avg win - 0.52 x 6% avg loss ~ +1.2%/trade x ~30 trades ~ +36% gross, ~20% net after costs. The sub-50% win rate is coherent, not a defect."
+  },
+  "rationale": "Differs from the stock pullback by design — breakout, not pullback; crypto, not equities; expectancy from reward:risk, not hit rate. The forecast is deliberately a coherent sub-50% win rate so the win rate is not chased at expectancy's expense."
+}
+```
+
 ### Negative examples — do NOT emit
 
 ```json
