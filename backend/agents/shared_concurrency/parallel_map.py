@@ -11,6 +11,10 @@ all fan-out through this one helper fixes worker bounds, exception propagation,
 and context propagation once instead of per-team. It is stdlib-only and lives in
 ``shared_concurrency`` so any team can use it without extra dependencies. See
 ``shared_concurrency/README.md`` for the rationale and usage examples.
+
+Requires Python 3.9+ (uses ``ThreadPoolExecutor.shutdown(cancel_futures=...)``).
+The project targets Python 3.10 (``backend/pyproject.toml`` ``target-version =
+"py310"``), so this is always satisfied.
 """
 
 from __future__ import annotations
