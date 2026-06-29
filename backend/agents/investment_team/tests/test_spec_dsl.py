@@ -47,6 +47,13 @@ def test_indicator_output_ranges_covers_bounded_indicators() -> None:
         "mfi": (0.0, 100.0),
         "williams_r": (-100.0, 0.0),
     }
+    # Validate each bounded indicator's actual range values explicitly (not just
+    # that the key is present) so a wrong bound is caught here, not downstream.
+    assert INDICATOR_OUTPUT_RANGES["rsi"] == (0.0, 100.0)
+    assert INDICATOR_OUTPUT_RANGES["adx"] == (0.0, 100.0)
+    assert INDICATOR_OUTPUT_RANGES["stochastic"] == (0.0, 100.0)
+    assert INDICATOR_OUTPUT_RANGES["mfi"] == (0.0, 100.0)
+    assert INDICATOR_OUTPUT_RANGES["williams_r"] == (-100.0, 0.0)
     for unbounded in (
         "sma",
         "ema",

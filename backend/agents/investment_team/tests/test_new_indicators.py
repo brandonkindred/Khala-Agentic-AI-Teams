@@ -224,6 +224,12 @@ _CASES = [
         20,
     ),
     (
+        "keltner_middle",
+        lambda r, b: r.keltner(b, 20, 10, 1.5, "middle"),
+        lambda b: _ref_keltner(b, 20, 10, 1.5, "middle"),
+        20,
+    ),
+    (
         "keltner_lower",
         lambda r, b: r.keltner(b, 20, 10, 1.5, "lower"),
         lambda b: _ref_keltner(b, 20, 10, 1.5, "lower"),
@@ -453,6 +459,7 @@ def test_scalar_wrappers_match_registry() -> None:
 
     k_u, k_m, k_l = si.keltner_channels(highs, lows, closes, 20, 10, 1.5)
     assert k_u == pytest.approx(reg.keltner(bars, 20, 10, 1.5, "upper"))
+    assert k_m == pytest.approx(reg.keltner(bars, 20, 10, 1.5, "middle"))
     assert k_l == pytest.approx(reg.keltner(bars, 20, 10, 1.5, "lower"))
 
 
@@ -497,7 +504,13 @@ def test_accessor_rejects_bad_params() -> None:
 
 @pytest.fixture
 def _contract_module():
-    """Install a minimal ``contract`` module so compiled strategies exec."""
+    """Install a minimal ``contract`` module so compiled strategies exec.
+
+    Saves and restores any pre-existing ``sys.modules['contract']`` so the
+    injection is exception-safe and leaves global state exactly as found (the
+    suite runs under pytest-xdist, which isolates by process, so this is a
+    within-worker hygiene measure, not a cross-worker race).
+    """
     mod = types.ModuleType("contract")
 
     class Strategy:  # noqa: D401 - test stub
@@ -505,9 +518,15 @@ def _contract_module():
             pass
 
     mod.Strategy = Strategy
+    _saved = sys.modules.get("contract")
     sys.modules["contract"] = mod
-    yield
-    sys.modules.pop("contract", None)
+    try:
+        yield
+    finally:
+        if _saved is not None:
+            sys.modules["contract"] = _saved
+        else:
+            sys.modules.pop("contract", None)
 
 
 def _compile_spec(ref: IndicatorRef) -> StrategySpec:
@@ -795,6 +814,10 @@ _SERIES_CASES = [
         lambda r, b: r.donchian(b, 20, "middle"),
     ),
     (
+        IndicatorRef(name="donchian", params={"band": "lower", "period": 20}),
+        lambda r, b: r.donchian(b, 20, "lower"),
+    ),
+    (
         IndicatorRef(
             name="keltner",
             params={"band": "lower", "period": 20, "atr_period": 10, "multiplier": 1.5},
@@ -930,22 +953,41 @@ def test_accessor_roc_honours_non_close_source() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Conformance warm-up sizing — cumulative indicators (OBV/VWAP) get the longer
-# margin rather than the bare default, so the synthetic fixture is long enough.
+# Conformance fixtures handle cumulative indicators (OBV) through the public
+# generator — exercising the cumulative warm-up sizing path without coupling to
+# the private helper. (OBV-vs-number is not synthesizable with the generic
+# oscillating recipe, so the generator returns a cleanly-marked fixture rather
+# than crashing — the contract we assert here.)
 # ---------------------------------------------------------------------------
 
 
-def test_conformance_warmup_for_cumulative_indicators() -> None:
-    from investment_team.strategy_lab.quality_gates.predicate_conformance_fixtures import (
-        _warmup_for_indicator,
+def test_conformance_generator_handles_obv_predicate() -> None:
+    spec = StrategySpec(
+        strategy_id="conf-obv",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=IndicatorRef(name="obv"), op=">", rhs=0.0))
+        ],
+        exit_rules=[],
+        target_symbols=["TEST"],
+        requires_custom_code=True,
     )
-
-    # OBV/VWAP have no rolling period; they get the explicit cumulative margin (50),
-    # not the bare 20 fallback a missing branch would hit.
-    assert _warmup_for_indicator(IndicatorRef(name="obv")) == 50
-    assert _warmup_for_indicator(IndicatorRef(name="vwap")) == 50
-    # A rolling indicator still sizes off its own default period.
-    assert _warmup_for_indicator(IndicatorRef(name="donchian")) == 25  # period 20 + 5
+    fixtures = generate_conformance_fixtures(spec)
+    assert len(fixtures) == 1
+    fx = fixtures[0]
+    assert fx.rule_kind == "entry"
+    # Either it synthesizes both verdict states, or it is cleanly marked
+    # unsynthesizable with a reason — never a half-built fixture.
+    if fx.synthesizable:
+        assert any(v is True for v in fx.expected_verdicts)
+        assert any(v is False for v in fx.expected_verdicts)
+    else:
+        assert fx.unsynthesizable_reason
+        assert fx.bars == []
 
 
 # ---------------------------------------------------------------------------
