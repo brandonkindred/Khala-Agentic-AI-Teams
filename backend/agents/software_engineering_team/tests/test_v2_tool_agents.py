@@ -143,7 +143,7 @@ def test_branding_theme_plan_llm_bad_json_recovers(monkeypatch) -> None:
             pass
 
         def __call__(self, prompt):
-            return "junk junk {\"summary\":\"ok\"} junk"
+            return 'junk junk {"summary":"ok"} junk'
 
     monkeypatch.setattr(mod, "Agent", _BadJsonAgent)
     agent = mod.BrandingThemeToolAgent.__new__(mod.BrandingThemeToolAgent)
@@ -213,8 +213,8 @@ def test_architecture_plan_no_model() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Trivial alias tool agents (Linter, Auth, ApiOpenapi, Containerization,
-# StateManagement) all share a constructor + 1-2 stub methods.
+# Trivial alias tool agents (Linter, Auth, ApiOpenapi, StateManagement) all
+# share a constructor + 1-2 stub methods.
 # ---------------------------------------------------------------------------
 
 
@@ -248,18 +248,6 @@ def test_api_openapi_tool_agent_constructs() -> None:
     )
 
     agent = ApiOpenApiToolAgent.__new__(ApiOpenApiToolAgent)
-    agent._model = None
-    agent.llm = None
-    result = agent.execute(_tool_input())
-    assert result is not None
-
-
-def test_containerization_tool_agent_constructs() -> None:
-    from software_engineering_team.frontend_code_v2_team.tool_agents.containerization.agent import (
-        ContainerizationAdapterAgent,
-    )
-
-    agent = ContainerizationAdapterAgent.__new__(ContainerizationAdapterAgent)
     agent._model = None
     agent.llm = None
     result = agent.execute(_tool_input())

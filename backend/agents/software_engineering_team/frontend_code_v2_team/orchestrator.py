@@ -39,16 +39,17 @@ MAX_REVIEW_ITERATIONS = 15
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     """Build team-owned tool agent instances with LLM support where applicable."""
+    from software_engineering_team.shared.tool_agent_git_branch import (
+        GitBranchManagementToolAgent,
+    )
+
     from .tool_agents.accessibility import AccessibilityToolAgent
     from .tool_agents.api_openapi import ApiOpenApiToolAgent
     from .tool_agents.architecture import ArchitectureToolAgent
     from .tool_agents.auth import AuthToolAgent
     from .tool_agents.branding_theme import BrandingThemeToolAgent
     from .tool_agents.build_specialist import BuildSpecialistAdapterAgent
-    from .tool_agents.cicd import CicdAdapterAgent
-    from .tool_agents.containerization import ContainerizationAdapterAgent
     from .tool_agents.documentation import DocumentationToolAgent
-    from .tool_agents.git_branch_management import GitBranchManagementToolAgent
     from .tool_agents.linter import LinterToolAgent
     from .tool_agents.performance import PerformanceToolAgent
     from .tool_agents.security import SecurityToolAgent
@@ -61,8 +62,6 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
         ToolAgentKind.STATE_MANAGEMENT: StateManagementToolAgent(),
         ToolAgentKind.AUTH: AuthToolAgent(),
         ToolAgentKind.API_OPENAPI: ApiOpenApiToolAgent(),
-        ToolAgentKind.CICD: CicdAdapterAgent(llm),
-        ToolAgentKind.CONTAINERIZATION: ContainerizationAdapterAgent(),
         ToolAgentKind.DOCUMENTATION: DocumentationToolAgent(llm),
         ToolAgentKind.TESTING_QA: TestingQAToolAgent(llm),
         ToolAgentKind.SECURITY: SecurityToolAgent(llm),
@@ -449,7 +448,9 @@ class FrontendDevelopmentAgent:
                 merge_to_development=merge_to_development,
             )
             result.deliver_result = deliver_result
-            delivered = deliver_result.merged if merge_to_development else deliver_result.branch_ready
+            delivered = (
+                deliver_result.merged if merge_to_development else deliver_result.branch_ready
+            )
             result.success = delivered and failed_count == 0
             result.summary = f"{exec_result.summary} {deliver_result.summary}"
             if failed_count > 0:

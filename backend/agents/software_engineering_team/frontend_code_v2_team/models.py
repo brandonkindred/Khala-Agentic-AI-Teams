@@ -78,8 +78,6 @@ class ToolAgentKind(str, Enum):
     STATE_MANAGEMENT = "state_management"
     AUTH = "auth"
     API_OPENAPI = "api_openapi"
-    CICD = "cicd"
-    CONTAINERIZATION = "containerization"
     DOCUMENTATION = "documentation"
     TESTING_QA = "testing_qa"
     SECURITY = "security"
