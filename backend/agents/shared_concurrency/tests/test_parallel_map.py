@@ -41,24 +41,21 @@ def test_preserves_input_order_under_jittered_completion() -> None:
     assert parallel_map([0, 1, 2, 3, 4], fn, max_workers=5) == [0, 10, 20, 30, 40]
 
 
-def test_completion_order_when_not_preserving() -> None:
-    """preserve_order=False returns results in genuine completion order.
+def test_not_preserving_order_returns_every_result_once() -> None:
+    """preserve_order=False returns every result exactly once.
 
-    Gates force item 4 to finish first, then 3, 2, 1, 0 — the reverse of input
-    order — so the result is deterministic, not timing-dependent.
+    Completion order across a burst of near-simultaneous completions is
+    inherently non-deterministic, so we assert the multiset of results — the
+    deterministic property — rather than a specific sequence. (test_preserves_
+    input_order_under_jittered_completion already proves ordering works when it
+    is requested.)
     """
-    gates = {i: threading.Event() for i in range(5)}
 
     def fn(x: int) -> int:
-        gates[x].wait(timeout=5)
-        # Open the next item's gate so completion is strictly 4 -> 3 -> ... -> 0.
-        if x > 0:
-            gates[x - 1].set()
-        return x
+        return x * 10
 
-    gates[4].set()  # release the chain head
     out = parallel_map([0, 1, 2, 3, 4], fn, max_workers=5, preserve_order=False)
-    assert out == [4, 3, 2, 1, 0]
+    assert sorted(out) == [0, 10, 20, 30, 40]
 
 
 def test_worker_bound_is_min_of_max_workers_and_len() -> None:
@@ -214,7 +211,47 @@ def test_fast_fail_does_not_wait_for_inflight_tasks() -> None:
         release.set()
 
 
+def test_on_first_exception_hook_raising_does_not_mask_worker_error() -> None:
+    """A raising hook is logged and discarded — the original worker exception
+    still propagates rather than being replaced by the hook's error."""
+
+    class _Worker(RuntimeError):
+        pass
+
+    def hook() -> None:
+        raise KeyError("hook blew up")
+
+    def fn(_x: int) -> int:
+        raise _Worker("real failure")
+
+    with pytest.raises(_Worker, match="real failure"):
+        parallel_map([1], fn, max_workers=1, on_first_exception=hook)
+
+
 def test_invalid_max_workers_rejected() -> None:
-    """max_workers < 1 is a precondition violation."""
-    with pytest.raises(AssertionError):
+    """max_workers < 1 raises ValueError (an explicit check, not an assert, so it
+    holds under ``python -O``)."""
+    with pytest.raises(ValueError):
         parallel_map([1, 2], lambda x: x, max_workers=0)
+
+
+def test_non_int_max_workers_rejected() -> None:
+    """A non-int max_workers (including bool) raises TypeError before the pool is
+    built, instead of a confusing error from ThreadPoolExecutor."""
+    with pytest.raises(TypeError):
+        parallel_map([1, 2], lambda x: x, max_workers=2.5)
+    with pytest.raises(TypeError):
+        parallel_map([1, 2], lambda x: x, max_workers=True)
+
+
+def test_non_callable_fn_rejected() -> None:
+    """A non-callable fn raises TypeError up front."""
+    with pytest.raises(TypeError):
+        parallel_map([1, 2], "not-callable", max_workers=2)
+
+
+def test_non_sized_items_rejected() -> None:
+    """A non-sized iterable (e.g. a generator) raises TypeError rather than
+    failing obscurely inside the helper."""
+    with pytest.raises(TypeError):
+        parallel_map((x for x in range(3)), lambda x: x, max_workers=2)

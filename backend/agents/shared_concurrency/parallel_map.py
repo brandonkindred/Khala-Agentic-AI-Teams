@@ -63,15 +63,24 @@ def parallel_map(
         on_first_exception: Optional zero-arg callback invoked exactly once, on
             the first worker exception, **before** pending tasks are cancelled and
             the exception is re-raised. Lets a caller flip its own "abandoned"
-            flag (e.g. under a progress lock) before any cancellation lands.
+            flag (e.g. under a progress lock) before any cancellation lands. If the
+            hook itself raises, that error is logged and discarded so the original
+            worker exception is the one that propagates.
 
     Returns:
-        The list of results. Length equals ``len(items)`` unless ``skip_none``
-        dropped some (or a worker raised, in which case nothing is returned).
+        The list of results — element type ``R``, plus ``None`` entries when
+        ``skip_none`` is False (the annotation is a bare ``list`` because the
+        element type depends on the ``skip_none`` flag). Length equals
+        ``len(items)`` unless ``skip_none`` dropped some (or a worker raised, in
+        which case nothing is returned).
 
-    Preconditions:
-        - ``fn`` is callable and safe to invoke concurrently from worker threads.
-        - ``max_workers`` >= 1.
+    Preconditions (enforced — invalid input raises at the boundary, and the
+    checks survive ``python -O`` which strips ``assert``):
+        - ``fn`` is callable (else ``TypeError``) and safe to invoke concurrently
+          from worker threads.
+        - ``max_workers`` is an ``int`` (else ``TypeError``) and >= 1 (else
+          ``ValueError``).
+        - ``items`` is a sized sequence (else ``TypeError``).
         - When ``propagate_context`` is True, this function is called on the
           thread whose context should be snapshotted into the workers.
 
@@ -91,8 +100,18 @@ def parallel_map(
           cannot be entered concurrently), so workers never share mutable context
           state.
     """
-    assert callable(fn), "fn must be callable"
-    assert max_workers >= 1, "max_workers must be >= 1"
+    # Explicit raises rather than ``assert`` so the preconditions still hold under
+    # ``python -O`` (which strips asserts) — an invalid argument fails here with a
+    # clear error instead of a confusing downstream ``TypeError``/``ValueError``
+    # from ``ThreadPoolExecutor`` or from calling a non-callable.
+    if not callable(fn):
+        raise TypeError("fn must be callable")
+    if not isinstance(max_workers, int) or isinstance(max_workers, bool):
+        raise TypeError("max_workers must be an int")
+    if max_workers < 1:
+        raise ValueError("max_workers must be >= 1")
+    if not hasattr(items, "__len__"):
+        raise TypeError("items must be a sized sequence")
 
     n = len(items)
     if n == 0:
@@ -122,7 +141,15 @@ def parallel_map(
             completion.append(value)
     except BaseException:
         if on_first_exception is not None:
-            on_first_exception()
+            # A raising hook must not replace the worker exception we are about to
+            # propagate, or the original error context is lost; log and discard it.
+            try:
+                on_first_exception()
+            except Exception:
+                logger.exception(
+                    "on_first_exception hook raised; the original worker "
+                    "exception will still propagate"
+                )
         pool.shutdown(wait=False, cancel_futures=True)
         raise
     pool.shutdown(wait=True)
