@@ -78,6 +78,9 @@
       @case ('persona') {
         @if (teamLoading()) {
           <p class="persona__loading">Loading team…</p>
+        } @else if (teamError()) {
+          <!-- Team load failed: the error banner above says so; don't also render
+               the launcher with an empty dropdown + disabled button. -->
         } @else if (noCompleteProcess()) {
           <!-- Safety net: the loaded team has no complete process to drive. -->
           <div class="persona-empty">
@@ -98,6 +101,8 @@
               </div>
               @if (personasLoading()) {
                 <p class="persona__loading">Loading personas…</p>
+              } @else if (personasError()) {
+                <p class="persona__error" role="alert">{{ personasError() }}</p>
               } @else if (personas().length === 0) {
                 <p class="persona__loading">No personas — create one to begin.</p>
               } @else {
@@ -133,8 +138,9 @@
               <label class="persona__field">
                 <span>Target process</span>
                 <select
+                  #processSelect
                   [value]="selectedProcessId() ?? ''"
-                  (change)="selectProcess($any($event.target).value)"
+                  (change)="selectProcess(processSelect.value)"
                 >
                   <option value="" disabled>Select a process…</option>
                   @for (proc of completeProcesses(); track proc.process_id) {

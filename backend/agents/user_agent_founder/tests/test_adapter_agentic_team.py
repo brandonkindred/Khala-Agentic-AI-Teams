@@ -381,6 +381,26 @@ def test_poll_build_maps_waiting_for_input_to_free_text_question():
     assert q["options"] == []  # empty ⇒ persona answers free-text via "other"
 
 
+def test_poll_build_waiting_without_step_id_falls_back_to_wait():
+    """A WAIT step missing ``current_step_id`` falls back to the literal "wait"
+    in the stable question id (the None-guard fallback)."""
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(
+        get_responses={
+            "/test-pipeline/runs/run-9": [
+                _FakeResponse(
+                    200,
+                    {"status": "waiting_for_input", "human_prompt": "Pick a tone."},
+                )
+            ]
+        }
+    )
+    payload = adapter.poll_build(fake, "run-9")
+    assert payload["pending_questions"][0]["id"] == "run-9:wait"
+
+
 def test_poll_build_waiting_without_prompt_is_treated_as_running():
     from user_agent_founder.targets import AgenticTeamAdapter
 

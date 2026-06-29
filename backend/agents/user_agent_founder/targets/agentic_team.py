@@ -186,7 +186,7 @@ class AgenticTeamAdapter:
               polling).
         """
         resp = client.get(
-            self._url(f"/test-pipeline/runs/{job_id}"),
+            self._url(f"/test-pipeline/runs/{quote(job_id, safe='')}"),
             timeout=HTTP_TIMEOUT,
         )
         if resp.status_code >= 400:
@@ -207,7 +207,11 @@ class AgenticTeamAdapter:
                 # Paused but no prompt yet — treat as still running so the next
                 # tick re-checks rather than surfacing an empty question.
                 return {"status": "running"}
-            step_id = run.get("current_step_id") or "wait"
+            # Explicit None check (not ``or``): only a *missing* step id falls
+            # back to "wait" — a valid falsy id (e.g. "0") is preserved.
+            step_id = run.get("current_step_id")
+            if step_id is None:
+                step_id = "wait"
             return {
                 "status": "waiting_for_input",
                 "waiting_for_answers": True,
@@ -255,7 +259,7 @@ class AgenticTeamAdapter:
         if not text:
             text = "(no answer provided)"
         resp = client.post(
-            self._url(f"/test-pipeline/runs/{job_id}/input"),
+            self._url(f"/test-pipeline/runs/{quote(job_id, safe='')}/input"),
             json={"input": text},
             timeout=HTTP_TIMEOUT,
         )

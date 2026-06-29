@@ -66,7 +66,14 @@ export interface PersonaTestRunDetail extends PersonaTestRun {
   decisions: PersonaDecision[];
 }
 
-/** Body for POST /start. */
+/**
+ * Body for POST /start.
+ *
+ * Properties are intentionally `snake_case` to mirror the backend JSON contract
+ * 1:1 — these objects are serialized straight onto the wire, so a camelCase
+ * model would need a transform layer for no benefit. Treat this interface as the
+ * API DTO, not an app-domain type.
+ */
 export interface StartTestRequest {
   persona_id: string;
   target_team_key: string;

@@ -201,6 +201,13 @@ def test_create_run_rejects_empty_target_team_key(store):
         store.create_run(target_team_key="")
 
 
+def test_create_run_rejects_empty_process_id(store):
+    import pytest
+
+    with pytest.raises(ValueError, match="process_id must be non-empty when provided"):
+        store.create_run(process_id="")
+
+
 def test_create_run_persists_persona_id_and_project_name(store, fake_pg):
     run_id = store.create_run(
         run_id="fixed-run-id",

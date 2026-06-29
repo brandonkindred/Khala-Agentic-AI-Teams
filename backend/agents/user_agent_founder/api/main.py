@@ -23,7 +23,7 @@ from user_agent_founder.store import (
     get_founder_store,
     get_persona_store,
 )
-from user_agent_founder.targets import ADAPTERS, get_adapter
+from user_agent_founder.targets import ADAPTERS, AGENTIC_TEAM_PREFIX, get_adapter
 from user_agent_founder.targets.agentic_team import PROVISIONING_PREFIX, UNIFIED_API_BASE
 
 logger = logging.getLogger(__name__)
@@ -282,13 +282,13 @@ def start_founder_workflow(
     # An agentic-team run drives a specific process; enforce the Stage-3 → Stage-4
     # gate server-side (not just in the UI) so a direct caller or a stale handoff
     # can't start a persona test against a missing/draft/archived process.
-    if req.target_team_key.startswith("agentic_team:"):
+    if req.target_team_key.startswith(AGENTIC_TEAM_PREFIX):
         if not req.process_id:
             raise HTTPException(
                 status_code=400,
                 detail="process_id is required when target_team_key is an agentic team",
             )
-        team_id = req.target_team_key[len("agentic_team:") :]
+        team_id = req.target_team_key[len(AGENTIC_TEAM_PREFIX) :]
         status = _agentic_process_status(team_id, req.process_id)
         # ``None`` means the provisioning service was unreachable: stay best-effort
         # and allow (an outage must not hard-block starts; a truly unrunnable
@@ -573,7 +573,10 @@ def _fetch_agentic_team(client: httpx.Client, team_id: str) -> tuple[int, dict]:
     resp = client.get(f"{_provisioning_base()}/teams/{quote(team_id, safe='')}")
     if resp.status_code >= 400:
         return resp.status_code, {}
-    return resp.status_code, (resp.json() or {}).get("team") or {}
+    data = resp.json()
+    if not isinstance(data, dict):  # a list/scalar body has no .get("team")
+        return resp.status_code, {}
+    return resp.status_code, data.get("team") or {}
 
 
 def _agentic_process_status(team_id: str, process_id: str) -> Optional[str]:
@@ -693,7 +696,9 @@ def list_testable_teams() -> TestableTeamsResponse:
     teams: list[TestableTeam] = []
     for team_key in ADAPTERS:
         cfg = TEAM_CONFIGS.get(team_key)
-        display_name = cfg.name if cfg is not None else team_key.replace("_", " ").title()
+        # getattr (not ``cfg.name``) so an unexpected config object shape degrades
+        # to the generated display name instead of crashing the endpoint.
+        display_name = getattr(cfg, "name", None) or team_key.replace("_", " ").title()
         teams.append(TestableTeam(team_key=team_key, display_name=display_name))
     teams.extend(_list_agentic_testable_teams())
     return TestableTeamsResponse(teams=teams)

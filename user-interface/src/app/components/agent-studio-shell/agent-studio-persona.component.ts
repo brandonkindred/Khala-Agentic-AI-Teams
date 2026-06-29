@@ -78,6 +78,8 @@ export class AgentStudioPersonaComponent implements OnInit {
   readonly personas = signal<PersonaInfo[]>([]);
   /** True while the persona library is being fetched (distinguishes "loading" from "empty"). */
   readonly personasLoading = signal(false);
+  /** Persona-library load failure, owned separately from the run/launch `error`. */
+  readonly personasError = signal<string | null>(null);
   readonly selectedProcessId = signal<string | null>(null);
   readonly launching = signal(false);
   readonly error = signal<string | null>(null);
@@ -93,6 +95,8 @@ export class AgentStudioPersonaComponent implements OnInit {
    * after a new run started and clobbering it / stopping the new poller.
    */
   private activeRunId: string | null = null;
+  /** Guards `newPersona` against opening multiple editor dialogs on rapid clicks. */
+  private dialogOpen = false;
 
   readonly teamId = computed(() => this.state.teamId());
   readonly selectedPersonaId = computed(() => this.state.personaId());
@@ -191,10 +195,10 @@ export class AgentStudioPersonaComponent implements OnInit {
   }
 
   private loadPersonas(): void {
-    // Reset any prior error before the request (consistent with loadTeam). Safe
-    // because loadPersonas runs only from ngOnInit, before any run/launch error
-    // could exist; it is not a general-purpose reload.
-    this.error.set(null);
+    // Owns its own `personasError` (cleared here, set on failure) so the library
+    // area can show a load error without touching the run/launch `error` signal —
+    // each error region is independently responsible and safely reloadable.
+    this.personasError.set(null);
     this.personasLoading.set(true);
     this.personaApi
       .getPersonas()
@@ -211,7 +215,7 @@ export class AgentStudioPersonaComponent implements OnInit {
         },
         error: () => {
           this.personasLoading.set(false);
-          this.error.set('Could not load personas.');
+          this.personasError.set('Could not load personas.');
         },
       });
   }
@@ -338,6 +342,12 @@ export class AgentStudioPersonaComponent implements OnInit {
    * closed on component destroy so it can't be orphaned in the overlay.
    */
   newPersona(): void {
+    // Guard rapid double-clicks so we don't stack multiple editor dialogs in the
+    // overlay; reset once this one closes.
+    if (this.dialogOpen) {
+      return;
+    }
+    this.dialogOpen = true;
     const ref = this.dialog.open<
       PersonaEditorDialogComponent,
       PersonaEditorDialogData,
@@ -350,6 +360,7 @@ export class AgentStudioPersonaComponent implements OnInit {
       .afterClosed()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((result) => {
+        this.dialogOpen = false;
         if (!result) {
           return;
         }

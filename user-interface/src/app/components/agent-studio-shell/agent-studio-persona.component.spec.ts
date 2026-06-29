@@ -224,11 +224,14 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.teamError()).toContain('Could not load');
   });
 
-  it('surfaces a personas-load error', () => {
+  it('surfaces a personas-load error in the library (not the shared error signal)', () => {
     build();
     personaApi.getPersonas.mockReturnValue(throwError(() => new Error('nope')));
     fixture.detectChanges();
-    expect(component.error()).toContain('Could not load personas');
+    expect(component.personasError()).toContain('Could not load personas');
+    // The run/launch `error` signal is untouched by a persona-library failure.
+    expect(component.error()).toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('Could not load personas');
   });
 
   it('ignores a stale status response from a superseded run', () => {
@@ -426,5 +429,43 @@ describe('AgentStudioPersonaComponent', () => {
     component.selectProcess('p1');
     component.launch();
     expect(personaApi.startTest).not.toHaveBeenCalled();
+  });
+
+  it('renders the decision transcript when a run has decisions', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(
+      of({
+        run_id: 'run-1',
+        status: 'running',
+        decisions: [
+          {
+            decision_id: 1,
+            question_text: 'What is the MVP scope?',
+            answer_text: 'Auth + dashboard only',
+            rationale: 'Ship fast, validate demand',
+          },
+        ],
+      }),
+    );
+    component.launch();
+    fixture.detectChanges();
+    const text = fixture.nativeElement.textContent;
+    expect(text).toContain('What is the MVP scope?');
+    expect(text).toContain('Auth + dashboard only');
+    expect(text).toContain('Ship fast, validate demand');
+    expect(text).not.toContain('Waiting for the first decision');
+  });
+
+  it('shows "Waiting for the first decision…" for a non-terminal run with no decisions', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(
+      of({ run_id: 'run-1', status: 'running', decisions: [] }),
+    );
+    component.launch();
+    fixture.detectChanges();
+    expect(component.runTerminal()).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('Waiting for the first decision');
   });
 });

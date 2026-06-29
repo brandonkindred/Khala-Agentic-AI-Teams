@@ -466,6 +466,17 @@ def test_agentic_process_status_404_is_not_found_but_5xx_is_none(monkeypatch):
     assert api_main._agentic_process_status("t1", "p1") is None
 
 
+def test_agentic_process_status_non_dict_body_is_not_found(monkeypatch):
+    """A 2xx whose body is a JSON list/scalar (no ``.get('team')``) degrades to
+    'not_found' rather than raising — the process simply can't be resolved."""
+    from user_agent_founder.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main.httpx, "Client", lambda *a, **kw: _StatusClient(200, ["unexpected", "list"])
+    )
+    assert api_main._agentic_process_status("t1", "p1") == "not_found"
+
+
 class _PartialClient:
     """List succeeds with teams A and B (both have a complete process), but B's
     detail GET raises — simulating a transient mid-loop transport fault."""
