@@ -145,7 +145,7 @@ class TechLeadAgent:
         parts.append(f"# Development Plan: {requirements.title}\n")
         parts.append("\n## Overview\n")
         parts.append(
-            f"This development plan covers {requirements.description}{'...' if len(requirements.description) > 200 else ''}\n"
+            f"This development plan covers {requirements.description}\n"
         )
 
         # Hierarchy summary
@@ -438,11 +438,11 @@ class TechLeadAgent:
                     f"- **id:** {t.id} | **type:** {t.type} | **title:** {t.title} | **status:** {t.status} | **assignee:** {t.assignee}"
                 )
                 task_lines.append(
-                    f"  **description:** {t.description}{'...' if len(t.description) > 500 else ''}"
+                    f"  **description:** {t.description}"
                 )
                 if t.requirements:
                     task_lines.append(
-                        f"  **requirements:** {t.requirements}{'...' if len(t.requirements) > 300 else ''}"
+                        f"  **requirements:** {t.requirements}"
                     )
                 if t.acceptance_criteria:
                     task_lines.append(

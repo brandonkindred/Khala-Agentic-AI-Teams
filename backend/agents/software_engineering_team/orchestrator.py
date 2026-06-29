@@ -415,8 +415,8 @@ def _log_task_completion_banner(
 ) -> None:
     """Log a big, flashy banner when a task is considered complete."""
     stats = _get_task_stats()
-    title_display = task_title[:50] + ("..." if len(task_title) > 50 else "")
-    desc_display = description[:60] + ("..." if len(description) > 60 else (""))
+    title_display = task_title
+    desc_display = description
     assignee_display = assignee.replace("_", " ").title()
 
     # Progress bar (40 chars wide)
@@ -1201,7 +1201,7 @@ def _try_build_fix_one_at_a_time(
             relevant_code = f"--- {file_path} ---\n{current_files[file_path][:8000]}"
         else:
             parts = []
-            for p, c in list(current_files.items())[:10]:
+            for p, c in current_files.items():
                 parts.append(f"--- {p} ---\n{c}")
             relevant_code = "\n".join(parts) if parts else "(no code)"
         if prompt_module == "frontend_code_v2_team.prompts":
