@@ -13,7 +13,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Subscription, interval, switchMap } from 'rxjs';
+import { EMPTY, Subscription, catchError, interval, switchMap } from 'rxjs';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
@@ -155,12 +155,17 @@ export class AgentStudioPersonaComponent implements OnInit {
       .subscribe({
         next: (resp) => {
           this.team.set(resp.team);
-          // Default the process selection to the only complete process, if one.
-          if (!this.selectedProcessId()) {
-            const complete = resp.team.processes.filter((p) => p.status === 'complete');
-            if (complete.length === 1) {
-              this.selectedProcessId.set(complete[0].process_id);
-            }
+          const complete = resp.team.processes.filter((p) => p.status === 'complete');
+          const current = this.selectedProcessId();
+          // Drop a handoff-seeded selection that isn't a *complete* process: the
+          // <select> only lists complete ones (so it'd show the placeholder) and
+          // the backend would 422 it, but the signal would still enable Run.
+          if (current && !complete.some((p) => p.process_id === current)) {
+            this.selectedProcessId.set(null);
+          }
+          // Default to the only complete process when nothing valid is selected.
+          if (!this.selectedProcessId() && complete.length === 1) {
+            this.selectedProcessId.set(complete[0].process_id);
           }
           this.cdr.markForCheck();
         },
@@ -238,16 +243,23 @@ export class AgentStudioPersonaComponent implements OnInit {
       });
     this.pollSub = interval(POLL_MS)
       .pipe(
-        switchMap(() => this.personaApi.getRunStatus(runId)),
+        // Handle the failure INSIDE switchMap: a transient getRunStatus error
+        // must not propagate to the outer interval subscription (that would
+        // terminate the stream permanently). catchError → EMPTY surfaces a
+        // banner and lets the next tick retry, matching the immediate-fetch
+        // comment's promise.
+        switchMap(() =>
+          this.personaApi.getRunStatus(runId).pipe(
+            catchError(() => {
+              this.error.set('Lost contact with the run; retrying…');
+              this.cdr.markForCheck();
+              return EMPTY;
+            }),
+          ),
+        ),
         takeUntilDestroyed(this.destroyRef),
       )
-      .subscribe({
-        next: (detail) => this.handleStatus(detail),
-        error: () => {
-          this.error.set('Lost contact with the run; retrying…');
-          this.cdr.markForCheck();
-        },
-      });
+      .subscribe((detail) => this.handleStatus(detail));
     // Fetch once immediately so the panel isn't blank for a full poll interval.
     this.personaApi
       .getRunStatus(runId)
@@ -270,6 +282,9 @@ export class AgentStudioPersonaComponent implements OnInit {
     if (detail.run_id !== this.activeRunId) {
       return;
     }
+    // A successful status clears any transient "lost contact" banner from a
+    // prior failed poll.
+    this.error.set(null);
     this.run.set(detail);
     if (TERMINAL_STATUSES.has(detail.status)) {
       this.stopPolling();

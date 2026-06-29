@@ -538,28 +538,50 @@ def delete_persona(persona_id: str) -> Response:
     return Response(status_code=204)
 
 
+def _provisioning_base() -> str:
+    """Base URL for the agentic-team-provisioning service over the unified API."""
+    from user_agent_founder.targets.agentic_team import PROVISIONING_PREFIX, UNIFIED_API_BASE
+
+    return f"{UNIFIED_API_BASE}{PROVISIONING_PREFIX}"
+
+
+def _fetch_agentic_team(client: httpx.Client, team_id: str) -> tuple[int, dict]:
+    """GET one agentic team's detail. Returns ``(status_code, team_dict)``.
+
+    Preconditions: ``client`` is an open httpx client.
+    Postconditions: ``team_dict`` is the response's ``.team`` object on a 2xx
+        (``{}`` if absent), and ``{}`` on an HTTP error. Propagates transport
+        exceptions to the caller (each caller decides how to degrade).
+    """
+    resp = client.get(f"{_provisioning_base()}/teams/{team_id}")
+    if resp.status_code >= 400:
+        return resp.status_code, {}
+    return resp.status_code, (resp.json() or {}).get("team") or {}
+
+
 def _agentic_process_status(team_id: str, process_id: str) -> Optional[str]:
     """Return the status of ``process_id`` on an agentic team, cross-service.
 
     Postconditions: returns the process's ``status`` string (e.g. ``"complete"``,
         ``"draft"``, ``"archived"``) when the team+process resolve; ``"missing"``
-        when the team or process isn't found; and ``None`` when the provisioning
-        service is unreachable (best-effort — the caller treats ``None`` as
-        "cannot determine" and must not hard-block on it). Never raises.
+        when the team is definitively **not found** (``404``) or the process
+        isn't on it; and ``None`` when the status can't be determined — a
+        transport failure **or** a non-404 HTTP error (``5xx``, auth ``401/403``,
+        rate-limit) — which the caller treats as "cannot determine" and must not
+        hard-block on (best-effort). A transient ``503`` is thus an outage, not a
+        gate violation. Never raises.
     """
-    from user_agent_founder.targets.agentic_team import PROVISIONING_PREFIX, UNIFIED_API_BASE
-
-    base = f"{UNIFIED_API_BASE}{PROVISIONING_PREFIX}"
     try:
         with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-            resp = client.get(f"{base}/teams/{team_id}")
-            if resp.status_code >= 400:
-                return "missing"
-            team = (resp.json() or {}).get("team") or {}
-            for proc in team.get("processes") or []:
-                if proc.get("process_id") == process_id:
-                    return proc.get("status") or "unknown"
-            return "missing"
+            code, team = _fetch_agentic_team(client, team_id)
+        if code == 404:
+            return "missing"  # definitively not found ⇒ a real gate rejection
+        if code >= 400:
+            return None  # 5xx/auth/transient ⇒ undeterminable, don't hard-block
+        for proc in team.get("processes") or []:
+            if proc.get("process_id") == process_id:
+                return proc.get("status") or "unknown"
+        return "missing"
     except Exception:
         logger.warning(
             "Could not verify agentic process status for team %s / process %s",
@@ -579,31 +601,37 @@ def _list_agentic_testable_teams() -> list[TestableTeam]:
     Stage-3 → Stage-4 gate (a complete process is required to test) is honored.
 
     Postconditions: returns one :class:`TestableTeam` per agentic team with a
-        ``complete`` process, keyed ``"agentic_team:<team_id>"``. Returns ``[]``
-        on any cross-service failure (the provisioning service being down must
-        not break the static-team listing) — failures are logged, never raised.
+        ``complete`` process, keyed ``"agentic_team:<team_id>"``. Best-effort and
+        **partial-failure tolerant**: a per-team detail fetch that errors or
+        raises skips only that team (the already-collected teams are kept), and a
+        top-level failure (e.g. the list call itself) returns whatever was
+        gathered so far. Failures are logged, never raised.
     """
-    from user_agent_founder.targets.agentic_team import PROVISIONING_PREFIX, UNIFIED_API_BASE
-
-    base = f"{UNIFIED_API_BASE}{PROVISIONING_PREFIX}"
     timeout = httpx.Timeout(10.0, connect=5.0)
     teams: list[TestableTeam] = []
     try:
         with httpx.Client(timeout=timeout) as client:
-            resp = client.get(f"{base}/teams")
+            resp = client.get(f"{_provisioning_base()}/teams")
             if resp.status_code >= 400:
                 logger.warning("Could not list agentic teams: HTTP %s", resp.status_code)
-                return []
+                return teams
             summaries = resp.json()
             for summary in summaries:
                 team_id = summary.get("team_id")
                 # No processes ⇒ can't be fully designed; skip the detail fetch.
                 if not team_id or not summary.get("process_count"):
                     continue
-                detail = client.get(f"{base}/teams/{team_id}")
-                if detail.status_code >= 400:
+                # Guard each detail fetch so one flaky/timing-out team doesn't
+                # discard the teams already collected (return partial, not []).
+                try:
+                    code, team = _fetch_agentic_team(client, team_id)
+                except Exception:
+                    logger.warning(
+                        "Could not fetch agentic team %s detail; skipping", team_id, exc_info=True
+                    )
                     continue
-                team = (detail.json() or {}).get("team") or {}
+                if code >= 400:
+                    continue
                 processes = team.get("processes") or []
                 if any(p.get("status") == "complete" for p in processes):
                     teams.append(
@@ -614,7 +642,6 @@ def _list_agentic_testable_teams() -> list[TestableTeam]:
                     )
     except Exception:
         logger.warning("Could not enumerate agentic testable teams", exc_info=True)
-        return []
     return teams
 
 

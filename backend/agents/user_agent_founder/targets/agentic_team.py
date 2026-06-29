@@ -172,9 +172,14 @@ class AgenticTeamAdapter:
                 "waiting_for_answers": True,
                 "pending_questions": [
                     {
-                        # Stable id per (run, step) so the orchestrator's
-                        # answered-set tracking dedupes correctly; empty options
-                        # force a free-text ("other") answer from the persona.
+                        # Id is stable per (run, step) so the orchestrator's
+                        # failed-submission dedup (``failed_question_sets``, keyed
+                        # by the question-id set) counts retries of the *same*
+                        # WAIT prompt correctly. The pipeline clears
+                        # ``waiting_for_input`` synchronously on ``/input``
+                        # (``submit_human_input``), so a successfully-answered
+                        # step doesn't re-surface the same id. Empty options force
+                        # a free-text ("other") answer from the persona.
                         "id": f"{job_id}:{step_id}",
                         "question_text": prompt,
                         "context": f"Pipeline run {job_id}, step {step_id}.",

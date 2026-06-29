@@ -395,6 +395,74 @@ class _TeamsResp:
         return self._json
 
 
+class _StatusClient:
+    """Fake httpx.Client whose every GET returns a fixed status code."""
+
+    def __init__(self, code, body=None):
+        self._code = code
+        self._body = body or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url, *, timeout=None):
+        return _TeamsResp(self._code, self._body)
+
+
+def test_agentic_process_status_404_is_missing_but_5xx_is_none(monkeypatch):
+    """A definitive 404 (team not found) is a gate rejection ('missing'); a 5xx
+    or other non-404 HTTP error is an outage ('None') and must not hard-block."""
+    from user_agent_founder.api import main as api_main
+
+    monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _StatusClient(404))
+    assert api_main._agentic_process_status("t1", "p1") == "missing"
+
+    monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _StatusClient(503))
+    assert api_main._agentic_process_status("t1", "p1") is None
+
+    monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _StatusClient(401))
+    assert api_main._agentic_process_status("t1", "p1") is None
+
+
+class _PartialClient:
+    """List succeeds with teams A and B (both have a complete process), but B's
+    detail GET raises — simulating a transient mid-loop transport fault."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url, *, timeout=None):
+        if url.endswith("/teams"):
+            return _TeamsResp(
+                200,
+                [
+                    {"team_id": "A", "name": "Alpha", "process_count": 1},
+                    {"team_id": "B", "name": "Beta", "process_count": 1},
+                ],
+            )
+        if url.endswith("/teams/A"):
+            return _TeamsResp(
+                200, {"team": {"name": "Alpha", "processes": [{"status": "complete"}]}}
+            )
+        raise RuntimeError("B detail transport reset")
+
+
+def test_list_agentic_testable_teams_keeps_others_when_one_detail_fails(monkeypatch):
+    """A per-team detail fetch that raises skips only that team — the teams
+    already collected are kept (not discarded to [])."""
+    from user_agent_founder.api import main as api_main
+
+    monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _PartialClient())
+    teams = api_main._list_agentic_testable_teams()
+    assert {t.team_key for t in teams} == {"agentic_team:A"}
+
+
 def test_testable_teams_includes_agentic_teams_with_complete_process(monkeypatch):
     from user_agent_founder.api import main as api_main
 

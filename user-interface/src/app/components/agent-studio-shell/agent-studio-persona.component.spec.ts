@@ -290,4 +290,51 @@ describe('AgentStudioPersonaComponent', () => {
     component.finishInCompose();
     expect(state.activeStage()).toBe(2);
   });
+
+  it('drops a handoff-seeded process that is not complete', () => {
+    // TEAM: p1 complete, p2 draft. A stale Stage-3 handoff seeds the draft p2;
+    // after the team loads it must be dropped (not left selected → it would
+    // enable Run on a process the backend 422s), falling back to the only
+    // complete process p1.
+    build();
+    state.setProcessId('p2');
+    fixture.detectChanges();
+    expect(component.selectedProcessId()).toBe('p1');
+  });
+
+  it('clears a stale "lost contact" banner when a status arrives', () => {
+    build();
+    fixture.detectChanges();
+    component.error.set('Lost contact with the run; retrying…');
+    component.launch(); // immediate getRunStatus success → handleStatus clears error
+    expect(component.error()).toBeNull();
+  });
+
+  it('survives a transient poll error and recovers without tearing down the stream', () => {
+    vi.useFakeTimers();
+    try {
+      build();
+      fixture.detectChanges();
+      personaApi.startTest.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
+      personaApi.getRunStatus
+        .mockReturnValueOnce(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }))
+        .mockReturnValueOnce(throwError(() => new Error('blip')))
+        .mockReturnValue(of({ run_id: 'run-1', status: 'completed', decisions: [] }));
+      component.launch();
+      expect(component.run()?.status).toBe('polling_build');
+
+      // First interval tick errors — caught inside switchMap, stream stays alive.
+      vi.advanceTimersByTime(10_000);
+      expect(component.error()).toContain('Lost contact');
+      expect(component.runTerminal()).toBe(false);
+
+      // Next tick succeeds — banner cleared, run reaches terminal (proves the
+      // poller kept ticking after the error rather than dying on it).
+      vi.advanceTimersByTime(10_000);
+      expect(component.error()).toBeNull();
+      expect(component.run()?.status).toBe('completed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
