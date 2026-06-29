@@ -38,6 +38,15 @@ def test_compute_section_chars_default_when_no_method():
     assert compute_section_chars(obj) == expected
 
 
+def test_compute_section_chars_default_when_method_raises():
+    class Raises:
+        def get_max_context_tokens(self):
+            raise RuntimeError("misconfigured client")
+
+    expected = int((spec_digest._DEFAULT_CONTEXT_TOKENS - 6000 - 4096) * 3.5)
+    assert compute_section_chars(Raises()) == expected
+
+
 # --- split_sections --------------------------------------------------------
 
 

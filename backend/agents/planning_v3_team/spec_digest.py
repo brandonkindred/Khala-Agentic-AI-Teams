@@ -44,11 +44,13 @@ def compute_section_chars(llm: Any) -> int:
     Postconditions:
         - Returns an int >= ``_MIN_SECTION_CHARS``.
     """
-    ctx = (
-        llm.get_max_context_tokens()
-        if hasattr(llm, "get_max_context_tokens")
-        else _DEFAULT_CONTEXT_TOKENS
-    )
+    # try/except (not just hasattr): a present-but-raising get_max_context_tokens must
+    # still degrade to the default rather than crash this critical-path helper, which
+    # runs before map_reduce's per-section guard.
+    try:
+        ctx = llm.get_max_context_tokens()
+    except Exception:
+        ctx = _DEFAULT_CONTEXT_TOKENS
     available = ctx - _RESERVED_PROMPT_TOKENS - _RESERVED_RESPONSE_TOKENS
     if available < 512:
         available = 512  # leave some room even for tiny models
