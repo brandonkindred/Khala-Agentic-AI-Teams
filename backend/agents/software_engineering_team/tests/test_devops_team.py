@@ -764,6 +764,25 @@ class TestDevOpsTestValidationAgent:
         DevOpsTestValidationAgent(object())  # non-None, non-Strands -> resolves via key
         assert captured["key"] == "devops"
 
+    def test_qa_delegation_exception_fails_closed(self) -> None:
+        """If the delegated QA agent raises, the shim returns a fail-closed
+        result instead of propagating the exception to the orchestrator."""
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
+
+        def _boom(_inp: Any) -> Any:
+            raise RuntimeError("LLM unavailable")
+
+        agent._qa.run = _boom  # type: ignore[assignment]
+        out = agent.run(DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={}))
+        assert out.approved is False
+        assert out.quality_gates.get("test_validation") == "fail"
+        assert "LLM unavailable" in out.summary
+
     def test_maps_evidence_and_trace_through(self) -> None:
         from devops_team.test_validation_agent import (
             DevOpsTestValidationAgent,

@@ -201,6 +201,17 @@ def test_qa_expert_agent_falls_back_on_validation_error() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_acceptance_evidence_system_prompt_is_standalone() -> None:
+    """The acceptance_evidence persona must not embed the bug-review prompt,
+    whose 'review code for bugs' directions contradict release validation."""
+    agent = QAExpertAgent(DummyLLMClient())
+    # The bug-review persona's distinctive phrasing is present in the default
+    # mode but must be absent from the standalone acceptance_evidence prompt.
+    assert "well-defined QA issues" in agent._system_prompts["default"]
+    assert "well-defined QA issues" not in agent._system_prompts["acceptance_evidence"]
+    assert "acceptance criteria" in agent._system_prompts["acceptance_evidence"].lower()
+
+
 def test_qa_expert_agent_acceptance_evidence_mode_maps_evidence() -> None:
     agent = QAExpertAgent(DummyLLMClient())
     result = agent.run(

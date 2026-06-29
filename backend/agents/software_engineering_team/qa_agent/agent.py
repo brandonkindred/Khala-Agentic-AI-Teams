@@ -59,7 +59,10 @@ class QAExpertAgent:
             "default": QA_PROMPT,
             "fix_build": QA_PROMPT + "\n\n" + QA_PROMPT_FIX_BUILD,
             "write_tests": QA_PROMPT + "\n\n" + QA_PROMPT_WRITE_TESTS,
-            "acceptance_evidence": QA_PROMPT + "\n\n" + QA_PROMPT_ACCEPTANCE_EVIDENCE,
+            # Standalone persona: acceptance_evidence is release validation, not
+            # bug review, so it must NOT inherit QA_PROMPT's bug-review directions
+            # (which would contradict "do NOT review source code for bugs").
+            "acceptance_evidence": QA_PROMPT_ACCEPTANCE_EVIDENCE,
         }
 
     def run(self, input_data: QAInput) -> QAOutput:

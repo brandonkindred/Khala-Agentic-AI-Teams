@@ -9,7 +9,8 @@ the DevOps orchestrator and existing tests are unaffected.
 
 from __future__ import annotations
 
-from typing import get_args
+import logging
+from typing import cast, get_args
 
 from devops_team.models import GateStatus
 from qa_agent import QAExpertAgent, QAInput
@@ -22,6 +23,8 @@ from .models import (
     ValidationEvidence,
 )
 
+logger = logging.getLogger(__name__)
+
 _VALID_GATE_STATUSES = frozenset(get_args(GateStatus))
 
 
@@ -33,7 +36,7 @@ def _coerce_gate_status(value: object) -> GateStatus:
     collapse to ``"not_run"`` so the output never violates the literal contract.
     """
     text = str(value).strip().lower()
-    return text if text in _VALID_GATE_STATUSES else "not_run"  # type: ignore[return-value]
+    return cast(GateStatus, text) if text in _VALID_GATE_STATUSES else "not_run"
 
 
 class DevOpsTestValidationAgent:
@@ -77,16 +80,28 @@ class DevOpsTestValidationAgent:
         already applies this rule in ``acceptance_evidence`` mode). Whenever the
         validation is unapproved, at least one gate is ``"fail"`` so the result
         fails closed (the DevOps pipeline blocks on a failing gate and does not
-        read ``approved`` directly).
+        read ``approved`` directly). If the delegated QA call raises, the result
+        also fails closed rather than propagating the exception to the
+        orchestrator.
         """
-        qa_out = self._qa.run(
-            QAInput(
-                code="",
-                request_mode="acceptance_evidence",
-                acceptance_criteria=input_data.acceptance_criteria,
-                tool_results=input_data.tool_results,
+        try:
+            qa_out = self._qa.run(
+                QAInput(
+                    code="",
+                    request_mode="acceptance_evidence",
+                    acceptance_criteria=input_data.acceptance_criteria,
+                    tool_results=input_data.tool_results,
+                )
             )
-        )
+        except Exception as exc:  # noqa: BLE001 — a release gate must never crash the orchestrator
+            logger.warning("DevOps test validation delegation failed (%s); failing closed", exc)
+            return DevOpsTestValidationOutput(
+                approved=False,
+                quality_gates={"test_validation": "fail"},
+                acceptance_trace=[],
+                evidence=[],
+                summary=f"Validation error: {exc}",
+            )
         gates = {k: _coerce_gate_status(v) for k, v in qa_out.quality_gates.items()}
         # Fail closed. The DevOps pipeline blocks on a gate == "fail" and never
         # inspects ``approved``; an unapproved validation that carries no failing
