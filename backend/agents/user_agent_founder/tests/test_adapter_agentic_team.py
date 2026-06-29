@@ -482,6 +482,19 @@ def test_submit_build_answers_coerces_non_string_other_text():
     assert fake.posts[0]["json"] == {"input": "42"}
 
 
+def test_submit_build_answers_preserves_falsy_zero_answer():
+    """A valid *falsy* answer (numeric 0 or the string "0") must be preserved, not
+    dropped to the placeholder by an ``or``-style default."""
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(post_responses={"/input": _FakeResponse(200, {})})
+    adapter.submit_build_answers(fake, "run-9", [{"other_text": 0}])
+    assert fake.posts[0]["json"] == {"input": "0"}
+    adapter.submit_build_answers(fake, "run-9", [{"other_text": "0"}])
+    assert fake.posts[1]["json"] == {"input": "0"}
+
+
 # ---------------------------------------------------------------------------
 # End-to-end: persona drives a collapsed agentic run through the orchestrator
 # ---------------------------------------------------------------------------

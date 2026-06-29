@@ -224,6 +224,14 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.teamError()).toContain('Could not load');
   });
 
+  it('surfaces an error when the response has no team (not perpetual loading)', () => {
+    build();
+    agenticApi.getTeam.mockReturnValue(of({ team: null }));
+    fixture.detectChanges();
+    expect(component.teamError()).toBe('Team not found.');
+    expect(component.teamLoading()).toBe(false);
+  });
+
   it('surfaces a personas-load error in the library (not the shared error signal)', () => {
     build();
     personaApi.getPersonas.mockReturnValue(throwError(() => new Error('nope')));

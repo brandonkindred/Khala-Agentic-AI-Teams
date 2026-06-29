@@ -37,6 +37,13 @@ def get_adapter(
     agentic-team keys and ignored for the static targets (which have neither a
     process nor a collapsed analysis phase).
 
+    This function does **not** enforce that ``process_id`` is present for
+    agentic-team keys — it threads whatever is given (including ``None``) into the
+    adapter, which raises :class:`StartFailed` at build time if it is still
+    missing. ``/start`` validates ``process_id`` up front for a clearer 400 (a
+    failed run is a worse experience); this is the last-resort guard, not the
+    first.
+
     Preconditions: ``team_key`` is non-empty; for an agentic-team key the id
         after the prefix is non-empty.
     Postconditions: returns an adapter satisfying :class:`TargetTeamAdapter`.

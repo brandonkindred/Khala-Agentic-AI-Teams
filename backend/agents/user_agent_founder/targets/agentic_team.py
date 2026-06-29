@@ -253,12 +253,13 @@ class AgenticTeamAdapter:
         # The WAIT question carries empty options, so ``selected_option_id`` is
         # always the synthetic ``"other"`` — only ``other_text`` is a meaningful
         # answer. Never fall back to ``selected_option_id`` (that would post the
-        # literal "other"); use the placeholder when the free text is absent so
-        # the run still advances and the /input min-length check is satisfied.
-        # Coerce to str before stripping: a malformed answer object could carry a
-        # non-string ``other_text`` (number/list), and ``.strip()`` on that would
-        # raise an AttributeError that crashes the worker thread.
-        text = str(first.get("other_text") or "").strip()
+        # literal "other"); use the placeholder when the free text is genuinely
+        # absent so the run still advances and the /input min-length check passes.
+        # Explicit None check (not ``or``): a valid *falsy* free-text answer (the
+        # string "0", or a numeric 0) is preserved rather than dropped. ``str()``
+        # coerces so a non-string value can't crash ``.strip()``.
+        raw = first.get("other_text")
+        text = str(raw).strip() if raw is not None else ""
         if not text:
             text = "(no answer provided)"
         resp = client.post(

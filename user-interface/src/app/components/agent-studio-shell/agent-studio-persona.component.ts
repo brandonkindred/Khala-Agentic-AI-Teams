@@ -32,6 +32,12 @@ const POLL_MS = 10_000;
 /** Transient banner shown on a failed poll; cleared on the next successful poll. */
 const LOST_CONTACT = 'Lost contact with the run; retrying…';
 
+// Back-loop destinations as 0-based indices into STUDIO_STAGES
+// (build=0, test=1, compose=2, personas=3). Named so the back-loops don't carry
+// bare magic numbers; keep in sync with the STUDIO_STAGES order.
+const STAGE_TEST_AGENT = 1;
+const STAGE_COMPOSE_TEAM = 2;
+
 type StudioPersonaMode = 'manual' | 'persona';
 
 /**
@@ -202,8 +208,14 @@ export class AgentStudioPersonaComponent implements OnInit {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {
-          this.team.set(resp.team ?? null);
-          const complete = (resp.team?.processes ?? []).filter((p) => p.status === 'complete');
+          // A 200 with no team (e.g. the id resolved to nothing) must surface as
+          // an error, not leave teamLoading() stuck true forever on "Loading team…".
+          if (!resp.team) {
+            this.teamError.set('Team not found.');
+            return;
+          }
+          this.team.set(resp.team);
+          const complete = resp.team.processes.filter((p) => p.status === 'complete');
           const current = this.selectedProcessId();
           // Drop a handoff-seeded selection that isn't a *complete* process: the
           // <select> only lists complete ones (so it'd show the placeholder) and
@@ -415,7 +427,7 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   /** Back-loop to Stage 3 (Compose Team) to revise the roster. */
   iterateRoster(): void {
-    this.state.navigateToStage(2); // Stage 3 — Compose Team
+    this.state.navigateToStage(STAGE_COMPOSE_TEAM);
   }
 
   /**
@@ -425,12 +437,12 @@ export class AgentStudioPersonaComponent implements OnInit {
    */
   fixAgent(): void {
     if (this.canFixAgent()) {
-      this.state.navigateToStage(1); // Stage 2 — Test Agent
+      this.state.navigateToStage(STAGE_TEST_AGENT);
     }
   }
 
   /** Jump to Stage 3 (Compose Team) from an empty/safety-net state. */
   finishInCompose(): void {
-    this.state.navigateToStage(2);
+    this.state.navigateToStage(STAGE_COMPOSE_TEAM);
   }
 }

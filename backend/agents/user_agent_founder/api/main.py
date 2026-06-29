@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 from urllib.parse import quote
 from uuid import uuid4
@@ -625,58 +626,66 @@ def _list_agentic_testable_teams() -> list[TestableTeam]:
     is required to test) is honored.
 
     Postconditions: returns one :class:`TestableTeam` per agentic team with a
-        ``complete`` process, keyed ``"agentic_team:<team_id>"``. Best-effort and
-        **partial-failure tolerant**: a per-team detail fetch that errors or
-        raises skips only that team (the already-collected teams are kept), and a
-        top-level failure (e.g. the list call itself) returns whatever was
-        gathered so far. Failures are logged, never raised.
+        ``complete`` process, keyed ``"agentic_team:<team_id>"``, in the order the
+        ``/teams`` list returned them. Best-effort and **partial-failure
+        tolerant**: a per-team detail fetch that errors or raises skips only that
+        team (the others are kept), and a top-level failure (e.g. the list call
+        itself) returns ``[]``. The per-team detail fetches — the N+1 hot spot —
+        run concurrently in a bounded thread pool to keep total latency near a
+        single round-trip rather than the sum of all of them. Failures are
+        logged, never raised.
     """
-    teams: list[TestableTeam] = []
     try:
         with httpx.Client(timeout=_BEST_EFFORT_TIMEOUT) as client:
             resp = client.get(f"{_provisioning_base()}/teams")
             if resp.status_code >= 400:
                 logger.warning("Could not list agentic teams: HTTP %s", resp.status_code)
-                return teams
+                return []
             summaries = resp.json()
             if not isinstance(summaries, list):
                 logger.warning(
                     "Unexpected /teams response shape (%s); skipping agentic teams",
                     type(summaries).__name__,
                 )
-                return teams
-            for summary in summaries:
-                team_id = summary.get("team_id")
-                if not team_id:
-                    continue
-                # Skip the detail fetch only when the summary *explicitly* reports
-                # zero processes. A missing/None ``process_count`` is not a reliable
-                # "no processes" signal, so fall through and let the complete-process
-                # check on the fetched detail decide (don't omit eligible teams).
-                if summary.get("process_count") == 0:
-                    continue
+                return []
+            # Candidates: a real team_id whose summary doesn't *explicitly* report
+            # zero processes. A missing/None ``process_count`` is not a reliable
+            # "no processes" signal, so keep it and let the detail check decide.
+            candidates = [
+                s for s in summaries if s.get("team_id") and s.get("process_count") != 0
+            ]
+            if not candidates:
+                return []
+
+            def _eligible(summary: dict) -> "TestableTeam | None":
+                team_id = summary["team_id"]
                 # Guard each detail fetch so one flaky/timing-out team doesn't
-                # discard the teams already collected (return partial, not []).
+                # discard the others (it contributes None, which is filtered out).
                 try:
                     code, team = _fetch_agentic_team(client, team_id)
                 except Exception:
                     logger.warning(
                         "Could not fetch agentic team %s detail; skipping", team_id, exc_info=True
                     )
-                    continue
+                    return None
                 if code >= 400:
-                    continue
+                    return None
                 processes = team.get("processes") or []
                 if any(p.get("status") == "complete" for p in processes):
-                    teams.append(
-                        TestableTeam(
-                            team_key=f"agentic_team:{team_id}",
-                            display_name=team.get("name") or summary.get("name") or team_id,
-                        )
+                    return TestableTeam(
+                        team_key=f"agentic_team:{team_id}",
+                        display_name=team.get("name") or summary.get("name") or team_id,
                     )
+                return None
+
+            # httpx.Client is thread-safe for concurrent requests; ``pool.map``
+            # preserves input order so the dropdown stays stable.
+            with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as pool:
+                results = list(pool.map(_eligible, candidates))
+            return [t for t in results if t is not None]
     except Exception:
         logger.warning("Could not enumerate agentic testable teams", exc_info=True)
-    return teams
+        return []
 
 
 @app.get("/testable-teams", response_model=TestableTeamsResponse)
