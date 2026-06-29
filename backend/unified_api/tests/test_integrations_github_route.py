@@ -307,7 +307,8 @@ def test_run_issue_propagates_upstream_error_detail(mock_cfg, mock_cred, mock_cl
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 409
-    assert resp.json()["detail"] == "Failed to start the coding job."
+    # 4xx upstream detail is client-actionable, so it is passed through (bounded).
+    assert resp.json()["detail"] == "issue blocked by sub-issues"
 
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")

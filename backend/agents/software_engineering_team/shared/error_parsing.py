@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 # are replaced with stable placeholders so two failures differing only in noise
 # collapse to one signature for repeated-failure (loop) detection, while the real
 # error text is preserved (no length truncation).
+# Random temp-file/dir tokens that vary every run even after the volatile ROOT is
+# stripped: NamedTemporaryFile/mkstemp basenames ("tmpa1b2c3"), pytest's per-run
+# dirs ("pytest-of-<user>", "pytest-7"). Normalized BEFORE the temp-path rule so a
+# random basename is never mistaken for a distinguishing path tail.
+_SIG_TMP_RANDOM_RE = re.compile(r"\bpytest-of-[^/\s:'\"]+|\bpytest-\d+\b|\btmp[a-z0-9_]{6,}\b")
 # Volatile part is the random ROOT (e.g. ``/tmp/pytest-of-x/pytest-7/``); the
 # trailing 1-2 path components (e.g. ``test_a0/conftest.py``) distinguish files
 # and are PRESERVED so two DISTINCT failures don't collapse to one signature.
@@ -58,6 +63,7 @@ def normalize_error_signature(build_errors: str) -> str:
         Deterministic: equal-modulo-noise inputs produce equal outputs.
     """
     text = build_errors
+    text = _SIG_TMP_RANDOM_RE.sub("<TMPID>", text)
     text = _SIG_TMP_PATH_RE.sub(r"<TMP>\1", text)
     text = _SIG_ISO_TS_RE.sub("<TS>", text)
     text = _SIG_CLOCK_TS_RE.sub("<TS>", text)

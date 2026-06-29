@@ -102,6 +102,13 @@ def upsert_learning(
     """
     if not pattern or not pattern.strip():
         raise ValueError("pattern must be a non-empty string")
+    # Bound the text feeding se_learnings.search_tsv (a GENERATED tsvector over
+    # ``pattern || ' ' || trigger``): Postgres rejects a tsvector larger than ~1MB,
+    # which would make the INSERT raise and the learning be silently dropped (the
+    # except below returns False). 8000 chars is ample for a diagnostic snippet.
+    pattern = pattern[:8000]
+    trigger = trigger[:8000]
+    counter_measure = counter_measure[:8000]
     try:
         with pg_cursor() as cur:
             if cur is None:

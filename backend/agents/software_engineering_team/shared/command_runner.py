@@ -142,9 +142,9 @@ class CommandResult:
             idx = text.find(marker)
             if idx != -1:
                 excerpt = text[idx:].strip()
-                return excerpt
+                return excerpt[:max_chars]
         # No marker: return full output
-        return text.strip()
+        return text.strip()[:max_chars]
 
     def parsed_failures(self, command_kind: str = "pytest") -> list:
         """

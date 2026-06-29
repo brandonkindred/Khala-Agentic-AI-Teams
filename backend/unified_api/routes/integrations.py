@@ -1806,15 +1806,18 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         ) from e
 
     if resp.status_code != 200:
-        # Sanitize: the upstream body could carry internal detail (a stack trace
-        # on an unhandled 500, an HTML error page, etc.). Log it server-side and
-        # return a generic message to the client, preserving the upstream status.
+        # The upstream body can carry internal detail (a stack trace on an unhandled
+        # 5xx, an HTML error page). Always log it server-side. For 4xx the detail is
+        # client-actionable (e.g. "issue blocked by sub-issues", "no ready issues"),
+        # so return a bounded copy; for 5xx return a generic message so internal
+        # traces aren't exposed.
         try:
             upstream_detail = resp.json().get("detail", resp.text)
         except Exception:
             upstream_detail = resp.text
         logger.warning("github run-issue: coding team service returned %s: %s", resp.status_code, upstream_detail)
-        raise HTTPException(status_code=resp.status_code, detail="Failed to start the coding job.")
+        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to start the coding job."
+        raise HTTPException(status_code=resp.status_code, detail=client_detail)
 
     try:
         data = resp.json()
@@ -1886,15 +1889,17 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
         ) from e
 
     if resp.status_code != 200:
-        # Sanitize: the upstream body could carry internal detail (a stack trace
-        # on an unhandled 500, etc.). Log it server-side and return a generic
-        # message to the client, preserving the upstream status code.
+        # The upstream body can carry internal detail (a stack trace on an unhandled
+        # 5xx). Always log it server-side. For 4xx the detail is client-actionable
+        # (e.g. "PR not found"), so return a bounded copy; for 5xx return a generic
+        # message so internal traces aren't exposed.
         try:
             upstream_detail = resp.json().get("detail", resp.text)
         except Exception:
             upstream_detail = resp.text
         logger.warning("github review-pr: coding team service returned %s: %s", resp.status_code, upstream_detail)
-        raise HTTPException(status_code=resp.status_code, detail="Failed to start the review.")
+        client_detail = str(upstream_detail)[:500] if resp.status_code < 500 else "Failed to start the review."
+        raise HTTPException(status_code=resp.status_code, detail=client_detail)
 
     try:
         data = resp.json()

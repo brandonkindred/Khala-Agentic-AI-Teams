@@ -173,6 +173,12 @@ def test_build_error_signature_normalizes_volatile_lines() -> None:
     # No length truncation: a long stable body is retained in full.
     long_err = "ImportError: cannot import name 'X' " + "details " * 300
     assert "details details" in _build_error_signature(long_err)
+    # Random temp-file basenames (NamedTemporaryFile/mkstemp) are normalized, so the
+    # SAME failure referencing a different random temp file collapses to one signature
+    # rather than defeating loop detection.
+    t1 = "OperationalError near /tmp/tmpa1b2c3.db: disk I/O error"
+    t2 = "OperationalError near /tmp/tmpx9y8z7w.db: disk I/O error"
+    assert _build_error_signature(t1) == _build_error_signature(t2)
 
 
 def test_build_code_review_issues_for_missing_test_routes_returns_targeted_issue() -> None:
