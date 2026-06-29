@@ -38,6 +38,14 @@ class _FakeCursor:
 
     Handles the narrow subset of SQL that the agentic_team_provisioning
     stores issue, plus no-op fallbacks for DDL we don't care about.
+
+    ⚠️ Routing is **tightly coupled to the store's exact query strings**: each
+    handler matches on a normalized ``startswith`` / substring of the SQL. Reordering
+    clauses, renaming columns, or adding comments in a store query can silently break
+    the match — an unmatched statement raises ``AssertionError`` (see the bottom of
+    :meth:`execute`), so a drift surfaces as a hard test failure, not a silent pass.
+    When you change a store query, update the matching handler here. (A real fix is a
+    repository abstraction the store could mock without faking SQL — out of scope.)
     """
 
     def __init__(self, db: dict[str, Any], ids: itertools.count) -> None:
@@ -84,6 +92,14 @@ class _FakeCursor:
         ):
             (team_id,) = params
             self._last_fetch_one = self._db["teams"].get(team_id)
+            return
+
+        # Team-row lock probe used by merge_generated_agents (FOR UPDATE is a no-op
+        # in the fake — it only checks existence). Distinct prefix from the full
+        # column select above ("select team_id from" vs "select team_id, ...").
+        if norm.startswith("select team_id from agentic_teams where team_id"):
+            (team_id,) = params
+            self._last_fetch_one = (team_id,) if team_id in self._db["teams"] else None
             return
 
         if "from agentic_teams t" in norm and "order by t.created_at desc" in norm:
@@ -144,11 +160,54 @@ class _FakeCursor:
             return
 
         # -- team_agents --------------------------------------------------
+        # Full-roster prune used by _write_team_agents: delete rows whose agent_name
+        # is not in the kept set. Must precede the single-row delete (it also matches
+        # "agent_name in norm") and the team-wide delete.
+        if norm.startswith("delete from agentic_team_agents where team_id") and "<> all" in norm:
+            team_id, names = params
+            keep = set(names)
+            for k in list(self._db["team_agents"].keys()):
+                if k[0] == team_id and k[1] not in keep:
+                    del self._db["team_agents"][k]
+            return
+
+        # Single-row targeted delete (RETURNING the deleted row) — must precede the
+        # team-wide delete handler, whose prefix this also matches.
+        if (
+            norm.startswith("delete from agentic_team_agents where team_id")
+            and "agent_name" in norm
+        ):
+            team_id, agent_name = params
+            removed = self._db["team_agents"].pop((team_id, agent_name), None)
+            self.rowcount = 1 if removed else 0
+            self._last_fetch_one = {"data_json": removed["data_json"]} if removed else None
+            return
+
         if norm.startswith("delete from agentic_team_agents where team_id"):
             (team_id,) = params
             for k in list(self._db["team_agents"].keys()):
                 if k[0] == team_id:
                     del self._db["team_agents"][k]
+            return
+
+        # Single-row upsert (ON CONFLICT) — preserves the existing created_at, like
+        # real Postgres. Must precede the plain INSERT handler.
+        if norm.startswith("insert into agentic_team_agents") and "on conflict" in norm:
+            team_id, agent_name, data_json, created_at, updated_at = params
+            data = _unwrap_json(data_json)
+            existing = self._db["team_agents"].get((team_id, agent_name))
+            if existing:
+                existing["data_json"] = data
+                existing["updated_at"] = updated_at
+            else:
+                self._db["team_agents"][(team_id, agent_name)] = {
+                    "team_id": team_id,
+                    "agent_name": agent_name,
+                    "data_json": data,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                }
+            self.rowcount = 1
             return
 
         if norm.startswith("insert into agentic_team_agents"):
@@ -162,6 +221,18 @@ class _FakeCursor:
                 "updated_at": updated_at,
             }
             self.rowcount = 1
+            return
+
+        # Single-row read by name (under the team lock) — must precede the team-wide
+        # list select below, whose prefix this also matches. Keyed on the WHERE
+        # "and agent_name" so the list query's "ORDER BY agent_name" doesn't match.
+        if (
+            norm.startswith("select data_json from agentic_team_agents where team_id")
+            and "and agent_name" in norm
+        ):
+            team_id, agent_name = params
+            row = self._db["team_agents"].get((team_id, agent_name))
+            self._last_fetch_one = {"data_json": row["data_json"]} if row else None
             return
 
         if norm.startswith("select data_json from agentic_team_agents where team_id"):
