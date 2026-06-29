@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from code_review_agent import CodeReviewUnavailableError
 from code_review_agent.profiles import ReviewProfile
 
 from llm_service.clients.dummy import DummyLLMClient
@@ -312,8 +313,6 @@ class _RaisingEngine:
 
 
 def test_engine_review_degrades_on_unavailable(monkeypatch):
-    from code_review_agent import CodeReviewUnavailableError
-
     monkeypatch.setattr(
         "code_review_agent.CodeReviewAgent",
         _RaisingEngine(CodeReviewUnavailableError("engine down")),

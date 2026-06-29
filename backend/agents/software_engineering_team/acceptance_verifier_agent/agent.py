@@ -54,13 +54,22 @@ def _tagged_criterion(issue: CodeReviewIssue) -> str:
 
     Postconditions: returns the substring of ``description`` before the first
     ``" :: "`` delimiter (the verbatim criterion the acceptance profile prefixes
-    each issue with); falls back to ``category`` for robustness if a model tagged
-    the criterion there instead. Pure; no side effects.
+    each issue with), or the whole description when the delimiter is absent. It
+    NEVER falls back to ``category`` — under the acceptance profile ``category``
+    is the fixed enum value ``spec-compliance``, so using it would attribute the
+    issue to a phantom "spec-compliance" criterion and let a genuinely unmet
+    criterion pass. Pure; no side effects.
     """
-    desc = issue.description or ""
-    if _CRITERION_DELIM in desc:
-        return desc.split(_CRITERION_DELIM, 1)[0]
-    return issue.category or desc
+    return (issue.description or "").split(_CRITERION_DELIM, 1)[0]
+
+
+def _is_attributable(criteria: List[str], issue: CodeReviewIssue) -> bool:
+    """Return whether ``issue`` attributes to any of ``criteria``.
+
+    Postconditions: True iff some criterion matches the issue (see
+    :func:`_matches_criterion`). Pure; no side effects.
+    """
+    return any(_matches_criterion(c, issue) for c in criteria)
 
 
 def _evidence_of(issue: CodeReviewIssue) -> str:
@@ -224,14 +233,31 @@ class AcceptanceVerifierAgent:
         per_criterion = derive_per_criterion(input_data.acceptance_criteria, result.issues)
         all_satisfied = all(c.satisfied for c in per_criterion)
 
+        # Conservative guard: the acceptance profile emits one issue per UNMET
+        # criterion, tagged with the verbatim criterion. An issue that attributes
+        # to no criterion means the reviewer flagged something unmet that we
+        # cannot map to a specific criterion (e.g. the model dropped the criterion
+        # prefix). Rather than let that unmet finding pass silently, block.
+        unattributed = [
+            i for i in result.issues if not _is_attributable(input_data.acceptance_criteria, i)
+        ]
+        summary = result.summary or "Acceptance verification complete"
+        if unattributed:
+            all_satisfied = False
+            summary = (
+                f"{summary} ({len(unattributed)} finding(s) could not be attributed to a "
+                "specific criterion; treated as unmet)."
+            )
+
         logger.info(
-            "AcceptanceVerifier: %s/%s satisfied, all_satisfied=%s",
+            "AcceptanceVerifier: %s/%s satisfied, %s unattributed, all_satisfied=%s",
             sum(1 for c in per_criterion if c.satisfied),
             len(per_criterion),
+            len(unattributed),
             all_satisfied,
         )
         return AcceptanceVerifierOutput(
             all_satisfied=all_satisfied,
             per_criterion=per_criterion,
-            summary=result.summary or "Acceptance verification complete",
+            summary=summary,
         )

@@ -154,6 +154,31 @@ def test_acceptance_two_unmet_criteria_same_file_both_reported() -> None:
     assert all(not c.satisfied for c in result.per_criterion)
 
 
+def test_acceptance_unattributed_finding_blocks() -> None:
+    """A finding that maps to no criterion (e.g. the model dropped the criterion
+    prefix) must not pass silently — the gate conservatively blocks."""
+    stub = _IssueStubClient(
+        {
+            "approved": False,
+            "issues": [
+                {
+                    "severity": "high",
+                    "category": "spec-compliance",
+                    "file_path": "",
+                    "description": "some finding without a criterion prefix",
+                }
+            ],
+            "summary": "vague",
+        }
+    )
+    result = AcceptanceVerifierAgent(stub).run(_input())
+    # No criterion was attributed, so per_criterion all look satisfied...
+    assert all(c.satisfied for c in result.per_criterion)
+    # ...but the unattributed finding forces an overall block.
+    assert result.all_satisfied is False
+    assert "could not be attributed" in result.summary
+
+
 class _RaisingEngine:
     """Stand-in for ``CodeReviewAgent`` whose ``run`` raises a given exception."""
 
@@ -214,12 +239,14 @@ def test_derive_per_criterion_all_satisfied_when_no_issues() -> None:
     assert all(c.evidence == "Satisfied" for c in out)
 
 
-def test_derive_per_criterion_matches_by_exact_category_only() -> None:
+def test_derive_per_criterion_matches_by_description_prefix() -> None:
     issues = [
-        CodeReviewIssue(severity="high", category="b", description="b is unmet"),
-        # 'c' appears only in the free-form description, not the category tag —
+        CodeReviewIssue(severity="high", category="spec-compliance", description="b :: b is unmet"),
+        # 'c' appears only in the free-form reason, not the criterion prefix —
         # it must NOT match (no broad substring/description scanning).
-        CodeReviewIssue(severity="high", category="other", description="mentions c here"),
+        CodeReviewIssue(
+            severity="high", category="spec-compliance", description="other :: mentions c here"
+        ),
     ]
     out = derive_per_criterion(["a", "b", "c"], issues)
     by = {c.criterion: c for c in out}
@@ -235,14 +262,28 @@ def test_derive_per_criterion_substring_collision_not_falsely_unmet() -> None:
     issues = [
         CodeReviewIssue(
             severity="high",
-            category="add(1,2) returns 3 and 4",
-            description="the 'and 4' part is missing",
+            category="spec-compliance",
+            description="add(1,2) returns 3 and 4 :: the 'and 4' part is missing",
         )
     ]
     out = derive_per_criterion(criteria, issues)
     by = {c.criterion: c for c in out}
     assert by["add(1,2) returns 3"].satisfied is True
     assert by["add(1,2) returns 3 and 4"].satisfied is False
+
+
+def test_derive_per_criterion_missing_delimiter_enum_category_not_attributed() -> None:
+    # MEDIUM regression: a finding with no " :: " delimiter and category set to
+    # the enum value "spec-compliance" must NOT be attributed to any criterion
+    # (the old category fallback would have returned "spec-compliance" as a
+    # phantom criterion, or otherwise mis-attributed).
+    issues = [
+        CodeReviewIssue(
+            severity="high", category="spec-compliance", description="some vague finding"
+        )
+    ]
+    out = derive_per_criterion(["add(0,0) returns 0"], issues)
+    assert out[0].satisfied is True
 
 
 def test_derive_per_criterion_uses_description_prefix_with_enum_category() -> None:
@@ -276,16 +317,27 @@ def test_derive_per_criterion_distinct_prefixes_for_same_reason() -> None:
     assert all(not c.satisfied for c in out)
 
 
-def test_derive_per_criterion_category_match_ignores_whitespace_and_case() -> None:
-    issues = [CodeReviewIssue(severity="high", category="  Returns  ZERO ", description="d")]
+def test_derive_per_criterion_prefix_match_ignores_whitespace_and_case() -> None:
+    issues = [
+        CodeReviewIssue(severity="high", category="spec-compliance", description="  Returns  ZERO  :: d")
+    ]
     out = derive_per_criterion(["returns zero"], issues)
     assert out[0].satisfied is False
 
 
 def test_derive_per_criterion_all_unmet() -> None:
-    issues = [CodeReviewIssue(severity="high", category="x", description="d")]
+    issues = [CodeReviewIssue(severity="high", category="spec-compliance", description="x :: d")]
     out = derive_per_criterion(["x"], issues)
     assert out[0].satisfied is False
+
+
+def test_derive_per_criterion_criterion_only_description_uses_full_text_as_evidence() -> None:
+    # No " :: " delimiter: the whole description is the criterion, and the
+    # evidence falls back to that text.
+    issues = [CodeReviewIssue(severity="high", category="spec-compliance", description="x")]
+    out = derive_per_criterion(["x"], issues)
+    assert out[0].satisfied is False
+    assert out[0].evidence == "x"
 
 
 def test_derive_per_criterion_blank_criterion_never_matches() -> None:
