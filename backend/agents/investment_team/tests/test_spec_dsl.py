@@ -44,8 +44,22 @@ def test_indicator_output_ranges_covers_bounded_indicators() -> None:
         "rsi": (0.0, 100.0),
         "adx": (0.0, 100.0),
         "stochastic": (0.0, 100.0),
+        "mfi": (0.0, 100.0),
+        "williams_r": (-100.0, 0.0),
     }
-    for unbounded in ("sma", "ema", "macd", "atr", "vwap", "bollinger"):
+    for unbounded in (
+        "sma",
+        "ema",
+        "macd",
+        "atr",
+        "vwap",
+        "bollinger",
+        "donchian",
+        "keltner",
+        "obv",
+        "roc",
+        "cci",
+    ):
         assert unbounded not in INDICATOR_OUTPUT_RANGES
 
 

@@ -836,6 +836,13 @@ def _build_indicators_stub():
         "adx",
         "stochastic",
         "vwap",
+        "donchian_channels",
+        "keltner_channels",
+        "obv",
+        "mfi",
+        "roc",
+        "cci",
+        "williams_r",
     ):
         setattr(mod, _name, getattr(_scalar, _name))
     return mod

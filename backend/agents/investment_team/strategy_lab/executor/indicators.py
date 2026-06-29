@@ -271,6 +271,114 @@ def vwap(
     return cum_tp_vol / cum_vol
 
 
+def donchian_channels(
+    high: pd.Series,
+    low: pd.Series,
+    period: int = 20,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Donchian channel: upper (rolling-max high), middle (midpoint), lower (rolling-min low)."""
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    upper = high.rolling(window=period).max()
+    lower = low.rolling(window=period).min()
+    middle = (upper + lower) / 2
+    return upper, middle, lower
+
+
+def keltner_channels(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 20,
+    atr_period: int = 10,
+    multiplier: float = 2.0,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Keltner channel: EMA(close) basis ± multiplier × ATR(atr_period)."""
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
+    middle = ema(close, period)
+    atr_series = atr(high, low, close, atr_period)
+    upper = middle + multiplier * atr_series
+    lower = middle - multiplier * atr_series
+    return upper, middle, lower
+
+
+def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    """On-Balance Volume: cumulative volume signed by the close-to-close direction."""
+    close = _coerce_series(close, "close")
+    volume = _coerce_series(volume, "volume")
+    direction = np.sign(close.diff()).fillna(0.0)
+    return (direction * volume).cumsum()
+
+
+def mfi(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    volume: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """Money Flow Index (0–100): volume-weighted RSI of typical price."""
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
+    volume = _coerce_series(volume, "volume")
+    tp = (high + low + close) / 3
+    raw_money_flow = tp * volume
+    tp_diff = tp.diff()
+    pos_flow = raw_money_flow.where(tp_diff > 0, 0.0)
+    neg_flow = raw_money_flow.where(tp_diff < 0, 0.0)
+    pos_sum = pos_flow.rolling(window=period).sum()
+    neg_sum = neg_flow.rolling(window=period).sum()
+    ratio = pos_sum / neg_sum.replace(0, np.nan)
+    result = 100 - (100 / (1 + ratio))
+    # neg_sum == 0 over a window (no down moves) → MFI = 100, matching rsi().
+    fill_values = pd.Series(np.where(neg_sum == 0, 100.0, np.nan), index=result.index)
+    return result.fillna(fill_values)
+
+
+def roc(series: pd.Series, period: int = 12) -> pd.Series:
+    """Rate of Change (percent) over ``period`` bars."""
+    series = _coerce_series(series)
+    prev = series.shift(period)
+    return (series - prev) / prev.replace(0, np.nan) * 100
+
+
+def cci(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 20,
+) -> pd.Series:
+    """Commodity Channel Index: typical-price deviation scaled by 0.015 × mean deviation."""
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
+    tp = (high + low + close) / 3
+    sma_tp = tp.rolling(window=period).mean()
+    mean_dev = tp.rolling(window=period).apply(
+        lambda window: np.abs(window - window.mean()).mean(), raw=True
+    )
+    return (tp - sma_tp) / (0.015 * mean_dev.replace(0, np.nan))
+
+
+def williams_r(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int = 14,
+) -> pd.Series:
+    """Williams %R (−100–0): close position within the trailing high/low range."""
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
+    highest_high = high.rolling(window=period).max()
+    lowest_low = low.rolling(window=period).min()
+    denom = (highest_high - lowest_low).replace(0, np.nan)
+    return -100 * (highest_high - close) / denom
+
+
 # ---------------------------------------------------------------------------
 # Indicator registry (#465)
 #
@@ -371,6 +479,46 @@ INDICATORS: Mapping[str, IndicatorSpec] = MappingProxyType(
             data_inputs=("high", "low", "close"),
             kwarg_names=("k_period", "d_period"),
             tuple_arity=2,
+        ),
+        "donchian_channels": IndicatorSpec(
+            helper=donchian_channels,
+            data_inputs=("high", "low"),
+            kwarg_names=("period",),
+            tuple_arity=3,
+        ),
+        "keltner_channels": IndicatorSpec(
+            helper=keltner_channels,
+            data_inputs=("high", "low", "close"),
+            kwarg_names=("period", "atr_period", "multiplier"),
+            tuple_arity=3,
+            float_kwargs=frozenset({"multiplier"}),
+        ),
+        "obv": IndicatorSpec(
+            helper=obv,
+            data_inputs=("close", "volume"),
+            kwarg_names=(),
+            tuple_arity=None,
+        ),
+        "mfi": IndicatorSpec(
+            helper=mfi,
+            data_inputs=("high", "low", "close", "volume"),
+            kwarg_names=("period",),
+            tuple_arity=None,
+        ),
+        "roc": IndicatorSpec(
+            helper=roc, data_inputs=("series",), kwarg_names=("period",), tuple_arity=None
+        ),
+        "cci": IndicatorSpec(
+            helper=cci,
+            data_inputs=("high", "low", "close"),
+            kwarg_names=("period",),
+            tuple_arity=None,
+        ),
+        "williams_r": IndicatorSpec(
+            helper=williams_r,
+            data_inputs=("high", "low", "close"),
+            kwarg_names=("period",),
+            tuple_arity=None,
         ),
     }
 )

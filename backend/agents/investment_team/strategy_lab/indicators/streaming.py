@@ -707,6 +707,22 @@ class IndicatorRegistry:
             return upper
         if select == "lower":
             return lower
+        if select == "percent_b":
+            # %B locates the live price within the band: 0 at the lower band,
+            # 1 at the upper. Flat window (upper == lower) → neutral 0.5 to
+            # avoid a 0/0; %B is intentionally unbounded outside [0, 1] when
+            # price pierces a band.
+            width = upper - lower
+            if width == 0:
+                return 0.5
+            price = _source_value(bars[-1], source)
+            return (price - lower) / width
+        if select == "bandwidth":
+            # Bandwidth normalises the band width by the middle band; 0 when the
+            # middle is 0 (degenerate) so the result stays finite.
+            if middle == 0:
+                return 0.0
+            return (upper - lower) / middle
         return None
 
     # ----- Stochastic ----------------------------------------------------
@@ -1021,3 +1037,244 @@ class IndicatorRegistry:
             source=source,
             select=select,
         )
+
+    # ----- Donchian channels --------------------------------------------
+
+    def donchian(
+        self,
+        bars: Sequence[Any],
+        period: int = 20,
+        select: str = "middle",
+    ) -> Optional[float]:
+        """Donchian channel ``(upper | middle | lower)`` at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
+        Post: ``upper`` is the highest high and ``lower`` the lowest low over
+        the trailing ``period`` bars; ``middle`` is their midpoint. The bands
+        depend only on those ``period`` highs/lows, so the registry keeps a
+        bounded :class:`deque` of ``(high, low)`` pairs and recomputes the
+        extrema over it — O(period) per call, independent of history length.
+        """
+        if not bars or len(bars) < period:
+            return None
+        key = ("donchian", period)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            triple = state["value"]
+        else:
+            hl: Optional[Deque[Tuple[float, float]]] = None
+            if state is not None and "hl" in state:
+                kind = self._advance_kind(state, bars, fp)
+                if kind in ("expand", "slide"):
+                    hl = state["hl"]
+                    hl.append((float(bars[-1].high), float(bars[-1].low)))
+            if hl is None:
+                hl = deque(maxlen=period)
+                for b in bars[-period:]:
+                    hl.append((float(b.high), float(b.low)))
+            upper = max(t[0] for t in hl)
+            lower = min(t[1] for t in hl)
+            triple = (upper, (upper + lower) / 2.0, lower)
+            self._state[key] = {"fp": fp, "value": triple, "hl": hl}
+        upper, middle, lower = triple
+        if select == "upper":
+            return upper
+        if select == "middle":
+            return middle
+        if select == "lower":
+            return lower
+        return None
+
+    # ----- Keltner channels ---------------------------------------------
+
+    def keltner(
+        self,
+        bars: Sequence[Any],
+        period: int = 20,
+        atr_period: int = 10,
+        multiplier: float = 2.0,
+        select: str = "middle",
+    ) -> Optional[float]:
+        """Keltner channel ``(upper | middle | lower)`` at ``bars[-1]``.
+
+        Pre: ``period >= 1``; ``atr_period >= 1``. Returns ``None`` until
+        ``len(bars) >= max(period, atr_period + 1)`` (the ATR leg needs a prior
+        close).
+        Post: ``middle`` is the windowed close-EMA over ``period`` bars; the
+        bands are ``middle ± multiplier × ATR(atr_period)``. Reuses
+        :func:`windowed_ema` for the basis and the same true-range recurrence as
+        :meth:`atr` for the width, so engine and sandbox agree bit-for-bit.
+        """
+        if not bars or len(bars) < max(period, atr_period + 1):
+            return None
+        key = ("keltner", period, atr_period, multiplier)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            triple = state["value"]
+        else:
+            middle = windowed_ema(bars, period, "close")
+            total = 0.0
+            for i in range(len(bars) - atr_period, len(bars)):
+                h = float(bars[i].high)
+                low = float(bars[i].low)
+                prev_close = float(bars[i - 1].close)
+                total += max(h - low, abs(h - prev_close), abs(low - prev_close))
+            atr_val = total / atr_period
+            triple = (middle + multiplier * atr_val, middle, middle - multiplier * atr_val)
+            self._state[key] = {"fp": fp, "value": triple}
+        upper, middle, lower = triple
+        if select == "upper":
+            return upper
+        if select == "middle":
+            return middle
+        if select == "lower":
+            return lower
+        return None
+
+    # ----- OBV -----------------------------------------------------------
+
+    def obv(self, bars: Sequence[Any]) -> Optional[float]:
+        """On-Balance Volume at ``bars[-1]`` (cumulative over ``bars``).
+
+        Pre: ``bars`` is non-empty. Post: the running signed-volume total — add
+        ``volume`` when the close rises vs. the prior bar, subtract it when the
+        close falls, leave it unchanged on an equal close. Cumulative over the
+        whole supplied window (like :meth:`vwap`), so a bounded sliding window
+        re-bases OBV to the window start.
+        """
+        if not bars:
+            return None
+        key = ("obv",)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+        value = 0.0
+        for i in range(1, len(bars)):
+            cur = float(bars[i].close)
+            prev = float(bars[i - 1].close)
+            if cur > prev:
+                value += float(bars[i].volume)
+            elif cur < prev:
+                value -= float(bars[i].volume)
+        self._state[key] = {"fp": fp, "value": value}
+        return value
+
+    # ----- MFI -----------------------------------------------------------
+
+    def mfi(self, bars: Sequence[Any], period: int = 14) -> Optional[float]:
+        """Money Flow Index (0–100) at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period + 1``
+        (each money-flow term compares typical price against the prior bar).
+        Post: the volume-weighted RSI of typical price over the trailing
+        ``period`` bars. Mirrors :meth:`rsi`'s zero-denominator convention:
+        all-positive flow → 100, no flow at all → 50.
+        """
+        if not bars or len(bars) < period + 1:
+            return None
+        key = ("mfi", period)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+        pos = 0.0
+        neg = 0.0
+        for i in range(len(bars) - period, len(bars)):
+            cur = bars[i]
+            prev = bars[i - 1]
+            tp = (float(cur.high) + float(cur.low) + float(cur.close)) / 3.0
+            tp_prev = (float(prev.high) + float(prev.low) + float(prev.close)) / 3.0
+            rmf = tp * float(cur.volume)
+            if tp > tp_prev:
+                pos += rmf
+            elif tp < tp_prev:
+                neg += rmf
+        if neg == 0:
+            value: float = 100.0 if pos > 0 else 50.0
+        else:
+            ratio = pos / neg
+            value = 100.0 - (100.0 / (1.0 + ratio))
+        self._state[key] = {"fp": fp, "value": value}
+        return value
+
+    # ----- ROC -----------------------------------------------------------
+
+    def roc(
+        self,
+        bars: Sequence[Any],
+        period: int = 12,
+        source: str = "close",
+    ) -> Optional[float]:
+        """Rate of Change (percent) at ``bars[-1]`` over ``period`` bars.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period + 1``.
+        Post: ``100 × (price_now − price_{−period}) / price_{−period}``; ``0.0``
+        when the reference price is exactly 0 (avoids a division by zero).
+        """
+        if not bars or len(bars) < period + 1:
+            return None
+        key = ("roc", period, source)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+        cur = _source_value(bars[-1], source)
+        prev = _source_value(bars[-1 - period], source)
+        value = 0.0 if prev == 0 else (cur - prev) / prev * 100.0
+        self._state[key] = {"fp": fp, "value": value}
+        return value
+
+    # ----- CCI -----------------------------------------------------------
+
+    def cci(self, bars: Sequence[Any], period: int = 20) -> Optional[float]:
+        """Commodity Channel Index at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
+        Post: ``(tp − sma_tp) / (0.015 × mean_deviation)`` over the trailing
+        ``period`` typical prices, where ``mean_deviation`` is the mean absolute
+        deviation from ``sma_tp``; ``0.0`` when that deviation is 0 (a flat
+        window has no defined CCI).
+        """
+        if not bars or len(bars) < period:
+            return None
+        key = ("cci", period)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+        tps = [(float(b.high) + float(b.low) + float(b.close)) / 3.0 for b in bars[-period:]]
+        sma_tp = sum(tps) / period
+        mean_dev = sum(abs(t - sma_tp) for t in tps) / period
+        cur_tp = tps[-1]
+        value = 0.0 if mean_dev == 0 else (cur_tp - sma_tp) / (0.015 * mean_dev)
+        self._state[key] = {"fp": fp, "value": value}
+        return value
+
+    # ----- Williams %R ---------------------------------------------------
+
+    def williams_r(self, bars: Sequence[Any], period: int = 14) -> Optional[float]:
+        """Williams %R (−100–0) at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
+        Post: ``−100 × (highest_high − close) / (highest_high − lowest_low)``
+        over the trailing ``period`` bars; ``−50.0`` (neutral) when the range is
+        0, mirroring :meth:`stochastic`'s flat-window convention.
+        """
+        if not bars or len(bars) < period:
+            return None
+        key = ("williams_r", period)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+        window = bars[-period:]
+        highest = max(float(b.high) for b in window)
+        lowest = min(float(b.low) for b in window)
+        rng = highest - lowest
+        close = float(bars[-1].close)
+        value = -50.0 if rng == 0 else -100.0 * (highest - close) / rng
+        self._state[key] = {"fp": fp, "value": value}
+        return value

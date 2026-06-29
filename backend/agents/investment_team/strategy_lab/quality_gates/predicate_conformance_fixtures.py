@@ -307,8 +307,25 @@ def _oscillate_indicator_vs_number(
         return _oscillate_ma_vs_number(lhs, threshold, total, op)
     if lhs.name == "rsi":
         return _oscillate_rsi_vs_number(threshold, total, op, lhs)
-    if lhs.name in ("macd", "bollinger", "atr", "adx", "stochastic", "vwap"):
+    if lhs.name in (
+        "macd",
+        "bollinger",
+        "atr",
+        "adx",
+        "stochastic",
+        "vwap",
+        "donchian",
+        "keltner",
+        "obv",
+        "mfi",
+        "cci",
+        "williams_r",
+    ):
         return _oscillate_generic_indicator(lhs, threshold, total, op)
+    if lhs.name == "roc":
+        # ROC is a momentum oscillator on a single source series, like the MAs —
+        # a trending/oscillating price drives it through the threshold.
+        return _oscillate_ma_vs_number(lhs, threshold, total, op)
     return None
 
 
@@ -581,4 +598,11 @@ def _warmup_for_indicator(ref: IndicatorRef) -> int:
         k = int(ref.param("k_period")) if "k_period" in ref.params else 14
         d = int(ref.param("d_period")) if "d_period" in ref.params else 3
         return k + d + 5
+    if ref.name in ("donchian", "cci", "williams_r", "mfi", "roc"):
+        period = int(ref.param("period")) if "period" in ref.params else 14
+        return period + 5
+    if ref.name == "keltner":
+        period = int(ref.param("period")) if "period" in ref.params else 20
+        atr_period = int(ref.param("atr_period")) if "atr_period" in ref.params else 10
+        return max(period, atr_period + 1) + 5
     return 20

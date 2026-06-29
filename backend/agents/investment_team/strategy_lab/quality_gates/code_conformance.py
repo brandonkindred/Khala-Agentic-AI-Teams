@@ -89,6 +89,13 @@ _INDICATOR_ALLOWED_CALL_NAMES: dict[str, frozenset[str]] = {
     "adx": frozenset({"adx"}),
     "stochastic": frozenset({"stochastic"}),
     "vwap": frozenset({"vwap"}),
+    "donchian": frozenset({"donchian_channels", "donchian"}),
+    "keltner": frozenset({"keltner_channels", "keltner"}),
+    "obv": frozenset({"obv"}),
+    "mfi": frozenset({"mfi"}),
+    "roc": frozenset({"roc"}),
+    "cci": frozenset({"cci"}),
+    "williams_r": frozenset({"williams_r"}),
 }
 
 assert set(_INDICATOR_ALLOWED_CALL_NAMES) == set(IndicatorName.__args__), (

@@ -49,11 +49,20 @@ The accepted `name` values and their parameter schemas:
 | `ema` | `period: int` (2-400) | `source` (default `close`) |
 | `rsi` | — | `period: int` (2-200, default 14), `source` (default `close`) |
 | `macd` | — | `fast` (default 12), `slow` (default 26), `signal` (default 9), `output` ∈ {macd, signal, histogram} (default `macd`), `source` (default `close`) |
-| `bollinger` | — | `period` (default 20, 5-200), `num_std` (default 2.0, >0), `band` ∈ {upper, middle, lower} (default `middle`), `source` (default `close`) |
+| `bollinger` | — | `period` (default 20, 5-200), `num_std` (default 2.0, >0), `band` ∈ {upper, middle, lower, percent_b, bandwidth} (default `middle`), `source` (default `close`) |
 | `atr` | — | `period` (default 14, 2-200) |
 | `adx` | — | `period` (default 14, 2-200) |
 | `stochastic` | — | `k_period` (default 14), `d_period` (default 3), `output` ∈ {k, d} (default `k`) |
 | `vwap` | — | — |
+| `donchian` | — | `period` (default 20, 2-400), `band` ∈ {upper, middle, lower} (default `middle`) — breakout channel (highest high / lowest low) |
+| `keltner` | — | `period` (default 20, 2-400), `atr_period` (default 10, 2-200), `multiplier` (default 2.0, >0), `band` ∈ {upper, middle, lower} (default `middle`) — EMA(close) ± multiplier·ATR |
+| `obv` | — | — (On-Balance Volume; cumulative signed volume) |
+| `mfi` | — | `period` (default 14, 2-200) — Money Flow Index, bounded 0–100 |
+| `roc` | — | `period` (default 12, 2-400), `source` (default `close`) — Rate of Change (percent) |
+| `cci` | — | `period` (default 20, 2-400) — Commodity Channel Index |
+| `williams_r` | — | `period` (default 14, 2-200) — Williams %R, bounded −100–0 |
+
+`bollinger` `band: percent_b` is `(price − lower) / (upper − lower)` (≈0 at the lower band, ≈1 at the upper, can exceed that range); `band: bandwidth` is `(upper − lower) / middle`.
 
 Bare bar fields are addressed by the string literals `"bar.close"`, `"bar.high"`, `"bar.low"`, `"bar.volume"` (used as `Predicate.lhs` / `Predicate.rhs` directly — no wrapper object).
 

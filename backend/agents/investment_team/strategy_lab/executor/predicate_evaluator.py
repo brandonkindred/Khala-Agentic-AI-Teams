@@ -468,6 +468,26 @@ def _registry_indicator(
         )
     if name == "vwap":
         return reg.vwap(bars)
+    if name == "donchian":
+        return reg.donchian(bars, period=int(ref.param("period")), select=str(ref.param("band")))
+    if name == "keltner":
+        return reg.keltner(
+            bars,
+            period=int(ref.param("period")),
+            atr_period=int(ref.param("atr_period")),
+            multiplier=float(ref.param("multiplier")),
+            select=str(ref.param("band")),
+        )
+    if name == "obv":
+        return reg.obv(bars)
+    if name == "mfi":
+        return reg.mfi(bars, period=int(ref.param("period")))
+    if name == "roc":
+        return reg.roc(bars, period=int(ref.param("period")), source=ref.source)
+    if name == "cci":
+        return reg.cci(bars, period=int(ref.param("period")))
+    if name == "williams_r":
+        return reg.williams_r(bars, period=int(ref.param("period")))
     raise ValueError(f"unknown indicator name: {name!r}")
 
 

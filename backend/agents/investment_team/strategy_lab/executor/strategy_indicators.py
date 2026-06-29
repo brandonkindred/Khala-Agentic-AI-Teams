@@ -199,6 +199,59 @@ def vwap(high, low, close, volume) -> float:
     return _scalar(IndicatorRegistry().vwap(_ohlc_bars(high, low, close, volume)))
 
 
+def donchian_channels(high, low, period=20) -> tuple[float, float, float]:
+    """Latest (upper, middle, lower) Donchian channel values. See module contract."""
+    bars = _ohlc_bars(high, low, close=low)
+    reg = IndicatorRegistry()
+    p = int(period)
+    return (
+        _scalar(reg.donchian(bars, period=p, select="upper")),
+        _scalar(reg.donchian(bars, period=p, select="middle")),
+        _scalar(reg.donchian(bars, period=p, select="lower")),
+    )
+
+
+def keltner_channels(
+    high, low, close, period=20, atr_period=10, multiplier=2.0
+) -> tuple[float, float, float]:
+    """Latest (upper, middle, lower) Keltner channel values. See module contract."""
+    bars = _ohlc_bars(high, low, close)
+    reg = IndicatorRegistry()
+    p, ap, m = int(period), int(atr_period), float(multiplier)
+    return (
+        _scalar(reg.keltner(bars, period=p, atr_period=ap, multiplier=m, select="upper")),
+        _scalar(reg.keltner(bars, period=p, atr_period=ap, multiplier=m, select="middle")),
+        _scalar(reg.keltner(bars, period=p, atr_period=ap, multiplier=m, select="lower")),
+    )
+
+
+def obv(close, volume) -> float:
+    """Latest On-Balance Volume value. See module contract."""
+    return _scalar(IndicatorRegistry().obv(_ohlc_bars(close, close, close, volume)))
+
+
+def mfi(high, low, close, volume, period=14) -> float:
+    """Latest Money Flow Index value. See module contract."""
+    return _scalar(
+        IndicatorRegistry().mfi(_ohlc_bars(high, low, close, volume), period=int(period))
+    )
+
+
+def roc(data, period=12) -> float:
+    """Latest Rate of Change (percent) value. See module contract."""
+    return _scalar(IndicatorRegistry().roc(_value_bars(data), int(period), source="close"))
+
+
+def cci(high, low, close, period=20) -> float:
+    """Latest Commodity Channel Index value. See module contract."""
+    return _scalar(IndicatorRegistry().cci(_ohlc_bars(high, low, close), period=int(period)))
+
+
+def williams_r(high, low, close, period=14) -> float:
+    """Latest Williams %R value. See module contract."""
+    return _scalar(IndicatorRegistry().williams_r(_ohlc_bars(high, low, close), period=int(period)))
+
+
 # ---------------------------------------------------------------------------
 # Unified accessor — backs ``ctx.indicator(...)`` (issue #703).
 #
@@ -214,7 +267,24 @@ def vwap(high, low, close, volume) -> float:
 # DSL indicator names this accessor understands (mirrors spec_dsl.IndicatorName);
 # kept as a literal set so the flat sandbox copy needs no spec_dsl import.
 _VALID_INDICATORS: frozenset[str] = frozenset(
-    {"sma", "ema", "rsi", "macd", "bollinger", "atr", "adx", "stochastic", "vwap"}
+    {
+        "sma",
+        "ema",
+        "rsi",
+        "macd",
+        "bollinger",
+        "atr",
+        "adx",
+        "stochastic",
+        "vwap",
+        "donchian",
+        "keltner",
+        "obv",
+        "mfi",
+        "roc",
+        "cci",
+        "williams_r",
+    }
 )
 _VALID_SOURCES: frozenset[str] = frozenset(
     {"close", "open", "high", "low", "volume", "hl2", "ohlc4"}
@@ -275,7 +345,7 @@ _INDICATOR_PARAM_VALIDATORS: dict[str, dict[str, "object"]] = {
     "bollinger": {
         "period": _int_in(5, 200),
         "num_std": _float_gt(0),
-        "band": _one_of("upper", "middle", "lower"),
+        "band": _one_of("upper", "middle", "lower", "percent_b", "bandwidth"),
     },
     "atr": {"period": _int_in(2, 200)},
     "adx": {"period": _int_in(2, 200)},
@@ -285,6 +355,21 @@ _INDICATOR_PARAM_VALIDATORS: dict[str, dict[str, "object"]] = {
         "output": _one_of("k", "d"),
     },
     "vwap": {},
+    "donchian": {
+        "period": _int_in(2, 400),
+        "band": _one_of("upper", "middle", "lower"),
+    },
+    "keltner": {
+        "period": _int_in(2, 400),
+        "atr_period": _int_in(2, 200),
+        "multiplier": _float_gt(0),
+        "band": _one_of("upper", "middle", "lower"),
+    },
+    "obv": {},
+    "mfi": {"period": _int_in(2, 200)},
+    "roc": {"period": _int_in(2, 400)},
+    "cci": {"period": _int_in(2, 400)},
+    "williams_r": {"period": _int_in(2, 200)},
 }
 
 
@@ -404,6 +489,10 @@ def indicator_value(
             select=str(params.get("band", "middle")),
         )
 
+    if name == "roc":
+        bars = _value_bars(_source_values(history, source))
+        return reg.roc(bars, period=int(params.get("period", 12)), source="close")
+
     # OHLC-sourced indicators read their fields directly and forbid a `source`
     # override (mirrors spec_dsl's allow_source=False for these names). Reject a
     # non-default source rather than silently computing a different indicator
@@ -423,6 +512,28 @@ def indicator_value(
             d_period=int(params.get("d_period", 3)),
             select=str(params.get("output", "k")),
         )
+    if name == "donchian":
+        return reg.donchian(
+            ohlc,
+            period=int(params.get("period", 20)),
+            select=str(params.get("band", "middle")),
+        )
+    if name == "keltner":
+        return reg.keltner(
+            ohlc,
+            period=int(params.get("period", 20)),
+            atr_period=int(params.get("atr_period", 10)),
+            multiplier=float(params.get("multiplier", 2.0)),
+            select=str(params.get("band", "middle")),
+        )
+    if name == "obv":
+        return reg.obv(ohlc)
+    if name == "mfi":
+        return reg.mfi(ohlc, period=int(params.get("period", 14)))
+    if name == "cci":
+        return reg.cci(ohlc, period=int(params.get("period", 20)))
+    if name == "williams_r":
+        return reg.williams_r(ohlc, period=int(params.get("period", 14)))
 
     # name == "vwap" (only remaining valid name)
     return reg.vwap(ohlc)

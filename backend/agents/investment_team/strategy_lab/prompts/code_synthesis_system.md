@@ -146,12 +146,19 @@ Names and parameters (pass the same `params` your spec's `IndicatorRef` uses; `o
 | `'sma'`, `'ema'` | `period` (required), `source='close'` | moving average |
 | `'rsi'` | `period=14`, `source='close'` | RSI |
 | `'macd'` | `fast=12, slow=26, signal=9, output='macd'`, `source='close'` | `output` ∈ `macd`/`signal`/`histogram` |
-| `'bollinger'` | `period=20, num_std=2.0, band='middle'`, `source='close'` | `band` ∈ `upper`/`middle`/`lower` |
+| `'bollinger'` | `period=20, num_std=2.0, band='middle'`, `source='close'` | `band` ∈ `upper`/`middle`/`lower`/`percent_b`/`bandwidth` |
 | `'atr'`, `'adx'` | `period=14` | volatility / trend strength |
 | `'stochastic'` | `k_period=14, d_period=3, output='k'` | `output` ∈ `k`/`d` |
 | `'vwap'` | — | cumulative VWAP |
+| `'donchian'` | `period=20, band='middle'` | breakout channel; `band` ∈ `upper`/`middle`/`lower` |
+| `'keltner'` | `period=20, atr_period=10, multiplier=2.0, band='middle'` | EMA(close) ± multiplier·ATR; `band` ∈ `upper`/`middle`/`lower` |
+| `'obv'` | — | On-Balance Volume (cumulative signed volume) |
+| `'mfi'` | `period=14` | Money Flow Index (0–100) |
+| `'roc'` | `period=12`, `source='close'` | Rate of Change (percent) |
+| `'cci'` | `period=20` | Commodity Channel Index |
+| `'williams_r'` | `period=14` | Williams %R (−100–0) |
 
-`source` accepts `close`/`open`/`high`/`low`/`volume`/`hl2`/`ohlc4`, but only where the indicator allows it — `atr`, `adx`, `stochastic`, and `vwap` read OHLC(V) directly and take no `source`.
+`source` accepts `close`/`open`/`high`/`low`/`volume`/`hl2`/`ohlc4`, but only where the indicator allows it — `atr`, `adx`, `stochastic`, `vwap`, `donchian`, `keltner`, `obv`, `mfi`, `cci`, and `williams_r` read OHLC(V) directly and take no `source`.
 
 ```python
 hist = ctx.indicator('macd', fast=12, slow=26, signal=9, output='histogram')
