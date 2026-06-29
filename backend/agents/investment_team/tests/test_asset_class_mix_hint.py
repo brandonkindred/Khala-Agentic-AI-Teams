@@ -24,7 +24,10 @@ from investment_team.strategy_lab.spec_dsl import (
     Predicate,
     StopLossRule,
 )
-from investment_team.strategy_lab_context import asset_class_mix_hint
+from investment_team.strategy_lab_context import (
+    _edge_exploitation_steer,
+    asset_class_mix_hint,
+)
 
 
 def _stub_backtest_result(
@@ -268,3 +271,44 @@ def test_invalid_mode_is_a_precondition_violation() -> None:
     """``mode`` outside the known set is a caller bug — fail loudly per DbC."""
     with pytest.raises(AssertionError):
         asset_class_mix_hint([], mode="bogus")
+
+
+# ---------------------------------------------------------------------------
+# _edge_exploitation_steer (focused unit tests for the private helper)
+# ---------------------------------------------------------------------------
+
+
+def test_edge_steer_names_highest_annual_return_bucket() -> None:
+    """Buckets rank by mean annualized return — crypto wins here despite a
+    lower win rate than stocks."""
+    records = [_record("crypto", annual=25.0, win=53.0), _record("stocks", annual=10.0, win=62.0)]
+    out = _edge_exploitation_steer(records, ["stocks", "crypto"], "stocks, or crypto", tail=24)
+    assert "crypto scores best" in out, out
+
+
+def test_edge_steer_tie_breaks_on_win_rate() -> None:
+    """When mean annual return ties, the higher mean win rate wins (the
+    dual-objective tie-break)."""
+    records = [_record("crypto", annual=10.0, win=52.0), _record("stocks", annual=10.0, win=58.0)]
+    out = _edge_exploitation_steer(records, ["stocks", "crypto"], "stocks, or crypto", tail=24)
+    assert "stocks scores best" in out, out
+
+
+def test_edge_steer_neutral_fallback_when_no_in_bounds_bucket() -> None:
+    """No allowed asset_class has an attributable edge → neutral menu, no
+    fabricated preference."""
+    records = [_record("stocks", annual=12.0)]
+    out = _edge_exploitation_steer(records, ["crypto", "forex"], "crypto, or forex", tail=24)
+    assert "No per-class edge attributable yet" in out, out
+    assert "scores best" not in out, out
+
+
+def test_edge_steer_asserts_its_preconditions() -> None:
+    """The documented preconditions are enforced, not just documented."""
+    rec = [_record("stocks")]
+    with pytest.raises(AssertionError):
+        _edge_exploitation_steer(rec, [], "menu", tail=24)
+    with pytest.raises(AssertionError):
+        _edge_exploitation_steer(rec, ["stocks"], "", tail=24)
+    with pytest.raises(AssertionError):
+        _edge_exploitation_steer(rec, ["stocks"], "menu", tail=0)

@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 _DIVERSITY_MODES = ("exploit", "explore")
 
 
-def _diversity_mode() -> str:
+def _resolve_diversity_mode() -> str:
     """Resolve the asset-class diversity-steering mode for this run.
 
     Reads ``STRATEGY_LAB_DIVERSITY_MODE``: ``exploit`` (default) steers toward
@@ -220,23 +220,16 @@ class DesignAgent:
         # ``format_prior_attribution`` returns its own "not enough history"
         # sentinel for an empty / all-non-executed list, so no guard is needed.
         prior_attribution = format_prior_attribution(prior_records)
-        mode = _diversity_mode()
+        mode = _resolve_diversity_mode()
+        # ``asset_class_mix_hint`` handles the empty-records case itself (a
+        # neutral menu), so a single call covers both the with- and no-priors
+        # paths. When a category restriction is active it already supplies the
+        # positive allowed-class menu; only the hard negative rule is appended.
+        mix_hint = asset_class_mix_hint(prior_records, exclude=exclude_asset_classes, mode=mode)
         if exclude_asset_classes:
-            # The menu-restricted mix hint already supplies the positive
-            # allowed-class menu — even with no priors, since asset_class_mix_hint
-            # handles the empty-records case — so the only thing to add here is the
-            # hard negative rule. Re-listing the allowed classes would just
-            # duplicate the mix-hint menu.
-            mix_hint = asset_class_mix_hint(prior_records, exclude=exclude_asset_classes, mode=mode)
             mix_hint += (
                 "\nMANDATORY EXCLUSION: Do NOT use these asset classes: "
                 f"{', '.join(exclude_asset_classes)}."
-            )
-        else:
-            mix_hint = (
-                asset_class_mix_hint(prior_records, mode=mode)
-                if prior_records
-                else "No history — choose freely."
             )
 
         signal_section = ""

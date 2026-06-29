@@ -31,7 +31,7 @@ from investment_team.strategy_lab.agents.design import (
     _SELF_REVIEW_SYSTEM_PROMPT,
     DesignAgent,
     _build_correction_prompt,
-    _diversity_mode,
+    _resolve_diversity_mode,
 )
 from investment_team.strategy_lab.agents.design_review import CritiqueIssue, SpecCritique
 from investment_team.strategy_lab.spec_dsl import (
@@ -1517,14 +1517,14 @@ def test_run_self_review_flags_expectancy_incoherence_then_self_revises(
 
 def test_diversity_mode_defaults_to_exploit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STRATEGY_LAB_DIVERSITY_MODE", raising=False)
-    assert _diversity_mode() == "exploit"
+    assert _resolve_diversity_mode() == "exploit"
 
 
 def test_diversity_mode_parses_explore_case_insensitively(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "  EXPLORE ")
-    assert _diversity_mode() == "explore"
+    assert _resolve_diversity_mode() == "explore"
 
 
 def test_diversity_mode_unknown_falls_back_to_exploit_and_warns(
@@ -1534,7 +1534,7 @@ def test_diversity_mode_unknown_falls_back_to_exploit_and_warns(
     misconfiguration is visible rather than silently masked."""
     monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "rotate-everything")
     with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
-        assert _diversity_mode() == "exploit"
+        assert _resolve_diversity_mode() == "exploit"
     assert any("rotate-everything" in rec.message for rec in caplog.records)
 
 
@@ -1544,7 +1544,7 @@ def test_diversity_mode_empty_value_is_silent_exploit(
     """An empty value is treated as unset — exploit, with no warning noise."""
     monkeypatch.setenv("STRATEGY_LAB_DIVERSITY_MODE", "   ")
     with caplog.at_level(logging.WARNING, logger="investment_team.strategy_lab.agents.design"):
-        assert _diversity_mode() == "exploit"
+        assert _resolve_diversity_mode() == "exploit"
     assert not caplog.records
 
 
