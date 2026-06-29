@@ -268,11 +268,13 @@ def test_start_agentic_team_requires_process_id(
 
 
 def test_start_agentic_team_persists_process_id(
-    fake_job_store, fake_store, fake_dispatch, fake_persona_store, fixed_run_id
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store, fixed_run_id, monkeypatch
 ):
-    """A well-formed agentic-team run threads process_id into create_run."""
+    """A well-formed agentic-team run (complete process) threads process_id into create_run."""
+    from user_agent_founder.api import main as api_main
     from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
 
+    monkeypatch.setattr(api_main, "_agentic_process_status", lambda _t, _p: "complete")
     resp = start_founder_workflow(
         StartRunRequest(target_team_key="agentic_team:team-1", process_id="proc-9")
     )
@@ -286,6 +288,69 @@ def test_start_agentic_team_persists_process_id(
         project_name=f"startup-founder-{fixed_run_id[:8]}",
         process_id="proc-9",
     )
+
+
+def test_start_agentic_team_rejects_non_complete_process(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store, monkeypatch
+):
+    """The Stage-3 → Stage-4 gate is enforced server-side: a draft/archived/missing
+    process is a 422, even for a direct API caller bypassing the UI."""
+    from user_agent_founder.api import main as api_main
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    monkeypatch.setattr(api_main, "_agentic_process_status", lambda _t, _p: "draft")
+    with pytest.raises(HTTPException) as excinfo:
+        start_founder_workflow(
+            StartRunRequest(target_team_key="agentic_team:team-1", process_id="proc-draft")
+        )
+    assert excinfo.value.status_code == 422
+    assert "not testable" in excinfo.value.detail
+    assert fake_dispatch == []
+    fake_store.create_run.assert_not_called()
+
+
+def test_start_agentic_team_allows_when_status_undeterminable(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store, fixed_run_id, monkeypatch
+):
+    """Best-effort: a provisioning outage (status None) must not hard-block the
+    start — the run proceeds and surfaces a real failure later if unrunnable."""
+    from user_agent_founder.api import main as api_main
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    monkeypatch.setattr(api_main, "_agentic_process_status", lambda _t, _p: None)
+    resp = start_founder_workflow(
+        StartRunRequest(target_team_key="agentic_team:team-1", process_id="proc-9")
+    )
+    assert resp.job_id == fixed_run_id
+    assert fake_dispatch == [fixed_run_id]
+
+
+def test_agentic_process_status_maps_team_detail(monkeypatch):
+    """_agentic_process_status returns the process status, 'missing' when absent,
+    and None on a cross-service outage."""
+    from user_agent_founder.api import main as api_main
+
+    detail = {"team": {"processes": [{"process_id": "p1", "status": "complete"}]}}
+    monkeypatch.setattr(
+        api_main.httpx, "Client", lambda *a, **kw: _FakeTeamsClient([], {"t1": detail})
+    )
+    # Reuse the _FakeTeamsClient: it returns the detail for /teams/{id}.
+    assert api_main._agentic_process_status("t1", "p1") == "complete"
+    assert api_main._agentic_process_status("t1", "nope") == "missing"
+
+    # Outage → None (never raises).
+    class _BoomClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, *a, **kw):
+            raise RuntimeError("provisioning down")
+
+    monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _BoomClient())
+    assert api_main._agentic_process_status("t1", "p1") is None
 
 
 # ---------------------------------------------------------------------------

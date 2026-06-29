@@ -76,8 +76,6 @@ export class AgentStudioPersonaComponent implements OnInit {
   readonly team = signal<AgenticTeam | null>(null);
   readonly teamError = signal<string | null>(null);
   readonly personas = signal<PersonaInfo[]>([]);
-  /** null while unknown/loading; true/false once `/testable-teams` resolves. */
-  readonly testable = signal<boolean | null>(null);
   readonly selectedProcessId = signal<string | null>(null);
   readonly launching = signal(false);
   readonly error = signal<string | null>(null);
@@ -87,6 +85,12 @@ export class AgentStudioPersonaComponent implements OnInit {
   readonly elapsedSec = signal(0);
   private pollSub: Subscription | null = null;
   private elapsedSub: Subscription | null = null;
+  /**
+   * The run currently being polled. Guards against a stale in-flight status
+   * response (e.g. the one-shot immediate fetch) from a previous run landing
+   * after a new run started and clobbering it / stopping the new poller.
+   */
+  private activeRunId: string | null = null;
 
   readonly teamId = computed(() => this.state.teamId());
   readonly selectedPersonaId = computed(() => this.state.personaId());
@@ -94,6 +98,18 @@ export class AgentStudioPersonaComponent implements OnInit {
   /** Only `complete` processes can be driven end-to-end (spec Stage 3 gate). */
   readonly completeProcesses = computed<ProcessDefinition[]>(() =>
     (this.team()?.processes ?? []).filter((p) => p.status === 'complete'),
+  );
+
+  /**
+   * The Stage-4 safety net: a loaded team with no `complete` process can't be
+   * tested. This is decided from the **locally loaded** team — the authoritative
+   * source for process status — rather than the founder service's
+   * `/testable-teams` list, which best-effort-omits agentic teams on a
+   * cross-service enumeration outage and would otherwise false-block a team whose
+   * complete processes are right here.
+   */
+  readonly noCompleteProcess = computed(
+    () => !!this.team() && this.completeProcesses().length === 0,
   );
 
   /** A registry agent must be in focus to "fix an agent" in the sandbox (Stage 2). */
@@ -115,7 +131,6 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.selectedProcessId.set(this.state.processId());
     this.loadTeam(teamId);
     this.loadPersonas();
-    this.refreshTestable(teamId);
   }
 
   setMode(mode: StudioPersonaMode): void {
@@ -176,26 +191,6 @@ export class AgentStudioPersonaComponent implements OnInit {
       });
   }
 
-  /** Stage-4 safety net: confirm this team is in the testable list (≥1 complete process). */
-  private refreshTestable(teamId: string): void {
-    const key = `agentic_team:${teamId}`;
-    this.personaApi
-      .getTestableTeams()
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (resp) => {
-          this.testable.set(resp.teams.some((t) => t.team_key === key));
-          this.cdr.markForCheck();
-        },
-        // A lookup failure shouldn't hard-block the user; treat as unknown and
-        // let the launch attempt surface any real error.
-        error: () => {
-          this.testable.set(null);
-          this.cdr.markForCheck();
-        },
-      });
-  }
-
   // ── Launch + live run ───────────────────────────────────────────────────
 
   launch(): void {
@@ -230,6 +225,8 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   private startPolling(runId: string): void {
     this.stopPolling();
+    this.activeRunId = runId;
+    this.run.set(null);
     this.elapsedSec.set(0);
     this.elapsedSub = interval(1000)
       .pipe(takeUntilDestroyed(this.destroyRef))
@@ -267,6 +264,12 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   /** Apply a polled status; stop polling once the run reaches a terminal state. */
   private handleStatus(detail: PersonaTestRunDetail): void {
+    // Ignore a stale response from a superseded run (e.g. the previous run's
+    // in-flight immediate fetch) so it can't clobber the current run or stop its
+    // poller.
+    if (detail.run_id !== this.activeRunId) {
+      return;
+    }
     this.run.set(detail);
     if (TERMINAL_STATUSES.has(detail.status)) {
       this.stopPolling();

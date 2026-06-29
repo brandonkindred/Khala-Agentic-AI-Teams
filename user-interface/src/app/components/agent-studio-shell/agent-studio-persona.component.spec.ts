@@ -2,8 +2,9 @@ import { Component, Input } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
-import { of, throwError } from 'rxjs';
+import { of, throwError, Subject } from 'rxjs';
 import { vi } from 'vitest';
+import type { PersonaTestRunDetail } from '../../models/persona-testing.model';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
@@ -29,6 +30,13 @@ const TEAM = {
   updated_at: '',
 };
 
+const TEAM_NO_COMPLETE = {
+  ...TEAM,
+  processes: [
+    { process_id: 'p2', name: 'Draft pipeline', description: '', steps: [], status: 'draft' },
+  ],
+};
+
 const PERSONAS = [
   { id: 'startup-founder', name: 'Startup Founder', description: '', icon: 'rocket', is_builtin: true },
   { id: 'impatient-pm', name: 'Impatient PM', description: '', icon: 'person', is_builtin: false },
@@ -41,7 +49,6 @@ describe('AgentStudioPersonaComponent', () => {
   let agenticApi: { getTeam: ReturnType<typeof vi.fn> };
   let personaApi: {
     getPersonas: ReturnType<typeof vi.fn>;
-    getTestableTeams: ReturnType<typeof vi.fn>;
     startTest: ReturnType<typeof vi.fn>;
     getRunStatus: ReturnType<typeof vi.fn>;
     createPersona: ReturnType<typeof vi.fn>;
@@ -50,16 +57,13 @@ describe('AgentStudioPersonaComponent', () => {
 
   const build = (opts: {
     teamId?: string | null;
-    testableKeys?: string[];
+    team?: unknown;
     dialogResult?: unknown;
   } = {}) => {
-    const { teamId = 't1', testableKeys = ['agentic_team:t1'], dialogResult } = opts;
-    agenticApi = { getTeam: vi.fn().mockReturnValue(of({ team: TEAM })) };
+    const { teamId = 't1', team = TEAM, dialogResult } = opts;
+    agenticApi = { getTeam: vi.fn().mockReturnValue(of({ team })) };
     personaApi = {
       getPersonas: vi.fn().mockReturnValue(of({ personas: PERSONAS })),
-      getTestableTeams: vi
-        .fn()
-        .mockReturnValue(of({ teams: testableKeys.map((k) => ({ team_key: k, display_name: k })) })),
       startTest: vi.fn().mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' })),
       getRunStatus: vi
         .fn()
@@ -101,7 +105,7 @@ describe('AgentStudioPersonaComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('Compose a team');
   });
 
-  it('loads team, personas and testability on init', () => {
+  it('loads team and personas on init', () => {
     build();
     fixture.detectChanges();
     expect(agenticApi.getTeam).toHaveBeenCalledWith('t1');
@@ -111,14 +115,26 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.selectedPersonaId()).toBe('startup-founder');
     expect(component.selectedProcessId()).toBe('p1');
     expect(component.completeProcesses()).toHaveLength(1);
-    expect(component.testable()).toBe(true);
+    // A team with a complete process is not blocked.
+    expect(component.noCompleteProcess()).toBe(false);
   });
 
-  it('shows the safety net when the team is not testable', () => {
-    build({ testableKeys: [] });
+  it('shows the safety net when the loaded team has no complete process', () => {
+    build({ team: TEAM_NO_COMPLETE });
     fixture.detectChanges();
-    expect(component.testable()).toBe(false);
+    expect(component.noCompleteProcess()).toBe(true);
     expect(fixture.nativeElement.textContent).toContain('no complete process');
+  });
+
+  it('does not block on a complete-process team (local data is authoritative, not /testable-teams)', () => {
+    // Even though this component no longer consults /testable-teams, a team whose
+    // complete processes are loaded locally must remain launchable — the prior
+    // bug hard-blocked when the testable list omitted the team on an enumeration
+    // outage. Here the team has a complete process, so it is never blocked.
+    build();
+    fixture.detectChanges();
+    expect(component.noCompleteProcess()).toBe(false);
+    expect(fixture.nativeElement.textContent).not.toContain('no complete process');
   });
 
   it('launches a persona test with the agentic_team key + process_id', () => {
@@ -211,11 +227,27 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.error()).toContain('Could not load personas');
   });
 
-  it('treats a testable-lookup failure as unknown (does not hard-block)', () => {
+  it('ignores a stale status response from a superseded run', () => {
     build();
-    personaApi.getTestableTeams.mockReturnValue(throwError(() => new Error('down')));
     fixture.detectChanges();
-    expect(component.testable()).toBeNull();
+    // First launch: the immediate getRunStatus is held pending via a Subject so
+    // it's still "in flight" when the next run starts.
+    const stale = new Subject<PersonaTestRunDetail>();
+    personaApi.startTest.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
+    personaApi.getRunStatus.mockReturnValueOnce(stale).mockReturnValue(new Subject());
+    component.launch();
+    expect(component.run()).toBeNull(); // run-1 status not yet emitted
+
+    // Second launch supersedes run-1.
+    personaApi.startTest.mockReturnValue(of({ job_id: 'run-2', status: 'running', message: '' }));
+    personaApi.getRunStatus.mockReturnValueOnce(new Subject()).mockReturnValue(new Subject());
+    component.launch();
+
+    // The stale run-1 response now lands — it must be ignored, not clobber run-2
+    // or stop the new poller.
+    stale.next({ run_id: 'run-1', status: 'completed', decisions: [] } as PersonaTestRunDetail);
+    expect(component.run()).toBeNull();
+    expect(component.runTerminal()).toBe(false);
   });
 
   it('keeps the live run non-terminal while the run is still in progress', () => {

@@ -277,13 +277,26 @@ def start_founder_workflow(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # An agentic-team run drives a specific process; without it the adapter has
-    # no pipeline to start, so reject early rather than fail in the worker.
-    if req.target_team_key.startswith("agentic_team:") and not req.process_id:
-        raise HTTPException(
-            status_code=400,
-            detail="process_id is required when target_team_key is an agentic team",
-        )
+    # An agentic-team run drives a specific process; enforce the Stage-3 → Stage-4
+    # gate server-side (not just in the UI) so a direct caller or a stale handoff
+    # can't start a persona test against a missing/draft/archived process.
+    if req.target_team_key.startswith("agentic_team:"):
+        if not req.process_id:
+            raise HTTPException(
+                status_code=400,
+                detail="process_id is required when target_team_key is an agentic team",
+            )
+        team_id = req.target_team_key[len("agentic_team:") :]
+        status = _agentic_process_status(team_id, req.process_id)
+        # ``None`` means the provisioning service was unreachable: stay best-effort
+        # and allow (an outage must not hard-block starts; a truly unrunnable
+        # process surfaces as a run failure). A *known* non-complete status is a
+        # gate violation and is rejected.
+        if status is not None and status != "complete":
+            raise HTTPException(
+                status_code=422,
+                detail=f"process {req.process_id} is not testable (status: {status})",
+            )
 
     persona = get_persona_store().get_persona(req.persona_id)
     if persona is None:
@@ -523,6 +536,38 @@ def delete_persona(persona_id: str) -> Response:
     if not get_persona_store().delete_persona(persona_id):
         raise HTTPException(status_code=404, detail=f"Persona {persona_id!r} not found")
     return Response(status_code=204)
+
+
+def _agentic_process_status(team_id: str, process_id: str) -> Optional[str]:
+    """Return the status of ``process_id`` on an agentic team, cross-service.
+
+    Postconditions: returns the process's ``status`` string (e.g. ``"complete"``,
+        ``"draft"``, ``"archived"``) when the team+process resolve; ``"missing"``
+        when the team or process isn't found; and ``None`` when the provisioning
+        service is unreachable (best-effort — the caller treats ``None`` as
+        "cannot determine" and must not hard-block on it). Never raises.
+    """
+    from user_agent_founder.targets.agentic_team import PROVISIONING_PREFIX, UNIFIED_API_BASE
+
+    base = f"{UNIFIED_API_BASE}{PROVISIONING_PREFIX}"
+    try:
+        with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+            resp = client.get(f"{base}/teams/{team_id}")
+            if resp.status_code >= 400:
+                return "missing"
+            team = (resp.json() or {}).get("team") or {}
+            for proc in team.get("processes") or []:
+                if proc.get("process_id") == process_id:
+                    return proc.get("status") or "unknown"
+            return "missing"
+    except Exception:
+        logger.warning(
+            "Could not verify agentic process status for team %s / process %s",
+            team_id,
+            process_id,
+            exc_info=True,
+        )
+        return None
 
 
 def _list_agentic_testable_teams() -> list[TestableTeam]:

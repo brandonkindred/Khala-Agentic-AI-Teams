@@ -67,8 +67,8 @@
       }
 
       @case ('persona') {
-        @if (testable() === false) {
-          <!-- Safety net: process status changed after the Stage-3 jump. -->
+        @if (noCompleteProcess()) {
+          <!-- Safety net: the loaded team has no complete process to drive. -->
           <div class="persona-empty">
             <mat-icon aria-hidden="true">report_problem</mat-icon>
             <p>This team has no complete process yet.</p>
