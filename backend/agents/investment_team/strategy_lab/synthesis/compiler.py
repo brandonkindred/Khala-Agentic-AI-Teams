@@ -42,6 +42,7 @@ from ..spec_dsl import (
     SignalExitRule,
     VolatilityTargetSizing,
     is_entry_anchored_exit,
+    iter_tree_indicator_refs,
 )
 
 
@@ -184,15 +185,13 @@ def _collect_indicators(
     """
     seen: dict[str, IndicatorRef] = {}
     for rule in entry_rules:
-        for side in (rule.when.lhs, rule.when.rhs):
-            if isinstance(side, IndicatorRef):
-                sigid = _sigid_for_side(side)
-                seen.setdefault(sigid, side)
+        for side in iter_tree_indicator_refs(rule.when):
+            sigid = _sigid_for_side(side)
+            seen.setdefault(sigid, side)
     for rule in signal_exit_rules:
-        for side in (rule.when.lhs, rule.when.rhs):
-            if isinstance(side, IndicatorRef):
-                sigid = _sigid_for_side(side)
-                seen.setdefault(sigid, side)
+        for side in iter_tree_indicator_refs(rule.when):
+            sigid = _sigid_for_side(side)
+            seen.setdefault(sigid, side)
     return [seen[sigid] for sigid in sorted(seen)]
 
 

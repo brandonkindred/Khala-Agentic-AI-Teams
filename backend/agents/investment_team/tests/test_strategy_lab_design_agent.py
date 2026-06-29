@@ -33,7 +33,9 @@ from investment_team.strategy_lab.agents.design import (
 )
 from investment_team.strategy_lab.agents.design_review import CritiqueIssue, SpecCritique
 from investment_team.strategy_lab.spec_dsl import (
+    AllOf,
     EntryRule,
+    EntryRuleAdapter,
     IndicatorRef,
     Predicate,
     SignalExitRule,
@@ -320,6 +322,92 @@ def test_design_system_prompt_states_dual_objective_and_forecast() -> None:
     assert "trap" in lowered  # the win-rate-alone caveat
     assert "FORECAST" in text  # the new decomposed-process step
     assert "expectancy_forecast" in text  # the machine-readable forecast field
+
+
+def test_design_system_prompt_documents_multi_confirmation_combinator() -> None:
+    """The design system prompt must document the ``all_of`` / ``any_of``
+    combinator as the win-rate lever for multi-confirmation entries — selective,
+    compilable, and NOT a ``requires_custom_code`` case."""
+    # The system prompt is loaded as a module-level constant; the test reads it
+    # directly to assert prompt-content guidance (mirrors the existing
+    # ``test_design_system_prompt_states_dual_objective_and_forecast``).
+    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+
+    text = _SYSTEM_PROMPT
+    lowered = text.lower()
+    # Entry selection is framed around win-rate selectivity.
+    assert "selectivity" in lowered
+    # The combinator is documented, with a worked all_of example.
+    assert "all_of" in lowered
+    assert "any_of" in lowered
+    assert "multi-confirmation" in lowered
+    assert '"kind": "all_of"' in text
+    # Faking an AND-thesis via OR'd entry rules is still called out as looser.
+    assert "loosens" in lowered
+
+
+def test_design_system_prompt_keeps_custom_code_off_the_multi_confirmation_path() -> None:
+    """``requires_custom_code`` must NOT be steered toward for multi-confirmation
+    (the Codex P1): the combinator handles it, so the flag reverts to genuinely
+    inexpressible cases (cross-asset / path-dependent state)."""
+    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+
+    text = _SYSTEM_PROMPT
+    lowered = text.lower()
+    assert "requires_custom_code" in text
+    # The default framing is restored: setting it true is rare.
+    assert "setting it `true` is rare" in lowered
+    # The genuinely-inexpressible cases remain the only triggers.
+    assert "cross-asset" in lowered
+    assert "path-dependent" in lowered
+
+
+def test_design_system_prompt_states_win_rate_tuned_exit_guidance() -> None:
+    """The design system prompt must carry the win-rate-tuned exit guidance:
+    bank partials early via a scaled take-profit, with a trailing-stop runner
+    on the remainder to preserve return."""
+    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+
+    lowered = _SYSTEM_PROMPT.lower()
+    assert "scaled_take_profit" in lowered
+    assert "partials early" in lowered
+    assert "trailing" in lowered and "runner" in lowered
+    # Tied back to the existing reward:risk / break-even win-rate self-check.
+    assert "reward_risk" in lowered or "break-even win rate" in lowered
+
+
+def test_run_accepts_all_of_multi_confirmation_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A multi-confirmation entry authored as one ``all_of`` rule parses cleanly
+    through ``DesignAgent().run()`` and stays ``requires_custom_code`` false —
+    the combinator path the prompt now steers toward is representable end-to-end."""
+    all_of_entry = {
+        "kind": "entry",
+        "side": "long",
+        "when": {
+            "kind": "all_of",
+            "of": [
+                {"lhs": "bar.close", "op": ">", "rhs": {"name": "sma", "params": {"period": 200}}},
+                {"lhs": {"name": "rsi", "params": {"period": 14}}, "op": "<", "rhs": 40},
+            ],
+        },
+    }
+    payload = _payload(
+        entry_rules=[all_of_entry],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+        extra={"hypothesis": "Long only when the 200-SMA trend AND an RSI pullback both confirm."},
+    )
+    _patch_design(monkeypatch, payload)
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    # The all_of tree round-trips through validation; the flag stays false.
+    rule = EntryRuleAdapter.validate_python(parsed["entry_rules"][0])
+    assert isinstance(rule.when, AllOf)
+    assert len(rule.when.of) == 2
+    assert parsed.get("requires_custom_code", False) is False
 
 
 def test_run_includes_exclude_directives_in_prompt(

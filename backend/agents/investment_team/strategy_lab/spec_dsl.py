@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any, Literal, Optional, Sequence, Union
+from typing import Annotated, Any, Iterator, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
@@ -306,10 +306,78 @@ class Predicate(_SpecNode):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Boolean predicate combinators. A rule's ``when`` may be a single ``Predicate``
+# (leaf) or a nested ``all_of`` / ``any_of`` tree, so a confirmation-stacked
+# entry (trend ∧ pullback ∧ volume) is expressible as ONE rule and compiles
+# deterministically — the engine evaluates the tree (see
+# ``executor.predicate_evaluator.evaluate_tree``); the compiled code emits no
+# predicate logic. Combinators carry no operators of their own, only children.
+# ---------------------------------------------------------------------------
+
+
+class AllOf(_SpecNode):
+    """Conjunction: satisfied only when EVERY child predicate/tree is satisfied.
+
+    Invariants: ``of`` carries ≥2 children — a 1-child ``all_of`` is just the
+    child, so it is rejected to keep the tree in a single canonical shape.
+    """
+
+    kind: Literal["all_of"] = "all_of"
+    of: list["PredicateTree"] = Field(min_length=2)
+
+
+class AnyOf(_SpecNode):
+    """Disjunction: satisfied when ANY child predicate/tree is satisfied.
+
+    Invariants: ``of`` carries ≥2 children (see :class:`AllOf`).
+    """
+
+    kind: Literal["any_of"] = "any_of"
+    of: list["PredicateTree"] = Field(min_length=2)
+
+
+# A predicate position in a rule's ``when``: a single comparison or a nested
+# boolean tree. ``Predicate`` (no ``kind``, ``extra="forbid"``) and the
+# combinators (``kind`` + ``of``, ``extra="forbid"``) are mutually exclusive
+# shapes, so this plain union dispatches unambiguously without an explicit
+# discriminator — a leaf dict never validates as a combinator and vice versa.
+PredicateTree = Union[Predicate, AllOf, AnyOf]
+
+
+def iter_leaf_predicates(node: "PredicateTree") -> Iterator[Predicate]:
+    """Yield every leaf ``Predicate`` in ``node`` (depth-first, left-to-right).
+
+    Preconditions: ``node`` is a ``Predicate`` / ``AllOf`` / ``AnyOf``.
+    Postconditions: yields each leaf once; a bare ``Predicate`` yields itself.
+    Single source of the tree recursion, reused by the compiler, the readiness
+    gate, the engine's indicator collection, and the conformance fixtures so
+    "what predicates does this ``when`` contain" is answered in exactly one place.
+    """
+    if isinstance(node, Predicate):
+        yield node
+        return
+    for child in node.of:
+        yield from iter_leaf_predicates(child)
+
+
+def iter_tree_indicator_refs(node: "PredicateTree") -> Iterator[IndicatorRef]:
+    """Yield every ``IndicatorRef`` on either side of any leaf predicate in ``node``.
+
+    Preconditions: ``node`` is a ``PredicateTree``.
+    Postconditions: yields refs in leaf order; the same ref may appear more than
+    once (callers dedupe by ``sig_id`` where needed).
+    """
+    for pred in iter_leaf_predicates(node):
+        for side in (pred.lhs, pred.rhs):
+            if isinstance(side, IndicatorRef):
+                yield side
+
+
 class EntryRule(_SpecNode):
     kind: Literal["entry"] = "entry"
     side: Literal["long", "short"] = "long"
-    when: Predicate
+    when: "PredicateTree"
     note: str = ""
 
 
@@ -476,7 +544,7 @@ class ScaledTakeProfitRule(_SpecNode):
 
 class SignalExitRule(_SpecNode):
     kind: Literal["signal_exit"] = "signal_exit"
-    when: Predicate
+    when: "PredicateTree"
     note: str = ""
 
 
@@ -674,6 +742,8 @@ SizingRule = Annotated[
 # Resolve forward refs so union members are usable from outside the module.
 IndicatorRef.model_rebuild()
 Predicate.model_rebuild()
+AllOf.model_rebuild()
+AnyOf.model_rebuild()
 EntryRule.model_rebuild()
 StopLossRule.model_rebuild()
 TakeProfitRule.model_rebuild()
@@ -688,6 +758,7 @@ FixedNotionalSizing.model_rebuild()
 # TypeAdapters expose discriminator dispatch for callers that need to
 # validate a raw dict without pre-selecting the concrete class.
 IndicatorRefAdapter: TypeAdapter = TypeAdapter(IndicatorRef)
+PredicateTreeAdapter: TypeAdapter = TypeAdapter(PredicateTree)
 EntryRuleAdapter: TypeAdapter = TypeAdapter(EntryRule)
 ExitRuleAdapter: TypeAdapter = TypeAdapter(ExitRule)
 SizingRuleAdapter: TypeAdapter = TypeAdapter(SizingRule)
@@ -791,6 +862,31 @@ def _format_predicate(p: Predicate) -> str:
     return f"{_format_side(p.lhs)} {_OP_SYMBOL[p.op]} {_format_side(p.rhs)}"
 
 
+def format_predicate_tree(node: "PredicateTree", *, leaf_formatter=_format_predicate) -> str:
+    """Render a predicate tree, parameterised by the per-leaf renderer.
+
+    A leaf ``Predicate`` renders via ``leaf_formatter`` (default: the prose
+    ``_format_predicate``); an ``all_of`` / ``any_of`` renders as a parenthesised
+    ``(c1 and c2 …)`` / ``(c1 or c2 …)`` so the boolean structure is unambiguous.
+
+    The single source of the tree-walk: prompt rendering uses the default prose
+    leaf, while the alignment gate passes its own ``repr``-style leaf renderer —
+    so neither re-implements the recursion.
+
+    Preconditions: ``node`` is a ``Predicate`` / ``AllOf`` / ``AnyOf``;
+    ``leaf_formatter`` maps a ``Predicate`` to ``str``.
+    Postconditions: returns a non-empty string.
+    """
+    if isinstance(node, Predicate):
+        return leaf_formatter(node)
+    joiner = " and " if isinstance(node, AllOf) else " or "
+    return (
+        "("
+        + joiner.join(format_predicate_tree(child, leaf_formatter=leaf_formatter) for child in node.of)
+        + ")"
+    )
+
+
 _STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
     "trailing_high": "trailing-high ",
     "trailing_low": "trailing-low ",
@@ -801,7 +897,7 @@ def _format_rule(
     rule: Union[EntryRule, StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule],
 ) -> str:
     if isinstance(rule, EntryRule):
-        return f"{rule.side} when {_format_predicate(rule.when)}"
+        return f"{rule.side} when {format_predicate_tree(rule.when)}"
     if isinstance(rule, StopLossRule):
         prefix = _STOP_LOSS_BASIS_PREFIX.get(rule.basis, "")
         base = f"{prefix}stop loss {_format_number(rule.pct * 100)}%"
@@ -817,7 +913,7 @@ def _format_rule(
         )
         return f"scaled take profit ({rungs})"
     if isinstance(rule, SignalExitRule):
-        return f"exit when {_format_predicate(rule.when)}"
+        return f"exit when {format_predicate_tree(rule.when)}"
     raise TypeError(f"unknown rule variant: {type(rule).__name__}")
 
 
