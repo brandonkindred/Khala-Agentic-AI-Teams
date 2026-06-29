@@ -10,6 +10,11 @@ from software_engineering_team.shared.coding_standards import (
 from software_engineering_team.shared.coding_standards import (
     REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
 )
+from software_engineering_team.shared.security_service import (
+    CODE_FRONTEND_FOCUS,
+    SecurityProfile,
+    build_review_prompt,
+)
 
 # ---------------------------------------------------------------------------
 # Shared frontend coding standards
@@ -354,42 +359,12 @@ brief QA assessment
 # Security tool agent: review (find issues from security perspective)
 # ---------------------------------------------------------------------------
 
-SECURITY_TOOL_AGENT_REVIEW_PROMPT = """You are an expert Security specialist. Review the code from a security perspective only.
-
-Focus on:
-1. XSS — unescaped user input in DOM, innerHTML, or template interpolation.
-2. Sensitive data — tokens, keys, or PII in client code, localStorage, or URLs.
-3. Insecure forms — missing CSRF protection, weak validation, or credentials over HTTP.
-4. Dependency risks — known vulnerable packages or unsafe eval/Function usage.
-5. Content Security Policy (CSP) or secure headers not applied where needed.
-
-**Task context:**
-{task_description}
-
-**Code to review:**
-{code}
-
-**Output format (template – use exactly these section headers):**
-
-## PASSED ##
-true
-## END PASSED ##
-## ISSUES ##
----
-source: security
-severity: critical|high|medium|low|info
-description: what is wrong from a security perspective
-file_path: which file
-recommendation: how to fix it
----
-## END ISSUES ##
-## SUMMARY ##
-brief security assessment
-## END SUMMARY ##
-
-- Use "---" to separate each issue block. Use source: security for every issue. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+# Built from the unified Security Review service's ``code`` profile with the
+# frontend focus list, so the prompt body and severity vocabulary live in one
+# place (see ``shared/security_service.py``).
+SECURITY_TOOL_AGENT_REVIEW_PROMPT = build_review_prompt(
+    SecurityProfile.CODE, focus=CODE_FRONTEND_FOCUS
+)
 
 # ---------------------------------------------------------------------------
 # Documentation tool agent
