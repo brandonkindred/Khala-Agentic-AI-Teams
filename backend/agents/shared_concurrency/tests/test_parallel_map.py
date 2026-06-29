@@ -239,6 +239,40 @@ def test_on_first_exception_hook_raising_does_not_mask_worker_error(caplog) -> N
     assert "hook blew up" in caplog.text
 
 
+def test_pool_is_shut_down_even_when_hook_raises_baseexception(monkeypatch) -> None:
+    """If on_first_exception raises a BaseException (e.g. KeyboardInterrupt), the
+    pool is still shut down — cleanup must not be skipped — and the BaseException
+    propagates."""
+    import sys
+
+    import shared_concurrency.parallel_map  # noqa: F401 — ensure the module is imported
+
+    # The package re-exports the ``parallel_map`` function under the same name as
+    # the submodule, so reach the module object through sys.modules.
+    pm = sys.modules["shared_concurrency.parallel_map"]
+
+    shutdown_calls: list = []
+    real_pool_cls = pm.ThreadPoolExecutor
+
+    class _SpyPool(real_pool_cls):
+        def shutdown(self, *args, **kwargs):
+            shutdown_calls.append((args, kwargs))
+            return super().shutdown(*args, **kwargs)
+
+    monkeypatch.setattr(pm, "ThreadPoolExecutor", _SpyPool)
+
+    def hook() -> None:
+        raise KeyboardInterrupt("interrupt inside hook")
+
+    def fn(_x: int) -> int:
+        raise RuntimeError("worker failure")
+
+    with pytest.raises(KeyboardInterrupt):
+        pm.parallel_map([1], fn, max_workers=1, on_first_exception=hook)
+
+    assert shutdown_calls, "pool.shutdown must run even when the hook raises BaseException"
+
+
 def test_invalid_max_workers_rejected() -> None:
     """max_workers < 1 raises ValueError (an explicit check, not an assert, so it
     holds under ``python -O``)."""

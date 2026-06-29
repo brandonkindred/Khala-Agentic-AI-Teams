@@ -153,17 +153,22 @@ def parallel_map(
         # / ``SystemExit`` are ``BaseException`` but not ``Exception`` — that
         # merely landed while we were waiting; the contract is "first worker
         # exception". Cleanup (cancel pending, re-raise) still runs for any exit.
-        if on_first_exception is not None and isinstance(exc, Exception):
-            # A raising hook must not replace the worker exception we are about to
-            # propagate, or the original error context is lost; log and discard it.
-            try:
-                on_first_exception()
-            except Exception:
-                logger.exception(
-                    "on_first_exception hook raised; the original worker "
-                    "exception will still propagate"
-                )
-        pool.shutdown(wait=False, cancel_futures=True)
+        try:
+            if on_first_exception is not None and isinstance(exc, Exception):
+                # A raising hook must not replace the worker exception we are about
+                # to propagate, or the original error context is lost; log and
+                # discard a hook ``Exception``. A hook ``BaseException`` is left to
+                # propagate — but the ``finally`` still shuts the pool down first,
+                # so the executor is never leaked on any exit path.
+                try:
+                    on_first_exception()
+                except Exception:
+                    logger.exception(
+                        "on_first_exception hook raised; the original worker "
+                        "exception will still propagate"
+                    )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         raise
     pool.shutdown(wait=True)
 
