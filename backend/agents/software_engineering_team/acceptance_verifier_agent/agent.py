@@ -15,7 +15,7 @@ empty-criteria short-circuit, and failure fallback.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Dict, List, Optional
 
 from code_review_agent import (
     CodeReviewAgent,
@@ -49,64 +49,57 @@ def _normalize(text: str) -> str:
     return " ".join((text or "").split()).lower()
 
 
-def _tagged_criterion(issue: CodeReviewIssue) -> str:
-    """Return the criterion an issue is attributed to.
+def _attributed_criterion(criteria: List[str], issue: CodeReviewIssue) -> Optional[str]:
+    """Return the criterion an ``issue`` is tagged with, or None.
 
-    Postconditions: returns the substring of ``description`` before the first
-    ``" :: "`` delimiter (the verbatim criterion the acceptance profile prefixes
-    each issue with), or the whole description when the delimiter is absent. It
-    NEVER falls back to ``category`` — under the acceptance profile ``category``
-    is the fixed enum value ``spec-compliance``, so using it would attribute the
-    issue to a phantom "spec-compliance" criterion and let a genuinely unmet
-    criterion pass. Pure; no side effects.
-    """
-    return (issue.description or "").split(_CRITERION_DELIM, 1)[0]
-
-
-def _is_attributable(criteria: List[str], issue: CodeReviewIssue) -> bool:
-    """Return whether ``issue`` attributes to any of ``criteria``.
-
-    Postconditions: True iff some criterion matches the issue (see
-    :func:`_matches_criterion`). Pure; no side effects.
-    """
-    return any(_matches_criterion(c, issue) for c in criteria)
-
-
-def _evidence_of(issue: CodeReviewIssue) -> str:
-    """Return the failure explanation for an unmet-criterion issue.
-
-    Postconditions: returns the text after the first ``" :: "`` delimiter when
-    present, else the full ``description``, else ``"Unmet"``. Pure.
-    """
-    desc = issue.description or ""
-    if _CRITERION_DELIM in desc:
-        tail = desc.split(_CRITERION_DELIM, 1)[1].strip()
-        if tail:
-            return tail
-    return desc or "Unmet"
-
-
-def _matches_criterion(criterion: str, issue: CodeReviewIssue) -> bool:
-    """Return whether ``issue`` reports ``criterion`` as unmet.
-
-    Matching is a normalized *exact* comparison of the issue's tagged criterion
-    (see :func:`_tagged_criterion`) against ``criterion``. Substring matching is
-    deliberately NOT used: it mis-fires when one criterion is a substring of
-    another (an issue tagged with the longer criterion would also match the
-    shorter one), which would mark a satisfied criterion as unmet and falsely
-    reject a valid change.
+    The acceptance profile prefixes each issue's ``description`` with the verbatim
+    criterion followed by ``" :: "``. Rather than split on the first delimiter
+    (which breaks when a criterion itself contains ``" :: "``), this compares each
+    KNOWN criterion against the description's leading ``" :: "``-delimited
+    segments: the criterion is the join of the first ``k`` segments for some
+    ``k``. This matches a criterion that contains the delimiter, tolerates an
+    empty reason (trailing delimiter), and — because the comparison is exact — a
+    criterion that is a prefix of another never steals the longer one's issue.
 
     Preconditions:
-        ``criterion`` is an acceptance-criterion string; ``issue`` is an engine
-        finding produced under the ``acceptance`` profile.
+        ``criteria`` are the acceptance criteria; ``issue`` is an engine finding.
     Postconditions:
-        Returns True iff the normalized tagged criterion equals the normalized
-        ``criterion`` (a blank criterion never matches). Pure; no side effects.
+        Returns the longest ``criterion`` that equals the normalized join of some
+        leading-segment prefix of the description; None when no criterion matches.
+        Blank criteria never match. Pure; no side effects.
     """
-    target = _normalize(criterion)
-    if not target:
-        return False
-    return _normalize(_tagged_criterion(issue)) == target
+    segments = (issue.description or "").split(_CRITERION_DELIM)
+    norm_by_criterion = {c: _normalize(c) for c in criteria if _normalize(c)}
+    best: Optional[str] = None
+    best_len = -1
+    for k in range(1, len(segments) + 1):
+        candidate = _normalize(_CRITERION_DELIM.join(segments[:k]))
+        for criterion, target in norm_by_criterion.items():
+            if target == candidate and len(target) > best_len:
+                best, best_len = criterion, len(target)
+    return best
+
+
+def _evidence_for(criterion: str, issue: CodeReviewIssue) -> str:
+    """Return the failure explanation for an unmet criterion's issue.
+
+    Preconditions:
+        ``issue`` is the finding ``_attributed_criterion`` mapped to ``criterion``.
+    Postconditions:
+        Returns the text after the criterion prefix and its ``" :: "`` delimiter
+        (the criterion may itself contain the delimiter, so the matched criterion's
+        own delimiter count is skipped). When the description carries no delimiter,
+        the whole description is returned (criterion-only tag); when a delimiter is
+        present but the remaining text is empty, returns ``"Unmet"`` rather than
+        echoing the criterion prefix. Pure; no side effects.
+    """
+    desc = issue.description or ""
+    if _CRITERION_DELIM not in desc:
+        return desc.strip() or "Unmet"
+    skip = _normalize(criterion).count(_CRITERION_DELIM) + 1
+    parts = desc.split(_CRITERION_DELIM)
+    tail = _CRITERION_DELIM.join(parts[skip:]).strip() if len(parts) > skip else ""
+    return tail or "Unmet"
 
 
 def derive_per_criterion(
@@ -119,16 +112,22 @@ def derive_per_criterion(
         ``issues`` are the engine findings (one per unmet criterion under the
         ``acceptance`` profile).
     Postconditions:
-        Returns one :class:`CriterionStatus` per input criterion in order. A
-        criterion is ``satisfied`` iff no issue matches it (see
-        :func:`_matches_criterion`); when unmet, its ``evidence`` is the matching
-        issue's failure explanation (see :func:`_evidence_of`), otherwise
-        ``"Satisfied"``. Pure; no side effects.
+        Returns one :class:`CriterionStatus` per input criterion in order. Each
+        issue is attributed to its longest matching criterion
+        (:func:`_attributed_criterion`); a criterion is ``unmet`` iff some issue
+        attributes to it (first such issue wins), with ``evidence`` from
+        :func:`_evidence_for`, else ``satisfied`` with ``"Satisfied"``. Pure; no
+        side effects.
     """
+    attribution: Dict[str, CodeReviewIssue] = {}
+    for issue in issues:
+        criterion = _attributed_criterion(criteria, issue)
+        if criterion is not None:
+            attribution.setdefault(criterion, issue)
     statuses: List[CriterionStatus] = []
     for criterion in criteria:
-        match = next((i for i in issues if _matches_criterion(criterion, i)), None)
-        if match is None:
+        issue = attribution.get(criterion)
+        if issue is None:
             statuses.append(
                 CriterionStatus(criterion=criterion, satisfied=True, evidence="Satisfied")
             )
@@ -137,7 +136,7 @@ def derive_per_criterion(
                 CriterionStatus(
                     criterion=criterion,
                     satisfied=False,
-                    evidence=_evidence_of(match),
+                    evidence=_evidence_for(criterion, issue),
                 )
             )
     return statuses
@@ -239,7 +238,9 @@ class AcceptanceVerifierAgent:
         # cannot map to a specific criterion (e.g. the model dropped the criterion
         # prefix). Rather than let that unmet finding pass silently, block.
         unattributed = [
-            i for i in result.issues if not _is_attributable(input_data.acceptance_criteria, i)
+            i
+            for i in result.issues
+            if _attributed_criterion(input_data.acceptance_criteria, i) is None
         ]
         summary = result.summary or "Acceptance verification complete"
         if unattributed:

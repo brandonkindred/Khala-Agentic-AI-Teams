@@ -340,6 +340,34 @@ def test_derive_per_criterion_criterion_only_description_uses_full_text_as_evide
     assert out[0].evidence == "x"
 
 
+def test_derive_per_criterion_criterion_containing_delimiter() -> None:
+    # MEDIUM regression: a criterion that itself contains " :: " must still be
+    # attributed correctly (longest-match treats it as a literal prefix), so the
+    # unmet criterion is caught rather than silently passing.
+    criteria = ["config :: value works", "other"]
+    issues = [
+        CodeReviewIssue(
+            severity="high",
+            category="spec-compliance",
+            description="config :: value works :: not parsed",
+        )
+    ]
+    out = derive_per_criterion(criteria, issues)
+    by = {c.criterion: c for c in out}
+    assert by["config :: value works"].satisfied is False
+    assert by["config :: value works"].evidence == "not parsed"
+    assert by["other"].satisfied is True
+
+
+def test_derive_per_criterion_empty_tail_evidence_is_unmet() -> None:
+    # LOW regression: a delimiter with an empty tail must not echo the criterion
+    # prefix as evidence; it reports "Unmet".
+    issues = [CodeReviewIssue(severity="high", category="spec-compliance", description="x :: ")]
+    out = derive_per_criterion(["x"], issues)
+    assert out[0].satisfied is False
+    assert out[0].evidence == "Unmet"
+
+
 def test_derive_per_criterion_blank_criterion_never_matches() -> None:
     # A blank criterion must not spuriously match an empty category.
     issues = [CodeReviewIssue(severity="high", category="", description="")]

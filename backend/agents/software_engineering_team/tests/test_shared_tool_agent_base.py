@@ -346,6 +346,7 @@ def test_engine_review_problem_solve_unchanged(monkeypatch):
 
 
 def test_problem_solve_no_model():
+    """problem_solve is a no-op that reports "skipped" when no model is set."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = None
     assert "problem_solve skipped" in agent.problem_solve(_Input()).summary
