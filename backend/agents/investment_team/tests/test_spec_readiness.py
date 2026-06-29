@@ -308,6 +308,28 @@ def test_rule4_no_exit_rules_is_critical() -> None:
     assert any("No exit rules" in c for c in _critical(results))
 
 
+def test_rule4_oco_bracket_only_is_exit_complete() -> None:
+    """An ``oco_bracket`` is engine-closable (its legs attach to the entry and
+    materialize into a resting OCO group), so a bracket-only spec is exit-complete
+    — Rule 4 must not flag it as missing an exit."""
+    from investment_team.strategy_lab.spec_dsl import (
+        BracketStopLeg,
+        BracketTakeProfitLeg,
+        OcoBracketRule,
+    )
+
+    spec = _spec(
+        exit_=[
+            OcoBracketRule(
+                stop_loss=BracketStopLeg(pct=0.03),
+                take_profit=BracketTakeProfitLeg(pct=0.06),
+            )
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("No exit rules" in c or "no rule of kind" in c for c in _critical(results))
+
+
 def test_rule4_partial_scaled_ladder_as_sole_exit_is_critical() -> None:
     """A laddered take-profit summing to < 1.0 with no other full-position exit
     leaves the residual open forever — must be flagged critical."""

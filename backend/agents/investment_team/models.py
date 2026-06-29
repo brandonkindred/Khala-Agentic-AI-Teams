@@ -14,7 +14,11 @@ from .strategy_lab.spec_dsl import (
     EntryRule,
     ExitRule,
     FixedFractionSizing,
+    OcoBracketRule,
+    ScaledTakeProfitRule,
     SizingRule,
+    StopLossRule,
+    TakeProfitRule,
 )
 
 # S&P 500 amortized average annual return (%). A backtested strategy is
@@ -473,6 +477,44 @@ class StrategySpec(BaseModel):
             raise ValueError(
                 f"at most one limit-style stop-loss (style='limit') is allowed "
                 f"per spec; got {limit_stops}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_oco_bracket_exclusivity(self) -> "StrategySpec":
+        """An ``oco_bracket`` is a self-contained full-position OCO exit.
+
+        The bracket is attached to the entry order and materialized by the engine
+        into resting OCO children sized to the whole position; a coexisting
+        ``stop_loss`` / ``take_profit`` / ``scaled_take_profit`` would be
+        evaluated independently by the bar-by-bar exit dispatcher and fight the
+        bracket (double protection, ambiguous sizing). So at most one bracket is
+        allowed, and when present it must be the sole engine-handled *price*
+        exit. A ``signal_exit`` may coexist as a secondary discretionary trigger.
+
+        Preconditions: ``exit_rules`` is the validated rule list.
+        Postconditions: returns ``self`` when at most one bracket is present and,
+        if one is, no ``stop_loss`` / ``take_profit`` / ``scaled_take_profit``
+        accompanies it; raises ``ValueError`` otherwise.
+        """
+        brackets = [r for r in self.exit_rules if isinstance(r, OcoBracketRule)]
+        if not brackets:
+            return self
+        if len(brackets) > 1:
+            raise ValueError(
+                f"at most one oco_bracket exit rule is allowed per spec; got {len(brackets)}"
+            )
+        conflicting = [
+            r
+            for r in self.exit_rules
+            if isinstance(r, (StopLossRule, TakeProfitRule, ScaledTakeProfitRule))
+        ]
+        if conflicting:
+            kinds = sorted({r.kind for r in conflicting})
+            raise ValueError(
+                "an oco_bracket is a full-position OCO exit and must be the sole "
+                f"engine-handled price exit; remove the coexisting {kinds} rule(s) "
+                "(a signal_exit may still accompany the bracket)"
             )
         return self
 

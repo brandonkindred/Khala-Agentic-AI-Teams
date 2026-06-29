@@ -43,6 +43,7 @@ from ..spec_dsl import (
     EntryRule,
     IndicatorName,
     IndicatorRef,
+    OcoBracketRule,
     Predicate,
     ScaledTakeProfitRule,
     SignalExitRule,
@@ -702,21 +703,36 @@ class SpecReadinessGate(GateResultsMixin):
         :class:`QualityGateResult` — a single
         critical when there are no exit rules, when none is of an engine-closable
         kind (``signal_exit`` / ``stop_loss`` / ``take_profit`` /
-        ``scaled_take_profit``), or when the only exits are scaled ladders summing
-        to < 1.0 with no full-position exit to close the residual; otherwise empty.
+        ``scaled_take_profit`` / ``oco_bracket``), or when the only exits are
+        scaled ladders summing to < 1.0 with no full-position exit to close the
+        residual; otherwise empty.
         """
         assert isinstance(ctx.spec, StrategySpec)
         # Classify by type, not a duck-typed ``kind`` attribute, so a malformed
         # rule can't slip past the check; ``allowed_kinds`` mirrors these types
-        # purely for the failure message.
-        allowed_rule_types = (SignalExitRule, StopLossRule, TakeProfitRule, ScaledTakeProfitRule)
-        allowed_kinds = {"signal_exit", "stop_loss", "take_profit", "scaled_take_profit"}
+        # purely for the failure message. ``oco_bracket`` is engine-closable: its
+        # stop / target legs attach to the entry order and the engine materializes
+        # them into a resting OCO group, so a bracket-only spec closes positions.
+        allowed_rule_types = (
+            SignalExitRule,
+            StopLossRule,
+            TakeProfitRule,
+            ScaledTakeProfitRule,
+            OcoBracketRule,
+        )
+        allowed_kinds = {
+            "signal_exit",
+            "stop_loss",
+            "take_profit",
+            "scaled_take_profit",
+            "oco_bracket",
+        }
         if not ctx.spec.exit_rules:
             return (
                 self._critical(
                     "No exit rules — positions would never close. Add at "
                     "least one of: signal_exit, stop_loss, take_profit, "
-                    "scaled_take_profit."
+                    "scaled_take_profit, oco_bracket."
                 ),
             )
         if not any(isinstance(r, allowed_rule_types) for r in ctx.spec.exit_rules):

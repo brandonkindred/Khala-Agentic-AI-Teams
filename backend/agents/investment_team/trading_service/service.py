@@ -64,10 +64,12 @@ from ..strategy_lab.spec_dsl import (
     ExitRule,
     FixedFractionSizing,
     FixedNotionalSizing,
+    OcoBracketRule,
     ScaledTakeProfitRule,
     StopLossRule,
     VolatilityTargetSizing,
     first_side_stop_factor,
+    protective_limit_price,
 )
 from ..strategy_lab_context import is_fractional_asset_class
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
@@ -82,9 +84,11 @@ from .engine.order_book import FILL_QTY_REL_TOL, OrderBook, PendingOrder
 from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
     Bar,
+    LimitAttachment,
     OrderRequest,
     OrderSide,
     OrderType,
+    StopAttachment,
     TimeInForce,
     UnfilledPolicy,
     UnsupportedOrderFeatureError,
@@ -1541,6 +1545,14 @@ class _EngineEntryDispatcher:
         self._cap_position: bool = isinstance(
             self.sizing, (FixedFractionSizing, FixedNotionalSizing, VolatilityTargetSizing)
         )
+        # At most one OCO bracket per spec (enforced by ``StrategySpec``); when
+        # present it is attached to every entry order so the engine materializes
+        # the protective stop / target as a resting OCO group on entry-fill. The
+        # bracket legs are NOT bar-by-bar dispatcher exits (the exit evaluator
+        # skips ``OcoBracketRule``), so this is the only place they take effect.
+        self._bracket: Optional[OcoBracketRule] = next(
+            (r for r in self.exit_rules if isinstance(r, OcoBracketRule)), None
+        )
 
     def maybe_emit(
         self,
@@ -1590,6 +1602,7 @@ class _EngineEntryDispatcher:
             return
         self._next_seq += 1
         side = OrderSide.LONG if rule.side == "long" else OrderSide.SHORT
+        attached_stop_loss, attached_take_profit = self._bracket_attachments(side, cur_bar.close)
         req = OrderRequest(
             client_order_id=f"e_entry_{self._next_seq}",
             symbol=sym,
@@ -1597,6 +1610,8 @@ class _EngineEntryDispatcher:
             qty=qty,
             order_type=OrderType.MARKET,
             tif=TimeInForce.DAY,
+            attached_stop_loss=attached_stop_loss,
+            attached_take_profit=attached_take_profit,
             reason=f"{ENGINE_ENTRY_REASON_PREFIX}entry[{rule_idx}]",
             # Every dispatcher-emitted order is clamped to ``max_position_pct`` at
             # the sizing price (see ``_cap_position``), so it is presized: this
@@ -1630,6 +1645,58 @@ class _EngineEntryDispatcher:
             order_type=OrderType.MARKET.value,
             reason=req.reason,
         )
+
+    def _bracket_attachments(
+        self, side: OrderSide, ref_price: float
+    ) -> tuple[Optional[StopAttachment], Optional[LimitAttachment]]:
+        """Resolve the OCO bracket (if any) into entry-order attachments.
+
+        Anchors the bracket's percentage legs at ``ref_price`` (the signal-bar
+        close, the same reference ``_compute_qty`` sizes against) into the
+        absolute prices the engine bracket materializer consumes. For a long the
+        stop sits below and the target above the reference; for a short the signs
+        flip. A ``limit``-style stop leg sets ``limit_offset`` (an absolute price
+        distance off the stop level, ``limit_offset_kind="abs"``) so the engine
+        materializes a STOP_LIMIT child whose limit rests on the protective side
+        via the shared ``protective_limit_price`` sign convention.
+
+        Preconditions: ``ref_price > 0`` (caller guards ``close <= 0`` before
+        sizing); ``side`` is the entry's ``OrderSide``.
+        Postconditions: ``(None, None)`` when the spec has no bracket; otherwise a
+        ``(StopAttachment, LimitAttachment)`` pair whose absolute prices are
+        strictly positive and on the correct side of ``ref_price``.
+        """
+        if self._bracket is None:
+            return None, None
+        assert ref_price > 0, "bracket reference price must be positive"
+        bracket = self._bracket
+        is_long = side == OrderSide.LONG
+        stop_pct = bracket.stop_loss.pct
+        tp_pct = bracket.take_profit.pct
+        if is_long:
+            stop_price = ref_price * (1.0 - stop_pct)
+            limit_price = ref_price * (1.0 + tp_pct)
+        else:
+            stop_price = ref_price * (1.0 + stop_pct)
+            limit_price = ref_price * (1.0 - tp_pct)
+        limit_offset: Optional[float] = None
+        if bracket.stop_loss.style == "limit":
+            # ``limit_offset_pct`` is a fraction of the stop level; the bracket
+            # materializer wants an absolute distance. Convert here and let the
+            # protective-side sign be applied at materialization (and validated by
+            # ``protective_limit_price`` for the on-emit consistency check below).
+            limit_offset = stop_price * bracket.stop_loss.limit_offset_pct
+            # Re-assert the resulting limit stays on the protective side and
+            # positive (mirrors ``_build_stop_limit_close``); the leg validator
+            # bounds ``limit_offset_pct < 1.0`` so ``limit_offset < stop_price``.
+            protective_limit_price(stop_price, limit_offset, closing_long=is_long)
+        stop_attachment = StopAttachment(
+            stop_price=stop_price,
+            limit_offset=limit_offset,
+            limit_offset_kind="abs",
+        )
+        take_profit_attachment = LimitAttachment(limit_price=limit_price)
+        return stop_attachment, take_profit_attachment
 
     def _compute_qty(
         self,

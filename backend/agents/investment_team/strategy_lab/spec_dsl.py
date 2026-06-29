@@ -548,6 +548,91 @@ class SignalExitRule(_SpecNode):
     note: str = ""
 
 
+class BracketStopLeg(_SpecNode):
+    """Stop-loss leg of an :class:`OcoBracketRule`.
+
+    ``pct`` is the protective distance off the entry reference price as a
+    positive fraction (``0.03`` = 3%), bounded ``< 1.0`` so a long's resolved
+    level ``ref * (1 - pct)`` stays strictly positive (the leg is side-agnostic,
+    the same reasoning as :class:`StopLossRule`). ``style`` mirrors
+    :class:`StopLossRule`: ``"market"`` materializes a plain STOP child;
+    ``"limit"`` materializes a STOP_LIMIT whose limit sits ``limit_offset_pct``
+    (of the stop level) on the protective side. The bracket stop is always
+    entry-anchored (static) — a trailing basis would re-price the resting child
+    every bar — so there is no ``basis`` field.
+
+    Preconditions: ``pct`` in ``(0, 1)``; ``limit_offset_pct`` in ``(0, 1)`` and
+    set iff ``style == "limit"``.
+    Postconditions: a validated leg whose ``style`` / ``limit_offset_pct`` are
+    mutually consistent.
+    """
+
+    pct: float = Field(gt=0, lt=1.0)
+    style: Literal["market", "limit"] = "market"
+    limit_offset_pct: Optional[float] = Field(default=None, gt=0, lt=1.0)
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _validate_limit_style(self):
+        """Tie ``limit_offset_pct`` to ``style`` (same coupling as
+        :meth:`StopLossRule._validate_limit_style`, minus the basis restriction —
+        a bracket stop has no trailing basis to forbid).
+
+        Preconditions: ``style`` is a valid Literal (Pydantic-enforced).
+        Postconditions: returns ``self`` when consistent; raises ``ValueError``
+        when ``style == "limit"`` lacks ``limit_offset_pct`` or when
+        ``limit_offset_pct`` is set without ``style == "limit"``.
+        """
+        if self.style == "limit":
+            if self.limit_offset_pct is None:
+                raise ValueError(
+                    "BracketStopLeg.style='limit' requires limit_offset_pct "
+                    "(the limit's distance from the stop level, as a fraction)"
+                )
+        elif self.limit_offset_pct is not None:
+            raise ValueError("BracketStopLeg.limit_offset_pct is only valid when style='limit'")
+        return self
+
+
+class BracketTakeProfitLeg(_SpecNode):
+    """Take-profit leg of an :class:`OcoBracketRule`.
+
+    ``pct`` is the favourable-move target off the entry reference price as a
+    positive fraction; the direction is implied by the position side (``+pct``
+    for a long, ``−pct`` for a short). Materializes a resting LIMIT child that
+    fills at its exact limit price (the OCO bracket's defining advantage over the
+    bar-by-bar ``take_profit`` market close).
+    """
+
+    pct: float = Field(gt=0)
+    note: str = ""
+
+
+class OcoBracketRule(_SpecNode):
+    """One-cancels-other bracket: a protective stop leg and a profit-target leg
+    attached to the entry order as a single OCO group.
+
+    On entry-fill the engine materializes the two legs into resting opposite-side
+    child orders (a STOP / STOP_LIMIT and a LIMIT) sharing one ``oco_group_id``;
+    when either fills the engine cancels its sibling
+    (``OrderBook.oco_cancel_siblings``). Unlike the independent ``stop_loss`` /
+    ``take_profit`` rules — which the engine evaluates bar-by-bar and closes at
+    market — a bracket's take-profit rests as a LIMIT and fills at its exact
+    price. The bracket is a *full-position* OCO: whichever leg fills closes the
+    whole position.
+
+    Invariants (enforced at the :class:`StrategySpec` level): a spec carries at
+    most one bracket, and a bracket is the sole engine-handled *price* exit (no
+    ``stop_loss`` / ``take_profit`` / ``scaled_take_profit`` alongside it). A
+    ``signal_exit`` may coexist as a secondary discretionary trigger.
+    """
+
+    kind: Literal["oco_bracket"] = "oco_bracket"
+    stop_loss: "BracketStopLeg"
+    take_profit: "BracketTakeProfitLeg"
+    note: str = ""
+
+
 def ladder_closes_full_position(rule: "ScaledTakeProfitRule") -> bool:
     """Whether a laddered take-profit's rungs together close the WHOLE position.
 
@@ -585,13 +670,26 @@ def is_full_position_exit(rule: Any) -> bool:
     full-position membership so a new exit kind is classified in one place.
     Preconditions: ``rule`` is an ``ExitRule`` member.
     Postconditions: ``True`` iff ``rule`` is a stop-loss, take-profit, signal exit,
-    or a ``ScaledTakeProfitRule`` whose rungs sum to 1.0.
+    OCO bracket, or a ``ScaledTakeProfitRule`` whose rungs sum to 1.0.
     """
-    if isinstance(rule, (StopLossRule, TakeProfitRule, SignalExitRule)):
+    if isinstance(rule, (StopLossRule, TakeProfitRule, SignalExitRule, OcoBracketRule)):
         return True
     if isinstance(rule, ScaledTakeProfitRule):
         return ladder_closes_full_position(rule)
     return False
+
+
+def is_bracket_exit(rule: Any) -> bool:
+    """Whether ``rule`` is an engine-native OCO bracket (vs. a bar-by-bar exit).
+
+    A bracket is attached to the entry order and materialized by the engine into
+    resting OCO children; the bar-by-bar exit dispatcher must NOT also evaluate
+    it (dual emission). Canonical single source of the "is this the attach-to-
+    entry bracket kind" test shared by the entry dispatcher and the gates.
+    Preconditions: ``rule`` is an ``ExitRule`` member.
+    Postconditions: ``True`` iff ``rule`` is an ``OcoBracketRule``.
+    """
+    return isinstance(rule, OcoBracketRule)
 
 
 def is_engine_handled_exit(rule: Any) -> bool:
@@ -687,13 +785,22 @@ def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[flo
     surfaced via ``stop_limit_unfilled_triggers`` telemetry, not by treating the
     rule as "no stop" (which would inject a redundant second stop).
 
+    An ``OcoBracketRule``'s stop leg also counts: it is a static (entry-anchored)
+    stop that caps loss for either side at its ``pct``, so a short carrying a
+    bracket already has an effective stop and must not get the redundant 100%
+    auto-stop injection.
+
     Preconditions: ``side`` is ``"long"`` or ``"short"``.
-    Postconditions: returns the first matching ``StopLossRule.pct`` as a float,
-    else ``None``.
+    Postconditions: returns the first matching stop fraction as a float — a
+    side-compatible ``StopLossRule.pct`` or an ``OcoBracketRule`` stop-leg
+    ``pct`` — else ``None``.
     """
     for r in exit_rules:
         if isinstance(r, StopLossRule) and stop_caps_side(r.basis, side):
             return float(r.pct)
+        if isinstance(r, OcoBracketRule):
+            # The bracket stop is entry-anchored (static), so it caps both sides.
+            return float(r.stop_loss.pct)
     return None
 
 
@@ -701,7 +808,7 @@ def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[flo
 # take-profit) plus signal-based exits.  The union is intentionally limited
 # to price-, P&L-, and signal-based exits.
 ExitRule = Annotated[
-    Union[StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule],
+    Union[StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule, OcoBracketRule],
     Field(discriminator="kind"),
 ]
 
@@ -750,6 +857,9 @@ TakeProfitRule.model_rebuild()
 TakeProfitLevel.model_rebuild()
 ScaledTakeProfitRule.model_rebuild()
 SignalExitRule.model_rebuild()
+BracketStopLeg.model_rebuild()
+BracketTakeProfitLeg.model_rebuild()
+OcoBracketRule.model_rebuild()
 FixedFractionSizing.model_rebuild()
 VolatilityTargetSizing.model_rebuild()
 FixedNotionalSizing.model_rebuild()
@@ -894,7 +1004,14 @@ _STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
 
 
 def _format_rule(
-    rule: Union[EntryRule, StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule],
+    rule: Union[
+        EntryRule,
+        StopLossRule,
+        TakeProfitRule,
+        ScaledTakeProfitRule,
+        SignalExitRule,
+        OcoBracketRule,
+    ],
 ) -> str:
     if isinstance(rule, EntryRule):
         return f"{rule.side} when {format_predicate_tree(rule.when)}"
@@ -914,6 +1031,12 @@ def _format_rule(
         return f"scaled take profit ({rungs})"
     if isinstance(rule, SignalExitRule):
         return f"exit when {format_predicate_tree(rule.when)}"
+    if isinstance(rule, OcoBracketRule):
+        sl = rule.stop_loss
+        stop = f"stop {_format_number(sl.pct * 100)}%"
+        if sl.style == "limit":
+            stop = f"{stop} (limit, {_format_number(sl.limit_offset_pct * 100)}% offset)"
+        return f"OCO bracket: {stop} / target {_format_number(rule.take_profit.pct * 100)}%"
     raise TypeError(f"unknown rule variant: {type(rule).__name__}")
 
 
