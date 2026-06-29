@@ -267,6 +267,22 @@ def test_start_agentic_team_requires_process_id(
     fake_store.create_run.assert_not_called()
 
 
+def test_start_rejects_path_traversal_team_key(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store
+):
+    """A crafted target_team_key with traversal characters is rejected at
+    get_adapter (400) before any cross-service call or dispatch."""
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    with pytest.raises(HTTPException) as excinfo:
+        start_founder_workflow(
+            StartRunRequest(target_team_key="agentic_team:../../x", process_id="p1")
+        )
+    assert excinfo.value.status_code == 400
+    assert fake_dispatch == []
+    fake_store.create_run.assert_not_called()
+
+
 def test_start_agentic_team_persists_process_id(
     fake_job_store, fake_store, fake_dispatch, fake_persona_store, fixed_run_id, monkeypatch
 ):
@@ -461,6 +477,17 @@ def test_list_agentic_testable_teams_keeps_others_when_one_detail_fails(monkeypa
     monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _PartialClient())
     teams = api_main._list_agentic_testable_teams()
     assert {t.team_key for t in teams} == {"agentic_team:A"}
+
+
+def test_list_agentic_testable_teams_handles_non_list_response(monkeypatch):
+    """A /teams response that isn't a list degrades to [] (and is logged) rather
+    than raising into the broad except."""
+    from user_agent_founder.api import main as api_main
+
+    monkeypatch.setattr(
+        api_main.httpx, "Client", lambda *a, **kw: _StatusClient(200, {"unexpected": "dict"})
+    )
+    assert api_main._list_agentic_testable_teams() == []
 
 
 def test_testable_teams_includes_agentic_teams_with_complete_process(monkeypatch):

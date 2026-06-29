@@ -307,6 +307,9 @@ export class AgentStudioPersonaComponent implements OnInit {
       PersonaEditorDialogData,
       PersonaEditorDialogResult
     >(PersonaEditorDialogComponent, { data: { mode: 'create' }, width: '560px' });
+    // Close the dialog if the component is destroyed (e.g. the stepper moves to
+    // another stage) so it isn't orphaned in the overlay.
+    this.destroyRef.onDestroy(() => ref.close());
     ref
       .afterClosed()
       .pipe(takeUntilDestroyed(this.destroyRef))

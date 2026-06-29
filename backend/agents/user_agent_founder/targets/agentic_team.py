@@ -27,7 +27,9 @@ It targets the *existing* provisioning endpoints under
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -37,6 +39,13 @@ UNIFIED_API_BASE = os.environ.get("UNIFIED_API_BASE_URL", "http://localhost:8080
 PROVISIONING_PREFIX = "/api/agentic-team-provisioning"
 
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+# A team id is a server-minted uuid (hex + hyphens). It is **user-controlled**
+# (parsed from ``target_team_key`` on ``/start``) and goes into a URL path, so it
+# is validated against this safe charset to block path traversal (``..``, ``/``,
+# ``\``) into other provisioning endpoints. Mirrors ``shared_postgres``-style id
+# expectations; reject anything else at construction.
+_TEAM_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Sentinel job id returned by the collapsed (no-op) analysis phase. The
 # orchestrator stores it as ``analysis_job_id`` but never calls back into the
@@ -70,6 +79,12 @@ class AgenticTeamAdapter:
     ) -> None:
         if not team_id:
             raise ValueError("AgenticTeamAdapter: team_id must be non-empty")
+        # Reject path-traversal / unsafe characters up front: ``team_id`` is
+        # user-controlled and lands in a URL path. ``get_adapter`` surfaces this
+        # as a 400 on ``/start`` rather than letting a crafted id reach the
+        # provisioning service.
+        if not _TEAM_ID_RE.match(team_id):
+            raise ValueError(f"AgenticTeamAdapter: invalid team_id {team_id!r}")
         self._team_id = team_id
         self._process_id = process_id
         # Carries the spec from analysis → build. Seeded at construction so a
@@ -80,7 +95,12 @@ class AgenticTeamAdapter:
         self.display_name = f"Agentic Team {team_id}"
 
     def _url(self, path: str) -> str:
-        return f"{UNIFIED_API_BASE}{PROVISIONING_PREFIX}/teams/{self._team_id}{path}"
+        # rstrip the base so a trailing-slash env value can't yield ``//api``;
+        # percent-encode the team-id path segment (defense-in-depth alongside the
+        # constructor charset check) so it can never traverse the path.
+        base = UNIFIED_API_BASE.rstrip("/")
+        team = quote(self._team_id, safe="")
+        return f"{base}{PROVISIONING_PREFIX}/teams/{team}{path}"
 
     # ── Phase 2: product analysis (collapsed to a no-op pass-through) ──────
 
@@ -125,8 +145,10 @@ class AgenticTeamAdapter:
 
         Preconditions: ``self._process_id`` is set.
         Postconditions: a pipeline run is created for ``(team, process)`` and its
-            ``run_id`` is returned. Raises :class:`StartFailed` if ``process_id``
-            is missing or the create endpoint returns an HTTP error.
+            non-empty ``run_id`` is returned. Raises :class:`StartFailed` if
+            ``process_id`` is missing, the create endpoint returns an HTTP error,
+            or the response carries no ``run_id`` (so a malformed response fails
+            fast instead of polling an empty job id to timeout).
         """
         if not self._process_id:
             raise StartFailed(400, "AgenticTeamAdapter: process_id is required to start a run")
@@ -137,7 +159,10 @@ class AgenticTeamAdapter:
         )
         if resp.status_code >= 400:
             raise StartFailed(resp.status_code, resp.text)
-        return resp.json().get("run_id", "")
+        run_id = resp.json().get("run_id")
+        if not run_id:
+            raise StartFailed(502, "Provisioning response missing run_id")
+        return run_id
 
     def poll_build(self, client: httpx.Client, job_id: str) -> dict[str, Any]:
         """Poll the pipeline run, mapping its status onto the founder contract.
@@ -205,11 +230,13 @@ class AgenticTeamAdapter:
             orchestrator retries with backoff).
         """
         first = answers[0] if answers else {}
-        text = first.get("other_text") or first.get("selected_option_id") or ""
-        if not text.strip():
-            # The pipeline /input endpoint requires a non-empty body; never post
-            # an empty string (it would 422). A blank persona answer is degenerate
-            # but we still advance the run with an explicit placeholder.
+        # The WAIT question carries empty options, so ``selected_option_id`` is
+        # always the synthetic ``"other"`` — only ``other_text`` is a meaningful
+        # answer. Never fall back to ``selected_option_id`` (that would post the
+        # literal "other"); use the placeholder when the free text is absent so
+        # the run still advances and the /input min-length check is satisfied.
+        text = (first.get("other_text") or "").strip()
+        if not text:
             text = "(no answer provided)"
         resp = client.post(
             self._url(f"/test-pipeline/runs/{job_id}/input"),

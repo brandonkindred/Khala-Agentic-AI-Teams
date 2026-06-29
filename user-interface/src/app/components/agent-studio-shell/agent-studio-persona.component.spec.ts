@@ -54,6 +54,7 @@ describe('AgentStudioPersonaComponent', () => {
     createPersona: ReturnType<typeof vi.fn>;
   };
   let dialog: { open: ReturnType<typeof vi.fn> };
+  let dialogClose: ReturnType<typeof vi.fn>;
 
   const build = (opts: {
     teamId?: string | null;
@@ -72,7 +73,10 @@ describe('AgentStudioPersonaComponent', () => {
         .fn()
         .mockReturnValue(of({ id: 'new-1', name: 'New', description: '', icon: 'person', is_builtin: false })),
     };
-    dialog = { open: vi.fn().mockReturnValue({ afterClosed: () => of(dialogResult) }) };
+    dialogClose = vi.fn();
+    dialog = {
+      open: vi.fn().mockReturnValue({ afterClosed: () => of(dialogResult), close: dialogClose }),
+    };
 
     TestBed.configureTestingModule({
       imports: [AgentStudioPersonaComponent, NoopAnimationsModule],
@@ -282,6 +286,15 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     component.newPersona();
     expect(personaApi.createPersona).not.toHaveBeenCalled();
+  });
+
+  it('closes an open persona dialog when the component is destroyed', () => {
+    build({ dialogResult: undefined });
+    fixture.detectChanges();
+    component.newPersona();
+    expect(dialogClose).not.toHaveBeenCalled();
+    fixture.destroy();
+    expect(dialogClose).toHaveBeenCalled();
   });
 
   it('finish-in-compose jumps to Stage 3', () => {

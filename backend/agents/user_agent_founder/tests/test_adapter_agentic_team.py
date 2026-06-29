@@ -182,6 +182,19 @@ def test_get_adapter_rejects_malformed_agentic_key():
         get_adapter("agentic_team:")
 
 
+def test_adapter_rejects_path_traversal_team_id():
+    """team_id is user-controlled (from target_team_key) and lands in a URL path,
+    so traversal / unsafe characters must be rejected at construction — get_adapter
+    surfaces it as a ValueError the /start endpoint turns into a 400."""
+    from user_agent_founder.targets import AgenticTeamAdapter, get_adapter
+
+    for bad in ["../../etc", "a/b", "a\\b", "..", "te am", "a;b", "a?b"]:
+        with pytest.raises(ValueError, match="invalid team_id"):
+            AgenticTeamAdapter(bad, process_id="p1")
+    with pytest.raises(ValueError, match="invalid team_id"):
+        get_adapter("agentic_team:../../sensitive")
+
+
 def test_url_construction_targets_provisioning_mount():
     from user_agent_founder.targets import AgenticTeamAdapter
 
@@ -267,6 +280,18 @@ def test_start_build_raises_on_http_error():
     assert exc.value.status_code == 404
 
 
+def test_start_build_raises_when_response_has_no_run_id():
+    """A 2xx create response missing run_id fails fast (502) instead of returning
+    an empty job id that the orchestrator would poll to timeout."""
+    from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(post_responses={"/test-pipeline/runs": _FakeResponse(201, {})})
+    with pytest.raises(StartFailed) as exc:
+        adapter.start_build(fake, "# SPEC")
+    assert exc.value.status_code == 502
+
+
 def test_poll_build_maps_waiting_for_input_to_free_text_question():
     from user_agent_founder.targets import AgenticTeamAdapter
 
@@ -349,6 +374,17 @@ def test_submit_build_answers_falls_back_for_blank_answer():
     fake = _FakeHttpxClient(post_responses={"/input": _FakeResponse(200, {})})
     # No other_text and a whitespace selected id → never post an empty body.
     adapter.submit_build_answers(fake, "run-9", [{"selected_option_id": "  "}])
+    assert fake.posts[0]["json"] == {"input": "(no answer provided)"}
+
+
+def test_submit_build_answers_never_posts_literal_other():
+    """When the bounded answer carries selected_option_id 'other' but no
+    other_text, the placeholder is posted — never the literal token 'other'."""
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(post_responses={"/input": _FakeResponse(200, {})})
+    adapter.submit_build_answers(fake, "run-9", [{"selected_option_id": "other"}])
     assert fake.posts[0]["json"] == {"input": "(no answer provided)"}
 
 

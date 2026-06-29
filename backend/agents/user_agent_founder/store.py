@@ -196,6 +196,10 @@ class FounderRunStore:
             ids persisted; the returned id equals ``run_id`` when given, else a
             fresh uuid4 hex.
         """
+        # Enforce the contract explicitly (``python -O`` strips ``assert``): an
+        # empty target would insert a row with no resolvable adapter.
+        if not target_team_key:
+            raise ValueError("create_run: target_team_key must be non-empty")
         run_id = run_id or str(uuid4())
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:

@@ -6,6 +6,7 @@ import logging
 import re
 import threading
 from typing import Any, Optional
+from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
@@ -23,6 +24,7 @@ from user_agent_founder.store import (
     get_persona_store,
 )
 from user_agent_founder.targets import ADAPTERS, get_adapter
+from user_agent_founder.targets.agentic_team import PROVISIONING_PREFIX, UNIFIED_API_BASE
 
 logger = logging.getLogger(__name__)
 
@@ -540,9 +542,8 @@ def delete_persona(persona_id: str) -> Response:
 
 def _provisioning_base() -> str:
     """Base URL for the agentic-team-provisioning service over the unified API."""
-    from user_agent_founder.targets.agentic_team import PROVISIONING_PREFIX, UNIFIED_API_BASE
-
-    return f"{UNIFIED_API_BASE}{PROVISIONING_PREFIX}"
+    # rstrip so a trailing-slash env value can't produce ``//api/...``.
+    return f"{UNIFIED_API_BASE.rstrip('/')}{PROVISIONING_PREFIX}"
 
 
 def _fetch_agentic_team(client: httpx.Client, team_id: str) -> tuple[int, dict]:
@@ -550,10 +551,12 @@ def _fetch_agentic_team(client: httpx.Client, team_id: str) -> tuple[int, dict]:
 
     Preconditions: ``client`` is an open httpx client.
     Postconditions: ``team_dict`` is the response's ``.team`` object on a 2xx
-        (``{}`` if absent), and ``{}`` on an HTTP error. Propagates transport
-        exceptions to the caller (each caller decides how to degrade).
+        (``{}`` if absent), and ``{}`` on an HTTP error. ``team_id`` is
+        percent-encoded into the path (defense-in-depth against traversal even
+        though callers validate it). Propagates transport exceptions to the
+        caller (each caller decides how to degrade).
     """
-    resp = client.get(f"{_provisioning_base()}/teams/{team_id}")
+    resp = client.get(f"{_provisioning_base()}/teams/{quote(team_id, safe='')}")
     if resp.status_code >= 400:
         return resp.status_code, {}
     return resp.status_code, (resp.json() or {}).get("team") or {}
@@ -616,6 +619,12 @@ def _list_agentic_testable_teams() -> list[TestableTeam]:
                 logger.warning("Could not list agentic teams: HTTP %s", resp.status_code)
                 return teams
             summaries = resp.json()
+            if not isinstance(summaries, list):
+                logger.warning(
+                    "Unexpected /teams response shape (%s); skipping agentic teams",
+                    type(summaries).__name__,
+                )
+                return teams
             for summary in summaries:
                 team_id = summary.get("team_id")
                 # No processes ⇒ can't be fully designed; skip the detail fetch.
@@ -657,6 +666,7 @@ def list_testable_teams() -> TestableTeamsResponse:
     try:
         from unified_api.config import TEAM_CONFIGS
     except Exception:
+        logger.warning("Could not import TEAM_CONFIGS; using default display names", exc_info=True)
         TEAM_CONFIGS = {}
     teams: list[TestableTeam] = []
     for team_key in ADAPTERS:
