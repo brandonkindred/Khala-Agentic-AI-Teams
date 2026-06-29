@@ -30,11 +30,22 @@ MAX_RELEVANT_CODE_CHARS = 8_000
 class SharedTestingQAToolAgent(BaseReviewToolAgent):
     """Common attributes for the backend/frontend Testing/QA tool agents.
 
-    Invariants: carries only the attributes that are identical across both
-    teams. The concrete subclass supplies ``review_prompt``,
-    ``problem_solving_prompt``, ``plan_recommendations``, and the
-    ``_parse_review`` / ``_parse_single_issue`` staticmethods (whose path
-    normalization differs per team).
+    Invariants: carries only the attributes that are identical across both teams.
+
+    Required on every concrete subclass (omitting any of these leaves the
+    inherited ``None``/empty default and the agent fails at review/problem-solve
+    time, mirroring the rest of the ``BaseReviewToolAgent`` family):
+
+    * ``review_prompt`` — the review LLM prompt (team-specific text).
+    * ``problem_solving_prompt`` — the single-issue fix prompt (team-specific).
+    * ``plan_recommendations`` — list of plan-phase advice (integration vs e2e).
+    * ``_parse_review`` / ``_parse_single_issue`` — staticmethod parsers whose
+      path normalization differs per team.
+
+    These are intentionally plain class attributes rather than
+    ``abc.abstractmethod``: the whole ``BaseReviewToolAgent`` family is
+    attribute-driven (no ABCMeta), so enforcing abstractness here would diverge
+    from every sibling tool agent.
     """
 
     name = "Testing/QA"

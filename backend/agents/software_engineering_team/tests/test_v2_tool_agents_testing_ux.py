@@ -262,6 +262,9 @@ class TestFEUxUsability:
 
 
 class TestTestingQACollapse:
+    # These tests assert class-level attributes and MRO only, so they use
+    # ``__new__`` to skip ``__init__`` (which would resolve a Strands model and
+    # need an LLM). This mirrors the other tool-agent tests in this module.
     def _be_agent(self):
         from software_engineering_team.backend_code_v2_team.tool_agents.testing_qa.agent import (
             TestingQAToolAgent,

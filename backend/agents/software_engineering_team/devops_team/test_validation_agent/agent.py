@@ -14,6 +14,7 @@ from typing import cast, get_args
 
 from devops_team.models import GateStatus
 from qa_agent import QAExpertAgent, QAInput
+from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient, get_strands_model
 
@@ -59,8 +60,6 @@ class DevOpsTestValidationAgent:
         """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
-        from strands.models.model import Model as _StrandsModel
-
         # Preserve the pre-refactor model-routing key: this validation call
         # resolves under "devops", not the QA agent's default "qa". A directly
         # supplied Strands model (tests/dummy) is passed through unchanged.

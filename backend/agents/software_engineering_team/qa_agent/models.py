@@ -96,7 +96,12 @@ class QAOutput(BaseModel):
     )
     approved: bool = Field(
         default=True,
-        description="True when code passes review (no critical/high bugs). Merge when approved.",
+        description=(
+            "Pass/fail signal, re-derived by the agent (not the LLM's raw flag). "
+            "In bug-review modes it means 'no critical/high bugs' — medium/low "
+            "issues do not block — not a holistic verdict; in acceptance_evidence "
+            "mode it means the LLM approved AND no quality gate failed. Merge when approved."
+        ),
     )
     integration_tests: str = Field(
         default="", description="Integration test code (for QA-only tasks)"

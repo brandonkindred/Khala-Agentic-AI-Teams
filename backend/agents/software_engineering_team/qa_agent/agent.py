@@ -43,6 +43,14 @@ class QAExpertAgent:
     """
     QA expert that reviews code for bugs, fixes them, runs live testing,
     and ensures adequate integration tests.
+
+    Approval semantics (note for consumers of ``QAOutput.approved``): the agent
+    re-derives ``approved`` rather than trusting the LLM's raw flag, and the rule
+    is mode-dependent. In the bug-review modes (``default``/``fix_build``/
+    ``write_tests``) ``approved`` means **"no critical/high bugs"** — a
+    long-standing behavior, not a holistic LLM verdict, so code with only
+    medium/low issues can still be approved. In ``acceptance_evidence`` mode
+    ``approved`` is the LLM verdict AND the absence of any failing quality gate.
     """
 
     def __init__(self, llm_client=None) -> None:
@@ -152,12 +160,24 @@ class QAExpertAgent:
         carries the criteria and tool results instead of the code under review.
         """
         if input_data.request_mode == "acceptance_evidence":
+            # Render the criteria/results as readable structured text rather than
+            # Python's list/dict ``repr`` so the model parses them cleanly.
+            criteria_text = (
+                "\n".join(f"{i + 1}. {c}" for i, c in enumerate(input_data.acceptance_criteria))
+                or "(none provided)"
+            )
+            tool_results_text = (
+                "\n".join(
+                    f"- {group}: {results}" for group, results in input_data.tool_results.items()
+                )
+                or "(none provided)"
+            )
             return (
                 "Interpret the tool/test results below and map the evidence back to the "
                 "acceptance criteria. Produce structured JSON with fields: approved, "
                 "quality_gates, acceptance_trace, validation_evidence, summary.\n\n"
-                f"**Acceptance criteria:** {input_data.acceptance_criteria}\n"
-                f"**Tool results:** {input_data.tool_results}"
+                f"**Acceptance criteria:**\n{criteria_text}\n\n"
+                f"**Tool results:**\n{tool_results_text}"
             )
 
         parts = [
