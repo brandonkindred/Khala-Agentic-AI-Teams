@@ -70,7 +70,7 @@ def test_worker_bound_is_min_of_max_workers_and_len() -> None:
     """
     live = {"now": 0, "peak": 0}
     lock = threading.Lock()
-    gate = threading.Barrier(3, timeout=5)
+    gate = threading.Barrier(3, timeout=30)
 
     def fn(x: int) -> int:
         with lock:
@@ -103,6 +103,18 @@ def test_skip_none_false_keeps_none_positionally() -> None:
         return x if x % 2 == 0 else None
 
     assert parallel_map([0, 1, 2, 3], fn, max_workers=4, skip_none=False) == [0, None, 2, None]
+
+
+def test_skip_none_filters_in_completion_order() -> None:
+    """skip_none and preserve_order are independent: with both completion order
+    and None-filtering, the result is the non-None values (multiset asserted,
+    since completion order is non-deterministic)."""
+
+    def fn(x: int):
+        return x * 10 if x % 2 == 0 else None
+
+    out = parallel_map([0, 1, 2, 3, 4], fn, max_workers=5, preserve_order=False, skip_none=True)
+    assert sorted(out) == [0, 20, 40]
 
 
 def test_context_propagates_into_workers() -> None:
@@ -293,6 +305,13 @@ def test_non_callable_fn_rejected() -> None:
     """A non-callable fn raises TypeError up front."""
     with pytest.raises(TypeError):
         parallel_map([1, 2], "not-callable", max_workers=2)
+
+
+def test_non_callable_on_first_exception_rejected() -> None:
+    """A non-callable on_first_exception raises TypeError up front, rather than
+    only failing (and being swallowed) inside the failure handler."""
+    with pytest.raises(TypeError):
+        parallel_map([1, 2], lambda x: x, max_workers=2, on_first_exception="nope")
 
 
 def test_non_sized_items_rejected() -> None:

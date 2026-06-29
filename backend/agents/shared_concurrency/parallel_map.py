@@ -101,6 +101,8 @@ def parallel_map(
         - ``items`` is a sized iterable — ``__len__`` and ``__iter__`` (else
           ``TypeError``). Any sized iterable is accepted, not only a ``Sequence``;
           the helper only needs to size and iterate the input.
+        - ``on_first_exception``, when not ``None``, is callable (else
+          ``TypeError``).
         - When ``propagate_context`` is True, this function is called on the
           thread whose context should be snapshotted into the workers.
 
@@ -132,6 +134,11 @@ def parallel_map(
         raise ValueError("max_workers must be >= 1")
     if not (hasattr(items, "__len__") and hasattr(items, "__iter__")):
         raise TypeError("items must be a sized iterable")
+    if on_first_exception is not None and not callable(on_first_exception):
+        # Validate up front like ``fn``: an uncallable hook would otherwise only
+        # surface inside the failure handler, where it's caught and logged, hiding
+        # the misconfiguration behind whatever worker error happened to occur.
+        raise TypeError("on_first_exception must be callable")
 
     n = len(items)
     if n == 0:
