@@ -106,6 +106,13 @@ def upsert_learning(
     # ``pattern || ' ' || trigger``): Postgres rejects a tsvector larger than ~1MB,
     # which would make the INSERT raise and the learning be silently dropped (the
     # except below returns False). 8000 chars is ample for a diagnostic snippet.
+    for _field, _val in (
+        ("pattern", pattern),
+        ("trigger", trigger),
+        ("counter_measure", counter_measure),
+    ):
+        if len(_val) > 8000:
+            logger.debug("upsert_learning: %s truncated from %d to 8000 chars", _field, len(_val))
     pattern = pattern[:8000]
     trigger = trigger[:8000]
     counter_measure = counter_measure[:8000]
