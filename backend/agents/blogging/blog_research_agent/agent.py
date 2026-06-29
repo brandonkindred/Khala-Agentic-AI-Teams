@@ -501,6 +501,10 @@ class ResearchAgent:
         # parallel_map copies this thread's context per task so the LLM
         # attribution/request-id contextvars propagate into the scoring workers
         # (raw threads don't copy them; see llm_service.attribution).
+        # skip_none=False keeps one result per document positionally, exactly as
+        # the previous list comprehension did — safe because _score_one_document
+        # always returns a tuple (never None; a failing LLM call raises rather
+        # than returning None), so the sort below never sees a None element.
         scored = parallel_map(
             documents,
             lambda doc: self._score_one_document(doc, brief_input),
@@ -585,6 +589,10 @@ class ResearchAgent:
         # parallel_map copies this thread's context per task so the LLM
         # attribution/request-id contextvars propagate into the summarizing
         # workers (raw threads don't copy them; see llm_service.attribution).
+        # skip_none=False keeps one result per item positionally, as the previous
+        # list comprehension did — safe because _summarize_one_document always
+        # returns a ResearchReference (its except path falls back to an excerpt,
+        # never None).
         references = parallel_map(
             items,
             lambda item: self._summarize_one_document(item, brief_input),
