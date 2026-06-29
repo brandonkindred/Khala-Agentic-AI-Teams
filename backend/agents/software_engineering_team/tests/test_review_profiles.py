@@ -69,7 +69,11 @@ def test_each_profile_has_its_own_criteria(profile: ReviewProfile, anchor: str) 
 def test_acceptance_profile_instructs_criterion_tagging() -> None:
     prompt = build_review_system_prompt(ReviewProfile.ACCEPTANCE)
     assert "EXACTLY ONE issue for each criterion that is NOT fully satisfied" in prompt
-    assert "verbatim text of the unmet acceptance criterion" in prompt
+    # The criterion is carried in the description prefix (delimiter " :: "), and
+    # category stays a valid output-contract enum value.
+    assert "VERBATIM acceptance-criterion text" in prompt
+    assert " :: " in prompt
+    assert '"category" to "spec-compliance"' in prompt
 
 
 def test_builder_accepts_string_value() -> None:

@@ -106,9 +106,9 @@ def test_acceptance_verifier_marks_unmet_criterion_from_tagged_issue() -> None:
             "issues": [
                 {
                     "severity": "high",
-                    "category": "add(0, 0) returns 0",
+                    "category": "spec-compliance",
                     "file_path": "",
-                    "description": "No code path returns 0 for add(0, 0).",
+                    "description": "add(0, 0) returns 0 :: No code path returns 0 for add(0, 0).",
                     "suggestion": "Handle the zero case.",
                 }
             ],
@@ -122,7 +122,36 @@ def test_acceptance_verifier_marks_unmet_criterion_from_tagged_issue() -> None:
     by_criterion = {c.criterion: c for c in result.per_criterion}
     assert by_criterion["add(1, 2) returns 3"].satisfied is True
     assert by_criterion["add(0, 0) returns 0"].satisfied is False
-    assert "returns 0" in by_criterion["add(0, 0) returns 0"].evidence
+    # Evidence is the text after the " :: " delimiter, not the criterion prefix.
+    assert by_criterion["add(0, 0) returns 0"].evidence == "No code path returns 0 for add(0, 0)."
+
+
+def test_acceptance_two_unmet_criteria_same_file_both_reported() -> None:
+    """Two unmet criteria sharing a file/blank line survive coordinator dedupe
+    because their descriptions differ by the verbatim-criterion prefix."""
+    stub = _IssueStubClient(
+        {
+            "approved": False,
+            "issues": [
+                {
+                    "severity": "high",
+                    "category": "spec-compliance",
+                    "file_path": "",
+                    "description": "add(1, 2) returns 3 :: no evidence found",
+                },
+                {
+                    "severity": "high",
+                    "category": "spec-compliance",
+                    "file_path": "",
+                    "description": "add(0, 0) returns 0 :: no evidence found",
+                },
+            ],
+            "summary": "Both criteria unmet",
+        }
+    )
+    result = AcceptanceVerifierAgent(stub).run(_input())
+    assert result.all_satisfied is False
+    assert all(not c.satisfied for c in result.per_criterion)
 
 
 class _RaisingEngine:
@@ -214,6 +243,37 @@ def test_derive_per_criterion_substring_collision_not_falsely_unmet() -> None:
     by = {c.criterion: c for c in out}
     assert by["add(1,2) returns 3"].satisfied is True
     assert by["add(1,2) returns 3 and 4"].satisfied is False
+
+
+def test_derive_per_criterion_uses_description_prefix_with_enum_category() -> None:
+    # P1 regression: the model obeys the output-contract enum (category=
+    # "spec-compliance") and tags the criterion in the description prefix. The
+    # criterion must still be attributed (a category-only match would wrongly
+    # report it satisfied).
+    issues = [
+        CodeReviewIssue(
+            severity="high",
+            category="spec-compliance",
+            description="add(0,0) returns 0 :: no zero path",
+        )
+    ]
+    out = derive_per_criterion(["add(0,0) returns 0", "other"], issues)
+    by = {c.criterion: c for c in out}
+    assert by["add(0,0) returns 0"].satisfied is False
+    assert by["add(0,0) returns 0"].evidence == "no zero path"
+    assert by["other"].satisfied is True
+
+
+def test_derive_per_criterion_distinct_prefixes_for_same_reason() -> None:
+    # P2 regression: two criteria whose findings share a file and reason but
+    # differ by criterion prefix are both attributed (distinct descriptions keep
+    # them from collapsing under the coordinator's dedupe).
+    issues = [
+        CodeReviewIssue(severity="high", category="spec-compliance", description="c1 :: no evidence"),
+        CodeReviewIssue(severity="high", category="spec-compliance", description="c2 :: no evidence"),
+    ]
+    out = derive_per_criterion(["c1", "c2"], issues)
+    assert all(not c.satisfied for c in out)
 
 
 def test_derive_per_criterion_category_match_ignores_whitespace_and_case() -> None:

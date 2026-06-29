@@ -238,10 +238,15 @@ _ACCEPTANCE_CRITERIA = (
     "citing the specific code (file and, where possible, line) that provides the evidence.\n"
     "- Emit EXACTLY ONE issue for each criterion that is NOT fully satisfied, and NO issue for a "
     "criterion that is satisfied.\n"
-    '- For every issue you emit, set "category" to the verbatim text of the unmet acceptance '
-    'criterion, set "severity" to "high", set "file_path" to the most relevant file (or the '
-    'criterion text if no single file applies), and set "description" to a precise explanation of '
-    "what evidence is missing.\n"
+    "- For every issue you emit:\n"
+    '  - set "severity" to "high" and "category" to "spec-compliance";\n'
+    '  - set "description" to the VERBATIM acceptance-criterion text, then the exact separator '
+    '" :: " (space-colon-colon-space), then a precise explanation of what evidence is missing — '
+    'for example: "add(0, 0) returns 0 :: no code path handles the zero case";\n'
+    '  - set "file_path" to the most relevant file, or leave it empty if no single file applies.\n'
+    "- The verbatim-criterion prefix is REQUIRED and must reproduce the criterion exactly so each "
+    "issue can be attributed to its criterion; do NOT paraphrase or abbreviate it, and do NOT put "
+    "the criterion in any other field.\n"
     "- Do NOT emit issues for code quality, style, naming, or anything other than unmet acceptance "
     "criteria; this gate blocks only on acceptance."
 )

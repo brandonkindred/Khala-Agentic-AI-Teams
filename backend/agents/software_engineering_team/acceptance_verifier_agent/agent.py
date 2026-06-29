@@ -30,6 +30,16 @@ from .models import AcceptanceVerifierInput, AcceptanceVerifierOutput, Criterion
 logger = logging.getLogger(__name__)
 
 
+# The acceptance profile encodes the criterion an issue belongs to as the prefix
+# of ``description``, separated from the failure explanation by this delimiter.
+# Carrying the criterion in ``description`` (rather than ``category``) keeps
+# ``category`` a valid value of the shared output-contract enum AND makes each
+# unmet criterion's description distinct, so the coordinator's dedupe (keyed on
+# file_path/line/description) never collapses two different unmet criteria into
+# one — both failure modes that a category-based tag would have suffered.
+_CRITERION_DELIM = " :: "
+
+
 def _normalize(text: str) -> str:
     """Whitespace-collapsed, lower-cased form for exact-match comparison.
 
@@ -39,28 +49,55 @@ def _normalize(text: str) -> str:
     return " ".join((text or "").split()).lower()
 
 
+def _tagged_criterion(issue: CodeReviewIssue) -> str:
+    """Return the criterion an issue is attributed to.
+
+    Postconditions: returns the substring of ``description`` before the first
+    ``" :: "`` delimiter (the verbatim criterion the acceptance profile prefixes
+    each issue with); falls back to ``category`` for robustness if a model tagged
+    the criterion there instead. Pure; no side effects.
+    """
+    desc = issue.description or ""
+    if _CRITERION_DELIM in desc:
+        return desc.split(_CRITERION_DELIM, 1)[0]
+    return issue.category or desc
+
+
+def _evidence_of(issue: CodeReviewIssue) -> str:
+    """Return the failure explanation for an unmet-criterion issue.
+
+    Postconditions: returns the text after the first ``" :: "`` delimiter when
+    present, else the full ``description``, else ``"Unmet"``. Pure.
+    """
+    desc = issue.description or ""
+    if _CRITERION_DELIM in desc:
+        tail = desc.split(_CRITERION_DELIM, 1)[1].strip()
+        if tail:
+            return tail
+    return desc or "Unmet"
+
+
 def _matches_criterion(criterion: str, issue: CodeReviewIssue) -> bool:
     """Return whether ``issue`` reports ``criterion`` as unmet.
 
-    Matching is a normalized *exact* comparison of the issue's ``category``
-    against the criterion. The ``acceptance`` profile instructs the model to set
-    ``category`` to the verbatim criterion text, so exact match is the reliable
-    signal. Substring matching is deliberately NOT used: it mis-fires when one
-    criterion is a substring of another (an issue tagged with the longer
-    criterion would also match the shorter one), which would mark a satisfied
-    criterion as unmet and falsely reject a valid change.
+    Matching is a normalized *exact* comparison of the issue's tagged criterion
+    (see :func:`_tagged_criterion`) against ``criterion``. Substring matching is
+    deliberately NOT used: it mis-fires when one criterion is a substring of
+    another (an issue tagged with the longer criterion would also match the
+    shorter one), which would mark a satisfied criterion as unmet and falsely
+    reject a valid change.
 
     Preconditions:
         ``criterion`` is an acceptance-criterion string; ``issue`` is an engine
         finding produced under the ``acceptance`` profile.
     Postconditions:
-        Returns True iff the normalized ``issue.category`` equals the normalized
+        Returns True iff the normalized tagged criterion equals the normalized
         ``criterion`` (a blank criterion never matches). Pure; no side effects.
     """
     target = _normalize(criterion)
     if not target:
         return False
-    return _normalize(issue.category) == target
+    return _normalize(_tagged_criterion(issue)) == target
 
 
 def derive_per_criterion(
@@ -76,7 +113,8 @@ def derive_per_criterion(
         Returns one :class:`CriterionStatus` per input criterion in order. A
         criterion is ``satisfied`` iff no issue matches it (see
         :func:`_matches_criterion`); when unmet, its ``evidence`` is the matching
-        issue's description, otherwise ``"Satisfied"``. Pure; no side effects.
+        issue's failure explanation (see :func:`_evidence_of`), otherwise
+        ``"Satisfied"``. Pure; no side effects.
     """
     statuses: List[CriterionStatus] = []
     for criterion in criteria:
@@ -90,7 +128,7 @@ def derive_per_criterion(
                 CriterionStatus(
                     criterion=criterion,
                     satisfied=False,
-                    evidence=match.description or "Unmet",
+                    evidence=_evidence_of(match),
                 )
             )
     return statuses
