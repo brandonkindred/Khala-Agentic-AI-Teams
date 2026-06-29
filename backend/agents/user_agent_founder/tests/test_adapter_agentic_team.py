@@ -352,6 +352,55 @@ def test_poll_build_json_list_2xx_is_a_poll_error():
     assert adapter.poll_build(fake, "r9") == {"_poll_error": 502}
 
 
+def test_start_build_converts_transport_error_to_start_failed():
+    """A transport failure (connect/timeout/DNS) during create becomes a clean
+    StartFailed(502), not a raw httpx exception crashing the worker thread."""
+    import httpx
+
+    from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
+
+    class _BoomClient:
+        def post(self, *a, **kw):
+            raise httpx.ConnectError("connection refused")
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    with pytest.raises(StartFailed) as exc:
+        adapter.start_build(_BoomClient(), "# SPEC")
+    assert exc.value.status_code == 502
+
+
+def test_poll_build_transport_error_is_a_poll_error():
+    """A transport failure during polling becomes a retryable _poll_error, not a
+    crash (the orchestrator keeps polling)."""
+    import httpx
+
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    class _BoomClient:
+        def get(self, *a, **kw):
+            raise httpx.ConnectTimeout("timed out")
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    result = adapter.poll_build(_BoomClient(), "r9")
+    assert result["_poll_error"] == 502
+    assert "timed out" in result["detail"]
+
+
+def test_start_build_truncates_upstream_error_body():
+    """An HTTP error body from the provisioning service is truncated in the
+    StartFailed detail so an internal error page isn't echoed wholesale."""
+    from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(
+        post_responses={"/test-pipeline/runs": _FakeResponse(500, text="x" * 1000)}
+    )
+    with pytest.raises(StartFailed) as exc:
+        adapter.start_build(fake, "# SPEC")
+    assert exc.value.status_code == 500
+    assert len(exc.value.body) <= 200
+
+
 def test_poll_build_maps_waiting_for_input_to_free_text_question():
     from user_agent_founder.targets import AgenticTeamAdapter
 

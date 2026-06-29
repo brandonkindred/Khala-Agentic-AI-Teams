@@ -147,19 +147,29 @@ class AgenticTeamAdapter:
         Preconditions: ``self._process_id`` is set.
         Postconditions: a pipeline run is created for ``(team, process)`` and its
             non-empty ``run_id`` is returned. Raises :class:`StartFailed` if
-            ``process_id`` is missing, the create endpoint returns an HTTP error,
-            or the response carries no ``run_id`` (so a malformed response fails
-            fast instead of polling an empty job id to timeout).
+            ``process_id`` is missing, a transport error occurs (connect/timeout/
+            DNS), the create endpoint returns an HTTP error, or the response
+            carries no ``run_id`` (so a malformed response fails fast instead of
+            polling an empty job id to timeout). Never lets a raw transport
+            exception escape — the orchestrator marks the run failed cleanly.
         """
         if not self._process_id:
             raise StartFailed(400, "AgenticTeamAdapter: process_id is required to start a run")
-        resp = client.post(
-            self._url("/test-pipeline/runs"),
-            json={"process_id": self._process_id, "initial_input": repo_path},
-            timeout=HTTP_TIMEOUT,
-        )
+        try:
+            resp = client.post(
+                self._url("/test-pipeline/runs"),
+                json={"process_id": self._process_id, "initial_input": repo_path},
+                timeout=HTTP_TIMEOUT,
+            )
+        except httpx.RequestError as exc:
+            # Transient transport failure (connect/timeout/DNS): surface a clean
+            # StartFailed so the orchestrator marks the run failed rather than the
+            # raw exception crashing the worker thread.
+            raise StartFailed(502, f"Pipeline create request failed: {str(exc)[:200]}") from exc
         if resp.status_code >= 400:
-            raise StartFailed(resp.status_code, resp.text)
+            # Truncate the upstream body so an internal error page / stack trace
+            # from the provisioning service isn't echoed wholesale to the caller.
+            raise StartFailed(resp.status_code, (resp.text or "")[:200])
         try:
             body = resp.json()
         except ValueError as exc:  # non-JSON 2xx (e.g. an HTML proxy page)
@@ -185,10 +195,15 @@ class AgenticTeamAdapter:
             * ``{"status": <other>}`` while still running (orchestrator keeps
               polling).
         """
-        resp = client.get(
-            self._url(f"/test-pipeline/runs/{quote(job_id, safe='')}"),
-            timeout=HTTP_TIMEOUT,
-        )
+        try:
+            resp = client.get(
+                self._url(f"/test-pipeline/runs/{quote(job_id, safe='')}"),
+                timeout=HTTP_TIMEOUT,
+            )
+        except httpx.RequestError as exc:
+            # Transient transport failure ⇒ a retryable poll error, not a crash
+            # (the orchestrator keeps polling on ``_poll_error``).
+            return {"_poll_error": 502, "detail": str(exc)[:200]}
         if resp.status_code >= 400:
             # Carry a truncated body for diagnostics; the orchestrator keys off
             # ``_poll_error`` and ignores extra keys.
