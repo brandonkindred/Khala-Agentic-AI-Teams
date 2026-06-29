@@ -75,6 +75,12 @@
   }
 
   &__item {
+    // Native <button> reset so it renders like the old row.
+    width: 100%;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    background: transparent;
     display: flex;
     align-items: center;
     gap: var(--kh-space-2);

@@ -159,7 +159,11 @@ class AgenticTeamAdapter:
         )
         if resp.status_code >= 400:
             raise StartFailed(resp.status_code, resp.text)
-        run_id = resp.json().get("run_id")
+        try:
+            body = resp.json()
+        except ValueError as exc:  # non-JSON 2xx (e.g. an HTML proxy page)
+            raise StartFailed(502, f"Invalid JSON from pipeline create: {exc}") from exc
+        run_id = body.get("run_id")
         if not run_id:
             raise StartFailed(502, "Provisioning response missing run_id")
         return run_id
@@ -168,7 +172,8 @@ class AgenticTeamAdapter:
         """Poll the pipeline run, mapping its status onto the founder contract.
 
         Postconditions: returns one of —
-            * ``{"_poll_error": <code>}`` on HTTP error (orchestrator retries);
+            * ``{"_poll_error": <code>}`` on HTTP error **or a non-JSON body**
+              (orchestrator retries — a transient proxy page shouldn't fail the run);
             * ``{"status": "completed"|"failed"|"cancelled", ...}`` at a terminal
               state (``error`` carried through on failure);
             * ``{"status": "waiting_for_input", "waiting_for_answers": True,
@@ -182,7 +187,10 @@ class AgenticTeamAdapter:
         )
         if resp.status_code >= 400:
             return {"_poll_error": resp.status_code}
-        run = resp.json()
+        try:
+            run = resp.json()
+        except ValueError:  # non-JSON 2xx ⇒ treat as a transient poll error
+            return {"_poll_error": 502}
         status = run.get("status", "")
 
         if status == "waiting_for_input":

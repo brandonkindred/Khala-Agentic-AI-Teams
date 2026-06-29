@@ -295,10 +295,12 @@ def start_founder_workflow(
         # process surfaces as a run failure). A *known* non-complete status is a
         # gate violation and is rejected.
         if status is not None and status != "complete":
-            raise HTTPException(
-                status_code=422,
-                detail=f"process {req.process_id} is not testable (status: {status})",
+            detail = (
+                f"team {team_id} or process {req.process_id} not found"
+                if status == "not_found"
+                else f"process {req.process_id} is not testable (status: {status})"
             )
+            raise HTTPException(status_code=422, detail=detail)
 
     persona = get_persona_store().get_persona(req.persona_id)
     if persona is None:
@@ -602,9 +604,12 @@ def _list_agentic_testable_teams() -> list[TestableTeam]:
     """Enumerate agentic teams that have at least one ``complete`` process.
 
     Cross-service, best-effort: queries the agentic-team-provisioning service
-    over the unified API. The "≥1 complete process" filter is applied here,
-    server-side, so the dropdown the frontend consumes is ready to use and the
-    Stage-3 → Stage-4 gate (a complete process is required to test) is honored.
+    over the unified API. ``GET /teams`` is expected to return a **JSON list** of
+    team summaries (``{team_id, name, process_count, ...}``); any other shape
+    (e.g. an object envelope) is logged and treated as empty. The "≥1 complete
+    process" filter is applied here, server-side, so the dropdown the frontend
+    consumes is ready to use and the Stage-3 → Stage-4 gate (a complete process
+    is required to test) is honored.
 
     Postconditions: returns one :class:`TestableTeam` per agentic team with a
         ``complete`` process, keyed ``"agentic_team:<team_id>"``. Best-effort and
@@ -630,8 +635,13 @@ def _list_agentic_testable_teams() -> list[TestableTeam]:
                 return teams
             for summary in summaries:
                 team_id = summary.get("team_id")
-                # No processes ⇒ can't be fully designed; skip the detail fetch.
-                if not team_id or not summary.get("process_count"):
+                if not team_id:
+                    continue
+                # Skip the detail fetch only when the summary *explicitly* reports
+                # zero processes. A missing/None ``process_count`` is not a reliable
+                # "no processes" signal, so fall through and let the complete-process
+                # check on the fetched detail decide (don't omit eligible teams).
+                if summary.get("process_count") == 0:
                     continue
                 # Guard each detail fetch so one flaky/timing-out team doesn't
                 # discard the teams already collected (return partial, not []).

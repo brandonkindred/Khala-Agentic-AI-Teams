@@ -15,6 +15,8 @@
         <button
           type="button"
           role="tab"
+          id="studio-tab-manual"
+          aria-controls="studio-tabpanel"
           class="persona__mode"
           [class.is-active]="mode() === 'manual'"
           [attr.aria-selected]="mode() === 'manual'"
@@ -25,6 +27,8 @@
         <button
           type="button"
           role="tab"
+          id="studio-tab-persona"
+          aria-controls="studio-tabpanel"
           class="persona__mode"
           [class.is-active]="mode() === 'persona'"
           [attr.aria-selected]="mode() === 'persona'"
@@ -57,12 +61,17 @@
       <p class="persona__error" role="alert">{{ teamError() }}</p>
     }
 
-    @switch (mode()) {
-      @case ('manual') {
-        @if (team()) {
-          <app-agentic-team-test-panel [team]="team()!" />
-        } @else if (!teamError()) {
-          <p class="persona__loading">Loading team…</p>
+    <div
+      id="studio-tabpanel"
+      role="tabpanel"
+      [attr.aria-labelledby]="mode() === 'manual' ? 'studio-tab-manual' : 'studio-tab-persona'"
+    >
+      @switch (mode()) {
+        @case ('manual') {
+          @if (team()) {
+            <app-agentic-team-test-panel [team]="team()!" />
+          } @else if (!teamError()) {
+            <p class="persona__loading">Loading team…</p>
         }
       }
 
@@ -88,23 +97,28 @@
               @if (personas().length === 0) {
                 <p class="persona__loading">No personas — create one to begin.</p>
               } @else {
-                <ul class="persona__list" role="listbox" aria-label="Testing personas">
+                <ul class="persona__list" aria-label="Testing personas">
                   @for (p of personas(); track p.id) {
-                    <li
-                      class="persona__item"
-                      role="option"
-                      tabindex="0"
-                      [class.is-selected]="selectedPersonaId() === p.id"
-                      [attr.aria-selected]="selectedPersonaId() === p.id"
-                      (click)="selectPersona(p.id)"
-                      (keydown.enter)="selectPersona(p.id)"
-                      (keydown.space)="selectPersona(p.id)"
-                    >
-                      <mat-icon aria-hidden="true">{{ p.icon || 'person' }}</mat-icon>
-                      <span class="persona__item-name">{{ p.name }}</span>
-                      @if (p.is_builtin) {
-                        <span class="persona__badge">built-in</span>
-                      }
+                    <li>
+                      <!--
+                        Native <button> toggles: focusable + keyboard-operable
+                        (Enter/Space) and in tab order without roving-tabindex /
+                        aria-activedescendant management. aria-pressed marks the
+                        selected one.
+                      -->
+                      <button
+                        type="button"
+                        class="persona__item"
+                        [class.is-selected]="selectedPersonaId() === p.id"
+                        [attr.aria-pressed]="selectedPersonaId() === p.id"
+                        (click)="selectPersona(p.id)"
+                      >
+                        <mat-icon aria-hidden="true">{{ p.icon || 'person' }}</mat-icon>
+                        <span class="persona__item-name">{{ p.name }}</span>
+                        @if (p.is_builtin) {
+                          <span class="persona__badge">built-in</span>
+                        }
+                      </button>
                     </li>
                   }
                 </ul>
@@ -170,6 +184,7 @@
           }
         }
       }
-    }
+      }
+    </div>
   </section>
 }

@@ -325,6 +325,29 @@ def test_start_agentic_team_rejects_non_complete_process(
     fake_store.create_run.assert_not_called()
 
 
+def test_start_agentic_team_not_found_detail_distinguishes_missing(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store, monkeypatch
+):
+    """A 'not_found' gate result (team or process absent) yields a 422 whose detail
+    names both ids — distinct from the generic 'not testable' wording reserved for
+    a present-but-non-complete process."""
+    from user_agent_founder.api import main as api_main
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    monkeypatch.setattr(api_main, "_agentic_process_status", lambda _t, _p: "not_found")
+    with pytest.raises(HTTPException) as excinfo:
+        start_founder_workflow(
+            StartRunRequest(target_team_key="agentic_team:team-x", process_id="proc-missing")
+        )
+    assert excinfo.value.status_code == 422
+    assert "not found" in excinfo.value.detail
+    assert "team-x" in excinfo.value.detail
+    assert "proc-missing" in excinfo.value.detail
+    assert "not testable" not in excinfo.value.detail
+    assert fake_dispatch == []
+    fake_store.create_run.assert_not_called()
+
+
 def test_start_agentic_team_allows_when_status_undeterminable(
     fake_job_store, fake_store, fake_dispatch, fake_persona_store, fixed_run_id, monkeypatch
 ):
@@ -475,6 +498,31 @@ def test_list_agentic_testable_teams_keeps_others_when_one_detail_fails(monkeypa
     from user_agent_founder.api import main as api_main
 
     monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _PartialClient())
+    teams = api_main._list_agentic_testable_teams()
+    assert {t.team_key for t in teams} == {"agentic_team:A"}
+
+
+class _NoCountClient:
+    """A /teams summary that OMITS process_count, but the team detail has a
+    complete process — the team must still be enumerated (the count is only an
+    optimization, not an eligibility signal)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url, *, timeout=None):
+        if url.endswith("/teams"):
+            return _TeamsResp(200, [{"team_id": "A", "name": "Alpha"}])  # no process_count
+        return _TeamsResp(200, {"team": {"name": "Alpha", "processes": [{"status": "complete"}]}})
+
+
+def test_list_agentic_testable_teams_lists_team_when_process_count_absent(monkeypatch):
+    from user_agent_founder.api import main as api_main
+
+    monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _NoCountClient())
     teams = api_main._list_agentic_testable_teams()
     assert {t.team_key for t in teams} == {"agentic_team:A"}
 

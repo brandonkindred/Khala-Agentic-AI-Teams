@@ -29,6 +29,8 @@ import {
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 /** Live-run poll cadence (ms). Matches the founder run's coarse 15–30s ticks. */
 const POLL_MS = 10_000;
+/** Transient banner shown on a failed poll; cleared on the next successful poll. */
+const LOST_CONTACT = 'Lost contact with the run; retrying…';
 
 type StudioPersonaMode = 'manual' | 'persona';
 
@@ -152,8 +154,8 @@ export class AgentStudioPersonaComponent implements OnInit {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {
-          this.team.set(resp.team);
-          const complete = resp.team.processes.filter((p) => p.status === 'complete');
+          this.team.set(resp.team ?? null);
+          const complete = (resp.team?.processes ?? []).filter((p) => p.status === 'complete');
           const current = this.selectedProcessId();
           // Drop a handoff-seeded selection that isn't a *complete* process: the
           // <select> only lists complete ones (so it'd show the placeholder) and
@@ -173,15 +175,18 @@ export class AgentStudioPersonaComponent implements OnInit {
   }
 
   private loadPersonas(): void {
+    // Reset any prior error before the request (consistent with loadTeam).
+    this.error.set(null);
     this.personaApi
       .getPersonas()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {
-          this.personas.set(resp.personas);
+          const personas = resp.personas ?? [];
+          this.personas.set(personas);
           // Default the persona selection when none carried from the handoff.
-          if (!this.selectedPersonaId() && resp.personas.length > 0) {
-            this.state.setPersonaId(resp.personas[0].id);
+          if (!this.selectedPersonaId() && personas.length > 0) {
+            this.state.setPersonaId(personas[0].id);
           }
         },
         error: () => {
@@ -242,7 +247,7 @@ export class AgentStudioPersonaComponent implements OnInit {
         switchMap(() =>
           this.personaApi.getRunStatus(runId).pipe(
             catchError(() => {
-              this.error.set('Lost contact with the run; retrying…');
+              this.error.set(LOST_CONTACT);
               return EMPTY;
             }),
           ),
@@ -271,9 +276,11 @@ export class AgentStudioPersonaComponent implements OnInit {
     if (detail.run_id !== this.activeRunId) {
       return;
     }
-    // A successful status clears any transient "lost contact" banner from a
-    // prior failed poll.
-    this.error.set(null);
+    // Clear ONLY the transient "lost contact" banner on a successful poll —
+    // not unrelated load/create errors (which own the same signal).
+    if (this.error() === LOST_CONTACT) {
+      this.error.set(null);
+    }
     this.run.set(detail);
     if (TERMINAL_STATUSES.has(detail.status)) {
       this.stopPolling();

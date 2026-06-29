@@ -68,13 +68,20 @@ class _FakeStore:
 
 class _FakeResponse:
     def __init__(
-        self, status_code: int = 200, json_data: dict | None = None, text: str = ""
+        self,
+        status_code: int = 200,
+        json_data: dict | None = None,
+        text: str = "",
+        bad_json: bool = False,
     ) -> None:
         self.status_code = status_code
         self._json = json_data or {}
         self.text = text
+        self._bad_json = bad_json
 
     def json(self) -> dict:
+        if self._bad_json:
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
         return self._json
 
     def raise_for_status(self) -> None:
@@ -290,6 +297,30 @@ def test_start_build_raises_when_response_has_no_run_id():
     with pytest.raises(StartFailed) as exc:
         adapter.start_build(fake, "# SPEC")
     assert exc.value.status_code == 502
+
+
+def test_start_build_raises_on_non_json_2xx():
+    """A 2xx body that isn't JSON (e.g. an HTML proxy page) → StartFailed(502),
+    not an unhandled JSONDecodeError crashing the worker thread."""
+    from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(
+        post_responses={"/test-pipeline/runs": _FakeResponse(200, bad_json=True)}
+    )
+    with pytest.raises(StartFailed) as exc:
+        adapter.start_build(fake, "# SPEC")
+    assert exc.value.status_code == 502
+
+
+def test_poll_build_non_json_2xx_is_a_poll_error():
+    """A 2xx non-JSON body during polling → a transient _poll_error (retry), not a
+    crash."""
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(get_responses={"/runs/r9": [_FakeResponse(200, bad_json=True)]})
+    assert adapter.poll_build(fake, "r9") == {"_poll_error": 502}
 
 
 def test_poll_build_maps_waiting_for_input_to_free_text_question():
