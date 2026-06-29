@@ -424,7 +424,7 @@ def test_roster_agent_from_manifest_rejects_blank_name(bad_name: str) -> None:
     manifest = AgentManifest.model_construct(
         id="x.y", team="t", name=bad_name, summary="", tags=[], cognition=None
     )
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         _roster_agent_from_manifest(manifest)
 
 
@@ -435,7 +435,7 @@ def test_roster_agent_from_manifest_rejects_missing_id() -> None:
     manifest = AgentManifest.model_construct(
         id="", team="t", name="ok", summary="", tags=[], cognition=None
     )
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         _roster_agent_from_manifest(manifest)
 
 

@@ -307,10 +307,14 @@ def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
         manifest with no cognition tools — the common catalog shape — still passes.
         ``tools`` carries ``cognition.tools`` when present.
     """
-    # Enforce the precondition (the registry is the source of truth, but fail fast
-    # rather than project a malformed manifest into the roster).
-    assert manifest.name and manifest.name.strip(), "manifest.name must be non-empty"
-    assert manifest.id, "manifest.id must be set"
+    # Enforce the precondition with explicit validation rather than ``assert`` (which
+    # ``python -O`` strips): ``AgentManifest.id``/``name`` are required but not
+    # length-constrained, so an empty string passes Pydantic — fail fast here rather
+    # than project a malformed manifest into the roster.
+    if not (manifest.name and manifest.name.strip()):
+        raise ValueError("manifest.name must be non-empty")
+    if not manifest.id:
+        raise ValueError("manifest.id must be set")
     return AgenticTeamAgent(
         agent_name=manifest.name,
         role=manifest.summary or manifest.name,
