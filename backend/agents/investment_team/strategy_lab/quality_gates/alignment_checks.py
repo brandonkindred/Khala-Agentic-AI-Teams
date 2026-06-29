@@ -57,13 +57,10 @@ from ..executor.predicate_evaluator import (
     PandasHistoryView,
 )
 from ..executor.predicate_evaluator import (
-    compare as _compare_shared,
+    evaluate_tree as _evaluate_tree,
 )
 from ..executor.predicate_evaluator import (
     relative_miss as _relative_miss_shared,
-)
-from ..executor.predicate_evaluator import (
-    resolve_side_value as _resolve_side_value,
 )
 from ..spec_dsl import (
     EntryRule,
@@ -74,6 +71,7 @@ from ..spec_dsl import (
     StopLossRule,
     TakeProfitRule,
     VolatilityTargetSizing,
+    format_predicate_tree,
 )
 from .models import GateResultsMixin, QualityGateResult
 
@@ -285,20 +283,14 @@ def _bars_to_frame(bars: List[Any]) -> pd.DataFrame:
     return df
 
 
-def _compare(
-    op: str,
-    lhs: float,
-    rhs: float,
-    *,
-    prev_lhs: Optional[float] = None,
-    prev_rhs: Optional[float] = None,
-) -> bool:
-    """Delegate to the shared predicate evaluator."""
-    return _compare_shared(op, lhs, rhs, prev_lhs=prev_lhs, prev_rhs=prev_rhs)
-
-
 def _format_predicate(p: Predicate) -> str:
-    """Render a predicate as ``lhs op rhs`` for human-readable details."""
+    """Render a predicate as ``lhs op rhs`` for human-readable details.
+
+    Used as the leaf renderer passed to the shared
+    :func:`spec_dsl.format_predicate_tree`, so an ``all_of`` / ``any_of`` ``when``
+    reads back as ``(lhs op rhs and …)`` in alignment findings without this module
+    re-implementing the tree-walk.
+    """
     return f"{p.lhs!r} {p.op} {p.rhs!r}"
 
 
@@ -1179,46 +1171,39 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         view = PandasHistoryView(df, cache)
 
         # Try each signal-exit rule in spec order — the first one whose
-        # predicate fires at the signal bar wins the alignment.
+        # predicate (tree) fires at the signal bar wins the alignment. The
+        # shared ``evaluate_tree`` handles leaf predicates, ``all_of`` /
+        # ``any_of`` combinators, cross-op previous-bar state, and warmup
+        # uniformly, so this loop is agnostic to the rule's ``when`` shape.
         for rule_idx, rule in enumerate(signal_exit_rules):
-            try:
-                lhs_value = _resolve_side_value(rule.when.lhs, view, signal_idx)
-                rhs_value = _resolve_side_value(rule.when.rhs, view, signal_idx)
-                prev_lhs: Optional[float] = None
-                prev_rhs: Optional[float] = None
-                if rule.when.op in ("cross_above", "cross_below") and signal_idx > 0:
-                    prev_lhs = _resolve_side_value(rule.when.lhs, view, signal_idx - 1)
-                    prev_rhs = _resolve_side_value(rule.when.rhs, view, signal_idx - 1)
-            except (ValueError, TypeError):
-                continue
+            result = _evaluate_tree(rule.when, view, signal_idx)
+            if result.status != "satisfied":
+                continue  # miss or warmup — try next rule
 
-            if lhs_value is None or rhs_value is None:
-                continue  # warmup NaN at exit bar — try next rule
-
-            if _compare(
-                rule.when.op,
-                lhs_value,
-                rhs_value,
-                prev_lhs=prev_lhs,
-                prev_rhs=prev_rhs,
-            ):
-                finding = AlignmentFinding(
-                    trade_num=trade.trade_num,
-                    rule_id=f"exit:signal_exit[{rule_idx}]",
-                    check_name="signal_exit",
-                    passed=True,
-                    severity="info",
-                    details=(
-                        f"Trade #{trade.trade_num} signal-exit satisfied by "
-                        f"exit[{rule_idx}]: {_format_predicate(rule.when)} → "
-                        f"lhs={lhs_value:.6g}, rhs={rhs_value:.6g}."
-                    ),
-                    computed_value=lhs_value,
-                    expected_value=rhs_value,
-                )
-                findings.append(finding)
-                gate_results.append(self._emit_for_finding(finding))
-                return
+            # ``lhs`` / ``rhs`` are populated for a leaf predicate and ``None``
+            # for a combinator (no single pair of scalars); render the scalar
+            # tail only when both are available.
+            scalar_tail = (
+                f" → lhs={result.lhs:.6g}, rhs={result.rhs:.6g}."
+                if result.lhs is not None and result.rhs is not None
+                else "."
+            )
+            finding = AlignmentFinding(
+                trade_num=trade.trade_num,
+                rule_id=f"exit:signal_exit[{rule_idx}]",
+                check_name="signal_exit",
+                passed=True,
+                severity="info",
+                details=(
+                    f"Trade #{trade.trade_num} signal-exit satisfied by "
+                    f"exit[{rule_idx}]: {format_predicate_tree(rule.when, leaf_formatter=_format_predicate)}{scalar_tail}"
+                ),
+                computed_value=result.lhs,
+                expected_value=result.rhs,
+            )
+            findings.append(finding)
+            gate_results.append(self._emit_for_finding(finding))
+            return
 
         # No SignalExitRule fired at the exit bar, but the engine did
         # not attribute the close to a structured rule — the strategy
@@ -1263,95 +1248,24 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             ``rhs`` is a numeric anchor; ``None`` otherwise.
         """
         rule_id = f"entry[{rule_idx}]"
-        predicate_repr = _format_predicate(rule.when)
-        op = rule.when.op
-        # One view, reused across the four resolves a cross predicate needs
-        # (lhs/rhs at i and i-1) so its cached numpy arrays are shared.
+        predicate_repr = format_predicate_tree(rule.when, leaf_formatter=_format_predicate)
+        # One view, reused across every resolve a cross predicate needs (lhs/rhs
+        # at i and i-1) so its cached numpy arrays are shared. The shared
+        # ``evaluate_tree`` owns leaf evaluation, cross-op previous-bar handling,
+        # warmup, AND ``all_of`` / ``any_of`` composition uniformly. ``lhs`` /
+        # ``rhs`` / ``rel_miss`` come straight off its result: populated for a
+        # leaf predicate, ``None`` for a combinator (no single scalar pair) — so
+        # a multi-confirmation rule never enters the near-miss path, which is
+        # filtered on ``rel_miss is not None``.
         view = PandasHistoryView(df, cache)
-        try:
-            lhs_value = _resolve_side_value(rule.when.lhs, view, entry_idx)
-            rhs_value = _resolve_side_value(rule.when.rhs, view, entry_idx)
-            # Cross ops need previous-bar state to distinguish a real
-            # state transition from a sustained inequality. Resolving
-            # the previous bar adds one extra series lookup per side;
-            # the cache hits on the indicator path so the cost is the
-            # array index access, not a full recompute.
-            prev_lhs: Optional[float] = None
-            prev_rhs: Optional[float] = None
-            if op in ("cross_above", "cross_below") and entry_idx > 0:
-                prev_lhs = _resolve_side_value(rule.when.lhs, view, entry_idx - 1)
-                prev_rhs = _resolve_side_value(rule.when.rhs, view, entry_idx - 1)
-        except (ValueError, TypeError) as exc:
-            return {
-                "status": "warmup",
-                "rule_id": rule_id,
-                "predicate_repr": predicate_repr,
-                "lhs": None,
-                "rhs": None,
-                "rel_miss": None,
-                "_error": str(exc),
-            }
-
-        if lhs_value is None or rhs_value is None:
-            return {
-                "status": "warmup",
-                "rule_id": rule_id,
-                "predicate_repr": predicate_repr,
-                "lhs": None,
-                "rhs": None,
-                "rel_miss": None,
-            }
-
-        # For cross ops we additionally need the previous-bar values
-        # to evaluate. ``entry_idx == 0`` or a NaN warmup on the prior
-        # bar produces ``None`` previous values; ``_compare`` then
-        # treats the cross as not satisfied, which downstream becomes
-        # a normal "miss" finding (the gate falls closed on
-        # indeterminate crosses rather than fabricating a satisfied
-        # outcome).
-        is_cross = op in ("cross_above", "cross_below")
-        if is_cross and (prev_lhs is None or prev_rhs is None) and entry_idx == 0:
-            return {
-                "status": "warmup",
-                "rule_id": rule_id,
-                "predicate_repr": predicate_repr,
-                "lhs": lhs_value,
-                "rhs": rhs_value,
-                "rel_miss": None,
-            }
-
-        satisfied = _compare(
-            op,
-            lhs_value,
-            rhs_value,
-            prev_lhs=prev_lhs,
-            prev_rhs=prev_rhs,
-        )
-        if satisfied:
-            return {
-                "status": "satisfied",
-                "rule_id": rule_id,
-                "predicate_repr": predicate_repr,
-                "lhs": lhs_value,
-                "rhs": rhs_value,
-                "rel_miss": 0.0,
-            }
+        result = _evaluate_tree(rule.when, view, entry_idx)
         return {
-            "status": "miss",
+            "status": result.status,
             "rule_id": rule_id,
             "predicate_repr": predicate_repr,
-            "lhs": lhs_value,
-            "rhs": rhs_value,
-            # Cross-predicate misses are about a missing prior-bar
-            # transition, not a numerical gap on the current bar. A
-            # sustained-above strategy can present a tiny
-            # ``|curr_lhs - curr_rhs|`` and the LLM near-miss
-            # adjudicator would happily legitimize it even though no
-            # cross happened — bypass the near-miss path entirely for
-            # cross ops by emitting ``rel_miss=None``. The aggregation
-            # step filters near-miss candidates on ``rel_miss is not
-            # None``.
-            "rel_miss": None if is_cross else _relative_miss(lhs_value, rhs_value),
+            "lhs": result.lhs,
+            "rhs": result.rhs,
+            "rel_miss": result.rel_miss,
         }
 
     def _build_near_miss_finding(

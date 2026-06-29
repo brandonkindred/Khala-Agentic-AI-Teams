@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Iterable, List, Optional
 
 from .models import StrategyLabRecord
+from .strategy_lab.spec_dsl import AllOf, AnyOf, Predicate, iter_leaf_predicates
 
 _CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
     "stocks",
@@ -247,6 +248,24 @@ def format_prior_results(records: List[StrategyLabRecord], *, max_records: int =
     return "\n\n".join(lines)
 
 
+def _leaf_predicates(when: object) -> list:
+    """Flatten a rule's ``when`` to its leaf predicates, defensively.
+
+    A single ``Predicate`` → ``[when]``; an ``all_of`` / ``any_of`` tree → its
+    leaf predicates in order; any other / malformed shape → ``[]`` so the caller
+    can fall back to a top-level read. Never raises — this feeds prompt-context
+    formatting, not a correctness gate.
+
+    Postconditions: returns a list of ``Predicate`` (possibly empty); each
+    element exposes ``lhs`` / ``rhs`` / ``op``.
+    """
+    if isinstance(when, Predicate):
+        return [when]
+    if isinstance(when, (AllOf, AnyOf)):
+        return list(iter_leaf_predicates(when))
+    return []
+
+
 def _entry_archetype(strategy: object) -> str:
     """Classify a strategy's entry rules into a coarse, comparable archetype label.
 
@@ -266,12 +285,21 @@ def _entry_archetype(strategy: object) -> str:
     EMA/SMA/VWAP breakouts written in the latter form keep their indicator
     family instead of all collapsing into ``"price_level"``.
 
+    A multi-confirmation ``when`` (an ``all_of`` / ``any_of`` tree) is flattened
+    to its leaf predicates: the indicator families across **all** legs are
+    gathered (e.g. ``"rsi+sma"`` for a trend ∧ pullback entry) and the
+    ``_crossover`` suffix applies when **any** leg is a cross. Without this, a
+    combinator entry would carry no top-level ``lhs``/``op`` and collapse to
+    ``"unknown"``, corrupting prior-result attribution for the very
+    multi-confirmation strategies this bucketing is meant to compare.
+
     Preconditions:
       - ``strategy`` exposes an ``entry_rules`` iterable; each rule exposes a
-        ``when`` predicate whose ``lhs``/``rhs`` are each an ``IndicatorRef``
-        (carrying ``name``), a price-ref ``str``, or a numeric threshold, plus an
-        ``op``. Missing/odd shapes degrade to ``"unknown"`` rather than raising —
-        this is prompt-context formatting, never a correctness gate.
+        ``when`` that is a single ``Predicate`` or an ``all_of`` / ``any_of``
+        tree of them, with sides that are each an ``IndicatorRef`` (carrying
+        ``name``), a price-ref ``str``, or a numeric threshold. Missing/odd
+        shapes degrade to ``"unknown"`` rather than raising — this is
+        prompt-context formatting, never a correctness gate.
     Postconditions:
       - Returns a non-empty string. No entry rules → ``"none"``.
     """
@@ -281,16 +309,25 @@ def _entry_archetype(strategy: object) -> str:
     tokens: set[str] = set()
     for rule in rules:
         when = getattr(rule, "when", None)
-        lhs = getattr(when, "lhs", None)
-        rhs = getattr(when, "rhs", None)
-        names = sorted({str(n) for s in (lhs, rhs) if (n := getattr(s, "name", None))})
+        leaves = _leaf_predicates(when)
+        if leaves:
+            sides = [side for leaf in leaves for side in (leaf.lhs, leaf.rhs)]
+            crossover = any(
+                str(getattr(leaf, "op", "")) in ("cross_above", "cross_below") for leaf in leaves
+            )
+        else:
+            # Unrecognised / malformed ``when`` — degrade exactly as before,
+            # reading whatever top-level fields it happens to carry.
+            sides = [getattr(when, "lhs", None), getattr(when, "rhs", None)]
+            crossover = str(getattr(when, "op", "")) in ("cross_above", "cross_below")
+        names = sorted({str(n) for s in sides if (n := getattr(s, "name", None))})
         if names:
             base = "+".join(names)
-        elif isinstance(lhs, str) or isinstance(rhs, (str, int, float)):
+        elif any(isinstance(s, str) or isinstance(s, (int, float)) for s in sides):
             base = "price_level"
         else:
             base = "unknown"
-        if str(getattr(when, "op", "")) in ("cross_above", "cross_below"):
+        if crossover:
             base = f"{base}_crossover"
         tokens.add(base)
     # ``,`` between rules, ``+`` within a predicate (set above) — distinct

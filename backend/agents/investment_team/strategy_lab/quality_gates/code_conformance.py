@@ -44,10 +44,9 @@ from ..spec_dsl import (
     _INDICATOR_PARAM_SPECS,
     EntryRule,
     IndicatorName,
-    IndicatorRef,
-    Predicate,
     SignalExitRule,
     Source,
+    iter_tree_indicator_refs,
 )
 from .code_safety import (
     _collect_position_aliases,
@@ -103,13 +102,15 @@ _POSITION_RECEIVER_NAMES: frozenset[str] = frozenset({"position", "pos"})
 _VALID_SOURCES: frozenset[str] = frozenset(get_args(Source))
 
 
-def _indicators_in_predicate(p: Predicate) -> set[str]:
-    """Return the set of DSL indicator names referenced on either side of ``p``."""
-    out: set[str] = set()
-    for side in (p.lhs, p.rhs):
-        if isinstance(side, IndicatorRef):
-            out.add(side.name)
-    return out
+def _indicators_in_predicate(when: Any) -> set[str]:
+    """Return the set of DSL indicator names referenced anywhere in ``when``.
+
+    ``when`` is a rule's predicate position: a single ``Predicate`` or an
+    ``all_of`` / ``any_of`` tree. Every leaf predicate's indicator sides are
+    collected so a multi-confirmation entry's full indicator set is required of
+    the generated code, not just the first leg.
+    """
+    return {ref.name for ref in iter_tree_indicator_refs(when)}
 
 
 def _collect_required_indicators(spec: Any) -> set[str]:
