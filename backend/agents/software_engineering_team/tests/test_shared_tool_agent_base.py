@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 
 import pytest
+from code_review_agent import CodeReviewUnavailableError
+from code_review_agent.profiles import ReviewProfile
 
+from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.tool_agent_base import (
     DEFAULT_MAX_RELEVANT_CODE_CHARS,
     BaseReviewToolAgent,
@@ -226,7 +229,160 @@ def test_review_llm_exception(monkeypatch):
     assert "failed (LLM error)" in out.summary
 
 
+# ---------------------------------------------------------------------------
+# review_via_engine: opt-in routing through the shared code-review engine
+# ---------------------------------------------------------------------------
+
+
+class _EngineStubClient(DummyLLMClient):
+    """Returns one canned engine-shaped response for every chunk-review call."""
+
+    def __init__(self, response: dict) -> None:
+        super().__init__()
+        self._response = response
+
+    def complete_json(self, prompt: str, **kwargs: object) -> dict:
+        return self._response
+
+
+class _EngineDemoAgent(_DemoAgent):
+    """Demo reviewer that opts into the shared engine with a profile."""
+
+    review_via_engine = True
+    review_profile = ReviewProfile.SPEC_CONFORMANCE
+
+
+def _engine_agent(response):
+    """Build an engine-routed demo agent whose engine returns ``response``."""
+    agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
+    agent._model = object()
+    agent.llm = _EngineStubClient(response)
+    return agent
+
+
+def test_engine_review_maps_issues_and_source():
+    """Engine issues are mapped to ReviewIssues with the agent's source and
+    suggestion → recommendation."""
+    agent = _engine_agent(
+        {
+            "approved": False,
+            "issues": [
+                {
+                    "severity": "high",
+                    "category": "spec-compliance",
+                    "file_path": "a.ts",
+                    "description": "missing pagination",
+                    "suggestion": "add page params",
+                }
+            ],
+            "summary": "needs work",
+        }
+    )
+    out = agent.review(_Input(current_files={"a.ts": "code"}))
+    assert len(out.issues) == 1
+    issue = out.issues[0]
+    assert issue.source == "demo"
+    assert issue.severity == "high"
+    # CodeReviewIssue.suggestion is mapped onto ReviewIssue.recommendation.
+    assert issue.recommendation == "add page params"
+    assert issue.file_path == "a.ts"
+    assert "Demo review: 1 issue(s) found." == out.summary
+
+
+def test_engine_review_clean_pass_reports_no_issues():
+    """A clean engine pass yields an empty issue list and a 0-issue summary."""
+    agent = _engine_agent({"approved": True, "issues": [], "summary": "ok"})
+    out = agent.review(_Input(current_files={"a.ts": "code"}))
+    assert out.issues == []
+    assert "Demo review: 0 issue(s) found." == out.summary
+
+
+def test_engine_review_skips_without_code():
+    """With no current files the engine is not invoked and review is skipped."""
+    agent = _engine_agent({"approved": True, "issues": [], "summary": "ok"})
+    out = agent.review(_Input(current_files={}))
+    assert "skipped (no code)" in out.summary
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"approved": True, "issues": "not-a-list", "extra": 1},  # wrong type
+        {"approved": True, "summary": "ok"},  # 'issues' key entirely missing
+        {"approved": True, "issues": ["not-a-dict", 7, None]},  # non-dict entries
+        {"issues": []},  # 'approved' key missing — engine defaults it
+        {"approved": True, "issues": []},  # 'summary' key missing — engine defaults it
+    ],
+    ids=[
+        "issues-wrong-type",
+        "issues-key-missing",
+        "issues-non-dict-entries",
+        "approved-key-missing",
+        "summary-key-missing",
+    ],
+)
+def test_engine_review_handles_malformed_response(response: dict):
+    """A malformed engine response — ``issues`` of the wrong type, the ``issues``
+    key entirely absent, or non-dict issue entries — is handled gracefully: the
+    engine sanitizes it and the adapter, mapping the typed CodeReviewOutput,
+    returns a clean phase output with no issues."""
+    agent = _engine_agent(response)
+    out = agent.review(_Input(current_files={"a.ts": "code"}))
+    assert out.issues == []
+    assert "Demo review: 0 issue(s) found." == out.summary
+
+
+class _RaisingEngine:
+    """Stand-in for ``CodeReviewAgent`` whose ``run`` raises a given exception."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __call__(self, _llm):
+        return self
+
+    def run(self, _input):
+        raise self._exc
+
+
+def test_engine_review_degrades_on_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CodeReviewUnavailableError from the engine degrades to a "(LLM error)"
+    summary instead of raising."""
+    monkeypatch.setattr(
+        "code_review_agent.CodeReviewAgent",
+        _RaisingEngine(CodeReviewUnavailableError("engine down")),
+    )
+    agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
+    agent._model = object()
+    agent.llm = None
+    out = agent.review(_Input(current_files={"a.ts": "code"}))
+    assert "failed (LLM error)" in out.summary
+
+
+def test_engine_review_propagates_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unexpected engine error (e.g. TypeError) is not masked — it propagates."""
+    monkeypatch.setattr("code_review_agent.CodeReviewAgent", _RaisingEngine(TypeError("boom")))
+    agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
+    agent._model = object()
+    agent.llm = None
+    with pytest.raises(TypeError):
+        agent.review(_Input(current_files={"a.ts": "code"}))
+
+
+def test_engine_review_problem_solve_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issues produced via the engine still flow through the unchanged
+    one-at-a-time problem_solve path keyed on ``source``."""
+    agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _FakeAgent("raw"))
+    issue = ReviewIssue(source="demo", description="d", file_path="x.ts", recommendation="r")
+    out = agent.problem_solve(_Input(current_files={"x.ts": "old"}, review_issues=[issue]))
+    assert "fixed 1 of 1" in out.summary
+
+
 def test_problem_solve_no_model():
+    """problem_solve is a no-op that reports "skipped" when no model is set."""
     agent = _DemoAgent.__new__(_DemoAgent)
     agent._model = None
     assert "problem_solve skipped" in agent.problem_solve(_Input()).summary

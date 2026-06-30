@@ -721,6 +721,15 @@ class TechLeadAgent:
         Review completed work against the spec after receiving a task update.
         Identifies gaps in spec coverage and creates new tasks to fill them.
         Returns a list of new Task objects (may be empty).
+
+        Note: this senior-architecture review is intentionally NOT routed through
+        the shared code-review engine (``code_review_agent``). Unlike the other
+        review gates, it does not judge a code diff into a pass/fail issue list —
+        it reads task summaries and a codebase summary and emits gap ``Task``s, so
+        routing it through an issue-based engine would change *what* it produces.
+        The ``senior_architecture`` profile vocabulary is centralized in
+        ``code_review_agent.profiles`` for any future caller that does review a
+        diff from a senior-architecture perspective.
         """
         if getattr(task_update, "failure_class", None) == "llm_connectivity":
             logger.info(

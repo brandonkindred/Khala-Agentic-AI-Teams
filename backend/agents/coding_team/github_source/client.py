@@ -537,12 +537,13 @@ class GitHubClient:
 
         Preconditions:
             - ``event`` is one of ``COMMENT``/``REQUEST_CHANGES``/``APPROVE``.
-            - Each entry in ``comments`` is either a line-anchored
+            - Each entry in ``comments`` is a **line-anchored**
               ``{"path", "line", "side", "body"}`` whose ``line`` falls on a line
-              present in the diff for ``commit_id``, or a file-level
-              ``{"path", "subject_type": "file", "body"}`` whose ``path`` is a file
-              the PR changes. GitHub rejects the *entire* review (422) if any
-              comment's line is invalid or its path is not in the diff.
+              present in the diff for ``commit_id``. The Reviews API's embedded
+              ``comments`` array does not accept ``subject_type``; file-level
+              comments must be posted via ``create_review_comment`` instead.
+              GitHub rejects the *entire* review (422) if any comment's line is
+              invalid or its path is not in the diff.
         Postconditions:
             - Returns the created review payload (carries ``id`` and ``html_url``).
               Raises ``GitHubAPIError`` on any non-2xx response.
@@ -558,6 +559,83 @@ class GitHubClient:
             self._request(
                 "POST",
                 f"/repos/{owner}/{repo}/pulls/{number}/reviews",
+                json=json_body,
+            )
+        )
+        return r.json()
+
+    def create_review_comment(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        number: int,
+        commit_id: str,
+        path: str,
+        body: str,
+        line: Optional[int] = None,
+        side: str = "RIGHT",
+        subject_type: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Post a single pull-request review comment on the dedicated endpoint.
+
+        Unlike the embedded ``comments`` array of ``create_pull_request_review``,
+        ``POST /pulls/{number}/comments`` accepts ``subject_type``, so it is the
+        only way to attach a finding to a file as a whole (``subject_type="file"``)
+        rather than to a specific diff line. Posting one comment at a time also
+        isolates failures: a single off-diff comment 422s on its own without
+        sinking a whole review's worth of inline feedback.
+
+        Preconditions:
+            - Exactly one anchor is supplied: either ``line`` (a 1-based line
+              present in the diff for ``commit_id``) or ``subject_type="file"``.
+            - ``line``, when supplied, is >= 1 (GitHub uses 1-based line numbers).
+            - ``subject_type``, when supplied, is ``"file"`` (the only value this
+              method posts — a file-level anchor).
+            - ``side`` selects the diff side for a line comment (``"RIGHT"`` = the
+              new file, the default; ``"LEFT"`` = the old file). Ignored when
+              ``subject_type`` is used.
+            - ``side``, when a line comment is posted, is ``"RIGHT"`` or ``"LEFT"``.
+            - ``path`` (non-empty) names a file the PR changes; ``commit_id`` is the
+              PR head SHA.
+            - ``body`` is a non-empty string, already token-scrubbed by the caller
+              (this method does not scrub, matching ``create_pull_request_review``).
+        Postconditions:
+            - Returns the created-comment payload (carries ``id`` and
+              ``html_url``). Raises ``GitHubAPIError`` on any non-2xx response so
+              the caller can catch a 422 and degrade.
+            - Raises ``ValueError`` when a precondition is violated (neither or
+              both of ``line``/``subject_type`` supplied, a non-positive ``line``,
+              a ``subject_type`` other than ``"file"``, an invalid ``side``, or an
+              empty ``path``/``body``), rather than sending an ambiguous request
+              GitHub would reject with an opaque 422.
+        """
+        if not path or not body:
+            raise ValueError("create_review_comment requires non-empty 'path' and 'body'")
+        if (line is None) == (subject_type is None):
+            raise ValueError(
+                "create_review_comment requires exactly one of 'line' or 'subject_type'"
+            )
+        if line is not None and line < 1:
+            raise ValueError("create_review_comment 'line' must be a 1-based line number (>= 1)")
+        if line is not None and side not in ("LEFT", "RIGHT"):
+            raise ValueError("create_review_comment 'side' must be 'LEFT' or 'RIGHT'")
+        if subject_type is not None and subject_type != "file":
+            raise ValueError("create_review_comment 'subject_type' must be 'file'")
+        json_body: dict[str, Any] = {
+            "commit_id": commit_id,
+            "path": path,
+            "body": body,
+        }
+        if line is not None:
+            json_body["line"] = line
+            json_body["side"] = side
+        if subject_type is not None:
+            json_body["subject_type"] = subject_type
+        r = self._check(
+            self._request(
+                "POST",
+                f"/repos/{owner}/{repo}/pulls/{number}/comments",
                 json=json_body,
             )
         )

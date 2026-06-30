@@ -74,6 +74,7 @@ Bare bar fields are addressed by the string literals `"bar.close"`, `"bar.high"`
   - `{"kind": "take_profit", "pct": float>0, "note": str}` — `pct` is a fraction. Closes the WHOLE position at one target.
   - `{"kind": "scaled_take_profit", "levels": [{"pct": float>0, "qty_fraction": 0<float<=1.0, "note": str}, …], "note": str}` — a **laddered** take-profit: close a *fraction* of the position at each of several successively higher targets, letting the remainder run. Each rung's `qty_fraction` is the fraction of the ORIGINAL entry quantity to close at that rung. Constraints: rung `pct` values must be **strictly increasing** (each a higher target) and the `qty_fraction` values must **sum to ≤ 1.0** — the remainder `(1 − Σ qty_fraction)` is left open for your stop-loss / trailing-stop / signal exits to close. Use this (instead of a single `take_profit`) when the hypothesis wants to *harvest partial profit at staged targets while letting a runner ride a trailing stop* — e.g. sell 50% at +5%, 30% at +10%, and let the last 20% trail. Symmetric for shorts (targets are `−pct` off entry). Pair it with a `stop_loss` (ideally `trailing_high`/`trailing_low`) so the un-laddered remainder still has a protective exit. If the `qty_fraction` values sum to **exactly 1.0** there is no remainder — the ladder closes the full position over its rungs — so an additional protective exit is optional rather than required.
   - `{"kind": "signal_exit", "when": Predicate | all_of/any_of tree, "note": str}` — `when` may also be a boolean combinator (same shapes as entry `when`).
+  - `{"kind": "oco_bracket", "stop_loss": {"pct": 0<float<1.0, "style"?: "market"|"limit", "limit_offset_pct"?: 0<float<1.0, "note": str}, "take_profit": {"pct": 0<float<1.0, "note": str}, "note": str}` — a broker-style **OCO bracket**: a protective stop leg and a profit-target leg attached to the entry order as ONE one-cancels-other group. On entry-fill the engine rests BOTH as opposite-side child orders sharing an OCO group; whichever fills first closes the WHOLE position and cancels the other. Unlike the bar-by-bar `take_profit` (which closes at the next bar's market open once the target is crossed), the bracket's take-profit rests as a **LIMIT and fills at its exact target price** — that resting-limit execution is the reason to choose a bracket over independent `stop_loss` + `take_profit` rules. Both legs are fractions off the entry reference price (long: stop below / target above entry; short: the signs flip). `stop_loss.style` is **optional and defaults to `"market"`** (the `?` marks both it and `limit_offset_pct` as conditional): `"market"` rests a STOP; `"limit"` rests a STOP_LIMIT and REQUIRES `limit_offset_pct` (the limit's distance from the stop, strictly `0<…<1.0`). **Omit both `style` and `limit_offset_pct` for an ordinary market bracket stop**, and only set `limit_offset_pct` together with `style: "limit"`. **Constraints:** a spec carries at most ONE `oco_bracket`, and a bracket must be the **SOLE price exit** — do NOT combine it with `stop_loss` / `take_profit` / `scaled_take_profit` (the spec is rejected). A `signal_exit` MAY accompany the bracket as a secondary discretionary trigger.
   Bar-counting "time stops" are deliberately NOT a supported kind — real traders close on price, P&L, or signal reversal, not on an arbitrary "exit after N bars" trigger.
   A `trailing_high` / `trailing_low` stop ratchets its trigger in the favorable direction as price moves your way and, by design, lifts the protective level **above entry** once a long is in profit (below entry for a short) — that is correct gain-locking behavior, not a defect. See the stop-order semantics reference in the system prompt.
 - **`sizing`** (single object, not a list):
@@ -226,6 +227,25 @@ A contrasting profile: a breakout wins *less often* but with a larger reward:ris
     "consistency_note": "reward:risk 1.5 needs only 40% wins to break even; 48% clears it. 0.48 x 9% avg win - 0.52 x 6% avg loss ~ +1.2%/trade x ~30 trades ~ +36% gross, ~20% net after costs. The sub-50% win rate is coherent, not a defect."
   },
   "rationale": "Differs from the stock pullback by design — breakout, not pullback; crypto, not equities; expectancy from reward:risk, not hit rate. The forecast is deliberately a coherent sub-50% win rate so the win rate is not chased at expectancy's expense."
+}
+```
+
+### Worked OCO bracket exit
+
+Use an `oco_bracket` when you want a resting limit take-profit paired with a
+protective stop as one OCO unit (the target fills at its exact price; whichever
+leg hits first cancels the other). The bracket is the sole price exit — no
+separate `stop_loss` / `take_profit`. The stop leg below omits `style`, so it
+defaults to `"market"` (a plain protective STOP); add `"style": "limit"` with a
+`limit_offset_pct` for a STOP_LIMIT instead:
+
+```json
+{
+  "exit_rules": [
+    {"kind": "oco_bracket",
+     "stop_loss": {"pct": 0.03},
+     "take_profit": {"pct": 0.06}}
+  ]
 }
 ```
 
