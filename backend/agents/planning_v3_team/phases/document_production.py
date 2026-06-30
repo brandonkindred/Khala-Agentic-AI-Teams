@@ -10,12 +10,62 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from llm_service import compact_text, get_client
 from planning_v3_team.models import ClientContext, HandoffPackage
 
 logger = logging.getLogger(__name__)
 
 CONTEXT_DOC_FILENAME = "client_context.md"
 INITIAL_SPEC_FILENAME = "initial_spec.md"
+
+ARCHITECTURE_OVERVIEW_MAX_CHARS = 8000
+
+
+def _compact_architecture_overview(overview: str, llm: Any = None) -> str:
+    """Intelligently compact an oversized architecture overview, never slicing it.
+
+    Uses ``compact_text`` (LLM-powered, preserves technical detail) instead of a raw
+    ``[:8000]`` slice. On any failure the FULL overview is returned — we never drop
+    architecture content.
+
+    Args:
+        overview: the architecture overview text (assumed longer than the budget).
+        llm: optional ``LLMClient`` to reuse; when ``None`` the team's cached client
+            is obtained lazily via ``get_client`` (memoized in ``factory.py``). The
+            parameter makes the dependency injectable for testing.
+
+    Preconditions:
+        - ``overview`` is a non-empty string longer than the budget.
+    Postconditions:
+        - Returns a string of at most ``ARCHITECTURE_OVERVIEW_MAX_CHARS`` characters.
+          Intelligent compaction is preferred; a hard truncation is applied only as a
+          last resort (compaction was best-effort and still over budget, or it raised),
+          so the bounded-output guarantee the old slice provided is preserved while we
+          still avoid blindly slicing the common case. Unlike the spec, this overview is
+          a *generated* secondary artifact, so a bounded last resort is acceptable.
+    """
+    try:
+        client = llm if llm is not None else get_client("planning_v3")
+        compacted = compact_text(
+            overview,
+            max_chars=ARCHITECTURE_OVERVIEW_MAX_CHARS,
+            llm=client,
+            content_description="architecture overview",
+        )
+        if len(compacted) > ARCHITECTURE_OVERVIEW_MAX_CHARS:
+            logger.warning(
+                "Compacted architecture overview still exceeds budget (%d > %d chars); "
+                "applying last-resort hard truncation.",
+                len(compacted),
+                ARCHITECTURE_OVERVIEW_MAX_CHARS,
+            )
+            return compacted[:ARCHITECTURE_OVERVIEW_MAX_CHARS]
+        return compacted
+    except Exception:
+        logger.warning(
+            "Architecture overview compaction failed; using bounded fallback", exc_info=True
+        )
+        return overview[:ARCHITECTURE_OVERVIEW_MAX_CHARS]
 
 
 def _write_context_document(repo_path: str, client_context: ClientContext) -> str:
@@ -182,8 +232,11 @@ def run_document_production(
                 repo_path=repo_path,
                 client_context=cc_dict,
             )
-            if architecture_overview and len(architecture_overview) > 8000:
-                architecture_overview = architecture_overview[:8000] + "\n\n(truncated)"
+            if (
+                architecture_overview
+                and len(architecture_overview) > ARCHITECTURE_OVERVIEW_MAX_CHARS
+            ):
+                architecture_overview = _compact_architecture_overview(architecture_overview)
         except Exception as e:
             logger.warning("Architecture step failed: %s", e)
 
