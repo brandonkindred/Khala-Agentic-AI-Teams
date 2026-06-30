@@ -14,6 +14,8 @@ from .strategy_lab.spec_dsl import (
     EntryRule,
     ExitRule,
     FixedFractionSizing,
+    OcoBracketRule,
+    SignalExitRule,
     SizingRule,
 )
 
@@ -473,6 +475,71 @@ class StrategySpec(BaseModel):
             raise ValueError(
                 f"at most one limit-style stop-loss (style='limit') is allowed "
                 f"per spec; got {limit_stops}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_oco_bracket_exclusivity(self) -> "StrategySpec":
+        """An ``oco_bracket`` is a self-contained full-position OCO exit.
+
+        The bracket is attached to the entry order and materialized by the engine
+        into resting OCO children sized to the whole position; a coexisting
+        ``stop_loss`` / ``take_profit`` / ``scaled_take_profit`` would be
+        evaluated independently by the bar-by-bar exit dispatcher and fight the
+        bracket (double protection, ambiguous sizing). So at most one bracket is
+        allowed, and when present it must be the sole engine-handled *price*
+        exit. A ``signal_exit`` may coexist as a secondary discretionary trigger.
+
+        Preconditions: ``exit_rules`` is the validated rule list.
+        Postconditions: returns ``self`` when at most one bracket is present and,
+        if one is, the only other exits are ``signal_exit`` rules; raises
+        ``ValueError`` otherwise.
+        """
+        brackets = [r for r in self.exit_rules if isinstance(r, OcoBracketRule)]
+        if not brackets:
+            return self
+        # A bracket attaches to engine-EMITTED entry orders, so it only functions
+        # when entries are engine-managed. With ``requires_custom_code=True`` the
+        # runtime routes entries through strategy code (``entry_rules=None`` is
+        # passed to the engine), the entry dispatcher never attaches the bracket,
+        # and the exit evaluator skips it — the bracket would be silently inert and
+        # close nothing. Reject the combination so it is never mistaken for a
+        # working exit. (The orchestrator can still flip the flag *after*
+        # construction via ``model_copy`` / assignment, which Pydantic does not
+        # re-validate — the SpecReadinessGate enforces the same invariant on the
+        # final spec for that path.)
+        if self.requires_custom_code:
+            raise ValueError(
+                "oco_bracket is not usable with requires_custom_code=True: the bracket "
+                "attaches only to engine-managed entries, so on the custom-code path it is "
+                "inert and closes nothing. Remove the bracket (use stop_loss / take_profit "
+                "/ signal_exit), or set requires_custom_code=False."
+            )
+        if len(brackets) > 1:
+            raise ValueError(
+                f"at most one oco_bracket exit rule is allowed per spec; got {len(brackets)}"
+            )
+        # Allowlist (not a hardcoded conflict denylist): a bracket may coexist
+        # ONLY with the bracket itself and ``signal_exit`` (a non-price,
+        # indicator-based trigger). Every other exit kind — current or
+        # future — is a conflicting engine-handled price exit by default, so a
+        # new price-exit kind added to the union is rejected with a bracket
+        # without needing this validator to be updated. Maintenance note: if a
+        # future NON-price exit kind is added that is meant to coexist with a
+        # bracket (like ``signal_exit``), add it to this allowlist tuple.
+        conflicting = [
+            (i, r)
+            for i, r in enumerate(self.exit_rules)
+            if not isinstance(r, (OcoBracketRule, SignalExitRule))
+        ]
+        if conflicting:
+            # Report the offending rules by ``exit_rules`` index AND kind so a
+            # spec with many exits can locate them directly.
+            offenders = ", ".join(f"[{i}] {r.kind}" for i, r in conflicting)
+            raise ValueError(
+                "an oco_bracket is a full-position OCO exit and must be the sole "
+                f"engine-handled price exit; remove the coexisting rule(s) {offenders} "
+                "(a signal_exit may still accompany the bracket)"
             )
         return self
 

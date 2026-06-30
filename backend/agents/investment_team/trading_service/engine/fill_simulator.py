@@ -1609,7 +1609,12 @@ class FillSimulator:
                 trail_offset_kind=sl.trail_offset_kind,
                 tif=TimeInForce.GTC,
                 unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
-                reason="bracket_sl",
+                # ``engine_exit:`` prefix so a bracket-leg close is attributed as
+                # an engine-owned exit: ``TradeRecord.exit_reason`` carries it
+                # verbatim (the reconciler is bypassed), the alignment/conformance
+                # gates treat the close as engine-owned, and the leg fill is
+                # counted in the engine-exit fire/fill telemetry.
+                reason=f"{ENGINE_EXIT_REASON_PREFIX}bracket_sl",
             )
             sl_child = self.order_book.submit_attached(
                 sl_req,
@@ -1646,7 +1651,9 @@ class FillSimulator:
                 limit_price=tp.limit_price,
                 tif=TimeInForce.GTC,
                 unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
-                reason="bracket_tp",
+                # ``engine_exit:`` prefix — see the SL leg above; a bracket
+                # take-profit close is an engine-owned exit.
+                reason=f"{ENGINE_EXIT_REASON_PREFIX}bracket_tp",
             )
             tp_child = self.order_book.submit_attached(
                 tp_req,
