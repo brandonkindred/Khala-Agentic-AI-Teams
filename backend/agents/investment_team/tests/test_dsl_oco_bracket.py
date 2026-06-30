@@ -61,6 +61,7 @@ from investment_team.trading_service.service import (
 )
 from investment_team.trading_service.strategy.contract import (
     Bar,
+    OrderRequest,
     OrderSide,
     OrderType,
 )
@@ -297,7 +298,7 @@ def _emit_with_bracket(side: str, bracket: OcoBracketRule, close: float = 100.0)
         risk_limits=RiskLimits(max_position_pct=100),
         asset_class="stocks",
     )
-    pending: list = []
+    pending: list[OrderRequest] = []
     dispatcher.maybe_emit(
         cur_bar=_make_bar(close=close),
         portfolio=_make_portfolio(),
@@ -348,7 +349,7 @@ def test_entry_without_bracket_has_no_attachments() -> None:
         sizing=FixedFractionSizing(fraction=0.02),
         exit_rules=[],
     )
-    pending: list = []
+    pending: list[OrderRequest] = []
     dispatcher.maybe_emit(
         cur_bar=_make_bar(close=100.0),
         portfolio=_make_portfolio(),
@@ -495,6 +496,7 @@ def test_end_to_end_limit_style_stop_materializes_and_fills_stop_limit_child() -
     outcome = sim.process_bar(_bar("2024-01-03", open_price=96.0, high=96.0, low=93.0, close=94.0))
     assert len(outcome.closed_trades) == 1
     assert outcome.closed_trades[0].exit_reason == "engine_exit:bracket_sl"
+    assert len(outcome.exit_fills) == 1
     assert outcome.exit_fills[0].price == pytest.approx(93.1)
     assert "AAA" not in portfolio.positions
     assert order_book.children_of(parent.order_id) == []
@@ -536,6 +538,7 @@ def test_end_to_end_short_limit_style_stop_fills_and_cancels_take_profit() -> No
     )
     assert len(outcome.closed_trades) == 1
     assert outcome.closed_trades[0].exit_reason == "engine_exit:bracket_sl"
+    assert len(outcome.exit_fills) == 1
     assert outcome.exit_fills[0].price == pytest.approx(107.1)
     assert "AAA" not in portfolio.positions
     assert order_book.children_of(parent.order_id) == []
