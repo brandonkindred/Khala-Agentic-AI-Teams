@@ -90,6 +90,14 @@ def test_split_sections_oversized_block_splits_on_blanklines():
     assert "".join(sections) == block
 
 
+def test_split_sections_crlf_blank_lines():
+    # Windows CRLF blank lines must still split (no headings, so blank-line path).
+    block = "para1 " * 20 + "\r\n\r\n" + "para2 " * 20
+    sections = split_sections(block, 80)
+    assert len(sections) >= 2
+    assert "".join(sections) == block  # lossless even with CRLF
+
+
 def test_split_sections_oversized_coherent_block_kept_whole():
     # No headings, no blank lines: a single coherent block over budget is kept whole
     # (map_reduce compacts it intelligently rather than slicing mid-content).
@@ -107,6 +115,16 @@ def test_parse_json_plain():
 
 def test_parse_json_fenced():
     assert parse_json_response('```json\n{"a": 2}\n```') == {"a": 2}
+
+
+def test_parse_json_tagged_fence_after_prose():
+    # A reasoning/prose preamble before a ```json block must not derail extraction.
+    resp = 'Here is my analysis...\n```json\n{"a": 3}\n```\nDone.'
+    assert parse_json_response(resp) == {"a": 3}
+
+
+def test_parse_json_untagged_leading_fence():
+    assert parse_json_response('```\n{"a": 4}\n```') == {"a": 4}
 
 
 def test_parse_json_empty_and_invalid():
@@ -290,7 +308,7 @@ def test_map_reduce_no_compact_when_client_lacks_surface():
         def get_max_context_tokens(self):
             return 1000  # floor 8000
 
-        # no .complete -> _can_compact False
+        # no .complete -> _supports_compaction False
 
     text = "w" * 9000
     mapped = []

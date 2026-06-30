@@ -137,8 +137,12 @@ def split_sections(text: str, max_chars: int) -> List[str]:
 
 
 def _blank_line_pieces(text: str) -> List[str]:
-    """Split on blank lines, retaining the delimiters so concatenation is lossless."""
-    parts = re.split(r"(\n\s*\n)", text)
+    """Split on blank lines, retaining the delimiters so concatenation is lossless.
+
+    The ``\\r?\\n`` handles both Unix (LF) and Windows (CRLF) line endings so specs
+    authored on Windows still split on blank lines.
+    """
+    parts = re.split(r"(\r?\n\s*\r?\n)", text)
     pieces: List[str] = []
     for i in range(0, len(parts), 2):
         seg = parts[i] + (parts[i + 1] if i + 1 < len(parts) else "")
@@ -188,7 +192,7 @@ def map_reduce(
     total = len(sections)
     for idx, section in enumerate(sections):
         chunk = section
-        if len(chunk) > section_chars and _can_compact(llm):
+        if len(chunk) > section_chars and _supports_compaction(llm):
             try:
                 chunk = compact_text(
                     chunk,
@@ -224,12 +228,18 @@ def map_reduce(
     return reduce_fn(results)
 
 
-def _can_compact(llm: Any) -> bool:
-    """True when ``llm`` supports the compaction surface (``.complete`` + ctx size)."""
+def _supports_compaction(llm: Any) -> bool:
+    """True when ``llm`` exposes the compaction surface (``.complete`` + ctx size)."""
     return hasattr(llm, "complete") and hasattr(llm, "get_max_context_tokens")
 
 
-# --- shared JSON parse helper (matches existing phase fence-stripping) -----
+# --- shared JSON parse helper -----
+
+# Prefer an explicit ```json fenced block anywhere in the response — this is robust
+# to a leading reasoning/"thinking" block or prose before the JSON, which a naive
+# "split on the first ```" would mis-extract. Non-greedy so it stops at the closing
+# fence of the first block.
+_JSON_FENCE_RE = re.compile(r"```json\s*([\s\S]*?)```", re.IGNORECASE)
 
 
 def parse_json_response(response: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -244,11 +254,16 @@ def parse_json_response(response: Optional[str]) -> Optional[Dict[str, Any]]:
     text = (response or "").strip()
     if not text:
         return None
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
+    fenced = _JSON_FENCE_RE.search(text)
+    if fenced:
+        # A json-tagged block won wherever it sits (handles thinking-then-json).
+        text = fenced.group(1).strip()
+    elif text.startswith("```"):
+        # Generic (untagged) fence at the start: take the first fenced block's body.
+        # (A ```json-tagged fence was already handled above.)
+        inner = text.split("```")
+        if len(inner) >= 3:
+            text = inner[1].strip()
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, TypeError):
