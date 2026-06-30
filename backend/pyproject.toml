@@ -25,7 +25,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["shared", "backend_agent", "frontend_team", "devops_agent", "qa_agent"]
+known-first-party = ["shared", "backend_agent", "frontend_team", "qa_agent"]
 
 # Complexity gating (C901 / PLR0915). High-water-mark being ratcheted down over
 # time toward the ruff defaults (10 / 50). NOTE: this pyproject governs
