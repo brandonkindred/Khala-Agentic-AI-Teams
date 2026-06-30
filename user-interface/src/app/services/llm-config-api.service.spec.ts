@@ -116,4 +116,33 @@ describe('LlmConfigApiService', () => {
     expect(req.request.body).toEqual({ ids: [3, 1, 2] });
     req.flush({ providers: [], storage_available: true, storage_status: 'available' });
   });
+
+  // Error propagation for the provider-list methods — each must surface an
+  // HttpErrorResponse to the subscriber rather than swallowing the failure.
+  const providerErrorCases: readonly {
+    name: string;
+    call: () => void;
+    url: string;
+    status: number;
+  }[] = [
+    { name: 'listProviders', call: () => service.listProviders().subscribe({ error: capture }), url: `${baseUrl}/providers`, status: 500 },
+    { name: 'createProvider', call: () => service.createProvider({ label: 'A', provider: 'claude', api_key: 'sk' }).subscribe({ error: capture }), url: `${baseUrl}/providers`, status: 400 },
+    { name: 'updateProvider', call: () => service.updateProvider(7, { label: 'B' }).subscribe({ error: capture }), url: `${baseUrl}/providers/7`, status: 404 },
+    { name: 'deleteProvider', call: () => service.deleteProvider(3).subscribe({ error: capture }), url: `${baseUrl}/providers/3`, status: 503 },
+    { name: 'reorderProviders', call: () => service.reorderProviders([1, 2]).subscribe({ error: capture }), url: `${baseUrl}/providers/order`, status: 429 },
+  ];
+
+  let captured: HttpErrorResponse | undefined;
+  const capture = (err: HttpErrorResponse) => (captured = err);
+
+  for (const tc of providerErrorCases) {
+    it(`${tc.name} propagates an HTTP error to the observable`, () => {
+      captured = undefined;
+      tc.call();
+      const req = httpMock.expectOne(tc.url);
+      req.flush('error', { status: tc.status, statusText: 'Error' });
+      expect(captured).toBeInstanceOf(HttpErrorResponse);
+      expect(captured?.status).toBe(tc.status);
+    });
+  }
 });

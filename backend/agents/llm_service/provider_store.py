@@ -205,6 +205,8 @@ def _decrypt_key(ciphertext: str) -> str:
         return ""
 
 
+# Column list for SELECTs. The ORDER here is the single source of truth that
+# ``_row_to_entry`` unpacks positionally — keep the two in lockstep when editing.
 _SELECT_COLUMNS = (
     "id, label, provider, model, base_url, api_key_ciphertext, sort_order, "
     "limit_exceeded, limit_type, reset_at, created_at, updated_at"
@@ -214,25 +216,42 @@ _SELECT_COLUMNS = (
 def _row_to_entry(row: tuple) -> ProviderEntry:
     """Map a SELECT row (``_SELECT_COLUMNS`` order) to a :class:`ProviderEntry`.
 
+    Unpacks the row into named locals in ``_SELECT_COLUMNS`` order so a column-order
+    change surfaces here (a length mismatch raises) instead of silently mis-mapping
+    by positional index.
+
     Postconditions: the api key is decrypted; ``reset_at`` is timezone-aware UTC
         when present. Never raises for a well-formed row.
     """
-    reset_at = row[9]
+    (
+        id_,
+        label,
+        provider,
+        model,
+        base_url,
+        api_key_ciphertext,
+        sort_order,
+        limit_exceeded,
+        limit_type,
+        reset_at,
+        created_at,
+        updated_at,
+    ) = row
     if reset_at is not None and reset_at.tzinfo is None:
         reset_at = reset_at.replace(tzinfo=timezone.utc)
     return ProviderEntry(
-        id=int(row[0]),
-        label=row[1],
-        provider=(row[2] or "").lower().strip(),
-        model=row[3] or "",
-        base_url=row[4] or "",
-        api_key=_decrypt_key(row[5] or ""),
-        sort_order=int(row[6]),
-        limit_exceeded=bool(row[7]),
-        limit_type=row[8] or "",
+        id=int(id_),
+        label=label,
+        provider=(provider or "").lower().strip(),
+        model=model or "",
+        base_url=base_url or "",
+        api_key=_decrypt_key(api_key_ciphertext or ""),
+        sort_order=int(sort_order),
+        limit_exceeded=bool(limit_exceeded),
+        limit_type=limit_type or "",
         reset_at=reset_at,
-        created_at=row[10],
-        updated_at=row[11],
+        created_at=created_at,
+        updated_at=updated_at,
     )
 
 
@@ -332,7 +351,13 @@ def create_entry(
     """Append a provider entry at the end of the fallback list.
 
     The new ``sort_order`` is ``max(sort_order)+1`` (0 for the first entry),
-    computed in the INSERT so concurrent appends don't collide on a stale max.
+    computed in the INSERT. Two appends racing in separate transactions can still
+    read the same ``MAX`` and produce a duplicate ``sort_order``; this is harmless —
+    ``reorder`` is the canonical ordering mechanism and selection /
+    ``load_ordered_entries`` tie-break deterministically on ``sort_order ASC, id ASC``,
+    so a transient duplicate only affects the relative order of two same-rank entries
+    until the next reorder. No unique constraint is imposed (it would make a
+    concurrent append fail rather than degrade gracefully).
 
     Preconditions: ``label`` and ``provider`` are non-empty; Postgres is enabled.
     Postconditions: the entry is persisted (api key Fernet-encrypted), the cache

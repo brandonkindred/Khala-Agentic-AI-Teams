@@ -350,6 +350,14 @@ def _mark_entry_exhausted(entry: "provider_store.ProviderEntry", err: LLMRateLim
     the error matches :data:`OLLAMA_WEEKLY_LIMIT_MESSAGE`, else a short ``rate``
     window. ``limit_type`` is the lightweight label stored alongside.
 
+    By design (the "track the reset time; keep the type label lightweight" decision),
+    the only weekly signal recognized today is Ollama's weekly-limit message — Claude
+    and other providers fall through to the ``rate`` window, driven by their
+    ``Retry-After`` when present. ``reset_at`` (not ``limit_type``) is the load-bearing
+    field for selection, so a misclassified type at worst uses the shorter fallback
+    window when no ``Retry-After`` is given; add a provider's weekly signal here if a
+    longer default is ever needed.
+
     Postconditions: persists the mark via :func:`provider_store.mark_exhausted`
         (idempotent, swallows its own write errors). Never raises.
     """

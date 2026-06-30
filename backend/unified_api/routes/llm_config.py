@@ -444,7 +444,9 @@ class LlmProviderUpdate(BaseModel):
     edits without re-entering it), mirroring ``PUT /api/llm-config``.
     """
 
-    label: str | None = Field(None, min_length=1)
+    # No ``min_length`` here: per the contract an empty/omitted field means "leave
+    # unchanged" (normalized to None in the handler), so an empty label must not 422.
+    label: str | None = Field(None, description="New label; empty/omitted leaves it unchanged.")
     provider: Literal["ollama", "claude"] | None = None
     model: str | None = None
     base_url: str | None = None
@@ -610,6 +612,16 @@ async def reorder_providers(body: LlmProviderOrderUpdate) -> LlmProviderListResp
         atomic transaction), caches refreshed, and the reordered list returned.
     """
     _require_storage()
+    # The reorder must be a permutation of the CURRENT id set: same length AND same
+    # members. Otherwise a partial list would leave omitted entries with stale
+    # sort_order (colliding with the new positions), and unknown ids would be silent
+    # no-ops — both leaving the order inconsistent. Reject early with a clear 400.
+    existing_ids = [e.id for e in provider_store.load_ordered_entries(use_cache=False)]
+    if len(body.ids) != len(existing_ids) or set(body.ids) != set(existing_ids):
+        raise HTTPException(
+            status_code=400,
+            detail="ids must be exactly the current set of provider ids (a permutation of the list).",
+        )
     try:
         provider_store.reorder(body.ids)
     except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
@@ -631,19 +643,26 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     existing = provider_store.get_entry(entry_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Provider {entry_id} not found")
-    # Merge updates over the existing entry for the guard: an empty api_key keeps the
-    # stored one, so the effective key is the new one (if given) else the existing.
+    # Per the contract, an empty/whitespace text field means "leave unchanged": normalize
+    # it to None so update_entry (which treats None as unchanged) never clears a stored
+    # value — mirrors the api_key handling and the single-provider PUT. Without this, a
+    # client sending model:"" or base_url:"" would silently wipe the field.
+    label = body.label.strip() if (body.label and body.label.strip()) else None
+    model = body.model.strip() if (body.model and body.model.strip()) else None
+    base_url = body.base_url.strip() if (body.base_url and body.base_url.strip()) else None
+    # Merge updates over the existing entry for the guard: an empty value keeps the
+    # stored one, so the effective field is the new one (if given) else the existing.
     merged_provider = body.provider or existing.provider
-    merged_base_url = body.base_url if body.base_url is not None else existing.base_url
+    merged_base_url = base_url if base_url is not None else existing.base_url
     effective_api_key = body.api_key.strip() or existing.api_key
     _guard_entry_credentials(merged_provider, merged_base_url, effective_api_key)
     try:
         updated = provider_store.update_entry(
             entry_id,
-            label=body.label,
+            label=label,
             provider=body.provider,
-            model=body.model,
-            base_url=body.base_url,
+            model=model,
+            base_url=base_url,
             # Empty string => leave the stored key untouched (None for the store).
             api_key=(body.api_key.strip() or None),
         )

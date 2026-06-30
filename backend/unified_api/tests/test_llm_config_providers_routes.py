@@ -173,6 +173,37 @@ def test_update_missing_entry_is_404(app_client):
     assert resp.status_code == 404
 
 
+def test_update_empty_text_fields_are_left_unchanged(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="ollama")]
+    # Empty strings mean "leave unchanged" per the contract — normalized to None so the
+    # store never clears the stored value.
+    resp = client.put("/api/llm-config/providers/1", json={"label": "  ", "model": "", "base_url": ""})
+    assert resp.status_code == 200
+    update_op = next(op for op in state["ops"] if isinstance(op, tuple) and op[0] == "update")
+    kw = update_op[2]
+    assert kw["label"] is None and kw["model"] is None and kw["base_url"] is None
+
+
+def test_update_empty_label_is_not_422(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1)]
+    # An empty label must be treated as "no change", not rejected with a 422.
+    resp = client.put("/api/llm-config/providers/1", json={"label": ""})
+    assert resp.status_code == 200
+
+
+def test_update_sets_non_empty_fields(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="ollama")]
+    resp = client.put(
+        "/api/llm-config/providers/1", json={"label": "New", "model": "qwen", "base_url": "http://h:11434"}
+    )
+    assert resp.status_code == 200
+    kw = next(op for op in state["ops"] if isinstance(op, tuple) and op[0] == "update")[2]
+    assert kw["label"] == "New" and kw["model"] == "qwen" and kw["base_url"] == "http://h:11434"
+
+
 def test_update_to_claude_without_key_is_400(app_client):
     client, state = app_client
     state["entries"] = [_entry(1, provider="ollama")]
@@ -200,6 +231,19 @@ def test_reorder_calls_store(app_client):
     resp = client.put("/api/llm-config/providers/order", json={"ids": [3, 1, 2]})
     assert resp.status_code == 200
     assert ("reorder", [3, 1, 2]) in state["ops"]
+
+
+def test_reorder_rejects_non_permutation(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1), _entry(2), _entry(3)]
+    # Missing an id, an unknown id, and a duplicate (wrong length) are all rejected.
+    assert client.put("/api/llm-config/providers/order", json={"ids": [1, 2]}).status_code == 400
+    assert client.put("/api/llm-config/providers/order", json={"ids": [1, 2, 99]}).status_code == 400
+    assert client.put("/api/llm-config/providers/order", json={"ids": [1, 2, 2]}).status_code == 400
+    # No store mutation happened for any rejected request.
+    assert not any(op[0] == "reorder" for op in state["ops"] if isinstance(op, tuple))
+    # A correct permutation succeeds.
+    assert client.put("/api/llm-config/providers/order", json={"ids": [3, 2, 1]}).status_code == 200
 
 
 def test_mutations_require_postgres(app_client, monkeypatch):

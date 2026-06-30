@@ -1,5 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
+import { CdkDragDrop } from '@angular/cdk/drag-drop';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
@@ -50,6 +51,10 @@ function entry(over: Partial<LlmProviderEntry> = {}): LlmProviderEntry {
 
 function listResponse(providers: LlmProviderEntry[]): LlmProviderListResponse {
   return { providers, storage_available: true, storage_status: 'available' };
+}
+
+function dropEvent(previousIndex: number, currentIndex: number): CdkDragDrop<LlmProviderEntry[]> {
+  return { previousIndex, currentIndex } as CdkDragDrop<LlmProviderEntry[]>;
 }
 
 describe('LlmConfigDashboardComponent', () => {
@@ -446,38 +451,57 @@ describe('LlmConfigDashboardComponent', () => {
     );
     component.loadProviders();
     apiSpy.reorderProviders.mockReturnValue(of(listResponse([entry({ id: 2 }), entry({ id: 1 })])));
-    component.onProviderDrop({ previousIndex: 0, currentIndex: 1 } as never);
+    component.onProviderDrop(dropEvent(0, 1));
     expect(apiSpy.reorderProviders).toHaveBeenCalledWith([2, 1]);
   });
 
   it('ignores a no-op drag-drop', () => {
-    component.onProviderDrop({ previousIndex: 1, currentIndex: 1 } as never);
+    component.onProviderDrop(dropEvent(1, 1));
     expect(apiSpy.reorderProviders).not.toHaveBeenCalled();
   });
 
-  it('reloads truth and reports when a mutation fails', () => {
+  it('reports a mutation failure without reloading (no race)', () => {
     apiSpy.createProvider.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
     apiSpy.listProviders.mockClear();
     component.startAdd();
     component.addForm!.label = 'X';
     component.submitAdd();
     expect(component.providersError).toBe('nope');
-    expect(apiSpy.listProviders).toHaveBeenCalled(); // reloads to resync
+    // No resync reload on error — that would race and clear the just-set error.
+    expect(apiSpy.listProviders).not.toHaveBeenCalled();
+  });
+
+  it('reverts the optimistic reorder and keeps the error on deferred failure', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(listResponse([entry({ id: 1, sort_order: 0 }), entry({ id: 2, sort_order: 1 })])),
+    );
+    component.loadProviders();
+    apiSpy.listProviders.mockClear();
+    // A Subject lets the reorder fail LATER (after the optimistic move), proving the
+    // error survives and the order reverts — the race the old reload-on-error had.
+    const result$ = new Subject<LlmProviderListResponse>();
+    apiSpy.reorderProviders.mockReturnValue(result$);
+    component.onProviderDrop(dropEvent(0, 1));
+    expect(component.providers.map((p) => p.id)).toEqual([2, 1]); // optimistic move applied
+    result$.error({ error: { detail: 'reorder failed' } });
+    expect(component.providersError).toBe('reorder failed');
+    expect(component.providers.map((p) => p.id)).toEqual([1, 2]); // reverted
+    expect(apiSpy.listProviders).not.toHaveBeenCalled(); // no resync reload
   });
 
   it('formats the reset estimate for a limited provider', () => {
-    const inTwoHours = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+    const base = Date.UTC(2026, 5, 30, 12, 0, 0);
+    (component as unknown as { now: () => number }).now = () => base;
+    const at = (ms: number) => new Date(base + ms).toISOString();
+    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: at(2 * 3600 * 1000) }))).toBe(
+      'resets in ~2h',
+    );
+    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: at(30 * 60 * 1000) }))).toBe(
+      'resets in ~30m',
+    );
     expect(
-      component.resetInfo(entry({ limit_exceeded: true, reset_at: inTwoHours })),
-    ).toBe('resets in ~2h');
-    const inThirtyMin = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-    expect(
-      component.resetInfo(entry({ limit_exceeded: true, reset_at: inThirtyMin })),
-    ).toContain('m');
-    const inThreeDays = new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString();
-    expect(
-      component.resetInfo(entry({ limit_exceeded: true, reset_at: inThreeDays })),
-    ).toContain('d');
+      component.resetInfo(entry({ limit_exceeded: true, reset_at: at(3 * 24 * 3600 * 1000) })),
+    ).toBe('resets in ~3d');
   });
 
   it('returns no reset estimate when not limited or no reset_at', () => {
@@ -487,7 +511,9 @@ describe('LlmConfigDashboardComponent', () => {
   });
 
   it('reports a past reset_at as resetting now', () => {
-    const past = new Date(Date.now() - 1000).toISOString();
+    const base = Date.UTC(2026, 5, 30, 12, 0, 0);
+    (component as unknown as { now: () => number }).now = () => base;
+    const past = new Date(base - 1000).toISOString();
     expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: past }))).toBe('resetting now');
   });
 

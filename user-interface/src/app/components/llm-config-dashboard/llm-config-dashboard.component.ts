@@ -157,9 +157,16 @@ export class LlmConfigDashboardComponent implements OnInit {
     if (event.previousIndex === event.currentIndex) {
       return;
     }
+    // Reorder is the only optimistic update — snapshot the previous order so the
+    // error path can revert it (the list is updated locally before the server confirms).
+    const previous = [...this.providers];
     moveItemInArray(this.providers, event.previousIndex, event.currentIndex);
     const ids = this.providers.map((p) => p.id);
-    this.persistProviders(this.api.reorderProviders(ids), 'Provider order saved.');
+    this.persistProviders(this.api.reorderProviders(ids), 'Provider order saved.', {
+      revert: () => {
+        this.providers = previous;
+      },
+    });
   }
 
   /** Open the add-provider form with sensible defaults. */
@@ -189,8 +196,10 @@ export class LlmConfigDashboardComponent implements OnInit {
       base_url: form.provider === 'ollama' ? form.base_url.trim() : '',
       api_key: form.api_key.trim(),
     };
-    this.persistProviders(this.api.createProvider(body), 'Provider added.', () => {
-      this.addForm = null;
+    this.persistProviders(this.api.createProvider(body), 'Provider added.', {
+      onSuccess: () => {
+        this.addForm = null;
+      },
     });
   }
 
@@ -228,8 +237,10 @@ export class LlmConfigDashboardComponent implements OnInit {
       base_url: form.provider === 'ollama' ? form.base_url.trim() : '',
       api_key: form.api_key.trim(),
     };
-    this.persistProviders(this.api.updateProvider(this.editingId, body), 'Provider updated.', () => {
-      this.editingId = null;
+    this.persistProviders(this.api.updateProvider(this.editingId, body), 'Provider updated.', {
+      onSuccess: () => {
+        this.editingId = null;
+      },
     });
   }
 
@@ -238,11 +249,19 @@ export class LlmConfigDashboardComponent implements OnInit {
     this.persistProviders(this.api.deleteProvider(entry.id), 'Provider removed.');
   }
 
-  /** Run a list-mutating call, refresh the list, and surface success/error. */
+  /** Run a list-mutating call and surface success/error.
+   *
+   * The mutating calls apply the server's authoritative list on success
+   * (`applyProviderList`); only reorder updates the local array optimistically, so on
+   * error the caller's `revert` restores it. We deliberately do NOT reload on error —
+   * a reload would clear/overwrite the just-set error message (its HTTP response races
+   * the error), and add/edit/delete never touched the local list, so there is nothing
+   * to resync.
+   */
   private persistProviders(
     call: Observable<LlmProviderListResponse>,
     successMsg: string,
-    onSuccess?: () => void,
+    opts?: { onSuccess?: () => void; revert?: () => void },
   ): void {
     this.providersError = null;
     this.providersSaving = true;
@@ -252,17 +271,18 @@ export class LlmConfigDashboardComponent implements OnInit {
         this.applyProviderList(res);
         this.providersSaving = false;
         this.success = successMsg;
-        onSuccess?.();
+        opts?.onSuccess?.();
       },
       error: (err) => {
         this.providersSaving = false;
-        // A failed reorder/edit could leave the local array out of sync; reload truth
-        // first (it clears providersError on entry), then set the error so it survives.
-        this.loadProviders();
+        opts?.revert?.();
         this.providersError = this.friendlyError(err, 'Failed to save the provider list.');
       },
     });
   }
+
+  /** Current epoch millis. Indirected so tests can pin time for `resetInfo`. */
+  private now = (): number => Date.now();
 
   /** Human-readable reset estimate for a usage-limited provider (e.g. "~2h"). */
   resetInfo(entry: LlmProviderEntry): string {
@@ -273,7 +293,7 @@ export class LlmConfigDashboardComponent implements OnInit {
     if (Number.isNaN(reset)) {
       return '';
     }
-    const ms = reset - Date.now();
+    const ms = reset - this.now();
     if (ms <= 0) {
       return 'resetting now';
     }
