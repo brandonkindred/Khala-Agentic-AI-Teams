@@ -49,12 +49,19 @@ from investment_team.trading_service.engine.fill_simulator import (
 )
 from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio
+
+# ``_EngineEntryDispatcher`` is private but is the unit under test for the
+# bracket-attachment math: it owns the signal-bar-close → absolute-price
+# resolution in isolation, so testing it directly pins that logic precisely.
+# The public ``TradingService`` path is covered by the end-to-end engine tests
+# at the bottom of this file.
 from investment_team.trading_service.service import (
     TradingServiceResult,
     _EngineEntryDispatcher,
 )
 from investment_team.trading_service.strategy.contract import (
     Bar,
+    OrderSide,
     OrderType,
 )
 
@@ -71,6 +78,8 @@ def _bracket(stop_pct: float = 0.03, tp_pct: float = 0.06, **stop_kwargs) -> Oco
 
 
 def test_oco_bracket_discriminator_dispatch() -> None:
+    """A raw ``kind="oco_bracket"`` dict dispatches through ``ExitRuleAdapter`` to an
+    ``OcoBracketRule`` with the legs parsed and ``style`` defaulting to ``market``."""
     raw = {"kind": "oco_bracket", "stop_loss": {"pct": 0.03}, "take_profit": {"pct": 0.06}}
     rule = ExitRuleAdapter.validate_python(raw)
     assert isinstance(rule, OcoBracketRule)
@@ -80,6 +89,8 @@ def test_oco_bracket_discriminator_dispatch() -> None:
 
 
 def test_oco_bracket_json_round_trip() -> None:
+    """A bracket survives a JSON dump/parse round-trip through ``ExitRuleAdapter``
+    unchanged (including a limit-style stop leg)."""
     rule = _bracket(stop_pct=0.04, tp_pct=0.09, style="limit", limit_offset_pct=0.01)
     restored = ExitRuleAdapter.validate_json(rule.model_dump_json())
     assert isinstance(restored, OcoBracketRule)
@@ -87,24 +98,38 @@ def test_oco_bracket_json_round_trip() -> None:
 
 
 def test_oco_bracket_classifiers() -> None:
+    """A bracket classifies as an engine-handled, full-position bracket; the
+    ``is_bracket_exit`` predicate returns False for non-bracket exit kinds (no
+    false positives that would mis-route them)."""
     rule = _bracket()
     assert is_bracket_exit(rule) is True
     assert is_full_position_exit(rule) is True
     assert is_engine_handled_exit(rule) is True
+    # Negative cases: other exit kinds must NOT be classified as brackets.
+    for raw in (
+        {"kind": "stop_loss", "pct": 0.03},
+        {"kind": "take_profit", "pct": 0.06},
+        {"kind": "signal_exit", "when": {"lhs": "bar.close", "op": "<", "rhs": 90.0}},
+    ):
+        assert is_bracket_exit(ExitRuleAdapter.validate_python(raw)) is False
 
 
 def test_bracket_stop_leg_limit_style_requires_offset() -> None:
+    """A ``style="limit"`` stop leg without ``limit_offset_pct`` is rejected."""
     with pytest.raises(ValueError, match="requires limit_offset_pct"):
         BracketStopLeg(pct=0.03, style="limit")
 
 
 def test_bracket_stop_leg_offset_requires_limit_style() -> None:
+    """``limit_offset_pct`` set without ``style="limit"`` is rejected."""
     with pytest.raises(ValueError, match="only valid when style='limit'"):
         BracketStopLeg(pct=0.03, limit_offset_pct=0.01)
 
 
 @pytest.mark.parametrize("pct", [0.0, -0.1, 1.0, 1.5])
 def test_bracket_stop_leg_pct_must_be_in_open_unit_interval(pct: float) -> None:
+    """The stop-leg ``pct`` must be strictly in (0, 1); 0, negatives, and >= 1.0 are
+    rejected."""
     # ``pct`` must be strictly in (0, 1): gt=0 rejects 0 / negatives, lt=1.0
     # rejects 1.0 and above (a long's resolved level stays positive only for
     # pct < 1.0).
@@ -114,6 +139,7 @@ def test_bracket_stop_leg_pct_must_be_in_open_unit_interval(pct: float) -> None:
 
 @pytest.mark.parametrize("pct", [0.0, -0.1, 1.0, 1.5])
 def test_bracket_take_profit_leg_pct_must_be_in_open_unit_interval(pct: float) -> None:
+    """The take-profit-leg ``pct`` is bounded the same way (strictly in (0, 1))."""
     # The take-profit leg is bounded the same way: a short's resolved target
     # ``ref * (1 - pct)`` is positive only for pct < 1.0.
     with pytest.raises(ValueError):
@@ -121,6 +147,8 @@ def test_bracket_take_profit_leg_pct_must_be_in_open_unit_interval(pct: float) -
 
 
 def test_short_bracket_high_take_profit_yields_positive_limit() -> None:
+    """A high (but < 1.0) take-profit still resolves a strictly-positive short-side
+    limit price."""
     # A valid high take-profit (just under the 1.0 bound) still resolves to a
     # strictly-positive short-side limit.
     req = _emit_with_bracket("short", _bracket(stop_pct=0.03, tp_pct=0.5), close=100.0)
@@ -129,6 +157,7 @@ def test_short_bracket_high_take_profit_yields_positive_limit() -> None:
 
 
 def test_format_rule_renders_bracket() -> None:
+    """The prose formatter renders a bracket (market and limit-style) for prompts."""
     from investment_team.strategy_lab.spec_dsl import _format_rule
 
     assert _format_rule(_bracket(stop_pct=0.03, tp_pct=0.06)) == (
@@ -139,6 +168,8 @@ def test_format_rule_renders_bracket() -> None:
 
 
 def test_first_side_stop_factor_recognizes_bracket_stop() -> None:
+    """A bracket's (entry-anchored) stop leg is recognized as an effective stop for
+    both sides, so it suppresses the short-safety auto-stop injection."""
     from investment_team.strategy_lab.spec_dsl import first_side_stop_factor
 
     rules = [_bracket(stop_pct=0.04)]
@@ -168,11 +199,13 @@ def _spec(exit_rules: list) -> dict:
 
 
 def test_spec_bracket_only_is_valid() -> None:
+    """A spec whose sole exit is a bracket constructs cleanly."""
     spec = StrategySpec(**_spec([_bracket()]))
     assert [r.kind for r in spec.exit_rules] == ["oco_bracket"]
 
 
 def test_spec_bracket_with_signal_exit_is_valid() -> None:
+    """A bracket may coexist with a ``signal_exit`` (the one allowed companion)."""
     from investment_team.strategy_lab.spec_dsl import SignalExitRule
 
     sig = SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=90.0))
@@ -189,16 +222,21 @@ def test_spec_bracket_with_signal_exit_is_valid() -> None:
     ],
 )
 def test_spec_bracket_rejects_coexisting_price_exit(conflicting: dict) -> None:
+    """A bracket alongside any other engine-handled price exit
+    (stop_loss / take_profit / scaled_take_profit) is rejected."""
     with pytest.raises(ValueError, match="sole .*price exit"):
         StrategySpec(**_spec([_bracket(), conflicting]))
 
 
 def test_spec_rejects_two_brackets() -> None:
+    """At most one bracket is allowed per spec."""
     with pytest.raises(ValueError, match="at most one oco_bracket"):
         StrategySpec(**_spec([_bracket(), _bracket()]))
 
 
 def test_spec_rejects_bracket_with_requires_custom_code() -> None:
+    """A bracket combined with ``requires_custom_code=True`` is rejected at
+    construction (the bracket would be inert on the custom-code path)."""
     # A bracket attaches only to engine-managed entries, so it is inert on the
     # custom-code path — reject the combination at construction.
     with pytest.raises(ValueError, match="not usable with requires_custom_code"):
@@ -272,6 +310,8 @@ def _emit_with_bracket(side: str, bracket: OcoBracketRule, close: float = 100.0)
 
 
 def test_entry_attaches_long_bracket_prices_off_close() -> None:
+    """For a long entry the dispatcher attaches a stop below and a target above the
+    signal-bar close (97 / 106 off a close of 100)."""
     req = _emit_with_bracket("long", _bracket(stop_pct=0.03, tp_pct=0.06), close=100.0)
     assert req.attached_stop_loss is not None
     assert req.attached_take_profit is not None
@@ -282,12 +322,16 @@ def test_entry_attaches_long_bracket_prices_off_close() -> None:
 
 
 def test_entry_attaches_short_bracket_prices_off_close() -> None:
+    """For a short entry the signs flip: stop above and target below the close
+    (103 / 94 off a close of 100)."""
     req = _emit_with_bracket("short", _bracket(stop_pct=0.03, tp_pct=0.06), close=100.0)
     assert req.attached_stop_loss.stop_price == pytest.approx(103.0)
     assert req.attached_take_profit.limit_price == pytest.approx(94.0)
 
 
 def test_entry_attaches_limit_style_stop_offset() -> None:
+    """A limit-style stop leg attaches a ``limit_offset`` (absolute distance off the
+    stop level) so the engine materializes a STOP_LIMIT child."""
     req = _emit_with_bracket(
         "long", _bracket(stop_pct=0.03, style="limit", limit_offset_pct=0.01), close=100.0
     )
@@ -297,6 +341,7 @@ def test_entry_attaches_limit_style_stop_offset() -> None:
 
 
 def test_entry_without_bracket_has_no_attachments() -> None:
+    """A spec with no bracket emits a plain entry order (no attachments)."""
     rules = [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
     dispatcher = _EngineEntryDispatcher(
         entry_rules=rules,
@@ -321,6 +366,8 @@ def test_entry_without_bracket_has_no_attachments() -> None:
 
 
 def test_bracket_is_skipped_by_exit_evaluator() -> None:
+    """The bar-by-bar exit evaluator emits no intent for a bracket (it is engine-
+    attached), even on a bar that would trigger an equivalent stop_loss."""
     pos = PositionState(
         symbol="AAA",
         side="long",
@@ -382,6 +429,8 @@ def _dispatcher_bracket_entry(order_book):
 
 
 def test_end_to_end_take_profit_leg_fills_and_cancels_stop() -> None:
+    """End-to-end: a dispatcher-emitted bracket materializes two OCO children; the
+    take-profit LIMIT fills and cancels the stop sibling (engine_exit:bracket_tp)."""
     sim, order_book, portfolio = _make_simulator()
     parent = _dispatcher_bracket_entry(order_book)
 
@@ -402,6 +451,8 @@ def test_end_to_end_take_profit_leg_fills_and_cancels_stop() -> None:
 
 
 def test_end_to_end_stop_leg_fills_and_cancels_take_profit() -> None:
+    """Mirror of the take-profit E2E: the STOP stop-loss fills and cancels the
+    take-profit sibling (engine_exit:bracket_sl)."""
     sim, order_book, portfolio = _make_simulator()
     parent = _dispatcher_bracket_entry(order_book)
 
@@ -416,6 +467,8 @@ def test_end_to_end_stop_leg_fills_and_cancels_take_profit() -> None:
 
 
 def test_end_to_end_limit_style_stop_materializes_and_fills_stop_limit_child() -> None:
+    """End-to-end (long): a limit-style bracket stop materializes a resting
+    STOP_LIMIT child that fills at its limit and cancels the take-profit sibling."""
     # A limit-style bracket stop materializes as a resting STOP_LIMIT child (not a
     # plain STOP) and, when triggered and able to fill at its limit, closes the
     # position and cancels the take-profit sibling.
@@ -443,5 +496,46 @@ def test_end_to_end_limit_style_stop_materializes_and_fills_stop_limit_child() -
     assert len(outcome.closed_trades) == 1
     assert outcome.closed_trades[0].exit_reason == "engine_exit:bracket_sl"
     assert outcome.exit_fills[0].price == pytest.approx(93.1)
+    assert "AAA" not in portfolio.positions
+    assert order_book.children_of(parent.order_id) == []
+
+
+def test_end_to_end_short_limit_style_stop_fills_and_cancels_take_profit() -> None:
+    """Short mirror of the limit-style bracket-stop E2E: verifies the short-side
+    ``protective_limit_price`` sign convention. For a short, the stop sits ABOVE
+    entry and the buy STOP_LIMIT child's protective limit sits ABOVE the stop; when
+    triggered it fills at its limit, closes the short, and cancels the take-profit
+    sibling."""
+    sim, order_book, portfolio = _make_simulator()
+    req = _emit_with_bracket(
+        "short",
+        _bracket(stop_pct=0.05, style="limit", limit_offset_pct=0.02, tp_pct=0.10),
+        close=100.0,
+    )
+    parent = order_book.submit(
+        req, submitted_at="2024-01-01", submitted_equity=10_000_000.0, expect_brackets=True
+    )
+
+    # Bar 2: short entry fills; the limit-style stop materializes as a BUY
+    # STOP_LIMIT child at stop=105 (above entry) with its limit on the protective
+    # side ABOVE the stop (105 + 0.02*105 = 107.1).
+    sim.process_bar(_bar("2024-01-02", open_price=100.0))
+    sl = next(
+        c
+        for c in order_book.children_of(parent.order_id)
+        if c.request.order_type == OrderType.STOP_LIMIT
+    )
+    assert sl.request.side == OrderSide.LONG  # buy-to-cover closes the short
+    assert sl.request.stop_price == pytest.approx(105.0)
+    assert sl.request.limit_price == pytest.approx(107.1)
+
+    # Bar 3: rises through the 105 stop while trading below the 107.1 limit → the
+    # STOP_LIMIT fills at its limit and the take-profit sibling is cancelled.
+    outcome = sim.process_bar(
+        _bar("2024-01-03", open_price=104.0, high=108.0, low=104.0, close=106.0)
+    )
+    assert len(outcome.closed_trades) == 1
+    assert outcome.closed_trades[0].exit_reason == "engine_exit:bracket_sl"
+    assert outcome.exit_fills[0].price == pytest.approx(107.1)
     assert "AAA" not in portfolio.positions
     assert order_book.children_of(parent.order_id) == []
