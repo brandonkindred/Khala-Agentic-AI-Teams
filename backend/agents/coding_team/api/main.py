@@ -1660,6 +1660,10 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
 # dropping/demoting the offending comment; other statuses signal a real failure.
 _HTTP_UNPROCESSABLE = 422
 
+# Body for the extra COMMENT review(s) the bisection path submits after the
+# summary has already been posted on its own — so they don't repeat the summary.
+_BISECT_CONTINUATION_BODY = "*(continued — additional findings)*"
+
 
 def _submit_review(
     client: GitHubClient,
@@ -1801,7 +1805,7 @@ def _bisect_submit(
             repo=repo,
             number=pr_number,
             commit_id=head_sha,
-            body="*(continued — additional findings)*",
+            body=_BISECT_CONTINUATION_BODY,
             event="COMMENT",
             comments=[p[0] for p in pairs],
         )
