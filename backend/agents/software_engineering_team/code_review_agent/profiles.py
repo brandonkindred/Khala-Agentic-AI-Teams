@@ -75,6 +75,12 @@ class _ProfileSpec:
 # ``tests/test_review_profiles.py`` asserts each one is ``in CODE_REVIEW_PROMPT``,
 # which both proves the transcription is exact and pins the shared contract.
 
+# NOTE: the composed prompt carries TWO role statements — the profile's own
+# ``role_line`` (set above each criteria block) and this generic "**Your role:**"
+# section. That duplication is inherited verbatim from the legacy
+# ``CODE_REVIEW_PROMPT`` and is preserved deliberately so the default profile stays
+# byte-identical (locked by ``test_review_profiles``). Collapsing the two is left
+# for a future prompt-cleanup that re-baselines the equivalence guard.
 _SHARED_ROLE_AND_SETTLED = (
     "\n\n**Your role:**\n"
     "You review code that has been written by a coding agent (Frontend or Backend) for a "

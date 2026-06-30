@@ -11,6 +11,8 @@ public class, ``run`` signature, output model, and blocking semantics.
 
 from __future__ import annotations
 
+import logging
+
 from code_review_agent import (
     CodeReviewAgent,
     CodeReviewInput,
@@ -24,6 +26,8 @@ from llm_service import LLMClient
 from software_engineering_team.shared.security_service import derive_approved, is_blocking
 
 from .models import ChangeReviewInput, ChangeReviewOutput
+
+logger = logging.getLogger(__name__)
 
 # The engine's severity vocabulary includes ``info``; ``ReviewFinding.severity``
 # does not. Everything else (critical/high/medium/low) is shared, so only
@@ -41,12 +45,19 @@ def _normalize_severity(severity: str) -> str:
     Postconditions:
         Returns a member of ``ReviewFinding``'s severity literal
         (critical|high|medium|low|minor|nit). ``info`` maps to ``low``; an
-        already-valid value passes through; anything unrecognized falls back to
-        ``low`` so a stray value never fails ``ReviewFinding`` validation. Pure.
+        already-valid value passes through; anything unrecognized logs a warning
+        and falls back to ``low`` so a stray value never fails ``ReviewFinding``
+        validation (the warning surfaces a possibly-new engine severity).
     """
     sev = (severity or "").strip().lower()
     sev = _SEVERITY_MAP.get(sev, sev)
-    return sev if sev in _REVIEW_FINDING_SEVERITIES else "low"
+    if sev not in _REVIEW_FINDING_SEVERITIES:
+        # A severity the engine emits but ReviewFinding doesn't know — likely a new
+        # engine level. Warn so it isn't silently treated as non-blocking, then fall
+        # back to the safe, validation-passing default.
+        logger.warning("ChangeReview: unrecognized severity %r mapped to 'low'", severity)
+        return "low"
+    return sev
 
 
 def _to_finding(index: int, issue: CodeReviewIssue) -> ReviewFinding:

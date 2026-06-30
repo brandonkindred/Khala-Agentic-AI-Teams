@@ -96,7 +96,11 @@ def _evidence_for(criterion: str, issue: CodeReviewIssue) -> str:
     desc = issue.description or ""
     if _CRITERION_DELIM not in desc:
         return desc.strip() or "Unmet"
-    skip = _normalize(criterion).count(_CRITERION_DELIM) + 1
+    # Count delimiters on the verbatim criterion (not its normalized form): the
+    # description is split on the raw delimiter, so the skip must match the raw
+    # criterion's delimiter segments — normalization could change the count when
+    # the criterion has irregular whitespace around a delimiter.
+    skip = criterion.count(_CRITERION_DELIM) + 1
     parts = desc.split(_CRITERION_DELIM)
     tail = _CRITERION_DELIM.join(parts[skip:]).strip() if len(parts) > skip else ""
     return tail or "Unmet"

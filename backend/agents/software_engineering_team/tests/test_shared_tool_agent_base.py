@@ -237,11 +237,11 @@ def test_review_llm_exception(monkeypatch):
 class _EngineStubClient(DummyLLMClient):
     """Returns one canned engine-shaped response for every chunk-review call."""
 
-    def __init__(self, response):
+    def __init__(self, response: dict) -> None:
         super().__init__()
         self._response = response
 
-    def complete_json(self, prompt, **kwargs):
+    def complete_json(self, prompt: str, **kwargs: object) -> dict:
         return self._response
 
 

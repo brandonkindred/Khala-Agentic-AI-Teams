@@ -999,6 +999,19 @@ class TestChangeReviewAgent:
                 ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
             )
 
+    def test_unrecognized_severity_maps_to_low_with_warning(self, caplog) -> None:
+        """_normalize_severity maps an unrecognized value to 'low' and warns.
+
+        (The engine sanitizes severities to its known set, so this defensive
+        branch is exercised at the helper level rather than through ``run``.)"""
+        import logging
+
+        from devops_team.change_review_agent.agent import _normalize_severity
+
+        with caplog.at_level(logging.WARNING):
+            assert _normalize_severity("catastrophic") == "low"
+        assert "unrecognized severity" in caplog.text.lower()
+
     def test_info_severity_maps_to_low_and_does_not_block(self) -> None:
         """An engine 'info' severity maps to ReviewFinding 'low' and does not block."""
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
