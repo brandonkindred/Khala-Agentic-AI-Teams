@@ -310,8 +310,16 @@ def test_engine_review_skips_without_code():
         {"approved": True, "issues": "not-a-list", "extra": 1},  # wrong type
         {"approved": True, "summary": "ok"},  # 'issues' key entirely missing
         {"approved": True, "issues": ["not-a-dict", 7, None]},  # non-dict entries
+        {"issues": []},  # 'approved' key missing — engine defaults it
+        {"approved": True, "issues": []},  # 'summary' key missing — engine defaults it
     ],
-    ids=["issues-wrong-type", "issues-key-missing", "issues-non-dict-entries"],
+    ids=[
+        "issues-wrong-type",
+        "issues-key-missing",
+        "issues-non-dict-entries",
+        "approved-key-missing",
+        "summary-key-missing",
+    ],
 )
 def test_engine_review_handles_malformed_response(response: dict):
     """A malformed engine response — ``issues`` of the wrong type, the ``issues``
@@ -337,7 +345,7 @@ class _RaisingEngine:
         raise self._exc
 
 
-def test_engine_review_degrades_on_unavailable(monkeypatch):
+def test_engine_review_degrades_on_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     """A CodeReviewUnavailableError from the engine degrades to a "(LLM error)"
     summary instead of raising."""
     monkeypatch.setattr(
@@ -351,7 +359,7 @@ def test_engine_review_degrades_on_unavailable(monkeypatch):
     assert "failed (LLM error)" in out.summary
 
 
-def test_engine_review_propagates_unexpected_error(monkeypatch):
+def test_engine_review_propagates_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unexpected engine error (e.g. TypeError) is not masked — it propagates."""
     monkeypatch.setattr("code_review_agent.CodeReviewAgent", _RaisingEngine(TypeError("boom")))
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
@@ -361,7 +369,7 @@ def test_engine_review_propagates_unexpected_error(monkeypatch):
         agent.review(_Input(current_files={"a.ts": "code"}))
 
 
-def test_engine_review_problem_solve_unchanged(monkeypatch):
+def test_engine_review_problem_solve_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     """Issues produced via the engine still flow through the unchanged
     one-at-a-time problem_solve path keyed on ``source``."""
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)

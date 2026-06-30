@@ -183,8 +183,8 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     )
 
     prompt = "\n".join(context_parts)
-    _model = resolve_code_review_model(llm)
-    agent = Agent(model=_model, system_prompt=build_review_system_prompt(input_data.profile))
+    model = resolve_code_review_model(llm)
+    agent = Agent(model=model, system_prompt=build_review_system_prompt(input_data.profile))
     result = agent(prompt)
     raw = str(result).strip()
     data = json.loads(raw)
