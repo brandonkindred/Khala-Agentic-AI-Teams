@@ -35,6 +35,8 @@ import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from code_review_agent.profiles import ReviewProfile
+
 from software_engineering_team.shared.v2_models import (
     ReviewIssue,
     ToolAgentOutput,
@@ -130,6 +132,19 @@ class BaseReviewToolAgent:
     # --- Issue routing ----------------------------------------------------
     issue_source: str = ""  # source set on emitted ReviewIssue
     problem_solve_sources: Tuple[str, ...] = ()
+
+    # --- Shared review engine (opt-in) -----------------------------------
+    # When True, ``review`` delegates to the shared code-review engine
+    # (``code_review_agent.CodeReviewAgent``) with :attr:`review_profile`
+    # instead of running this agent's own one-shot ``review_prompt`` — so the
+    # gate inherits the engine's chunking, false-positive filtering, and
+    # synthesis. Off by default so the specialized-lens agents (security,
+    # accessibility, performance, …) keep their own criteria; flip it only on a
+    # generic spec/standards reviewer whose criteria the engine's profile
+    # already expresses. ``build_runner`` agents are unaffected (they take the
+    # build-runner branch first).
+    review_via_engine: bool = False
+    review_profile: ReviewProfile = ReviewProfile.SPEC_CONFORMANCE
 
     # --- Prompts / parsing ------------------------------------------------
     review_prompt: Optional[str] = None
@@ -259,9 +274,61 @@ class BaseReviewToolAgent:
             summary=f"{review_label}: {len(issues)} {self.build_review_noun} found.",
         )
 
+    def _engine_review(self, inp) -> ToolAgentPhaseOutput:
+        """Run the shared code-review engine and map its issues to ReviewIssues.
+
+        Preconditions: :attr:`review_via_engine` is set; ``inp.current_files``
+        maps path -> content.
+        Postconditions: returns a :class:`ToolAgentPhaseOutput` whose ``issues``
+        carry this agent's :attr:`issue_source`. A ``CodeReviewUnavailableError``
+        (the review could not be run) degrades to a "(LLM error)" summary with no
+        issues; any other exception is a defect and propagates. Each engine
+        ``CodeReviewIssue.suggestion`` becomes the ``ReviewIssue.recommendation``.
+        """
+        from code_review_agent import (
+            CodeReviewAgent,
+            CodeReviewInput,
+            CodeReviewUnavailableError,
+        )
+
+        review_label = f"{self.name} review"
+        if not inp.current_files:
+            return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no code).")
+        try:
+            result = CodeReviewAgent(self.llm).run(
+                CodeReviewInput(
+                    files=dict(inp.current_files),
+                    task_description=inp.task_description or "",
+                    # Pass the input's language through, or "" — the engine's chunk
+                    # reviewer guesses per-chunk when language is empty, which is
+                    # safer than forcing a default for non-TypeScript projects.
+                    language=getattr(inp, "language", None) or "",
+                    profile=self.review_profile,
+                )
+            )
+        except CodeReviewUnavailableError as e:
+            self._logger.warning("%s engine review unavailable: %s", review_label, e)
+            return ToolAgentPhaseOutput(summary=f"{review_label} failed (LLM error).")
+        issues = [
+            ReviewIssue(
+                source=self.issue_source,
+                severity=i.severity,
+                description=i.description,
+                file_path=i.file_path,
+                recommendation=i.suggestion,
+            )
+            for i in result.issues
+        ]
+        return ToolAgentPhaseOutput(
+            issues=issues,
+            summary=f"{review_label}: {len(issues)} issue(s) found.",
+        )
+
     def review(self, inp) -> ToolAgentPhaseOutput:
         if self.build_runner is not None:
             return self._build_review(inp)
+        if self.review_via_engine:
+            return self._engine_review(inp)
         review_label = f"{self.name} review"
         if not self._model:
             return ToolAgentPhaseOutput(summary=f"{review_label} skipped (no LLM).")
