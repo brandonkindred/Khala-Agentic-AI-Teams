@@ -554,6 +554,15 @@ _ANSWER_WAIT_HEARTBEAT_STALE_S = 30.0
 # multi-host deployments without blocking resume indefinitely on a far-future/corrupt stamp.
 _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S = 10.0
 
+# GitHub returns 422 Unprocessable Entity for validation errors — specifically a
+# review comment whose line is off the diff. Only a 422 is recoverable by
+# dropping/demoting the offending comment; other statuses signal a real failure.
+_HTTP_UNPROCESSABLE = 422
+
+# Body for the extra COMMENT review(s) the bisection path submits after the
+# summary has already been posted on its own — so they don't repeat the summary.
+_BISECT_CONTINUATION_BODY = "*(continued — additional findings)*"
+
 
 def _answer_wait_heartbeat_fresh(data: Dict[str, Any]) -> bool:
     """True when a live answer-wait loop (possibly in another worker process) heartbeated recently.
@@ -1667,16 +1676,6 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             safe_err = scrub_token_from_text(str(review_exc))
             update_job(job_id, status="failed", error=safe_err)
             update_review(job_id, status="failed", error=safe_err, completed=True)
-
-
-# GitHub returns 422 Unprocessable Entity for validation errors — specifically a
-# review comment whose line is off the diff. Only a 422 is recoverable by
-# dropping/demoting the offending comment; other statuses signal a real failure.
-_HTTP_UNPROCESSABLE = 422
-
-# Body for the extra COMMENT review(s) the bisection path submits after the
-# summary has already been posted on its own — so they don't repeat the summary.
-_BISECT_CONTINUATION_BODY = "*(continued — additional findings)*"
 
 
 def _submit_review(
