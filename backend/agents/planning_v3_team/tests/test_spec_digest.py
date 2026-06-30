@@ -55,6 +55,13 @@ def test_split_sections_empty():
     assert split_sections("", 100) == []
 
 
+def test_split_sections_rejects_non_positive_max_chars():
+    import pytest
+
+    with pytest.raises(AssertionError):
+        split_sections("anything", 0)
+
+
 def test_split_sections_fits():
     assert split_sections("short text", 100) == ["short text"]
 

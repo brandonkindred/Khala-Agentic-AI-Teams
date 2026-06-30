@@ -91,6 +91,7 @@ def split_sections(text: str, max_chars: int) -> List[str]:
         - Returns ``[]`` for empty text, ``[text]`` when it already fits, else a list
           whose concatenation reproduces ``text`` exactly (no characters dropped).
     """
+    assert max_chars > 0, "max_chars must be positive"
     if not text:
         return []
     if len(text) <= max_chars:
