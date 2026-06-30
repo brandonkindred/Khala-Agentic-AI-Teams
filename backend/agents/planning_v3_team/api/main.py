@@ -81,8 +81,8 @@ def _get_llm():
     digestion path uses the same client for per-section extraction plus a
     ``compact_text`` fallback (``.complete`` / ``.get_max_context_tokens``). A Strands
     ``Agent`` exposes none of these, so returning one made the phases silently fall
-    back to default output. ``get_client`` returns an ``_AttributingClient`` (a
-    virtual ``LLMClient``) that provides all three.
+    back to default output. ``get_client`` returns an ``LLMClient`` that provides all
+    three.
     """
     return get_client("planning_v3")
 

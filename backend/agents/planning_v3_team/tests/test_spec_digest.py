@@ -58,7 +58,7 @@ def test_split_sections_empty():
 def test_split_sections_rejects_non_positive_max_chars():
     import pytest
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         split_sections("anything", 0)
 
 

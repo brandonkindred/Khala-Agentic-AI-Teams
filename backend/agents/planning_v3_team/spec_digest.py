@@ -38,7 +38,7 @@ def _env_positive_int(name: str, default: int) -> int:
         return default
     try:
         value = int(raw)
-    except (TypeError, ValueError):
+    except ValueError:  # os.environ values are str, so int() only raises ValueError
         return default
     return value if value >= 1 else default
 
@@ -120,7 +120,10 @@ def split_sections(text: str, max_chars: int) -> List[str]:
         - Returns ``[]`` for empty text, ``[text]`` when it already fits, else a list
           whose concatenation reproduces ``text`` exactly (no characters dropped).
     """
-    assert max_chars > 0, "max_chars must be positive"
+    # Explicit raise (not assert) so the precondition still holds under ``python -O``,
+    # which strips asserts.
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
     if not text:
         return []
     if len(text) <= max_chars:

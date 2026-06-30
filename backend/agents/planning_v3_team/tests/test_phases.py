@@ -136,6 +136,23 @@ def test_run_requirements_questions_not_a_list_falls_back():
     assert len(ctx_update["open_questions"]) >= 1
 
 
+def test_run_requirements_idless_questions_get_unique_ids():
+    # Two questions lacking an id must NOT collapse to the default "q" twice — each
+    # gets a synthesized unique id so downstream consumers see distinct ids.
+    context = {"client_context": ClientContext(problem_summary="P"), "spec_content": "S"}
+    payload = (
+        '{"questions": ['
+        '{"question_text": "First?", "category": "tech", "priority": "low", "options": []},'
+        '{"question_text": "Second?", "category": "tech", "priority": "low", "options": []}'
+        "]}"
+    )
+    llm = make_llm(payload)
+    ctx_update, _ = run_requirements(context, llm=llm)
+    ids = [q.id for q in ctx_update["open_questions"]]
+    assert len(ids) == len(set(ids))  # all ids unique
+    assert len(ids) == 2
+
+
 def test_run_requirements_skips_malformed_options():
     # A well-formed question with malformed option entries keeps the question, drops options.
     context = {"client_context": ClientContext(problem_summary="P"), "spec_content": "S"}

@@ -127,8 +127,12 @@ def _requirements_reduce(parts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             qtext = (q.get("question_text") or "").strip().lower()
             if (qid and qid in seen_ids) or (qtext and qtext in seen_text):
                 continue
-            if qid:
-                seen_ids.add(qid)
+            if not qid:
+                # Synthesize a unique id so id-less questions don't all collapse to the
+                # build loop's default "q" (which would yield duplicate OpenQuestion ids).
+                qid = f"q_{len(questions) + 1}"
+                q = {**q, "id": qid}  # copy, don't mutate the caller's dict
+            seen_ids.add(qid)
             if qtext:
                 seen_text.add(qtext)
             questions.append(q)

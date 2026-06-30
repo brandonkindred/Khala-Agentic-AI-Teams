@@ -43,8 +43,10 @@ def test_architecture_overview_compacted_not_truncated(tmp_path, monkeypatch):
     assert "(truncated)" not in overview  # never the old slice marker
 
 
-def test_architecture_overview_kept_full_on_compaction_failure(tmp_path, monkeypatch):
-    """When compaction can't run (client unavailable), the FULL overview is preserved."""
+def test_architecture_overview_bounded_on_compaction_failure(tmp_path, monkeypatch):
+    """When compaction can't run, the overview is bounded to the budget (last resort)."""
+    from planning_v3_team.phases.document_production import ARCHITECTURE_OVERVIEW_MAX_CHARS
+
     big = "B" * 9000
 
     def boom(*a, **k):
@@ -58,8 +60,33 @@ def test_architecture_overview_kept_full_on_compaction_failure(tmp_path, monkeyp
         use_planning_v2=False,
         run_architecture_fn=lambda **kw: big,
     )
-    # Full overview preserved (never sliced) when compaction can't run.
-    assert ctx_update["handoff_package"].architecture_overview == big
+    overview = ctx_update["handoff_package"].architecture_overview
+    assert overview == big[:ARCHITECTURE_OVERVIEW_MAX_CHARS]
+    assert len(overview) == ARCHITECTURE_OVERVIEW_MAX_CHARS
+
+
+def test_architecture_overview_hard_capped_when_compaction_overshoots(tmp_path, monkeypatch):
+    """If compact_text returns more than the budget, a last-resort hard cap applies."""
+    from planning_v3_team.phases.document_production import ARCHITECTURE_OVERVIEW_MAX_CHARS
+
+    monkeypatch.setattr(
+        "planning_v3_team.phases.document_production.get_client",
+        lambda agent_key=None: object(),
+    )
+    # compact_text "fails to compress" and returns something still over budget.
+    monkeypatch.setattr(
+        "planning_v3_team.phases.document_production.compact_text",
+        lambda text, *, max_chars, llm, content_description: "C" * 12000,
+    )
+    ctx_update, _ = run_document_production(
+        _base_context(tmp_path),
+        use_product_analysis=False,
+        use_planning_v2=False,
+        run_architecture_fn=lambda **kw: "A" * 9000,
+    )
+    assert (
+        len(ctx_update["handoff_package"].architecture_overview) == ARCHITECTURE_OVERVIEW_MAX_CHARS
+    )
 
 
 def test_compact_architecture_overview_uses_injected_llm(monkeypatch):
