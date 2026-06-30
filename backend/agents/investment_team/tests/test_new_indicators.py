@@ -783,6 +783,42 @@ def test_pandas_keltner_orders_bands() -> None:
     assert (middle[mask] >= lower[mask]).all()
 
 
+def test_pandas_keltner_matches_registry_and_warmup() -> None:
+    """Pandas Keltner uses the registry's windowed-EMA basis and warm-up contract.
+
+    The Series helper must agree with ``IndicatorRegistry.keltner`` value-for-value
+    (windowed EMA, not an expanding ewm) and stay NaN until ``max(period, atr_period
+    + 1)`` bars, so the static coverage probe never sees a Keltner value the runtime
+    would still report as None.
+    """
+    high, low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    reg = IndicatorRegistry()
+    upper, middle, lower = pdi.keltner_channels(high, low, close, 20, 10, 2.0)
+    assert float(middle.iloc[-1]) == pytest.approx(reg.keltner(bars, 20, 10, 2.0, "middle"))
+    assert float(upper.iloc[-1]) == pytest.approx(reg.keltner(bars, 20, 10, 2.0, "upper"))
+    assert float(lower.iloc[-1]) == pytest.approx(reg.keltner(bars, 20, 10, 2.0, "lower"))
+    # Warm-up boundary: max(period=20, atr_period+1=11) = 20 → first value at index 19.
+    assert pd.isna(middle.iloc[18]) and reg.keltner(bars[:19], 20, 10, 2.0, "middle") is None
+    assert pd.notna(middle.iloc[19]) and reg.keltner(bars[:20], 20, 10, 2.0, "middle") is not None
+
+
+def test_pandas_mfi_warmup_requires_prior_bar() -> None:
+    """Pandas MFI emits its first value only once ``period + 1`` bars exist.
+
+    Each money-flow term compares against the previous bar, so the Series helper must
+    match ``IndicatorRegistry.mfi`` — None until ``period + 1`` bars — rather than
+    emitting one bar early off the zero-filled first diff.
+    """
+    high, low, close, vol = _frame()
+    bars = _series(80, seed=14)
+    reg = IndicatorRegistry()
+    series = pdi.mfi(high, low, close, vol, 14)
+    # period=14 → first value at index 14 (the 15th bar), NaN at index 13.
+    assert pd.isna(series.iloc[13]) and reg.mfi(bars[:14], 14) is None
+    assert pd.notna(series.iloc[14]) and reg.mfi(bars[:15], 14) is not None
+
+
 def test_pandas_obv_matches_registry_tail() -> None:
     """Pandas OBV tail equals the streaming registry's OBV."""
     _high, _low, close, vol = _frame()

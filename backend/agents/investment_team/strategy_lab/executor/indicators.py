@@ -293,15 +293,37 @@ def keltner_channels(
     atr_period: int = 10,
     multiplier: float = 2.0,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """Keltner channel: EMA(close) basis ± multiplier × ATR(atr_period)."""
+    """Keltner channel: windowed-EMA(close) basis ± multiplier × ATR(atr_period).
+
+    Mirrors ``IndicatorRegistry.keltner``: the basis is a *windowed* EMA — the seed
+    slides with the trailing ``period`` window, matching ``windowed_ema``, not an
+    expanding ``ewm()`` that is finite from bar 0 — and the bands are NaN until
+    ``max(period, atr_period + 1)`` bars so the Series helper honours the same
+    warm-up contract as the runtime/compiled paths. (An expanding ``ewm`` basis with
+    no warm-up gate would let the static coverage probe / direct Series consumers see
+    Keltner values during the runtime warm-up window and mark predicates active a few
+    bars early.)
+    """
     high = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
     close = _coerce_series(close, "close")
-    middle = ema(close, period)
+    alpha = 2.0 / (period + 1.0)
+
+    def _windowed_ema(window: np.ndarray) -> float:
+        # EMA over the trailing window seeded from its oldest element, exactly like
+        # streaming.windowed_ema (the seed slides forward one bar each step).
+        val = window[0]
+        for x in window[1:]:
+            val = alpha * x + (1.0 - alpha) * val
+        return val
+
+    middle = close.rolling(window=period).apply(_windowed_ema, raw=True)
     atr_series = atr(high, low, close, atr_period)
     upper = middle + multiplier * atr_series
     lower = middle - multiplier * atr_series
-    return upper, middle, lower
+    # Registry warm-up contract: no value until max(period, atr_period + 1) bars.
+    valid = np.arange(len(close)) >= (max(period, atr_period + 1) - 1)
+    return upper.where(valid), middle.where(valid), lower.where(valid)
 
 
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
@@ -327,8 +349,13 @@ def mfi(
     tp = (high + low + close) / 3
     raw_money_flow = tp * volume
     tp_diff = tp.diff()
-    pos_flow = raw_money_flow.where(tp_diff > 0, 0.0)
-    neg_flow = raw_money_flow.where(tp_diff < 0, 0.0)
+    # The first bar has no prior typical price to compare against, so its money flow
+    # is undefined (NaN, not zero). Masking it keeps it out of the rolling window, so
+    # the first MFI value lands at index ``period`` — i.e. once ``period + 1`` bars
+    # exist — matching IndicatorRegistry.mfi (each of the ``period`` flow terms needs
+    # a prior bar). A plain ``0.0`` fill would emit one bar early, at index ``period - 1``.
+    pos_flow = raw_money_flow.where(tp_diff > 0, 0.0).mask(tp_diff.isna())
+    neg_flow = raw_money_flow.where(tp_diff < 0, 0.0).mask(tp_diff.isna())
     pos_sum = pos_flow.rolling(window=period).sum()
     neg_sum = neg_flow.rolling(window=period).sum()
     ratio = pos_sum / neg_sum.replace(0, np.nan)
