@@ -158,14 +158,18 @@ def test_short_bracket_high_take_profit_yields_positive_limit() -> None:
 
 
 def test_format_rule_renders_bracket() -> None:
-    """The prose formatter renders a bracket (market and limit-style) for prompts."""
-    from investment_team.strategy_lab.spec_dsl import _format_rule
+    """A bracket renders to prose for prompts (market and limit-style). Exercised via
+    the public ``format_rules_for_prompt`` (which delegates to the per-rule
+    formatter) rather than the private ``_format_rule``."""
+    from investment_team.strategy_lab.spec_dsl import format_rules_for_prompt
 
-    assert _format_rule(_bracket(stop_pct=0.03, tp_pct=0.06)) == (
+    assert format_rules_for_prompt([_bracket(stop_pct=0.03, tp_pct=0.06)]) == (
         "OCO bracket: stop 3% / target 6%"
     )
     limit = _bracket(stop_pct=0.03, tp_pct=0.06, style="limit", limit_offset_pct=0.01)
-    assert _format_rule(limit) == "OCO bracket: stop 3% (limit, 1% offset) / target 6%"
+    assert (
+        format_rules_for_prompt([limit]) == "OCO bracket: stop 3% (limit, 1% offset) / target 6%"
+    )
 
 
 def test_first_side_stop_factor_recognizes_bracket_stop() -> None:
@@ -387,6 +391,13 @@ def test_bracket_is_skipped_by_exit_evaluator() -> None:
 
 # ---------------------------------------------------------------------------
 # End-to-end: dispatcher-emitted bracket materializes a resting OCO group
+#
+# These tests intentionally drive the FULL DSL path — dispatcher emits the entry
+# with the attachments it computes, then the engine materializes them — to verify
+# the exact attachments the dispatcher produces flow through to OCO materialization
+# and OCO cancellation. The engine's materialization from an explicitly-constructed
+# ``OrderRequest`` + ``StopAttachment`` / ``LimitAttachment`` is independently
+# covered by ``tests/test_bracket_orders.py`` / ``test_bracket_stop_limit.py``.
 # ---------------------------------------------------------------------------
 
 

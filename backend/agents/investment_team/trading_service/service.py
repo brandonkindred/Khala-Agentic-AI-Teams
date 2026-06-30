@@ -1666,6 +1666,11 @@ class _EngineEntryDispatcher:
         Postconditions: ``(None, None)`` when the spec has no bracket; otherwise a
         ``(StopAttachment, LimitAttachment)`` pair whose absolute prices are
         strictly positive and on the correct side of ``ref_price``.
+        Raises:
+            ValueError: if ``ref_price <= 0`` (precondition violation), or if a
+                resolved ``stop_price`` / ``limit_price`` is non-positive — a
+                defensive postcondition guard that would only trip if a leg field
+                bound were loosened without updating this math.
         """
         if self._bracket is None:
             return None, None

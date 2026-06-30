@@ -524,7 +524,9 @@ class StrategySpec(BaseModel):
         # indicator-based trigger). Every other exit kind — current or
         # future — is a conflicting engine-handled price exit by default, so a
         # new price-exit kind added to the union is rejected with a bracket
-        # without needing this validator to be updated.
+        # without needing this validator to be updated. Maintenance note: if a
+        # future NON-price exit kind is added that is meant to coexist with a
+        # bracket (like ``signal_exit``), add it to this allowlist tuple.
         conflicting = [
             r for r in self.exit_rules if not isinstance(r, (OcoBracketRule, SignalExitRule))
         ]
