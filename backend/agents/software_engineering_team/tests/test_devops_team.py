@@ -895,34 +895,166 @@ class TestDevOpsTestValidationAgent:
 
 
 class TestChangeReviewAgent:
-    def test_approves(self) -> None:
+    # The gate now routes through the shared code-review engine with the
+    # ``devops_maintainability`` profile, so stubs return the engine's flat
+    # issue shape ({approved, issues, summary}); the adapter maps those issues
+    # to ``ReviewFinding`` and re-derives approval from blocking severities.
+
+    def test_requires_client(self) -> None:
+        """Constructing with a None client fails fast via an explicit ValueError."""
+        from devops_team.change_review_agent import ChangeReviewAgent
+
+        with pytest.raises(ValueError):
+            ChangeReviewAgent(None)
+
+    def test_empty_artifacts_approve_without_engine(self) -> None:
+        """No artifacts => nothing to block on and the engine is never invoked.
+
+        Uses a tripwire client that raises if the engine touches it, so the
+        short-circuit is verified rather than merely tolerated.
+        """
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
-        client = _StubClient({"approved": True, "findings": [], "summary": "ok"})
-        agent = ChangeReviewAgent(client)
+        class _TripWireClient(DummyLLMClient):
+            def complete_json(self, *a, **kw):  # type: ignore[override]
+                raise AssertionError("engine must not be called when artifacts are empty")
+
+            def chat_json_round(self, *a, **kw):  # type: ignore[override]
+                raise AssertionError("engine must not be called when artifacts are empty")
+
+        agent = ChangeReviewAgent(_TripWireClient())
         out = agent.run(ChangeReviewInput(task_description="test", artifacts={}))
         assert out.approved
+        assert out.findings == []
 
-    def test_blocks_on_finding(self) -> None:
+    def test_approves_when_engine_finds_nothing(self) -> None:
+        """A clean engine result yields approval with no findings."""
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        client = _StubClient({"approved": True, "issues": [], "summary": "ok"})
+        agent = ChangeReviewAgent(client)
+        out = agent.run(
+            ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
+        )
+        assert out.approved
+        assert out.findings == []
+
+    def test_blocks_on_high_severity_finding(self) -> None:
+        """A high-severity engine issue maps to a blocking ReviewFinding and the
+        blocking rule overrides the engine's approved flag."""
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
         client = _StubClient(
             {
-                "approved": True,
-                "findings": [
+                "approved": True,  # engine flag is overridden by the blocking rule
+                "issues": [
                     {
-                        "finding_id": "F1",
-                        "severity": "medium",
-                        "blocking": True,
-                        "issue": "brittle",
+                        "severity": "high",
+                        "category": "brittle-automation",
+                        "file_path": "Dockerfile",
+                        "description": "latest tag pinned nowhere",
+                        "suggestion": "pin a digest",
                     }
                 ],
                 "summary": "blocked",
             }
         )
         agent = ChangeReviewAgent(client)
-        out = agent.run(ChangeReviewInput(task_description="test", artifacts={}))
+        out = agent.run(
+            ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x:latest\n"})
+        )
         assert not out.approved
+        assert len(out.findings) == 1
+        assert out.findings[0].blocking
+        assert out.findings[0].severity == "high"
+
+    def test_engine_unavailable_degrades_to_approved(self, monkeypatch) -> None:
+        """A CodeReviewUnavailableError degrades the gate to approved (no findings)
+        rather than crashing the DevOps pipeline."""
+        from code_review_agent import CodeReviewUnavailableError
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        class _RaisingEngine:
+            def __init__(self, exc):
+                self._exc = exc
+
+            def __call__(self, _llm):
+                return self
+
+            def run(self, _input):
+                raise self._exc
+
+        monkeypatch.setattr(
+            "devops_team.change_review_agent.agent.CodeReviewAgent",
+            _RaisingEngine(CodeReviewUnavailableError("engine down")),
+        )
+        agent = ChangeReviewAgent(_StubClient({}))
+        out = agent.run(
+            ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
+        )
+        assert out.approved
+        assert out.findings == []
+        assert "unavailable" in out.summary.lower()
+
+    def test_engine_programming_error_propagates(self, monkeypatch) -> None:
+        """An unexpected engine error (e.g. TypeError) is not masked — it propagates."""
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        class _RaisingEngine:
+            def __call__(self, _llm):
+                return self
+
+            def run(self, _input):
+                raise TypeError("boom")
+
+        monkeypatch.setattr(
+            "devops_team.change_review_agent.agent.CodeReviewAgent", _RaisingEngine()
+        )
+        agent = ChangeReviewAgent(_StubClient({}))
+        with pytest.raises(TypeError):
+            agent.run(
+                ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
+            )
+
+    def test_unrecognized_severity_maps_to_low_with_warning(self, caplog) -> None:
+        """_normalize_severity maps an unrecognized value to 'low' and warns.
+
+        (The engine sanitizes severities to its known set, so this defensive
+        branch is exercised at the helper level rather than through ``run``.)"""
+        import logging
+
+        from devops_team.change_review_agent.agent import _normalize_severity
+
+        with caplog.at_level(logging.WARNING):
+            assert _normalize_severity("catastrophic") == "low"
+        assert "unrecognized severity" in caplog.text.lower()
+
+    def test_info_severity_maps_to_low_and_does_not_block(self) -> None:
+        """An engine 'info' severity maps to ReviewFinding 'low' and does not block."""
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "issues": [
+                    {
+                        "severity": "info",
+                        "category": "maintainability",
+                        "file_path": "Dockerfile",
+                        "description": "consider a comment",
+                        "suggestion": "add one",
+                    }
+                ],
+                "summary": "fyi",
+            }
+        )
+        agent = ChangeReviewAgent(client)
+        out = agent.run(
+            ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
+        )
+        assert out.approved
+        assert out.findings[0].severity == "low"
+        assert not out.findings[0].blocking
 
 
 class TestDocumentationRunbookAgent:
@@ -1014,20 +1146,17 @@ class TestDevOpsTeamLeadAgentIntegration:
         This test runs the full pipeline twice on the same lead-agent
         instance — the second run exercises every cached sub-agent for a
         second time, which is exactly the failure mode that bug caused."""
-        import itertools
-
-        # Chain two happy-path scripts together so one client can serve
-        # both pipeline runs without having to be swapped mid-run.
-        chained = _ScriptedClient(
-            list(
-                itertools.chain.from_iterable(
-                    [
-                        [r for r in _scripted_llm_for_happy_path()._responses],
-                        [r for r in _scripted_llm_for_happy_path()._responses],
-                    ]
-                )
-            )
-        )
+        # Chain two happy-path scripts together so one client can serve both
+        # pipeline runs without having to be swapped mid-run. One happy-path run
+        # makes exactly 8 scripted LLM calls (the infra-debug agent's tool path
+        # fails without an LLM call, so the script's trailing entry is never
+        # consumed in a single run). Trim each run's script to those 8 responses
+        # so the two runs stay aligned end-to-end; leaving the unconsumed 9th
+        # entry in would shift run 2 by one and feed change_review — which now
+        # routes through the stricter shared review engine — a non-conforming
+        # response that it correctly rejects.
+        per_run = _scripted_llm_for_happy_path()._responses[:8]
+        chained = _ScriptedClient(per_run + per_run)
         agent = DevOpsTeamLeadAgent(chained)
         for i in range(2):
             pkg = agent.run(_base_task_spec())
