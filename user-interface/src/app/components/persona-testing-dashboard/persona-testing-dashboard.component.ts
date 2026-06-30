@@ -34,6 +34,11 @@ const TEAM_SOURCE: JobSource = 'user_agent_founder';
 const POLL_RUNS_MS = 15_000;
 const TERMINAL_STATUSES = ['completed', 'failed'];
 const RESUMABLE_STATUSES = new Set<string>(['failed', 'interrupted', 'agent_crash']);
+// Dynamic agentic-team target keys (`agentic_team:<id>`). This legacy dialog has
+// no process selector and can't supply the `process_id` those targets require, so
+// they're filtered out here — agentic teams are launched from Agent Studio, which
+// has a dedicated process picker. The backend `/testable-teams` still lists them.
+const AGENTIC_TEAM_PREFIX = 'agentic_team:';
 
 @Component({
   selector: 'app-persona-testing-dashboard',
@@ -73,7 +78,10 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.refreshPersonas();
     this.api.getTestableTeams().subscribe({
-      next: (resp) => (this.teams = resp.teams),
+      next: (resp) =>
+        (this.teams = (resp?.teams ?? []).filter(
+          (t) => !t.team_key.startsWith(AGENTIC_TEAM_PREFIX),
+        )),
     });
 
     this.runsSub = timer(0, POLL_RUNS_MS)
