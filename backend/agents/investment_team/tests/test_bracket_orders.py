@@ -169,9 +169,9 @@ def test_entry_fill_materializes_stop_and_take_profit_children() -> None:
         assert child.submitted_at == "2024-01-02"
 
     assert sl.request.stop_price == pytest.approx(95.0, rel=1e-9)
-    assert sl.request.reason == "bracket_sl"
+    assert sl.request.reason == "engine_exit:bracket_sl"
     assert tp.request.limit_price == pytest.approx(110.0, rel=1e-9)
-    assert tp.request.reason == "bracket_tp"
+    assert tp.request.reason == "engine_exit:bracket_tp"
 
     # Position is open; no trade closed yet.
     assert portfolio.positions["AAA"].qty == pytest.approx(10.0, rel=1e-9)
