@@ -589,6 +589,12 @@ class GitHubClient:
         Preconditions:
             - Exactly one anchor is supplied: either ``line`` (a 1-based line
               present in the diff for ``commit_id``) or ``subject_type="file"``.
+            - ``line``, when supplied, is >= 1 (GitHub uses 1-based line numbers).
+            - ``subject_type``, when supplied, is ``"file"`` (the only value this
+              method posts — a file-level anchor).
+            - ``side`` selects the diff side for a line comment (``"RIGHT"`` = the
+              new file, the default; ``"LEFT"`` = the old file). Ignored when
+              ``subject_type`` is used.
             - ``path`` names a file the PR changes; ``commit_id`` is the PR head
               SHA.
             - ``body`` is already token-scrubbed by the caller (this method does
@@ -597,14 +603,19 @@ class GitHubClient:
             - Returns the created-comment payload (carries ``id`` and
               ``html_url``). Raises ``GitHubAPIError`` on any non-2xx response so
               the caller can catch a 422 and degrade.
-            - Raises ``ValueError`` when the "exactly one anchor" precondition is
-              violated (neither or both of ``line``/``subject_type`` supplied),
-              rather than sending an ambiguous request GitHub would reject.
+            - Raises ``ValueError`` when a precondition is violated (neither or
+              both of ``line``/``subject_type`` supplied, a non-positive ``line``,
+              or a ``subject_type`` other than ``"file"``), rather than sending an
+              ambiguous request GitHub would reject with an opaque 422.
         """
         if (line is None) == (subject_type is None):
             raise ValueError(
                 "create_review_comment requires exactly one of 'line' or 'subject_type'"
             )
+        if line is not None and line < 1:
+            raise ValueError("create_review_comment 'line' must be a 1-based line number (>= 1)")
+        if subject_type is not None and subject_type != "file":
+            raise ValueError("create_review_comment 'subject_type' must be 'file'")
         json_body: dict[str, Any] = {
             "commit_id": commit_id,
             "path": path,

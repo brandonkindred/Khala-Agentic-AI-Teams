@@ -701,6 +701,39 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 1
         assert job["review_summary"]["comment_findings"] == 0
 
+    def test_multiple_bad_lines_are_bisected_out(self, review_app) -> None:
+        # Bisection must isolate more than one off-diff line: with two bad lines
+        # among three in-diff findings, only the good line stays inline and both
+        # bad lines are demoted to file-level comments (none lost to standalone).
+        # (Diff valid lines for a.py are {1, 2, 3}, so all three are line-anchored.)
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("high", line=1, description="bad alpha"),
+                _FakeReviewIssue("high", line=2, description="good beta"),
+                _FakeReviewIssue("high", line=3, description="bad gamma"),
+            ]
+        )
+        gh = review_app["github"]["client"]
+        gh.bad_lines = {1, 3}  # two off-diff lines rejected inline by GitHub
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        # Only the good line (2) is posted inline; neither bad line is.
+        posted_line_comments = [
+            c for rev in gh.submitted_reviews for c in rev.get("comments", []) if "line" in c
+        ]
+        assert any(c["line"] == 2 for c in posted_line_comments)
+        assert all(c["line"] not in {1, 3} for c in posted_line_comments)
+        # Both bad lines are demoted to file-level comments; nothing went standalone.
+        demoted_bodies = [c.get("body", "") for c in gh.review_comments]
+        assert any("bad alpha" in b for b in demoted_bodies)
+        assert any("bad gamma" in b for b in demoted_bodies)
+        assert gh.comments == []
+        assert job["review_summary"]["inline_comments"] == 1
+        assert job["review_summary"]["file_comments"] == 2
+        assert job["review_summary"]["comment_findings"] == 0
+
     def test_leftover_finding_posted_as_inline_not_standalone(self, review_app) -> None:
         # After the fix, a finding whose file is not in the diff is re-anchored as a
         # file-level inline review comment, not posted as a standalone conversation
