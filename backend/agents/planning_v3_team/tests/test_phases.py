@@ -2,11 +2,13 @@
 
 import sys
 from pathlib import Path
+from unittest.mock import create_autospec
 
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
+from llm_service import LLMClient  # noqa: E402
 from planning_v3_team.models import ClientContext  # noqa: E402
 from planning_v3_team.phases import (  # noqa: E402
     run_discovery,
@@ -15,6 +17,44 @@ from planning_v3_team.phases import (  # noqa: E402
     run_synthesis,
 )
 from planning_v3_team.tests.conftest import make_llm, multi_heading_doc  # noqa: E402
+
+
+def _autospec_llm(complete_text_return: str):
+    """A strict-spec LLMClient mock: kwargs are validated against the REAL
+    ``LLMClient`` signature, so a call passing ``think=``/``objective=`` only succeeds
+    if those parameters actually exist. Guards against silent interface drift that a
+    permissive ``MagicMock`` would hide."""
+    llm = create_autospec(LLMClient, instance=True)
+    llm.get_max_context_tokens.return_value = 16384
+    llm.complete_text.return_value = complete_text_return
+    return llm
+
+
+def test_run_discovery_complete_text_kwargs_match_real_signature():
+    """Proves the phase's complete_text(think=, objective=) call matches LLMClient."""
+    llm = _autospec_llm(
+        '{"problem_summary": "Need X", "opportunity_statement": "",'
+        ' "target_users": [], "success_criteria": [], "assumptions": []}'
+    )
+    ctx_update, _ = run_discovery({"client_context": ClientContext(), "spec_content": "S"}, llm=llm)
+    # If complete_text rejected think/objective, autospec raises TypeError ->
+    # map_reduce falls back and problem_summary would be the raw material "S".
+    assert ctx_update["client_context"].problem_summary == "Need X"
+    llm.complete_text.assert_called_once()
+
+
+def test_run_requirements_complete_text_kwargs_match_real_signature():
+    """Same strict-spec check for the requirements phase's complete_text call."""
+    llm = _autospec_llm(
+        '{"questions": [{"id": "q1", "question_text": "Where?", "category": "tech",'
+        ' "priority": "low", "options": []}]}'
+    )
+    ctx_update, _ = run_requirements(
+        {"client_context": ClientContext(problem_summary="P"), "spec_content": "S"}, llm=llm
+    )
+    ids = {q.id for q in ctx_update["open_questions"]}
+    assert "q1" in ids  # LLM path, not the default fallback
+    llm.complete_text.assert_called_once()
 
 
 def test_run_intake():

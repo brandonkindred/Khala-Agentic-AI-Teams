@@ -139,8 +139,10 @@ def split_sections(text: str, max_chars: int) -> List[str]:
 def _blank_line_pieces(text: str) -> List[str]:
     """Split on blank lines, retaining the delimiters so concatenation is lossless.
 
-    The ``\\r?\\n`` handles both Unix (LF) and Windows (CRLF) line endings so specs
-    authored on Windows still split on blank lines.
+    A "blank line" is any line that is empty or whitespace-only — the ``\\s*`` between
+    the two newlines matches spaces/tabs, so a line containing only whitespace still
+    counts as a separator. The ``\\r?\\n`` handles both Unix (LF) and Windows (CRLF)
+    line endings so specs authored on Windows still split on blank lines.
     """
     parts = re.split(r"(\r?\n\s*\r?\n)", text)
     pieces: List[str] = []
