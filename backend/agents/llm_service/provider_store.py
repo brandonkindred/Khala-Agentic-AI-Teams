@@ -437,9 +437,14 @@ def update_entry(
     if api_key is not None:
         sets.append("api_key_ciphertext = %s")
         params.append(_encrypt_key(api_key.strip()))
-    # A config edit clears stale limit-state: a rotated key / changed model may have
-    # an unexhausted budget, and leaving it marked would needlessly skip the entry.
-    sets.extend(["limit_exceeded = FALSE", "limit_type = ''", "reset_at = NULL"])
+    # Clear stale limit-state ONLY when a *connection-affecting* field changed
+    # (provider/model/base_url/api_key): a rotated key or changed model may have an
+    # unexhausted budget, and leaving it marked would needlessly skip the entry. A
+    # cosmetic edit (e.g. label only) must NOT un-mark a still-rate-limited provider,
+    # which would cause premature retries / failover.
+    config_changed = any(v is not None for v in (provider, model, base_url, api_key))
+    if config_changed:
+        sets.extend(["limit_exceeded = FALSE", "limit_type = ''", "reset_at = NULL"])
     sets.append("updated_at = NOW()")
     from shared_postgres import get_conn
 
@@ -475,15 +480,25 @@ def delete_entry(entry_id: int) -> bool:
     return deleted
 
 
+class ReorderMismatchError(ValueError):
+    """Raised when a reorder's ``ids`` are not an exact permutation of the live set."""
+
+
 def reorder(entry_ids: "list[int] | tuple[int, ...]") -> None:
     """Reassign ``sort_order`` to match the given id order (0-based) in ONE txn.
 
+    The id set is validated against the live rows *inside the same transaction*,
+    holding a row-level lock (``SELECT ... FOR UPDATE``) so a concurrent
+    create/delete can't slip between the check and the writes — the validation and
+    the reassignment are atomic. ``entry_ids`` must be an exact permutation of the
+    current ids (same length AND same members), else :class:`ReorderMismatchError`
+    (a ``ValueError``) is raised and nothing is written.
+
     Preconditions: ``entry_ids`` lists the ids in the desired most->least preferred
-        order; Postgres enabled. Ids not present in the list keep their existing
-        ``sort_order`` (callers pass the full set). Postconditions: each listed id's
-        ``sort_order`` equals its position; the whole reassignment commits
-        atomically (a partial reorder can never persist); the cache is cleared.
-        Raises ``RuntimeError`` when Postgres disabled.
+        order; Postgres enabled. Postconditions: each id's ``sort_order`` equals its
+        position; the whole reassignment commits atomically (a partial reorder can
+        never persist); the cache is cleared. Raises ``RuntimeError`` when Postgres
+        disabled, ``ReorderMismatchError`` when ``entry_ids`` is not a permutation.
     """
     if not _postgres_enabled():
         raise RuntimeError("Postgres is not configured; cannot modify provider config")
@@ -491,6 +506,15 @@ def reorder(entry_ids: "list[int] | tuple[int, ...]") -> None:
     from shared_postgres import get_conn
 
     with get_conn() as conn, conn.cursor() as cur:
+        # Lock the full row set for the duration of the transaction so the membership
+        # check below can't race a concurrent insert/delete.
+        cur.execute("SELECT id FROM llm_provider_configs FOR UPDATE")
+        live_ids = [r[0] for r in cur.fetchall()]
+        if len(entry_ids) != len(live_ids) or set(entry_ids) != set(live_ids):
+            # Roll back the FOR UPDATE lock by raising (get_conn rolls back on error).
+            raise ReorderMismatchError(
+                "ids must be exactly the current set of provider ids (a permutation of the list)."
+            )
         for position, entry_id in enumerate(entry_ids):
             cur.execute(
                 "UPDATE llm_provider_configs SET sort_order = %s, updated_at = NOW() WHERE id = %s",

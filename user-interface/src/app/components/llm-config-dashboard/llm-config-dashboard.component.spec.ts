@@ -491,17 +491,25 @@ describe('LlmConfigDashboardComponent', () => {
 
   it('formats the reset estimate for a limited provider', () => {
     const base = Date.UTC(2026, 5, 30, 12, 0, 0);
-    (component as unknown as { now: () => number }).now = () => base;
     const at = (ms: number) => new Date(base + ms).toISOString();
-    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: at(2 * 3600 * 1000) }))).toBe(
-      'resets in ~2h',
-    );
-    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: at(30 * 60 * 1000) }))).toBe(
-      'resets in ~30m',
-    );
+    // nowMs is passed explicitly for deterministic assertions (no field override).
     expect(
-      component.resetInfo(entry({ limit_exceeded: true, reset_at: at(3 * 24 * 3600 * 1000) })),
+      component.resetInfo(entry({ limit_exceeded: true, reset_at: at(2 * 3600 * 1000) }), base),
+    ).toBe('resets in ~2h');
+    expect(
+      component.resetInfo(entry({ limit_exceeded: true, reset_at: at(30 * 60 * 1000) }), base),
+    ).toBe('resets in ~30m');
+    expect(
+      component.resetInfo(entry({ limit_exceeded: true, reset_at: at(3 * 24 * 3600 * 1000) }), base),
     ).toBe('resets in ~3d');
+  });
+
+  it('shows "<1m" instead of "~0m" when under 30 seconds remain', () => {
+    const base = Date.UTC(2026, 5, 30, 12, 0, 0);
+    const at = (ms: number) => new Date(base + ms).toISOString();
+    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: at(20 * 1000) }), base)).toBe(
+      'resets in <1m',
+    );
   });
 
   it('returns no reset estimate when not limited or no reset_at', () => {
@@ -512,9 +520,10 @@ describe('LlmConfigDashboardComponent', () => {
 
   it('reports a past reset_at as resetting now', () => {
     const base = Date.UTC(2026, 5, 30, 12, 0, 0);
-    (component as unknown as { now: () => number }).now = () => base;
     const past = new Date(base - 1000).toISOString();
-    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: past }))).toBe('resetting now');
+    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: past }), base)).toBe(
+      'resetting now',
+    );
   });
 
   it('startAdd closes any open edit and startEdit closes the add form', () => {

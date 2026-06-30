@@ -451,6 +451,13 @@ class LlmProviderUpdate(BaseModel):
     model: str | None = None
     base_url: str | None = None
     api_key: str = Field("", description="New API key; empty leaves the stored key unchanged.")
+    clear_api_key: bool = Field(
+        False,
+        description=(
+            "When true, remove the stored API key (e.g. switching to a keyless local "
+            "Ollama). Ignored when a non-empty api_key is also provided."
+        ),
+    )
 
     @field_validator("base_url")
     @classmethod
@@ -612,18 +619,14 @@ async def reorder_providers(body: LlmProviderOrderUpdate) -> LlmProviderListResp
         atomic transaction), caches refreshed, and the reordered list returned.
     """
     _require_storage()
-    # The reorder must be a permutation of the CURRENT id set: same length AND same
-    # members. Otherwise a partial list would leave omitted entries with stale
-    # sort_order (colliding with the new positions), and unknown ids would be silent
-    # no-ops — both leaving the order inconsistent. Reject early with a clear 400.
-    existing_ids = [e.id for e in provider_store.load_ordered_entries(use_cache=False)]
-    if len(body.ids) != len(existing_ids) or set(body.ids) != set(existing_ids):
-        raise HTTPException(
-            status_code=400,
-            detail="ids must be exactly the current set of provider ids (a permutation of the list).",
-        )
+    # ``reorder`` validates that ``ids`` is an exact permutation of the live id set
+    # *inside its transaction* (under a row lock), so the check and the writes are
+    # atomic and a concurrent create/delete can't make a stale set slip through —
+    # a mismatch raises ReorderMismatchError, surfaced here as 400.
     try:
         provider_store.reorder(body.ids)
+    except provider_store.ReorderMismatchError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
         logger.exception("Failed to reorder LLM provider list")
         raise HTTPException(status_code=503, detail="Failed to reorder providers: storage error.") from e
@@ -650,11 +653,26 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     label = body.label.strip() if (body.label and body.label.strip()) else None
     model = body.model.strip() if (body.model and body.model.strip()) else None
     base_url = body.base_url.strip() if (body.base_url and body.base_url.strip()) else None
-    # Merge updates over the existing entry for the guard: an empty value keeps the
-    # stored one, so the effective field is the new one (if given) else the existing.
+    # API key resolution: a non-empty api_key sets it; otherwise clear_api_key=True
+    # removes it ("" for the store); otherwise leave it unchanged (None for the store).
+    new_api_key = body.api_key.strip()
+    if new_api_key:
+        api_key_arg: str | None = new_api_key
+    elif body.clear_api_key:
+        api_key_arg = ""  # explicit removal
+    else:
+        api_key_arg = None  # unchanged
+    # Merge updates over the existing entry for the guard: the effective key is the new
+    # one (if given), "" when cleared, else the existing — so the guard still rejects a
+    # Claude / Ollama-Cloud entry left without any usable key.
     merged_provider = body.provider or existing.provider
     merged_base_url = base_url if base_url is not None else existing.base_url
-    effective_api_key = body.api_key.strip() or existing.api_key
+    if new_api_key:
+        effective_api_key = new_api_key
+    elif body.clear_api_key:
+        effective_api_key = ""
+    else:
+        effective_api_key = existing.api_key
     _guard_entry_credentials(merged_provider, merged_base_url, effective_api_key)
     try:
         updated = provider_store.update_entry(
@@ -663,8 +681,7 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
             provider=body.provider,
             model=model,
             base_url=base_url,
-            # Empty string => leave the stored key untouched (None for the store).
-            api_key=(body.api_key.strip() or None),
+            api_key=api_key_arg,
         )
     except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
         logger.exception("Failed to update LLM provider entry %s", entry_id)

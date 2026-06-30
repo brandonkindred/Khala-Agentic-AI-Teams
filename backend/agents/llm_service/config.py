@@ -404,13 +404,12 @@ def failover_fast_429_enabled() -> bool:
     """True when failover-chain clients should fail fast on 429 (default on).
 
     Postconditions: returns the boolean value of ``LLM_FAILOVER_FAST_429`` (default
-        True when unset). When True the factory builds failover-chain provider
+        True when unset/blank). When True the factory builds failover-chain provider
         clients with a zero in-place rate-limit retry budget so a 429 hands off to
         the next provider immediately instead of sleeping minutes. Never raises.
     """
-    raw = os.environ.get(ENV_LLM_FAILOVER_FAST_429)
-    if raw is None or raw == "":
-        return True
+    # ``env_flag_enabled`` is already a default-on toggle (unset/blank -> True; only
+    # an explicit false/0/no -> False) reading the env once.
     return _env_flag_enabled(ENV_LLM_FAILOVER_FAST_429)
 
 

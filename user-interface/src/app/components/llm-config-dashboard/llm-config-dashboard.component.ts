@@ -281,11 +281,12 @@ export class LlmConfigDashboardComponent implements OnInit {
     });
   }
 
-  /** Current epoch millis. Indirected so tests can pin time for `resetInfo`. */
-  private now = (): number => Date.now();
-
-  /** Human-readable reset estimate for a usage-limited provider (e.g. "~2h"). */
-  resetInfo(entry: LlmProviderEntry): string {
+  /** Human-readable reset estimate for a usage-limited provider (e.g. "~2h").
+   *
+   * ``nowMs`` defaults to the current time; tests pass a fixed value for
+   * deterministic assertions (no private-field override needed).
+   */
+  resetInfo(entry: LlmProviderEntry, nowMs: number = Date.now()): string {
     if (!entry.limit_exceeded || !entry.reset_at) {
       return '';
     }
@@ -293,11 +294,15 @@ export class LlmConfigDashboardComponent implements OnInit {
     if (Number.isNaN(reset)) {
       return '';
     }
-    const ms = reset - this.now();
+    const ms = reset - nowMs;
     if (ms <= 0) {
       return 'resetting now';
     }
     const minutes = Math.round(ms / 60000);
+    if (minutes < 1) {
+      // Under ~30s rounds to 0 minutes — avoid the confusing "resets in ~0m".
+      return 'resets in <1m';
+    }
     if (minutes < 60) {
       return `resets in ~${minutes}m`;
     }

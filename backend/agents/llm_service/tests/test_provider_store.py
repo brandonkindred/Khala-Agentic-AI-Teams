@@ -267,19 +267,37 @@ def test_create_entry_validates_inputs(fake_db):
         ps.create_entry(label="x", provider="")
 
 
-def test_update_entry_clears_limit_state(fake_db):
+def test_update_entry_config_change_clears_limit_state(fake_db):
     fake_db._fetchone = [_row(_entry(2))]
-    ps.update_entry(2, label="new", api_key="k2")
+    ps.update_entry(2, label="new", api_key="k2")  # api_key is a config field
     sql = fake_db.executed[-1][0]
     assert "limit_exceeded = FALSE" in sql and "reset_at = NULL" in sql
     assert "label = %s" in sql
 
 
+def test_update_label_only_preserves_limit_state(fake_db):
+    fake_db._fetchone = [_row(_entry(2))]
+    ps.update_entry(2, label="renamed")  # cosmetic edit only
+    sql = fake_db.executed[-1][0]
+    assert "label = %s" in sql
+    # A label-only edit must NOT un-mark a still-rate-limited provider.
+    assert "limit_exceeded = FALSE" not in sql and "reset_at = NULL" not in sql
+
+
+def test_update_model_change_clears_limit_state(fake_db):
+    fake_db._fetchone = [_row(_entry(2))]
+    ps.update_entry(2, model="other-model")
+    sql = fake_db.executed[-1][0]
+    assert "model = %s" in sql and "limit_exceeded = FALSE" in sql
+
+
 def test_update_entry_skips_unset_fields(fake_db):
     fake_db._fetchone = [_row(_entry(2))]
-    ps.update_entry(2)  # nothing but the limit-state reset
+    ps.update_entry(2)  # no fields at all → only updated_at
     sql = fake_db.executed[-1][0]
-    assert "label = %s" not in sql and "limit_exceeded = FALSE" in sql
+    assert "label = %s" not in sql
+    assert "limit_exceeded = FALSE" not in sql  # nothing config-affecting changed
+    assert "updated_at = NOW()" in sql
 
 
 def test_delete_entry_reports_rowcount(fake_db):
@@ -290,10 +308,21 @@ def test_delete_entry_reports_rowcount(fake_db):
 
 
 def test_reorder_assigns_positions(fake_db):
+    fake_db._fetchall = [(1,), (2,), (3,)]  # live id set for the FOR UPDATE check
     ps.reorder([3, 1, 2])
     # one UPDATE per id, positions 0,1,2 in order
     updates = [c for c in fake_db.executed if "sort_order = %s" in c[0]]
     assert [c[1] for c in updates] == [(0, 3), (1, 1), (2, 2)]
+
+
+def test_reorder_rejects_non_permutation(fake_db):
+    fake_db._fetchall = [(1,), (2,), (3,)]
+    with pytest.raises(ps.ReorderMismatchError):
+        ps.reorder([1, 2])  # missing id 3
+    with pytest.raises(ps.ReorderMismatchError):
+        ps.reorder([1, 2, 99])  # unknown id
+    # No UPDATE was issued for the rejected reorders (only the SELECT).
+    assert not any("sort_order = %s" in c[0] for c in fake_db.executed)
 
 
 def test_mark_exhausted_writes_limit_state(fake_db):

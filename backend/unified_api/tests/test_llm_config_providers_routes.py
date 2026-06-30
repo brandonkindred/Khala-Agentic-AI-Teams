@@ -73,6 +73,11 @@ def app_client(monkeypatch):
         return True
 
     def fake_reorder(ids):
+        # Mirror the real store: validate the permutation atomically and raise on
+        # mismatch (the route maps ReorderMismatchError -> 400).
+        live = {e.id for e in state["entries"]}
+        if len(ids) != len(live) or set(ids) != live:
+            raise ps.ReorderMismatchError("not a permutation")
         state["ops"].append(("reorder", list(ids)))
 
     monkeypatch.setattr(route.provider_store, "create_entry", lambda **kw: fake_create(**kw))
@@ -202,6 +207,32 @@ def test_update_sets_non_empty_fields(app_client):
     assert resp.status_code == 200
     kw = next(op for op in state["ops"] if isinstance(op, tuple) and op[0] == "update")[2]
     assert kw["label"] == "New" and kw["model"] == "qwen" and kw["base_url"] == "http://h:11434"
+
+
+def test_update_clear_api_key_removes_stored_key(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="ollama", api_key="oldkey")]  # local Ollama needs no key
+    resp = client.put("/api/llm-config/providers/1", json={"clear_api_key": True})
+    assert resp.status_code == 200
+    kw = next(op for op in state["ops"] if isinstance(op, tuple) and op[0] == "update")[2]
+    assert kw["api_key"] == ""  # explicit removal (vs None = unchanged)
+
+
+def test_update_clear_api_key_ignored_when_new_key_given(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="ollama", api_key="old")]
+    resp = client.put("/api/llm-config/providers/1", json={"clear_api_key": True, "api_key": "newkey"})
+    assert resp.status_code == 200
+    kw = next(op for op in state["ops"] if isinstance(op, tuple) and op[0] == "update")[2]
+    assert kw["api_key"] == "newkey"  # a provided key wins over the clear flag
+
+
+def test_update_clear_api_key_on_claude_without_fallback_is_400(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="claude", api_key="old")]
+    # Clearing a Claude entry's only key (no env fallback) leaves it unusable → 400.
+    resp = client.put("/api/llm-config/providers/1", json={"clear_api_key": True})
+    assert resp.status_code == 400
 
 
 def test_update_to_claude_without_key_is_400(app_client):
