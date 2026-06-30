@@ -66,9 +66,10 @@ def _attributed_criterion(criteria: List[str], issue: CodeReviewIssue) -> Option
     Preconditions:
         ``criteria`` are the acceptance criteria; ``issue`` is an engine finding.
     Postconditions:
-        Returns the longest ``criterion`` that equals the normalized join of some
-        leading-segment prefix of the description; None when no criterion matches.
-        Blank criteria never match. Pure; no side effects.
+        Returns the ``criterion`` whose NORMALIZED form (``_normalize(criterion)``,
+        not the raw string) is the longest among those equal to the normalized
+        join of some leading-segment prefix of the description; None when no
+        criterion matches. Blank criteria never match. Pure; no side effects.
     """
     segments = (issue.description or "").split(_CRITERION_DELIM)
     norm_by_criterion = {c: _normalize(c) for c in criteria if _normalize(c)}
