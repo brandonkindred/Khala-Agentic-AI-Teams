@@ -702,6 +702,12 @@ def list_testable_teams() -> TestableTeamsResponse:
     except Exception:
         logger.warning("Could not import TEAM_CONFIGS; using default display names", exc_info=True)
         TEAM_CONFIGS = {}
+    # Guard the shape too: if the import succeeds but TEAM_CONFIGS isn't a dict
+    # (e.g. a module/None after a refactor), the ``.get`` below would 500. Degrade
+    # to generated display names instead.
+    if not isinstance(TEAM_CONFIGS, dict):
+        logger.warning("TEAM_CONFIGS is not a dict (%s); using default display names", type(TEAM_CONFIGS).__name__)
+        TEAM_CONFIGS = {}
     teams: list[TestableTeam] = []
     for team_key in ADAPTERS:
         cfg = TEAM_CONFIGS.get(team_key)

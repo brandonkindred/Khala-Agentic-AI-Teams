@@ -539,4 +539,19 @@ describe('AgentStudioPersonaComponent', () => {
     component.newPersona();
     expect(dialog.open).toHaveBeenCalledTimes(2);
   });
+
+  it('does not throw when the team response omits the processes field', () => {
+    build({ team: { team_id: 't1', name: 'T', processes: undefined } as unknown });
+    expect(() => fixture.detectChanges()).not.toThrow();
+    expect(component.completeProcesses()).toEqual([]);
+    expect(component.noCompleteProcess()).toBe(true);
+  });
+
+  it('ignores a null status payload in handleStatus (no throw, run untouched)', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(null));
+    expect(() => component.launch()).not.toThrow();
+    expect(component.run()).toBeNull();
+  });
 });

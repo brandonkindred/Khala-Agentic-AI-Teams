@@ -31,6 +31,15 @@
     cursor: pointer;
     font-size: var(--kh-text-sm);
 
+    &:hover {
+      background: var(--kh-surface-2, rgba(0, 0, 0, 0.04));
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--kh-accent);
+      outline-offset: 2px;
+    }
+
     &.is-active {
       background: var(--kh-accent);
       color: var(--kh-on-accent, #fff);
@@ -79,7 +88,7 @@
     width: 100%;
     font: inherit;
     color: inherit;
-    text-align: left;
+    text-align: start; // logical (RTL-aware) instead of physical `left`
     background: transparent;
     display: flex;
     align-items: center;
@@ -159,9 +168,9 @@
   &__decision {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    border-left: 2px solid var(--kh-border);
-    padding-left: var(--kh-space-2);
+    gap: 2px; // intentional hairline gap between Q/A/rationale lines (below the --kh-space-1 step)
+    border-inline-start: 2px solid var(--kh-border); // logical (RTL-aware)
+    padding-inline-start: var(--kh-space-2);
   }
 
   &__decision-action {

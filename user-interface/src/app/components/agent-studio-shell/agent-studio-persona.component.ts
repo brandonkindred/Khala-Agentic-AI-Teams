@@ -217,7 +217,10 @@ export class AgentStudioPersonaComponent implements OnInit {
             return;
           }
           this.team.set(resp.team);
-          const complete = resp.team.processes.filter((p) => p.status === 'complete');
+          // Guard `processes` with ?? [] so a malformed team (schema mismatch /
+          // backend bug omitting the field) degrades gracefully instead of
+          // throwing on .filter() and breaking the view.
+          const complete = (resp.team.processes ?? []).filter((p) => p.status === 'complete');
           const current = this.selectedProcessId();
           // Drop a handoff-seeded selection that isn't a *complete* process: the
           // <select> only lists complete ones (so it'd show the placeholder) and
@@ -358,10 +361,11 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   /** Apply a polled status; stop polling once the run reaches a terminal state. */
   private handleStatus(detail: PersonaTestRunDetail): void {
-    // Ignore a stale response from a superseded run (e.g. the previous run's
-    // in-flight immediate fetch) so it can't clobber the current run or stop its
-    // poller.
-    if (detail.run_id !== this.activeRunId) {
+    // Ignore a null/undefined payload (defensive against a malformed response
+    // slipping past the error handler) and a stale response from a superseded
+    // run (e.g. the previous run's in-flight immediate fetch) so neither can
+    // clobber the current run or stop its poller.
+    if (!detail || detail.run_id !== this.activeRunId) {
       return;
     }
     // Clear ONLY the transient "lost contact" banner on a successful poll —

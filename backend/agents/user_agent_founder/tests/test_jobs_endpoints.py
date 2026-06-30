@@ -531,6 +531,8 @@ class _NoCountClient:
 
 
 def test_list_agentic_testable_teams_lists_team_when_process_count_absent(monkeypatch):
+    """A team summary that omits ``process_count`` is still enumerated when its
+    detail shows a complete process (a missing count is not a 'no processes' signal)."""
     from user_agent_founder.api import main as api_main
 
     monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _NoCountClient())
@@ -550,6 +552,8 @@ def test_list_agentic_testable_teams_handles_non_list_response(monkeypatch):
 
 
 def test_testable_teams_includes_agentic_teams_with_complete_process(monkeypatch):
+    """/testable-teams returns the static registry targets plus any agentic team
+    that has at least one ``complete`` process (keyed ``agentic_team:<id>``)."""
     from user_agent_founder.api import main as api_main
 
     teams_list = [
@@ -578,6 +582,8 @@ def test_testable_teams_includes_agentic_teams_with_complete_process(monkeypatch
 
 
 def test_testable_teams_survives_provisioning_outage(monkeypatch):
+    """When the cross-service agentic enumeration fails, /testable-teams still
+    returns the static registry targets (best-effort: the outage isn't fatal)."""
     from user_agent_founder.api import main as api_main
 
     monkeypatch.setattr(
@@ -590,6 +596,25 @@ def test_testable_teams_survives_provisioning_outage(monkeypatch):
     # Cross-service failure must not break the static listing.
     assert any(t.team_key == "software_engineering" for t in resp.teams)
     assert not any(t.team_key.startswith("agentic_team:") for t in resp.teams)
+
+
+def test_testable_teams_handles_non_dict_team_configs(monkeypatch):
+    """If TEAM_CONFIGS imports as a non-dict (e.g. after a refactor), the endpoint
+    degrades to generated display names rather than 500-ing on ``.get``."""
+    import sys
+    import types
+
+    from user_agent_founder.api import main as api_main
+
+    fake_cfg = types.ModuleType("unified_api.config")
+    fake_cfg.TEAM_CONFIGS = ["not", "a", "dict"]  # wrong shape on purpose
+    monkeypatch.setitem(sys.modules, "unified_api.config", fake_cfg)
+    # Skip the cross-service enumeration; this test is about the config guard.
+    monkeypatch.setattr(api_main, "_list_agentic_testable_teams", lambda: [])
+
+    resp = api_main.list_testable_teams()
+    se = next(t for t in resp.teams if t.team_key == "software_engineering")
+    assert se.display_name  # generated fallback, no AttributeError
 
 
 def test_dispatch_thread_mode_threads_process_id_and_spec(fake_store, monkeypatch):
@@ -631,6 +656,9 @@ def test_dispatch_thread_mode_threads_process_id_and_spec(fake_store, monkeypatc
 def test_start_marks_job_failed_when_dispatch_raises(
     fake_job_store, fake_store, fake_persona_store, fixed_run_id, monkeypatch
 ):
+    """If dispatch raises after the job row is created, /start marks the job
+    'failed' (with the error recorded) and surfaces a 500 rather than leaving a
+    dangling 'running' row."""
     from user_agent_founder.api import main as api_main
 
     def _boom(run_id: str) -> str:
