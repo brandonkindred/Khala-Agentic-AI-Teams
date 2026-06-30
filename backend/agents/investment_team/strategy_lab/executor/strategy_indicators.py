@@ -261,7 +261,15 @@ def mfi(high, low, close, volume, period=14) -> float:
 
 
 def roc(data, period=12) -> float:
-    """Latest Rate of Change (percent) value. See module contract."""
+    """Latest Rate of Change (percent) value. See module contract.
+
+    ``roc`` is source-aware, but — like the other source-aware scalar wrappers
+    (:func:`sma`, :func:`ema`, :func:`rsi`) — this helper takes ``data`` already
+    projected onto a single series and reads it via the registry's ``close``
+    slot. Source selection is the accessor's job: use
+    ``indicator_value("roc", history, source=...)`` / ``ctx.indicator(...)`` to
+    compute ROC over a non-close source.
+    """
     return _scalar(IndicatorRegistry().roc(_value_bars(data), int(period), source="close"))
 
 

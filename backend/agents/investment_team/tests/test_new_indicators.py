@@ -382,6 +382,7 @@ def test_flat_window_neutral_conventions() -> None:
         ("keltner", {"multiplier": 0}),
         ("keltner", {"atr_period": 1}),
         ("keltner", {"period": 401}),
+        ("keltner", {"band": "nope"}),  # unknown band selector
         ("mfi", {"period": 1}),
         ("mfi", {"period": 201}),
         ("roc", {"period": 1}),
@@ -465,6 +466,7 @@ def test_defaults_filled_for_new_indicators() -> None:
     assert IndicatorRef(name="donchian").param("band") == "middle"
     assert IndicatorRef(name="keltner").param("atr_period") == 10
     assert IndicatorRef(name="keltner").param("multiplier") == 2.0
+    assert IndicatorRef(name="keltner").param("band") == "middle"
     assert IndicatorRef(name="mfi").param("period") == 14
     assert IndicatorRef(name="roc").param("period") == 12
     assert IndicatorRef(name="cci").param("period") == 20
