@@ -901,10 +901,9 @@ class TestChangeReviewAgent:
     # to ``ReviewFinding`` and re-derives approval from blocking severities.
 
     def test_empty_artifacts_approve_without_engine(self) -> None:
+        """No artifacts => nothing to block on and the engine is never invoked."""
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
-        # No artifacts => nothing to block on; the engine is never invoked, so a
-        # tripwire client that fails on any LLM call proves the short-circuit.
         client = _StubClient({"approved": False, "issues": [{"severity": "high"}], "summary": "x"})
         agent = ChangeReviewAgent(client)
         out = agent.run(ChangeReviewInput(task_description="test", artifacts={}))
@@ -912,6 +911,7 @@ class TestChangeReviewAgent:
         assert out.findings == []
 
     def test_approves_when_engine_finds_nothing(self) -> None:
+        """A clean engine result yields approval with no findings."""
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
         client = _StubClient({"approved": True, "issues": [], "summary": "ok"})
@@ -923,6 +923,8 @@ class TestChangeReviewAgent:
         assert out.findings == []
 
     def test_blocks_on_high_severity_finding(self) -> None:
+        """A high-severity engine issue maps to a blocking ReviewFinding and the
+        blocking rule overrides the engine's approved flag."""
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
         client = _StubClient(
@@ -950,6 +952,8 @@ class TestChangeReviewAgent:
         assert out.findings[0].severity == "high"
 
     def test_engine_unavailable_degrades_to_approved(self, monkeypatch) -> None:
+        """A CodeReviewUnavailableError degrades the gate to approved (no findings)
+        rather than crashing the DevOps pipeline."""
         from code_review_agent import CodeReviewUnavailableError
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
@@ -976,6 +980,7 @@ class TestChangeReviewAgent:
         assert "unavailable" in out.summary.lower()
 
     def test_engine_programming_error_propagates(self, monkeypatch) -> None:
+        """An unexpected engine error (e.g. TypeError) is not masked — it propagates."""
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
         class _RaisingEngine:
@@ -995,6 +1000,7 @@ class TestChangeReviewAgent:
             )
 
     def test_info_severity_maps_to_low_and_does_not_block(self) -> None:
+        """An engine 'info' severity maps to ReviewFinding 'low' and does not block."""
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
         client = _StubClient(

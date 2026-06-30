@@ -253,6 +253,7 @@ class _EngineDemoAgent(_DemoAgent):
 
 
 def _engine_agent(response):
+    """Build an engine-routed demo agent whose engine returns ``response``."""
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
     agent.llm = _EngineStubClient(response)
@@ -260,6 +261,8 @@ def _engine_agent(response):
 
 
 def test_engine_review_maps_issues_and_source():
+    """Engine issues are mapped to ReviewIssues with the agent's source and
+    suggestion → recommendation."""
     agent = _engine_agent(
         {
             "approved": False,
@@ -287,6 +290,7 @@ def test_engine_review_maps_issues_and_source():
 
 
 def test_engine_review_clean_pass_reports_no_issues():
+    """A clean engine pass yields an empty issue list and a 0-issue summary."""
     agent = _engine_agent({"approved": True, "issues": [], "summary": "ok"})
     out = agent.review(_Input(current_files={"a.ts": "code"}))
     assert out.issues == []
@@ -294,9 +298,20 @@ def test_engine_review_clean_pass_reports_no_issues():
 
 
 def test_engine_review_skips_without_code():
+    """With no current files the engine is not invoked and review is skipped."""
     agent = _engine_agent({"approved": True, "issues": [], "summary": "ok"})
     out = agent.review(_Input(current_files={}))
     assert "skipped (no code)" in out.summary
+
+
+def test_engine_review_handles_malformed_response():
+    """A malformed engine response (missing ``issues``, non-dict entries) is
+    handled gracefully — the engine sanitizes it and the adapter, mapping the
+    typed CodeReviewOutput, returns a clean phase output with no issues."""
+    agent = _engine_agent({"approved": True, "issues": "not-a-list", "extra": 1})
+    out = agent.review(_Input(current_files={"a.ts": "code"}))
+    assert out.issues == []
+    assert "Demo review: 0 issue(s) found." == out.summary
 
 
 class _RaisingEngine:
@@ -313,6 +328,8 @@ class _RaisingEngine:
 
 
 def test_engine_review_degrades_on_unavailable(monkeypatch):
+    """A CodeReviewUnavailableError from the engine degrades to a "(LLM error)"
+    summary instead of raising."""
     monkeypatch.setattr(
         "code_review_agent.CodeReviewAgent",
         _RaisingEngine(CodeReviewUnavailableError("engine down")),
@@ -325,6 +342,7 @@ def test_engine_review_degrades_on_unavailable(monkeypatch):
 
 
 def test_engine_review_propagates_unexpected_error(monkeypatch):
+    """An unexpected engine error (e.g. TypeError) is not masked — it propagates."""
     monkeypatch.setattr("code_review_agent.CodeReviewAgent", _RaisingEngine(TypeError("boom")))
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
@@ -334,8 +352,8 @@ def test_engine_review_propagates_unexpected_error(monkeypatch):
 
 
 def test_engine_review_problem_solve_unchanged(monkeypatch):
-    # Issues produced via the engine still flow through the unchanged
-    # one-at-a-time problem_solve path keyed on ``source``.
+    """Issues produced via the engine still flow through the unchanged
+    one-at-a-time problem_solve path keyed on ``source``."""
     agent = _EngineDemoAgent.__new__(_EngineDemoAgent)
     agent._model = object()
     agent.llm = None

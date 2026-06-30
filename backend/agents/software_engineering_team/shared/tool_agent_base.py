@@ -299,7 +299,10 @@ class BaseReviewToolAgent:
                 CodeReviewInput(
                     files=dict(inp.current_files),
                     task_description=inp.task_description or "",
-                    language=(getattr(inp, "language", None) or "") or "typescript",
+                    # Pass the input's language through, or "" — the engine's chunk
+                    # reviewer guesses per-chunk when language is empty, which is
+                    # safer than forcing a default for non-TypeScript projects.
+                    language=getattr(inp, "language", None) or "",
                     profile=self.review_profile,
                 )
             )
