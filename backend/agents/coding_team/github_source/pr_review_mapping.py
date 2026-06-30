@@ -8,6 +8,10 @@ Pure, side-effect-free helpers used by the ``/review-pr`` flow:
   inline comment (its line is in the diff), a file-level review comment (its file
   changed but the cited line is not in the diff), or a standalone leftover (its
   file is not in the diff at all).
+- ``split_review_comments`` — partition mapped comments into the line-anchored
+  group (rides the single review) and the file-level group (posted individually
+  on the dedicated review-comments endpoint, the only one that takes
+  ``subject_type``).
 - ``format_comment_body`` — render one finding as a review-comment body.
 - ``anchor_to_first_file`` — produce a file-level inline review comment for a
   leftover finding (file not in diff) anchored to the first changed file.
@@ -205,7 +209,36 @@ def map_issues_to_comments(
     return review_comments, leftover
 
 
-def format_comment_body(issue: Any) -> str:
+def split_review_comments(
+    comments: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Partition mapped comments into line-anchored and file-level groups.
+
+    The two shapes produced by ``map_issues_to_comments``/``anchor_to_first_file``
+    travel on different GitHub endpoints: line-anchored comments ride the single
+    review (``POST /pulls/{n}/reviews``), while file-level comments
+    (``subject_type="file"``) must go on the dedicated comments endpoint
+    (``POST /pulls/{n}/comments``) — the reviews array rejects ``subject_type``.
+
+    Preconditions:
+        - ``comments`` is a list of entries produced by ``map_issues_to_comments``
+          or ``anchor_to_first_file``: each is line-anchored (carries ``line``) or
+          file-level (carries ``subject_type == "file"``).
+    Postconditions:
+        - Returns ``(line_anchored, file_level)`` where ``line_anchored`` is every
+          entry carrying a ``line`` key and ``file_level`` is every other entry.
+          The split is exhaustive: the two groups' lengths always sum to
+          ``len(comments)`` (no entry is dropped or duplicated), so a finding can
+          never be silently lost even if a future producer emits an unexpected
+          shape — it falls into ``file_level`` and is still posted (file-level).
+          Input order is preserved within each group.
+    """
+    line_anchored = [c for c in comments if "line" in c]
+    file_level = [c for c in comments if "line" not in c]
+    return line_anchored, file_level
+
+
+def format_comment_body(issue: ReviewFinding) -> str:
     """Render one finding as a review-comment body: what's wrong + the fix (prose).
 
     Used for both line-anchored and file-level review comments — the body carries
