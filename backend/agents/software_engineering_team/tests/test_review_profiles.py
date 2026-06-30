@@ -162,20 +162,27 @@ class _IssueProbe(DummyLLMClient):
 def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     """skip_false_positive_filter=True bypasses the whole-codebase verifier call;
     the default runs it once."""
-    called = {"n": 0}
+    calls: list[tuple] = []
 
     def _spy(llm, input_data, issues):
-        called["n"] += 1
+        calls.append((llm, input_data, issues))
         return issues
 
     monkeypatch.setattr(coord, "filter_false_positives", _spy)
 
-    # Default: the filter runs.
+    # Default: the filter runs once, with the call signature the coordinator
+    # promises — the engine's LLM client, the CodeReviewInput, and the raw
+    # issue list the chunk reviewer produced (asserting these guards against a
+    # silent regression in how the coordinator invokes the filter).
     CodeReviewAgent(_IssueProbe()).run(CodeReviewInput(files={"a.py": "x = 1"}))
-    assert called["n"] == 1
+    assert len(calls) == 1
+    spy_llm, spy_input, spy_issues = calls[0]
+    assert isinstance(spy_input, CodeReviewInput)
+    assert isinstance(spy_llm, _IssueProbe)
+    assert isinstance(spy_issues, list) and spy_issues, "expected the raw chunk issues"
 
     # Skipped: the filter is bypassed entirely.
     CodeReviewAgent(_IssueProbe()).run(
         CodeReviewInput(files={"a.py": "x = 1"}, skip_false_positive_filter=True)
     )
-    assert called["n"] == 1  # unchanged — no second call
+    assert len(calls) == 1  # unchanged — no second call

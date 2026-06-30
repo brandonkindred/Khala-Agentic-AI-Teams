@@ -908,11 +908,21 @@ class TestChangeReviewAgent:
             ChangeReviewAgent(None)
 
     def test_empty_artifacts_approve_without_engine(self) -> None:
-        """No artifacts => nothing to block on and the engine is never invoked."""
+        """No artifacts => nothing to block on and the engine is never invoked.
+
+        Uses a tripwire client that raises if the engine touches it, so the
+        short-circuit is verified rather than merely tolerated.
+        """
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
-        client = _StubClient({"approved": False, "issues": [{"severity": "high"}], "summary": "x"})
-        agent = ChangeReviewAgent(client)
+        class _TripWireClient(DummyLLMClient):
+            def complete_json(self, *a, **kw):  # type: ignore[override]
+                raise AssertionError("engine must not be called when artifacts are empty")
+
+            def chat_json_round(self, *a, **kw):  # type: ignore[override]
+                raise AssertionError("engine must not be called when artifacts are empty")
+
+        agent = ChangeReviewAgent(_TripWireClient())
         out = agent.run(ChangeReviewInput(task_description="test", artifacts={}))
         assert out.approved
         assert out.findings == []
