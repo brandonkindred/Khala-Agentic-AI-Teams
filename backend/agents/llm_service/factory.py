@@ -293,9 +293,11 @@ def _build_entry_client(
     model = entry.model.strip() or llm_config.resolve_model(agent_key)
     base_url = entry.base_url.strip() or llm_config.resolve_base_url()
     # The entry's own key authenticates a Cloud entry; empty falls back to the
-    # globally-resolved key (single-provider behavior), so a local Ollama entry
-    # needs none.
-    api_key = entry.api_key
+    # globally-resolved key — made explicit here to mirror the Claude branch above
+    # (OllamaLLMClient would also resolve it internally when given an empty key, but
+    # resolving at the call site keeps the two branches symmetric and the contract
+    # clear). A local Ollama entry resolves to "" → no Authorization header.
+    api_key = entry.api_key or llm_config.resolve_ollama_api_key()
     if on_reasoning is not None:
         return OllamaLLMClient(
             model=model,

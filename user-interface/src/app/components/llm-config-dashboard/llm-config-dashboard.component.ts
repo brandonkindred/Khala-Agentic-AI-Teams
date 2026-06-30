@@ -12,6 +12,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatIconModule } from '@angular/material/icon';
 import { MatAutocompleteModule } from '@angular/material/autocomplete';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
 import type {
   LlmConfigResponse,
@@ -64,6 +65,7 @@ function emptyProviderForm(): ProviderForm {
     MatIconModule,
     MatAutocompleteModule,
     MatProgressSpinnerModule,
+    MatTooltipModule,
   ],
   templateUrl: './llm-config-dashboard.component.html',
   styleUrl: './llm-config-dashboard.component.scss',
@@ -154,6 +156,12 @@ export class LlmConfigDashboardComponent implements OnInit {
 
   /** Reorder the list on drag-drop and persist the new order. */
   onProviderDrop(event: CdkDragDrop<LlmProviderEntry[]>): void {
+    // Ignore a drop while a save is already in flight: two concurrent reorder
+    // requests could resolve out of order and corrupt the persisted order. The drop
+    // list is also disabled in the template while saving (belt-and-suspenders).
+    if (this.providersSaving) {
+      return;
+    }
     if (event.previousIndex === event.currentIndex) {
       return;
     }

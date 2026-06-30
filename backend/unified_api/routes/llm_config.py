@@ -498,16 +498,27 @@ async def _provider_list_response() -> LlmProviderListResponse:
     store even when this request lands on a different worker than the mutation.
 
     Postconditions: returns the list ordered most->least preferred with keys masked.
-        Never raises (a read failure yields an empty list).
+        Never raises — any read failure (probe, store read, or mapping) degrades to an
+        empty list with ``storage_status="unreachable"`` rather than a 500, so a
+        transient DB blip never breaks the settings UI (incl. after a successful
+        mutation, where this assembles the response).
     """
     try:
         provider_store.clear_cache()
     except Exception:  # noqa: BLE001 - a cache-clear failure must never 500 a read
         logger.warning("Failed to clear provider-list cache for GET providers", exc_info=True)
+    # _probe_storage_status is itself no-raise (bounded_probe with on_failure), but the
+    # store read + mapping are wrapped so a DB error degrades gracefully instead of 500ing.
     storage_status = await _probe_storage_status()
-    entries = provider_store.load_ordered_entries(use_cache=False)
+    try:
+        entries = provider_store.load_ordered_entries(use_cache=False)
+        providers = [_entry_to_response(e) for e in entries]
+    except Exception:  # noqa: BLE001 - honor the "never raises" contract; degrade gracefully
+        logger.exception("Failed to read the LLM provider list")
+        providers = []
+        storage_status = "unreachable"
     return LlmProviderListResponse(
-        providers=[_entry_to_response(e) for e in entries],
+        providers=providers,
         storage_available=storage_status == "available",
         storage_status=storage_status,
     )

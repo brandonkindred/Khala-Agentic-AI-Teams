@@ -460,6 +460,17 @@ describe('LlmConfigDashboardComponent', () => {
     expect(apiSpy.reorderProviders).not.toHaveBeenCalled();
   });
 
+  it('ignores a drag-drop while a save is already in flight (no concurrent reorder)', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(listResponse([entry({ id: 1, sort_order: 0 }), entry({ id: 2, sort_order: 1 })])),
+    );
+    component.loadProviders();
+    component.providersSaving = true; // a previous mutation is still pending
+    component.onProviderDrop(dropEvent(0, 1));
+    expect(apiSpy.reorderProviders).not.toHaveBeenCalled();
+    expect(component.providers.map((p) => p.id)).toEqual([1, 2]); // order unchanged
+  });
+
   it('reports a mutation failure without reloading (no race)', () => {
     apiSpy.createProvider.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
     apiSpy.listProviders.mockClear();

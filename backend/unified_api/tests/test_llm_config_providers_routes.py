@@ -118,6 +118,23 @@ def test_list_masks_keys_and_reports_state(app_client):
     assert body["storage_available"] is True
 
 
+def test_list_degrades_gracefully_on_read_error(app_client, monkeypatch):
+    client, _state = app_client
+
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(route.provider_store, "load_ordered_entries", boom)
+    resp = client.get("/api/llm-config/providers")
+    # The endpoint honors its "never raises" contract: 200 with an empty list and an
+    # unreachable status instead of a 500.
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["providers"] == []
+    assert body["storage_available"] is False
+    assert body["storage_status"] == "unreachable"
+
+
 def test_create_ollama_local_succeeds(app_client):
     client, state = app_client
     resp = client.post(

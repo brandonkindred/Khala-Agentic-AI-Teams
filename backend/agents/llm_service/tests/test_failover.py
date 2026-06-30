@@ -376,7 +376,8 @@ def test_full_failover_path_unmocked_build(monkeypatch):
     chain = [entries[0], e2]
     monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: list(chain))
     monkeypatch.setattr(ps, "select_active_entry", lambda es, **k: es[0])
-    monkeypatch.setattr(ps, "mark_exhausted", lambda *a, **k: None)
+    marks: list[int] = []
+    monkeypatch.setattr(ps, "mark_exhausted", lambda entry_id, **kw: marks.append(entry_id))
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
 
     calls = []
@@ -391,3 +392,5 @@ def test_full_failover_path_unmocked_build(monkeypatch):
     c = get_client("backend")
     assert unwrap_client(c).chat("p") == "ok-from-m2"
     assert calls == ["m1", "m2"]
+    # The 429'd provider (entry id 1) must actually be marked exhausted.
+    assert marks == [1]

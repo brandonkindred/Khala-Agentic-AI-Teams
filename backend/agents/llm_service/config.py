@@ -124,9 +124,11 @@ CLAUDE_MODEL_SUGGESTIONS: list[str] = list(KNOWN_CLAUDE_CONTEXT.keys())
 
 # Invariant: the default model must itself have a known context window (and thus
 # appear in the suggestion list), so it never falls back to DEFAULT_CLAUDE_CONTEXT.
-assert DEFAULT_CLAUDE_MODEL in KNOWN_CLAUDE_CONTEXT, (
-    "DEFAULT_CLAUDE_MODEL must be a key in KNOWN_CLAUDE_CONTEXT"
-)
+# An explicit raise (not a bare ``assert``) so the check survives ``python -O``.
+if DEFAULT_CLAUDE_MODEL not in KNOWN_CLAUDE_CONTEXT:
+    raise RuntimeError(
+        f"DEFAULT_CLAUDE_MODEL {DEFAULT_CLAUDE_MODEL!r} must be a key in KNOWN_CLAUDE_CONTEXT"
+    )
 
 # ---------------------------------------------------------------------------
 # Known model context (tokens) – used when /api/show is unavailable or not called

@@ -47,7 +47,7 @@
       }
       @if (providersError) {
         <div class="banner banner-error" role="alert">
-          <mat-icon>error_outline</mat-icon> <span>{{ providersError }}</span>
+          <mat-icon aria-hidden="true">error_outline</mat-icon> <span>{{ providersError }}</span>
         </div>
       }
 
@@ -58,7 +58,13 @@
         </p>
       }
 
-      <div cdkDropList class="provider-list" (cdkDropListDropped)="onProviderDrop($event)">
+      <div
+        cdkDropList
+        cdkDropListOrientation="vertical"
+        [cdkDropListDisabled]="providersSaving"
+        class="provider-list"
+        (cdkDropListDropped)="onProviderDrop($event)"
+      >
         @for (entry of providers; track entry.id) {
           <div class="provider-item" cdkDrag>
             @if (editingId === entry.id) {
@@ -112,11 +118,13 @@
                   <span class="provider-model">{{ entry.model }}</span>
                 }
                 @if (entry.api_key_configured) {
-                  <span class="key-badge" title="API key configured"><mat-icon>key</mat-icon></span>
+                  <span class="key-badge" matTooltip="API key configured" aria-label="API key configured">
+                    <mat-icon aria-hidden="true">key</mat-icon>
+                  </span>
                 }
                 @if (entry.limit_exceeded) {
-                  <span class="limit-badge" [title]="entry.limit_type || 'usage limit'">
-                    <mat-icon>block</mat-icon> limit exceeded
+                  <span class="limit-badge" [matTooltip]="entry.limit_type || 'usage limit'">
+                    <mat-icon aria-hidden="true">block</mat-icon> limit exceeded
                     @if (resetInfo(entry)) {
                       <span class="reset">· {{ resetInfo(entry) }}</span>
                     }
@@ -125,11 +133,11 @@
               </div>
               <div class="provider-actions">
                 <button mat-icon-button type="button" (click)="startEdit(entry)" aria-label="Edit provider">
-                  <mat-icon>edit</mat-icon>
+                  <mat-icon aria-hidden="true">edit</mat-icon>
                 </button>
                 <button mat-icon-button type="button" (click)="removeProvider(entry)" aria-label="Remove provider"
                   [disabled]="providersSaving">
-                  <mat-icon>delete</mat-icon>
+                  <mat-icon aria-hidden="true">delete</mat-icon>
                 </button>
               </div>
             }
@@ -173,7 +181,7 @@
         </div>
       } @else {
         <button mat-stroked-button type="button" class="add-provider-btn" (click)="startAdd()" [disabled]="!storageAvailable">
-          <mat-icon>add</mat-icon> Add provider
+          <mat-icon aria-hidden="true">add</mat-icon> Add provider
         </button>
       }
     </mat-card-content>
