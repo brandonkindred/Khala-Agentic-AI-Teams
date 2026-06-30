@@ -836,3 +836,158 @@ def test_resolve_repo_path_rejects_missing_owner_or_repo(monkeypatch, missing):
     with pytest.raises(HTTPException) as exc:
         _resolve_repo_path(cfg, issue_number=1)
     assert exc.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# POST /github/events: webhook receiver for the "@khala review" PR-comment trigger
+# ---------------------------------------------------------------------------
+
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
+
+_EVENTS = "/api/integrations/github/events"
+
+
+def _sign(secret: str, body: bytes) -> str:
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def test_github_events_ping_returns_ok():
+    """A ping event with a valid signature short-circuits to {"ok": true}."""
+    body = b'{"zen": "Keep it simple."}'
+    with patch("unified_api.integrations_store.get_github_webhook_secret", return_value="whsec"):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={"X-GitHub-Event": "ping", "X-Hub-Signature-256": _sign("whsec", body)},
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+def test_github_events_rejects_bad_signature():
+    body = b'{"action":"created"}'
+    with patch("unified_api.integrations_store.get_github_webhook_secret", return_value="whsec"):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={"X-GitHub-Event": "issue_comment", "X-Hub-Signature-256": _sign("wrong", body)},
+        )
+    assert resp.status_code == 401
+    assert "signature" in resp.json()["detail"].lower()
+
+
+def test_github_events_skips_verification_without_secret():
+    """With no secret configured, an unsigned valid payload is dispatched (eased setup)."""
+    body = b'{"action":"created"}'
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret", return_value=None),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(_EVENTS, content=body, headers={"X-GitHub-Event": "issue_comment"})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    disp.assert_called_once()
+
+
+def test_github_events_dispatches_valid_signed_comment():
+    body = b'{"action":"created","issue":{"number":42}}'
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret", return_value="whsec"),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={
+                "X-GitHub-Event": "issue_comment",
+                "X-Hub-Signature-256": _sign("whsec", body),
+            },
+        )
+    assert resp.status_code == 200
+    disp.assert_called_once()
+    assert disp.call_args[0][0] == "issue_comment"
+
+
+def test_github_events_returns_400_on_invalid_json():
+    body = b"not json"
+    with patch("unified_api.integrations_store.get_github_webhook_secret", return_value="whsec"):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={
+                "X-GitHub-Event": "issue_comment",
+                "X-Hub-Signature-256": _sign("whsec", body),
+            },
+        )
+    assert resp.status_code == 400
+    assert "Invalid JSON" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# GET /github config status: webhook_secret_configured flag
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{_M}.get_github_config")
+def test_get_github_reports_webhook_secret_configured(mock_cfg):
+    mock_cfg.return_value = {**_GH_STATUS_CFG, "store_reachable": True, "webhook_secret_configured": True}
+    resp = client.get(_GITHUB_CFG_ENDPOINT)
+    assert resp.status_code == 200
+    assert resp.json()["webhook_secret_configured"] is True
+
+
+@patch(f"{_M}.get_github_config")
+def test_get_github_webhook_secret_unconfigured_defaults_false(mock_cfg):
+    mock_cfg.return_value = {**_GH_STATUS_CFG, "store_reachable": True}
+    resp = client.get(_GITHUB_CFG_ENDPOINT)
+    assert resp.status_code == 200
+    assert resp.json()["webhook_secret_configured"] is False
+
+
+# ---------------------------------------------------------------------------
+# POST /github/review-pr: thin wrapper over the shared _start_pr_review helper
+# ---------------------------------------------------------------------------
+
+_REVIEW_PR = "/api/integrations/github/review-pr"
+
+
+@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_review_pr_success_forwards_pr_number(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {
+                "job_id": "rev-1",
+                "pr_number": 7,
+                "pr_url": "https://github.com/acme/widget/pull/7",
+                "status": "pending",
+                "message": "started",
+            },
+        )
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_PR, json={"pr_number": 7})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["job_id"] == "rev-1"
+    assert fake.calls[0][0] == "http://coding:8103/review-pr"
+    assert fake.calls[0][1]["pr_number"] == 7
+
+
+@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_review_pr_forwards_base_branch(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {"job_id": "rev-2", "pr_number": 7, "pr_url": "u", "status": "pending", "message": ""},
+        )
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_PR, json={"pr_number": 7, "base_branch": "develop"})
+    assert resp.status_code == 200
+    assert fake.calls[0][1]["base_branch"] == "develop"

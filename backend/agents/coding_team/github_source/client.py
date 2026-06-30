@@ -418,6 +418,29 @@ class GitHubClient:
             )
         )
 
+    def create_comment_reaction(
+        self, owner: str, repo: str, comment_id: int, content: str = "eyes"
+    ) -> None:
+        """React to an issue/PR comment (``POST .../issues/comments/{id}/reactions``).
+
+        Preconditions:
+            - ``content`` is a valid GitHub reaction
+              (``+1``/``-1``/``laugh``/``confused``/``heart``/``hooray``/``rocket``/``eyes``).
+        Postconditions:
+            - Adds the reaction to the comment. GitHub returns 200 when the reaction
+              already exists and 201 when newly created; both are accepted by ``_check``.
+              Raises ``GitHubAPIError`` on any non-2xx (e.g. a missing comment or a token
+              without write scope) — callers that treat the reaction as best-effort must
+              guard the call themselves.
+        """
+        self._check(
+            self._request(
+                "POST",
+                f"/repos/{owner}/{repo}/issues/comments/{comment_id}/reactions",
+                json={"content": content},
+            )
+        )
+
     def find_existing_pr(self, owner: str, repo: str, head: str) -> Optional[PullRequest]:
         params = {"state": "open", "head": f"{owner}:{head}"}
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}/pulls", params=params))

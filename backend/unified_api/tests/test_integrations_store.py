@@ -203,6 +203,85 @@ def test_get_integrations_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert github["enabled"] is False
 
 
+def _install_inmemory_github_credentials(store_mod, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Patch the store module's credential helpers with an in-memory dict.
+
+    Lets the GitHub config tests round-trip PAT + webhook secret without Postgres.
+    """
+    creds: dict[tuple[str, str], str] = {}
+
+    def _set(service: str, key: str, value: str) -> None:
+        if value:
+            creds[(service, key)] = value
+        else:
+            creds.pop((service, key), None)
+
+    def _status(service: str, key: str) -> tuple[str, bool]:
+        return creds.get((service, key), ""), True
+
+    def _delete(service: str, key: str) -> None:
+        creds.pop((service, key), None)
+
+    monkeypatch.setattr(store_mod, "set_credential", _set)
+    monkeypatch.setattr(store_mod, "get_credential_status", _status)
+    monkeypatch.setattr(store_mod, "delete_credential", _delete)
+    return creds
+
+
+def test_set_github_config_persists_webhook_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A webhook secret is stored as an encrypted credential and reported as configured."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    creds = _install_inmemory_github_credentials(store, monkeypatch)
+
+    store.set_github_config(enabled=True, owner="acme", repo="widget", webhook_secret="whsec_abc")
+
+    assert creds[("github", "webhook_secret")] == "whsec_abc"
+    assert store.get_github_webhook_secret() == "whsec_abc"
+    cfg = store.get_github_config()
+    assert cfg["webhook_secret_configured"] is True
+
+
+def test_set_github_config_blank_webhook_secret_preserves_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty webhook_secret on a later save does not erase the stored one."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    creds = _install_inmemory_github_credentials(store, monkeypatch)
+
+    store.set_github_config(enabled=True, owner="acme", repo="widget", webhook_secret="whsec_abc")
+    store.set_github_config(enabled=True, owner="acme", repo="widget", default_label="x")
+
+    assert creds[("github", "webhook_secret")] == "whsec_abc"
+
+
+def test_get_github_webhook_secret_env_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no stored secret, GITHUB_WEBHOOK_SECRET is used; absent both → None."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    _install_inmemory_github_credentials(store, monkeypatch)
+
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "env_secret")
+    assert store.get_github_webhook_secret() == "env_secret"
+    assert store.get_github_config()["webhook_secret_configured"] is True
+
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    assert store.get_github_webhook_secret() is None
+    assert store.get_github_config()["webhook_secret_configured"] is False
+
+
+def test_clear_github_config_removes_webhook_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disconnecting GitHub deletes the stored webhook secret along with the PAT."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    creds = _install_inmemory_github_credentials(store, monkeypatch)
+
+    store.set_github_config(
+        enabled=True, owner="acme", repo="widget", personal_access_token="ghp_x", webhook_secret="whsec_abc"
+    )
+    store.clear_github_config()
+
+    assert ("github", "webhook_secret") not in creds
+    assert ("github", "personal_access_token") not in creds
+
+
 def test_get_slack_config_invalid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """get_slack_config returns defaults when file contains invalid JSON."""
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
@@ -251,4 +330,3 @@ def test_clear_medium_session_storage_removes_disk_file(tmp_path: Path, monkeypa
     assert not session_path.exists()
     cfg = store.get_medium_config()
     assert cfg["session_configured"] is False
-

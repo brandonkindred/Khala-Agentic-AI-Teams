@@ -597,6 +597,51 @@ async def slack_events(request: Request) -> Any:
     return {"ok": True}
 
 
+@router.post("/github/events")
+async def github_events(request: Request) -> Any:
+    """Receive GitHub webhook deliveries and trigger reviews from PR comments.
+
+    Handles:
+    - ``ping``: GitHub's webhook-setup probe → ``{"ok": true}``
+    - ``issue_comment`` (``action == "created"``): a ``@khala review`` comment from a
+      collaborator on a PR starts the existing code-review flow.
+
+    GitHub expects a fast 2xx (deliveries time out), so event processing is handed to a
+    background thread. When a webhook secret is configured (stored credential or
+    ``GITHUB_WEBHOOK_SECRET``), the ``X-Hub-Signature-256`` HMAC is verified and a bad
+    signature is rejected with 401; with no secret configured, verification is skipped
+    (logged) to ease first-time setup — mirroring the Slack events handler.
+    """
+    from unified_api.github_events_handler import (
+        dispatch_github_event,
+        verify_github_signature,
+    )
+    from unified_api.integrations_store import get_github_webhook_secret
+
+    body = await request.body()
+    event_type = request.headers.get("X-GitHub-Event", "").strip()
+    signature = request.headers.get("X-Hub-Signature-256", "")
+
+    secret = await asyncio.to_thread(get_github_webhook_secret)
+    if secret:
+        if not verify_github_signature(secret, body, signature):
+            raise HTTPException(status_code=401, detail="Invalid GitHub signature")
+    else:
+        logger.warning("GitHub webhook secret not configured — skipping signature verification")
+
+    # Respond to the setup probe before attempting to parse an event payload.
+    if event_type == "ping":
+        return {"ok": True}
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
+
+    dispatch_github_event(event_type, payload)
+    return {"ok": True}
+
+
 @router.post("/slack/commands")
 async def slack_commands(request: Request) -> Any:
     """
@@ -935,6 +980,14 @@ class GitHubConfigResponse(BaseModel):
     owner: str
     repo: str
     default_label: str
+    webhook_secret_configured: bool = Field(
+        default=False,
+        description=(
+            "True when a webhook signing secret is configured (stored credential or "
+            "GITHUB_WEBHOOK_SECRET env var), used to verify '@khala review' PR-comment "
+            "webhooks delivered to POST /api/integrations/github/events."
+        ),
+    )
     credential_store_unreachable: bool = Field(
         default=False,
         description=(
@@ -953,6 +1006,7 @@ class GitHubConfigUpdate(BaseModel):
     repo: str = ""
     default_label: str = ""
     repo_path: str = Field(default="", description="Operator override for local checkout path")
+    webhook_secret: str = Field(default="", description="GitHub webhook signing secret; empty preserves existing")
 
 
 class GitHubDependencyRef(BaseModel):
@@ -1038,6 +1092,7 @@ def _build_github_config_response(
         owner=cfg["owner"],
         repo=cfg["repo"],
         default_label=cfg["default_label"],
+        webhook_secret_configured=bool(cfg.get("webhook_secret_configured", False)),
         credential_store_unreachable=credential_store_unreachable,
     )
 
@@ -1118,6 +1173,7 @@ async def update_github(body: GitHubConfigUpdate) -> GitHubConfigResponse:
         personal_access_token=body.token,
         default_label=body.default_label,
         repo_path=body.repo_path,
+        webhook_secret=body.webhook_secret,
     )
     return await _github_config_response()
 
@@ -1835,9 +1891,11 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         ) from e
 
 
-@router.post("/github/review-pr", response_model=RunPrReviewResponse)
-async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
-    """Start the code-reviewer agents on a specific open pull request.
+async def _start_pr_review(pr_number: int, base_branch: str | None) -> RunPrReviewResponse:
+    """Resolve the GitHub target and start a PR review on the coding-team service.
+
+    Shared by ``POST /github/review-pr`` (manual UI trigger) and the GitHub webhook
+    handler (``@khala review`` PR comment) so the two paths cannot drift.
 
     Unlike ``run_github_issue`` this does **not** clone the repository: the review
     reads the PR diff and file content purely through the GitHub REST API, so the
@@ -1865,11 +1923,11 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
         "owner": owner,
         "repo": repo,
         "repo_path": _resolve_repo_path(cfg),
-        "pr_number": body.pr_number,
+        "pr_number": pr_number,
         "github_token": token,
     }
-    if body.base_branch:
-        payload["base_branch"] = body.base_branch
+    if base_branch:
+        payload["base_branch"] = base_branch
 
     target = f"{coding_team_url.rstrip('/')}/review-pr"
     try:
@@ -1915,6 +1973,16 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",
         ) from e
+
+
+@router.post("/github/review-pr", response_model=RunPrReviewResponse)
+async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
+    """Start the code-reviewer agents on a specific open pull request.
+
+    Thin wrapper over :func:`_start_pr_review` (the shared review-start path also used by
+    the ``@khala review`` PR-comment webhook).
+    """
+    return await _start_pr_review(body.pr_number, body.base_branch)
 
 
 @router.get("/github/reviews", response_model=list[CodeReviewRunItem])

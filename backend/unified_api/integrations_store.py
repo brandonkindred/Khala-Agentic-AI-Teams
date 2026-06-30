@@ -577,7 +577,31 @@ def get_github_config() -> dict[str, Any]:
     """
     meta = get_github_config_meta()
     token, store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")
-    return {**meta, "token_configured": bool(token), "store_reachable": store_reachable}
+    webhook_secret, _ = get_credential_status(_GITHUB_SERVICE, "webhook_secret")
+    webhook_secret_configured = bool(webhook_secret) or bool(os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip())
+    return {
+        **meta,
+        "token_configured": bool(token),
+        "store_reachable": store_reachable,
+        "webhook_secret_configured": webhook_secret_configured,
+    }
+
+
+def get_github_webhook_secret() -> str | None:
+    """Return the GitHub webhook signing secret, or ``None`` if not configured.
+
+    Preconditions: none.
+    Postconditions: returns the stored secret from the credential store, falling back to
+        the ``GITHUB_WEBHOOK_SECRET`` environment variable. Returns ``None`` when neither
+        is set (so the caller can decide whether to skip signature verification). The
+        credential read never raises (``get_credential_status`` swallows its own errors);
+        a store outage yields the env fallback or ``None``.
+    """
+    secret, _ = get_credential_status(_GITHUB_SERVICE, "webhook_secret")
+    if secret:
+        return secret
+    env_secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()
+    return env_secret or None
 
 
 def set_github_config(
@@ -588,13 +612,17 @@ def set_github_config(
     personal_access_token: str = "",
     default_label: str = "",
     repo_path: str = "",
+    webhook_secret: str = "",
 ) -> None:
-    """Persist GitHub config. PAT goes encrypted to Postgres; rest to JSON.
+    """Persist GitHub config. PAT and webhook secret go encrypted to Postgres; rest to JSON.
 
-    Preserves existing values when empty strings are passed for owner/repo/repo_path.
+    Preserves existing values when empty strings are passed for owner/repo/repo_path and
+    leaves the stored webhook secret untouched when ``webhook_secret`` is blank.
     """
     if personal_access_token.strip():
         set_credential(_GITHUB_SERVICE, "personal_access_token", personal_access_token.strip())
+    if webhook_secret.strip():
+        set_credential(_GITHUB_SERVICE, "webhook_secret", webhook_secret.strip())
 
     with _LOCK:
         data = _read_raw()
@@ -610,8 +638,9 @@ def set_github_config(
 
 
 def clear_github_config() -> None:
-    """Remove GitHub PAT and reset config to disabled defaults."""
+    """Remove GitHub PAT + webhook secret and reset config to disabled defaults."""
     delete_credential(_GITHUB_SERVICE, "personal_access_token")
+    delete_credential(_GITHUB_SERVICE, "webhook_secret")
     with _LOCK:
         data = _read_raw()
         data["github"] = {

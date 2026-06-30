@@ -579,6 +579,15 @@ Optional override for the GitHub REST base URL used by the coding team's GitHub 
 (`backend/agents/coding_team/github_source/`). Defaults to `https://api.github.com`; set to a GitHub
 Enterprise URL when relevant.
 
+### GITHUB_WEBHOOK_SECRET
+Signing secret for the GitHub webhook receiver `POST /api/integrations/github/events`, which lets a
+collaborator trigger a PR review by commenting `@khala review` on a pull request. The receiver
+verifies each delivery's `X-Hub-Signature-256` HMAC against this secret and rejects mismatches with
+`401`. A secret stored via `PUT /api/integrations/github` (encrypted in Postgres) takes precedence
+over this env var. When neither is set, signature verification is skipped (logged) to ease first-time
+setup — set a secret in any real deployment. Only `issue_comment` events from OWNER/MEMBER/COLLABORATOR
+authors on the configured `owner/repo` trigger a review.
+
 ### GITHUB_DEPENDENCY_CONCURRENCY
 Bounds the concurrent per-issue `blocked_by` dependency fetches that enrich
 `GET /api/integrations/github/issues` (the coding-team issue picker). Each open issue is annotated
