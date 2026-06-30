@@ -167,6 +167,26 @@ def test_map_reduce_single_section_one_map_call():
     assert out == {"parts": [{"v": "small"}]}
 
 
+def test_map_reduce_warns_on_many_sections(caplog):
+    """A very large input that splits into many sections logs a warning (no cap, no drop)."""
+    llm = MagicMock()
+    llm.get_max_context_tokens.return_value = 1000  # floor 8000 chars
+    # 51 heading-blocks of ~5k each -> 51 sections (each block alone exceeds half the
+    # 8000 budget, so packing keeps them separate), above the _MANY_SECTIONS_WARN=50 line.
+    text = multi_heading_doc(51, 5000)
+    with caplog.at_level("WARNING"):
+        out = map_reduce(
+            text,
+            llm,
+            content_description="spec",
+            map_fn=lambda *a: {"ok": 1},
+            reduce_fn=_identity_reduce,
+            fallback={},
+        )
+    assert any("sections" in r.message for r in caplog.records)
+    assert len(out["parts"]) > 50  # every section still processed, nothing dropped
+
+
 def test_map_reduce_multiple_sections_all_reduced():
     llm = MagicMock()
     llm.get_max_context_tokens.return_value = 1000  # tiny -> floor 8000 chars

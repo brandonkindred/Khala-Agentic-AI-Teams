@@ -34,6 +34,12 @@ _RESERVED_RESPONSE_TOKENS = 4096
 _MIN_SECTION_CHARS = 8000
 _DEFAULT_CONTEXT_TOKENS = 16384
 
+# Soft observability threshold: above this many sections, one map (LLM) call per
+# section means noticeable cost/latency. We never cap (that would drop spec
+# content — the very thing this module exists to avoid); we only warn so callers
+# are aware of an unusually large digest.
+_MANY_SECTIONS_WARN = 50
+
 
 def compute_section_chars(llm: Any) -> int:
     """Max chars of spec text to feed one map (per-section) prompt.
@@ -59,6 +65,12 @@ def compute_section_chars(llm: Any) -> int:
 
 # --- splitter -------------------------------------------------------------
 
+# CommonMark ATX heading: 1-6 '#' followed by at least one space. The required
+# space (``\s+``, not ``\s*``) is deliberate — it avoids treating comment/shebang
+# lines inside fenced code blocks (``#!/bin/bash``, ``#TODO``) as section
+# boundaries. A non-standard space-less heading (``#Heading``) simply isn't a
+# boundary; the splitter then falls back to blank-line boundaries, so no content
+# is ever lost — only the section granularity is coarser for such inputs.
 _HEADING_RE = re.compile(r"^#{1,6}\s+.*$", re.MULTILINE)
 
 
@@ -165,6 +177,13 @@ def map_reduce(
         return fallback
     section_chars = compute_section_chars(llm)
     sections = split_sections(text, section_chars)
+    if len(sections) > _MANY_SECTIONS_WARN:
+        logger.warning(
+            "Digesting %s into %d sections (one LLM call each); large input may "
+            "increase cost/latency. No content is dropped.",
+            content_description,
+            len(sections),
+        )
     results: List[Dict[str, Any]] = []
     total = len(sections)
     for idx, section in enumerate(sections):
