@@ -22,6 +22,7 @@ _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
+from llm_service import get_client  # noqa: E402
 from planning_v3_team.models import (  # noqa: E402
     PlanningV3ResultResponse,
     PlanningV3RunRequest,
@@ -74,12 +75,16 @@ class SubmitAnswersRequest(BaseModel):
 
 
 def _get_llm():
-    """Return Strands-compatible model for the planning_v3 team."""
-    from strands import Agent
+    """Return a real LLMClient for the planning_v3 team.
 
-    from llm_service import get_strands_model
-
-    return Agent(model=get_strands_model("planning_v3"))
+    The discovery/requirements phases call ``llm.complete_text(...)`` and the spec
+    digestion path uses the same client for per-section extraction plus a
+    ``compact_text`` fallback (``.complete`` / ``.get_max_context_tokens``). A Strands
+    ``Agent`` exposes none of these, so returning one made the phases silently fall
+    back to default output. ``get_client`` returns an ``LLMClient`` that provides all
+    three.
+    """
+    return get_client("planning_v3")
 
 
 def _run_workflow_background(

@@ -162,9 +162,7 @@ def resolve_workspace(
     # ``python -O`` would strip) so a future caller passing a separator /
     # traversal token fails loud rather than escaping the leaf.
     if not job_id or job_id in (".", "..") or any(c in job_id for c in ("/", "\\", "\x00")):
-        raise WorkspaceResolutionError(
-            f"job_id must be a single safe path segment, got {job_id!r}"
-        )
+        raise WorkspaceResolutionError(f"job_id must be a single safe path segment, got {job_id!r}")
 
     base = _base_root()
 
