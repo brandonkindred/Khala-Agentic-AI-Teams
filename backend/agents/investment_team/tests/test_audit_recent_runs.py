@@ -677,6 +677,26 @@ class TestCheckNarrativeFidelity:
         assert result.status == "FAIL"
         assert "donchian" in result.details
 
+    @pytest.mark.parametrize(
+        "prose,concept",
+        [
+            ("On-Balance Volume confirmed the move", "on-balance volume"),
+            ("the Money Flow Index was overbought", "money flow"),
+            ("a sharp Rate of Change spike", "rate of change"),
+            ("Williams %R turned up", "williams"),
+        ],
+    )
+    def test_fail_phantom_prose_form(self, prose: str, concept: str) -> None:
+        # Prose long-forms (not just the DSL token / acronym) must be detected:
+        # "williams_r" never appears verbatim in a narrative, and "On-Balance
+        # Volume" / "Money Flow Index" / "Rate of Change" would evade a token match.
+        from investment_team.scripts.audit_recent_runs import check_narrative_fidelity
+
+        rec = _synthetic_record(analysis_narrative=prose)
+        result = check_narrative_fidelity(rec)
+        assert result.status == "FAIL"
+        assert concept in result.details
+
 
 # ---------------------------------------------------------------------------
 # Check 8: Liquidity realism
@@ -995,17 +1015,29 @@ class TestRiskLimitWhitelistSync:
 
 
 class TestIndicatorVocabSync:
-    """The audit replicates the DSL indicator catalogue as a decoupled literal set
-    (it avoids importing the spec DSL at runtime). This guard keeps the replica in
-    sync with ``spec_dsl.IndicatorName`` so a newly supported indicator can't be
-    added to the DSL while narrative-fidelity audits stay blind to phantom use of
-    it — exactly the gap that left Donchian/Keltner/OBV/MFI/ROC/CCI/Williams %R
-    undetectable when the catalogue first expanded."""
+    """The audit replicates the indicator concept vocabulary (DSL tokens + prose
+    aliases) as decoupled literals — it imports no gate/DSL modules at runtime.
+    These guards keep the replica byte-for-byte in sync with ``spec_readiness`` and
+    covering every ``IndicatorName``, so a newly supported indicator — or a new
+    prose alias for one — can't be added while narrative-fidelity audits stay blind
+    to phantom use of it (the gap that let prose like 'On-Balance Volume' or
+    'Williams %R' slip past when the catalogue first expanded)."""
 
-    def test_audit_vocab_matches_dsl_indicator_names(self) -> None:
+    def test_audit_concepts_match_spec_readiness(self) -> None:
+        from investment_team.scripts.audit_recent_runs import (
+            _CONCEPT_TERMS,
+            _CONCEPT_TO_INDICATOR_NAMES,
+        )
+        from investment_team.strategy_lab.quality_gates import spec_readiness
+
+        assert _CONCEPT_TO_INDICATOR_NAMES == spec_readiness._CONCEPT_TO_INDICATOR_NAMES
+        assert _CONCEPT_TERMS.pattern == spec_readiness._CONCEPT_TERMS.pattern
+
+    def test_audit_concepts_cover_every_dsl_indicator(self) -> None:
         import typing
 
-        from investment_team.scripts.audit_recent_runs import _INDICATOR_NAMES
+        from investment_team.scripts.audit_recent_runs import _CONCEPT_TO_INDICATOR_NAMES
         from investment_team.strategy_lab.spec_dsl import IndicatorName
 
-        assert _INDICATOR_NAMES == set(typing.get_args(IndicatorName))
+        covered: set[str] = set().union(*_CONCEPT_TO_INDICATOR_NAMES.values())
+        assert covered == set(typing.get_args(IndicatorName))

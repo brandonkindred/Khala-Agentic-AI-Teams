@@ -42,31 +42,44 @@ _RISK_LIMIT_TIGHTEN_DIR: Dict[str, Optional[str]] = {
 
 _RISK_LIMIT_KEYS = frozenset(_RISK_LIMIT_TIGHTEN_DIR.keys())
 
-# Mirrors the DSL ``IndicatorName`` catalogue (kept as a decoupled literal copy so
-# the audit imports no gate/DSL modules at runtime). MUST stay in sync with
-# ``spec_dsl.IndicatorName`` — ``tests/test_audit_recent_runs.py`` asserts equality so
-# a new indicator can't be added to the DSL without the phantom-narrative check
-# learning to detect it.
-_INDICATOR_NAMES = frozenset(
-    {
-        "sma",
-        "ema",
-        "rsi",
-        "macd",
-        "bollinger",
-        "atr",
-        "adx",
-        "stochastic",
-        "vwap",
-        "donchian",
-        "keltner",
-        "obv",
-        "mfi",
-        "roc",
-        "cci",
-        "williams_r",
-    }
+# Indicator concept vocabulary for narrative mentions, mirrored from
+# ``spec_readiness`` as a decoupled literal copy (the audit imports no gate/DSL
+# modules at runtime). The regex matches both DSL tokens *and* the common prose
+# forms ("on-balance volume", "money flow", "rate of change", "williams", …), and
+# the map resolves each match to the DSL indicator(s) it names — so a narrative
+# that name-drops an indicator in prose can't slip past ``check_narrative_fidelity``
+# just because it avoided the exact DSL identifier (``williams_r`` never appears in
+# prose at all). ``tests/test_audit_recent_runs.py`` asserts both stay byte-for-byte
+# in sync with ``spec_readiness`` and that the map covers every ``IndicatorName``.
+_CONCEPT_TERMS = re.compile(
+    r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|stochastic|adx|vwap|"
+    r"donchian|keltner|obv|on[\s-]balance\s+volume|mfi|money\s+flow|roc|"
+    r"rate\s+of\s+change|cci|williams)\b",
+    re.IGNORECASE,
 )
+_CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
+    "rsi": frozenset({"rsi"}),
+    "macd": frozenset({"macd"}),
+    "moving average": frozenset({"sma", "ema"}),
+    "ema": frozenset({"ema"}),
+    "sma": frozenset({"sma"}),
+    "bollinger": frozenset({"bollinger"}),
+    "atr": frozenset({"atr"}),
+    "stochastic": frozenset({"stochastic"}),
+    "adx": frozenset({"adx"}),
+    "vwap": frozenset({"vwap"}),
+    "donchian": frozenset({"donchian"}),
+    "keltner": frozenset({"keltner"}),
+    "obv": frozenset({"obv"}),
+    "on balance volume": frozenset({"obv"}),
+    "on-balance volume": frozenset({"obv"}),
+    "mfi": frozenset({"mfi"}),
+    "money flow": frozenset({"mfi"}),
+    "roc": frozenset({"roc"}),
+    "rate of change": frozenset({"roc"}),
+    "cci": frozenset({"cci"}),
+    "williams": frozenset({"williams_r"}),
+}
 
 _MULTIPLIER_TOL = 1e-6
 
@@ -495,10 +508,18 @@ def check_narrative_fidelity(record: Dict[str, Any]) -> CheckResult:
         return CheckResult(name, "SKIP", "No analysis_narrative")
 
     spec_indicators = _collect_spec_indicators(record)
-    phantoms = []
-    for ind in sorted(_INDICATOR_NAMES):
-        if re.search(rf"\b{ind}\b", narrative, re.IGNORECASE) and ind not in spec_indicators:
-            phantoms.append(ind)
+    # Match DSL tokens and common prose forms, normalising whitespace exactly as
+    # spec_readiness does, then resolve each mention to the indicator(s) it could
+    # name. A mention is phantom only when *none* of those indicators is in the
+    # spec (so "moving average" is satisfied by either SMA or EMA).
+    mentioned = {
+        re.sub(r"\s+", " ", m.group(0).lower()) for m in _CONCEPT_TERMS.finditer(narrative)
+    }
+    phantoms = sorted(
+        concept
+        for concept in mentioned
+        if not (_CONCEPT_TO_INDICATOR_NAMES.get(concept, frozenset()) & spec_indicators)
+    )
 
     if phantoms:
         return CheckResult(name, "FAIL", f"Phantom indicators in narrative: {', '.join(phantoms)}")
