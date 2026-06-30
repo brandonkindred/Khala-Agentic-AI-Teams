@@ -498,6 +498,23 @@ class StrategySpec(BaseModel):
         brackets = [r for r in self.exit_rules if isinstance(r, OcoBracketRule)]
         if not brackets:
             return self
+        # A bracket attaches to engine-EMITTED entry orders, so it only functions
+        # when entries are engine-managed. With ``requires_custom_code=True`` the
+        # runtime routes entries through strategy code (``entry_rules=None`` is
+        # passed to the engine), the entry dispatcher never attaches the bracket,
+        # and the exit evaluator skips it — the bracket would be silently inert and
+        # close nothing. Reject the combination so it is never mistaken for a
+        # working exit. (The orchestrator can still flip the flag *after*
+        # construction via ``model_copy`` / assignment, which Pydantic does not
+        # re-validate — the SpecReadinessGate enforces the same invariant on the
+        # final spec for that path.)
+        if self.requires_custom_code:
+            raise ValueError(
+                "oco_bracket is not usable with requires_custom_code=True: the bracket "
+                "attaches only to engine-managed entries, so on the custom-code path it is "
+                "inert and closes nothing. Remove the bracket (use stop_loss / take_profit "
+                "/ signal_exit), or set requires_custom_code=False."
+            )
         if len(brackets) > 1:
             raise ValueError(
                 f"at most one oco_bracket exit rule is allowed per spec; got {len(brackets)}"

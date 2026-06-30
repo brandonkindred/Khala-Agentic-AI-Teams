@@ -330,6 +330,34 @@ def test_rule4_oco_bracket_only_is_exit_complete() -> None:
     assert not any("No exit rules" in c or "no rule of kind" in c for c in _critical(results))
 
 
+def test_rule4_oco_bracket_on_custom_code_spec_is_critical() -> None:
+    """A bracket only attaches to engine-managed entries, so it is inert when the
+    spec later runs with ``requires_custom_code=True`` (entries route through
+    strategy code). The orchestrator flips that flag post-construction via
+    ``model_copy`` (which Pydantic does not re-validate), so the readiness gate —
+    re-run on the flipped spec — must flag the bracket-bearing custom-code spec as
+    not exit-complete."""
+    from investment_team.strategy_lab.spec_dsl import (
+        BracketStopLeg,
+        BracketTakeProfitLeg,
+        OcoBracketRule,
+    )
+
+    base = _spec(
+        exit_=[
+            OcoBracketRule(
+                stop_loss=BracketStopLeg(pct=0.03),
+                take_profit=BracketTakeProfitLeg(pct=0.06),
+            )
+        ]
+    )
+    # Mirror the orchestrator's trial-compile flip — ``model_copy(update=...)``
+    # bypasses the StrategySpec validator that would otherwise reject this.
+    flipped = base.model_copy(update={"requires_custom_code": True})
+    results = SpecReadinessGate().validate(flipped, backtest_config=_config())
+    assert "exit_completeness:bracket_requires_engine_entries" in _rule_ids(results)
+
+
 def test_rule4_partial_scaled_ladder_as_sole_exit_is_critical() -> None:
     """A laddered take-profit summing to < 1.0 with no other full-position exit
     leaves the residual open forever — must be flagged critical."""

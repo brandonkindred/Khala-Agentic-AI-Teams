@@ -198,6 +198,13 @@ def test_spec_rejects_two_brackets() -> None:
         StrategySpec(**_spec([_bracket(), _bracket()]))
 
 
+def test_spec_rejects_bracket_with_requires_custom_code() -> None:
+    # A bracket attaches only to engine-managed entries, so it is inert on the
+    # custom-code path — reject the combination at construction.
+    with pytest.raises(ValueError, match="not usable with requires_custom_code"):
+        StrategySpec(requires_custom_code=True, **_spec([_bracket()]))
+
+
 # ---------------------------------------------------------------------------
 # Entry dispatcher: bracket → entry-order attachments
 # ---------------------------------------------------------------------------
