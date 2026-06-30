@@ -39,6 +39,7 @@ from typing import Literal, Mapping, Optional, Sequence
 
 from ..spec_dsl import (
     ExitRule,
+    OcoBracketRule,
     ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
@@ -424,7 +425,16 @@ def _intent_for_rule(
     triggered stop-loss / take-profit / signal-exit; and the cursor-rung intent
     (only when its target is reached) for a ``ScaledTakeProfitRule``. A limit-style
     stop's intent carries its fully-resolved ``stop_price`` / ``limit_price``.
+
+    An ``OcoBracketRule`` is NOT evaluated here: the bracket is attached to the
+    entry order and materialized by the engine into resting OCO children, so the
+    bar-by-bar dispatcher must not also emit a close for it (dual emission). It is
+    skipped at this single chokepoint (both evaluation entry points funnel through
+    here) rather than reaching ``_rule_triggers`` / ``_kind_of``, which only know
+    the bar-by-bar kinds.
     """
+    if isinstance(rule, OcoBracketRule):
+        return None
     if isinstance(rule, ScaledTakeProfitRule):
         rung = _next_scaled_rung(rule, position, bar, cursor_map.get(idx, 0))
         if rung is None:

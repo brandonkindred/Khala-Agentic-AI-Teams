@@ -19,6 +19,7 @@ from .models import (
     CodeReviewOutput,
     CodeReviewUnavailableError,
 )
+from .profiles import ReviewProfile, build_review_system_prompt
 
 __all__ = [
     "ChunkReviewAgent",
@@ -29,5 +30,7 @@ __all__ = [
     "CodeReviewOutput",
     "CodeReviewUnavailableError",
     "CodebaseIndex",
+    "ReviewProfile",
+    "build_review_system_prompt",
     "filter_false_positives",
 ]
