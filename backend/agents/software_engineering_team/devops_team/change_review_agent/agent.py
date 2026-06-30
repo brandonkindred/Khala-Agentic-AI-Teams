@@ -92,7 +92,9 @@ class ChangeReviewAgent:
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
+        # Explicit raise (not assert) so the precondition survives ``python -O``.
+        if llm_client is None:
+            raise ValueError("llm_client is required")
         self.llm = llm_client
 
     def run(self, input_data: ChangeReviewInput) -> ChangeReviewOutput:

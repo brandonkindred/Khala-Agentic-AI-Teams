@@ -25,6 +25,8 @@ from code_review_agent import (
 )
 from code_review_agent.models import CodeReviewIssue
 
+from llm_service import LLMClient
+
 from .models import AcceptanceVerifierInput, AcceptanceVerifierOutput, CriterionStatus
 
 logger = logging.getLogger(__name__)
@@ -157,14 +159,17 @@ class AcceptanceVerifierAgent:
           met" contract.
     """
 
-    def __init__(self, llm_client=None) -> None:
+    def __init__(self, llm_client: LLMClient) -> None:
         """Store the LLM client the engine will run on.
 
         Preconditions:
             ``llm_client`` is not None — the gate fails fast rather than deferring
             a confusing error to the first ``run`` call (matches ``ChangeReviewAgent``).
+            Enforced with an explicit ``raise`` (not ``assert``) so the boundary
+            check survives ``python -O``.
         """
-        assert llm_client is not None, "llm_client is required"
+        if llm_client is None:
+            raise ValueError("llm_client is required")
         self.llm = llm_client
 
     def run(self, input_data: AcceptanceVerifierInput) -> AcceptanceVerifierOutput:

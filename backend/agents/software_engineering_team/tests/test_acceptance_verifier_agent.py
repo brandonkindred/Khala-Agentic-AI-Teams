@@ -58,7 +58,7 @@ def test_acceptance_verifier_default_run_returns_output() -> None:
 
 def test_acceptance_verifier_requires_client() -> None:
     """Constructing the agent with a None client fails fast (precondition)."""
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         AcceptanceVerifierAgent(None)
 
 

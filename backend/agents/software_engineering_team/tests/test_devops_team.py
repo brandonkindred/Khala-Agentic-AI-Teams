@@ -900,6 +900,13 @@ class TestChangeReviewAgent:
     # issue shape ({approved, issues, summary}); the adapter maps those issues
     # to ``ReviewFinding`` and re-derives approval from blocking severities.
 
+    def test_requires_client(self) -> None:
+        """Constructing with a None client fails fast via an explicit ValueError."""
+        from devops_team.change_review_agent import ChangeReviewAgent
+
+        with pytest.raises(ValueError):
+            ChangeReviewAgent(None)
+
     def test_empty_artifacts_approve_without_engine(self) -> None:
         """No artifacts => nothing to block on and the engine is never invoked."""
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
