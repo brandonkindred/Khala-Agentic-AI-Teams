@@ -65,13 +65,15 @@ def compute_section_chars(llm: Any) -> int:
 
 # --- splitter -------------------------------------------------------------
 
-# CommonMark ATX heading: 1-6 '#' followed by at least one space. The required
-# space (``\s+``, not ``\s*``) is deliberate — it avoids treating comment/shebang
-# lines inside fenced code blocks (``#!/bin/bash``, ``#TODO``) as section
-# boundaries. A non-standard space-less heading (``#Heading``) simply isn't a
-# boundary; the splitter then falls back to blank-line boundaries, so no content
-# is ever lost — only the section granularity is coarser for such inputs.
-_HEADING_RE = re.compile(r"^#{1,6}\s+.*$", re.MULTILINE)
+# CommonMark ATX heading: up to 3 leading spaces, then 1-6 '#' followed by at least
+# one space. The optional ``[ ]{0,3}`` matches CommonMark's allowance for slightly
+# indented headings; the required trailing space (``\s+``, not ``\s*``) is deliberate
+# — it avoids treating comment/shebang lines inside fenced code blocks
+# (``#!/bin/bash``, ``#TODO``) as section boundaries. A non-standard space-less
+# heading (``#Heading``) simply isn't a boundary; the splitter then falls back to
+# blank-line boundaries, so no content is ever lost — only the section granularity is
+# coarser for such inputs.
+_HEADING_RE = re.compile(r"^[ ]{0,3}#{1,6}\s+.*$", re.MULTILINE)
 
 
 def split_sections(text: str, max_chars: int) -> List[str]:

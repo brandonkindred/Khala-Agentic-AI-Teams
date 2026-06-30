@@ -90,7 +90,13 @@ def _requirements_map_factory(
     problem: str,
 ) -> Callable[[str, Any, int, int], Optional[Dict[str, Any]]]:
     """Build the map step. ``problem`` (small) is prepended to every section so each
-    section's question generation stays problem-aware."""
+    section's question generation stays problem-aware.
+
+    Contract: the returned callable expects an ``llm_service.LLMClient`` exposing
+    ``complete_text(prompt, *, objective, temperature, think)`` (see
+    ``llm_service.interface``); the ``think``/``objective`` kwargs are part of that
+    interface and validated in tests via ``create_autospec(LLMClient)``.
+    """
 
     def _map(section: str, llm: Any, idx: int, total: int) -> Optional[Dict[str, Any]]:
         input_text = f"Problem: {problem}\nBrief/Spec section:\n{section}"

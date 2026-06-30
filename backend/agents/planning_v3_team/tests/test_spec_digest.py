@@ -74,6 +74,15 @@ def test_split_sections_at_headings():
     assert sections[0].startswith("# A")
 
 
+def test_split_sections_indented_headings():
+    # CommonMark allows up to 3 leading spaces before a heading.
+    text = "  # A\n" + "a" * 50 + "\n   # B\n" + "b" * 50
+    sections = split_sections(text, 60)
+    assert len(sections) >= 2
+    assert "".join(sections) == text  # lossless
+    assert sections[0].startswith("  # A")
+
+
 def test_split_sections_leading_text_before_first_heading():
     text = "intro line\n\n# H1\n" + "a" * 80 + "\n# H2\n" + "b" * 80
     sections = split_sections(text, 60)

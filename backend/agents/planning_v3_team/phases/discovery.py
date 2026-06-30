@@ -42,7 +42,13 @@ Respond with JSON only (no markdown fences):
 
 
 def _discovery_map(section: str, llm: Any, idx: int, total: int) -> Optional[Dict[str, Any]]:
-    """Map step: extract discovery facts from one section of the brief+spec."""
+    """Map step: extract discovery facts from one section of the brief+spec.
+
+    Contract: ``llm`` must be an ``llm_service.LLMClient`` exposing
+    ``complete_text(prompt, *, objective, temperature, think)`` (see
+    ``llm_service.interface``); the ``think``/``objective`` kwargs are part of that
+    interface and validated in tests via ``create_autospec(LLMClient)``.
+    """
     response = llm.complete_text(
         DISCOVERY_PROMPT.format(input_text=section),
         temperature=0.0,
