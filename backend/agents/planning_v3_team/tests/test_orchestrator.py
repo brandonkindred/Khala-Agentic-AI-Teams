@@ -45,6 +45,8 @@ def test_run_workflow_with_llm_no_pra(tmp_path):
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete.return_value = "CONDENSED"
     mock_llm.complete_text.return_value = '{"problem_summary": "Need X", "opportunity_statement": "Y", "target_users": ["u1"], "success_criteria": ["c1"], "assumptions": []}'
+    # The mock is injected directly via run_workflow's `llm=` parameter (it forwards
+    # llm to run_discovery/run_requirements); _get_llm is not involved on this path.
     result = run_workflow(
         repo_path=repo,
         initial_brief="App",
@@ -54,7 +56,12 @@ def test_run_workflow_with_llm_no_pra(tmp_path):
         job_updater=None,
     )
     assert result.get("success") is True
-    assert result.get("handoff_package") is not None
+    handoff = result.get("handoff_package")
+    assert handoff is not None
+    # Prove the digestion path actually ran under the mock (not the real client):
+    # the mocked discovery output must surface in the handoff's client context.
+    assert mock_llm.complete_text.called
+    assert handoff["client_context"]["problem_summary"] == "Need X"
 
 
 def test_get_llm_returns_llm_client(monkeypatch):
@@ -62,5 +69,6 @@ def test_get_llm_returns_llm_client(monkeypatch):
     from planning_v3_team.api import main as api_main
 
     sentinel = object()
-    monkeypatch.setattr("llm_service.get_client", lambda agent_key=None: sentinel)
+    # _get_llm now imports get_client at module top, so patch the name in its module.
+    monkeypatch.setattr(api_main, "get_client", lambda agent_key=None: sentinel)
     assert api_main._get_llm() is sentinel

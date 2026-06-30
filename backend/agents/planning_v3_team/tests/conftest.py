@@ -40,3 +40,12 @@ def make_llm(complete_text_return, *, max_ctx: int = 16384, complete_return: str
 def llm_factory():
     """Expose ``make_llm`` as a fixture for tests that prefer fixture injection."""
     return make_llm
+
+
+def multi_heading_doc(n: int, body_chars: int) -> str:
+    """Build a markdown doc with ``n`` heading-blocks of ~``body_chars`` each.
+
+    Shared test helper for forcing multi-section splits (used by the spec_digest
+    and phase tests).
+    """
+    return "".join(f"# Heading {i}\n" + ("b" * body_chars) + "\n" for i in range(n))

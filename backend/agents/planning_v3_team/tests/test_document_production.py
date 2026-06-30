@@ -1,4 +1,4 @@
-"""Tests for architecture-overview compaction (no truncation) and _get_llm wiring."""
+"""Tests for architecture-overview compaction in document production (no truncation)."""
 
 import sys
 from pathlib import Path
@@ -20,13 +20,15 @@ def _base_context(tmp_path):
 
 
 def test_architecture_overview_compacted_not_truncated(tmp_path, monkeypatch):
+    """An oversized architecture overview is compacted (via compact_text), never sliced."""
     big = "A" * 9000  # > 8000 budget
+    # document_production imports these at module top, so patch them in that module.
     monkeypatch.setattr(
-        "llm_service.get_client",
+        "planning_v3_team.phases.document_production.get_client",
         lambda agent_key=None: object(),  # not actually used; compact_text is patched
     )
     monkeypatch.setattr(
-        "llm_service.compact_text",
+        "planning_v3_team.phases.document_production.compact_text",
         lambda text, *, max_chars, llm, content_description: "COMPACTED OVERVIEW",
     )
 
@@ -42,12 +44,13 @@ def test_architecture_overview_compacted_not_truncated(tmp_path, monkeypatch):
 
 
 def test_architecture_overview_kept_full_on_compaction_failure(tmp_path, monkeypatch):
+    """When compaction can't run (client unavailable), the FULL overview is preserved."""
     big = "B" * 9000
 
     def boom(*a, **k):
         raise RuntimeError("no client")
 
-    monkeypatch.setattr("llm_service.get_client", boom)
+    monkeypatch.setattr("planning_v3_team.phases.document_production.get_client", boom)
 
     ctx_update, _ = run_document_production(
         _base_context(tmp_path),
@@ -60,6 +63,7 @@ def test_architecture_overview_kept_full_on_compaction_failure(tmp_path, monkeyp
 
 
 def test_architecture_overview_small_unchanged(tmp_path):
+    """An overview within budget passes through unchanged (no compaction call)."""
     small = "short overview"
     ctx_update, _ = run_document_production(
         _base_context(tmp_path),

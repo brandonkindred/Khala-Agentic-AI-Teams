@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from llm_service import compact_text, get_client
 from planning_v3_team.models import ClientContext, HandoffPackage
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,6 @@ def _compact_architecture_overview(overview: str) -> str:
         - Returns a string; on compaction failure it is the unmodified ``overview``.
     """
     try:
-        from llm_service import compact_text, get_client
-
         return compact_text(
             overview,
             max_chars=ARCHITECTURE_OVERVIEW_MAX_CHARS,

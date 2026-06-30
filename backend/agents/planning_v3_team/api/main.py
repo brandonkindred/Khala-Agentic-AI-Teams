@@ -22,6 +22,7 @@ _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
+from llm_service import get_client  # noqa: E402
 from planning_v3_team.models import (  # noqa: E402
     PlanningV3ResultResponse,
     PlanningV3RunRequest,
@@ -83,8 +84,6 @@ def _get_llm():
     back to default output. ``get_client`` returns an ``_AttributingClient`` (a
     virtual ``LLMClient``) that provides all three.
     """
-    from llm_service import get_client
-
     return get_client("planning_v3")
 
 

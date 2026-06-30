@@ -15,6 +15,7 @@ from planning_v3_team.spec_digest import (  # noqa: E402
     parse_json_response,
     split_sections,
 )
+from planning_v3_team.tests.conftest import multi_heading_doc  # noqa: E402
 
 # --- compute_section_chars -------------------------------------------------
 
@@ -166,15 +167,10 @@ def test_map_reduce_single_section_one_map_call():
     assert out == {"parts": [{"v": "small"}]}
 
 
-def _multi_heading_doc(n: int, body_chars: int) -> str:
-    """Build a markdown doc with ``n`` heading-blocks of ~``body_chars`` each."""
-    return "".join(f"# Heading {i}\n" + ("b" * body_chars) + "\n" for i in range(n))
-
-
 def test_map_reduce_multiple_sections_all_reduced():
     llm = MagicMock()
     llm.get_max_context_tokens.return_value = 1000  # tiny -> floor 8000 chars
-    text = _multi_heading_doc(4, 5000)  # 4 blocks ~5000 each -> several <=8000 sections
+    text = multi_heading_doc(4, 5000)  # 4 blocks ~5000 each -> several <=8000 sections
     seen = []
 
     def _map(section, _llm, idx, total):
@@ -196,7 +192,7 @@ def test_map_reduce_multiple_sections_all_reduced():
 def test_map_reduce_skips_none_results():
     llm = MagicMock()
     llm.get_max_context_tokens.return_value = 1000
-    text = _multi_heading_doc(4, 5000)
+    text = multi_heading_doc(4, 5000)
 
     def _map(section, _llm, idx, total):
         return None if idx == 0 else {"ok": idx}

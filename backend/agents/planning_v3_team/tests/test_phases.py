@@ -14,7 +14,7 @@ from planning_v3_team.phases import (  # noqa: E402
     run_requirements,
     run_synthesis,
 )
-from planning_v3_team.tests.conftest import make_llm  # noqa: E402
+from planning_v3_team.tests.conftest import make_llm, multi_heading_doc  # noqa: E402
 
 
 def test_run_intake():
@@ -120,7 +120,7 @@ def test_run_discovery_multi_section_tolerates_malformed_fields():
             ' "target_users": ["u1"], "success_criteria": ["good"], "assumptions": []}',
         ]
     )
-    context = {"client_context": ClientContext(), "spec_content": _multi_heading_doc(2, 5000)}
+    context = {"client_context": ClientContext(), "spec_content": multi_heading_doc(2, 5000)}
     llm = make_llm(lambda *a, **k: next(payloads), max_ctx=1000)
     ctx_update, _ = run_discovery(context, llm=llm)
     cc = ctx_update["client_context"]
@@ -142,7 +142,7 @@ def test_run_requirements_dedupes_across_sections():
     # Force multi-section via a tiny context; both sections return the same question id.
     context = {
         "client_context": ClientContext(problem_summary="P"),
-        "spec_content": _multi_heading_doc(3, 5000),
+        "spec_content": multi_heading_doc(3, 5000),
     }
     payload = (
         '{"questions": [{"id": "dup", "question_text": "Same?", "category": "tech",'
@@ -195,7 +195,7 @@ def test_run_discovery_multi_section_unions_lists():
     )
     context = {
         "client_context": ClientContext(),
-        "spec_content": _multi_heading_doc(2, 5000),
+        "spec_content": multi_heading_doc(2, 5000),
     }
     llm = make_llm(lambda *a, **k: next(payloads), max_ctx=1000)
     ctx_update, _ = run_discovery(context, llm=llm)
@@ -227,7 +227,3 @@ def test_run_requirements_accepts_dict_client_context():
     llm = make_llm('{"questions": []}')
     ctx_update, _ = run_requirements(context, llm=llm)
     assert ctx_update["open_questions"]  # defaults applied
-
-
-def _multi_heading_doc(n: int, body_chars: int) -> str:
-    return "".join(f"# Heading {i}\n" + ("b" * body_chars) + "\n" for i in range(n))
