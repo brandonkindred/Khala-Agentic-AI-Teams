@@ -53,6 +53,10 @@ _TEAM_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # analysis endpoints, so its only job is to be a non-empty, recognizable marker.
 _ANALYSIS_NOOP_JOB_ID = "agentic-team-analysis-noop"
 
+# Posted to the pipeline's ``/input`` when the persona's WAIT answer is genuinely
+# empty, so the run still advances and the endpoint's min-length check passes.
+_NO_ANSWER_PLACEHOLDER = "(no answer provided)"
+
 # Terminal pipeline statuses, normalized to the founder poll contract's terminal
 # states. ``waiting_for_input`` is handled separately (it becomes a question).
 # Both British ("cancelled") and American ("canceled") spellings are accepted
@@ -281,7 +285,7 @@ class AgenticTeamAdapter:
         raw = first.get("other_text")
         text = str(raw).strip() if raw is not None else ""
         if not text:
-            text = "(no answer provided)"
+            text = _NO_ANSWER_PLACEHOLDER
         try:
             resp = client.post(
                 self._url(f"/test-pipeline/runs/{quote(job_id, safe='')}/input"),

@@ -39,10 +39,15 @@ SCHEMA = TeamSchema(
         # software-engineering target leaves it unset.
         """ALTER TABLE user_agent_founder_runs
             ADD COLUMN IF NOT EXISTS process_id TEXT""",
+        # Backfill the default persona only for *agentic-team* runs that predate
+        # the persona_id column. Scoped to ``agentic_team:%`` so pre-existing
+        # software-engineering runs keep a NULL persona_id (they are not persona
+        # runs and must not be mislabeled as such). project_name is intentionally
+        # left NULL rather than stamped with a placeholder — a synthetic name would
+        # misrepresent the run.
         """UPDATE user_agent_founder_runs
-            SET persona_id = COALESCE(persona_id, 'startup-founder'),
-                project_name = COALESCE(project_name, 'taskflow-mvp')
-            WHERE persona_id IS NULL OR project_name IS NULL""",
+            SET persona_id = COALESCE(persona_id, 'startup-founder')
+            WHERE target_team_key LIKE 'agentic_team:%' AND persona_id IS NULL""",
         """CREATE TABLE IF NOT EXISTS user_agent_founder_personas (
             persona_id              TEXT PRIMARY KEY,
             name                    TEXT NOT NULL,

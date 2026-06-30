@@ -216,9 +216,10 @@ export class AgentStudioPersonaComponent implements OnInit {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {
-          // A 200 with no team (e.g. the id resolved to nothing) must surface as
-          // an error, not leave teamLoading() stuck true forever on "Loading team…".
-          if (!resp.team) {
+          // A 200 with no team (e.g. the id resolved to nothing, or the HTTP
+          // client mapped an empty body to null) must surface as an error, not
+          // leave teamLoading() stuck true forever on "Loading team…".
+          if (!resp || !resp.team) {
             this.teamError.set('Team not found.');
             return;
           }
@@ -257,7 +258,9 @@ export class AgentStudioPersonaComponent implements OnInit {
       .subscribe({
         next: (resp) => {
           this.personasLoading.set(false);
-          const personas = resp.personas ?? [];
+          // `resp?.` guards a null body (empty 200 / network-mapped null) so the
+          // library degrades to an empty list rather than throwing.
+          const personas = resp?.personas ?? [];
           this.personas.set(personas);
           // Default the persona selection when none carried from the handoff, OR
           // when the handoff-seeded id isn't in the loaded list (e.g. it was
@@ -308,6 +311,12 @@ export class AgentStudioPersonaComponent implements OnInit {
       .subscribe({
         next: (resp) => {
           this.launching.set(false);
+          // A null/jobless response can't be polled; surface an error instead of
+          // calling startPolling(undefined) and silently stalling the run view.
+          if (!resp || !resp.job_id) {
+            this.error.set('Could not start the persona test.');
+            return;
+          }
           this.startPolling(resp.job_id);
         },
         error: () => {
@@ -436,6 +445,12 @@ export class AgentStudioPersonaComponent implements OnInit {
           .pipe(takeUntilDestroyed(this.destroyRef))
           .subscribe({
             next: (created) => {
+              // Guard a null/idless body so we don't push a bogus entry into the
+              // library or select a persona with an undefined id.
+              if (!created || !created.id) {
+                this.error.set('Could not create the persona.');
+                return;
+              }
               this.personas.update((list) => [...list, created]);
               this.state.setPersonaId(created.id);
             },

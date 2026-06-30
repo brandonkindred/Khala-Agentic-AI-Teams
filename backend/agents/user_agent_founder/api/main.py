@@ -651,8 +651,13 @@ def _list_agentic_testable_teams() -> list[TestableTeam]:
             # Candidates: a real team_id whose summary doesn't *explicitly* report
             # zero processes. A missing/None ``process_count`` is not a reliable
             # "no processes" signal, so keep it and let the detail check decide.
+            # Filter to dicts first so a single non-dict element (e.g. a stray
+            # string) can't raise AttributeError on ``.get`` and discard *every*
+            # valid team via the outer except.
             candidates = [
-                s for s in summaries if s.get("team_id") and s.get("process_count") != 0
+                s
+                for s in summaries
+                if isinstance(s, dict) and s.get("team_id") and s.get("process_count") != 0
             ]
             if not candidates:
                 return []

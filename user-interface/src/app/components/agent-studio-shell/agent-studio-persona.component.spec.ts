@@ -172,6 +172,17 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.error()).toContain('Could not start');
   });
 
+  it('surfaces an error when the launch response is null (no startPolling(undefined))', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.startTest.mockReturnValue(of(null));
+    component.launch();
+    expect(component.error()).toContain('Could not start');
+    expect(component.launching()).toBe(false);
+    // A null response must not start a run view.
+    expect(component.run()).toBeNull();
+  });
+
   it('iterate-roster jumps to Compose (Stage 3)', () => {
     build();
     fixture.detectChanges();
@@ -232,6 +243,23 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.teamLoading()).toBe(false);
   });
 
+  it('surfaces an error when the team response itself is null (no TypeError)', () => {
+    build();
+    // A null body (empty 200 / network-mapped null) must not throw on resp.team.
+    agenticApi.getTeam.mockReturnValue(of(null));
+    expect(() => fixture.detectChanges()).not.toThrow();
+    expect(component.teamError()).toBe('Team not found.');
+    expect(component.team()).toBeNull();
+  });
+
+  it('degrades to an empty library when the personas response is null', () => {
+    build();
+    personaApi.getPersonas.mockReturnValue(of(null));
+    expect(() => fixture.detectChanges()).not.toThrow();
+    expect(component.personas()).toEqual([]);
+    expect(component.personasLoading()).toBe(false);
+  });
+
   it('surfaces a personas-load error in the library (not the shared error signal)', () => {
     build();
     personaApi.getPersonas.mockReturnValue(throwError(() => new Error('nope')));
@@ -290,6 +318,25 @@ describe('AgentStudioPersonaComponent', () => {
     personaApi.createPersona.mockReturnValue(throwError(() => new Error('boom')));
     component.newPersona();
     expect(component.error()).toContain('Could not create');
+  });
+
+  it('surfaces an error when the created-persona response is null', () => {
+    build({
+      dialogResult: {
+        name: 'New',
+        description: '',
+        icon: 'person',
+        system_prompt: 's',
+        spec_generation_prompt: 'g',
+      },
+    });
+    fixture.detectChanges();
+    personaApi.createPersona.mockReturnValue(of(null));
+    const before = component.personas().length;
+    component.newPersona();
+    expect(component.error()).toContain('Could not create');
+    // A null body must not be pushed into the library.
+    expect(component.personas().length).toBe(before);
   });
 
   it('does nothing when the persona editor is cancelled', () => {

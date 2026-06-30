@@ -569,6 +569,33 @@ def test_list_agentic_testable_teams_handles_non_list_response(monkeypatch):
     assert api_main._list_agentic_testable_teams() == []
 
 
+class _MixedListClient:
+    """A /teams list with a stray non-dict element alongside a valid team. The
+    non-dict must be skipped (not raise AttributeError on ``.get`` and discard the
+    valid team via the broad except)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get(self, url, *, timeout=None):
+        if url.endswith("/teams"):
+            return _TeamsResp(200, ["not-a-dict", {"team_id": "A", "name": "Alpha"}])
+        return _TeamsResp(200, {"team": {"name": "Alpha", "processes": [{"status": "complete"}]}})
+
+
+def test_list_agentic_testable_teams_skips_non_dict_summary_elements(monkeypatch):
+    """A non-dict element in the /teams list is filtered out, leaving the valid
+    agentic team enumerated rather than the whole result collapsing to []."""
+    from user_agent_founder.api import main as api_main
+
+    monkeypatch.setattr(api_main.httpx, "Client", lambda *a, **kw: _MixedListClient())
+    teams = api_main._list_agentic_testable_teams()
+    assert {t.team_key for t in teams} == {"agentic_team:A"}
+
+
 def test_testable_teams_includes_agentic_teams_with_complete_process(monkeypatch):
     """/testable-teams returns the static registry targets plus any agentic team
     that has at least one ``complete`` process (keyed ``agentic_team:<id>``)."""

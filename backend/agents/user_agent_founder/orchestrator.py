@@ -421,7 +421,10 @@ def run_workflow(
         run = store.get_run(run_id)
 
         if adapter is None:
-            team_key = getattr(run, "target_team_key", None) or "software_engineering"
+            # Explicit None check (``run`` is Optional) rather than getattr-with-
+            # default, so the contract is obvious and matches the guards just below
+            # and in _dispatch_founder_run.
+            team_key = (run.target_team_key if run is not None else None) or "software_engineering"
             # ``process_id``/``spec`` are set only for agentic-team targets;
             # ``get_adapter`` ignores them for the software-engineering target.
             # ``spec`` seeds the analysis→build pass-through so a run resumed
