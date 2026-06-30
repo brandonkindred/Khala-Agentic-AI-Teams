@@ -18,12 +18,30 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from llm_service import compact_text
 
 logger = logging.getLogger(__name__)
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    """Read a positive int from the environment, falling back to ``default``.
+
+    Garbage or non-positive values fall back to ``default`` (defensive parsing,
+    matching the repo-wide env-var convention).
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 1 else default
+
 
 # Conservative chars-per-token for code/spec text. Mirrors
 # software_engineering_team.shared.context_sizing.CHARS_PER_TOKEN without taking a
@@ -37,8 +55,9 @@ _DEFAULT_CONTEXT_TOKENS = 16384
 # Soft observability threshold: above this many sections, one map (LLM) call per
 # section means noticeable cost/latency. We never cap (that would drop spec
 # content — the very thing this module exists to avoid); we only warn so callers
-# are aware of an unusually large digest.
-_MANY_SECTIONS_WARN = 50
+# are aware of an unusually large digest. Overridable via env for cost-sensitive
+# deployments (``PLANNING_V3_MANY_SECTIONS_WARN``; see docs/ENV_VARS.md).
+_MANY_SECTIONS_WARN = _env_positive_int("PLANNING_V3_MANY_SECTIONS_WARN", 50)
 
 
 def compute_section_chars(llm: Any) -> int:
@@ -73,6 +92,11 @@ def compute_section_chars(llm: Any) -> int:
 # heading (``#Heading``) simply isn't a boundary; the splitter then falls back to
 # blank-line boundaries, so no content is ever lost — only the section granularity is
 # coarser for such inputs.
+#
+# Known limitation (accepted, lossless): a heading-shaped comment inside a fenced code
+# block (e.g. ``# fetch data`` in a ```python block) can be treated as a section
+# boundary. We don't track open fences — the only effect is a slightly different (never
+# missing) section split, and per-section extraction tolerates such boundaries.
 _HEADING_RE = re.compile(r"^[ ]{0,3}#{1,6}\s+.*$", re.MULTILINE)
 
 
@@ -240,15 +264,17 @@ def _supports_compaction(llm: Any) -> bool:
 
 # --- shared JSON parse helper -----
 
-# Prefer an explicit ```json fenced block anywhere in the response — this is robust
-# to a leading reasoning/"thinking" block or prose before the JSON, which a naive
-# "split on the first ```" would mis-extract. Non-greedy so it stops at the closing
-# fence of the first block.
+# Prefer an explicit ```json fenced block anywhere in the response — robust to a
+# leading reasoning/"thinking" block or prose before the JSON. Non-greedy so it stops
+# at the closing fence of the first block.
 _JSON_FENCE_RE = re.compile(r"```json\s*([\s\S]*?)```", re.IGNORECASE)
+# Fallback: any fenced block (optionally language-tagged) located anywhere in the
+# response — handles prose followed by an untagged ``` block, not just a leading fence.
+_ANY_FENCE_RE = re.compile(r"```[^\n`]*\n?([\s\S]*?)```")
 
 
 def parse_json_response(response: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Parse an LLM JSON response, tolerating ```json fences.
+    """Parse an LLM JSON response, tolerating ```json (or untagged) fences anywhere.
 
     Postconditions:
         - Returns a ``dict`` on success, or ``None`` for empty/invalid input OR any
@@ -259,16 +285,11 @@ def parse_json_response(response: Optional[str]) -> Optional[Dict[str, Any]]:
     text = (response or "").strip()
     if not text:
         return None
-    fenced = _JSON_FENCE_RE.search(text)
+    fenced = _JSON_FENCE_RE.search(text) or _ANY_FENCE_RE.search(text)
     if fenced:
-        # A json-tagged block won wherever it sits (handles thinking-then-json).
+        # A ```json block wins; otherwise the first fenced block's body, wherever it
+        # sits (handles thinking/prose before the fence).
         text = fenced.group(1).strip()
-    elif text.startswith("```"):
-        # Generic (untagged) fence at the start: take the first fenced block's body.
-        # (A ```json-tagged fence was already handled above.)
-        inner = text.split("```")
-        if len(inner) >= 3:
-            text = inner[1].strip()
     try:
         parsed = json.loads(text)
     except (json.JSONDecodeError, TypeError):

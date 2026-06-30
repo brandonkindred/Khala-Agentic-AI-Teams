@@ -143,6 +143,23 @@ def test_parse_json_untagged_leading_fence():
     assert parse_json_response('```\n{"a": 4}\n```') == {"a": 4}
 
 
+def test_parse_json_untagged_fence_after_prose():
+    # Prose, then an untagged fenced JSON block (not at index 0) must still be found.
+    resp = 'Sure, here you go:\n```\n{"a": 5}\n```'
+    assert parse_json_response(resp) == {"a": 5}
+
+
+def test_env_positive_int(monkeypatch):
+    monkeypatch.setenv("PV3_TEST_INT", "120")
+    assert spec_digest._env_positive_int("PV3_TEST_INT", 50) == 120
+    monkeypatch.setenv("PV3_TEST_INT", "garbage")
+    assert spec_digest._env_positive_int("PV3_TEST_INT", 50) == 50  # garbage -> default
+    monkeypatch.setenv("PV3_TEST_INT", "0")
+    assert spec_digest._env_positive_int("PV3_TEST_INT", 50) == 50  # non-positive -> default
+    monkeypatch.delenv("PV3_TEST_INT", raising=False)
+    assert spec_digest._env_positive_int("PV3_TEST_INT", 50) == 50  # unset -> default
+
+
 def test_parse_json_empty_and_invalid():
     assert parse_json_response("") is None
     assert parse_json_response(None) is None

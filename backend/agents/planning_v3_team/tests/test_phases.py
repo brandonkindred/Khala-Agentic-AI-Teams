@@ -169,6 +169,23 @@ def test_run_discovery_multi_section_tolerates_malformed_fields():
     assert cc.success_criteria == ["good"]  # non-str item skipped, deduped
 
 
+def test_run_discovery_multi_section_coerces_numeric_scalar():
+    # First section returns a numeric problem_summary; reduce coerces it to str rather
+    # than discarding it (the other section has an empty summary).
+    payloads = iter(
+        [
+            '{"problem_summary": 42, "opportunity_statement": "",'
+            ' "target_users": [], "success_criteria": [], "assumptions": []}',
+            '{"problem_summary": "", "opportunity_statement": "",'
+            ' "target_users": ["u1"], "success_criteria": [], "assumptions": []}',
+        ]
+    )
+    context = {"client_context": ClientContext(), "spec_content": multi_heading_doc(2, 5000)}
+    llm = make_llm(lambda *a, **k: next(payloads), max_ctx=1000)
+    ctx_update, _ = run_discovery(context, llm=llm)
+    assert ctx_update["client_context"].problem_summary == "42"  # coerced, not discarded
+
+
 def test_run_discovery_non_object_json_falls_back():
     # A top-level JSON array (not an object) must be treated as no result -> fallback.
     context = {"client_context": ClientContext(), "spec_content": "Material"}

@@ -21,12 +21,18 @@ INITIAL_SPEC_FILENAME = "initial_spec.md"
 ARCHITECTURE_OVERVIEW_MAX_CHARS = 8000
 
 
-def _compact_architecture_overview(overview: str) -> str:
+def _compact_architecture_overview(overview: str, llm: Any = None) -> str:
     """Intelligently compact an oversized architecture overview, never slicing it.
 
     Uses ``compact_text`` (LLM-powered, preserves technical detail) instead of a raw
     ``[:8000]`` slice. On any failure the FULL overview is returned — we never drop
     architecture content.
+
+    Args:
+        overview: the architecture overview text (assumed longer than the budget).
+        llm: optional ``LLMClient`` to reuse; when ``None`` the team's cached client
+            is obtained lazily via ``get_client`` (memoized in ``factory.py``). The
+            parameter makes the dependency injectable for testing.
 
     Preconditions:
         - ``overview`` is a non-empty string longer than the budget.
@@ -34,10 +40,11 @@ def _compact_architecture_overview(overview: str) -> str:
         - Returns a string; on compaction failure it is the unmodified ``overview``.
     """
     try:
+        client = llm if llm is not None else get_client("planning_v3")
         return compact_text(
             overview,
             max_chars=ARCHITECTURE_OVERVIEW_MAX_CHARS,
-            llm=get_client("planning_v3"),
+            llm=client,
             content_description="architecture overview",
         )
     except Exception:

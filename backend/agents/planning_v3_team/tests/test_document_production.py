@@ -62,6 +62,23 @@ def test_architecture_overview_kept_full_on_compaction_failure(tmp_path, monkeyp
     assert ctx_update["handoff_package"].architecture_overview == big
 
 
+def test_compact_architecture_overview_uses_injected_llm(monkeypatch):
+    """When an llm is passed, the helper uses it directly and does NOT call get_client."""
+    from planning_v3_team.phases import document_production as dp
+
+    def fail_get_client(*a, **k):
+        raise AssertionError("get_client should not be called when llm is provided")
+
+    monkeypatch.setattr(dp, "get_client", fail_get_client)
+    monkeypatch.setattr(
+        dp,
+        "compact_text",
+        lambda text, *, max_chars, llm, content_description: f"COMPACTED:{llm}",
+    )
+    out = dp._compact_architecture_overview("X" * 9000, llm="INJECTED")
+    assert out == "COMPACTED:INJECTED"
+
+
 def test_architecture_overview_small_unchanged(tmp_path):
     """An overview within budget passes through unchanged (no compaction call)."""
     small = "short overview"

@@ -69,12 +69,16 @@ def _discovery_reduce(parts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         return dict(parts[0])
 
     def first_str(key: str) -> str:
-        # Only consider string values; a malformed non-str scalar is ignored rather
-        # than crashing the reduce (the LLM occasionally returns wrong-typed fields).
+        # Take the first non-empty string. A non-str *scalar* (number) is coerced to
+        # str so a wrong-typed-but-meaningful value isn't silently discarded; containers
+        # (dict/list) are skipped since str() of them would be noise, not content.
         for p in parts:
             v = p.get(key)
-            if isinstance(v, str) and v.strip():
-                return v
+            if isinstance(v, str):
+                if v.strip():
+                    return v
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                return str(v)
         return ""
 
     def union(key: str) -> list:
