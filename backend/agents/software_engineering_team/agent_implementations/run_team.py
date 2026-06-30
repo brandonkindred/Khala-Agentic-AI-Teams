@@ -124,6 +124,19 @@ def main() -> None:
             )
             continue
 
+        # DevOps execution moved to devops_team (DevOpsTeamLeadAgent), which runs through
+        # the API/orchestrator (repo-based run_workflow) rather than this simple agent.run()
+        # CLI demo. Surface the skip explicitly so devops tasks (e.g. Dockerfile/CI work) are
+        # not silently dropped while the run still reports a completed pipeline.
+        if task.assignee == "devops":
+            logger.warning(
+                "=== Task %s (%s) -> devops - skipped in CLI demo; run DevOps via "
+                "devops_team through the API/orchestrator ===",
+                task.id,
+                task.type.value,
+            )
+            continue
+
         if task.assignee not in agent_map:
             continue
 
