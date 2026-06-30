@@ -1522,9 +1522,23 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             # Submit line-anchored comments in the review, bisecting out any
             # off-diff line so the rest stay anchored. Whatever GitHub still
             # rejects is demoted to a file-level comment below.
-            dropped_lines = _submit_review(
-                client, owner, repo, pr_number, pr.head_sha, body, event, line_comments
-            )
+            try:
+                dropped_lines = _submit_review(
+                    client, owner, repo, pr_number, pr.head_sha, body, event, line_comments
+                )
+            except GitHubAPIError:
+                # _submit_review raises only when the whole submission failed
+                # (a non-422 on line comments, or every summary-only attempt for
+                # a no-line-comment review). Tolerate it ONLY when there are
+                # file-level findings still to post — the summary is then a
+                # best-effort courtesy and those findings carry the review (and
+                # surface any real error themselves). Otherwise nothing reached
+                # GitHub, so let the failure mark the job failed rather than
+                # report a hollow success.
+                if line_comments or not file_comments:
+                    raise
+                logger.warning("Summary-only review failed; posting file-level findings only")
+                dropped_lines = []
             inline_count = len(line_comments) - len(dropped_lines)
 
             # File-level comments (mapped + re-anchored leftovers) and any
@@ -1699,6 +1713,10 @@ def _submit_review(
           (``[]`` when all were posted); the caller demotes those to file-level
           comments. Raises ``GitHubAPIError`` for any non-422 status so the job
           fails loudly instead of masking a real API failure.
+        - When ``comments`` is empty this only posts the summary body; it returns
+          ``[]`` on success and raises ``GitHubAPIError`` if every attempt fails,
+          so the caller can fail a zero-finding review whose only output was the
+          (un-postable) summary instead of reporting a hollow success.
     """
     # Scrub before anything leaves for GitHub: the body (LLM summary) and each
     # inline-comment body (LLM description/suggestion) can echo a token from the
@@ -1713,10 +1731,13 @@ def _submit_review(
     events = [event] if event == "COMMENT" else [event, "COMMENT"]
 
     if not pairs:
-        # No line-anchored findings: this call only posts the summary body, a
-        # courtesy review that carries no findings. Its failure is logged but
-        # never fails the job (any file-level findings post on the dedicated
-        # endpoint and fail loudly there) — honouring the best-effort policy.
+        # No line-anchored findings: this call only posts the summary body. If it
+        # succeeds, nothing was dropped. If every attempt fails, raise so the
+        # caller can decide: when file-level findings still post on the dedicated
+        # endpoint the summary is a best-effort courtesy and its failure is
+        # tolerated, but a zero-finding review whose only output is this summary
+        # must surface as failed rather than report a hollow success.
+        last_exc: Optional[GitHubAPIError] = None
         for ev in events:
             try:
                 client.create_pull_request_review(
@@ -1731,7 +1752,9 @@ def _submit_review(
                 return []
             except GitHubAPIError as e:
                 logger.warning("PR summary-only review failed (event=%s): %s", ev, e)
-        return []
+                last_exc = e
+        assert last_exc is not None
+        raise last_exc
 
     # Happy path: one review carrying the summary body + every inline comment.
     # REQUEST_CHANGES degrades to COMMENT for the bot's own PR without losing the

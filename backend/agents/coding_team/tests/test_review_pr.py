@@ -860,6 +860,34 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] == 1
         assert job["review_summary"]["comment_findings"] == 0
 
+    def test_zero_finding_review_summary_failure_marks_job_failed(self, review_app) -> None:
+        # A zero-finding review's only output is the summary body. If that cannot
+        # be posted, nothing reached GitHub — the job must surface as failed, not
+        # report a hollow success (there are no findings to carry the review via
+        # another path).
+        gh = review_app["github"]["client"]
+        gh.review_fail_times = 1  # the lone summary-only review attempt fails
+        review_app["github"]["agent_output"] = _FakeOutput(issues=[])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert gh.submitted_reviews == []
+        assert gh.review_comments == []
+
+    def test_zero_finding_review_summary_success_completes(self, review_app) -> None:
+        # The clean-review baseline: zero findings, summary posts fine → completed.
+        review_app["github"]["agent_output"] = _FakeOutput(issues=[])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert len(gh.submitted_reviews) == 1  # the summary-only review
+        assert gh.review_comments == []
+        assert gh.comments == []
+        assert job["review_summary"]["comment_findings"] == 0
+
     def test_non_422_review_error_marks_job_failed_not_degraded(self, review_app) -> None:
         # A non-422 review failure (e.g. 403 permission / rate-limit) is a real
         # error, not a bad diff line: it must propagate and mark the job failed
