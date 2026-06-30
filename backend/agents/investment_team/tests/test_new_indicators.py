@@ -408,6 +408,14 @@ def test_roc_accepts_source_override() -> None:
 
 
 @pytest.mark.parametrize("band", ["percent_b", "bandwidth", "upper", "middle", "lower"])
+def test_bollinger_accepts_source_override(band) -> None:
+    """Bollinger is source-aware: a source override is accepted for every band, including %B/bandwidth."""
+    ref = IndicatorRef(name="bollinger", source="hl2", params={"band": band, "period": 20})
+    assert ref.source == "hl2"
+    assert ref.param("band") == band
+
+
+@pytest.mark.parametrize("band", ["percent_b", "bandwidth", "upper", "middle", "lower"])
 def test_bollinger_new_bands_accepted(band) -> None:
     ref = IndicatorRef(name="bollinger", params={"band": band})
     assert ref.param("band") == band
@@ -451,12 +459,17 @@ def test_prose_formatter_renders_new_indicators(ref, fragment) -> None:
 
 def test_defaults_filled_for_new_indicators() -> None:
     assert IndicatorRef(name="donchian").param("period") == 20
+    assert IndicatorRef(name="donchian").param("band") == "middle"
     assert IndicatorRef(name="keltner").param("atr_period") == 10
     assert IndicatorRef(name="keltner").param("multiplier") == 2.0
     assert IndicatorRef(name="mfi").param("period") == 14
     assert IndicatorRef(name="roc").param("period") == 12
     assert IndicatorRef(name="cci").param("period") == 20
     assert IndicatorRef(name="williams_r").param("period") == 14
+    # The new Bollinger band outputs inherit the indicator's num_std default (2.0),
+    # so the prose formatter and downstream layers receive the right width.
+    assert IndicatorRef(name="bollinger", params={"band": "percent_b"}).param("num_std") == 2.0
+    assert IndicatorRef(name="bollinger", params={"band": "bandwidth"}).param("num_std") == 2.0
 
 
 # ---------------------------------------------------------------------------
