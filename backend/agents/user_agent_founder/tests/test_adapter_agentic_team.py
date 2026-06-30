@@ -26,6 +26,7 @@ import pytest
 
 @dataclass
 class _FakeRun:
+    """Fake StoredRun record for adapter tests."""
     run_id: str
     status: str = "running"
     se_job_id: str | None = None
@@ -42,6 +43,7 @@ class _FakeRun:
 
 
 class _FakeStore:
+    """Minimal in-memory founder-store double that records calls."""
     def __init__(self, run: _FakeRun) -> None:
         self._run = run
         self.update_calls: list[dict[str, Any]] = []
@@ -142,6 +144,7 @@ class _FakeHttpxClient:
 
 @pytest.fixture
 def stub_orchestrator_io(monkeypatch):
+    """Patch orchestrator I/O (sleeps, side-effecting helpers) for fast, deterministic tests."""
     from user_agent_founder import orchestrator
 
     monkeypatch.setattr(orchestrator.time, "sleep", lambda _s: None)
@@ -159,6 +162,7 @@ def stub_orchestrator_io(monkeypatch):
 
 
 def test_agentic_team_adapter_satisfies_protocol():
+    """AgenticTeamAdapter satisfies the TargetTeamAdapter protocol and sets team_key/display_name."""
     from user_agent_founder.targets import AgenticTeamAdapter, TargetTeamAdapter
 
     adapter = AgenticTeamAdapter("team-xyz", process_id="p1")
@@ -168,6 +172,7 @@ def test_agentic_team_adapter_satisfies_protocol():
 
 
 def test_adapter_rejects_empty_team_id():
+    """AgenticTeamAdapter raises ValueError when team_id is empty."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     with pytest.raises(ValueError, match="team_id must be non-empty"):
@@ -175,6 +180,7 @@ def test_adapter_rejects_empty_team_id():
 
 
 def test_get_adapter_parses_agentic_key_and_threads_process_id():
+    """get_adapter parses 'agentic_team:<id>' keys and threads process_id into the adapter."""
     from user_agent_founder.targets import AgenticTeamAdapter, get_adapter
 
     adapter = get_adapter("agentic_team:abc", process_id="proc-7")
@@ -186,6 +192,7 @@ def test_get_adapter_parses_agentic_key_and_threads_process_id():
 
 
 def test_get_adapter_rejects_malformed_agentic_key():
+    """get_adapter raises ValueError for 'agentic_team:' with a missing team id."""
     from user_agent_founder.targets import get_adapter
 
     with pytest.raises(ValueError, match="missing team id"):
@@ -215,6 +222,7 @@ def test_adapter_rejects_path_traversal_team_id():
 
 
 def test_url_construction_targets_provisioning_mount():
+    """Adapter._url builds the provisioning-service URL for a given path."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     adapter = AgenticTeamAdapter("t1", process_id="p1")
@@ -228,6 +236,7 @@ def test_url_construction_targets_provisioning_mount():
 
 
 def test_analysis_is_noop_passthrough():
+    """The analysis phase is a no-op pass-through that carries the spec forward without HTTP."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     adapter = AgenticTeamAdapter("t1", process_id="p1")
@@ -266,6 +275,7 @@ def test_constructor_spec_seed_survives_resume_without_start_from_spec():
 
 
 def test_start_build_posts_process_and_spec_returns_run_id():
+    """start_build POSTs process_id + initial_input and returns the pipeline run_id."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     adapter = AgenticTeamAdapter("t1", process_id="proc1")
@@ -279,6 +289,7 @@ def test_start_build_posts_process_and_spec_returns_run_id():
 
 
 def test_start_build_requires_process_id():
+    """start_build raises StartFailed(400) when process_id is None."""
     from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
 
     adapter = AgenticTeamAdapter("t1", process_id=None)
@@ -288,6 +299,7 @@ def test_start_build_requires_process_id():
 
 
 def test_start_build_raises_on_http_error():
+    """start_build raises StartFailed with the upstream status code on an HTTP error."""
     from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
 
     adapter = AgenticTeamAdapter("t1", process_id="proc1")
@@ -411,6 +423,7 @@ def test_start_build_truncates_upstream_error_body():
 
 
 def test_poll_build_maps_waiting_for_input_to_free_text_question():
+    """poll_build maps waiting_for_input to a single free-text question with a stable id."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     adapter = AgenticTeamAdapter("t1", process_id="proc1")
@@ -460,6 +473,7 @@ def test_poll_build_waiting_without_step_id_falls_back_to_wait():
 
 
 def test_poll_build_waiting_without_prompt_is_treated_as_running():
+    """A waiting_for_input status with no human_prompt is treated as 'running'."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     adapter = AgenticTeamAdapter("t1", process_id="proc1")
@@ -474,6 +488,7 @@ def test_poll_build_waiting_without_prompt_is_treated_as_running():
 
 
 def test_poll_build_terminal_and_error_mapping():
+    """poll_build maps terminal statuses, errors, and HTTP failures correctly."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     adapter = AgenticTeamAdapter("t1", process_id="proc1")
@@ -522,6 +537,7 @@ def test_poll_build_waiting_with_empty_step_id_falls_back_to_wait():
 
 
 def test_submit_build_answers_posts_free_text_to_input():
+    """submit_build_answers POSTs the free-text answer to the pipeline's /input route."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     adapter = AgenticTeamAdapter("t1", process_id="proc1")
@@ -536,6 +552,7 @@ def test_submit_build_answers_posts_free_text_to_input():
 
 
 def test_submit_build_answers_falls_back_for_blank_answer():
+    """submit_build_answers posts the placeholder when the answer is blank."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     adapter = AgenticTeamAdapter("t1", process_id="proc1")
@@ -618,6 +635,7 @@ def test_submit_build_answers_converts_transport_error_to_http_error():
 
 
 def test_persona_drives_agentic_team_end_to_end(stub_orchestrator_io, monkeypatch):
+    """End-to-end: a persona drives a collapsed agentic run through the orchestrator."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
     orchestrator = stub_orchestrator_io

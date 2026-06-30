@@ -45,19 +45,25 @@
         <button mat-stroked-button type="button" (click)="iterateRoster()">
           <mat-icon aria-hidden="true">arrow_back</mat-icon> iterate roster
         </button>
-        <button
-          mat-stroked-button
-          type="button"
-          [disabled]="!canFixAgent()"
+        <!-- Tooltip lives on the wrapping span, not the button: Material tooltips
+             don't fire on a disabled element (no pointer events), so the
+             "why is this disabled" hint would never show on the button itself. -->
+        <span
           [matTooltip]="
             canFixAgent()
               ? 'Open the in-focus agent in the Stage 2 sandbox'
               : 'No registry agent in focus — use Browse agents to pick one'
           "
-          (click)="fixAgent()"
         >
-          <mat-icon aria-hidden="true">build</mat-icon> fix an agent
-        </button>
+          <button
+            mat-stroked-button
+            type="button"
+            [disabled]="!canFixAgent()"
+            (click)="fixAgent()"
+          >
+            <mat-icon aria-hidden="true">build</mat-icon> fix an agent
+          </button>
+        </span>
       </div>
     </header>
 
@@ -68,12 +74,13 @@
     <div
       id="studio-tabpanel"
       role="tabpanel"
+      tabindex="0"
       [attr.aria-labelledby]="mode() === 'manual' ? 'studio-tab-manual' : 'studio-tab-persona'"
     >
       @switch (mode()) {
         @case ('manual') {
-          @if (team()) {
-            <app-agentic-team-test-panel [team]="team()!" />
+          @if (team(); as t) {
+            <app-agentic-team-test-panel [team]="t" />
           } @else if (!teamError()) {
             <p class="persona__loading">Loading team…</p>
         }

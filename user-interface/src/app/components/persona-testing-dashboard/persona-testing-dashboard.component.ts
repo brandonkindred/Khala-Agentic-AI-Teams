@@ -82,6 +82,12 @@ export class PersonaTestingDashboardComponent implements OnInit, OnDestroy {
         (this.teams = (resp?.teams ?? []).filter(
           (t) => !t.team_key.startsWith(AGENTIC_TEAM_PREFIX),
         )),
+      // Degrade gracefully on a failed load: leave the team list empty (the
+      // start dialog short-circuits when there are no teams) rather than letting
+      // the error surface unhandled.
+      error: () => {
+        this.teams = [];
+      },
     });
 
     this.runsSub = timer(0, POLL_RUNS_MS)

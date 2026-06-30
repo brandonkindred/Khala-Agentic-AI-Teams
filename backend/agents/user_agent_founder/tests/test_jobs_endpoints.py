@@ -380,6 +380,9 @@ def test_start_agentic_team_allows_when_status_undeterminable(
     )
     assert resp.job_id == fixed_run_id
     assert fake_dispatch == [fixed_run_id]
+    # The best-effort path must still thread process_id into the run (a regression
+    # that dropped it would otherwise pass this test silently).
+    assert fake_store.create_run.call_args.kwargs.get("process_id") == "proc-9"
 
 
 def test_agentic_process_status_maps_team_detail(monkeypatch):
@@ -444,6 +447,8 @@ class _FakeTeamsClient:
 
 
 class _TeamsResp:
+    """Fake httpx.Response for team endpoints: a fixed status code and JSON body."""
+
     def __init__(self, status_code, json_data):
         self.status_code = status_code
         self._json = json_data
