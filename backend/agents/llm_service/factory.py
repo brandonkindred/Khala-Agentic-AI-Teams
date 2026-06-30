@@ -37,7 +37,9 @@ logger = logging.getLogger(__name__)
 # Cache keys carry a 4th element — the rate-limit retry override (``-1`` for "use the
 # env schedule", ``0`` for the failover fast-fail clients) — so a fast-fail failover
 # client and a normal client for the same (model, base_url/key, timeout) never alias.
-_client_cache: dict[tuple[str, str, int, int], OllamaLLMClient] = {}
+# The Ollama key also carries a 5th element (api-key fingerprint) so a per-provider
+# Cloud key from the fallback list never aliases a client keyed differently.
+_client_cache: dict[tuple[str, str, int, int, str], OllamaLLMClient] = {}
 # Claude clients cache by (model, api-key fingerprint, timeout-ms, rl-override) so a
 # key, model, timeout, or rate-limit-override change yields a fresh client (and a
 # stale key never lingers behind a cached client).
@@ -55,16 +57,32 @@ def _rl_key(rate_limit_max_retries: Optional[int]) -> int:
 
 
 def _ollama_cached(
-    model: str, base_url: str, timeout: float, rate_limit_max_retries: Optional[int]
+    model: str,
+    base_url: str,
+    timeout: float,
+    rate_limit_max_retries: Optional[int],
+    api_key: str = "",
 ) -> "tuple[OllamaLLMClient, bool]":
     """Return a cached Ollama client for the args, building one on a miss.
 
+    The cache key includes an api-key fingerprint (mirroring the Claude cache) so a
+    per-provider Cloud key from the fallback list yields a distinct client and never
+    aliases one keyed differently; an empty key (the single-provider path) fingerprints
+    to ``"no-key"`` and falls back to the globally-resolved key at request time.
+
     Postconditions: returns ``(client, was_miss)`` where ``client`` is the shared
-        singleton for ``(model, base_url, timeout, rl-override)`` and ``was_miss`` is
-        True only when this call constructed it (so the caller can log the effective
-        config exactly once, on a genuine miss). Thread-safe.
+        singleton for ``(model, base_url, timeout, rl-override, key-fingerprint)`` and
+        ``was_miss`` is True only when this call constructed it (so the caller can log
+        the effective config exactly once, on a genuine miss). Thread-safe.
     """
-    cache_key = (model, base_url, _timeout_cache_key(timeout), _rl_key(rate_limit_max_retries))
+    fingerprint = sha256_fingerprint(api_key) if api_key else "no-key"
+    cache_key = (
+        model,
+        base_url,
+        _timeout_cache_key(timeout),
+        _rl_key(rate_limit_max_retries),
+        fingerprint,
+    )
     with _cache_lock:
         client = _client_cache.get(cache_key)
         miss = client is None
@@ -74,6 +92,7 @@ def _ollama_cached(
                 base_url=base_url,
                 timeout=timeout,
                 rate_limit_max_retries=rate_limit_max_retries,
+                api_key=api_key,
             )
             _client_cache[cache_key] = client
     return client, miss
@@ -273,6 +292,10 @@ def _build_entry_client(
         return client
     model = entry.model.strip() or llm_config.resolve_model(agent_key)
     base_url = entry.base_url.strip() or llm_config.resolve_base_url()
+    # The entry's own key authenticates a Cloud entry; empty falls back to the
+    # globally-resolved key (single-provider behavior), so a local Ollama entry
+    # needs none.
+    api_key = entry.api_key
     if on_reasoning is not None:
         return OllamaLLMClient(
             model=model,
@@ -280,8 +303,9 @@ def _build_entry_client(
             timeout=timeout,
             on_reasoning=on_reasoning,
             rate_limit_max_retries=rate_limit_max_retries,
+            api_key=api_key,
         )
-    client, _ = _ollama_cached(model, base_url, timeout, rate_limit_max_retries)
+    client, _ = _ollama_cached(model, base_url, timeout, rate_limit_max_retries, api_key)
     return client
 
 

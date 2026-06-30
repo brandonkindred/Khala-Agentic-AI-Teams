@@ -290,6 +290,27 @@ def test_build_entry_client_ollama(monkeypatch):
     assert c._rate_limit_max_retries_override == 0
 
 
+def test_build_entry_client_ollama_honors_entry_key(monkeypatch):
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_OLLAMA_API_KEY", raising=False)
+    e = _full_entry("ollama", model="m", base_url="https://ollama.com", api_key="sk-entry")
+    c = _build_entry_client(e, None, None, None)
+    assert isinstance(c, OllamaLLMClient)
+    assert c._api_key_override == "sk-entry"
+    # The per-entry key authenticates the request, not the (absent) global key.
+    assert c._ollama_auth_headers() == {"Authorization": "Bearer sk-entry"}
+
+
+def test_ollama_cache_distinguishes_by_key():
+    from llm_service.factory import _ollama_cached
+
+    c1, _ = _ollama_cached("m", "https://ollama.com", 900.0, None, "k1")
+    c2, _ = _ollama_cached("m", "https://ollama.com", 900.0, None, "k2")
+    c1b, _ = _ollama_cached("m", "https://ollama.com", 900.0, None, "k1")
+    assert c1 is c1b  # same key → shared client
+    assert c1 is not c2  # different key → distinct client
+
+
 def test_build_entry_client_claude(monkeypatch):
     e = _full_entry("claude", model="claude-opus-4-8", api_key="sk-ant")
     c = _build_entry_client(e, None, None, None)

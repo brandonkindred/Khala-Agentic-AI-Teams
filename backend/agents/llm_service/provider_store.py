@@ -573,6 +573,34 @@ def select_active_entry(
     return min(limited, key=lambda e: e.reset_at or far_future)
 
 
+def list_fingerprint() -> str:
+    """Return a stable fingerprint of the ordered list's STRUCTURE.
+
+    Captures the identity that determines client construction and failover behavior
+    — each entry's ``sort_order``, ``provider``, ``model``, ``base_url``, and whether
+    it has a key — but deliberately EXCLUDES volatile limit-state (``limit_exceeded``
+    / ``reset_at`` / ``limit_type``), which the :class:`FailoverLLMClient` handles
+    dynamically per call. Consumers (e.g. the Strands model cache key) fold this in
+    so adding/removing/reordering/editing a provider — including the empty→non-empty
+    transition that enables failover — invalidates warm caches in every worker within
+    the read TTL, while a 429 marking never churns them.
+
+    Postconditions: ``"none"`` when the list is empty or Postgres is disabled; else a
+        short hex digest. Reads the TTL-cached list (no extra DB round-trip on the hot
+        path). Never raises (a read failure yields ``"none"``).
+    """
+    import hashlib
+
+    entries = load_ordered_entries()
+    if not entries:
+        return "none"
+    payload = "|".join(
+        f"{e.sort_order}:{e.provider}:{e.model}:{e.base_url}:{1 if e.api_key else 0}"
+        for e in entries
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
 def resolve_active_provider_config(agent_key: Optional[str] = None) -> Optional[ProviderEntry]:
     """Return the provider entry to use now, or ``None`` for the legacy path.
 

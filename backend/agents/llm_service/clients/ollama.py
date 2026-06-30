@@ -209,21 +209,24 @@ def _thinking_downgrade_enabled() -> bool:
     return llm_config.env_flag_enabled(llm_config.ENV_LLM_THINKING_DOWNGRADE_RETRY)
 
 
-def _ollama_bearer_auth_headers() -> dict[str, str]:
+def _ollama_bearer_auth_headers(api_key_override: str = "") -> dict[str, str]:
     """Return the Authorization Bearer header for an Ollama Cloud request.
 
     Single source of truth for Ollama auth, shared by the module-level
     ``list_ollama_models`` (/api/tags) and ``OllamaLLMClient._ollama_auth_headers``
     (the /api/show and /v1/chat/completions paths), so the listing and chat paths
-    can never authenticate differently. Resolves the Ollama Cloud key via
-    :func:`llm_config.resolve_ollama_api_key` (runtime config set through the
-    settings UI, falling back to ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY``).
+    can never authenticate differently. A non-empty ``api_key_override`` (a
+    per-provider key from the multi-provider fallback list) wins; otherwise the key
+    is resolved via :func:`llm_config.resolve_ollama_api_key` (runtime config set
+    through the settings UI, falling back to ``OLLAMA_API_KEY`` /
+    ``LLM_OLLAMA_API_KEY``).
 
     Preconditions: none.
     Postconditions: returns ``{"Authorization": "Bearer <key>"}`` when a key is
-        resolved, else ``{}`` (local Ollama needs no auth). Never raises.
+        resolved (override first, else the global resolver), else ``{}`` (local
+        Ollama needs no auth). Never raises.
     """
-    key = llm_config.resolve_ollama_api_key()
+    key = (api_key_override or "").strip() or llm_config.resolve_ollama_api_key()
     if not key:
         return {}
     return {"Authorization": f"Bearer {key}"}
@@ -420,6 +423,7 @@ class OllamaLLMClient(LLMClient):
         timeout: float = 900.0,
         on_reasoning: Optional[Callable[[str], None]] = None,
         rate_limit_max_retries: Optional[int] = None,
+        api_key: str = "",
     ) -> None:
         """Construct an Ollama-backed LLM client.
 
@@ -434,6 +438,13 @@ class OllamaLLMClient(LLMClient):
         provider instead of sleeping minutes; ``None`` keeps the env-configured
         schedule.
 
+        ``api_key`` is an optional per-client Ollama Cloud key. When non-empty it
+        authenticates this client's requests (used by the multi-provider fallback
+        list so a Cloud entry authenticates with its own stored key); when empty the
+        client falls back to the globally-resolved key
+        (``llm_config.resolve_ollama_api_key``), preserving the single-provider
+        behavior.
+
         Preconditions: ``on_reasoning`` is callable or ``None``;
             ``rate_limit_max_retries`` is ``None`` or ``>= 0``.
         Postconditions: when set, the hook receives every reasoning delta of every
@@ -447,6 +458,7 @@ class OllamaLLMClient(LLMClient):
         self._rate_limit_max_retries_override = (
             max(0, int(rate_limit_max_retries)) if rate_limit_max_retries is not None else None
         )
+        self._api_key_override = (api_key or "").strip()
         self._model_num_ctx: Optional[int] = None
         # Provisional num_ctx fallback (set only when /api/show cannot be resolved),
         # with the wall-clock time it was recorded. Never written to _model_num_ctx.
@@ -506,10 +518,11 @@ class OllamaLLMClient(LLMClient):
         chat path and the /api/tags listing path share one auth implementation and
         cannot drift. Resolves the key via :func:`llm_config.resolve_ollama_api_key`
         so a key set through the settings UI (runtime config) takes effect, falling
-        back to the ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY`` env vars. Empty -> no
-        header (local Ollama needs none).
+        back to the ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY`` env vars. A per-client
+        ``api_key`` (a fallback-list Cloud entry's own key) overrides that global
+        resolution. Empty -> no header (local Ollama needs none).
         """
-        return _ollama_bearer_auth_headers()
+        return _ollama_bearer_auth_headers(self._api_key_override)
 
     def _rate_limit_retry_config(self) -> "tuple[int, float, float]":
         """Return the 429 backoff config, applying this client's retry override.

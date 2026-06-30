@@ -417,6 +417,31 @@ def test_mark_and_reset_swallow_write_errors(monkeypatch):
     ps.reset_entry(1)
 
 
+def test_list_fingerprint_empty_is_none(no_postgres):
+    assert ps.list_fingerprint() == "none"
+
+
+def test_list_fingerprint_changes_with_structure(fake_db):
+    fake_db._fetchall = [_row(_entry(1))]
+    fp1 = ps.list_fingerprint()
+    assert fp1 != "none"
+    ps.clear_cache()
+    fake_db._fetchall = [_row(_entry(1)), _row(_entry(2, sort_order=1))]
+    fp2 = ps.list_fingerprint()
+    assert fp1 != fp2  # adding an entry changes the structural fingerprint
+
+
+def test_list_fingerprint_stable_across_limit_state(fake_db):
+    fake_db._fetchall = [_row(_entry(1))]
+    fp1 = ps.list_fingerprint()
+    ps.clear_cache()
+    # Same structure, now usage-limited: fingerprint must NOT change (so a 429
+    # marking never churns the Strands cache).
+    fake_db._fetchall = [_row(_entry(1, limit_exceeded=True, reset_at=NOW))]
+    fp2 = ps.list_fingerprint()
+    assert fp1 == fp2
+
+
 def test_load_ordered_entries_caches(fake_db):
     fake_db._fetchall = [_row(_entry(1))]
     first = ps.load_ordered_entries()
