@@ -339,7 +339,10 @@ def test_mfi_and_williams_r_stay_in_range() -> None:
     """The two new bounded oscillators stay within their declared output_range at every depth."""
     bars = _series(120, seed=21)
     reg = IndicatorRegistry()
-    for n in range(16, len(bars) + 1):
+    # Start at 14 so the first valid value of each oscillator is range-checked:
+    # williams_r warms up at 14 bars, mfi at 15 (period + 1). The None guards skip
+    # the depths where an indicator hasn't warmed up yet.
+    for n in range(14, len(bars) + 1):
         sub = bars[:n]
         m = reg.mfi(sub, 14)
         w = reg.williams_r(sub, 14)

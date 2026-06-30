@@ -335,11 +335,11 @@ def mfi(
     result = 100 - (100 / (1 + ratio))
     # neg_sum == 0 over a full window: 100 when there is up-flow (no down moves),
     # else 50 for a flat window (no flow at all) — matching IndicatorRegistry.mfi
-    # and rsi(). Warm-up rows (neg_sum NaN) keep NaN. ``np.where`` is over Series,
-    # so neg_sum/pos_sum are aligned element-wise.
-    fill_values = pd.Series(
-        np.where(neg_sum == 0, np.where(pos_sum > 0, 100.0, 50.0), np.nan),
-        index=result.index,
+    # and rsi(). Built with pandas-native ``mask``/``where`` so the boolean masks
+    # stay index-aligned with ``pos_sum``/``neg_sum``. Warm-up rows (neg_sum NaN,
+    # so ``neg_sum == 0`` is False) fall through ``where`` to NaN and keep it.
+    fill_values = (
+        pd.Series(50.0, index=result.index).mask(pos_sum > 0, 100.0).where(neg_sum == 0)
     )
     return result.fillna(fill_values)
 
