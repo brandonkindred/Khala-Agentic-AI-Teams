@@ -47,8 +47,11 @@ def _env_positive_int(name: str, default: int) -> int:
 # software_engineering_team.shared.context_sizing.CHARS_PER_TOKEN without taking a
 # runtime cross-team import (that module is imported only inside SE today).
 CHARS_PER_TOKEN = 3.5
-_RESERVED_PROMPT_TOKENS = 6000  # phase prompt template + headers
-_RESERVED_RESPONSE_TOKENS = 4096
+# Token reserves carved out of the model context before sizing a section (phase prompt
+# template + headers, and the model's response). Conservative defaults; overridable per
+# deployment/model via env (see docs/ENV_VARS.md).
+_RESERVED_PROMPT_TOKENS = _env_positive_int("PLANNING_V3_RESERVED_PROMPT_TOKENS", 6000)
+_RESERVED_RESPONSE_TOKENS = _env_positive_int("PLANNING_V3_RESERVED_RESPONSE_TOKENS", 4096)
 _MIN_SECTION_CHARS = 8000
 _DEFAULT_CONTEXT_TOKENS = 16384
 
