@@ -1549,9 +1549,14 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                         )
                         file_comment_count += 1
                         continue
-                    except GitHubAPIError:
+                    except GitHubAPIError as e:
+                        # Only a 422 (bad anchor) is worth demoting to a standalone
+                        # comment; any other status (permission, rate-limit,
+                        # transport, server) is a real failure that must propagate
+                        # so the job fails loudly instead of silently degrading.
+                        if e.status != _HTTP_UNPROCESSABLE:
+                            raise
                         # Last resort: fall through to standalone posting (rare).
-                        pass
                 standalone.append(comment)
 
             # Only truly-unpostable findings fall through to standalone comments.
@@ -1650,6 +1655,12 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             update_review(job_id, status="failed", error=safe_err, completed=True)
 
 
+# GitHub returns 422 Unprocessable Entity for validation errors — specifically a
+# review comment whose line is off the diff. Only a 422 is recoverable by
+# dropping/demoting the offending comment; other statuses signal a real failure.
+_HTTP_UNPROCESSABLE = 422
+
+
 def _submit_review(
     client: GitHubClient,
     owner: str,
@@ -1668,7 +1679,9 @@ def _submit_review(
     self-PR case without losing inline feedback). If the full batch still 422s, a
     stray bad line is poisoning it — post the summary on its own so it is not lost,
     then bisect the comments so only the genuinely-bad lines are dropped while the
-    rest stay anchored in (smaller) COMMENT reviews.
+    rest stay anchored in (smaller) COMMENT reviews. Only a 422 is treated as a
+    bad line; any other status (permission, rate-limit, transport, server) is a
+    real failure and is re-raised rather than silently degraded.
 
     Preconditions:
         - Every entry in ``comments`` is line-anchored (carries ``line``);
@@ -1678,8 +1691,10 @@ def _submit_review(
           happy path, or across bisected COMMENT reviews when a bad line forced a
           split). The review body and every comment body are token-scrubbed before
           submission (LLM output may echo a secret from the reviewed code). Returns
-          the original comments GitHub rejected even when submitted alone (``[]``
-          when all were posted); the caller demotes those to file-level comments.
+          the original comments GitHub rejected with a 422 even when submitted alone
+          (``[]`` when all were posted); the caller demotes those to file-level
+          comments. Raises ``GitHubAPIError`` for any non-422 status so the job
+          fails loudly instead of masking a real API failure.
     """
     # Scrub before anything leaves for GitHub: the body (LLM summary) and each
     # inline-comment body (LLM description/suggestion) can echo a token from the
@@ -1709,6 +1724,13 @@ def _submit_review(
             )
             return []
         except GitHubAPIError as e:
+            # Only a 422 (validation — a bad diff line) is recoverable by
+            # dropping the event/comments. A 403 (permission/rate-limit), 0
+            # (transport), or 5xx is a real failure: re-raise so the outer
+            # handler marks the job failed instead of silently degrading to
+            # standalone comments and reporting success.
+            if e.status != _HTTP_UNPROCESSABLE:
+                raise
             logger.warning("PR review submit failed (event=%s, comments=%d): %s", ev, len(pairs), e)
             last_exc = e
 
@@ -1770,6 +1792,11 @@ def _bisect_submit(
         )
         return []
     except GitHubAPIError as e:
+        # Only a 422 means a bad diff line worth bisecting out; any other status
+        # (permission, rate-limit, transport, server) is a real failure that must
+        # propagate rather than be mistaken for one stray off-diff comment.
+        if e.status != _HTTP_UNPROCESSABLE:
+            raise
         logger.warning("PR review submit failed (event=COMMENT, comments=%d): %s", len(pairs), e)
         if len(pairs) <= 1:
             return [p[1] for p in pairs]

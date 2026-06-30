@@ -354,9 +354,11 @@ class _FakeReviewClient:
         self.review_comments: list[dict[str, Any]] = []
         self.comments: list[tuple[int, str]] = []
         self.fail_get_pr = False
-        self.review_fail_times = 0  # number of leading create_review calls that 422
+        self.review_fail_times = 0  # number of leading create_review calls that fail
+        self.review_fail_status = 422  # status raised by review_fail_times / bad_lines
         self.bad_lines: set[int] = set()  # lines whose review 422s (drives bisection)
         self.review_comment_fail_paths: set[str] = set()  # paths that 422 as file comments
+        self.review_comment_fail_status = 422  # status raised by review_comment_fail_paths
         self.review_exc: Optional[Exception] = None  # non-API error to raise on submit
         self.comment_fail_times = 0  # number of leading add_issue_comment calls that 422
         self._comment_calls = 0
@@ -407,17 +409,17 @@ class _FakeReviewClient:
             raise GitHubAPIError(422, "subject_type not allowed in review comments")
         if self.bad_lines and any(c.get("line") in self.bad_lines for c in comments):
             self.reviews.append(kwargs)
-            raise GitHubAPIError(422, "bad line")
+            raise GitHubAPIError(self.review_fail_status, "bad line")
         if len(self.reviews) < self.review_fail_times:
             self.reviews.append(kwargs)
-            raise GitHubAPIError(422, "bad line")
+            raise GitHubAPIError(self.review_fail_status, "review submit failed")
         self.reviews.append(kwargs)
         self.submitted_reviews.append(kwargs)
         return {"id": 1, "html_url": "https://example/review/1"}
 
     def create_review_comment(self, **kwargs: Any) -> dict[str, Any]:
         if kwargs.get("path") in self.review_comment_fail_paths:
-            raise GitHubAPIError(422, "bad file comment")
+            raise GitHubAPIError(self.review_comment_fail_status, "file comment failed")
         self.review_comments.append(kwargs)
         return {"id": 2, "html_url": "https://example/comment/2"}
 
@@ -794,6 +796,42 @@ class TestReviewEndpoint:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
         assert job["review_summary"]["comments_failed"] == 1
+
+    def test_non_422_review_error_marks_job_failed_not_degraded(self, review_app) -> None:
+        # A non-422 review failure (e.g. 403 permission / rate-limit) is a real
+        # error, not a bad diff line: it must propagate and mark the job failed
+        # rather than be silently degraded to file-level/standalone comments and
+        # reported as completed.
+        gh = review_app["github"]["client"]
+        gh.review_fail_times = 1
+        gh.review_fail_status = 403
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        # The error propagated before any degradation: no review was posted and no
+        # finding was quietly re-routed to a file-level comment. (A failure notice
+        # on the PR is expected and lives in gh.comments.)
+        assert gh.submitted_reviews == []
+        assert gh.review_comments == []
+
+    def test_non_422_file_comment_error_marks_job_failed_not_degraded(self, review_app) -> None:
+        # A non-422 failure from the dedicated file-comment endpoint is likewise a
+        # real error and must propagate, not silently fall through to a standalone
+        # conversation comment.
+        gh = review_app["github"]["client"]
+        gh.review_comment_fail_paths = {"a.py"}
+        gh.review_comment_fail_status = 403
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[_FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff find")]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        # The finding was NOT silently posted as a standalone conversation comment;
+        # only the failure notice (which never carries the finding text) is allowed.
+        assert not any("off-diff find" in body for _n, body in gh.comments)
 
     def test_all_changed_files_are_reviewed_without_cap(self, review_app) -> None:
         gh = review_app["github"]["client"]
