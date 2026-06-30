@@ -327,9 +327,13 @@ def test_warmup_returns_none() -> None:
     assert reg.cci(_series(10), 20) is None
     assert reg.williams_r(_series(10), 14) is None
     assert reg.obv([]) is None
+    # The derived Bollinger outputs share the band warmup contract: insufficient
+    # bars (< period) yield None, exactly like the upper/middle/lower selectors.
+    assert reg.bollinger_bands(_series(10), 20, 2.0, select="percent_b") is None
+    assert reg.bollinger_bands(_series(10), 20, 2.0, select="bandwidth") is None
 
 
-def test_bounded_oscillators_stay_in_range() -> None:
+def test_mfi_and_williams_r_stay_in_range() -> None:
     bars = _series(120, seed=21)
     reg = IndicatorRegistry()
     for n in range(16, len(bars) + 1):
@@ -349,6 +353,7 @@ def test_flat_window_neutral_conventions() -> None:
     ]
     reg = IndicatorRegistry()
     assert reg.williams_r(flat, 14) == -50.0
+    assert reg.roc(flat, 12) == 0.0  # flat window → zero percent change
     assert reg.cci(flat, 20) == 0.0
     assert reg.mfi(flat, 14) == 50.0  # no up/down typical-price moves
     assert reg.obv(flat) == 0.0
