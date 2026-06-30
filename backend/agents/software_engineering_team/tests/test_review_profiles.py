@@ -8,6 +8,7 @@ the chunk reviewer's system prompt.
 
 from __future__ import annotations
 
+import code_review_agent.coordinator as coord
 import pytest
 from code_review_agent import CodeReviewAgent, CodeReviewInput, ReviewProfile
 from code_review_agent.profiles import (
@@ -79,17 +80,19 @@ def test_acceptance_profile_instructs_criterion_tagging() -> None:
     assert '"category" to "spec-compliance"' in prompt
 
 
-def test_builder_accepts_string_value() -> None:
-    """build_review_system_prompt accepts a profile's string value as well as the enum."""
-    assert build_review_system_prompt("spec_conformance") == build_review_system_prompt(
-        ReviewProfile.SPEC_CONFORMANCE
-    )
+@pytest.mark.parametrize("profile", list(ReviewProfile))
+def test_builder_accepts_string_value(profile: ReviewProfile) -> None:
+    """build_review_system_prompt accepts every profile's string value, and the
+    coercion yields the same prompt as passing the enum member itself."""
+    assert build_review_system_prompt(profile.value) == build_review_system_prompt(profile)
 
 
-def test_builder_rejects_unknown_profile() -> None:
-    """An unknown profile value raises ValueError."""
+@pytest.mark.parametrize("bad", ["not_a_profile", None, 42, object()])
+def test_builder_rejects_unknown_profile(bad: object) -> None:
+    """An unknown profile value — a bad string, None, an int, or an arbitrary
+    object — raises ValueError consistently (str-Enum coercion)."""
     with pytest.raises(ValueError):
-        build_review_system_prompt("not_a_profile")
+        build_review_system_prompt(bad)
 
 
 def test_registry_exhausts_all_profiles() -> None:
@@ -159,8 +162,6 @@ class _IssueProbe(DummyLLMClient):
 def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     """skip_false_positive_filter=True bypasses the whole-codebase verifier call;
     the default runs it once."""
-    import code_review_agent.coordinator as coord
-
     called = {"n": 0}
 
     def _spy(llm, input_data, issues):

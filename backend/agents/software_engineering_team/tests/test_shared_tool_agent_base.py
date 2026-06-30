@@ -304,11 +304,21 @@ def test_engine_review_skips_without_code():
     assert "skipped (no code)" in out.summary
 
 
-def test_engine_review_handles_malformed_response():
-    """A malformed engine response (missing ``issues``, non-dict entries) is
-    handled gracefully — the engine sanitizes it and the adapter, mapping the
-    typed CodeReviewOutput, returns a clean phase output with no issues."""
-    agent = _engine_agent({"approved": True, "issues": "not-a-list", "extra": 1})
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"approved": True, "issues": "not-a-list", "extra": 1},  # wrong type
+        {"approved": True, "summary": "ok"},  # 'issues' key entirely missing
+        {"approved": True, "issues": ["not-a-dict", 7, None]},  # non-dict entries
+    ],
+    ids=["issues-wrong-type", "issues-key-missing", "issues-non-dict-entries"],
+)
+def test_engine_review_handles_malformed_response(response: dict):
+    """A malformed engine response — ``issues`` of the wrong type, the ``issues``
+    key entirely absent, or non-dict issue entries — is handled gracefully: the
+    engine sanitizes it and the adapter, mapping the typed CodeReviewOutput,
+    returns a clean phase output with no issues."""
+    agent = _engine_agent(response)
     out = agent.review(_Input(current_files={"a.ts": "code"}))
     assert out.issues == []
     assert "Demo review: 0 issue(s) found." == out.summary
