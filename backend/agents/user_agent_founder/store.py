@@ -202,12 +202,14 @@ class FounderRunStore:
             fresh uuid4 hex.
         """
         # Enforce the contract explicitly (``python -O`` strips ``assert``): an
-        # empty target would insert a row with no resolvable adapter.
-        if not target_team_key:
+        # empty (or whitespace-only) target would insert a row with no resolvable
+        # adapter.
+        if not target_team_key or not target_team_key.strip():
             raise ValueError("create_run: target_team_key must be non-empty")
-        # process_id is optional, but an *empty* string is a caller bug (an
-        # agentic run needs a real process id; the SE target passes None).
-        if process_id is not None and not process_id:
+        # process_id is optional, but an *empty* (or whitespace-only) string is a
+        # caller bug (an agentic run needs a real process id; the SE target passes
+        # None).
+        if process_id is not None and not process_id.strip():
             raise ValueError("create_run: process_id must be non-empty when provided")
         run_id = run_id or str(uuid4())
         now = datetime.now(tz=timezone.utc)

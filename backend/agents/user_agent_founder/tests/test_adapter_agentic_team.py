@@ -192,6 +192,15 @@ def test_get_adapter_rejects_malformed_agentic_key():
         get_adapter("agentic_team:")
 
 
+def test_get_adapter_rejects_empty_team_key():
+    """An empty team_key has no resolvable adapter; get_adapter rejects it up
+    front rather than threading "" into the static-registry lookup."""
+    from user_agent_founder.targets import get_adapter
+
+    with pytest.raises(ValueError, match="team_key must be non-empty"):
+        get_adapter("")
+
+
 def test_adapter_rejects_path_traversal_team_id():
     """team_id is user-controlled (from target_team_key) and lands in a URL path,
     so traversal / unsafe characters must be rejected at construction — get_adapter
@@ -473,6 +482,7 @@ def test_poll_build_terminal_and_error_mapping():
             "/runs/done": [_FakeResponse(200, {"status": "completed"})],
             "/runs/boom": [_FakeResponse(200, {"status": "failed", "error": "kaboom"})],
             "/runs/stop": [_FakeResponse(200, {"status": "cancelled"})],
+            "/runs/halt": [_FakeResponse(200, {"status": "canceled"})],
             "/runs/gone": [_FakeResponse(503, {}, text="upstream exploded")],
             "/runs/going": [_FakeResponse(200, {"status": "running"})],
         }
@@ -481,6 +491,9 @@ def test_poll_build_terminal_and_error_mapping():
     assert adapter.poll_build(fake, "boom") == {"status": "failed", "error": "kaboom"}
     # 'cancelled' is a terminal status (matches the British spelling in _TERMINAL).
     assert adapter.poll_build(fake, "stop") == {"status": "cancelled", "error": None}
+    # 'canceled' (American spelling) is terminal too — the upstream status string
+    # is not normalized, so both spellings must map to a terminal result.
+    assert adapter.poll_build(fake, "halt") == {"status": "canceled", "error": None}
     # HTTP error carries the code plus a truncated body for diagnostics.
     gone = adapter.poll_build(fake, "gone")
     assert gone["_poll_error"] == 503
@@ -578,6 +591,25 @@ def test_submit_build_answers_raises_on_http_error():
     fake = _FakeHttpxClient(post_responses={"/input": _FakeResponse(500, text="boom")})
     with pytest.raises(httpx.HTTPStatusError):
         adapter.submit_build_answers(fake, "run-9", [{"other_text": "x"}])
+
+
+def test_submit_build_answers_converts_transport_error_to_http_error():
+    """A transport failure (connect/timeout/DNS) while posting the answer is
+    re-raised as an httpx.HTTPStatusError(502) — the orchestrator's answer
+    retry loop only catches HTTPStatusError, so a bare RequestError would
+    otherwise escape the retry and fail the run on the first network blip."""
+    import httpx
+
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    class _BoomClient:
+        def post(self, url, *a, **kw):
+            raise httpx.ConnectError("connection refused", request=httpx.Request("POST", url))
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        adapter.submit_build_answers(_BoomClient(), "run-9", [{"other_text": "x"}])
+    assert exc.value.response.status_code == 502
 
 
 # ---------------------------------------------------------------------------

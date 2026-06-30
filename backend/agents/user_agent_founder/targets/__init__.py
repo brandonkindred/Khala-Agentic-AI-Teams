@@ -51,6 +51,8 @@ def get_adapter(
         agentic-team key — the registry/parser is the single source of truth for
         which teams the persona framework can drive.
     """
+    if not team_key:
+        raise ValueError("get_adapter: team_key must be non-empty")
     if team_key.startswith(AGENTIC_TEAM_PREFIX):
         team_id = team_key[len(AGENTIC_TEAM_PREFIX) :]
         if not team_id:

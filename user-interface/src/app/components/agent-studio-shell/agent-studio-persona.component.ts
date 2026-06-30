@@ -25,14 +25,20 @@ import {
   type PersonaEditorDialogResult,
 } from '../persona-testing-dashboard/persona-editor-dialog.component';
 
-/** Persona-test run statuses that are terminal (polling stops). */
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+/**
+ * Persona-test run statuses that are terminal (polling stops). Both the British
+ * ('cancelled') and American ('canceled') spellings are accepted because the
+ * backend pipeline status string is not normalized at the source.
+ */
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled']);
 /** Live-run poll cadence (ms). Matches the founder run's coarse 15–30s ticks. */
 const POLL_MS = 10_000;
 /** Upper bound on the launch (`POST /start`) request so a hung call can't wedge the UI. */
 const LAUNCH_TIMEOUT_MS = 30_000;
 /** Transient banner shown on a failed poll; cleared on the next successful poll. */
 const LOST_CONTACT = 'Lost contact with the run; retrying…';
+/** Width of the persona create/edit dialog; matches the dashboard's editor dialog. */
+const PERSONA_DIALOG_WIDTH = '560px';
 
 // Back-loop destinations as 0-based indices into STUDIO_STAGES
 // (build=0, test=1, compose=2, personas=3). Named so the back-loops don't carry
@@ -408,7 +414,7 @@ export class AgentStudioPersonaComponent implements OnInit {
         PersonaEditorDialogComponent,
         PersonaEditorDialogData,
         PersonaEditorDialogResult
-      >(PersonaEditorDialogComponent, { data: { mode: 'create' }, width: '560px' });
+      >(PersonaEditorDialogComponent, { data: { mode: 'create' }, width: PERSONA_DIALOG_WIDTH });
     } catch {
       this.error.set('Could not open the persona editor.');
       return;

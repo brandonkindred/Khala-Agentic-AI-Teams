@@ -267,6 +267,24 @@ def test_start_agentic_team_requires_process_id(
     fake_store.create_run.assert_not_called()
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_start_agentic_team_rejects_blank_process_id(
+    fake_job_store, fake_store, fake_dispatch, fake_persona_store, blank
+):
+    """An empty or whitespace-only process_id is rejected with the same 400 as a
+    missing one — it can't address a real process, so it must not start a run."""
+    from user_agent_founder.api.main import StartRunRequest, start_founder_workflow
+
+    with pytest.raises(HTTPException) as excinfo:
+        start_founder_workflow(
+            StartRunRequest(target_team_key="agentic_team:team-1", process_id=blank)
+        )
+    assert excinfo.value.status_code == 400
+    assert "process_id" in excinfo.value.detail
+    assert fake_dispatch == []
+    fake_store.create_run.assert_not_called()
+
+
 def test_start_rejects_path_traversal_team_key(
     fake_job_store, fake_store, fake_dispatch, fake_persona_store
 ):

@@ -55,7 +55,9 @@ _ANALYSIS_NOOP_JOB_ID = "agentic-team-analysis-noop"
 
 # Terminal pipeline statuses, normalized to the founder poll contract's terminal
 # states. ``waiting_for_input`` is handled separately (it becomes a question).
-_TERMINAL = {"completed", "failed", "cancelled"}
+# Both British ("cancelled") and American ("canceled") spellings are accepted
+# because the upstream pipeline status string is not normalized at the source.
+_TERMINAL = {"completed", "failed", "cancelled", "canceled"}
 
 
 class AgenticTeamAdapter:
@@ -280,9 +282,21 @@ class AgenticTeamAdapter:
         text = str(raw).strip() if raw is not None else ""
         if not text:
             text = "(no answer provided)"
-        resp = client.post(
-            self._url(f"/test-pipeline/runs/{quote(job_id, safe='')}/input"),
-            json={"input": text},
-            timeout=HTTP_TIMEOUT,
-        )
+        try:
+            resp = client.post(
+                self._url(f"/test-pipeline/runs/{quote(job_id, safe='')}/input"),
+                json={"input": text},
+                timeout=HTTP_TIMEOUT,
+            )
+        except httpx.RequestError as exc:
+            # Transient transport failure (connect/timeout/DNS): re-raise as an
+            # HTTPStatusError(502) so the orchestrator's answer-submission retry
+            # loop (which only catches HTTPStatusError) backs off and retries,
+            # consistent with start_build/poll_build. A bare RequestError would
+            # otherwise escape the retry and fail the run on the first blip.
+            raise httpx.HTTPStatusError(
+                f"Answer submission request failed: {str(exc)[:200]}",
+                request=exc.request,
+                response=httpx.Response(502, request=exc.request),
+            ) from exc
         resp.raise_for_status()

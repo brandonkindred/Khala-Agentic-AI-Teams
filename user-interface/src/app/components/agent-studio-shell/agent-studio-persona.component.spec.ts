@@ -362,6 +362,59 @@ describe('AgentStudioPersonaComponent', () => {
     }
   });
 
+  it('ticks the elapsed counter every second while the run is live, then freezes at terminal', () => {
+    vi.useFakeTimers();
+    try {
+      build();
+      fixture.detectChanges();
+      personaApi.startTest.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
+      // A non-terminal status keeps the per-second elapsed counter running.
+      personaApi.getRunStatus.mockReturnValue(
+        of({ run_id: 'run-1', status: 'polling_build', decisions: [] }),
+      );
+      component.launch();
+      expect(component.elapsedSec()).toBe(0);
+
+      vi.advanceTimersByTime(3000);
+      expect(component.elapsedSec()).toBe(3);
+
+      // The next poll reports a terminal status: the counter must stop advancing.
+      personaApi.getRunStatus.mockReturnValue(
+        of({ run_id: 'run-1', status: 'completed', decisions: [] }),
+      );
+      vi.advanceTimersByTime(10_000);
+      expect(component.runTerminal()).toBe(true);
+      const frozen = component.elapsedSec();
+      vi.advanceTimersByTime(5000);
+      expect(component.elapsedSec()).toBe(frozen);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows "persona is thinking…" while the run is live and hides it at terminal', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.startTest.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
+    // Hold the run non-terminal so the thinking indicator stays visible.
+    personaApi.getRunStatus.mockReturnValue(
+      of({ run_id: 'run-1', status: 'polling_build', decisions: [] }),
+    );
+    component.launch();
+    fixture.detectChanges();
+    expect(component.runTerminal()).toBe(false);
+    expect(fixture.nativeElement.textContent).toContain('persona is thinking…');
+
+    // A terminal status removes the indicator (polling has stopped).
+    personaApi.getRunStatus.mockReturnValue(
+      of({ run_id: 'run-1', status: 'completed', decisions: [] }),
+    );
+    component.launch();
+    fixture.detectChanges();
+    expect(component.runTerminal()).toBe(true);
+    expect(fixture.nativeElement.textContent).not.toContain('persona is thinking…');
+  });
+
   it('shows a loading indicator (not the empty state) while personas load', () => {
     build();
     // Hold the personas response pending so the loading branch is observable.

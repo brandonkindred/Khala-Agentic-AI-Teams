@@ -26,6 +26,8 @@ import pytest
 
 @dataclass
 class _FakeRun:
+    """Lightweight stand-in for a ``StoredRun`` row used to script resume state."""
+
     run_id: str
     status: str = "running"
     se_job_id: str | None = None
@@ -78,6 +80,8 @@ class FakeFounderStore:
 
 
 class _FakeResponse:
+    """Minimal httpx.Response stand-in: status code, JSON body, and raw text."""
+
     def __init__(
         self, status_code: int = 200, json_data: dict | None = None, text: str = ""
     ) -> None:

@@ -284,7 +284,7 @@ def start_founder_workflow(
     # gate server-side (not just in the UI) so a direct caller or a stale handoff
     # can't start a persona test against a missing/draft/archived process.
     if req.target_team_key.startswith(AGENTIC_TEAM_PREFIX):
-        if not req.process_id:
+        if not req.process_id or not req.process_id.strip():
             raise HTTPException(
                 status_code=400,
                 detail="process_id is required when target_team_key is an agentic team",
