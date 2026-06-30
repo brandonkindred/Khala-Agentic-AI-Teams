@@ -577,7 +577,11 @@ def _fetch_agentic_team(client: httpx.Client, team_id: str) -> tuple[int, dict]:
     data = resp.json()
     if not isinstance(data, dict):  # a list/scalar body has no .get("team")
         return resp.status_code, {}
-    return resp.status_code, data.get("team") or {}
+    team = data.get("team")
+    # Enforce the documented dict contract: a truthy *non-dict* ``team`` (e.g. a
+    # list from an API shape change) would otherwise be returned verbatim and
+    # AttributeError in callers that do ``team.get(...)``.
+    return resp.status_code, team if isinstance(team, dict) else {}
 
 
 def _agentic_process_status(team_id: str, process_id: str) -> Optional[str]:

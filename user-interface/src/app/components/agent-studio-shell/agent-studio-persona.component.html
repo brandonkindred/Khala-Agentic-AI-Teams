@@ -99,8 +99,14 @@
             <div class="persona__library">
               <div class="persona__library-head">
                 <h3>Persona</h3>
-                <button mat-stroked-button type="button" (click)="newPersona()">
-                  <mat-icon aria-hidden="true">add</mat-icon> New persona
+                <button
+                  mat-stroked-button
+                  type="button"
+                  [disabled]="creatingPersona()"
+                  (click)="newPersona()"
+                >
+                  <mat-icon aria-hidden="true">add</mat-icon>
+                  {{ creatingPersona() ? 'Creating…' : 'New persona' }}
                 </button>
               </div>
               @if (personasLoading()) {

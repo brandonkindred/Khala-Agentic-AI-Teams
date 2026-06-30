@@ -195,21 +195,25 @@ def test_create_run_persists_explicit_target_team_key(store, fake_pg):
 
 
 def test_create_run_rejects_empty_target_team_key(store):
+    """An empty target_team_key is rejected with a ValueError (no adapter)."""
     with pytest.raises(ValueError, match="target_team_key must be non-empty"):
         store.create_run(target_team_key="")
 
 
 def test_create_run_rejects_whitespace_only_target_team_key(store):
+    """A whitespace-only target_team_key is rejected like an empty one."""
     with pytest.raises(ValueError, match="target_team_key must be non-empty"):
         store.create_run(target_team_key="   ")
 
 
 def test_create_run_rejects_empty_process_id(store):
+    """An empty process_id (when provided) is rejected with a ValueError."""
     with pytest.raises(ValueError, match="process_id must be non-empty when provided"):
         store.create_run(target_team_key="software_engineering", process_id="")
 
 
 def test_create_run_rejects_whitespace_only_process_id(store):
+    """A whitespace-only process_id is rejected like an empty one."""
     with pytest.raises(ValueError, match="process_id must be non-empty when provided"):
         store.create_run(target_team_key="software_engineering", process_id="   ")
 

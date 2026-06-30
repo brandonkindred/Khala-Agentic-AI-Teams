@@ -596,6 +596,21 @@ def test_list_agentic_testable_teams_skips_non_dict_summary_elements(monkeypatch
     assert {t.team_key for t in teams} == {"agentic_team:A"}
 
 
+def test_fetch_agentic_team_coerces_non_dict_team_to_empty_dict():
+    """A truthy *non-dict* ``team`` value (e.g. a list from an API shape change)
+    is coerced to {} so callers doing ``team.get(...)`` can't AttributeError —
+    honoring the function's documented dict contract."""
+    from user_agent_founder.api import main as api_main
+
+    class _Client:
+        def get(self, url, *, timeout=None):
+            return _TeamsResp(200, {"team": ["not", "a", "dict"]})
+
+    code, team = api_main._fetch_agentic_team(_Client(), "t1")
+    assert code == 200
+    assert team == {}
+
+
 def test_testable_teams_includes_agentic_teams_with_complete_process(monkeypatch):
     """/testable-teams returns the static registry targets plus any agentic team
     that has at least one ``complete`` process (keyed ``agentic_team:<id>``)."""

@@ -46,7 +46,7 @@ SCHEMA = TeamSchema(
         # left NULL rather than stamped with a placeholder — a synthetic name would
         # misrepresent the run.
         """UPDATE user_agent_founder_runs
-            SET persona_id = COALESCE(persona_id, 'startup-founder')
+            SET persona_id = 'startup-founder'
             WHERE target_team_key LIKE 'agentic_team:%' AND persona_id IS NULL""",
         """CREATE TABLE IF NOT EXISTS user_agent_founder_personas (
             persona_id              TEXT PRIMARY KEY,

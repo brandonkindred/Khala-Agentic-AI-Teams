@@ -94,6 +94,8 @@ export class AgentStudioPersonaComponent implements OnInit {
   readonly personasLoading = signal(false);
   /** Persona-library load failure, owned separately from the run/launch `error`. */
   readonly personasError = signal<string | null>(null);
+  /** True while a create-persona POST is in flight (drives a progress indicator). */
+  readonly creatingPersona = signal(false);
   readonly selectedProcessId = signal<string | null>(null);
   readonly launching = signal(false);
   readonly error = signal<string | null>(null);
@@ -399,6 +401,9 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.elapsedSub?.unsubscribe();
     this.pollSub = null;
     this.elapsedSub = null;
+    // Clear the active run id so a late status callback for the just-stopped run
+    // is guarded out by handleStatus; startPolling re-sets it for the next run.
+    this.activeRunId = null;
   }
 
   // ── Persona authoring ─────────────────────────────────────────────────────
@@ -410,8 +415,8 @@ export class AgentStudioPersonaComponent implements OnInit {
    */
   newPersona(): void {
     // Guard rapid double-clicks so we don't stack multiple editor dialogs in the
-    // overlay; reset once this one closes.
-    if (this.dialogOpen) {
+    // overlay, and don't re-open while a previous create is still in flight.
+    if (this.dialogOpen || this.creatingPersona()) {
       return;
     }
     // dialog.open is synchronous, so set the guard only *after* it succeeds — if
@@ -440,11 +445,16 @@ export class AgentStudioPersonaComponent implements OnInit {
         if (!result) {
           return;
         }
+        // Flag the in-flight create so the UI can show progress and disable the
+        // "New persona" trigger — without this the dialog is already closed and a
+        // user with no feedback might retry and double-submit.
+        this.creatingPersona.set(true);
         this.personaApi
           .createPersona(result)
           .pipe(takeUntilDestroyed(this.destroyRef))
           .subscribe({
             next: (created) => {
+              this.creatingPersona.set(false);
               // Guard a null/idless body so we don't push a bogus entry into the
               // library or select a persona with an undefined id.
               if (!created || !created.id) {
@@ -455,6 +465,7 @@ export class AgentStudioPersonaComponent implements OnInit {
               this.state.setPersonaId(created.id);
             },
             error: () => {
+              this.creatingPersona.set(false);
               // Shared run-config `error` signal (intentionally — launch and
               // create are both run-config-area actions, never surfaced at once,
               // and launch() clears it before starting). The personas-*library*

@@ -339,6 +339,44 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.personas().length).toBe(before);
   });
 
+  it('flags creatingPersona while the create POST is in flight and guards re-entry', () => {
+    build({
+      dialogResult: {
+        name: 'New',
+        description: '',
+        icon: 'person',
+        system_prompt: 's',
+        spec_generation_prompt: 'g',
+      },
+    });
+    fixture.detectChanges();
+    // Hold the create response pending so the in-flight state is observable.
+    const pending = new Subject<PersonaInfo>();
+    personaApi.createPersona.mockReturnValue(pending);
+    expect(component.creatingPersona()).toBe(false);
+
+    component.newPersona();
+    expect(component.creatingPersona()).toBe(true);
+    // A second trigger is guarded out while a create is still in flight.
+    component.newPersona();
+    expect(dialog.open).toHaveBeenCalledTimes(1);
+
+    pending.next({
+      id: 'new-1',
+      name: 'New',
+      description: '',
+      icon: 'person',
+      is_builtin: false,
+      system_prompt: 's',
+      spec_generation_prompt: 'g',
+      created_at: '',
+      updated_at: '',
+    });
+    pending.complete();
+    expect(component.creatingPersona()).toBe(false);
+    expect(component.personas().some((p) => p.id === 'new-1')).toBe(true);
+  });
+
   it('does nothing when the persona editor is cancelled', () => {
     build({ dialogResult: undefined });
     fixture.detectChanges();
