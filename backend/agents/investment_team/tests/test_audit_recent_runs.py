@@ -664,6 +664,19 @@ class TestCheckNarrativeFidelity:
         assert result.status == "FAIL"
         assert "ema" in result.details
 
+    def test_fail_phantom_new_indicator(self) -> None:
+        # A narrative that name-drops one of the newly added catalogue indicators
+        # (here Donchian) without the spec using it must be flagged as a phantom —
+        # the regression this guards is the audit vocab missing the new names.
+        from investment_team.scripts.audit_recent_runs import check_narrative_fidelity
+
+        rec = _synthetic_record(
+            analysis_narrative="Price broke the Donchian channel, confirming the breakout."
+        )
+        result = check_narrative_fidelity(rec)
+        assert result.status == "FAIL"
+        assert "donchian" in result.details
+
 
 # ---------------------------------------------------------------------------
 # Check 8: Liquidity realism
@@ -979,3 +992,20 @@ class TestRiskLimitWhitelistSync:
         # stays as the surviving deployed-capital cap.
         assert "max_loss_per_trade_pct" not in _RISK_LIMIT_KEYS
         assert "max_position_pct" in _RISK_LIMIT_KEYS
+
+
+class TestIndicatorVocabSync:
+    """The audit replicates the DSL indicator catalogue as a decoupled literal set
+    (it avoids importing the spec DSL at runtime). This guard keeps the replica in
+    sync with ``spec_dsl.IndicatorName`` so a newly supported indicator can't be
+    added to the DSL while narrative-fidelity audits stay blind to phantom use of
+    it — exactly the gap that left Donchian/Keltner/OBV/MFI/ROC/CCI/Williams %R
+    undetectable when the catalogue first expanded."""
+
+    def test_audit_vocab_matches_dsl_indicator_names(self) -> None:
+        import typing
+
+        from investment_team.scripts.audit_recent_runs import _INDICATOR_NAMES
+        from investment_team.strategy_lab.spec_dsl import IndicatorName
+
+        assert _INDICATOR_NAMES == set(typing.get_args(IndicatorName))

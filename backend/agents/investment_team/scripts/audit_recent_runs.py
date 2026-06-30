@@ -42,6 +42,11 @@ _RISK_LIMIT_TIGHTEN_DIR: Dict[str, Optional[str]] = {
 
 _RISK_LIMIT_KEYS = frozenset(_RISK_LIMIT_TIGHTEN_DIR.keys())
 
+# Mirrors the DSL ``IndicatorName`` catalogue (kept as a decoupled literal copy so
+# the audit imports no gate/DSL modules at runtime). MUST stay in sync with
+# ``spec_dsl.IndicatorName`` — ``tests/test_audit_recent_runs.py`` asserts equality so
+# a new indicator can't be added to the DSL without the phantom-narrative check
+# learning to detect it.
 _INDICATOR_NAMES = frozenset(
     {
         "sma",
@@ -53,6 +58,13 @@ _INDICATOR_NAMES = frozenset(
         "adx",
         "stochastic",
         "vwap",
+        "donchian",
+        "keltner",
+        "obv",
+        "mfi",
+        "roc",
+        "cci",
+        "williams_r",
     }
 )
 
