@@ -472,17 +472,40 @@ def test_poll_build_terminal_and_error_mapping():
         get_responses={
             "/runs/done": [_FakeResponse(200, {"status": "completed"})],
             "/runs/boom": [_FakeResponse(200, {"status": "failed", "error": "kaboom"})],
+            "/runs/stop": [_FakeResponse(200, {"status": "cancelled"})],
             "/runs/gone": [_FakeResponse(503, {}, text="upstream exploded")],
             "/runs/going": [_FakeResponse(200, {"status": "running"})],
         }
     )
     assert adapter.poll_build(fake, "done") == {"status": "completed", "error": None}
     assert adapter.poll_build(fake, "boom") == {"status": "failed", "error": "kaboom"}
+    # 'cancelled' is a terminal status (matches the British spelling in _TERMINAL).
+    assert adapter.poll_build(fake, "stop") == {"status": "cancelled", "error": None}
     # HTTP error carries the code plus a truncated body for diagnostics.
     gone = adapter.poll_build(fake, "gone")
     assert gone["_poll_error"] == 503
     assert gone["detail"] == "upstream exploded"
     assert adapter.poll_build(fake, "going") == {"status": "running"}
+
+
+def test_poll_build_waiting_with_empty_step_id_falls_back_to_wait():
+    """An *empty* current_step_id is treated as missing (→ "wait"), so the
+    question id can't become ``run-9:`` and collide across WAIT steps."""
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(
+        get_responses={
+            "/test-pipeline/runs/run-9": [
+                _FakeResponse(
+                    200,
+                    {"status": "waiting_for_input", "current_step_id": "", "human_prompt": "Q?"},
+                )
+            ]
+        }
+    )
+    payload = adapter.poll_build(fake, "run-9")
+    assert payload["pending_questions"][0]["id"] == "run-9:wait"
 
 
 def test_submit_build_answers_posts_free_text_to_input():
@@ -542,6 +565,19 @@ def test_submit_build_answers_preserves_falsy_zero_answer():
     assert fake.posts[0]["json"] == {"input": "0"}
     adapter.submit_build_answers(fake, "run-9", [{"other_text": "0"}])
     assert fake.posts[1]["json"] == {"input": "0"}
+
+
+def test_submit_build_answers_raises_on_http_error():
+    """A non-2xx from /input propagates as httpx.HTTPStatusError (raise_for_status),
+    so the orchestrator's retry/backoff sees the failure rather than a silent post."""
+    import httpx
+
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    fake = _FakeHttpxClient(post_responses={"/input": _FakeResponse(500, text="boom")})
+    with pytest.raises(httpx.HTTPStatusError):
+        adapter.submit_build_answers(fake, "run-9", [{"other_text": "x"}])
 
 
 # ---------------------------------------------------------------------------

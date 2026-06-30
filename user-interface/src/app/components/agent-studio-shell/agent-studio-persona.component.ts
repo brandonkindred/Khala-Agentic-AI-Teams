@@ -12,7 +12,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { EMPTY, Subscription, catchError, interval, switchMap } from 'rxjs';
+import { EMPTY, Subscription, catchError, interval, switchMap, timeout } from 'rxjs';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
@@ -29,6 +29,8 @@ import {
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 /** Live-run poll cadence (ms). Matches the founder run's coarse 15–30s ticks. */
 const POLL_MS = 10_000;
+/** Upper bound on the launch (`POST /start`) request so a hung call can't wedge the UI. */
+const LAUNCH_TIMEOUT_MS = 30_000;
 /** Transient banner shown on a failed poll; cleared on the next successful poll. */
 const LOST_CONTACT = 'Lost contact with the run; retrying…';
 
@@ -291,7 +293,9 @@ export class AgentStudioPersonaComponent implements OnInit {
         target_team_key: `agentic_team:${teamId}`,
         process_id: processId,
       })
-      .pipe(takeUntilDestroyed(this.destroyRef))
+      // Bound the request so a hung connection can't leave `launching` stuck true
+      // with no feedback; the error branch surfaces a banner and re-enables Run.
+      .pipe(timeout(LAUNCH_TIMEOUT_MS), takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {
           this.launching.set(false);
@@ -391,12 +395,21 @@ export class AgentStudioPersonaComponent implements OnInit {
     if (this.dialogOpen) {
       return;
     }
+    // dialog.open is synchronous, so set the guard only *after* it succeeds — if
+    // it throws, the flag stays false and a later click can retry (a thrown open
+    // must not permanently block persona creation).
+    let ref;
+    try {
+      ref = this.dialog.open<
+        PersonaEditorDialogComponent,
+        PersonaEditorDialogData,
+        PersonaEditorDialogResult
+      >(PersonaEditorDialogComponent, { data: { mode: 'create' }, width: '560px' });
+    } catch {
+      this.error.set('Could not open the persona editor.');
+      return;
+    }
     this.dialogOpen = true;
-    const ref = this.dialog.open<
-      PersonaEditorDialogComponent,
-      PersonaEditorDialogData,
-      PersonaEditorDialogResult
-    >(PersonaEditorDialogComponent, { data: { mode: 'create' }, width: '560px' });
     // Close the dialog if the component is destroyed (e.g. the stepper moves to
     // another stage) so it isn't orphaned in the overlay.
     this.destroyRef.onDestroy(() => ref.close());
@@ -417,6 +430,10 @@ export class AgentStudioPersonaComponent implements OnInit {
               this.state.setPersonaId(created.id);
             },
             error: () => {
+              // Shared run-config `error` signal (intentionally — launch and
+              // create are both run-config-area actions, never surfaced at once,
+              // and launch() clears it before starting). The personas-*library*
+              // load error has its own `personasError` signal.
               this.error.set('Could not create the persona.');
             },
           });

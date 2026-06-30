@@ -510,4 +510,33 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     expect(component.selectedPersonaId()).toBe('startup-founder');
   });
+
+  it('times out a hung launch request and re-enables Run', () => {
+    vi.useFakeTimers();
+    try {
+      build();
+      fixture.detectChanges();
+      personaApi.startTest.mockReturnValue(new Subject()); // never emits
+      component.launch();
+      expect(component.launching()).toBe(true);
+      vi.advanceTimersByTime(30_000);
+      expect(component.launching()).toBe(false);
+      expect(component.error()).toContain('Could not start');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not permanently block newPersona when dialog.open throws', () => {
+    build();
+    fixture.detectChanges();
+    dialog.open.mockImplementationOnce(() => {
+      throw new Error('overlay boom');
+    });
+    component.newPersona();
+    expect(component.error()).toContain('Could not open');
+    // A later click can retry — the guard wasn't left stuck true.
+    component.newPersona();
+    expect(dialog.open).toHaveBeenCalledTimes(2);
+  });
 });

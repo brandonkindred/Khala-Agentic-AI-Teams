@@ -126,6 +126,11 @@ class StoredChatMessage:
 
 
 def _row_to_run(row: dict[str, Any]) -> StoredRun:
+    # Explicit None check (not ``or``) so a corrupt empty-string value isn't
+    # silently masked as the default — create_run forbids empty, so an empty
+    # string here means data corruption worth surfacing rather than hiding. Read
+    # once into a local to avoid a duplicate dict lookup.
+    ttk = row.get("target_team_key")
     return StoredRun(
         run_id=row["run_id"],
         status=row["status"],
@@ -133,14 +138,7 @@ def _row_to_run(row: dict[str, Any]) -> StoredRun:
         analysis_job_id=row["analysis_job_id"],
         spec_content=row["spec_content"],
         repo_path=row["repo_path"],
-        # Explicit None check (not ``or``) so a corrupt empty-string value isn't
-        # silently masked as the default — create_run forbids empty, so an empty
-        # string here means data corruption worth surfacing rather than hiding.
-        target_team_key=(
-            row.get("target_team_key")
-            if row.get("target_team_key") is not None
-            else DEFAULT_TARGET_TEAM_KEY
-        ),
+        target_team_key=ttk if ttk is not None else DEFAULT_TARGET_TEAM_KEY,
         persona_id=row.get("persona_id"),
         project_name=row.get("project_name"),
         process_id=row.get("process_id"),

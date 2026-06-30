@@ -222,10 +222,13 @@ class AgenticTeamAdapter:
                 # Paused but no prompt yet — treat as still running so the next
                 # tick re-checks rather than surfacing an empty question.
                 return {"status": "running"}
-            # Explicit None check (not ``or``): only a *missing* step id falls
-            # back to "wait" — a valid falsy id (e.g. "0") is preserved.
+            # Treat a missing *or empty* step id as absent → fall back to "wait"
+            # so the question id can't become ``"run-9:"`` (an empty step
+            # component would collide across distinct WAIT steps in the
+            # orchestrator's id-set dedup). A non-empty falsy-looking id (e.g.
+            # the literal "0") is still a valid distinct step and is preserved.
             step_id = run.get("current_step_id")
-            if step_id is None:
+            if step_id is None or step_id == "":
                 step_id = "wait"
             return {
                 "status": "waiting_for_input",
