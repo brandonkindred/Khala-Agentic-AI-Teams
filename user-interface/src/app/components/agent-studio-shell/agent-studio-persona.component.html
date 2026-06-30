@@ -203,6 +203,11 @@
           }
         }
       }
+      @default {
+        <!-- Defensive: mode() is only ever 'manual' or 'persona'; render a
+             fallback so a stray value can't leave the tabpanel silently empty. -->
+        <p class="persona__loading">Unknown testing mode.</p>
+      }
       }
     </div>
   </section>

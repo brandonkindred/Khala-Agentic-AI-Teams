@@ -126,10 +126,16 @@ class StoredChatMessage:
 
 
 def _row_to_run(row: dict[str, Any]) -> StoredRun:
-    # Explicit None check (not ``or``) so a corrupt empty-string value isn't
-    # silently masked as the default — create_run forbids empty, so an empty
-    # string here means data corruption worth surfacing rather than hiding. Read
-    # once into a local to avoid a duplicate dict lookup.
+    """Map a runs row to a :class:`StoredRun`.
+
+    Invariant: an empty-string ``target_team_key`` is propagated verbatim, not
+    coerced to the default. ``create_run`` forbids inserting an empty/whitespace
+    value, so an empty string read back signals data corruption that should
+    surface (e.g. as a failed adapter lookup) rather than be silently masked.
+    Only a genuine ``NULL`` falls back to ``DEFAULT_TARGET_TEAM_KEY``.
+    """
+    # Explicit None check (not ``or``) per the invariant above. Read once into a
+    # local to avoid a duplicate dict lookup.
     ttk = row.get("target_team_key")
     return StoredRun(
         run_id=row["run_id"],

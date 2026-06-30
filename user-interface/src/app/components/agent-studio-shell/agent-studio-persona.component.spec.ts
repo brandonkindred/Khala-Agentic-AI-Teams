@@ -439,6 +439,32 @@ describe('AgentStudioPersonaComponent', () => {
     }
   });
 
+  it('stops polling (and the elapsed timer) once the component is destroyed', () => {
+    vi.useFakeTimers();
+    try {
+      build();
+      fixture.detectChanges();
+      personaApi.startTest.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
+      // Non-terminal status: without teardown, polling + the 1s timer keep firing.
+      personaApi.getRunStatus.mockReturnValue(
+        of({ run_id: 'run-1', status: 'polling_build', decisions: [] }),
+      );
+      component.launch();
+      // One immediate fetch on launch.
+      expect(personaApi.getRunStatus).toHaveBeenCalledTimes(1);
+      const frozenElapsed = component.elapsedSec();
+
+      fixture.destroy();
+      // takeUntilDestroyed must tear down both the poll and the elapsed interval:
+      // no further getRunStatus calls and the counter no longer advances.
+      vi.advanceTimersByTime(60_000);
+      expect(personaApi.getRunStatus).toHaveBeenCalledTimes(1);
+      expect(component.elapsedSec()).toBe(frozenElapsed);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows "persona is thinking…" while the run is live and hides it at terminal', () => {
     build();
     fixture.detectChanges();

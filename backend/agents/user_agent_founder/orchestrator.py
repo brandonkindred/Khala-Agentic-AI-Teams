@@ -420,26 +420,32 @@ def run_workflow(
         # below rather than escaping the worker thread silently.
         run = store.get_run(run_id)
 
+        # A missing run row is unrecoverable: every subsequent store write keys
+        # off run_id and would be a silent no-op, and we must NOT fall back to a
+        # default team and execute an unrelated workflow. Abort instead. (This is
+        # distinct from a transient store outage, which raises and is caught by the
+        # failure handler below — get_run returns None only for a genuinely absent
+        # row.)
+        if run is None:
+            logger.error("Founder workflow aborted: run %s not found in store", run_id)
+            return
+
         if adapter is None:
-            # Explicit None check (``run`` is Optional) rather than getattr-with-
-            # default, so the contract is obvious and matches the guards just below
-            # and in _dispatch_founder_run.
-            team_key = (run.target_team_key if run is not None else None) or "software_engineering"
             # ``process_id``/``spec`` are set only for agentic-team targets;
             # ``get_adapter`` ignores them for the software-engineering target.
             # ``spec`` seeds the analysis→build pass-through so a run resumed
-            # before ``repo_path`` is persisted still carries it. ``run`` may be
-            # ``None`` (``get_run`` returns ``Optional``), hence the explicit guard.
+            # before ``repo_path`` is persisted still carries it.
+            team_key = run.target_team_key or "software_engineering"
             adapter = get_adapter(
                 team_key,
-                process_id=run.process_id if run is not None else None,
-                spec=run.spec_content if run is not None else None,
+                process_id=run.process_id,
+                spec=run.spec_content,
             )
 
-        project_name = getattr(run, "project_name", None) or f"user-agent-founder-{run_id}"
+        project_name = run.project_name or f"user-agent-founder-{run_id}"
 
         # Phase 1: Generate the product spec (skip if already done)
-        if run is not None and run.spec_content:
+        if run.spec_content:
             spec_content = run.spec_content
             logger.info(
                 "Resuming run %s past Phase 1 (spec already generated, %d chars)",
@@ -472,7 +478,7 @@ def run_workflow(
         with httpx.Client() as client:
             # Phase 2: Product analysis (skip entirely if repo_path stored;
             # skip submit only if analysis_job_id stored without repo_path)
-            if run is not None and run.repo_path:
+            if run.repo_path:
                 repo_path: str | None = run.repo_path
                 logger.info(
                     "Resuming run %s past Phase 2 (analysis already complete, repo_path=%s)",
@@ -494,7 +500,7 @@ def run_workflow(
                     spec_content,
                     adapter,
                     project_name,
-                    existing_job_id=run.analysis_job_id if run is not None else None,
+                    existing_job_id=run.analysis_job_id,
                 )
                 if repo_path is None:
                     return  # status already set to failed
@@ -507,7 +513,7 @@ def run_workflow(
                 run_id,
                 repo_path,
                 adapter,
-                existing_job_id=run.se_job_id if run is not None else None,
+                existing_job_id=run.se_job_id,
             )
             if success:
                 store.update_run(run_id, status="completed")

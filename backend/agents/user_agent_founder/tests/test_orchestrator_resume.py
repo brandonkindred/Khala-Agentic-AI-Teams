@@ -35,6 +35,8 @@ class _FakeRun:
     spec_content: str | None = None
     repo_path: str | None = None
     target_team_key: str = "software_engineering"
+    persona_id: str | None = None
+    project_name: str | None = None
     process_id: str | None = None
     created_at: str = "2026-04-25T00:00:00+00:00"
     updated_at: str = "2026-04-25T00:00:00+00:00"
@@ -159,6 +161,23 @@ def _install_httpx(monkeypatch, orchestrator, fake_client: FakeHttpxClient) -> N
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_missing_run_aborts_without_running_any_phase(stub_orchestrator_io, monkeypatch):
+    """A run_id with no row in the store aborts immediately: no spec gen, no HTTP,
+    and no silent fallback to a default team adapter executing an unrelated run."""
+    orchestrator = stub_orchestrator_io
+    # Store holds "run-exists"; we dispatch a different id, so get_run returns None.
+    store = FakeFounderStore(_FakeRun(run_id="run-exists"))
+    agent = MagicMock()
+    fake = FakeHttpxClient()
+    _install_httpx(monkeypatch, orchestrator, fake)
+
+    orchestrator.run_workflow("run-missing", store, agent)
+
+    agent.generate_spec.assert_not_called()
+    assert fake.posts == []
+    assert store.update_calls == []
 
 
 def test_fresh_run_runs_all_phases(stub_orchestrator_io, monkeypatch):
