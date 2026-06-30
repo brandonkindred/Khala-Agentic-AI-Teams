@@ -607,10 +607,19 @@ async def github_events(request: Request) -> Any:
       collaborator on a PR starts the existing code-review flow.
 
     GitHub expects a fast 2xx (deliveries time out), so event processing is handed to a
-    background thread. When a webhook secret is configured (stored credential or
-    ``GITHUB_WEBHOOK_SECRET``), the ``X-Hub-Signature-256`` HMAC is verified and a bad
-    signature is rejected with 401; with no secret configured, verification is skipped
-    (logged) to ease first-time setup — mirroring the Slack events handler.
+    background thread.
+
+    Preconditions: ``request`` is the raw GitHub webhook delivery; the ``X-GitHub-Event``
+        and ``X-Hub-Signature-256`` headers carry the event type and HMAC signature.
+    Postconditions:
+        - When a webhook secret is configured (stored credential or ``GITHUB_WEBHOOK_SECRET``),
+          the ``X-Hub-Signature-256`` HMAC is verified against the raw body and a mismatch
+          raises ``HTTPException(401)``; with no secret configured, verification is skipped
+          (logged) to ease first-time setup — mirroring the Slack events handler.
+        - ``ping`` deliveries return ``{"ok": true}`` after verification.
+        - A non-JSON body raises ``HTTPException(400)``; otherwise the event is dispatched
+          to :func:`dispatch_github_event` (which never raises) and ``{"ok": true}`` is
+          returned. Returns before any review work runs.
     """
     from unified_api.github_events_handler import (
         dispatch_github_event,
@@ -1103,11 +1112,15 @@ def _degraded_github_config_response() -> GitHubConfigResponse:
     Preconditions: none.
     Postconditions: returns the JSON-only settings (owner/repo/enabled/default_label,
         read via ``get_github_config_meta`` — NO Postgres) with ``token_configured=False``
-        and ``credential_store_unreachable=True``. Only the credential-derived fields are
-        unknown during a store outage; the saved settings are not, so the panel shows the
-        configured repo plus the unreachable warning instead of blanking everything (which
-        would conflate "store down" with "nothing configured"). Never raises — a failure
-        reading even the JSON falls back to empty settings.
+        and ``credential_store_unreachable=True``. ``webhook_secret_configured`` reflects
+        the ``GITHUB_WEBHOOK_SECRET`` env var (readable without Postgres), so an
+        env-configured secret is not falsely reported as absent during a store outage; the
+        stored-credential secret is the only webhook field that is genuinely unknown here.
+        Only the credential-derived fields are unknown during a store outage; the saved
+        settings are not, so the panel shows the configured repo plus the unreachable
+        warning instead of blanking everything (which would conflate "store down" with
+        "nothing configured"). Never raises — a failure reading even the JSON falls back to
+        empty settings.
     """
     try:
         meta = get_github_config_meta()
@@ -1120,6 +1133,7 @@ def _degraded_github_config_response() -> GitHubConfigResponse:
         owner=str(meta.get("owner", "")),
         repo=str(meta.get("repo", "")),
         default_label=str(meta.get("default_label", "")),
+        webhook_secret_configured=bool(os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()),
         credential_store_unreachable=True,
     )
 
@@ -1891,7 +1905,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         ) from e
 
 
-async def _start_pr_review(pr_number: int, base_branch: str | None) -> RunPrReviewResponse:
+async def _start_pr_review(pr_number: int, base_branch: str | None, *, token: str | None = None) -> RunPrReviewResponse:
     """Resolve the GitHub target and start a PR review on the coding-team service.
 
     Shared by ``POST /github/review-pr`` (manual UI trigger) and the GitHub webhook
@@ -1906,14 +1920,28 @@ async def _start_pr_review(pr_number: int, base_branch: str | None) -> RunPrRevi
     Preconditions:
         - GitHub integration is enabled with a stored PAT and a configured owner/repo.
         - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+        - ``token``, when supplied, is a GitHub PAT the caller already resolved (the
+          webhook path passes this so a single credential-store read serves the whole
+          request); when ``None`` the PAT is read here via ``_resolve_github_target``.
     Postconditions:
         - On success returns a ``RunPrReviewResponse`` describing the started review
           job. Every failure path raises ``HTTPException`` with an explanatory detail;
           no ``httpx`` error escapes as an unhandled exception.
     """
-    # Centralized validation (enabled + PAT + owner/repo), which also maps an
-    # unreachable credential store to a 503 rather than a misleading "not configured".
-    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
+    if token:
+        # Caller already resolved the PAT (webhook path) — validate only the JSON-only
+        # settings here, skipping a second credential-store read.
+        cfg = await asyncio.to_thread(get_github_config_meta)
+        if not cfg.get("enabled"):
+            raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
+        owner = str(cfg.get("owner", "")).strip()
+        repo = str(cfg.get("repo", "")).strip()
+        if not owner or not repo:
+            raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+    else:
+        # Centralized validation (enabled + PAT + owner/repo), which also maps an
+        # unreachable credential store to a 503 rather than a misleading "not configured".
+        cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
     if not coding_team_url:

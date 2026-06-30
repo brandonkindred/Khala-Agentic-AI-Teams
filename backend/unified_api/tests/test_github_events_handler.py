@@ -219,44 +219,48 @@ def test_dispatch_defaults_missing_comment_id_to_zero():
 # ---------------------------------------------------------------------------
 
 
-def test_process_review_request_reacts_then_starts():
-    with patch(f"{_H}._add_eyes_reaction") as react, patch(f"{_H}._start_review") as start:
+def test_process_review_request_resolves_token_once_then_reacts_and_starts():
+    # The token is resolved a SINGLE time and reused by both the reaction and the
+    # review start (no duplicate credential-store read per webhook).
+    with (
+        patch(f"{_H}._resolve_github_token", return_value="ghp_tok") as tok,
+        patch(f"{_H}._add_eyes_reaction") as react,
+        patch(f"{_H}._start_review") as start,
+    ):
         gh.process_review_request("acme", "widget", 42, 999)
-    react.assert_called_once_with("acme", "widget", 999)
-    start.assert_called_once_with(42)
+    tok.assert_called_once_with()
+    react.assert_called_once_with("acme", "widget", 999, "ghp_tok")
+    start.assert_called_once_with(42, "ghp_tok")
 
 
 def test_add_eyes_reaction_noop_without_comment_id():
-    with patch(f"{_H}._resolve_github_token") as tok:
-        gh._add_eyes_reaction("acme", "widget", 0)
-    tok.assert_not_called()
+    fake_client = MagicMock()
+    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
+        gh._add_eyes_reaction("acme", "widget", 0, "ghp_tok")
+    fake_client.create_comment_reaction.assert_not_called()
 
 
 def test_add_eyes_reaction_noop_without_token():
-    with patch(f"{_H}._resolve_github_token", return_value=None):
-        # Must not raise even though no client is built.
-        gh._add_eyes_reaction("acme", "widget", 999)
+    fake_client = MagicMock()
+    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
+        # No token → no client built, must not raise.
+        gh._add_eyes_reaction("acme", "widget", 999, None)
+    fake_client.create_comment_reaction.assert_not_called()
 
 
 def test_add_eyes_reaction_calls_client():
     fake_client = MagicMock()
     fake_client.__enter__ = MagicMock(return_value=fake_client)
     fake_client.__exit__ = MagicMock(return_value=False)
-    with (
-        patch(f"{_H}._resolve_github_token", return_value="ghp_tok"),
-        patch("coding_team.github_source.client.GitHubClient", return_value=fake_client),
-    ):
-        gh._add_eyes_reaction("acme", "widget", 999)
+    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
+        gh._add_eyes_reaction("acme", "widget", 999, "ghp_tok")
     fake_client.create_comment_reaction.assert_called_once_with("acme", "widget", 999, content="eyes")
 
 
 def test_add_eyes_reaction_swallows_errors():
-    with (
-        patch(f"{_H}._resolve_github_token", return_value="ghp_tok"),
-        patch("coding_team.github_source.client.GitHubClient", side_effect=RuntimeError("boom")),
-    ):
+    with patch("coding_team.github_source.client.GitHubClient", side_effect=RuntimeError("boom")):
         # Best-effort: an exception here must not propagate.
-        gh._add_eyes_reaction("acme", "widget", 999)
+        gh._add_eyes_reaction("acme", "widget", 999, "ghp_tok")
 
 
 def test_resolve_github_token_reads_credential():
@@ -279,21 +283,25 @@ def test_configured_owner_repo_empty_on_error():
         assert gh._configured_owner_repo() == ("", "")
 
 
-def test_start_review_invokes_shared_helper():
-    async def _fake_start(pr_number, base_branch):
-        assert (pr_number, base_branch) == (42, None)
+def test_start_review_invokes_shared_helper_with_token():
+    seen = {}
+
+    async def _fake_start(pr_number, base_branch, *, token=None):
+        seen["args"] = (pr_number, base_branch, token)
         return MagicMock(job_id="job-1")
 
     with patch("unified_api.routes.integrations._start_pr_review", _fake_start):
-        gh._start_review(42)  # must not raise
+        gh._start_review(42, "ghp_tok")  # must not raise
+    # The pre-resolved token is threaded through so the review path does not re-read it.
+    assert seen["args"] == (42, None, "ghp_tok")
 
 
 def test_start_review_swallows_errors():
-    async def _boom(pr_number, base_branch):
+    async def _boom(pr_number, base_branch, *, token=None):
         raise RuntimeError("downstream down")
 
     with patch("unified_api.routes.integrations._start_pr_review", _boom):
-        gh._start_review(42)  # logged, not raised
+        gh._start_review(42, "ghp_tok")  # logged, not raised
 
 
 def test_configured_owner_repo_reads_meta():

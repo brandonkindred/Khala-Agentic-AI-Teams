@@ -991,3 +991,57 @@ def test_review_pr_forwards_base_branch(mock_cfg, mock_cred, monkeypatch):
         resp = client.post(_REVIEW_PR, json={"pr_number": 7, "base_branch": "develop"})
     assert resp.status_code == 200
     assert fake.calls[0][1]["base_branch"] == "develop"
+
+
+# ---------------------------------------------------------------------------
+# _start_pr_review(token=...): webhook path reuses a pre-resolved PAT (no 2nd read)
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+from unified_api.routes.integrations import _start_pr_review  # noqa: E402
+
+
+def test_start_pr_review_with_token_skips_credential_read(monkeypatch):
+    """When a token is passed, the PAT is NOT re-read via get_credential_status; only the
+    JSON-only settings are validated, and the passed token is forwarded."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {"job_id": "rev-9", "pr_number": 7, "pr_url": "u", "status": "pending", "message": ""},
+        )
+    )
+    with (
+        patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG)),
+        patch(f"{_M}.get_credential_status", side_effect=AssertionError("must not read PAT")) as cred,
+        patch(f"{_M}.httpx.AsyncClient", return_value=fake),
+    ):
+        result = asyncio.run(_start_pr_review(7, None, token="ghp_pre"))
+    assert result.job_id == "rev-9"
+    assert fake.calls[0][1]["github_token"] == "ghp_pre"
+    cred.assert_not_called()
+
+
+def test_start_pr_review_with_token_400_when_disabled():
+    from fastapi import HTTPException as _HTTPExc
+
+    with (
+        patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "enabled": False}),
+        pytest.raises(_HTTPExc) as exc,
+    ):
+        asyncio.run(_start_pr_review(7, None, token="ghp_pre"))
+    assert exc.value.status_code == 400
+    assert "not enabled" in exc.value.detail
+
+
+def test_start_pr_review_with_token_400_when_owner_repo_missing():
+    from fastapi import HTTPException as _HTTPExc
+
+    with (
+        patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "", "repo": ""}),
+        pytest.raises(_HTTPExc) as exc,
+    ):
+        asyncio.run(_start_pr_review(7, None, token="ghp_pre"))
+    assert exc.value.status_code == 400
+    assert "owner/repo" in exc.value.detail

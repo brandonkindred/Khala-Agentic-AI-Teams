@@ -616,8 +616,13 @@ def set_github_config(
 ) -> None:
     """Persist GitHub config. PAT and webhook secret go encrypted to Postgres; rest to JSON.
 
-    Preserves existing values when empty strings are passed for owner/repo/repo_path and
-    leaves the stored webhook secret untouched when ``webhook_secret`` is blank.
+    Preconditions: all arguments are strings (``enabled`` a bool). Blank ``owner``/``repo``/
+        ``repo_path`` mean "preserve existing"; blank ``personal_access_token``/
+        ``webhook_secret`` mean "leave the stored credential untouched".
+    Postconditions: the non-blank PAT and webhook secret are written encrypted via
+        ``set_credential``; the JSON settings (enabled/owner/repo/default_label/repo_path)
+        are rewritten atomically under ``_LOCK``. Returns ``None``. Raises only if the
+        underlying credential or JSON write fails.
     """
     if personal_access_token.strip():
         set_credential(_GITHUB_SERVICE, "personal_access_token", personal_access_token.strip())
@@ -638,7 +643,14 @@ def set_github_config(
 
 
 def clear_github_config() -> None:
-    """Remove GitHub PAT + webhook secret and reset config to disabled defaults."""
+    """Remove GitHub PAT + webhook secret and reset config to disabled defaults.
+
+    Preconditions: none.
+    Postconditions: deletes the stored ``personal_access_token`` and ``webhook_secret``
+        credentials and rewrites the JSON settings to the disabled-defaults shape
+        (enabled=False, empty owner/repo/default_label/repo_path) atomically under
+        ``_LOCK``. Idempotent — safe to call when nothing is configured. Returns ``None``.
+    """
     delete_credential(_GITHUB_SERVICE, "personal_access_token")
     delete_credential(_GITHUB_SERVICE, "webhook_secret")
     with _LOCK:

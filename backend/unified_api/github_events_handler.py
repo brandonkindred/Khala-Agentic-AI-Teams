@@ -70,7 +70,13 @@ def verify_github_signature(secret: str, body: bytes, signature_header: str) -> 
 
 
 def parse_review_command(comment_body: str) -> bool:
-    """Return ``True`` if the comment body contains the ``@khala review`` command."""
+    """Return ``True`` if the comment body contains the ``@khala review`` command.
+
+    Preconditions: ``comment_body`` is the raw comment text (may be empty or ``None``).
+    Postconditions: returns ``True`` iff a case-insensitive ``@khala review`` token (with
+        a trailing word boundary) appears anywhere in the body; ``False`` otherwise. Pure;
+        never raises.
+    """
     if not comment_body:
         return False
     return _REVIEW_COMMAND.search(comment_body) is not None
@@ -80,14 +86,23 @@ def is_authorized(author_association: str) -> bool:
     """Return ``True`` if the commenter's repo association may trigger a review.
 
     GitHub reports ``author_association`` as one of OWNER/MEMBER/COLLABORATOR/
-    CONTRIBUTOR/FIRST_TIMER/FIRST_TIME_CONTRIBUTOR/MANNEQUIN/NONE. Only the first three
-    are treated as authorized.
+    CONTRIBUTOR/FIRST_TIMER/FIRST_TIME_CONTRIBUTOR/MANNEQUIN/NONE.
+
+    Preconditions: ``author_association`` is the comment's association string (may be
+        empty or ``None``).
+    Postconditions: returns ``True`` only for OWNER/MEMBER/COLLABORATOR (case-insensitive);
+        every other value, including empty/``None``, returns ``False``. Pure; never raises.
     """
     return str(author_association or "").strip().upper() in _AUTHORIZED_ASSOCIATIONS
 
 
 def _comment_is_from_bot(comment: dict[str, Any]) -> bool:
-    """True when the comment was authored by a bot (avoid reacting to our own output)."""
+    """True when the comment was authored by a bot (avoid reacting to our own output).
+
+    Preconditions: ``comment`` is the webhook payload's ``comment`` object (may be empty).
+    Postconditions: returns ``True`` iff ``comment.user.type`` is ``"Bot"``
+        (case-insensitive). Pure; never raises.
+    """
     user = comment.get("user") or {}
     return str(user.get("type", "")).strip().lower() == "bot"
 
@@ -112,12 +127,16 @@ def _resolve_github_token() -> str | None:
         return None
 
 
-def _add_eyes_reaction(owner: str, repo: str, comment_id: int) -> None:
-    """Best-effort 👀 reaction on the triggering comment (never raises)."""
-    if not comment_id:
-        return
-    token = _resolve_github_token()
-    if not token:
+def _add_eyes_reaction(owner: str, repo: str, comment_id: int, token: str | None) -> None:
+    """Best-effort 👀 reaction on the triggering comment.
+
+    Preconditions: ``token`` is the GitHub PAT to authenticate with, or ``None`` when no
+        credential is available.
+    Postconditions: adds an ``eyes`` reaction to comment ``comment_id`` only when both a
+        token and a non-zero comment id are present; otherwise a no-op. Never raises — the
+        reaction is a courtesy acknowledgement and must not block the review.
+    """
+    if not comment_id or not token:
         return
     try:
         from coding_team.github_source.client import GitHubClient
@@ -130,9 +149,12 @@ def _add_eyes_reaction(owner: str, repo: str, comment_id: int) -> None:
         logger.warning("GitHub webhook: could not add reaction to comment %s", comment_id, exc_info=True)
 
 
-def _start_review(pr_number: int) -> None:
+def _start_review(pr_number: int, token: str | None) -> None:
     """Start the existing PR-review flow for ``pr_number`` (runs the async helper).
 
+    Preconditions: ``pr_number`` is a positive PR number; ``token`` is a pre-resolved
+        GitHub PAT reused so the review path does not re-read the credential store, or
+        ``None`` to let that path resolve it.
     Postconditions: forwards to the same ``_start_pr_review`` path used by
         ``POST /api/integrations/github/review-pr``. Errors are logged, not raised — the
         webhook has already returned 200 and there is no client to surface them to.
@@ -142,16 +164,26 @@ def _start_review(pr_number: int) -> None:
 
         from unified_api.routes.integrations import _start_pr_review
 
-        result = asyncio.run(_start_pr_review(pr_number, None))
+        result = asyncio.run(_start_pr_review(pr_number, None, token=token))
         logger.info("GitHub webhook: started review job %s for PR #%s", getattr(result, "job_id", "?"), pr_number)
     except Exception:
         logger.exception("GitHub webhook: failed to start review for PR #%s", pr_number)
 
 
 def process_review_request(owner: str, repo: str, pr_number: int, comment_id: int) -> None:
-    """Acknowledge with a reaction, then start the code review. Runs in a worker thread."""
-    _add_eyes_reaction(owner, repo, comment_id)
-    _start_review(pr_number)
+    """Acknowledge with a 👀 reaction, then start the code review. Runs in a worker thread.
+
+    Preconditions: ``owner``/``repo`` are the (config-matched) repository coordinates;
+        ``pr_number`` is a positive PR number; ``comment_id`` is the triggering comment's
+        id (0 when unknown).
+    Postconditions: resolves the GitHub PAT once and reuses it for both the reaction and
+        the review start, so a single credential-store read serves the whole webhook.
+        Best-effort throughout — neither a failed reaction nor a failed review start
+        raises (the webhook has already returned 200).
+    """
+    token = _resolve_github_token()
+    _add_eyes_reaction(owner, repo, comment_id, token)
+    _start_review(pr_number, token)
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +192,13 @@ def process_review_request(owner: str, repo: str, pr_number: int, comment_id: in
 
 
 def _configured_owner_repo() -> tuple[str, str]:
-    """Return the configured (owner, repo), or ("", "") if unavailable."""
+    """Return the configured (owner, repo), or ("", "") if unavailable.
+
+    Preconditions: none.
+    Postconditions: returns the stripped owner/repo from the GitHub config settings
+        (JSON only — no credential read). Returns ``("", "")`` when nothing is configured
+        or the settings read fails. Never raises.
+    """
     try:
         from unified_api.integrations_store import get_github_config_meta
 
@@ -182,8 +220,11 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any]) -> None:
     - the commenter's ``author_association`` is OWNER/MEMBER/COLLABORATOR
     - the repository matches the configured owner/repo (never review an arbitrary repo)
 
-    On all checks passing, spawns a daemon thread running :func:`process_review_request`.
-    Any unmet check is a silent no-op. Never raises.
+    Preconditions: ``event_type`` is the value of the ``X-GitHub-Event`` header;
+        ``payload`` is the parsed webhook body (already signature-verified by the route).
+    Postconditions: spawns a daemon thread running :func:`process_review_request` exactly
+        once when every condition above holds; any unmet condition is a silent no-op.
+        Never raises (it returns before the thread does any I/O).
     """
     if event_type != "issue_comment":
         return
