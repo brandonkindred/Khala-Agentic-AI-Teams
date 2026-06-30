@@ -22,7 +22,7 @@ import sys
 import textwrap
 import types
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import pandas as pd
 import pytest
@@ -68,9 +68,9 @@ class _Bar:
     symbol: str = "X"
 
 
-def _series(n: int, seed: int = 0) -> List[_Bar]:
+def _series(n: int, seed: int = 0) -> list[_Bar]:
     rng = random.Random(seed)
-    bars: List[_Bar] = []
+    bars: list[_Bar] = []
     close = 100.0
     for i in range(n):
         close = max(5.0, close + rng.uniform(-3.0, 3.0) + i * 0.05)
@@ -93,7 +93,7 @@ def _series(n: int, seed: int = 0) -> List[_Bar]:
 # ---------------------------------------------------------------------------
 
 
-def _wema(vals: List[float], period: int) -> float:
+def _wema(vals: list[float], period: int) -> float:
     """Windowed EMA over ``vals`` seeded from the first element (the registry's basis)."""
     alpha = 2.0 / (period + 1.0)
     v = vals[0]
@@ -310,6 +310,7 @@ def test_sliding_window_matches_cold_compute(case) -> None:
 
 
 def test_same_bar_repeat_returns_cached() -> None:
+    """Re-querying the same trailing bar returns the cached value (same-bar fingerprint hit)."""
     bars = _series(60, seed=5)
     reg = IndicatorRegistry()
     for _id, reg_call, _ref, _warm in _CASES:
@@ -319,6 +320,7 @@ def test_same_bar_repeat_returns_cached() -> None:
 
 
 def test_warmup_returns_none() -> None:
+    """Each new indicator (and the derived Bollinger outputs) returns None below its warmup."""
     reg = IndicatorRegistry()
     assert reg.donchian(_series(10), 20, "upper") is None
     assert reg.keltner(_series(10), 20, 10, 2.0, "middle") is None
@@ -334,6 +336,7 @@ def test_warmup_returns_none() -> None:
 
 
 def test_mfi_and_williams_r_stay_in_range() -> None:
+    """The two new bounded oscillators stay within their declared output_range at every depth."""
     bars = _series(120, seed=21)
     reg = IndicatorRegistry()
     for n in range(16, len(bars) + 1):
@@ -745,6 +748,7 @@ def _frame():
 
 
 def test_pandas_donchian_orders_bands() -> None:
+    """Pandas Donchian bands are correctly ordered (upper >= middle >= lower)."""
     high, low, _close, _vol = _frame()
     upper, middle, lower = pdi.donchian_channels(high, low, period=20)
     mask = middle.notna()
@@ -753,6 +757,7 @@ def test_pandas_donchian_orders_bands() -> None:
 
 
 def test_pandas_keltner_orders_bands() -> None:
+    """Pandas Keltner bands are correctly ordered (upper >= middle >= lower)."""
     high, low, close, _vol = _frame()
     upper, middle, lower = pdi.keltner_channels(high, low, close, period=20, atr_period=10)
     mask = middle.notna() & upper.notna()
@@ -761,12 +766,14 @@ def test_pandas_keltner_orders_bands() -> None:
 
 
 def test_pandas_obv_matches_registry_tail() -> None:
+    """Pandas OBV tail equals the streaming registry's OBV."""
     _high, _low, close, vol = _frame()
     bars = _series(80, seed=14)
     assert float(pdi.obv(close, vol).iloc[-1]) == pytest.approx(IndicatorRegistry().obv(bars))
 
 
 def test_pandas_mfi_bounded_and_matches_registry_tail() -> None:
+    """Pandas MFI stays in [0, 100] and its tail matches the registry."""
     high, low, close, vol = _frame()
     series = pdi.mfi(high, low, close, vol, period=14)
     finite = series.dropna()
@@ -776,6 +783,7 @@ def test_pandas_mfi_bounded_and_matches_registry_tail() -> None:
 
 
 def test_pandas_roc_matches_registry_tail() -> None:
+    """Pandas ROC tail equals the streaming registry's ROC."""
     _high, _low, close, _vol = _frame()
     bars = _series(80, seed=14)
     assert float(pdi.roc(close, period=12).iloc[-1]) == pytest.approx(
@@ -784,6 +792,7 @@ def test_pandas_roc_matches_registry_tail() -> None:
 
 
 def test_pandas_cci_matches_registry_tail() -> None:
+    """Pandas CCI tail equals the streaming registry's CCI."""
     high, low, close, _vol = _frame()
     bars = _series(80, seed=14)
     assert float(pdi.cci(high, low, close, period=20).iloc[-1]) == pytest.approx(
@@ -792,12 +801,94 @@ def test_pandas_cci_matches_registry_tail() -> None:
 
 
 def test_pandas_williams_r_bounded_and_matches_registry_tail() -> None:
+    """Pandas Williams %R stays in [-100, 0] and its tail matches the registry."""
     high, low, close, _vol = _frame()
     series = pdi.williams_r(high, low, close, period=14)
     finite = series.dropna()
     assert (finite >= -100).all() and (finite <= 0).all()
     bars = _series(80, seed=14)
     assert float(series.iloc[-1]) == pytest.approx(IndicatorRegistry().williams_r(bars, 14))
+
+
+def _pandas_bb_percent_b(close: pd.Series, period: int, num_std: float) -> pd.Series:
+    """Derive Bollinger %B from the pandas reference bands: (close − lower) / (upper − lower)."""
+    upper, _middle, lower = pdi.bollinger_bands(close, period, num_std)
+    return (close - lower) / (upper - lower)
+
+
+def _pandas_bb_bandwidth(close: pd.Series, period: int, num_std: float) -> pd.Series:
+    """Derive Bollinger bandwidth from the pandas reference bands: (upper − lower) / middle."""
+    upper, middle, lower = pdi.bollinger_bands(close, period, num_std)
+    return (upper - lower) / middle
+
+
+def _ref_bb_sample(bars, period: int, num_std: float, select: str) -> Optional[float]:
+    """%B / bandwidth using *sample* std (ddof=1), matching pandas ``rolling().std()``.
+
+    The streaming registry uses population variance (``sq/period − mean²``, ddof=0), but the
+    pandas reference ``bollinger_bands`` builds its bands from ``Series.rolling().std()`` —
+    pandas' sample std. This reference mirrors that convention so the pandas derived outputs
+    can be cross-checked against an independent computation rather than the registry tail.
+    """
+    if len(bars) < period:
+        return None
+    vals = [b.close for b in bars[-period:]]
+    mean = sum(vals) / period
+    var = sum((v - mean) ** 2 for v in vals) / (period - 1)  # sample variance (ddof=1)
+    std = var**0.5
+    upper, lower = mean + num_std * std, mean - num_std * std
+    if select == "percent_b":
+        width = upper - lower
+        return 0.5 if width == 0 else (bars[-1].close - lower) / width
+    if select == "bandwidth":
+        return 0.0 if mean == 0 else (upper - lower) / mean
+    raise AssertionError(select)
+
+
+def test_pandas_bb_percent_b_matches_sample_std_reference() -> None:
+    """%B derived from the pandas bands matches an independent sample-std reference tail.
+
+    The pandas bands use sample std (ddof=1), so this verifies the static reference layer
+    against a hand-rolled sample-std computation — not the registry, which uses population
+    std and so produces slightly different Bollinger values by construction.
+    """
+    _high, _low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    derived = _pandas_bb_percent_b(close, 20, 2.0)
+    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_sample(bars, 20, 2.0, "percent_b"))
+    # Warmup rows (insufficient bars for the rolling std) stay NaN, like the bands.
+    assert pd.isna(derived.iloc[0])
+
+
+def test_pandas_bb_bandwidth_matches_sample_std_reference() -> None:
+    """Bandwidth derived from the pandas bands matches an independent sample-std reference tail."""
+    _high, _low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    derived = _pandas_bb_bandwidth(close, 20, 2.0)
+    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_sample(bars, 20, 2.0, "bandwidth"))
+    assert pd.isna(derived.iloc[0])
+
+
+def test_pandas_bb_flat_window_neutral_conventions() -> None:
+    """Flat-window neutral values (%B→0.5, bandwidth→0) live in the registry/accessor.
+
+    The raw pandas bands collapse on a flat window (std=0 → upper==middle==lower), so a
+    naive band-derived %B is 0/0 (NaN) while bandwidth is 0/mean (0.0). The neutral %B=0.5
+    convention is applied by the registry (``select='percent_b'``), not the raw bands — this
+    test pins both behaviours so the divergence is intentional and documented.
+    """
+    flat_close = pd.Series([50.0] * 30)
+    reg = IndicatorRegistry()
+    flat_bars = [
+        _Bar(timestamp=f"t{i}", open=50, high=50, low=50, close=50, volume=100) for i in range(30)
+    ]
+    # Registry applies the neutral conventions.
+    assert reg.bollinger_bands(flat_bars, 20, 2.0, select="percent_b") == 0.5
+    assert reg.bollinger_bands(flat_bars, 20, 2.0, select="bandwidth") == 0.0
+    # Raw band-derived bandwidth agrees (0 width / 50 mean = 0); derived %B is the 0/0 NaN
+    # the registry's neutral convention exists to replace.
+    assert float(_pandas_bb_bandwidth(flat_close, 20, 2.0).iloc[-1]) == 0.0
+    assert pd.isna(_pandas_bb_percent_b(flat_close, 20, 2.0).iloc[-1])
 
 
 @pytest.mark.parametrize(
@@ -813,6 +904,7 @@ def test_pandas_williams_r_bounded_and_matches_registry_tail() -> None:
     ],
 )
 def test_indicators_registry_has_new_specs(name, arity) -> None:
+    """The new pandas helpers are registered in INDICATORS with the expected tuple arity."""
     assert name in pdi.INDICATORS
     assert pdi.INDICATORS[name].tuple_arity == arity
 
@@ -892,7 +984,7 @@ def test_compute_indicator_series_matches_registry_tail(case) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _flat_bars(n: int = 30, price: float = 50.0, volume: float = 100.0) -> List[_Bar]:
+def _flat_bars(n: int = 30, price: float = 50.0, volume: float = 100.0) -> list[_Bar]:
     return [
         _Bar(timestamp=f"t{i}", open=price, high=price, low=price, close=price, volume=volume)
         for i in range(n)
