@@ -101,6 +101,9 @@ def compute_section_chars(llm: Any) -> int:
 # boundary. We don't track open fences — the only effect is a slightly different (never
 # missing) section split, and per-section extraction tolerates such boundaries.
 _HEADING_RE = re.compile(r"^[ ]{0,3}#{1,6}\s+.*$", re.MULTILINE)
+# Blank-line separator (handles CRLF and whitespace-only lines), captured so split()
+# keeps the delimiters for lossless reconstruction. Compiled once at module level.
+_BLANK_LINE_RE = re.compile(r"(\r?\n\s*\r?\n)")
 
 
 def split_sections(text: str, max_chars: int) -> List[str]:
@@ -177,7 +180,7 @@ def _blank_line_pieces(text: str) -> List[str]:
     counts as a separator. The ``\\r?\\n`` handles both Unix (LF) and Windows (CRLF)
     line endings so specs authored on Windows still split on blank lines.
     """
-    parts = re.split(r"(\r?\n\s*\r?\n)", text)
+    parts = _BLANK_LINE_RE.split(text)
     pieces: List[str] = []
     for i in range(0, len(parts), 2):
         seg = parts[i] + (parts[i + 1] if i + 1 < len(parts) else "")
@@ -264,8 +267,10 @@ def map_reduce(
 
 
 def _supports_compaction(llm: Any) -> bool:
-    """True when ``llm`` exposes the compaction surface (``.complete`` + ctx size)."""
-    return hasattr(llm, "complete") and hasattr(llm, "get_max_context_tokens")
+    """True when ``llm`` exposes a *callable* compaction surface (``.complete`` + ctx size)."""
+    return callable(getattr(llm, "complete", None)) and callable(
+        getattr(llm, "get_max_context_tokens", None)
+    )
 
 
 # --- shared JSON parse helper -----
