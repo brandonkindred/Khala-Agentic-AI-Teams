@@ -275,6 +275,32 @@ class TestCreateReviewComment:
                 owner="o", repo="r", number=7, commit_id="s", path="a.py", body="b"
             )
 
+    def test_rejects_invalid_preconditions(self) -> None:
+        """Non-positive line, bad side, and empty path/body each raise ValueError."""
+        client = _client_with(lambda _req: httpx.Response(500, text="should not be hit"))
+        with pytest.raises(ValueError):  # line < 1
+            client.create_review_comment(
+                owner="o", repo="r", number=7, commit_id="s", path="a.py", body="b", line=0
+            )
+        with pytest.raises(ValueError):  # invalid side for a line comment
+            client.create_review_comment(
+                owner="o", repo="r", number=7, commit_id="s", path="a.py",
+                body="b", line=3, side="MIDDLE",
+            )
+        with pytest.raises(ValueError):  # non-"file" subject_type
+            client.create_review_comment(
+                owner="o", repo="r", number=7, commit_id="s", path="a.py",
+                body="b", subject_type="line",
+            )
+        with pytest.raises(ValueError):  # empty path
+            client.create_review_comment(
+                owner="o", repo="r", number=7, commit_id="s", path="", body="b", line=3
+            )
+        with pytest.raises(ValueError):  # empty body
+            client.create_review_comment(
+                owner="o", repo="r", number=7, commit_id="s", path="a.py", body="", line=3
+            )
+
 
 class TestAuthenticatedLogin:
     def test_returns_login(self) -> None:

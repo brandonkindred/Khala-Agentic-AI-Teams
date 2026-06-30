@@ -595,25 +595,31 @@ class GitHubClient:
             - ``side`` selects the diff side for a line comment (``"RIGHT"`` = the
               new file, the default; ``"LEFT"`` = the old file). Ignored when
               ``subject_type`` is used.
-            - ``path`` names a file the PR changes; ``commit_id`` is the PR head
-              SHA.
-            - ``body`` is already token-scrubbed by the caller (this method does
-              not scrub, matching ``create_pull_request_review``).
+            - ``side``, when a line comment is posted, is ``"RIGHT"`` or ``"LEFT"``.
+            - ``path`` (non-empty) names a file the PR changes; ``commit_id`` is the
+              PR head SHA.
+            - ``body`` is a non-empty string, already token-scrubbed by the caller
+              (this method does not scrub, matching ``create_pull_request_review``).
         Postconditions:
             - Returns the created-comment payload (carries ``id`` and
               ``html_url``). Raises ``GitHubAPIError`` on any non-2xx response so
               the caller can catch a 422 and degrade.
             - Raises ``ValueError`` when a precondition is violated (neither or
               both of ``line``/``subject_type`` supplied, a non-positive ``line``,
-              or a ``subject_type`` other than ``"file"``), rather than sending an
-              ambiguous request GitHub would reject with an opaque 422.
+              a ``subject_type`` other than ``"file"``, an invalid ``side``, or an
+              empty ``path``/``body``), rather than sending an ambiguous request
+              GitHub would reject with an opaque 422.
         """
+        if not path or not body:
+            raise ValueError("create_review_comment requires non-empty 'path' and 'body'")
         if (line is None) == (subject_type is None):
             raise ValueError(
                 "create_review_comment requires exactly one of 'line' or 'subject_type'"
             )
         if line is not None and line < 1:
             raise ValueError("create_review_comment 'line' must be a 1-based line number (>= 1)")
+        if line is not None and side not in ("LEFT", "RIGHT"):
+            raise ValueError("create_review_comment 'side' must be 'LEFT' or 'RIGHT'")
         if subject_type is not None and subject_type != "file":
             raise ValueError("create_review_comment 'subject_type' must be 'file'")
         json_body: dict[str, Any] = {
