@@ -50,6 +50,7 @@ _cache_lock = threading.Lock()
 def _rl_key(rate_limit_max_retries: Optional[int]) -> int:
     """Map a rate-limit override to a hashable cache-key component.
 
+    Preconditions: ``rate_limit_max_retries`` is an int or ``None``.
     Postconditions: returns the override unchanged when set, else ``-1`` (the
         "use the env schedule" sentinel — distinct from a real ``0`` override).
     """
@@ -70,6 +71,8 @@ def _ollama_cached(
     aliases one keyed differently; an empty key (the single-provider path) fingerprints
     to ``"no-key"`` and falls back to the globally-resolved key at request time.
 
+    Preconditions: ``model``/``base_url`` are resolved strings; ``timeout`` is a
+        number; ``api_key`` may be ``""`` (no Authorization header).
     Postconditions: returns ``(client, was_miss)`` where ``client`` is the shared
         singleton for ``(model, base_url, timeout, rl-override, key-fingerprint)`` and
         ``was_miss`` is True only when this call constructed it (so the caller can log
@@ -106,6 +109,8 @@ def _claude_cached(
     Cached by ``(model, api-key fingerprint, timeout-ms, rl-override)`` so a key,
     model, timeout, or rate-limit-override change yields a fresh client.
 
+    Preconditions: ``model``/``api_key`` are resolved strings (``api_key`` may be
+        ``""``); ``timeout`` is a number.
     Postconditions: returns ``(client, was_miss)`` (see :func:`_ollama_cached`).
         Thread-safe.
     """
@@ -256,6 +261,70 @@ def attributed_client(inner: Any, agent_key: Optional[str]) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _build_claude_concrete(
+    model: str,
+    api_key: str,
+    timeout: float,
+    on_reasoning: Optional[Callable[[str], None]],
+    rate_limit_max_retries: Optional[int],
+) -> ClaudeLLMClient:
+    """Build an unwrapped Claude client — cached unless ``on_reasoning`` is set.
+
+    Shared by the entry (fallback-list) and legacy concrete builders so the "fresh
+    client when a per-caller hook is present, else the shared cached singleton" rule
+    lives in exactly one place.
+
+    Preconditions: ``model``/``api_key`` are resolved strings; ``timeout`` is a
+        number; ``on_reasoning`` is callable or ``None``.
+    Postconditions: returns a ready client whose 429 backoff budget is
+        ``rate_limit_max_retries``; goes through the shared cache only when
+        ``on_reasoning is None`` (a per-caller hook must never be shared).
+    """
+    if on_reasoning is not None:
+        return ClaudeLLMClient(
+            model=model,
+            api_key=api_key,
+            timeout=timeout,
+            on_reasoning=on_reasoning,
+            rate_limit_max_retries=rate_limit_max_retries,
+        )
+    client, _ = _claude_cached(model, api_key, timeout, rate_limit_max_retries)
+    return client
+
+
+def _build_ollama_concrete(
+    model: str,
+    base_url: str,
+    timeout: float,
+    on_reasoning: Optional[Callable[[str], None]],
+    rate_limit_max_retries: Optional[int],
+    api_key: str = "",
+) -> OllamaLLMClient:
+    """Build an unwrapped Ollama client — cached unless ``on_reasoning`` is set.
+
+    Shared by the entry (fallback-list) and legacy concrete builders (see
+    :func:`_build_claude_concrete`).
+
+    Preconditions: ``model``/``base_url`` are resolved strings; ``timeout`` is a
+        number; ``api_key`` may be ``""`` (no Authorization header); ``on_reasoning``
+        is callable or ``None``.
+    Postconditions: returns a ready client whose 429 backoff budget is
+        ``rate_limit_max_retries``; goes through the shared cache only when
+        ``on_reasoning is None``.
+    """
+    if on_reasoning is not None:
+        return OllamaLLMClient(
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            on_reasoning=on_reasoning,
+            rate_limit_max_retries=rate_limit_max_retries,
+            api_key=api_key,
+        )
+    client, _ = _ollama_cached(model, base_url, timeout, rate_limit_max_retries, api_key)
+    return client
+
+
 def _build_entry_client(
     entry: "provider_store.ProviderEntry",
     agent_key: Optional[str],
@@ -280,16 +349,7 @@ def _build_entry_client(
     if entry.provider in ("claude", "anthropic"):
         model = entry.model.strip() or llm_config.resolve_claude_model(agent_key)
         api_key = entry.api_key or llm_config.resolve_claude_api_key()
-        if on_reasoning is not None:
-            return ClaudeLLMClient(
-                model=model,
-                api_key=api_key,
-                timeout=timeout,
-                on_reasoning=on_reasoning,
-                rate_limit_max_retries=rate_limit_max_retries,
-            )
-        client, _ = _claude_cached(model, api_key, timeout, rate_limit_max_retries)
-        return client
+        return _build_claude_concrete(model, api_key, timeout, on_reasoning, rate_limit_max_retries)
     model = entry.model.strip() or llm_config.resolve_model(agent_key)
     base_url = entry.base_url.strip() or llm_config.resolve_base_url()
     # The entry's own key authenticates a Cloud entry; empty falls back to the
@@ -298,17 +358,7 @@ def _build_entry_client(
     # resolving at the call site keeps the two branches symmetric and the contract
     # clear). A local Ollama entry resolves to "" → no Authorization header.
     api_key = entry.api_key or llm_config.resolve_ollama_api_key()
-    if on_reasoning is not None:
-        return OllamaLLMClient(
-            model=model,
-            base_url=base_url,
-            timeout=timeout,
-            on_reasoning=on_reasoning,
-            rate_limit_max_retries=rate_limit_max_retries,
-            api_key=api_key,
-        )
-    client, _ = _ollama_cached(model, base_url, timeout, rate_limit_max_retries, api_key)
-    return client
+    return _build_ollama_concrete(model, base_url, timeout, on_reasoning, rate_limit_max_retries, api_key)
 
 
 def _build_legacy_concrete(
@@ -320,6 +370,8 @@ def _build_legacy_concrete(
     runtime (so an in-flight call still reaches a provider). Mirrors the resolution
     of the non-failover :func:`get_client` path without the attribution wrapper.
 
+    Preconditions: ``agent_key`` is a non-empty key or ``None``; ``on_reasoning`` is
+        callable or ``None``.
     Postconditions: returns a ready concrete provider client per
         :func:`llm_config.resolve_provider`. Never raises for a resolvable config.
     """
@@ -328,20 +380,10 @@ def _build_legacy_concrete(
     if provider in ("claude", "anthropic"):
         model = llm_config.resolve_claude_model(agent_key)
         api_key = llm_config.resolve_claude_api_key()
-        if on_reasoning is not None:
-            return ClaudeLLMClient(
-                model=model, api_key=api_key, timeout=timeout, on_reasoning=on_reasoning
-            )
-        client, _ = _claude_cached(model, api_key, timeout, None)
-        return client
+        return _build_claude_concrete(model, api_key, timeout, on_reasoning, None)
     model = llm_config.resolve_model(agent_key)
     base_url = llm_config.resolve_base_url()
-    if on_reasoning is not None:
-        return OllamaLLMClient(
-            model=model, base_url=base_url, timeout=timeout, on_reasoning=on_reasoning
-        )
-    client, _ = _ollama_cached(model, base_url, timeout, None)
-    return client
+    return _build_ollama_concrete(model, base_url, timeout, on_reasoning, None)
 
 
 def _mark_entry_exhausted(entry: "provider_store.ProviderEntry", err: LLMRateLimitError) -> None:
@@ -360,17 +402,24 @@ def _mark_entry_exhausted(entry: "provider_store.ProviderEntry", err: LLMRateLim
     window when no ``Retry-After`` is given; add a provider's weekly signal here if a
     longer default is ever needed.
 
+    A ``Retry-After`` of exactly ``0`` ("retry immediately") is honored as a 0-second
+    window — the entry's ``reset_at`` is "now", so it is reconsidered on the very next
+    selection rather than being parked for the full fallback window. Only a missing
+    (``None``) or negative ``Retry-After`` falls through to the configured fallback.
+
+    Preconditions: ``err.retry_after_seconds`` is a non-negative number or ``None``.
     Postconditions: persists the mark via :func:`provider_store.mark_exhausted`
         (idempotent, swallows its own write errors). Never raises.
     """
     secs = err.retry_after_seconds
     message = str(err) or getattr(err, "message", "") or ""
+    has_retry_after = secs is not None and secs >= 0
     if OLLAMA_WEEKLY_LIMIT_MESSAGE in message:
         limit_type = "weekly"
-        window = secs if (secs and secs > 0) else llm_config.failover_weekly_window_seconds()
+        window = secs if has_retry_after else llm_config.failover_weekly_window_seconds()
     else:
         limit_type = "rate"
-        window = secs if (secs and secs > 0) else llm_config.failover_rate_window_seconds()
+        window = secs if has_retry_after else llm_config.failover_rate_window_seconds()
     reset_at = datetime.now(timezone.utc) + timedelta(seconds=float(window))
     provider_store.mark_exhausted(entry.id, limit_type=limit_type, reset_at=reset_at)
 
@@ -485,6 +534,8 @@ def _build_failover_client(
     :class:`_AttributingClient` when ``agent_key`` is truthy (attribution outermost,
     so a retried provider still attributes to the same agent).
 
+    Preconditions: ``agent_key`` is a non-empty key or ``None``; ``on_reasoning`` is
+        callable or ``None``.
     Postconditions: ``None`` -> caller uses the legacy path; non-``None`` is ready to
         use. Never raises (a store read failure yields ``None``).
     """

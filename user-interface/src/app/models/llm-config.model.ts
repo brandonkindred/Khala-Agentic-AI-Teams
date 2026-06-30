@@ -100,4 +100,9 @@ export interface LlmProviderUpdate {
   base_url?: string;
   /** New API key; empty leaves the stored key unchanged. */
   api_key?: string;
+  /**
+   * Remove the stored API key (e.g. switching to a keyless local Ollama). A
+   * non-empty `api_key` takes precedence over this flag on the server.
+   */
+  clear_api_key?: boolean;
 }

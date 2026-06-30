@@ -436,6 +436,30 @@ describe('LlmConfigDashboardComponent', () => {
     expect(component.editingId).toBeNull();
   });
 
+  it('sends clear_api_key when the operator clears the stored key', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 3 })])));
+    component.loadProviders();
+    apiSpy.updateProvider.mockReturnValue(of(listResponse([entry({ id: 3 })])));
+    component.startEdit(component.providers[0]);
+    component.editForm.clear_api_key = true;
+    component.submitEdit();
+    expect(apiSpy.updateProvider).toHaveBeenCalledWith(3, expect.objectContaining({ clear_api_key: true }));
+  });
+
+  it('lets a typed key win over the clear flag (clear_api_key false)', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 3 })])));
+    component.loadProviders();
+    apiSpy.updateProvider.mockReturnValue(of(listResponse([entry({ id: 3 })])));
+    component.startEdit(component.providers[0]);
+    component.editForm.clear_api_key = true;
+    component.editForm.api_key = 'sk-new';
+    component.submitEdit();
+    expect(apiSpy.updateProvider).toHaveBeenCalledWith(
+      3,
+      expect.objectContaining({ api_key: 'sk-new', clear_api_key: false }),
+    );
+  });
+
   it('removes a provider', () => {
     apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 7 })])));
     component.loadProviders();

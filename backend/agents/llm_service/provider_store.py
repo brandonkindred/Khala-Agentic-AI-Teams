@@ -515,10 +515,20 @@ def reorder(entry_ids: "list[int] | tuple[int, ...]") -> None:
             raise ReorderMismatchError(
                 "ids must be exactly the current set of provider ids (a permutation of the list)."
             )
-        for position, entry_id in enumerate(entry_ids):
+        if entry_ids:
+            # One bulk UPDATE (CASE id WHEN ... THEN <position>) instead of a write per
+            # row: a single round-trip regardless of list size. ``entry_ids`` is an
+            # exact permutation of the locked live set, so every id matches a CASE arm.
+            when_clauses = " ".join(["WHEN %s THEN %s"] * len(entry_ids))
+            placeholders = ", ".join(["%s"] * len(entry_ids))
+            params: list = []
+            for position, entry_id in enumerate(entry_ids):
+                params.extend([entry_id, position])
+            params.extend(entry_ids)
             cur.execute(
-                "UPDATE llm_provider_configs SET sort_order = %s, updated_at = NOW() WHERE id = %s",
-                (position, entry_id),
+                f"UPDATE llm_provider_configs SET sort_order = CASE id {when_clauses} END, "
+                f"updated_at = NOW() WHERE id IN ({placeholders})",
+                params,
             )
         conn.commit()
     clear_cache()

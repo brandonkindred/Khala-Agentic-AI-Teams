@@ -310,9 +310,13 @@ def test_delete_entry_reports_rowcount(fake_db):
 def test_reorder_assigns_positions(fake_db):
     fake_db._fetchall = [(1,), (2,), (3,)]  # live id set for the FOR UPDATE check
     ps.reorder([3, 1, 2])
-    # one UPDATE per id, positions 0,1,2 in order
-    updates = [c for c in fake_db.executed if "sort_order = %s" in c[0]]
-    assert [c[1] for c in updates] == [(0, 3), (1, 1), (2, 2)]
+    # A single bulk UPDATE (CASE id WHEN <id> THEN <position>) — one round-trip.
+    updates = [c for c in fake_db.executed if "sort_order = CASE id" in c[0]]
+    assert len(updates) == 1
+    sql, params = updates[0]
+    # CASE arms pair each id with its 0-based position, then the WHERE IN id list.
+    assert list(params) == [3, 0, 1, 1, 2, 2, 3, 1, 2]
+    assert "WHERE id IN (%s, %s, %s)" in sql
 
 
 def test_reorder_rejects_non_permutation(fake_db):
@@ -322,7 +326,7 @@ def test_reorder_rejects_non_permutation(fake_db):
     with pytest.raises(ps.ReorderMismatchError):
         ps.reorder([1, 2, 99])  # unknown id
     # No UPDATE was issued for the rejected reorders (only the SELECT).
-    assert not any("sort_order = %s" in c[0] for c in fake_db.executed)
+    assert not any("sort_order = CASE id" in c[0] for c in fake_db.executed)
 
 
 def test_mark_exhausted_writes_limit_state(fake_db):

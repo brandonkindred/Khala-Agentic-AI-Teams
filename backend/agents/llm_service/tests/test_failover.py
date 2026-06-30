@@ -207,6 +207,23 @@ def test_mark_rate_uses_retry_after(monkeypatch):
     assert 110 < delta < 180  # ~retry_after, not the default window
 
 
+def test_mark_retry_after_zero_resets_immediately(monkeypatch):
+    """Retry-After: 0 ("retry now") yields a ~now reset_at, not the full fallback window."""
+    captured = {}
+    monkeypatch.setattr(
+        ps,
+        "mark_exhausted",
+        lambda i, *, limit_type, reset_at: captured.update(reset_at=reset_at),
+    )
+    err = LLMRateLimitError("too many requests", status_code=429, retry_after_seconds=0)
+    before = datetime.now(timezone.utc)
+    _mark_entry_exhausted(_entry(3), err)
+    # Honored as a 0s window — reset_at is essentially "now", far short of the
+    # configured rate fallback window (so the entry is reconsidered immediately).
+    delta = (captured["reset_at"] - before).total_seconds()
+    assert 0 <= delta < 5
+
+
 # --------------------------------------------------------------------------- #
 # Factory integration + Strands unwrap_client regression guard                 #
 # --------------------------------------------------------------------------- #

@@ -13,6 +13,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatAutocompleteModule } from '@angular/material/autocomplete';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatCheckboxModule } from '@angular/material/checkbox';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
 import type {
   LlmConfigResponse,
@@ -38,10 +39,12 @@ interface ProviderForm {
   model: string;
   base_url: string;
   api_key: string;
+  /** Edit only: remove the stored key (ignored when a new api_key is typed). */
+  clear_api_key: boolean;
 }
 
 function emptyProviderForm(): ProviderForm {
-  return { label: '', provider: 'ollama', model: '', base_url: '', api_key: '' };
+  return { label: '', provider: 'ollama', model: '', base_url: '', api_key: '', clear_api_key: false };
 }
 
 /**
@@ -66,6 +69,7 @@ function emptyProviderForm(): ProviderForm {
     MatAutocompleteModule,
     MatProgressSpinnerModule,
     MatTooltipModule,
+    MatCheckboxModule,
   ],
   templateUrl: './llm-config-dashboard.component.html',
   styleUrl: './llm-config-dashboard.component.scss',
@@ -221,6 +225,7 @@ export class LlmConfigDashboardComponent implements OnInit {
       model: entry.model,
       base_url: entry.base_url,
       api_key: '',
+      clear_api_key: false,
     };
   }
 
@@ -228,7 +233,11 @@ export class LlmConfigDashboardComponent implements OnInit {
     this.editingId = null;
   }
 
-  /** Persist an inline edit. An empty api_key leaves the stored key untouched. */
+  /**
+   * Persist an inline edit. An empty api_key leaves the stored key untouched; the
+   * "clear stored key" toggle removes it (ignored when a new key is typed, mirroring
+   * the server, which lets a provided key win over the flag).
+   */
   submitEdit(): void {
     if (this.editingId === null) {
       return;
@@ -238,12 +247,14 @@ export class LlmConfigDashboardComponent implements OnInit {
       this.providersError = 'Please enter a label for the provider.';
       return;
     }
+    const newKey = form.api_key.trim();
     const body: LlmProviderUpdate = {
       label: form.label.trim(),
       provider: form.provider,
       model: form.model.trim(),
       base_url: form.provider === 'ollama' ? form.base_url.trim() : '',
-      api_key: form.api_key.trim(),
+      api_key: newKey,
+      clear_api_key: form.clear_api_key && !newKey,
     };
     this.persistProviders(this.api.updateProvider(this.editingId, body), 'Provider updated.', {
       onSuccess: () => {
