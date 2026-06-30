@@ -104,9 +104,15 @@ _INDICATOR_ALLOWED_CALL_NAMES: dict[str, frozenset[str]] = {
     "williams_r": frozenset({"williams_r"}),
 }
 
-assert set(_INDICATOR_ALLOWED_CALL_NAMES) == set(IndicatorName.__args__), (
-    "indicator allow-list must cover every DSL IndicatorName literal"
-)
+# Explicit raise (not a bare ``assert``) so this load-time invariant survives
+# ``python -O``: it guards gate correctness — a DSL indicator missing from the
+# allow-list would silently let an unsupported call pass the conformance gate.
+if set(_INDICATOR_ALLOWED_CALL_NAMES) != set(IndicatorName.__args__):
+    raise RuntimeError(
+        "indicator allow-list (_INDICATOR_ALLOWED_CALL_NAMES) must cover every DSL "
+        f"IndicatorName literal; mismatch: "
+        f"{set(IndicatorName.__args__) ^ set(_INDICATOR_ALLOWED_CALL_NAMES)}"
+    )
 
 # Names recognised as the position-snapshot receiver in exit branches.
 _POSITION_RECEIVER_NAMES: frozenset[str] = frozenset({"position", "pos"})

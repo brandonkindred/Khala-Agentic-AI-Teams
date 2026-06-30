@@ -313,10 +313,13 @@ def test_same_bar_repeat_returns_cached() -> None:
     """Re-querying the same trailing bar returns the cached value (same-bar fingerprint hit)."""
     bars = _series(60, seed=5)
     reg = IndicatorRegistry()
-    for _id, reg_call, _ref, _warm in _CASES:
+    for _id, reg_call, ref_call, _warm in _CASES:
         first = reg_call(reg, bars)
         second = reg_call(reg, bars)
         assert first == pytest.approx(second), _id
+        # The cached value must also be *correct*, not merely stable — a registry
+        # that cached a wrong value would otherwise pass the idempotency check.
+        assert first == pytest.approx(ref_call(bars), rel=0, abs=1e-9), _id
 
 
 def test_warmup_returns_none() -> None:
@@ -606,7 +609,12 @@ _COMPILE_REFS = [
 @pytest.mark.parametrize(
     "ref",
     _COMPILE_REFS,
-    ids=[r.name + ":" + str(r.param("band") if "band" in r.params else "") for r in _COMPILE_REFS],
+    # Prefix the positional index so the ids are collision-proof even if two refs
+    # share a name and band (pytest errors on duplicate parametrize ids).
+    ids=[
+        f"{i}-{r.name}-{r.param('band') if 'band' in r.params else 'scalar'}"
+        for i, r in enumerate(_COMPILE_REFS)
+    ],
 )
 def test_compiles_and_inline_helper_matches_registry(ref, _contract_module) -> None:
     code = compile_strategy(_compile_spec(ref))
@@ -801,6 +809,22 @@ def test_pandas_keltner_matches_registry_and_warmup() -> None:
     # Warm-up boundary: max(period=20, atr_period+1=11) = 20 → first value at index 19.
     assert pd.isna(middle.iloc[18]) and reg.keltner(bars[:19], 20, 10, 2.0, "middle") is None
     assert pd.notna(middle.iloc[19]) and reg.keltner(bars[:20], 20, 10, 2.0, "middle") is not None
+
+
+def test_pandas_keltner_warmup_when_atr_period_dominates() -> None:
+    """The warm-up follows ``max(period, atr_period + 1)`` even when atr_period wins.
+
+    The earlier test has period > atr_period; here atr_period + 1 is the larger term,
+    so the boundary must shift to it (and still match the registry value-for-value).
+    """
+    high, low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    reg = IndicatorRegistry()
+    # period=10, atr_period=30 → max(10, 31) = 31 → first value at index 30 (31 bars).
+    upper, middle, lower = pdi.keltner_channels(high, low, close, 10, 30, 2.0)
+    assert pd.isna(middle.iloc[29]) and reg.keltner(bars[:30], 10, 30, 2.0, "middle") is None
+    assert pd.notna(middle.iloc[30]) and reg.keltner(bars[:31], 10, 30, 2.0, "middle") is not None
+    assert float(middle.iloc[-1]) == pytest.approx(reg.keltner(bars, 10, 30, 2.0, "middle"))
 
 
 def test_pandas_mfi_warmup_requires_prior_bar() -> None:
