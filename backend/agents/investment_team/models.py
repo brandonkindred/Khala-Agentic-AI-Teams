@@ -528,13 +528,17 @@ class StrategySpec(BaseModel):
         # future NON-price exit kind is added that is meant to coexist with a
         # bracket (like ``signal_exit``), add it to this allowlist tuple.
         conflicting = [
-            r for r in self.exit_rules if not isinstance(r, (OcoBracketRule, SignalExitRule))
+            (i, r)
+            for i, r in enumerate(self.exit_rules)
+            if not isinstance(r, (OcoBracketRule, SignalExitRule))
         ]
         if conflicting:
-            kinds = sorted({r.kind for r in conflicting})
+            # Report the offending rules by ``exit_rules`` index AND kind so a
+            # spec with many exits can locate them directly.
+            offenders = ", ".join(f"[{i}] {r.kind}" for i, r in conflicting)
             raise ValueError(
                 "an oco_bracket is a full-position OCO exit and must be the sole "
-                f"engine-handled price exit; remove the coexisting {kinds} rule(s) "
+                f"engine-handled price exit; remove the coexisting rule(s) {offenders} "
                 "(a signal_exit may still accompany the bracket)"
             )
         return self

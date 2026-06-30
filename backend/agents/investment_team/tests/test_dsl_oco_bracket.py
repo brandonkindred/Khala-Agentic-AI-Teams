@@ -50,14 +50,15 @@ from investment_team.trading_service.engine.fill_simulator import (
 from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio
 
-# ``_EngineEntryDispatcher`` is private but is the unit under test for the
-# bracket-attachment math: it owns the signal-bar-close → absolute-price
-# resolution in isolation, so testing it directly pins that logic precisely.
-# The public ``TradingService`` path is covered by the end-to-end engine tests
-# at the bottom of this file.
+# The pure bracket-attachment price math is unit-tested via the public
+# ``resolve_bracket_attachments`` below. ``_EngineEntryDispatcher`` is private but
+# is still imported to exercise the dispatcher *wiring* (that ``maybe_emit``
+# attaches the resolved legs, and omits them when there is no bracket) and to
+# drive the end-to-end engine tests at the bottom of this file.
 from investment_team.trading_service.service import (
     TradingServiceResult,
     _EngineEntryDispatcher,
+    resolve_bracket_attachments,
 )
 from investment_team.trading_service.strategy.contract import (
     Bar,
@@ -149,12 +150,12 @@ def test_bracket_take_profit_leg_pct_must_be_in_open_unit_interval(pct: float) -
 
 def test_short_bracket_high_take_profit_yields_positive_limit() -> None:
     """A high (but < 1.0) take-profit still resolves a strictly-positive short-side
-    limit price."""
-    # A valid high take-profit (just under the 1.0 bound) still resolves to a
-    # strictly-positive short-side limit.
-    req = _emit_with_bracket("short", _bracket(stop_pct=0.03, tp_pct=0.5), close=100.0)
-    assert req.attached_take_profit.limit_price == pytest.approx(50.0)
-    assert req.attached_take_profit.limit_price > 0
+    limit price (50 off a reference of 100)."""
+    _sl, tp = resolve_bracket_attachments(
+        _bracket(stop_pct=0.03, tp_pct=0.5), OrderSide.SHORT, 100.0
+    )
+    assert tp.limit_price == pytest.approx(50.0)
+    assert tp.limit_price > 0
 
 
 def test_format_rule_renders_bracket() -> None:
@@ -314,35 +315,44 @@ def _emit_with_bracket(side: str, bracket: OcoBracketRule, close: float = 100.0)
     return pending[0]
 
 
-def test_entry_attaches_long_bracket_prices_off_close() -> None:
-    """For a long entry the dispatcher attaches a stop below and a target above the
-    signal-bar close (97 / 106 off a close of 100)."""
-    req = _emit_with_bracket("long", _bracket(stop_pct=0.03, tp_pct=0.06), close=100.0)
-    assert req.attached_stop_loss is not None
-    assert req.attached_take_profit is not None
-    assert req.attached_stop_loss.stop_price == pytest.approx(97.0)
-    assert req.attached_take_profit.limit_price == pytest.approx(106.0)
+def test_resolve_long_bracket_prices_off_ref() -> None:
+    """For a long, the resolved stop sits below and the target above the reference
+    (97 / 106 off 100); a market-style stop leg carries no limit offset."""
+    sl, tp = resolve_bracket_attachments(
+        _bracket(stop_pct=0.03, tp_pct=0.06), OrderSide.LONG, 100.0
+    )
+    assert sl.stop_price == pytest.approx(97.0)
+    assert tp.limit_price == pytest.approx(106.0)
     # Market-style stop leg → no limit offset on the attachment.
-    assert req.attached_stop_loss.limit_offset is None
+    assert sl.limit_offset is None
 
 
-def test_entry_attaches_short_bracket_prices_off_close() -> None:
-    """For a short entry the signs flip: stop above and target below the close
-    (103 / 94 off a close of 100)."""
-    req = _emit_with_bracket("short", _bracket(stop_pct=0.03, tp_pct=0.06), close=100.0)
-    assert req.attached_stop_loss.stop_price == pytest.approx(103.0)
-    assert req.attached_take_profit.limit_price == pytest.approx(94.0)
+def test_resolve_short_bracket_prices_off_ref() -> None:
+    """For a short the signs flip: stop above and target below the reference
+    (103 / 94 off 100)."""
+    sl, tp = resolve_bracket_attachments(
+        _bracket(stop_pct=0.03, tp_pct=0.06), OrderSide.SHORT, 100.0
+    )
+    assert sl.stop_price == pytest.approx(103.0)
+    assert tp.limit_price == pytest.approx(94.0)
 
 
-def test_entry_attaches_limit_style_stop_offset() -> None:
-    """A limit-style stop leg attaches a ``limit_offset`` (absolute distance off the
+def test_resolve_limit_style_stop_offset() -> None:
+    """A limit-style stop leg resolves a ``limit_offset`` (absolute distance off the
     stop level) so the engine materializes a STOP_LIMIT child."""
-    req = _emit_with_bracket(
-        "long", _bracket(stop_pct=0.03, style="limit", limit_offset_pct=0.01), close=100.0
+    sl, _tp = resolve_bracket_attachments(
+        _bracket(stop_pct=0.03, style="limit", limit_offset_pct=0.01), OrderSide.LONG, 100.0
     )
     # limit_offset is an absolute distance: limit_offset_pct * stop_price.
-    assert req.attached_stop_loss.limit_offset == pytest.approx(0.97)
-    assert req.attached_stop_loss.limit_offset_kind == "abs"
+    assert sl.limit_offset == pytest.approx(0.97)
+    assert sl.limit_offset_kind == "abs"
+
+
+def test_resolve_bracket_rejects_non_positive_ref_price() -> None:
+    """The pure resolver enforces its ``ref_price > 0`` precondition with an
+    explicit ``ValueError`` (active even under ``python -O``)."""
+    with pytest.raises(ValueError, match="reference price must be positive"):
+        resolve_bracket_attachments(_bracket(), OrderSide.LONG, 0.0)
 
 
 def test_entry_without_bracket_has_no_attachments() -> None:
