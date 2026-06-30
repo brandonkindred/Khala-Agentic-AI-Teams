@@ -425,6 +425,15 @@ def test_bollinger_new_bands_accepted(band) -> None:
         (IndicatorRef(name="roc", params={"period": 12}, source="hl2"), "roc(12, source=hl2)"),
         (IndicatorRef(name="cci", params={"period": 20}), "cci(20)"),
         (IndicatorRef(name="williams_r", params={"period": 14}), "williams_r(14)"),
+        # The derived Bollinger outputs must also render (prose / readiness / docs).
+        (
+            IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20}),
+            "bollinger_percent_b(20,2)",
+        ),
+        (
+            IndicatorRef(name="bollinger", params={"band": "bandwidth", "period": 20}),
+            "bollinger_bandwidth(20,2)",
+        ),
     ],
 )
 def test_prose_formatter_renders_new_indicators(ref, fragment) -> None:

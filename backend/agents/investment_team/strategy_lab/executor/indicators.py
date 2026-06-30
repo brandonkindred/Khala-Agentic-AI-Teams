@@ -366,6 +366,11 @@ def cci(
     close = _coerce_series(close, "close")
     tp = (high + low + close) / 3
     sma_tp = tp.rolling(window=period).mean()
+    # Mean absolute deviation has no native pandas rolling op, so this uses a
+    # ``rolling.apply`` with a NumPy lambda (``raw=True``). It's O(n·period) and
+    # not vectorised — fine for this reference/coverage-probe layer (the engine
+    # hot path uses the streaming ``IndicatorRegistry.cci`` loop, not this); if it
+    # ever runs on large frames, replace with a vectorised MAD.
     mean_dev = tp.rolling(window=period).apply(
         lambda window: np.abs(window - window.mean()).mean(), raw=True
     )

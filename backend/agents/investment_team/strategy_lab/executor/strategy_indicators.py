@@ -513,6 +513,11 @@ def indicator_value(
         )
 
     if name == "roc":
+        # ``_source_values`` already projects the requested ``source`` into a flat
+        # series, and ``_value_bars`` lands it in each bar's ``close`` slot — so the
+        # registry must read ``source="close"`` here to consume exactly that
+        # projected series. This mirrors the sma/ema/rsi/macd/bollinger branches
+        # above; the bars carry only a ``close`` field, not the original OHLC.
         bars = _value_bars(_source_values(history, source))
         return reg.roc(bars, period=int(params.get("period", 12)), source="close")
 
