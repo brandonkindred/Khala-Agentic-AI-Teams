@@ -238,7 +238,7 @@ def split_review_comments(
     return line_anchored, file_level
 
 
-def format_comment_body(issue: Any) -> str:
+def format_comment_body(issue: ReviewFinding) -> str:
     """Render one finding as a review-comment body: what's wrong + the fix (prose).
 
     Used for both line-anchored and file-level review comments — the body carries

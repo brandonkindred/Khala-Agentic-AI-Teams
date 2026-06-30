@@ -207,7 +207,11 @@ class TestCreatePullRequestReview:
 
 
 class TestCreateReviewComment:
+    """Tests for GitHubClient.create_review_comment covering line-anchored and
+    file-level posting, error handling, and precondition validation."""
+
     def test_line_comment_posts_line_and_side(self) -> None:
+        """A line-anchored comment sends line + side and no subject_type."""
         captured: dict[str, Any] = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -230,6 +234,7 @@ class TestCreateReviewComment:
         assert "subject_type" not in captured["body"]
 
     def test_file_comment_posts_subject_type_no_line(self) -> None:
+        """A file-level comment sends subject_type="file" and omits line/side."""
         captured: dict[str, Any] = {}
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -248,6 +253,7 @@ class TestCreateReviewComment:
         assert "side" not in captured["body"]
 
     def test_422_raises(self) -> None:
+        """A non-2xx response surfaces as GitHubAPIError for the caller to handle."""
         client = _client_with(lambda _req: httpx.Response(422, text="bad file comment"))
         with pytest.raises(GitHubAPIError):
             client.create_review_comment(
@@ -256,6 +262,7 @@ class TestCreateReviewComment:
             )
 
     def test_requires_exactly_one_anchor(self) -> None:
+        """Neither or both of line/subject_type violates the precondition → ValueError."""
         # Never reaches the network: the precondition is enforced first.
         client = _client_with(lambda _req: httpx.Response(500, text="should not be hit"))
         with pytest.raises(ValueError):  # both supplied
@@ -409,10 +416,10 @@ class _FakeReviewClient:
             raise GitHubAPIError(422, "subject_type not allowed in review comments")
         if self.bad_lines and any(c.get("line") in self.bad_lines for c in comments):
             self.reviews.append(kwargs)
-            raise GitHubAPIError(self.review_fail_status, "bad line")
+            raise GitHubAPIError(self.review_fail_status, "off-diff line rejected")
         if len(self.reviews) < self.review_fail_times:
             self.reviews.append(kwargs)
-            raise GitHubAPIError(self.review_fail_status, "review submit failed")
+            raise GitHubAPIError(self.review_fail_status, "simulated review failure")
         self.reviews.append(kwargs)
         self.submitted_reviews.append(kwargs)
         return {"id": 1, "html_url": "https://example/review/1"}
@@ -796,6 +803,29 @@ class TestReviewEndpoint:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
         assert job["review_summary"]["comments_failed"] == 1
+
+    def test_summary_only_review_failure_does_not_fail_job(self, review_app) -> None:
+        # With no line-anchored findings, _submit_review posts only the summary
+        # body. That courtesy review carries no findings, so its failure must NOT
+        # fail the job — the file-level findings still post on the dedicated
+        # endpoint. (Regression guard for the empty-line-comments path.)
+        gh = review_app["github"]["client"]
+        gh.review_fail_times = 1  # the lone summary-only review attempt 422s
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[_FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff only")]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        # The summary never posted, but the file-level finding did — and nothing
+        # fell through to a standalone conversation comment.
+        assert gh.submitted_reviews == []
+        assert len(gh.review_comments) == 1
+        assert gh.review_comments[0]["subject_type"] == "file"
+        assert gh.comments == []
+        assert job["review_summary"]["file_comments"] == 1
+        assert job["review_summary"]["comment_findings"] == 0
 
     def test_non_422_review_error_marks_job_failed_not_degraded(self, review_app) -> None:
         # A non-422 review failure (e.g. 403 permission / rate-limit) is a real

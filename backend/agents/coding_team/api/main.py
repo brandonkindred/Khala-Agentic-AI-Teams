@@ -1706,11 +1706,32 @@ def _submit_review(
         ({**c, "body": scrub_token_from_text(c.get("body", ""))}, c) for c in comments
     ]
 
+    events = [event] if event == "COMMENT" else [event, "COMMENT"]
+
+    if not pairs:
+        # No line-anchored findings: this call only posts the summary body, a
+        # courtesy review that carries no findings. Its failure is logged but
+        # never fails the job (any file-level findings post on the dedicated
+        # endpoint and fail loudly there) — honouring the best-effort policy.
+        for ev in events:
+            try:
+                client.create_pull_request_review(
+                    owner=owner,
+                    repo=repo,
+                    number=pr_number,
+                    commit_id=head_sha,
+                    body=body,
+                    event=ev,
+                    comments=[],
+                )
+                return []
+            except GitHubAPIError as e:
+                logger.warning("PR summary-only review failed (event=%s): %s", ev, e)
+        return []
+
     # Happy path: one review carrying the summary body + every inline comment.
     # REQUEST_CHANGES degrades to COMMENT for the bot's own PR without losing the
     # comments.
-    events = [event] if event == "COMMENT" else [event, "COMMENT"]
-    last_exc: Optional[GitHubAPIError] = None
     for ev in events:
         try:
             client.create_pull_request_review(
@@ -1732,12 +1753,6 @@ def _submit_review(
             if e.status != _HTTP_UNPROCESSABLE:
                 raise
             logger.warning("PR review submit failed (event=%s, comments=%d): %s", ev, len(pairs), e)
-            last_exc = e
-
-    if not pairs:
-        # No inline comments to bisect: the body-only review itself failed.
-        assert last_exc is not None
-        raise last_exc
 
     # The full batch was rejected by a bad line. Post the summary on its own so it
     # is not lost, then bisect the comments to drop only the offending ones.
