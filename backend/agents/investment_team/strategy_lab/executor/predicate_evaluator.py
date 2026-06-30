@@ -280,6 +280,14 @@ def evaluate_signal_exit_rules(
 # ---------------------------------------------------------------------------
 
 
+# Trailing-window bound for the alignment/coverage walk. Matches the engine's
+# ``StreamingHistoryView`` retention ceiling (``max_bars=500``) and the compiler's
+# ``_VWAP_HISTORY`` history depth, so cumulative indicators (``vwap``, ``obv`` —
+# which re-base to the window start) compute over the same trailing window the
+# runtime traded on, instead of diverging once history exceeds the bound.
+_SERIES_WINDOW: int = 500
+
+
 class _FrameBar:
     """Bar adapter over one OHLCV frame row, for the registry walk below."""
 
@@ -304,10 +312,15 @@ def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
     audit re-evaluates predicates with the same math the engine ran. ``NaN``
     during warm-up (the registry returns ``None``).
 
-    Forward-walks one fresh ``IndicatorRegistry`` over the frame, feeding it the
-    growing prefix so it advances by a single recurrence step per row. This is a
-    post-hoc, per-(ref, symbol) cached pass — not the engine hot path — so the
-    walk's cost (O(window) per row; cumulative for VWAP) is acceptable.
+    Forward-walks one fresh ``IndicatorRegistry`` over the frame, feeding it a
+    deque bounded to ``_SERIES_WINDOW`` (the same retention ceiling as the engine's
+    ``StreamingHistoryView``) so it advances by a single recurrence step per row.
+    The bound is what keeps the cumulative indicators (``vwap``, ``obv``) faithful:
+    they re-base to the window start, so an unbounded prefix would report a
+    full-history value while the runtime traded on the trailing window. Windowed
+    indicators are unaffected (they only read the trailing ``period`` bars). This is
+    a post-hoc, per-(ref, symbol) cached pass — not the engine hot path — so the
+    walk's cost (O(window) per row) is acceptable.
     """
     n = len(df)
     if n == 0:
@@ -323,10 +336,10 @@ def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
         return float(arr[idx]) if arr is not None else 0.0
 
     reg = IndicatorRegistry()
-    bars: list[_FrameBar] = []
+    window: deque[_FrameBar] = deque(maxlen=_SERIES_WINDOW)
     out: list[float] = []
     for idx in range(n):
-        bars.append(
+        window.append(
             _FrameBar(
                 _at(opens, idx),
                 _at(highs, idx),
@@ -335,7 +348,10 @@ def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
                 _at(volumes, idx),
             )
         )
-        value = _registry_indicator(reg, ref, bars)
+        # ``list(window)`` mirrors ``StreamingHistoryView._ensure_bars_list``: the
+        # registry needs a sliceable/indexable sequence, and the deque has already
+        # dropped any bar beyond the trailing window so engine and audit agree.
+        value = _registry_indicator(reg, ref, list(window))
         out.append(math.nan if value is None else value)
     return pd.Series(out, index=df.index, dtype=float)
 

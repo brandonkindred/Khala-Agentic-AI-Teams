@@ -1032,6 +1032,61 @@ def test_compute_indicator_series_matches_registry_tail(case) -> None:
     assert float(series.iloc[-1]) == pytest.approx(expected, rel=0, abs=1e-9)
 
 
+def test_compute_indicator_series_obv_bounded_to_runtime_window() -> None:
+    """OBV is cumulative, so the audit walk must bound to the runtime's trailing window.
+
+    Past the engine's retention ceiling the alignment/coverage path must compute OBV
+    over the same trailing window the runtime traded on (``StreamingHistoryView``),
+    not full history — otherwise a long backtest would validate predicates against a
+    full-history OBV the runtime never saw.
+    """
+    from investment_team.strategy_lab.executor.predicate_evaluator import (
+        BarRecord,
+        StreamingHistoryView,
+        compute_indicator_series,
+    )
+
+    n = 520  # > the 500-bar window
+    # Strictly rising closes, unit volume → OBV gains 1 per bar, so the window start
+    # matters: the trailing-500 window yields a different total than full history.
+    df = pd.DataFrame(
+        {
+            "open": [100.0 + i for i in range(n)],
+            "high": [100.5 + i for i in range(n)],
+            "low": [99.5 + i for i in range(n)],
+            "close": [100.0 + i for i in range(n)],
+            "volume": [1.0] * n,
+        }
+    )
+    ref = IndicatorRef(name="obv")
+    audit_tail = float(compute_indicator_series(ref, df).iloc[-1])
+
+    view = StreamingHistoryView()
+    for i in range(n):
+        view.append(
+            BarRecord(
+                timestamp=f"t{i}",
+                open=100.0 + i,
+                high=100.5 + i,
+                low=99.5 + i,
+                close=100.0 + i,
+                volume=1.0,
+            )
+        )
+    runtime_tail = view.indicator(ref, view.length() - 1)
+
+    # The audit matches the runtime's trailing-window OBV …
+    assert audit_tail == pytest.approx(runtime_tail)
+    # … and is strictly less than the full-history OBV it would report unbounded
+    # (the dropped early bars each contributed +1 to a full-history cumulative sum).
+    rising_bars = [
+        _Bar(timestamp=f"t{i}", open=100.0 + i, high=100.5 + i, low=99.5 + i, close=100.0 + i, volume=1.0)
+        for i in range(n)
+    ]
+    full_history = IndicatorRegistry().obv(rising_bars)
+    assert audit_tail < full_history
+
+
 # ---------------------------------------------------------------------------
 # Pandas reference — degenerate-window edge cases match the streaming registry
 # (and the documented safe defaults), with warm-up rows left NaN.
