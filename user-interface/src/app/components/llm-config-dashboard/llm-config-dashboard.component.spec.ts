@@ -4,7 +4,12 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
 import { LlmConfigDashboardComponent } from './llm-config-dashboard.component';
-import type { LlmConfigResponse, OllamaModelsResponse } from '../../models/llm-config.model';
+import type {
+  LlmConfigResponse,
+  LlmProviderEntry,
+  LlmProviderListResponse,
+  OllamaModelsResponse,
+} from '../../models/llm-config.model';
 
 const BASE_CONFIG: LlmConfigResponse = {
   provider: 'ollama',
@@ -27,6 +32,26 @@ const FALLBACK_MODELS: OllamaModelsResponse = {
   source: 'fallback',
 };
 
+function entry(over: Partial<LlmProviderEntry> = {}): LlmProviderEntry {
+  return {
+    id: 1,
+    label: 'Anthropic',
+    provider: 'claude',
+    model: 'claude-opus-4-8',
+    base_url: '',
+    sort_order: 0,
+    api_key_configured: true,
+    limit_exceeded: false,
+    limit_type: '',
+    reset_at: null,
+    ...over,
+  };
+}
+
+function listResponse(providers: LlmProviderEntry[]): LlmProviderListResponse {
+  return { providers, storage_available: true, storage_status: 'available' };
+}
+
 describe('LlmConfigDashboardComponent', () => {
   let component: LlmConfigDashboardComponent;
   let fixture: ComponentFixture<LlmConfigDashboardComponent>;
@@ -34,12 +59,27 @@ describe('LlmConfigDashboardComponent', () => {
     getConfig: ReturnType<typeof vi.fn>;
     updateConfig: ReturnType<typeof vi.fn>;
     getOllamaModels: ReturnType<typeof vi.fn>;
+    listProviders: ReturnType<typeof vi.fn>;
+    createProvider: ReturnType<typeof vi.fn>;
+    updateProvider: ReturnType<typeof vi.fn>;
+    deleteProvider: ReturnType<typeof vi.fn>;
+    reorderProviders: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
-    apiSpy = { getConfig: vi.fn(), updateConfig: vi.fn(), getOllamaModels: vi.fn() };
+    apiSpy = {
+      getConfig: vi.fn(),
+      updateConfig: vi.fn(),
+      getOllamaModels: vi.fn(),
+      listProviders: vi.fn(),
+      createProvider: vi.fn(),
+      updateProvider: vi.fn(),
+      deleteProvider: vi.fn(),
+      reorderProviders: vi.fn(),
+    };
     apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG }));
     apiSpy.getOllamaModels.mockReturnValue(of({ ...FALLBACK_MODELS }));
+    apiSpy.listProviders.mockReturnValue(of(listResponse([])));
 
     await TestBed.configureTestingModule({
       imports: [LlmConfigDashboardComponent, NoopAnimationsModule],
@@ -321,5 +361,150 @@ describe('LlmConfigDashboardComponent', () => {
     // applyConfig runs in the save success handler and refreshes the model list.
     expect(apiSpy.getOllamaModels).toHaveBeenCalled();
     expect(component.ollamaModelSuggestions).toEqual(['saved-model']);
+  });
+
+  // --- Multi-provider fallback list ---------------------------------------
+
+  it('loads the provider list on init', () => {
+    expect(apiSpy.listProviders).toHaveBeenCalled();
+    expect(component.providers).toEqual([]);
+  });
+
+  it('sorts the loaded list by sort_order defensively', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(listResponse([entry({ id: 2, sort_order: 1 }), entry({ id: 1, sort_order: 0 })])),
+    );
+    component.loadProviders();
+    expect(component.providers.map((p) => p.id)).toEqual([1, 2]);
+  });
+
+  it('sets providersError when the list load fails', () => {
+    apiSpy.listProviders.mockReturnValue(throwError(() => ({ error: { detail: 'list down' } })));
+    component.loadProviders();
+    expect(component.providersError).toBe('list down');
+    expect(component.providersLoading).toBe(false);
+  });
+
+  it('adds a provider via the add form', () => {
+    apiSpy.createProvider.mockReturnValue(of(listResponse([entry({ id: 5, label: 'New' })])));
+    component.startAdd();
+    expect(component.addForm).not.toBeNull();
+    component.addForm!.label = 'New';
+    component.addForm!.provider = 'claude';
+    component.addForm!.api_key = 'sk';
+    component.submitAdd();
+    expect(apiSpy.createProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'New', provider: 'claude', api_key: 'sk' }),
+    );
+    expect(component.addForm).toBeNull(); // closed on success
+    expect(component.providers.map((p) => p.id)).toEqual([5]);
+    expect(component.success).toBeTruthy();
+  });
+
+  it('omits the ollama base_url for a claude add', () => {
+    apiSpy.createProvider.mockReturnValue(of(listResponse([])));
+    component.startAdd();
+    component.addForm!.label = 'C';
+    component.addForm!.provider = 'claude';
+    component.addForm!.base_url = 'http://should-be-dropped';
+    component.submitAdd();
+    expect(apiSpy.createProvider.mock.calls[0][0].base_url).toBe('');
+  });
+
+  it('rejects an add with a blank label', () => {
+    component.startAdd();
+    component.addForm!.label = '   ';
+    component.submitAdd();
+    expect(apiSpy.createProvider).not.toHaveBeenCalled();
+    expect(component.providersError).toContain('label');
+  });
+
+  it('edits a provider without resending the key when left blank', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 3 })])));
+    component.loadProviders();
+    apiSpy.updateProvider.mockReturnValue(of(listResponse([entry({ id: 3, label: 'Renamed' })])));
+    component.startEdit(component.providers[0]);
+    expect(component.editForm.api_key).toBe(''); // key never pre-filled
+    component.editForm.label = 'Renamed';
+    component.submitEdit();
+    expect(apiSpy.updateProvider).toHaveBeenCalledWith(3, expect.objectContaining({ label: 'Renamed', api_key: '' }));
+    expect(component.editingId).toBeNull();
+  });
+
+  it('removes a provider', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 7 })])));
+    component.loadProviders();
+    apiSpy.deleteProvider.mockReturnValue(of(listResponse([])));
+    component.removeProvider(component.providers[0]);
+    expect(apiSpy.deleteProvider).toHaveBeenCalledWith(7);
+    expect(component.providers).toEqual([]);
+  });
+
+  it('persists a new order on drag-drop', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(listResponse([entry({ id: 1, sort_order: 0 }), entry({ id: 2, sort_order: 1 })])),
+    );
+    component.loadProviders();
+    apiSpy.reorderProviders.mockReturnValue(of(listResponse([entry({ id: 2 }), entry({ id: 1 })])));
+    component.onProviderDrop({ previousIndex: 0, currentIndex: 1 } as never);
+    expect(apiSpy.reorderProviders).toHaveBeenCalledWith([2, 1]);
+  });
+
+  it('ignores a no-op drag-drop', () => {
+    component.onProviderDrop({ previousIndex: 1, currentIndex: 1 } as never);
+    expect(apiSpy.reorderProviders).not.toHaveBeenCalled();
+  });
+
+  it('reloads truth and reports when a mutation fails', () => {
+    apiSpy.createProvider.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
+    apiSpy.listProviders.mockClear();
+    component.startAdd();
+    component.addForm!.label = 'X';
+    component.submitAdd();
+    expect(component.providersError).toBe('nope');
+    expect(apiSpy.listProviders).toHaveBeenCalled(); // reloads to resync
+  });
+
+  it('formats the reset estimate for a limited provider', () => {
+    const inTwoHours = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+    expect(
+      component.resetInfo(entry({ limit_exceeded: true, reset_at: inTwoHours })),
+    ).toBe('resets in ~2h');
+    const inThirtyMin = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    expect(
+      component.resetInfo(entry({ limit_exceeded: true, reset_at: inThirtyMin })),
+    ).toContain('m');
+    const inThreeDays = new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString();
+    expect(
+      component.resetInfo(entry({ limit_exceeded: true, reset_at: inThreeDays })),
+    ).toContain('d');
+  });
+
+  it('returns no reset estimate when not limited or no reset_at', () => {
+    expect(component.resetInfo(entry({ limit_exceeded: false }))).toBe('');
+    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: null }))).toBe('');
+    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: 'now' }))).toBe('');
+  });
+
+  it('reports a past reset_at as resetting now', () => {
+    const past = new Date(Date.now() - 1000).toISOString();
+    expect(component.resetInfo(entry({ limit_exceeded: true, reset_at: past }))).toBe('resetting now');
+  });
+
+  it('startAdd closes any open edit and startEdit closes the add form', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 9 })])));
+    component.loadProviders();
+    component.startAdd();
+    component.startEdit(component.providers[0]);
+    expect(component.addForm).toBeNull();
+    expect(component.editingId).toBe(9);
+    component.startAdd();
+    expect(component.editingId).toBeNull();
+    expect(component.addForm).not.toBeNull();
+    component.cancelAdd();
+    expect(component.addForm).toBeNull();
+    component.startEdit(component.providers[0]);
+    component.cancelEdit();
+    expect(component.editingId).toBeNull();
   });
 });

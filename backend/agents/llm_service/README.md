@@ -16,6 +16,12 @@ Selected by `LLM_PROVIDER` (resolved per call): runtime config (UI) → env → 
 
 `PUT /api/llm-config` (unified API) stores provider/model/keys Fernet-encrypted in the shared `encrypted_integration_credentials` table under the `llm_config` service. Every team container reads them back through `shared_postgres.secrets` → `llm_service.runtime_config` — **no dependency on `unified_api`** — because all containers share the Fernet key (`INTEGRATION_ENCRYPTION_KEY` env, or `$AGENT_CACHE/integration.key` on the shared volume) and the same Postgres. Runtime reads are cached for `LLM_RUNTIME_CONFIG_TTL_S` seconds (default 30), so a UI change reaches every container within the TTL; the PUT endpoint also clears the local client cache immediately. Requires Postgres — env vars remain the fallback when it is unset.
 
+### Multi-provider fallback list
+
+The settings UI also manages an **ordered list of provider entries** (`GET/POST/PUT/DELETE /api/llm-config/providers` + `PUT /api/llm-config/providers/order`), persisted in the dedicated `llm_provider_configs` table by `llm_service.provider_store` (same Fernet key for the API key, same no-`unified_api`-dependency rule as `runtime_config`). Entries are ordered most→least preferred.
+
+`get_client` resolves the active provider via `provider_store.resolve_active_provider_config`: the first entry that is **not** usage-limited wins; an entry whose `reset_at` has passed is reset and used; when all are limited the soonest-reset entry is chosen. When a list is configured, `get_client` returns a `FailoverLLMClient` (wrapped in `_AttributingClient` for a keyed call) that, on an `LLMRateLimitError`, marks the current entry exhausted (computing `reset_at` from the 429's `Retry-After` or a fallback window, with a lightweight `weekly`/`rate` `limit_type`) and retries the **same** call on the next available provider. `unwrap_client` deliberately stops at the `FailoverLLMClient` (peeling only the attribution wrapper) so the Strands adapter's `unwrap_client(client).chat` dispatch still routes through failover. With an empty list (or Postgres unset) `get_client` falls through to the single-provider resolution above, unchanged. Latency/window tuning: `LLM_FAILOVER_FAST_429`, `LLM_FAILOVER_RATE_WINDOW_S`, `LLM_FAILOVER_WEEKLY_WINDOW_S` (see `docs/ENV_VARS.md`).
+
 ## Usage
 
 ```python

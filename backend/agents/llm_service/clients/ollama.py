@@ -419,6 +419,7 @@ class OllamaLLMClient(LLMClient):
         base_url: str = "https://ollama.com",
         timeout: float = 900.0,
         on_reasoning: Optional[Callable[[str], None]] = None,
+        rate_limit_max_retries: Optional[int] = None,
     ) -> None:
         """Construct an Ollama-backed LLM client.
 
@@ -427,7 +428,14 @@ class OllamaLLMClient(LLMClient):
         the model's thinking live (e.g. to a job record / UI) without changing the
         return contract. Best-effort: a hook exception never affects the LLM call.
 
-        Preconditions: ``on_reasoning`` is callable or ``None``.
+        ``rate_limit_max_retries`` overrides the in-place 429 backoff retry budget
+        (normally from ``LLM_RATE_LIMIT_MAX_RETRIES``). The multi-provider failover
+        path passes ``0`` so a 429 raises immediately and hands off to the next
+        provider instead of sleeping minutes; ``None`` keeps the env-configured
+        schedule.
+
+        Preconditions: ``on_reasoning`` is callable or ``None``;
+            ``rate_limit_max_retries`` is ``None`` or ``>= 0``.
         Postconditions: when set, the hook receives every reasoning delta of every
             streamed response in arrival order; otherwise reasoning handling is
             unchanged.
@@ -436,6 +444,9 @@ class OllamaLLMClient(LLMClient):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.on_reasoning = on_reasoning
+        self._rate_limit_max_retries_override = (
+            max(0, int(rate_limit_max_retries)) if rate_limit_max_retries is not None else None
+        )
         self._model_num_ctx: Optional[int] = None
         # Provisional num_ctx fallback (set only when /api/show cannot be resolved),
         # with the wall-clock time it was recorded. Never written to _model_num_ctx.
@@ -499,6 +510,19 @@ class OllamaLLMClient(LLMClient):
         header (local Ollama needs none).
         """
         return _ollama_bearer_auth_headers()
+
+    def _rate_limit_retry_config(self) -> "tuple[int, float, float]":
+        """Return the 429 backoff config, applying this client's retry override.
+
+        Postconditions: returns ``(max_retries, initial, cap)`` from
+            :func:`parse_rate_limit_retry_config`, with ``max_retries`` replaced by
+            this client's ``rate_limit_max_retries`` override when one was given
+            (the failover path passes ``0`` for immediate hand-off). Never raises.
+        """
+        max_retries, initial, cap = parse_rate_limit_retry_config()
+        if self._rate_limit_max_retries_override is not None:
+            max_retries = self._rate_limit_max_retries_override
+        return max_retries, initial, cap
 
     def _fetch_model_num_ctx(self) -> int:
         """Resolve the model's num_ctx from the known-model table, env, or Ollama /api/show.
@@ -1574,7 +1598,7 @@ class OllamaLLMClient(LLMClient):
     ) -> Dict[str, Any]:
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
-        rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
+        rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
@@ -1818,7 +1842,7 @@ class OllamaLLMClient(LLMClient):
     ) -> str:
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
-        rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
+        rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
@@ -2005,7 +2029,7 @@ class OllamaLLMClient(LLMClient):
             raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
-        rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
+        rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(

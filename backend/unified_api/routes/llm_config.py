@@ -28,13 +28,14 @@ to untrusted clients, gate these routes with a real auth dependency.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from llm_service import clear_client_cache, runtime_config
+from llm_service import clear_client_cache, provider_store, runtime_config
 from llm_service import config as llm_config
 from llm_service.clients import list_ollama_models
 from shared_postgres import (
@@ -87,6 +88,25 @@ _PROVIDER_OPTIONS = ["ollama", "claude"]
 _OLLAMA_MODEL_SUGGESTIONS = list(llm_config.OLLAMA_MODEL_SUGGESTIONS)
 
 
+def _validate_ollama_base_url_value(v: str) -> str:
+    """Reject a malformed Ollama base URL; shared by every settings model.
+
+    Preconditions: none. Postconditions: an empty value passes (means "unchanged"
+        / "use default"); a non-empty value must be a well-formed http/https URL
+        (scheme + host) and must NOT embed credentials (``user:pass@host``), else
+        ValueError — a bad URL would be stored and break every Ollama request, and a
+        credential-bearing URL would leak secrets into the store and request logs.
+    """
+    if not v or not v.strip():
+        return v
+    parsed = urlparse(v.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("ollama_base_url must be an http(s) URL, e.g. http://localhost:11434")
+    if parsed.username or parsed.password:
+        raise ValueError("ollama_base_url must not contain credentials (user:pass@host)")
+    return v
+
+
 def _is_ollama_cloud_url(url: str) -> bool:
     """Return True when ``url`` points at the Ollama Cloud endpoint.
 
@@ -119,24 +139,8 @@ class LlmConfigUpdate(BaseModel):
     @field_validator("ollama_base_url")
     @classmethod
     def _validate_ollama_base_url(cls, v: str) -> str:
-        """Reject a malformed Ollama base URL before it is persisted.
-
-        Preconditions: none.
-        Postconditions: an empty value passes (means "unchanged"); a non-empty value
-            must be a well-formed http/https URL (scheme + host) and must NOT embed
-            credentials (``user:pass@host``), else ValueError — a bad URL would
-            otherwise be stored and break every Ollama request until an operator
-            manually corrected it, and a credential-bearing URL would leak secrets
-            into the runtime store and request logs.
-        """
-        if not v or not v.strip():
-            return v
-        parsed = urlparse(v.strip())
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise ValueError("ollama_base_url must be an http(s) URL, e.g. http://localhost:11434")
-        if parsed.username or parsed.password:
-            raise ValueError("ollama_base_url must not contain credentials (user:pass@host)")
-        return v
+        """Reject a malformed Ollama base URL before it is persisted."""
+        return _validate_ollama_base_url_value(v)
 
 
 class LlmConfigResponse(BaseModel):
@@ -384,3 +388,288 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
     # store could drop between the commit above and this response, and the next GET
     # would then disagree with what this PUT claimed.
     return _build_response(await _probe_storage_status())
+
+
+# ---------------------------------------------------------------------------
+# Multi-provider fallback list — ordered providers with usage-limit state.
+# ---------------------------------------------------------------------------
+
+
+class LlmProviderEntryResponse(BaseModel):
+    """One configured provider in the fallback list. API keys are never returned."""
+
+    id: int
+    label: str
+    provider: str
+    model: str
+    base_url: str
+    sort_order: int
+    api_key_configured: bool = Field(
+        False, description="True when this entry has a stored API key (the value is never returned)."
+    )
+    limit_exceeded: bool = Field(False, description="True while this provider is usage-limited.")
+    limit_type: str = Field("", description="Lightweight label for the limit (e.g. 'rate', 'weekly').")
+    reset_at: datetime | None = Field(
+        None, description="When the usage limit is expected to reset (UTC); null when not limited."
+    )
+
+
+class LlmProviderListResponse(BaseModel):
+    """Ordered provider list (most->least preferred) plus storage status for the UI."""
+
+    providers: list[LlmProviderEntryResponse]
+    storage_available: bool = Field(..., description="True only when the runtime store is configured AND reachable.")
+    storage_status: StorageStatus
+
+
+class LlmProviderCreate(BaseModel):
+    """Request body to add a provider to the fallback list."""
+
+    label: str = Field(..., min_length=1, description="Human-readable name, e.g. 'Anthropic API'.")
+    provider: Literal["ollama", "claude"] = Field(..., description="Provider type.")
+    model: str = Field("", description="Model id for the provider (empty = provider default).")
+    base_url: str = Field("", description="Ollama base URL (empty = default); ignored for Claude.")
+    api_key: str = Field("", description="API key for the provider (never returned by GET).")
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str) -> str:
+        return _validate_ollama_base_url_value(v)
+
+
+class LlmProviderUpdate(BaseModel):
+    """Request body to edit a provider; omitted/empty fields leave the stored value.
+
+    ``api_key`` empty leaves the existing key untouched (so the UI can save other
+    edits without re-entering it), mirroring ``PUT /api/llm-config``.
+    """
+
+    label: str | None = Field(None, min_length=1)
+    provider: Literal["ollama", "claude"] | None = None
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str = Field("", description="New API key; empty leaves the stored key unchanged.")
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str | None) -> str | None:
+        return v if v is None else _validate_ollama_base_url_value(v)
+
+
+class LlmProviderOrderUpdate(BaseModel):
+    """Request body to reorder the list: the full set of ids, most->least preferred."""
+
+    ids: list[int] = Field(..., description="Provider ids in the new preference order.")
+
+
+def _entry_to_response(entry: provider_store.ProviderEntry) -> LlmProviderEntryResponse:
+    """Map a stored entry to its API shape, masking the API key.
+
+    Postconditions: ``api_key_configured`` reflects whether a key is stored; the key
+        value itself is never included. Never raises.
+    """
+    return LlmProviderEntryResponse(
+        id=entry.id,
+        label=entry.label,
+        provider=entry.provider,
+        model=entry.model,
+        base_url=entry.base_url,
+        sort_order=entry.sort_order,
+        api_key_configured=bool(entry.api_key),
+        limit_exceeded=entry.limit_exceeded,
+        limit_type=entry.limit_type,
+        reset_at=entry.reset_at,
+    )
+
+
+async def _provider_list_response() -> LlmProviderListResponse:
+    """Assemble the current ordered provider list + freshly-probed storage status.
+
+    Drops the provider-list cache first so the view always reflects the committed
+    store even when this request lands on a different worker than the mutation.
+
+    Postconditions: returns the list ordered most->least preferred with keys masked.
+        Never raises (a read failure yields an empty list).
+    """
+    try:
+        provider_store.clear_cache()
+    except Exception:  # noqa: BLE001 - a cache-clear failure must never 500 a read
+        logger.warning("Failed to clear provider-list cache for GET providers", exc_info=True)
+    storage_status = await _probe_storage_status()
+    entries = provider_store.load_ordered_entries(use_cache=False)
+    return LlmProviderListResponse(
+        providers=[_entry_to_response(e) for e in entries],
+        storage_available=storage_status == "available",
+        storage_status=storage_status,
+    )
+
+
+def _require_storage() -> None:
+    """Raise 503 when the runtime store is not configured.
+
+    Postconditions: returns normally only when ``POSTGRES_HOST`` is set; otherwise
+        raises ``HTTPException(503)`` — the list is Postgres-only, no env fallback.
+    """
+    if not is_postgres_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "POSTGRES_HOST is not set; the LLM provider list cannot be persisted. "
+                "Set Postgres env vars, or configure a single provider via environment variables."
+            ),
+        )
+
+
+def _guard_entry_credentials(provider: str, base_url: str, effective_api_key: str) -> None:
+    """Reject a provider entry that cannot work without a key (per-entry guards).
+
+    Mirrors the single-provider ``PUT`` guards: a Claude entry needs a key (its own
+    or the env fallback); an Ollama entry pointed at Ollama Cloud needs a key; a
+    local Ollama URL needs none.
+
+    Preconditions: ``provider`` is ``"ollama"``/``"claude"``. Postconditions: raises
+        ``HTTPException(400)`` when the required key is absent; returns otherwise.
+    """
+    if provider == "claude":
+        if not effective_api_key and not llm_config.resolve_claude_api_key():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot configure a Claude provider without an API key. Provide "
+                    "api_key, or set LLM_CLAUDE_API_KEY / ANTHROPIC_API_KEY first."
+                ),
+            )
+        return
+    # Ollama: only the cloud endpoint requires a key.
+    effective_base_url = base_url.strip() or llm_config.resolve_base_url()
+    if _is_ollama_cloud_url(effective_base_url) and not effective_api_key and not llm_config.resolve_ollama_api_key():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cannot use Ollama Cloud without an API key. Provide api_key, or set "
+                "OLLAMA_API_KEY / LLM_OLLAMA_API_KEY first."
+            ),
+        )
+
+
+def _refresh_caches_after_mutation() -> None:
+    """Drop the runtime/provider/client caches so the new list takes effect now.
+
+    Postconditions: the runtime-config, provider-list, and provider-client caches
+        are cleared in this process; other containers pick the change up within the
+        TTL. A cache-clear failure is logged, never raised (the write already
+        committed).
+    """
+    try:
+        runtime_config.clear_cache()
+        clear_client_cache()  # also clears the provider-list cache (provider_store.clear_cache)
+    except Exception:  # noqa: BLE001 - never 500 after a successful persist
+        logger.exception("Failed to clear caches after a provider-list mutation")
+
+
+@router.get("/providers", response_model=LlmProviderListResponse)
+async def list_providers() -> LlmProviderListResponse:
+    """Return the ordered provider fallback list (API keys masked)."""
+    return await _provider_list_response()
+
+
+@router.post("/providers", response_model=LlmProviderListResponse)
+async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
+    """Add a provider to the end of the fallback list.
+
+    Preconditions: Postgres configured; the per-entry key guards pass. Postconditions:
+        the entry is persisted (api key encrypted) at the end of the list, caches are
+        refreshed, and the full list is returned.
+    """
+    _require_storage()
+    _guard_entry_credentials(body.provider, body.base_url, body.api_key.strip())
+    try:
+        provider_store.create_entry(
+            label=body.label,
+            provider=body.provider,
+            model=body.model,
+            base_url=body.base_url,
+            api_key=body.api_key,
+        )
+    except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
+        logger.exception("Failed to create LLM provider entry")
+        raise HTTPException(status_code=503, detail="Failed to persist provider: storage error.") from e
+    _refresh_caches_after_mutation()
+    return await _provider_list_response()
+
+
+@router.put("/providers/order", response_model=LlmProviderListResponse)
+async def reorder_providers(body: LlmProviderOrderUpdate) -> LlmProviderListResponse:
+    """Reassign the fallback order to match ``ids`` (most->least preferred).
+
+    Declared before ``/providers/{entry_id}`` so the literal ``order`` path is not
+    captured by the typed ``{entry_id}`` route.
+
+    Preconditions: Postgres configured; ``ids`` lists the provider ids in the new
+        order. Postconditions: each id's ``sort_order`` equals its position (one
+        atomic transaction), caches refreshed, and the reordered list returned.
+    """
+    _require_storage()
+    try:
+        provider_store.reorder(body.ids)
+    except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
+        logger.exception("Failed to reorder LLM provider list")
+        raise HTTPException(status_code=503, detail="Failed to reorder providers: storage error.") from e
+    _refresh_caches_after_mutation()
+    return await _provider_list_response()
+
+
+@router.put("/providers/{entry_id}", response_model=LlmProviderListResponse)
+async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProviderListResponse:
+    """Edit one provider; omitted/empty fields keep the stored value.
+
+    Preconditions: the entry exists; Postgres configured; the per-entry key guards
+        pass for the resulting (merged) provider/base_url/key. Postconditions: the
+        named fields are updated, caches refreshed, and the full list returned.
+    """
+    _require_storage()
+    existing = provider_store.get_entry(entry_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Provider {entry_id} not found")
+    # Merge updates over the existing entry for the guard: an empty api_key keeps the
+    # stored one, so the effective key is the new one (if given) else the existing.
+    merged_provider = body.provider or existing.provider
+    merged_base_url = body.base_url if body.base_url is not None else existing.base_url
+    effective_api_key = body.api_key.strip() or existing.api_key
+    _guard_entry_credentials(merged_provider, merged_base_url, effective_api_key)
+    try:
+        updated = provider_store.update_entry(
+            entry_id,
+            label=body.label,
+            provider=body.provider,
+            model=body.model,
+            base_url=body.base_url,
+            # Empty string => leave the stored key untouched (None for the store).
+            api_key=(body.api_key.strip() or None),
+        )
+    except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
+        logger.exception("Failed to update LLM provider entry %s", entry_id)
+        raise HTTPException(status_code=503, detail="Failed to persist provider: storage error.") from e
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Provider {entry_id} not found")
+    _refresh_caches_after_mutation()
+    return await _provider_list_response()
+
+
+@router.delete("/providers/{entry_id}", response_model=LlmProviderListResponse)
+async def delete_provider(entry_id: int) -> LlmProviderListResponse:
+    """Remove a provider from the fallback list.
+
+    Preconditions: Postgres configured. Postconditions: the entry is gone (404 when
+        it never existed), caches refreshed, and the remaining list returned.
+    """
+    _require_storage()
+    try:
+        deleted = provider_store.delete_entry(entry_id)
+    except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
+        logger.exception("Failed to delete LLM provider entry %s", entry_id)
+        raise HTTPException(status_code=503, detail="Failed to delete provider: storage error.") from e
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Provider {entry_id} not found")
+    _refresh_caches_after_mutation()
+    return await _provider_list_response()

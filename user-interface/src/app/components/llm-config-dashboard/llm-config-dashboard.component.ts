@@ -1,11 +1,14 @@
 import { Component, DestroyRef, OnInit, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { Observable } from 'rxjs';
 import { FormsModule } from '@angular/forms';
+import { CdkDragDrop, DragDropModule, moveItemInArray } from '@angular/cdk/drag-drop';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatButtonModule } from '@angular/material/button';
 import { MatRadioModule } from '@angular/material/radio';
+import { MatSelectModule } from '@angular/material/select';
 import { MatIconModule } from '@angular/material/icon';
 import { MatAutocompleteModule } from '@angular/material/autocomplete';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
@@ -14,6 +17,10 @@ import type {
   LlmConfigResponse,
   LlmConfigUpdate,
   LlmProvider,
+  LlmProviderCreate,
+  LlmProviderEntry,
+  LlmProviderListResponse,
+  LlmProviderUpdate,
   LlmStorageStatus,
   OllamaModelsResponse,
 } from '../../models/llm-config.model';
@@ -22,6 +29,19 @@ type OllamaMode = 'local' | 'cloud';
 
 const OLLAMA_CLOUD_URL = 'https://ollama.com';
 const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434';
+
+/** Editable form fields for a provider list entry (add or edit). */
+interface ProviderForm {
+  label: string;
+  provider: LlmProvider;
+  model: string;
+  base_url: string;
+  api_key: string;
+}
+
+function emptyProviderForm(): ProviderForm {
+  return { label: '', provider: 'ollama', model: '', base_url: '', api_key: '' };
+}
 
 /**
  * LLM Provider settings page. Lets an operator pick the provider (Ollama or
@@ -34,11 +54,13 @@ const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434';
   standalone: true,
   imports: [
     FormsModule,
+    DragDropModule,
     MatCardModule,
     MatFormFieldModule,
     MatInputModule,
     MatButtonModule,
     MatRadioModule,
+    MatSelectModule,
     MatIconModule,
     MatAutocompleteModule,
     MatProgressSpinnerModule,
@@ -86,8 +108,184 @@ export class LlmConfigDashboardComponent implements OnInit {
   claudeModelOptions: string[] = [];
   ollamaModelSuggestions: string[] = [];
 
+  // --- Multi-provider fallback list ---------------------------------------
+  /** Ordered providers (most→least preferred). Empty = use the single default below. */
+  providers: LlmProviderEntry[] = [];
+  providersLoading = false;
+  providersError: string | null = null;
+  providersSaving = false;
+  /** The add-provider form is shown when this is non-null. */
+  addForm: ProviderForm | null = null;
+  /** The id of the entry being edited inline, or null. */
+  editingId: number | null = null;
+  editForm: ProviderForm = emptyProviderForm();
+
   ngOnInit(): void {
     this.loadConfig();
+    this.loadProviders();
+  }
+
+  /** Load the ordered provider list. */
+  loadProviders(): void {
+    this.providersLoading = true;
+    this.providersError = null;
+    this.api
+      .listProviders()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (res) => {
+          this.applyProviderList(res);
+          this.providersLoading = false;
+        },
+        error: (err) => {
+          this.providersError = this.friendlyError(err, 'Failed to load provider list.');
+          this.providersLoading = false;
+        },
+      });
+  }
+
+  private applyProviderList(res: LlmProviderListResponse): void {
+    // Trust the server order; sort defensively in case a client reorders the array.
+    this.providers = [...(res.providers ?? [])].sort((a, b) => a.sort_order - b.sort_order);
+    if (res.storage_status) {
+      this.storageStatus = res.storage_status;
+    }
+  }
+
+  /** Reorder the list on drag-drop and persist the new order. */
+  onProviderDrop(event: CdkDragDrop<LlmProviderEntry[]>): void {
+    if (event.previousIndex === event.currentIndex) {
+      return;
+    }
+    moveItemInArray(this.providers, event.previousIndex, event.currentIndex);
+    const ids = this.providers.map((p) => p.id);
+    this.persistProviders(this.api.reorderProviders(ids), 'Provider order saved.');
+  }
+
+  /** Open the add-provider form with sensible defaults. */
+  startAdd(): void {
+    this.editingId = null;
+    this.addForm = { ...emptyProviderForm(), base_url: OLLAMA_LOCAL_DEFAULT };
+  }
+
+  cancelAdd(): void {
+    this.addForm = null;
+  }
+
+  /** Submit the add-provider form. */
+  submitAdd(): void {
+    if (!this.addForm) {
+      return;
+    }
+    const form = this.addForm;
+    if (!form.label.trim()) {
+      this.providersError = 'Please enter a label for the provider.';
+      return;
+    }
+    const body: LlmProviderCreate = {
+      label: form.label.trim(),
+      provider: form.provider,
+      model: form.model.trim(),
+      base_url: form.provider === 'ollama' ? form.base_url.trim() : '',
+      api_key: form.api_key.trim(),
+    };
+    this.persistProviders(this.api.createProvider(body), 'Provider added.', () => {
+      this.addForm = null;
+    });
+  }
+
+  /** Begin inline editing of an entry (keys are never pre-filled). */
+  startEdit(entry: LlmProviderEntry): void {
+    this.addForm = null;
+    this.editingId = entry.id;
+    this.editForm = {
+      label: entry.label,
+      provider: entry.provider,
+      model: entry.model,
+      base_url: entry.base_url,
+      api_key: '',
+    };
+  }
+
+  cancelEdit(): void {
+    this.editingId = null;
+  }
+
+  /** Persist an inline edit. An empty api_key leaves the stored key untouched. */
+  submitEdit(): void {
+    if (this.editingId === null) {
+      return;
+    }
+    const form = this.editForm;
+    if (!form.label.trim()) {
+      this.providersError = 'Please enter a label for the provider.';
+      return;
+    }
+    const body: LlmProviderUpdate = {
+      label: form.label.trim(),
+      provider: form.provider,
+      model: form.model.trim(),
+      base_url: form.provider === 'ollama' ? form.base_url.trim() : '',
+      api_key: form.api_key.trim(),
+    };
+    this.persistProviders(this.api.updateProvider(this.editingId, body), 'Provider updated.', () => {
+      this.editingId = null;
+    });
+  }
+
+  /** Remove a provider from the list. */
+  removeProvider(entry: LlmProviderEntry): void {
+    this.persistProviders(this.api.deleteProvider(entry.id), 'Provider removed.');
+  }
+
+  /** Run a list-mutating call, refresh the list, and surface success/error. */
+  private persistProviders(
+    call: Observable<LlmProviderListResponse>,
+    successMsg: string,
+    onSuccess?: () => void,
+  ): void {
+    this.providersError = null;
+    this.providersSaving = true;
+    this.success = null;
+    call.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (res) => {
+        this.applyProviderList(res);
+        this.providersSaving = false;
+        this.success = successMsg;
+        onSuccess?.();
+      },
+      error: (err) => {
+        this.providersSaving = false;
+        // A failed reorder/edit could leave the local array out of sync; reload truth
+        // first (it clears providersError on entry), then set the error so it survives.
+        this.loadProviders();
+        this.providersError = this.friendlyError(err, 'Failed to save the provider list.');
+      },
+    });
+  }
+
+  /** Human-readable reset estimate for a usage-limited provider (e.g. "~2h"). */
+  resetInfo(entry: LlmProviderEntry): string {
+    if (!entry.limit_exceeded || !entry.reset_at) {
+      return '';
+    }
+    const reset = new Date(entry.reset_at).getTime();
+    if (Number.isNaN(reset)) {
+      return '';
+    }
+    const ms = reset - Date.now();
+    if (ms <= 0) {
+      return 'resetting now';
+    }
+    const minutes = Math.round(ms / 60000);
+    if (minutes < 60) {
+      return `resets in ~${minutes}m`;
+    }
+    const hours = Math.round(minutes / 60);
+    if (hours < 48) {
+      return `resets in ~${hours}h`;
+    }
+    return `resets in ~${Math.round(hours / 24)}d`;
   }
 
   /** Load the current effective config and populate the form. */

@@ -100,6 +100,21 @@ additive-only, so it can never shorten the configured floor. Only the integer-se
 honored (HTTP-date / non-numeric / non-positive are ignored). Strands models (Strategy Lab) have no
 HTTP-level access to the header, so this applies only to the central client.
 
+### LLM_FAILOVER_FAST_429 / LLM_FAILOVER_RATE_WINDOW_S / LLM_FAILOVER_WEEKLY_WINDOW_S
+Tune the **multi-provider fallback list** (the ordered providers configured in the LLM Provider
+settings UI / `POST /api/llm-config/providers`, stored in the `llm_provider_configs` table). When
+more than one provider is configured, a 429 on one provider marks it usage-limited (with a
+`reset_at`) and hands off to the next available provider; once `reset_at` passes, the provider is
+reset and used again. `LLM_FAILOVER_FAST_429` (default **on**; `false`/`0`/`no` disables) builds the
+non-last failover-chain clients with a **zero** in-place 429-retry budget so the hand-off isn't
+delayed by the slow `LLM_RATE_LIMIT_*` backoff above — the **last** provider in the chain keeps the
+configured backoff (nowhere left to fail over to), so a single-entry list behaves exactly as before.
+`LLM_FAILOVER_RATE_WINDOW_S` (default `3600`) and `LLM_FAILOVER_WEEKLY_WINDOW_S` (default `604800` =
+7 days) are the fallback reset windows used to compute `reset_at` only when the 429 carries no
+`Retry-After`; the weekly window is used when the error matches the Ollama weekly-limit message, the
+rate window otherwise. With an empty list (or `POSTGRES_HOST` unset) the legacy single-provider
+resolution (`LLM_PROVIDER`/`LLM_MODEL`/keys → env) is used unchanged.
+
 ---
 
 ## Temporal, Security, and Logging

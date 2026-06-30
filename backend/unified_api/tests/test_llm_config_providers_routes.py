@@ -1,0 +1,211 @@
+"""Tests for /api/llm-config/providers — the ordered multi-provider fallback list:
+masking, per-entry guards, CRUD, reorder, and the Postgres-required contract."""
+
+from __future__ import annotations
+
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+_backend = Path(__file__).resolve().parent.parent.parent
+if str(_backend) not in sys.path:
+    sys.path.insert(0, str(_backend))
+_agents = _backend / "agents"
+if str(_agents) not in sys.path:
+    sys.path.insert(0, str(_agents))
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from llm_service import provider_store as ps  # noqa: E402
+from unified_api.routes import llm_config as route  # noqa: E402
+
+
+def _entry(entry_id, *, provider="ollama", label="e", api_key="", limit=False):
+    return ps.ProviderEntry(
+        id=entry_id,
+        label=label,
+        provider=provider,
+        model="m",
+        base_url="http://localhost:11434" if provider == "ollama" else "",
+        api_key=api_key,
+        sort_order=entry_id,
+        limit_exceeded=limit,
+        limit_type="rate" if limit else "",
+        reset_at=datetime(2026, 6, 30, tzinfo=timezone.utc) if limit else None,
+    )
+
+
+@pytest.fixture
+def app_client(monkeypatch):
+    """TestClient over a minimal app with provider_store + caches stubbed."""
+    state: dict = {"entries": [], "ops": []}
+
+    monkeypatch.setattr(route, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(route, "resolve_storage_status", lambda *a, **k: "available")
+    monkeypatch.setattr(route, "clear_client_cache", lambda: state["ops"].append("clear_clients"))
+    monkeypatch.setattr(route.runtime_config, "clear_cache", lambda: None)
+
+    # provider_store stubs (no DB).
+    monkeypatch.setattr(route.provider_store, "clear_cache", lambda: None)
+    monkeypatch.setattr(route.provider_store, "load_ordered_entries", lambda *a, **k: list(state["entries"]))
+
+    def fake_create(**kw):
+        state["ops"].append(("create", kw))
+        e = _entry(99, provider=kw["provider"], label=kw["label"], api_key=kw.get("api_key", ""))
+        state["entries"].append(e)
+        return e
+
+    def fake_get(entry_id):
+        return next((e for e in state["entries"] if e.id == entry_id), None)
+
+    def fake_update(entry_id, **kw):
+        state["ops"].append(("update", entry_id, kw))
+        return fake_get(entry_id)
+
+    def fake_delete(entry_id):
+        e = fake_get(entry_id)
+        if e is None:
+            return False
+        state["entries"].remove(e)
+        return True
+
+    def fake_reorder(ids):
+        state["ops"].append(("reorder", list(ids)))
+
+    monkeypatch.setattr(route.provider_store, "create_entry", lambda **kw: fake_create(**kw))
+    monkeypatch.setattr(route.provider_store, "get_entry", fake_get)
+    monkeypatch.setattr(route.provider_store, "update_entry", lambda i, **kw: fake_update(i, **kw))
+    monkeypatch.setattr(route.provider_store, "delete_entry", fake_delete)
+    monkeypatch.setattr(route.provider_store, "reorder", fake_reorder)
+
+    for var in (
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "ANTHROPIC_API_KEY",
+        "LLM_CLAUDE_API_KEY",
+        "OLLAMA_API_KEY",
+        "LLM_OLLAMA_API_KEY",
+        "LLM_BASE_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+
+    app = FastAPI()
+    app.include_router(route.router)
+    return TestClient(app), state
+
+
+def test_list_masks_keys_and_reports_state(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, api_key="sk-secret", limit=True), _entry(2)]
+    resp = client.get("/api/llm-config/providers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [p["id"] for p in body["providers"]] == [1, 2]
+    assert body["providers"][0]["api_key_configured"] is True
+    assert body["providers"][0]["limit_exceeded"] is True
+    assert body["providers"][0]["reset_at"] is not None
+    assert body["providers"][1]["api_key_configured"] is False
+    assert "sk-secret" not in resp.text  # key value never returned
+    assert body["storage_available"] is True
+
+
+def test_create_ollama_local_succeeds(app_client):
+    client, state = app_client
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"label": "Local", "provider": "ollama", "base_url": "http://localhost:11434"},
+    )
+    assert resp.status_code == 200
+    assert any(op[0] == "create" for op in state["ops"] if isinstance(op, tuple))
+    assert ("clear_clients") in state["ops"]
+
+
+def test_create_claude_without_key_is_400(app_client):
+    client, _state = app_client
+    resp = client.post("/api/llm-config/providers", json={"label": "C", "provider": "claude"})
+    assert resp.status_code == 400
+    assert "without an API key" in resp.json()["detail"]
+
+
+def test_create_claude_with_key_succeeds(app_client):
+    client, _state = app_client
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"label": "C", "provider": "claude", "api_key": "sk-ant"},
+    )
+    assert resp.status_code == 200
+
+
+def test_create_ollama_cloud_without_key_is_400(app_client):
+    client, _state = app_client
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"label": "Cloud", "provider": "ollama", "base_url": "https://ollama.com"},
+    )
+    assert resp.status_code == 400
+    assert "Ollama Cloud" in resp.json()["detail"]
+
+
+def test_create_rejects_malformed_base_url(app_client):
+    client, _state = app_client
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"label": "Bad", "provider": "ollama", "base_url": "not-a-url"},
+    )
+    assert resp.status_code == 422  # pydantic validation
+
+
+def test_update_existing_entry(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1)]
+    resp = client.put("/api/llm-config/providers/1", json={"label": "Renamed"})
+    assert resp.status_code == 200
+    assert any(op[0] == "update" for op in state["ops"] if isinstance(op, tuple))
+
+
+def test_update_missing_entry_is_404(app_client):
+    client, _state = app_client
+    resp = client.put("/api/llm-config/providers/777", json={"label": "x"})
+    assert resp.status_code == 404
+
+
+def test_update_to_claude_without_key_is_400(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="ollama")]
+    resp = client.put("/api/llm-config/providers/1", json={"provider": "claude"})
+    assert resp.status_code == 400
+
+
+def test_delete_entry(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1)]
+    resp = client.delete("/api/llm-config/providers/1")
+    assert resp.status_code == 200
+    assert resp.json()["providers"] == []
+
+
+def test_delete_missing_is_404(app_client):
+    client, _state = app_client
+    resp = client.delete("/api/llm-config/providers/42")
+    assert resp.status_code == 404
+
+
+def test_reorder_calls_store(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1), _entry(2), _entry(3)]
+    resp = client.put("/api/llm-config/providers/order", json={"ids": [3, 1, 2]})
+    assert resp.status_code == 200
+    assert ("reorder", [3, 1, 2]) in state["ops"]
+
+
+def test_mutations_require_postgres(app_client, monkeypatch):
+    client, _state = app_client
+    monkeypatch.setattr(route, "is_postgres_enabled", lambda: False)
+    assert client.post("/api/llm-config/providers", json={"label": "x", "provider": "ollama"}).status_code == 503
+    assert client.put("/api/llm-config/providers/1", json={"label": "x"}).status_code == 503
+    assert client.delete("/api/llm-config/providers/1").status_code == 503
+    assert client.put("/api/llm-config/providers/order", json={"ids": [1]}).status_code == 503

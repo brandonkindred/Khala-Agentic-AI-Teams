@@ -76,4 +76,44 @@ describe('LlmConfigApiService', () => {
     expect(captured).toBeInstanceOf(HttpErrorResponse);
     expect(captured?.status).toBe(500);
   });
+
+  it('listProviders issues GET /api/llm-config/providers', () => {
+    const mock = { providers: [], storage_available: true, storage_status: 'available' };
+    service.listProviders().subscribe((res) => expect(res).toEqual(mock));
+    const req = httpMock.expectOne(`${baseUrl}/providers`);
+    expect(req.request.method).toBe('GET');
+    req.flush(mock);
+  });
+
+  it('createProvider issues POST /api/llm-config/providers with body', () => {
+    const body = { label: 'A', provider: 'claude' as const, api_key: 'sk' };
+    service.createProvider(body).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/providers`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual(body);
+    req.flush({ providers: [], storage_available: true, storage_status: 'available' });
+  });
+
+  it('updateProvider issues PUT /api/llm-config/providers/{id}', () => {
+    service.updateProvider(7, { label: 'B' }).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/providers/7`);
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body).toEqual({ label: 'B' });
+    req.flush({ providers: [], storage_available: true, storage_status: 'available' });
+  });
+
+  it('deleteProvider issues DELETE /api/llm-config/providers/{id}', () => {
+    service.deleteProvider(3).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/providers/3`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush({ providers: [], storage_available: true, storage_status: 'available' });
+  });
+
+  it('reorderProviders issues PUT /api/llm-config/providers/order with ids', () => {
+    service.reorderProviders([3, 1, 2]).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/providers/order`);
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body).toEqual({ ids: [3, 1, 2] });
+    req.flush({ providers: [], storage_available: true, storage_status: 'available' });
+  });
 });

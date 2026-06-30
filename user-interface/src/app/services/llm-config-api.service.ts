@@ -2,7 +2,14 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
-import type { LlmConfigResponse, LlmConfigUpdate, OllamaModelsResponse } from '../models/llm-config.model';
+import type {
+  LlmConfigResponse,
+  LlmConfigUpdate,
+  LlmProviderCreate,
+  LlmProviderListResponse,
+  LlmProviderUpdate,
+  OllamaModelsResponse,
+} from '../models/llm-config.model';
 
 /**
  * Service for the LLM Provider settings API (`/api/llm-config`).
@@ -29,5 +36,30 @@ export class LlmConfigApiService {
    */
   getOllamaModels(): Observable<OllamaModelsResponse> {
     return this.http.get<OllamaModelsResponse>(`${this.baseUrl}/ollama-models`);
+  }
+
+  /** GET /api/llm-config/providers — the ordered fallback list (keys masked). */
+  listProviders(): Observable<LlmProviderListResponse> {
+    return this.http.get<LlmProviderListResponse>(`${this.baseUrl}/providers`);
+  }
+
+  /** POST /api/llm-config/providers — append a provider to the list. */
+  createProvider(body: LlmProviderCreate): Observable<LlmProviderListResponse> {
+    return this.http.post<LlmProviderListResponse>(`${this.baseUrl}/providers`, body);
+  }
+
+  /** PUT /api/llm-config/providers/{id} — edit a provider (empty fields unchanged). */
+  updateProvider(id: number, body: LlmProviderUpdate): Observable<LlmProviderListResponse> {
+    return this.http.put<LlmProviderListResponse>(`${this.baseUrl}/providers/${id}`, body);
+  }
+
+  /** DELETE /api/llm-config/providers/{id} — remove a provider from the list. */
+  deleteProvider(id: number): Observable<LlmProviderListResponse> {
+    return this.http.delete<LlmProviderListResponse>(`${this.baseUrl}/providers/${id}`);
+  }
+
+  /** PUT /api/llm-config/providers/order — reorder the list (ids, most→least preferred). */
+  reorderProviders(ids: number[]): Observable<LlmProviderListResponse> {
+    return this.http.put<LlmProviderListResponse>(`${this.baseUrl}/providers/order`, { ids });
   }
 }

@@ -162,6 +162,8 @@ The `product_delivery` team (`backend/agents/product_delivery/`, mounted at `/ap
 
 Provider/model/keys are selectable via env vars **or** the LLM Provider settings UI (`/llm-config` → `PUT /api/llm-config`), which persists them Fernet-encrypted in shared Postgres so every team container reads them through `shared_postgres.secrets` / `llm_service.runtime_config` (resolution order: runtime → env → default).
 
+**Multi-provider fallback:** the same UI also manages an **ordered list of provider entries** (`/api/llm-config/providers` → `llm_provider_configs` table via `llm_service.provider_store`), most→least preferred. `get_client` selects the most-preferred entry that isn't usage-limited; on a 429 a `FailoverLLMClient` marks the entry (with a `reset_at`) and retries the same call on the next available provider, resetting an entry automatically once its limit window passes. The list takes precedence when non-empty; an empty list (or `POSTGRES_HOST` unset) falls back to the single-provider resolution above. Tuning vars: `LLM_FAILOVER_FAST_429`, `LLM_FAILOVER_RATE_WINDOW_S`, `LLM_FAILOVER_WEEKLY_WINDOW_S` (see `docs/ENV_VARS.md`).
+
 Environment variables for LLM: `LLM_PROVIDER` (`ollama`/`claude`/`dummy`), `LLM_BASE_URL`, `LLM_MODEL`, `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY`
 
 ## Code Style

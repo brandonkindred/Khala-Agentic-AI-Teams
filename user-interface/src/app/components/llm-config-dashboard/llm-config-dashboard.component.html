@@ -32,11 +32,158 @@
     </div>
   }
 
+  <mat-card class="config-card providers-card">
+    <mat-card-header>
+      <mat-card-title>Provider fallback order</mat-card-title>
+      <mat-card-subtitle>
+        Most preferred first. When a provider hits its usage limit, agents fall back to the
+        next available one; a limited provider is reused automatically once its limit resets.
+        Drag to reorder.
+      </mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+      @if (providersLoading) {
+        <div class="loading"><mat-spinner diameter="24"></mat-spinner> <span>Loading providers…</span></div>
+      }
+      @if (providersError) {
+        <div class="banner banner-error" role="alert">
+          <mat-icon>error_outline</mat-icon> <span>{{ providersError }}</span>
+        </div>
+      }
+
+      @if (!providersLoading && providers.length === 0) {
+        <p class="empty-note">
+          No fallback providers configured. Add one below to enable multi-provider fallback,
+          or the single default provider configured further down is used.
+        </p>
+      }
+
+      <div cdkDropList class="provider-list" (cdkDropListDropped)="onProviderDrop($event)">
+        @for (entry of providers; track entry.id) {
+          <div class="provider-item" cdkDrag>
+            @if (editingId === entry.id) {
+              <div class="provider-form" data-testid="edit-form">
+                <mat-form-field appearance="outline">
+                  <mat-label>Label</mat-label>
+                  <input matInput name="editLabel" [(ngModel)]="editForm.label" />
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Provider</mat-label>
+                  <mat-select name="editProvider" [(ngModel)]="editForm.provider">
+                    <mat-option value="ollama">Ollama</mat-option>
+                    <mat-option value="claude">Claude (Anthropic)</mat-option>
+                  </mat-select>
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Model</mat-label>
+                  <input matInput name="editModel" [(ngModel)]="editForm.model" placeholder="Model id (optional)" />
+                </mat-form-field>
+                @if (editForm.provider === 'ollama') {
+                  <mat-form-field appearance="outline">
+                    <mat-label>Base URL</mat-label>
+                    <input matInput name="editBaseUrl" [(ngModel)]="editForm.base_url" placeholder="http://localhost:11434" />
+                  </mat-form-field>
+                }
+                <mat-form-field appearance="outline">
+                  <mat-label>API key</mat-label>
+                  <input
+                    matInput
+                    type="password"
+                    autocomplete="off"
+                    name="editApiKey"
+                    [(ngModel)]="editForm.api_key"
+                    [placeholder]="entry.api_key_configured ? '•••••••• (configured — leave blank to keep)' : 'Enter API key'"
+                  />
+                </mat-form-field>
+                <div class="form-actions">
+                  <button mat-button type="button" (click)="cancelEdit()">Cancel</button>
+                  <button mat-flat-button color="primary" type="button" (click)="submitEdit()" [disabled]="providersSaving">
+                    Save
+                  </button>
+                </div>
+              </div>
+            } @else {
+              <mat-icon class="drag-handle" cdkDragHandle aria-label="Drag to reorder">drag_indicator</mat-icon>
+              <div class="provider-main">
+                <span class="provider-order">{{ $index + 1 }}</span>
+                <span class="provider-label">{{ entry.label }}</span>
+                <span class="provider-type">{{ entry.provider }}</span>
+                @if (entry.model) {
+                  <span class="provider-model">{{ entry.model }}</span>
+                }
+                @if (entry.api_key_configured) {
+                  <span class="key-badge" title="API key configured"><mat-icon>key</mat-icon></span>
+                }
+                @if (entry.limit_exceeded) {
+                  <span class="limit-badge" [title]="entry.limit_type || 'usage limit'">
+                    <mat-icon>block</mat-icon> limit exceeded
+                    @if (resetInfo(entry)) {
+                      <span class="reset">· {{ resetInfo(entry) }}</span>
+                    }
+                  </span>
+                }
+              </div>
+              <div class="provider-actions">
+                <button mat-icon-button type="button" (click)="startEdit(entry)" aria-label="Edit provider">
+                  <mat-icon>edit</mat-icon>
+                </button>
+                <button mat-icon-button type="button" (click)="removeProvider(entry)" aria-label="Remove provider"
+                  [disabled]="providersSaving">
+                  <mat-icon>delete</mat-icon>
+                </button>
+              </div>
+            }
+          </div>
+        }
+      </div>
+
+      @if (addForm) {
+        <div class="provider-form" data-testid="add-form">
+          <mat-form-field appearance="outline">
+            <mat-label>Label</mat-label>
+            <input matInput name="addLabel" [(ngModel)]="addForm.label" placeholder="e.g. Anthropic API" />
+          </mat-form-field>
+          <mat-form-field appearance="outline">
+            <mat-label>Provider</mat-label>
+            <mat-select name="addProvider" [(ngModel)]="addForm.provider">
+              <mat-option value="ollama">Ollama</mat-option>
+              <mat-option value="claude">Claude (Anthropic)</mat-option>
+            </mat-select>
+          </mat-form-field>
+          <mat-form-field appearance="outline">
+            <mat-label>Model</mat-label>
+            <input matInput name="addModel" [(ngModel)]="addForm.model" placeholder="Model id (optional)" />
+          </mat-form-field>
+          @if (addForm.provider === 'ollama') {
+            <mat-form-field appearance="outline">
+              <mat-label>Base URL</mat-label>
+              <input matInput name="addBaseUrl" [(ngModel)]="addForm.base_url" placeholder="http://localhost:11434" />
+            </mat-form-field>
+          }
+          <mat-form-field appearance="outline">
+            <mat-label>API key</mat-label>
+            <input matInput type="password" autocomplete="off" name="addApiKey" [(ngModel)]="addForm.api_key" placeholder="Enter API key" />
+          </mat-form-field>
+          <div class="form-actions">
+            <button mat-button type="button" (click)="cancelAdd()">Cancel</button>
+            <button mat-flat-button color="primary" type="button" (click)="submitAdd()" [disabled]="providersSaving">
+              Add provider
+            </button>
+          </div>
+        </div>
+      } @else {
+        <button mat-stroked-button type="button" class="add-provider-btn" (click)="startAdd()" [disabled]="!storageAvailable">
+          <mat-icon>add</mat-icon> Add provider
+        </button>
+      }
+    </mat-card-content>
+  </mat-card>
+
   @if (!loading) {
     <mat-card class="config-card">
       <mat-card-content>
         <section class="field-group">
-          <div class="field-label" id="provider-label">Provider</div>
+          <div class="field-label" id="provider-label">Default provider (used when no fallback providers are configured)</div>
           <mat-radio-group
             [ngModel]="provider"
             (ngModelChange)="onProviderChange($event)"
