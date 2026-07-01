@@ -55,6 +55,11 @@ CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review 
 # duplicating the literal (it is unique to this prompt template).
 CODE_TO_REVIEW_HEADER = "**Code to review:**"
 
+# Absolute cap on the sibling-surface context block (chars). It carries only
+# symbol names, so a small budget is plenty; the cap keeps the prompt bounded
+# even when many sibling files changed.
+_SIBLING_SURFACE_MAX_CHARS = 2_000
+
 
 class ChunkReviewAgent:
     """Reviews one chunk of code. Used by CodeReviewCoordinator for large codebases.
@@ -167,6 +172,20 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         )
     if architecture_overview:
         context_parts.extend(["", "**Architecture:**", architecture_overview])
+    sibling_surface = (input_data.sibling_surface or "")[:_SIBLING_SURFACE_MAX_CHARS]
+    if sibling_surface:
+        context_parts.extend(
+            [
+                "",
+                "**Other files changed in this submission (top-level symbols they define/export):**",
+                "Flag any reference in the code below to a symbol that a sibling file was "
+                "expected to provide but no longer does (e.g. a renamed or removed function, "
+                "class, or export). Do not flag symbols that are still present.",
+                "---",
+                sibling_surface,
+                "---",
+            ]
+        )
     if existing_codebase_excerpt:
         context_parts.extend(
             [

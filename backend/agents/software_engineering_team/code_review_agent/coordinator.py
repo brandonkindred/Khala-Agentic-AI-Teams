@@ -35,6 +35,16 @@ reviewed" outcomes are never stored, so a transient failure is retried for real
 next cycle. The cache is best-effort: a miss simply recomputes, so correctness
 never depends on a hit, and any change to code, context, or model invalidates
 the key.
+
+Cross-file surface: each chunk reviewer is also given the *sibling surface* —
+the top-level symbols (Python ``def``/``class``, TS/JS ``export``s) defined by
+the other changed files in the submission that are not in this chunk — so it can
+flag a reference to a symbol a sibling renamed or removed, a cross-file break a
+bounded single-chunk view would otherwise miss. That surface is folded into the
+chunk's cache key, so a sibling's *surface* change (a rename/removal) re-runs the
+dependent chunk with the new surface, while a body-only sibling edit leaves the
+surface unchanged and the chunk stays cached — closing the cross-file gap without
+invalidating the whole submission on every fix.
 """
 
 from __future__ import annotations
@@ -834,6 +844,7 @@ def _review_chunk_with_recovery(
     reviewer: ChunkReviewAgent,
     chunk: ReviewChunk,
     base_input: Dict,
+    sibling_surface: str = "",
     depth: int = 0,
     retried: bool = False,
 ) -> _ChunkOutcome:
@@ -842,6 +853,9 @@ def _review_chunk_with_recovery(
     Preconditions:
         - ``base_input`` holds the shared ``ChunkReviewInput`` fields
           (task/spec/architecture context), not per-chunk fields.
+        - ``sibling_surface`` is this chunk's view of the other changed files'
+          top-level symbols; it rides along to every bisected child unchanged
+          (siblings are, by definition, files outside this chunk).
 
     Postconditions:
         - Returns an outcome covering every line of the chunk — every line is
@@ -870,6 +884,7 @@ def _review_chunk_with_recovery(
         code_chunk=chunk.content,
         file_path_or_label=chunk.paths_label,
         segment_note=_segment_notes(chunk),
+        sibling_surface=sibling_surface,
         **base_input,
     )
     try:
@@ -897,8 +912,14 @@ def _review_chunk_with_recovery(
                 exc,
                 chunk.paths_label,
             )
-            outcome = _review_chunk_with_recovery(reviewer, halves[0], base_input, depth + 1)
-            outcome.absorb(_review_chunk_with_recovery(reviewer, halves[1], base_input, depth + 1))
+            outcome = _review_chunk_with_recovery(
+                reviewer, halves[0], base_input, sibling_surface, depth + 1
+            )
+            outcome.absorb(
+                _review_chunk_with_recovery(
+                    reviewer, halves[1], base_input, sibling_surface, depth + 1
+                )
+            )
             return outcome
         if not retried:
             logger.warning(
@@ -907,7 +928,9 @@ def _review_chunk_with_recovery(
                 exc,
                 chunk.paths_label,
             )
-            return _review_chunk_with_recovery(reviewer, chunk, base_input, depth, retried=True)
+            return _review_chunk_with_recovery(
+                reviewer, chunk, base_input, sibling_surface, depth, retried=True
+            )
         # Known content failure that cannot bisect further and survived its
         # retry: degrade instead of aborting the whole run. The chunk's code is
         # named by a blocking ``high`` "not reviewed" finding (which rejects the
@@ -981,6 +1004,93 @@ def _review_model_fingerprint(llm: LLMClient) -> str:
     return type(model).__name__
 
 
+# Top-level symbol declarations whose rename/removal in one file can break a
+# reference in another: Python ``def``/``class`` and TS/JS ``export`` bindings
+# (named or ``export { ... }`` lists). Extraction is heuristic and only feeds
+# reviewer *context* — over- or under-matching never gates the review, so a
+# tolerant regex is fine.
+_PY_SYMBOL_RE = re.compile(
+    r"^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_]\w*)", re.MULTILINE
+)
+_TS_EXPORT_RE = re.compile(
+    r"^[ \t]*export[ \t]+(?:default[ \t]+)?(?:async[ \t]+)?"
+    r"(?:function|class|const|let|var|interface|type|enum)[ \t]+([A-Za-z_$][\w$]*)",
+    re.MULTILINE,
+)
+_TS_EXPORT_LIST_RE = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}", re.MULTILINE)
+
+# Cap per file so one huge file can't dominate a chunk's sibling-surface context.
+_MAX_SYMBOLS_PER_FILE = 60
+
+
+def _symbol_surface(content: str) -> List[str]:
+    """Extract a file's top-level defined/exported symbol names.
+
+    Postconditions:
+        - Returns a sorted, de-duplicated list of Python ``def``/``class`` names
+          and TS/JS ``export`` binding names (including names inside
+          ``export { a, b as c }``, where the exported name ``c`` is taken).
+          Capped at ``_MAX_SYMBOLS_PER_FILE``. Heuristic and best-effort — used
+          only as reviewer context, never to gate a verdict.
+    """
+    names: set[str] = set()
+    for match in _PY_SYMBOL_RE.finditer(content):
+        names.add(match.group(1))
+    for match in _TS_EXPORT_RE.finditer(content):
+        names.add(match.group(1))
+    for match in _TS_EXPORT_LIST_RE.finditer(content):
+        for item in match.group(1).split(","):
+            token = item.strip()
+            if not token:
+                continue
+            # ``a as b`` exports the alias ``b``; a bare name exports itself.
+            exported = token.split()[-1]
+            if re.fullmatch(r"[A-Za-z_$][\w$]*", exported):
+                names.add(exported)
+    return sorted(names)[:_MAX_SYMBOLS_PER_FILE]
+
+
+def _surface_by_path(blocks: List[Tuple[str, str]]) -> Dict[str, List[str]]:
+    """Map each named block path to its top-level symbol surface.
+
+    Postconditions:
+        - One entry per block with a non-empty path *and* a non-empty surface;
+          headerless ('') blocks and symbol-less files are omitted, so the map
+          holds only files whose public surface can be referenced cross-file.
+    """
+    surface: Dict[str, List[str]] = {}
+    for path, content in blocks:
+        if not path:
+            continue
+        names = _symbol_surface(content)
+        if names:
+            surface[path] = names
+    return surface
+
+
+def _sibling_surface(chunk: ReviewChunk, surface_by_path: Dict[str, List[str]]) -> str:
+    """Render the top-level surface of the changed files *outside* this chunk.
+
+    Preconditions:
+        - ``surface_by_path`` is the whole submission's ``_surface_by_path``.
+
+    Postconditions:
+        - Returns a deterministic, path-sorted ``"path: name1, name2"``-per-line
+          string covering every changed file whose path is not one of this
+          chunk's own paths. Empty when no sibling file has a surface. Because it
+          is derived only from sibling files, editing a file's *body* without
+          changing its top-level symbols leaves this string (and any cache key
+          built from it) unchanged.
+    """
+    own_paths = {seg.path for seg in chunk.segments if seg.path}
+    lines = [
+        f"{path}: {', '.join(surface_by_path[path])}"
+        for path in sorted(surface_by_path)
+        if path not in own_paths
+    ]
+    return "\n".join(lines)
+
+
 def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     """Hash the review inputs shared by every chunk in one coordinator run.
 
@@ -1014,15 +1124,20 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _chunk_cache_key(chunk: ReviewChunk, context_fp: str) -> str:
+def _chunk_cache_key(chunk: ReviewChunk, context_fp: str, sibling_surface: str) -> str:
     """Key one chunk's map-phase review by its exact LLM input plus context.
 
     Postconditions:
-        - Combines the chunk's rendered content and segment notes (the bytes the
-          reviewer actually sees) with the run's context fingerprint, so two
-          chunks collide only when their LLM inputs are byte-identical.
+        - Combines the chunk's rendered content, segment notes, and the
+          sibling-surface context (the bytes the reviewer actually sees) with the
+          run's context fingerprint, so two chunks collide only when their LLM
+          inputs are byte-identical. Including ``sibling_surface`` invalidates a
+          cached chunk when a *sibling* changed file's public surface changed
+          (e.g. a renamed/removed export), so the reviewer re-runs with that new
+          surface — a body-only sibling edit leaves the surface (and the key)
+          unchanged, preserving the hit.
     """
-    body = f"{context_fp}\x00{chunk.content}\x00{_segment_notes(chunk)}"
+    body = f"{context_fp}\x00{chunk.content}\x00{_segment_notes(chunk)}\x00{sibling_surface}"
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -1031,6 +1146,7 @@ def _cached_review_chunk(
     chunk: ReviewChunk,
     base_input: Dict,
     context_fp: str,
+    sibling_surface: str = "",
 ) -> _ChunkOutcome:
     """Review one chunk, reusing a cached map-phase outcome when unchanged.
 
@@ -1038,6 +1154,9 @@ def _cached_review_chunk(
         - Same as ``_review_chunk_with_recovery`` for ``base_input``.
         - ``context_fp`` is the run's ``_context_fingerprint`` (folds in the
           shared context and the resolved model).
+        - ``sibling_surface`` is this chunk's view of the other changed files'
+          top-level symbols (see ``_sibling_surface``); it is fed to the reviewer
+          and folded into the cache key.
 
     Postconditions:
         - When caching is disabled (``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` ==
@@ -1056,16 +1175,16 @@ def _cached_review_chunk(
     """
     capacity = _chunk_outcome_cache_size()
     if capacity <= 0:
-        return _review_chunk_with_recovery(reviewer, chunk, base_input)
+        return _review_chunk_with_recovery(reviewer, chunk, base_input, sibling_surface)
 
-    key = _chunk_cache_key(chunk, context_fp)
+    key = _chunk_cache_key(chunk, context_fp, sibling_surface)
     with _CHUNK_OUTCOME_CACHE_LOCK:
         hit = _CHUNK_OUTCOME_CACHE.get(key)
         if hit is not None:
             _CHUNK_OUTCOME_CACHE.move_to_end(key)
             return hit.clone()
 
-    outcome = _review_chunk_with_recovery(reviewer, chunk, base_input)
+    outcome = _review_chunk_with_recovery(reviewer, chunk, base_input, sibling_surface)
 
     # Only cache a fully-reviewed chunk. A degraded (not-reviewed) outcome must
     # be retried for real next cycle, and an outcome with no LLM verdict never
@@ -1192,6 +1311,7 @@ def _map_chunks(
     chunks: List[ReviewChunk],
     base_input: Dict,
     context_fp: str,
+    surface_by_path: Dict[str, List[str]],
     progress_callback: Optional[ReviewProgressCallback] = None,
 ) -> List[_ChunkOutcome]:
     """Review all chunks, fanning out independent map calls.
@@ -1206,6 +1326,9 @@ def _map_chunks(
           reviewed through ``_cached_review_chunk``, which reuses a prior
           map-phase outcome when the chunk's LLM input and this fingerprint are
           both unchanged (a miss simply recomputes, so results are identical).
+        - ``surface_by_path`` is the whole submission's ``_surface_by_path``;
+          each chunk's ``_sibling_surface`` (the other changed files' top-level
+          symbols) is fed to its reviewer and folded into its cache key.
 
     Postconditions:
         - Returns one outcome per chunk in input order. A content failure that
@@ -1232,7 +1355,10 @@ def _map_chunks(
     abandoned = threading.Event()
 
     def _run_one(chunk: ReviewChunk) -> _ChunkOutcome:
-        outcome = _cached_review_chunk(chunk_reviewer, chunk, base_input, context_fp)
+        sibling_surface = _sibling_surface(chunk, surface_by_path)
+        outcome = _cached_review_chunk(
+            chunk_reviewer, chunk, base_input, context_fp, sibling_surface
+        )
         with progress_lock:
             if not abandoned.is_set():
                 completed_count[0] += 1
@@ -1384,9 +1510,18 @@ def run_coordinator(
     # here (not per chunk) because it is identical for every chunk in this run.
     context_fp = _context_fingerprint(base_input, _review_model_fingerprint(llm))
 
+    # Top-level symbol surface of every changed file, so each chunk's reviewer can
+    # see what its *siblings* define/export and flag references to a symbol a
+    # sibling renamed or removed — a cross-file break a bounded single-chunk view
+    # would otherwise miss. Folded into each chunk's cache key so a sibling's
+    # surface change re-runs the dependent chunk while body-only edits stay cached.
+    surface_by_path = _surface_by_path(blocks)
+
     chunk_reviewer = ChunkReviewAgent(llm)
     outcome = _ChunkOutcome()
-    for per_chunk in _map_chunks(chunk_reviewer, chunks, base_input, context_fp, progress_callback):
+    for per_chunk in _map_chunks(
+        chunk_reviewer, chunks, base_input, context_fp, surface_by_path, progress_callback
+    ):
         outcome.absorb(per_chunk)
 
     # Total-failure guard: individual chunks degrade gracefully to a

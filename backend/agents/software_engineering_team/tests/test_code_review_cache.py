@@ -307,6 +307,102 @@ def test_model_fingerprint_falls_back_when_resolution_raises(
     assert coord._review_model_fingerprint(_CountingClient(_APPROVED)) == "_CountingClient"
 
 
+class _PromptCapturingClient(DummyLLMClient):
+    """Records every map-phase prompt; returns a fixed approval."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self.map_prompts: List[str] = []
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        with self._lock:
+            if _MAP_MARKER in prompt:
+                self.map_prompts.append(prompt)
+        return dict(_APPROVED)
+
+
+def _defined_file(symbol: str, body: str = "1") -> str:
+    """A ~12k Python file defining ``symbol`` (its own chunk; has a surface)."""
+    return f"def {symbol}():\n    return {body}\n" + ("# pad " + "x" * 12_000)
+
+
+# ---------------------------------------------------------------------------
+# Cross-file "sibling surface" mitigation
+# ---------------------------------------------------------------------------
+
+
+def test_symbol_surface_extracts_py_and_ts_symbols() -> None:
+    """Python def/class and TS export bindings (incl. export lists) are found."""
+    py = "def foo():\n    pass\n\nclass Bar:\n    pass\n"
+    assert coord._symbol_surface(py) == ["Bar", "foo"]
+
+    # Trailing comma / blank entry in the export list is skipped, not crashed on.
+    ts = "export function alpha() {}\nexport const beta = 1\nexport { gamma, delta as epsilon, }\n"
+    assert coord._symbol_surface(ts) == ["alpha", "beta", "epsilon", "gamma"]
+
+
+def test_surface_by_path_skips_headerless_and_symbolless() -> None:
+    """Only named blocks with a non-empty surface appear in the map."""
+    blocks = [
+        ("app/a.py", "def a():\n    pass\n"),
+        ("app/blank.py", "x = 1  # no top-level def/class/export\n"),
+        ("", "def orphan():\n    pass\n"),  # headerless → skipped
+    ]
+    surface = coord._surface_by_path(blocks)
+    assert surface == {"app/a.py": ["a"]}
+
+
+def test_sibling_surface_excludes_own_chunk_paths() -> None:
+    """A chunk sees only the *other* files' surfaces, path-sorted."""
+    from code_review_agent.models import FileSegment, ReviewChunk
+
+    chunk = ReviewChunk(segments=[FileSegment(path="app/a.py", content="def a(): pass")])
+    surface = {"app/a.py": ["a"], "app/b.py": ["foo"], "app/c.py": ["bar"]}
+    assert coord._sibling_surface(chunk, surface) == "app/b.py: foo\napp/c.py: bar"
+
+
+def test_sibling_surface_appears_in_chunk_prompt() -> None:
+    """File A's reviewer prompt lists the symbols its sibling B defines."""
+    client = _PromptCapturingClient()
+    data = _two_file_input(_defined_file("a_func"), _defined_file("foo"))
+
+    run_coordinator(client, data)
+
+    # Select A's own prompt by its code (B's prompt also mentions "a_func" in its
+    # sibling-surface block, so match the definition, not the bare name).
+    a_prompt = next(p for p in client.map_prompts if "def a_func" in p)
+    assert "app/b.py: foo" in a_prompt
+    assert "Other files changed in this submission" in a_prompt
+
+
+def test_sibling_rename_invalidates_dependent_chunk() -> None:
+    """Renaming a symbol in B re-reviews the unchanged dependent chunk A."""
+    client = _CountingClient(_APPROVED)
+    a = _defined_file("a_func")
+
+    run_coordinator(client, _two_file_input(a, _defined_file("foo")))
+    assert client.map_calls == 2  # A and B
+
+    # B renames foo -> bar: B's content changes (miss) AND A's sibling surface
+    # changes (foo -> bar), so A is re-reviewed too.
+    run_coordinator(client, _two_file_input(a, _defined_file("bar")))
+    assert client.map_calls == 4
+
+
+def test_sibling_body_only_edit_keeps_dependent_cached() -> None:
+    """A body-only change to B leaves B's surface — and A's cache — intact."""
+    client = _CountingClient(_APPROVED)
+    a = _defined_file("a_func")
+
+    run_coordinator(client, _two_file_input(a, _defined_file("foo", body="1")))
+    assert client.map_calls == 2
+
+    # B's body changes but its surface (def foo) does not: B misses, A stays cached.
+    run_coordinator(client, _two_file_input(a, _defined_file("foo", body="2")))
+    assert client.map_calls == 3
+
+
 def test_lru_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Past capacity, the oldest entry is evicted and re-reviewed on return."""
     monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "1")

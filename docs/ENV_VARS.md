@@ -317,7 +317,12 @@ degraded "not reviewed" outcomes are never stored, so a transient failure is
 retried for real next cycle. The cache covers the **map phase only** — the
 false-positive verification pass always re-runs against the current whole
 submission, so no coverage or fail-safe guarantee is weakened, and a changed
-profile, task context, or model invalidates the key.
+profile, task context, or model invalidates the key. Each chunk reviewer is also
+given the *sibling surface* (the top-level symbols the other changed files
+define/export), which is folded into the chunk's cache key: a sibling's
+surface change (a renamed/removed export) re-runs the dependent chunk so the
+reviewer can flag the now-broken cross-file reference, while a body-only sibling
+edit leaves the surface — and the cached chunk — unchanged.
 
 ### CODE_REVIEW_FALSE_POSITIVE_FILTER
 Default-on toggle for the false-positive verification pass. After the map-reduce
