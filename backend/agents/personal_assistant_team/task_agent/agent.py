@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from llm_service import LLMNotConfiguredError
+
 from ..models import Priority, TaskItem, TaskList, TaskStatus
 from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
@@ -229,6 +231,8 @@ class TaskAgent:
                 think=False,
                 objective="parse tasks from text",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to parse tasks (JSON extraction failed):\n%s", e)
             return ParseTasksResult(items=[])
@@ -427,6 +431,8 @@ class TaskAgent:
                 objective="categorize grocery items",
             )
             return data.get("categorized_items", [])
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to categorize items (JSON extraction failed):\n%s", e)
             return [{"description": item, "category": "other"} for item in items]
@@ -480,6 +486,8 @@ class TaskAgent:
                 objective="suggest list items",
             )
             return data.get("suggestions", [])
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to suggest items (JSON extraction failed):\n%s", e)
             return []
