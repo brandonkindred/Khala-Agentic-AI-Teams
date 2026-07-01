@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from llm_service import LLMNotConfiguredError
+
 from ..models import CalendarEvent
 from ..shared.credential_store import CredentialStore
 from ..shared.llm import JSONExtractionFailure, LLMClient
@@ -164,6 +166,8 @@ class CalendarAgent:
                 think=False,
                 objective="parse event from text",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to parse event from text (JSON extraction failed):\n%s", e)
             return EventFromTextResult(
@@ -353,6 +357,8 @@ class CalendarAgent:
                 think=False,
                 objective="suggest schedule slots",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to generate schedule suggestions (JSON extraction failed):\n%s", e)
             suggestions = []

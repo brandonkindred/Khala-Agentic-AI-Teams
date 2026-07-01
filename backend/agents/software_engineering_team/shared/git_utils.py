@@ -208,6 +208,44 @@ def checkout_branch(repo_path: str | Path, branch: str) -> Tuple[bool, str]:
     return True, f"Checked out {branch}"
 
 
+class UnsafeRepoPathError(ValueError):
+    """Raised when a relative file path would escape (or equal) the repo root.
+
+    Subclasses ``ValueError`` for backward compatibility; the dedicated type lets
+    callers catch *only* an unsafe-path rejection (traversal or empty key) and
+    convert it into a handled failure, without masking unrelated ``ValueError``s.
+    """
+
+
+def resolve_safe_repo_path(root: Path, rel_path: str) -> Path:
+    """Resolve ``rel_path`` under ``root``, rejecting empty/escaping paths.
+
+    The single containment gate shared by :func:`write_files_and_commit` and
+    :func:`software_engineering_team.shared.repo_writer.write_repo_text_files`,
+    so the traversal guard is applied uniformly on every write path rather than
+    on one and missing on the other.
+
+    Preconditions:
+        ``root`` is an already-resolved repo-root directory.
+    Postconditions:
+        Returns the absolute path to write for ``rel_path``. Raises
+        ``UnsafeRepoPathError`` when ``rel_path`` is empty, resolves to ``root``
+        itself, or lies outside ``root``. Containment is decided lexically
+        (``os.path.normpath``), so a symlinked component of ``rel_path`` is not
+        followed — only ``..``/leading-``/`` escapes are normalized away.
+    """
+    safe_rel_path = rel_path.lstrip("/")
+    if not safe_rel_path:
+        raise UnsafeRepoPathError(f"File path must not be empty: {rel_path!r}")
+    full_path = Path(os.path.normpath(root / safe_rel_path))
+    # Containment via ``parents`` avoids the ``str.startswith`` sibling-prefix
+    # pitfall (e.g. ``/repo`` vs ``/repo-evil``); the ``== root`` check rejects a
+    # key that resolves to the repo directory itself (e.g. ``"."`` / ``"a/.."``).
+    if full_path == root or root not in full_path.parents:
+        raise UnsafeRepoPathError(f"Path traversal detected: {rel_path}")
+    return full_path
+
+
 def write_files_and_commit(
     repo_path: str | Path,
     files_dict: Dict[str, str],
@@ -217,13 +255,23 @@ def write_files_and_commit(
     Write files to repo, git add, and commit on the current branch.
     files_dict: { "path/relative/to/repo": "content" }
 
-    Returns (success, message).
+    Returns (success, message). An unsafe path (empty, repo-root, or traversal)
+    is reported as ``(False, ...)`` rather than raised, so callers that unpack
+    ``(success, message)`` run their normal write-failure/cleanup path instead
+    of aborting on an exception. Validation happens before any file is written,
+    so a rejected batch leaves nothing partially written.
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return False, "Not a git repository"
-    for file_path, content in files_dict.items():
-        full_path = path / file_path
+    try:
+        resolved = [
+            (resolve_safe_repo_path(path, file_path), content)
+            for file_path, content in files_dict.items()
+        ]
+    except UnsafeRepoPathError as exc:
+        return False, f"Unsafe file path rejected: {exc}"
+    for full_path, content in resolved:
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
     code, out = _run_git(path, ["git", "add", "-A"])

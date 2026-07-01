@@ -121,6 +121,17 @@ rate window otherwise. The provider list is the sole source of LLM resolution: w
 `POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError` (there
 is no single-provider env fallback).
 
+### LLM_COMPACTION_CACHE_SIZE
+Capacity of the process-global memoization cache for `compact_text` (`llm_service/compaction.py`),
+default **256**. `compact_text` compacts oversized text (spec, architecture overview, existing
+codebase, etc.) with an LLM; the result is deterministic given `(model, budget, content)`, so it is
+cached in a bounded LRU keyed on that triple and reused on repeated identical calls — most notably
+the code review agent's review→fix→re-review loop, which hands the same shared context to every task
+and every cycle. Only genuine full compactions are cached; every fallback path (LLM failure, empty
+result, or a chunked run with any degraded chunk) is retried rather than frozen. Set to `0` to
+disable the cache (pure passthrough); a value below 0 is floored to 0, and unparseable values fall
+back to the default.
+
 ---
 
 ## Temporal, Security, and Logging
@@ -308,6 +319,16 @@ Absolute ceilings on the spec / architecture-overview / existing-codebase
 excerpts repeated in every review map call. Defaults `16000` / `4000` / `8000`,
 floors `1000` / `500` / `500`.
 
+### CODE_REVIEW_SIBLING_SURFACE_CHARS
+Cap (chars) on the cross-file "sibling surface" block added to every map prompt —
+the top-level symbols (Python `def`/`class`, TS/JS exports) defined by the *other*
+changed files in the submission, shown so the reviewer can flag a reference to a
+symbol a sibling renamed or removed. Default `2000`, floor `0` (`0` drops the
+block). This single value is reserved in the per-chunk code budget
+(`compute_code_review_chunk_chars`), used to truncate `_sibling_surface`, and
+sliced in the prompt, so the reservation, the cache key, and the prompt can never
+diverge.
+
 ### CODE_REVIEW_MAP_PARALLELISM
 Max concurrent review LLM calls per review run, shared by both phases: the map
 phase (chunk reviews) and the later false-positive verification phase (one call
@@ -323,6 +344,27 @@ bisected. Default `8000`, floor `1000`.
 Max bisect-and-retry recursion depth for a failing review chunk before the run
 fails with `CodeReviewUnavailableError`. Default `3`, floor `0` (`0` disables
 bisection; a chunk then gets only the single same-input retry).
+
+### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
+Max entries in the coordinator's process-global map-phase outcome cache. The
+review→fix→re-review loop re-invokes the whole coordinator after every batch fix,
+but a fix only mutates the files that had issues — so most chunks are byte-identical
+to the previous cycle. The cache reuses the prior map-phase result for any chunk
+whose exact LLM input (rendered `### path ###` content + segment notes) and context
+fingerprint (task/spec/architecture/acceptance/profile inputs plus the resolved
+review model) are unchanged, so only the chunks the fix actually touched go back
+through the LLM. Default `512`, floor `0` (`0` disables the cache entirely — every
+chunk is reviewed from scratch). Only fully-reviewed chunk outcomes are cached;
+degraded "not reviewed" outcomes are never stored, so a transient failure is
+retried for real next cycle. The cache covers the **map phase only** — the
+false-positive verification pass always re-runs against the current whole
+submission, so no coverage or fail-safe guarantee is weakened, and a changed
+profile, task context, or model invalidates the key. Each chunk reviewer is also
+given the *sibling surface* (the top-level symbols the other changed files
+define/export), which is folded into the chunk's cache key: a sibling's
+surface change (a renamed/removed export) re-runs the dependent chunk so the
+reviewer can flag the now-broken cross-file reference, while a body-only sibling
+edit leaves the surface — and the cached chunk — unchanged.
 
 ### CODE_REVIEW_FALSE_POSITIVE_FILTER
 Default-on toggle for the false-positive verification pass. After the map-reduce
