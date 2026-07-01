@@ -57,11 +57,15 @@ _ANALYSIS_NOOP_JOB_ID = "agentic-team-analysis-noop"
 # empty, so the run still advances and the endpoint's min-length check passes.
 _NO_ANSWER_PLACEHOLDER = "(no answer provided)"
 
-# Terminal pipeline statuses, normalized to the founder poll contract's terminal
-# states. ``waiting_for_input`` is handled separately (it becomes a question).
-# Both British ("cancelled") and American ("canceled") spellings are accepted
-# because the upstream pipeline status string is not normalized at the source.
+# Terminal pipeline statuses. ``waiting_for_input`` is handled separately (it
+# becomes a question). Both British ("cancelled") and American ("canceled")
+# spellings are accepted as *input* because the upstream pipeline status string
+# is not normalized at the source; ``poll_build`` below rewrites either to the
+# single canonical "cancelled" before returning, so callers (the orchestrator's
+# ``_run_phase``, shared across every target-team adapter) only ever need to
+# match one spelling.
 _TERMINAL = {"completed", "failed", "cancelled", "canceled"}
+_CANCELLED_SPELLINGS = {"cancelled", "canceled"}
 
 
 class AgenticTeamAdapter:
@@ -258,6 +262,13 @@ class AgenticTeamAdapter:
             }
 
         if status in _TERMINAL:
+            # Rewrite either cancellation spelling to the canonical "cancelled"
+            # so _run_phase's exact-string terminal check (shared by every
+            # adapter) recognizes it — otherwise a pipeline that reports the
+            # American spelling would poll for MAX_POLL_ATTEMPTS and time out
+            # instead of failing promptly with a clear "was cancelled" error.
+            if status in _CANCELLED_SPELLINGS:
+                status = "cancelled"
             return {"status": status, "error": run.get("error")}
 
         return {"status": status or "running"}

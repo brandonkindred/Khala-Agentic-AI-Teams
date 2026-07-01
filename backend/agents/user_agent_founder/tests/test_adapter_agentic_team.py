@@ -511,9 +511,12 @@ def test_poll_build_terminal_and_error_mapping():
     assert adapter.poll_build(fake, "boom") == {"status": "failed", "error": "kaboom"}
     # 'cancelled' is a terminal status (matches the British spelling in _TERMINAL).
     assert adapter.poll_build(fake, "stop") == {"status": "cancelled", "error": None}
-    # 'canceled' (American spelling) is terminal too — the upstream status string
-    # is not normalized, so both spellings must map to a terminal result.
-    assert adapter.poll_build(fake, "halt") == {"status": "canceled", "error": None}
+    # 'canceled' (American spelling) is terminal too, and the *returned* status
+    # is rewritten to the canonical 'cancelled' — the upstream status string
+    # is not normalized at the source, but the orchestrator's _run_phase does
+    # an exact-string terminal check against one spelling, so a raw 'canceled'
+    # would poll for MAX_POLL_ATTEMPTS and time out instead of failing promptly.
+    assert adapter.poll_build(fake, "halt") == {"status": "cancelled", "error": None}
     # HTTP error carries the code plus a truncated body for diagnostics.
     gone = adapter.poll_build(fake, "gone")
     assert gone["_poll_error"] == 503
@@ -687,6 +690,41 @@ def test_persona_drives_agentic_team_end_to_end(stub_orchestrator_io, monkeypatc
     assert answered["json"] == {"input": "punchy founder voice"}
     # The decision was recorded for the audit trail.
     assert any(d.get("answer_text") == "punchy founder voice" for d in store.decisions)
+
+
+def test_persona_run_cancelled_with_american_spelling_fails_promptly(
+    stub_orchestrator_io, monkeypatch
+):
+    """A pipeline that reports the American 'canceled' spelling must be
+    recognized as terminal by the orchestrator's _run_phase (which does an
+    exact-string match against 'cancelled') and fail promptly with a clear
+    cancellation error — not poll for MAX_POLL_ATTEMPTS and time out."""
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    orchestrator = stub_orchestrator_io
+    run = _FakeRun(run_id="run-cancel-american", spec_content=None)
+    store = _FakeStore(run)
+    agent = MagicMock()
+    agent.generate_spec.return_value = "# Generated spec"
+
+    fake = _FakeHttpxClient(
+        post_responses={"/test-pipeline/runs": _FakeResponse(201, {"run_id": "run-pipe"})},
+        get_responses={
+            "/test-pipeline/runs/run-pipe": [_FakeResponse(200, {"status": "canceled"})],
+        },
+    )
+    monkeypatch.setattr(orchestrator.httpx, "Client", lambda *a, **kw: fake)
+
+    orchestrator.run_workflow(
+        "run-cancel-american", store, agent, AgenticTeamAdapter("t1", process_id="proc1")
+    )
+
+    assert run.status == "failed"
+    # Fails on the *first* poll with the cancellation message, not after
+    # exhausting MAX_POLL_ATTEMPTS with a generic timeout message.
+    assert "cancelled" in run.error.lower()
+    assert "timed out" not in run.error.lower()
+    assert len(fake.gets) == 1
 
 
 if __name__ == "__main__":
