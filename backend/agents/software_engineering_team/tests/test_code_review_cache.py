@@ -256,6 +256,50 @@ def test_degraded_outcome_is_not_cached() -> None:
     assert result.approved is True
 
 
+class _FailFullThenBisectClient(DummyLLMClient):
+    """Fails the full chunk (both markers present) but approves each bisected half.
+
+    Simulates a recoverable content failure on the full-chunk input that only
+    succeeds once _review_chunk_with_recovery bisects it: after the split, no
+    single half carries both markers, so each half is approved.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self.map_calls = 0
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        with self._lock:
+            if _MAP_MARKER in prompt:
+                self.map_calls += 1
+        if "S_MARK_START" in prompt and "E_MARK_END" in prompt:
+            raise LLMSemanticExhaustionError("full chunk too big")
+        return dict(_APPROVED)
+
+
+def test_bisected_recovery_outcome_is_not_cached() -> None:
+    """A chunk that only succeeds via bisection is re-attempted next cycle, not cached."""
+    # One chunk (<= the map budget so it isn't pre-split) but >= 2x the min split
+    # size (2 x 8000) so recovery can bisect the single over-large segment.
+    body = "y = 1\n" * 2_900  # ~17.4k chars across thousands of lines
+    content = "S_MARK_START\n" + body + "E_MARK_END\n"
+    data = _one_file_input(content=content)
+
+    client = _FailFullThenBisectClient()
+    first = run_coordinator(client, data)
+    before = client.map_calls
+    assert before >= 3  # full chunk (fails) + the >=2 bisected halves (succeed)
+    assert first.approved is True  # halves approved; no not-reviewed finding
+
+    # Identical re-run: the bisected aggregate must NOT have been cached, so the
+    # full chunk is re-attempted (fails, bisects) again — the same work repeats
+    # rather than a 0-call cache hit. (A cache hit would leave map_calls == before.)
+    second = run_coordinator(client, data)
+    assert client.map_calls == 2 * before
+    assert second.approved is True
+
+
 def test_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     """Size 0 disables the cache: every run re-invokes the model, as before."""
     monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "0")

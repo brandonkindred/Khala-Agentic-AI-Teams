@@ -599,11 +599,13 @@ def _cached_review_chunk(
         - On a hit, returns a deep clone of the stored outcome (never the shared
           instance), so the caller may mutate it freely; findings/verdicts are
           reproduced identically.
-        - On a miss, runs the real review and — only when the outcome is a fully
-          reviewed chunk (no ``not_reviewed_issues`` and at least one
-          ``approved_flags`` entry) — stores a clone under the chunk key,
-          evicting the oldest entry past capacity. Degraded outcomes are never
-          cached, so a transient failure is retried for real next cycle.
+        - On a miss, runs the real review and — only when the outcome came from
+          the exact full-chunk LLM input (no ``not_reviewed_issues`` and
+          *exactly one* ``approved_flags`` entry) — stores a clone under the
+          chunk key, evicting the oldest entry past capacity. Degraded outcomes
+          (a transient failure is retried for real next cycle) and bisected
+          recoveries (>= 2 sub-reviews, reduced context — re-attempted at full
+          context next cycle) are never cached.
         - Never suppresses ``_review_chunk_with_recovery``'s exceptions
           (infrastructure failure, unexpected defect): they propagate unchanged.
     """
@@ -620,10 +622,16 @@ def _cached_review_chunk(
 
     outcome = _review_chunk_with_recovery(reviewer, chunk, base_input, sibling_surface)
 
-    # Only cache a fully-reviewed chunk. A degraded (not-reviewed) outcome must
-    # be retried for real next cycle, and an outcome with no LLM verdict never
-    # represents a settled review.
-    if not outcome.not_reviewed_issues and outcome.approved_flags:
+    # Cache only an outcome produced from the *exact full-chunk* LLM input: no
+    # degraded ("not reviewed") coverage findings, and exactly one sub-review.
+    # A degraded outcome must be retried for real next cycle. Requiring a single
+    # sub-review also excludes a bisected recovery (the full chunk raised a
+    # recoverable content error and only succeeded after splitting): its aggregate
+    # has >= 2 approved_flags and reflects lower-context, split-across-the-boundary
+    # reviews. Freezing that under the full-chunk key would keep serving the
+    # reduced-fidelity result on later identical cycles instead of retrying the
+    # full chunk — so we skip it and let the next cycle re-attempt full context.
+    if not outcome.not_reviewed_issues and len(outcome.approved_flags) == 1:
         with _CHUNK_OUTCOME_CACHE_LOCK:
             _CHUNK_OUTCOME_CACHE[key] = outcome.clone()
             _CHUNK_OUTCOME_CACHE.move_to_end(key)
