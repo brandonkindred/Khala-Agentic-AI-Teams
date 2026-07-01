@@ -17,6 +17,7 @@ from typing import Any, Dict
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.phases.documentation import (
+    MAX_DOCUMENTATION_ITERATIONS,
     _write_files,
     run_documentation_phase_impl,
 )
@@ -25,8 +26,6 @@ from .. import models as _models
 from ..models import DocumentationPhaseResult, ExecutionResult, PlanningResult, ToolAgentKind
 
 __all__ = ["MAX_DOCUMENTATION_ITERATIONS", "run_documentation_phase", "_write_files"]
-
-MAX_DOCUMENTATION_ITERATIONS = 100
 
 
 def run_documentation_phase(

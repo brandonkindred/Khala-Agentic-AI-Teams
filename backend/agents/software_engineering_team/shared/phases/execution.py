@@ -22,7 +22,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.repo_writer import write_repo_text_files
 from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
 
@@ -69,20 +71,9 @@ class ReviewDependencies:
         self.tool_agents = tool_agents or {}
 
 
-def _write_microtask_files(repo_path: Path, files: Dict[str, str]) -> None:
-    """Write microtask output files to the repository.
-
-    Preconditions:
-        ``repo_path`` is a directory; ``files`` maps relative paths to content.
-    Postconditions:
-        Each file is written under ``repo_path`` (parents created); a leading
-        ``/`` in a key is stripped so writes stay inside ``repo_path``.
-    """
-    for rel_path, content in files.items():
-        safe_rel_path = rel_path.lstrip("/")
-        file_path = repo_path / safe_rel_path
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(content, encoding="utf-8")
+# Writing microtask output files is the same guarded operation as the
+# documentation phase's writer — both delegate to the one shared implementation.
+_write_microtask_files = write_repo_text_files
 
 
 def _run_general_microtask_impl(
@@ -96,8 +87,7 @@ def _run_general_microtask_impl(
     execution_prompt: str,
     parse_files_and_summary: Callable[[str], Dict[str, Any]],
     profile: StackProfile,
-    agent_factory: Callable[..., Any],
-    resolve_model: Callable[[LLMClient], Any],
+    runner: LlmRunner,
 ) -> Dict[str, str]:
     """Use the LLM to implement a general (non-specialist) microtask.
 
@@ -120,7 +110,7 @@ def _run_general_microtask_impl(
     if profile.execution_has_language_conventions:
         fmt["language_conventions"] = profile.conventions_for(language)
     prompt = execution_prompt.format(**fmt)
-    raw = (lambda _r: str(_r))(agent_factory(model=resolve_model(llm))(prompt)).strip()
+    raw = runner.run(llm, prompt)
     data = parse_files_and_summary(raw)
     files = data.get("files") or {}
 

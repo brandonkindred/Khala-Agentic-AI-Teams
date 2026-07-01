@@ -315,3 +315,31 @@ def write_agent_output(
         )
 
     return write_files_and_commit(Path(repo_path).resolve(), validated_files, commit_message)
+
+
+def write_repo_text_files(repo_path: Path, files: Dict[str, str]) -> None:
+    """Write text files under ``repo_path``, rejecting path-traversal escapes.
+
+    Shared by the code-v2 documentation and execution phases (which previously
+    each carried an identical ``_write_files`` / ``_write_microtask_files``).
+
+    Preconditions:
+        ``repo_path`` is a directory; ``files`` maps relative paths to text
+        content.
+    Postconditions:
+        Each file is written under ``repo_path`` (parents created). A leading
+        ``/`` is stripped; any key that resolves outside ``repo_path`` (e.g. via
+        ``..``) raises ``ValueError`` before that file is written.
+    Invariants:
+        No file is ever written outside ``repo_path.resolve()``.
+    """
+    root = Path(repo_path).resolve()
+    for rel_path, content in files.items():
+        safe_rel_path = rel_path.lstrip("/")
+        full_path = (root / safe_rel_path).resolve()
+        # Containment via ``parents`` avoids the ``str.startswith`` sibling-prefix
+        # pitfall (e.g. ``/repo`` vs ``/repo-evil``).
+        if full_path != root and root not in full_path.parents:
+            raise ValueError(f"Path traversal detected: {rel_path}")
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(content, encoding="utf-8")

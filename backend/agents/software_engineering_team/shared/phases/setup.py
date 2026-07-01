@@ -18,6 +18,7 @@ from typing import Callable, Set, Tuple
 from software_engineering_team.shared.git_utils import (
     ensure_development_branch,
     initialize_new_repo,
+    write_files_and_commit,
 )
 from software_engineering_team.shared.v2_models import SetupResult
 
@@ -104,8 +105,6 @@ def _ensure_readme_with_title(path: Path, title: str) -> None:
     readme.write_text(content, encoding="utf-8")
     # Commit if we have git and changes
     try:
-        from software_engineering_team.shared.git_utils import write_files_and_commit
-
         write_files_and_commit(path, {"README.md": content}, "docs: add README with project title")
     except Exception as e:
         logger.warning("Could not commit README: %s", e)

@@ -17,12 +17,10 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional
 
-from strands import Agent
-
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.stack_profile import StackProfile
-from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +113,7 @@ def run_planning_impl(
     planning_prompt: str,
     parse_planning_template: Callable[[str], Dict[str, Any]],
     models: ModuleType,
+    runner: LlmRunner,
 ) -> Any:
     """Execute the Planning phase and return a PlanningResult.
 
@@ -149,7 +148,7 @@ def run_planning_impl(
         profile.planning_progress_label,
         language,
     )
-    raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+    raw = runner.run(llm, prompt)
     raw_parsed = parse_planning_template(raw)
     result = parse_planning_output(raw_parsed, language, models=models)
     logger.info(
@@ -202,6 +201,7 @@ def plan_fixes_impl(  # pragma: no cover  # integration-only: LLM-driven re-plan
     planning_fixes_prompt: str,
     parse_planning_template: Callable[[str], Dict[str, Any]],
     models: ModuleType,
+    runner: LlmRunner,
 ) -> List[Any]:
     """Create microtasks to fix unresolved review issues (escalation from problem-solving).
 
@@ -230,7 +230,7 @@ def plan_fixes_impl(  # pragma: no cover  # integration-only: LLM-driven re-plan
     logger.info(
         "[%s] Planning fix microtasks for %d unresolved issues", task.id, len(unresolved_issues)
     )
-    raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+    raw = runner.run(llm, prompt)
     raw_parsed = parse_planning_template(raw)
     result = parse_planning_output(raw_parsed, language, models=models)
     return result.microtasks

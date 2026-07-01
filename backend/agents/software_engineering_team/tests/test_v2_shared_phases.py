@@ -15,17 +15,22 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from software_engineering_team.backend_code_v2_team import models as be_models
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskStatus, TaskType
 from software_engineering_team.shared.phases import execution as sh_exec
 from software_engineering_team.shared.phases import planning as sh_plan
+from software_engineering_team.shared.phases import problem_solving as sh_ps
 from software_engineering_team.shared.phases import setup as sh_setup
 from software_engineering_team.shared.prompts import (
     build_execution_prompt,
     build_planning_prompt,
     build_problem_solving_single_issue_prompt,
 )
+from software_engineering_team.shared.repo_writer import write_repo_text_files
 from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.strands_model import LlmRunner
 
 # --- helpers ---------------------------------------------------------------
 
@@ -38,13 +43,18 @@ class _StubAgent:
         return self._resp
 
 
-def _agent_factory(resp: str):
-    """Return an ``agent_factory(model=...) -> callable(prompt) -> str`` stub."""
+def _runner(resp: str, *, on_prompt=None) -> LlmRunner:
+    """Build an ``LlmRunner`` whose agent returns ``resp`` (recording the prompt)."""
 
     def factory(*, model=None):  # noqa: ARG001 - model is resolved but unused by the stub
-        return _StubAgent(resp)
+        def agent(prompt: str) -> str:
+            if on_prompt is not None:
+                on_prompt(prompt)
+            return resp
 
-    return factory
+        return agent
+
+    return LlmRunner(agent_factory=factory, resolve_model=lambda _llm: None)
 
 
 def _task() -> Task:
@@ -202,13 +212,6 @@ def test_parse_planning_output_fallback_and_skip():
 def test_run_general_microtask_impl_gates_conventions():
     seen_prompt = {}
 
-    def capturing_factory(*, model=None):  # noqa: ARG001
-        def agent(prompt: str) -> str:
-            seen_prompt["prompt"] = prompt
-            return "resp"
-
-        return agent
-
     files = sh_exec._run_general_microtask_impl(
         llm=object(),
         microtask=SimpleNamespace(description="do it", title="t"),
@@ -219,8 +222,7 @@ def test_run_general_microtask_impl_gates_conventions():
         execution_prompt="conv={language_conventions} desc={microtask_description}",
         parse_files_and_summary=lambda _r: {"files": {"a.py": "x"}},
         profile=_BACKEND_PROFILE,
-        agent_factory=capturing_factory,
-        resolve_model=lambda _llm: None,
+        runner=_runner("resp", on_prompt=lambda p: seen_prompt.update(prompt=p)),
     )
     assert files == {"a.py": "x"}
     # backend profile injected the conventions into the prompt.
@@ -240,8 +242,7 @@ def test_run_general_microtask_impl_omits_conventions_for_frontend():
         execution_prompt="desc={microtask_description} arch={architecture_context}",
         parse_files_and_summary=lambda _r: {"files": {}},
         profile=_FRONTEND_PROFILE,
-        agent_factory=_agent_factory("resp"),
-        resolve_model=lambda _llm: None,
+        runner=_runner("resp"),
     )
     assert files == {}
 
@@ -391,12 +392,11 @@ def test_run_setup_impl_on_existing_repo(tmp_path: Path):
 
 
 def test_ensure_readme_logs_when_commit_raises(tmp_path: Path, monkeypatch, caplog):
-    from software_engineering_team.shared import git_utils
-
     def _raise(*_a, **_k):
         raise RuntimeError("no git")
 
-    monkeypatch.setattr(git_utils, "write_files_and_commit", _raise)
+    # setup.py now imports write_files_and_commit at module top, so patch it there.
+    monkeypatch.setattr(sh_setup, "write_files_and_commit", _raise)
     with caplog.at_level("WARNING"):
         sh_setup._ensure_readme_with_title(tmp_path, "Title")
     assert "could not commit readme" in caplog.text.lower()
@@ -451,8 +451,6 @@ def test_run_planning_impl_appends_tool_agent_recommendations(monkeypatch):
         "depends_on:\n---\n## END MICROTASKS ##\n## LANGUAGE ##\npython\n## END LANGUAGE ##\n"
         "## SUMMARY ##\nbase\n## END SUMMARY ##\n"
     )
-    monkeypatch.setattr(sh_plan, "Agent", lambda *a, **kw: _StubAgent(template))
-    monkeypatch.setattr(sh_plan, "resolve_text_mode_strands_model", lambda _llm: object())
 
     class _PlanAgent:
         def plan(self, _inp):
@@ -480,8 +478,119 @@ def test_run_planning_impl_appends_tool_agent_recommendations(monkeypatch):
             "summary": "base",
         },
         models=be_models,
+        runner=_runner(template),
     )
     # The planning tool agent's recommendation was appended to the summary; the
     # raising agent was caught and skipped.
     assert "use an index" in result.summary
     assert result.microtasks[0].id == "mt-1"
+
+
+# --- LlmRunner + shared writer + problem_solving ---------------------------
+
+
+def test_llm_runner_run_stringifies_and_strips():
+    captured = {}
+
+    def factory(*, model=None):
+        captured["model"] = model
+
+        def agent(prompt: str):
+            captured["prompt"] = prompt
+            return "  spaced result \n"
+
+        return agent
+
+    runner = LlmRunner(agent_factory=factory, resolve_model=lambda llm: f"model:{llm}")
+    out = runner.run("LLM", "the prompt")
+    assert out == "spaced result"  # stringified + stripped
+    assert captured == {"model": "model:LLM", "prompt": "the prompt"}
+
+
+def test_write_repo_text_files_rejects_traversal(tmp_path: Path):
+    write_repo_text_files(tmp_path, {"/pkg/mod.py": "content", "top.txt": "t"})
+    assert (tmp_path / "pkg" / "mod.py").read_text(encoding="utf-8") == "content"
+    assert (tmp_path / "top.txt").read_text(encoding="utf-8") == "t"
+
+    with pytest.raises(ValueError, match="Path traversal"):
+        write_repo_text_files(tmp_path, {"../escape.py": "x"})
+    # A sibling-prefixed directory must not be mistaken for containment.
+    assert not (tmp_path.parent / "escape.py").exists()
+
+
+def _issue(**kw):
+    base = dict(
+        source="review",
+        severity="high",
+        file_path="a.py",
+        description="bug",
+        recommendation="fix it",
+    )
+    base.update(kw)
+    return be_models.ReviewIssue(**base)
+
+
+def test_run_batch_coding_fixes_impl_skips_non_dict_issues_addressed():
+    """A non-dict entry in issues_addressed must be skipped, not crash."""
+    parsed = {
+        "files": {"a.py": "fixed"},
+        # Malformed: one bare string alongside a valid dict entry. addressed_count
+        # (2) < len(actionable) (3), so the unresolved-computation block runs and
+        # must skip the non-dict entry instead of calling ``.get`` on a str.
+        "issues_addressed": ["oops-not-a-dict", {"issue_index": 2}],
+        "summary": "did it",
+    }
+    result = sh_ps.run_batch_coding_fixes_impl(
+        llm=object(),
+        microtask=SimpleNamespace(id="mt-1"),
+        issues=[_issue(), _issue(description="bug2"), _issue(description="bug3")],
+        current_files={"a.py": "orig"},
+        language="python",
+        repo_path="",
+        task_id="t1",
+        phase_name="code_review",
+        detail_callback=None,
+        profile=_BACKEND_PROFILE,
+        models=be_models,
+        batch_fix_prompt="{language_conventions}{issue_count}{phase_name}{formatted_issues}{current_code}",
+        parse_batch_fix_template=lambda _raw: parsed,
+        runner=_runner("ignored — parse stub returns the parsed dict"),
+    )
+    # No crash on the bare string; issue 2 (index 1) addressed, issues 1 & 3 unresolved.
+    assert result.files["a.py"] == "fixed"
+    assert len(result.unresolved_issues) == 2
+
+
+def test_fix_issues_one_at_a_time_impl_resolves_then_reports_unresolved():
+    """First issue resolves via a file fix; second never resolves → unresolved."""
+    responses = iter(
+        [
+            "## FILE a.py ##\nfixed\n## RESOLVED ##\ntrue\n## END RESOLVED ##\n",  # issue 1 fixed
+            "## RESOLVED ##\nfalse\n",  # issue 2 attempt → no files, not resolved
+        ]
+    )
+    parses = iter(
+        [
+            {"files": {"a.py": "fixed"}, "resolved": True, "summary": "s", "root_cause": "rc"},
+            {"files": {}, "resolved": False},
+        ]
+    )
+
+    runner = LlmRunner(
+        agent_factory=lambda *, model=None: lambda _p: next(responses),
+        resolve_model=lambda _llm: None,
+    )
+    merged, fixes, unresolved = sh_ps._fix_issues_one_at_a_time_impl(
+        llm=object(),
+        actionable=[_issue(), _issue(description="bug2")],
+        current_files={"a.py": "orig"},
+        lang_conv="PY",
+        task_id="t1",
+        single_issue_prompt="{source}{severity}{description}{file_path}{recommendation}{current_code}",
+        parse_single=lambda _raw: next(parses),
+        has_language_conventions=False,
+        runner=runner,
+    )
+    assert merged["a.py"] == "fixed"
+    assert len(fixes) == 1 and fixes[0]["fix"] == "s"
+    assert len(unresolved) == 1

@@ -16,12 +16,18 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from strands import Agent
+
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.phases.planning import (
     parse_planning_output,
     plan_fixes_impl,
     run_planning_impl,
+)
+from software_engineering_team.shared.strands_model import (
+    LlmRunner,
+    resolve_text_mode_strands_model,
 )
 
 from .. import models as _models
@@ -31,6 +37,12 @@ from ..prompts import PLANNING_FIXES_FOR_ISSUES_PROMPT, PLANNING_PROMPT
 from ._profile import PROFILE, _detect_language
 
 logger = logging.getLogger(__name__)
+
+
+def _llm_runner() -> LlmRunner:
+    """Build the LLM runner from this module's globals so tests can monkeypatch them."""
+    return LlmRunner(agent_factory=Agent, resolve_model=resolve_text_mode_strands_model)
+
 
 __all__ = [
     "run_planning",
@@ -82,6 +94,7 @@ def run_planning(
         planning_prompt=PLANNING_PROMPT,
         parse_planning_template=parse_planning_template,
         models=_models,
+        runner=_llm_runner(),
     )
 
 
@@ -109,6 +122,7 @@ def plan_fixes_for_unresolved_issues(  # pragma: no cover  # integration-only: L
         planning_fixes_prompt=PLANNING_FIXES_FOR_ISSUES_PROMPT,
         parse_planning_template=parse_planning_template,
         models=_models,
+        runner=_llm_runner(),
     )
     if unresolved_issues:
         logger.info("[%s] Planned %d fix microtasks", task.id, len(microtasks))

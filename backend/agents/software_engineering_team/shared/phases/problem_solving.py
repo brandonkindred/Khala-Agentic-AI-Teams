@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +110,7 @@ def run_batch_coding_fixes_impl(
     models: ModuleType,
     batch_fix_prompt: str,
     parse_batch_fix_template: Callable[[str], Dict[str, Any]],
-    agent_factory: Callable[..., Any],
-    resolve_model: Callable[[LLMClient], Any],
+    runner: LlmRunner,
 ) -> Any:
     """Fix ALL issues from a review phase in a single batch.
 
@@ -163,7 +163,7 @@ def run_batch_coding_fixes_impl(
     )
 
     try:
-        raw = (lambda _r: str(_r))(agent_factory(model=resolve_model(llm))(prompt)).strip()
+        raw = runner.run(llm, prompt)
     except Exception as exc:
         logger.error(
             "[%s] Microtask %s: batch fix LLM call failed: %s",
@@ -192,6 +192,10 @@ def run_batch_coding_fixes_impl(
     if addressed_count < len(actionable):
         addressed_indices = set()
         for item in issues_addressed:
+            if not isinstance(item, dict):
+                # Defensive: the LLM may emit a non-dict entry (e.g. a bare
+                # string) which has no ``.get`` — skip it rather than crash.
+                continue
             try:
                 idx = int(item.get("issue_index", 0)) - 1
                 if 0 <= idx < len(actionable):
@@ -242,8 +246,7 @@ def _fix_issues_one_at_a_time_impl(
     single_issue_prompt: str,
     parse_single: Callable[[str], Dict[str, Any]],
     has_language_conventions: bool,
-    agent_factory: Callable[..., Any],
-    resolve_model: Callable[[LLMClient], Any],
+    runner: LlmRunner,
     microtask_id: str = "",
     phase_name: str = "",
     detail_callback: Optional[Callable[[str], None]] = None,
@@ -305,7 +308,7 @@ def _fix_issues_one_at_a_time_impl(
                 fmt["language_conventions"] = lang_conv
             prompt = single_issue_prompt.format(**fmt)
             try:
-                raw = str(agent_factory(model=resolve_model(llm))(prompt)).strip()
+                raw = runner.run(llm, prompt)
             except Exception as exc:
                 logger.warning(
                     "[%s] %s%sfix LLM call failed (issue %d, attempt %d): %s",
@@ -412,8 +415,7 @@ def run_problem_solving_impl(
     models: ModuleType,
     single_issue_prompt: str,
     parse_single: Callable[[str], Dict[str, Any]],
-    agent_factory: Callable[..., Any],
-    resolve_model: Callable[[LLMClient], Any],
+    runner: LlmRunner,
 ) -> Any:
     """Analyse review issues and produce fixes, one issue at a time.
 
@@ -446,8 +448,7 @@ def run_problem_solving_impl(
         single_issue_prompt=single_issue_prompt,
         parse_single=parse_single,
         has_language_conventions=profile.problem_solving_has_language_conventions,
-        agent_factory=agent_factory,
-        resolve_model=resolve_model,
+        runner=runner,
     )
     summary_parts: List[str] = []
 
@@ -508,8 +509,7 @@ def run_problem_solving_for_microtask_impl(
     models: ModuleType,
     single_issue_prompt: str,
     parse_single: Callable[[str], Dict[str, Any]],
-    agent_factory: Callable[..., Any],
-    resolve_model: Callable[[LLMClient], Any],
+    runner: LlmRunner,
 ) -> Any:
     """Fix issues for a single microtask, one issue at a time.
 
@@ -545,8 +545,7 @@ def run_problem_solving_for_microtask_impl(
         single_issue_prompt=single_issue_prompt,
         parse_single=parse_single,
         has_language_conventions=profile.problem_solving_has_language_conventions,
-        agent_factory=agent_factory,
-        resolve_model=resolve_model,
+        runner=runner,
         microtask_id=microtask_id,
         detail_callback=detail_callback,
     )

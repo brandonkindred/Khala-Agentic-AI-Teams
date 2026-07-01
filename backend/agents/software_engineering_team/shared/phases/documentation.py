@@ -16,25 +16,11 @@ from typing import Any, Dict
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.repo_writer import write_repo_text_files as _write_files
 
 logger = logging.getLogger(__name__)
 
-
-def _write_files(repo_path: Path, files: Dict[str, str]) -> None:
-    """Write files to disk.
-
-    Preconditions:
-        ``repo_path`` is a directory path; ``files`` maps relative paths to
-        text content.
-    Postconditions:
-        Each file is written under ``repo_path`` (parents created); leading
-        ``/`` in a key is stripped so writes stay inside ``repo_path``.
-    """
-    for rel_path, content in files.items():
-        safe_rel_path = rel_path.lstrip("/")
-        full_path = repo_path / safe_rel_path
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_text(content, encoding="utf-8")
+MAX_DOCUMENTATION_ITERATIONS = 100
 
 
 def run_documentation_phase_impl(

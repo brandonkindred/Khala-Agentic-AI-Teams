@@ -30,7 +30,10 @@ from software_engineering_team.shared.phases.execution import (
     _write_microtask_files,
     run_execution_impl,
 )
-from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+from software_engineering_team.shared.strands_model import (
+    LlmRunner,
+    resolve_text_mode_strands_model,
+)
 
 from .. import models as _models
 from ..models import (
@@ -53,6 +56,12 @@ from ._profile import PROFILE
 logger = logging.getLogger(__name__)
 
 ToolAgentRunner = Callable[[ToolAgentInput], ToolAgentOutput]
+
+
+def _llm_runner() -> LlmRunner:
+    """Build the LLM runner from this module's globals so tests can monkeypatch them."""
+    return LlmRunner(agent_factory=Agent, resolve_model=resolve_text_mode_strands_model)
+
 
 __all__ = [
     "ReviewDependencies",
@@ -89,8 +98,7 @@ def _run_general_microtask(
         execution_prompt=EXECUTION_PROMPT,
         parse_files_and_summary=parse_files_and_summary_template,
         profile=PROFILE,
-        agent_factory=Agent,
-        resolve_model=resolve_text_mode_strands_model,
+        runner=_llm_runner(),
     )
 
 

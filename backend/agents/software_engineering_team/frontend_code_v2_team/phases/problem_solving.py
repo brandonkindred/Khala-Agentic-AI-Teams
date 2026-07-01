@@ -26,7 +26,10 @@ from software_engineering_team.shared.phases.problem_solving import (
     run_problem_solving_for_microtask_impl,
     run_problem_solving_impl,
 )
-from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+from software_engineering_team.shared.strands_model import (
+    LlmRunner,
+    resolve_text_mode_strands_model,
+)
 
 from .. import models as _models
 from ..models import Microtask, ProblemSolvingResult, ReviewIssue, ReviewResult, ToolAgentKind
@@ -46,6 +49,11 @@ __all__ = [
     "_format_issues_for_batch",
     "_relevant_code_for_issue",
 ]
+
+
+def _llm_runner() -> LlmRunner:
+    """Build the LLM runner from this module's globals so tests can monkeypatch them."""
+    return LlmRunner(agent_factory=Agent, resolve_model=resolve_text_mode_strands_model)
 
 
 def run_batch_coding_fixes(
@@ -75,8 +83,7 @@ def run_batch_coding_fixes(
         models=_models,
         batch_fix_prompt=BATCH_FIX_PROMPT,
         parse_batch_fix_template=parse_batch_fix_template,
-        agent_factory=Agent,
-        resolve_model=resolve_text_mode_strands_model,
+        runner=_llm_runner(),
     )
 
 
@@ -103,8 +110,7 @@ def run_problem_solving(
         models=_models,
         single_issue_prompt=PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT,
         parse_single=parse_problem_solving_single_issue_template,
-        agent_factory=Agent,
-        resolve_model=resolve_text_mode_strands_model,
+        runner=_llm_runner(),
     )
 
 
@@ -135,6 +141,5 @@ def run_problem_solving_for_microtask(
         models=_models,
         single_issue_prompt=PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT,
         parse_single=parse_problem_solving_single_issue_template,
-        agent_factory=Agent,
-        resolve_model=resolve_text_mode_strands_model,
+        runner=_llm_runner(),
     )
