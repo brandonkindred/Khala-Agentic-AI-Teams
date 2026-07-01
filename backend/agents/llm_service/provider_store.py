@@ -667,25 +667,3 @@ def list_fingerprint() -> str:
         for e in entries
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
-
-
-def resolve_active_provider_config(agent_key: Optional[str] = None) -> Optional[ProviderEntry]:
-    """Return the provider entry to use now, or ``None`` for the legacy path.
-
-    Returns ``None`` when Postgres is disabled OR the list is empty, so
-    :func:`llm_service.factory.get_client` falls through to the unchanged
-    ``resolve_*``/env resolution (full back-compat). Otherwise returns the selected
-    entry per :func:`select_active_entry`.
-
-    ``agent_key`` is accepted for symmetry with the resolver API (and future
-    per-agent provider routing) but does not currently affect selection.
-
-    Preconditions: none. Postconditions: returns a usable entry or ``None``; never
-        raises (a read failure yields ``[]`` -> ``None``).
-    """
-    if not _postgres_enabled():
-        return None
-    entries = load_ordered_entries()
-    if not entries:
-        return None
-    return select_active_entry(entries)

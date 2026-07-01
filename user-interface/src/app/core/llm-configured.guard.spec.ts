@@ -7,7 +7,10 @@ import { LlmConfigApiService } from '../services/llm-config-api.service';
 import { LlmProviderListResponse } from '../models/llm-config.model';
 import { LlmSetupState, llmConfiguredGuard } from './llm-configured.guard';
 
-function listResponse(providerCount: number): LlmProviderListResponse {
+function listResponse(
+  providerCount: number,
+  status: LlmProviderListResponse['storage_status'] = 'available',
+): LlmProviderListResponse {
   const providers = Array.from({ length: providerCount }, (_v, i) => ({
     id: i + 1,
     label: 'e',
@@ -20,7 +23,7 @@ function listResponse(providerCount: number): LlmProviderListResponse {
     limit_type: '',
     reset_at: null,
   }));
-  return { providers, storage_available: true, storage_status: 'available' };
+  return { providers, storage_available: status === 'available', storage_status: status };
 }
 
 describe('llmConfiguredGuard', () => {
@@ -115,6 +118,26 @@ describe('llmConfiguredGuard', () => {
     apiSpy.listProviders.mockReturnValue(throwError(() => ({ status: 503 })));
     const out = resolve(run('/dashboard'));
     expect(out).toBe(true);
+    expect(dialogSpy.open).not.toHaveBeenCalled();
+  });
+
+  it('does not prompt when the store is transiently unreachable (empty list, 200)', () => {
+    // Backend degrades a Postgres blip to 200 {providers:[], storage_status:'unreachable'}.
+    apiSpy.listProviders.mockReturnValue(of(listResponse(0, 'unreachable')));
+    const out = resolve(run('/dashboard'));
+    expect(out).toBe(true);
+    expect(dialogSpy.open).not.toHaveBeenCalled();
+    // Not cached: a later navigation re-checks once the store recovers.
+    apiSpy.listProviders.mockClear();
+    apiSpy.listProviders.mockReturnValue(of(listResponse(0, 'available')));
+    resolve(run('/blogging'));
+    expect(apiSpy.listProviders).toHaveBeenCalled();
+    expect(dialogSpy.open).toHaveBeenCalledTimes(1); // now genuinely empty → prompt
+  });
+
+  it('does not prompt when the store is unconfigured (empty list, 200)', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse(0, 'unconfigured')));
+    resolve(run('/dashboard'));
     expect(dialogSpy.open).not.toHaveBeenCalled();
   });
 

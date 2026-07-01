@@ -218,11 +218,6 @@ def test_disabled_load_is_empty(no_postgres):
     assert ps.load_ordered_entries() == []
 
 
-def test_disabled_resolve_active_is_none(no_postgres):
-    assert ps.resolve_active_provider_config() is None
-    assert ps.resolve_active_provider_config("backend") is None
-
-
 def test_disabled_create_update_delete_reorder_raise(no_postgres):
     with pytest.raises(RuntimeError):
         ps.create_entry(label="x", provider="ollama")
@@ -356,12 +351,6 @@ def test_get_entry_returns_mapped_row(fake_db):
 def test_get_entry_missing_returns_none(fake_db):
     fake_db._fetchone = []
     assert ps.get_entry(123) is None
-
-
-def test_resolve_active_provider_config_uses_selection(fake_db):
-    fake_db._fetchall = [_row(_entry(1)), _row(_entry(2))]
-    out = ps.resolve_active_provider_config()
-    assert out.id == 1
 
 
 def test_update_entry_all_fields(fake_db):

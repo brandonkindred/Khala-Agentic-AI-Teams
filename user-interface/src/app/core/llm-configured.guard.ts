@@ -32,8 +32,10 @@ export class LlmSetupState {
  * navigation (the app stays usable) and:
  * - self-skips `/llm-config` so the setup page is always reachable;
  * - shows the dialog at most once per session and stops querying once configured;
- * - fails open (allows navigation, no dialog) on any API/probe error, so a transient
- *   Postgres blip never spuriously prompts or blocks.
+ * - only prompts when the store is genuinely reachable-and-empty: an HTTP error, or a
+ *   200 whose `storage_status` is `unreachable`/`unconfigured` (the backend degrades a
+ *   transient Postgres read failure to `providers:[]` + a non-`available` status rather
+ *   than a 5xx), fails open with no dialog — so a DB blip never spuriously prompts.
  */
 export const llmConfiguredGuard: CanActivateChildFn = (
   _route,
@@ -53,6 +55,13 @@ export const llmConfiguredGuard: CanActivateChildFn = (
     map((res) => {
       if ((res.providers ?? []).length > 0) {
         setup.configured = true;
+        return true;
+      }
+      // An empty list is only "no LLMs configured" when the store is actually
+      // available. A transient `unreachable` (or `unconfigured`) store returns 200
+      // with `providers:[]`; treat it like the error path — fail open, no prompt,
+      // and don't cache, so a later navigation re-checks once the store recovers.
+      if (res.storage_status !== 'available') {
         return true;
       }
       setup.prompted = true;

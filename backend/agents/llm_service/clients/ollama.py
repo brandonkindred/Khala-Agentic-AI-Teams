@@ -209,24 +209,22 @@ def _thinking_downgrade_enabled() -> bool:
     return llm_config.env_flag_enabled(llm_config.ENV_LLM_THINKING_DOWNGRADE_RETRY)
 
 
-def _ollama_bearer_auth_headers(api_key_override: str = "") -> dict[str, str]:
-    """Return the Authorization Bearer header for an Ollama Cloud request.
+def _ollama_bearer_auth_headers() -> dict[str, str]:
+    """Return the Authorization Bearer header for the model-listing Ollama request.
 
-    Single source of truth for Ollama auth, shared by the module-level
-    ``list_ollama_models`` (/api/tags) and ``OllamaLLMClient._ollama_auth_headers``
-    (the /api/show and /v1/chat/completions paths), so the listing and chat paths
-    can never authenticate differently. A non-empty ``api_key_override`` (a
-    per-provider key from the multi-provider fallback list) wins; otherwise the key
-    is resolved via :func:`llm_config.resolve_ollama_api_key` (runtime config set
-    through the settings UI, falling back to ``OLLAMA_API_KEY`` /
-    ``LLM_OLLAMA_API_KEY``).
+    Serves the module-level ``list_ollama_models`` (/api/tags) only. The key is
+    resolved via :func:`llm_config.resolve_ollama_api_key` (runtime config set through
+    the settings UI, falling back to ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY``). The
+    per-request chat/embedding paths do NOT share this helper —
+    :meth:`OllamaLLMClient._ollama_auth_headers` authenticates with the provider
+    entry's own key exclusively (no env fallback), so the two paths resolve auth
+    independently by design.
 
     Preconditions: none.
     Postconditions: returns ``{"Authorization": "Bearer <key>"}`` when a key is
-        resolved (override first, else the global resolver), else ``{}`` (local
-        Ollama needs no auth). Never raises.
+        resolved, else ``{}`` (local Ollama needs no auth). Never raises.
     """
-    key = (api_key_override or "").strip() or llm_config.resolve_ollama_api_key()
+    key = llm_config.resolve_ollama_api_key()
     if not key:
         return {}
     return {"Authorization": f"Bearer {key}"}
