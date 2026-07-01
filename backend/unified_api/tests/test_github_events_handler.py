@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import sys
+from concurrent import futures
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -357,3 +358,18 @@ def test_dispatch_submits_to_bounded_executor_not_raw_thread():
     ):
         gh.dispatch_github_event("issue_comment", _comment_payload())
     fake_executor.submit.assert_called_once_with(proc, "acme", "widget", 42, 999)
+
+
+def test_dispatch_never_raises_when_executor_is_shut_down():
+    """A shut-down dispatch executor (or an interpreter-shutdown race) must not make
+    dispatch_github_event raise — its documented contract is 'never raises', and the
+    webhook route has already returned its HTTP response by the time this runs."""
+    real_executor = futures.ThreadPoolExecutor(max_workers=1)
+    real_executor.shutdown(wait=True)
+    with (
+        patch(f"{_H}._get_dispatch_executor", return_value=real_executor),
+        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
+        patch(f"{_H}.process_review_request") as proc,
+    ):
+        gh.dispatch_github_event("issue_comment", _comment_payload())  # must not raise
+    proc.assert_not_called()

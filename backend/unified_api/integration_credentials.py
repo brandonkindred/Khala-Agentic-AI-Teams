@@ -21,6 +21,7 @@ Security notes:
 from __future__ import annotations
 
 import logging
+import os
 
 from cryptography.fernet import Fernet
 
@@ -111,6 +112,35 @@ def get_credential_status(service: str, key: str) -> tuple[str, bool]:
     if not postgres_credentials_enabled():
         return "", True
     return pg_get_credential_status(service, key)
+
+
+def resolve_credential_with_env_fallback(service: str, key: str, env_var: str | None = None) -> tuple[str | None, bool]:
+    """Read a stored credential, falling back to an environment variable.
+
+    Shared by every "fail closed on a credential-store outage" caller (e.g. the GitHub
+    PAT and the GitHub webhook signing secret) so the value-vs-reachability distinction
+    from :func:`get_credential_status` and the env-fallback-is-always-reachable rule are
+    implemented exactly once.
+
+    Preconditions: ``service``/``key`` identify the stored credential; ``env_var``, if
+        given, names an environment variable fallback (checked only when the stored
+        value is empty).
+    Postconditions: returns ``(value_or_None, store_reachable)``. ``store_reachable``
+        reflects the credential-store read UNLESS a non-empty ``env_var`` fallback is
+        used, in which case it is reported ``True`` regardless of store state — the env
+        var has no store dependency, so its presence must never be blocked by a Postgres
+        outage. Callers that must fail closed (e.g. reject rather than silently skip
+        verification) check ``store_reachable`` when the returned value is ``None``.
+        Never raises (``get_credential_status`` swallows its own errors).
+    """
+    value, store_reachable = get_credential_status(service, key)
+    if value:
+        return value, True
+    if env_var:
+        env_value = os.environ.get(env_var, "").strip()
+        if env_value:
+            return env_value, True
+    return None, store_reachable
 
 
 def set_credential(service: str, key: str, value: str) -> None:

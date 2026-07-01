@@ -129,7 +129,7 @@ def test_run_issue_returns_400_when_integration_disabled(mock_cfg):
     assert "not enabled" in resp.json()["detail"]
 
 
-@patch(f"{_M}.get_credential_status", return_value=("", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("", True))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_400_when_pat_missing(mock_cfg, mock_status):
     # Store reachable, token genuinely absent → 400 "not configured" (a single read
@@ -140,7 +140,7 @@ def test_run_issue_returns_400_when_pat_missing(mock_cfg, mock_status):
     assert "PAT" in resp.json()["detail"]
 
 
-@patch(f"{_M}.get_credential_status", return_value=("", False))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("", False))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_503_when_credential_store_unreachable(mock_cfg, mock_status):
     # An empty PAT while the credential store is unreachable (the SAME read reports it)
@@ -151,7 +151,7 @@ def test_run_issue_returns_503_when_credential_store_unreachable(mock_cfg, mock_
     assert "credential store" in resp.json()["detail"]
 
 
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_400_when_owner_repo_missing(mock_cfg, mock_status):
     mock_cfg.return_value = {**_GH_CFG, "owner": "", "repo": ""}
@@ -160,7 +160,7 @@ def test_run_issue_returns_400_when_owner_repo_missing(mock_cfg, mock_status):
     assert "owner/repo" in resp.json()["detail"]
 
 
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_503_when_service_url_unset(mock_cfg, mock_status, monkeypatch):
     mock_cfg.return_value = dict(_GH_CFG)
@@ -172,7 +172,7 @@ def test_run_issue_returns_503_when_service_url_unset(mock_cfg, mock_status, mon
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone")
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_502_on_clone_failure(mock_cfg, mock_status, mock_clone, mock_path, monkeypatch):
     """A clone failure (e.g. missing git binary) must be a clean 502, not a 500."""
@@ -273,7 +273,7 @@ def test_get_github_degrades_on_probe_timeout(mock_cfg, mock_meta, monkeypatch):
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_returns_502_when_service_unreachable(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -286,7 +286,7 @@ def test_run_issue_returns_502_when_service_unreachable(mock_cfg, mock_cred, moc
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_returns_504_on_service_timeout(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -299,7 +299,7 @@ def test_run_issue_returns_504_on_service_timeout(mock_cfg, mock_cred, mock_clon
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_propagates_upstream_error_detail(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -313,7 +313,7 @@ def test_run_issue_propagates_upstream_error_detail(mock_cfg, mock_cred, mock_cl
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_upstream_error_with_non_json_body(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -326,7 +326,7 @@ def test_run_issue_upstream_error_with_non_json_body(mock_cfg, mock_cred, mock_c
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_502_on_malformed_success_body(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     """A 200 from the service that is missing required fields is a 502, not a 500."""
@@ -345,7 +345,7 @@ def test_run_issue_502_on_malformed_success_body(mock_cfg, mock_cred, mock_clone
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_success_returns_job(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
@@ -365,7 +365,7 @@ def test_run_issue_success_returns_job(mock_cfg, mock_cred, mock_clone, mock_pat
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_forwards_base_branch(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -621,7 +621,7 @@ def test_resolve_repo_path_operator_override_returned_verbatim():
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_cred, mock_clone, monkeypatch):
     """An auto-derived run clones the per-issue folder and forwards repo_path +
@@ -649,7 +649,7 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(
     f"{_M}.get_github_config_meta",
     return_value={"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"},
@@ -969,7 +969,7 @@ def test_get_github_webhook_secret_unconfigured_defaults_false(mock_cfg):
 _REVIEW_PR = "/api/integrations/github/review-pr"
 
 
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_pr_success_forwards_pr_number(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -994,7 +994,7 @@ def test_review_pr_success_forwards_pr_number(mock_cfg, mock_cred, monkeypatch):
     assert fake.calls[0][1]["pr_number"] == 7
 
 
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_pr_forwards_base_branch(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -1020,8 +1020,8 @@ from unified_api.routes.integrations import _start_pr_review  # noqa: E402
 
 
 def test_start_pr_review_with_token_skips_credential_read(monkeypatch):
-    """When a token is passed, the PAT is NOT re-read via get_credential_status; only the
-    JSON-only settings are validated, and the passed token is forwarded."""
+    """When a token is passed, the PAT is NOT re-read via resolve_credential_with_env_fallback;
+    only the JSON-only settings are validated, and the passed token is forwarded."""
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(
         result=_FakeResp(
@@ -1031,7 +1031,7 @@ def test_start_pr_review_with_token_skips_credential_read(monkeypatch):
     )
     with (
         patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG)),
-        patch(f"{_M}.get_credential_status", side_effect=AssertionError("must not read PAT")) as cred,
+        patch(f"{_M}.resolve_credential_with_env_fallback", side_effect=AssertionError("must not read PAT")) as cred,
         patch(f"{_M}.httpx.AsyncClient", return_value=fake),
     ):
         result = asyncio.run(_start_pr_review(7, None, token="ghp_pre"))

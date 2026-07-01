@@ -208,6 +208,8 @@ def _install_inmemory_github_credentials(store_mod, monkeypatch: pytest.MonkeyPa
 
     Lets the GitHub config tests round-trip PAT + webhook secret without Postgres.
     """
+    import unified_api.integration_credentials as creds_mod
+
     creds: dict[tuple[str, str], str] = {}
 
     def _set(service: str, key: str, value: str) -> None:
@@ -225,6 +227,12 @@ def _install_inmemory_github_credentials(store_mod, monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(store_mod, "set_credential", _set)
     monkeypatch.setattr(store_mod, "get_credential_status", _status)
     monkeypatch.setattr(store_mod, "delete_credential", _delete)
+    # get_github_webhook_secret_status() goes through
+    # resolve_credential_with_env_fallback(), which is defined in (and calls
+    # get_credential_status from) integration_credentials.py directly — patching only
+    # the name imported into store_mod's namespace above doesn't reach it, so patch the
+    # source too, at the same in-memory dict.
+    monkeypatch.setattr(creds_mod, "get_credential_status", _status)
     return creds
 
 
@@ -306,9 +314,11 @@ def test_get_github_webhook_secret_status_unreachable_store_fails_closed(
     """A credential-store outage (not merely 'nothing stored') must report
     store_reachable=False so the webhook route fails closed instead of treating an
     outage the same as 'no secret configured'."""
+    import unified_api.integration_credentials as creds_mod
+
     store, _ = _reload_modules(tmp_path, monkeypatch)
     monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
-    monkeypatch.setattr(store, "get_credential_status", lambda service, key: ("", False))
+    monkeypatch.setattr(creds_mod, "get_credential_status", lambda service, key: ("", False))
 
     assert store.get_github_webhook_secret_status() == (None, False)
 
@@ -318,9 +328,11 @@ def test_get_github_webhook_secret_status_env_var_overrides_unreachable_store(
 ) -> None:
     """An env-var-configured secret is never blocked by a Postgres outage — the env
     fallback has no store dependency, so it's reported as reachable regardless."""
+    import unified_api.integration_credentials as creds_mod
+
     store, _ = _reload_modules(tmp_path, monkeypatch)
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "env_secret")
-    monkeypatch.setattr(store, "get_credential_status", lambda service, key: ("", False))
+    monkeypatch.setattr(creds_mod, "get_credential_status", lambda service, key: ("", False))
 
     assert store.get_github_webhook_secret_status() == ("env_secret", True)
 

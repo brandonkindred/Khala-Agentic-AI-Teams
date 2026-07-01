@@ -49,7 +49,7 @@ from unified_api.google_browser_login_credentials import (
     google_browser_login_storage_available,
     set_google_browser_login_credentials,
 )
-from unified_api.integration_credentials import get_credential_status
+from unified_api.integration_credentials import resolve_credential_with_env_fallback
 from unified_api.integrations_store import (
     clear_github_config,
     clear_medium_google_oauth_identity,
@@ -1360,12 +1360,15 @@ def _resolve_github_target(token_override: str | None = None) -> tuple[dict[str,
     Postconditions:
         - Returns the config dict plus the resolved token/owner/repo. A missing
           prerequisite raises ``HTTPException(400)``.
-        - When ``token_override`` is ``None`` and the token is empty, an unreachable
+        - When ``token_override`` is ``None`` and no token is found, an unreachable
           Postgres credential store raises ``HTTPException(503)`` instead of 400, so a
           transient DB outage is never reported as "PAT not configured". The 400-vs-503
-          decision comes from a SINGLE credential read (:func:`get_credential_status`
-          reports value + reachability together), so there is no second probe and no
-          TOCTOU window between the read and the probe.
+          decision comes from a SINGLE credential read
+          (:func:`unified_api.integration_credentials.resolve_credential_with_env_fallback`
+          reports value + reachability together — the same shared helper the GitHub
+          webhook signing secret uses, so the two credentials can't silently diverge on
+          this fail-closed behavior), so there is no second probe and no TOCTOU window
+          between the read and the probe.
         - When ``token_override`` is supplied, the credential-store read is skipped
           entirely (the store is not re-touched) and ``token_override`` is returned
           verbatim; only the JSON-only settings (enabled/owner/repo) are validated.
@@ -1380,10 +1383,12 @@ def _resolve_github_target(token_override: str | None = None) -> tuple[dict[str,
     if token_override:
         token = token_override
     else:
-        # The only DB round-trip on this path is the single get_credential_status
-        # below — which yields BOTH the token value and the 503-vs-400 reachability
-        # signal.
-        token, store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")
+        # The only DB round-trip on this path is the single
+        # resolve_credential_with_env_fallback call below — which yields BOTH the token
+        # value and the 503-vs-400 reachability signal (the PAT has no env fallback, so
+        # env_var is omitted; only the reachability distinction is shared with the
+        # webhook secret's own fail-closed check).
+        token, store_reachable = resolve_credential_with_env_fallback(_GITHUB_SERVICE, "personal_access_token")
         if not token:
             # An empty token can mean two very different things, and the same read
             # tells us which: a down credential store (503, transient) vs a genuinely

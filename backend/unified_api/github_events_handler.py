@@ -22,12 +22,15 @@ import re
 from concurrent import futures
 from typing import Any
 
+from unified_api.bounded_executor import get_or_recreate_executor, submit_safely
+
 logger = logging.getLogger(__name__)
 
 # Bounds webhook-triggered review work to a fixed pool instead of spawning an
 # unbounded OS thread per delivery (a burst of "@khala review" comments would
 # otherwise create one thread each). Mirrors the pattern already used for the
-# health-check probe pool in unified_api/main.py (`_get_probe_executor`).
+# health-check probe pool in unified_api/main.py (`_get_probe_executor`) — both share
+# the lazy-create/recreate-after-shutdown logic via `bounded_executor`.
 _DISPATCH_EXECUTOR: futures.ThreadPoolExecutor | None = None
 
 
@@ -41,8 +44,9 @@ def _get_dispatch_executor() -> futures.ThreadPoolExecutor:
         Never raises.
     """
     global _DISPATCH_EXECUTOR
-    if _DISPATCH_EXECUTOR is None or getattr(_DISPATCH_EXECUTOR, "_shutdown", False):
-        _DISPATCH_EXECUTOR = futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="gh-webhook-review")
+    _DISPATCH_EXECUTOR = get_or_recreate_executor(
+        _DISPATCH_EXECUTOR, max_workers=4, thread_name_prefix="gh-webhook-review"
+    )
     return _DISPATCH_EXECUTOR
 
 
@@ -260,7 +264,10 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any]) -> None:
     Postconditions: submits :func:`process_review_request` to the bounded dispatch
         executor (see :func:`_get_dispatch_executor`) exactly once when every condition
         above holds; any unmet condition is a silent no-op. Never raises (it returns
-        before the submitted work does any I/O).
+        before the submitted work does any I/O) — the submit itself goes through
+        :func:`unified_api.bounded_executor.submit_safely`, which swallows the
+        ``RuntimeError`` a shut-down executor (or interpreter-shutdown race) would
+        otherwise raise, so this contract holds even during process teardown.
     """
     if event_type != "issue_comment":
         return
@@ -307,4 +314,13 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any]) -> None:
     comment_id = comment.get("id")
     comment_id = comment_id if isinstance(comment_id, int) else 0
 
-    _get_dispatch_executor().submit(process_review_request, repo_owner, repo_name, pr_number, comment_id)
+    submit_safely(
+        _get_dispatch_executor(),
+        process_review_request,
+        repo_owner,
+        repo_name,
+        pr_number,
+        comment_id,
+        logger=logger,
+        log_prefix="GitHub webhook dispatch",
+    )
