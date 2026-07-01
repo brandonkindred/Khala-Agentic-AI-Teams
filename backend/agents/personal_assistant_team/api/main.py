@@ -87,7 +87,11 @@ async def serve_ui():
     )
 
 
-llm = get_llm_client("personal_assistant")
+# Resolve the LLM lazily so the service can start (and serve health checks /
+# the /llm-config setup flow) even when no provider is configured yet. A
+# missing provider then fails an individual agent run rather than crashing
+# container startup at import time.
+llm = get_llm_client("personal_assistant", lazy=True)
 credential_store = CredentialStore()
 profile_store = UserProfileStore()
 orchestrator = PersonalAssistantOrchestrator(llm, credential_store, profile_store)
