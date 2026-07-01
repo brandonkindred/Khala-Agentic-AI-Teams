@@ -4,15 +4,17 @@ import { MatIconModule } from '@angular/material/icon';
 import { STUDIO_STAGES } from '../../models/agent-studio.model';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
+import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 
 /**
  * Agent Studio shell — the single `/agent-studio` surface (spec §2.1). Renders
- * the forward-only 4-stage stepper and the active stage. Stage 1 (Build Agent)
- * and Stage 2 (Test Agent) are implemented; Compose / Personas are still stubbed
- * by the placeholder. Owns one `AgentStudioStateService` per session (provided
- * here, not at root, so each visit starts clean).
+ * the forward-only 4-stage stepper and the active stage. Stage 1 (Build Agent),
+ * Stage 2 (Test Agent) and Stage 4 (Test Team w/ Personas) are implemented;
+ * Compose (Stage 3) is still stubbed by the placeholder. Owns one
+ * `AgentStudioStateService` per session (provided here, not at root, so each
+ * visit starts clean).
  */
 @Component({
   selector: 'app-agent-studio-shell',
@@ -21,6 +23,7 @@ import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.compone
     MatButtonModule,
     MatIconModule,
     AgentStudioBuildAgentComponent,
+    AgentStudioPersonaComponent,
     AgentStudioStagePlaceholderComponent,
     AgentStudioTestAgentComponent,
   ],
