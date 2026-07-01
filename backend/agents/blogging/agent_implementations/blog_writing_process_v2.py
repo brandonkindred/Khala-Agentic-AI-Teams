@@ -65,11 +65,10 @@ from temporalio.exceptions import CancelledError
 from validators.runner import run_validators_from_work_dir
 
 from llm_service import (
+    LLMClientModel,
     OllamaLLMClient,
-    attributed_client,
-    client_agent_key,
     get_strands_model,
-    unwrap_client,
+    with_model_override,
 )
 from llm_service.interface import LLMClient
 
@@ -109,42 +108,56 @@ def _is_external_cancellation(exc: BaseException) -> bool:
     return False
 
 
+def _apply_stage_model_override(base: LLMClient, model: Optional[str]) -> LLMClient:
+    """Return a variant of ``base`` pinning Ollama fallback candidates to ``model``.
+
+    ``base`` may be a Strands :class:`LLMClientModel` (what the pipeline actually
+    passes — ``get_strands_model`` wraps the failover client) or a raw failover
+    client. In both cases the override reaches the backing :class:`FailoverLLMClient`
+    via :func:`with_model_override`, so an Ollama candidate uses ``model`` while a
+    non-Ollama candidate keeps its configured model — multi-provider failover is
+    preserved. A backing with no failover client (e.g. a ``DummyLLMClient``) or a
+    falsy ``model`` returns ``base`` unchanged.
+
+    Preconditions: ``model`` is a non-empty model name or falsy. Postconditions:
+        returns a client ready to use; ``base`` is never mutated (a Strands model is
+        rebuilt over the pinned backing, preserving its response format and config).
+    """
+    if not model:
+        return base
+    if isinstance(base, LLMClientModel):
+        pinned_backing = with_model_override(base.client, model)
+        if pinned_backing is base.client:
+            # No failover client underneath (e.g. Dummy) — nothing to pin.
+            return base
+        return LLMClientModel(pinned_backing, **base.get_config())
+    return with_model_override(base, model)
+
+
 def planning_llm_client(base: LLMClient) -> LLMClient:
     """Return the LLM client to use for blog planning.
 
-    When ``BLOG_PLANNING_MODEL`` is set and ``base`` is Ollama-backed, returns a
-    client pinned to that model; otherwise returns ``base`` unchanged. The
-    per-model override preserves ``base``'s agent attribution (re-applies the
-    original ``agent_key`` via :func:`attributed_client`) so planning requests
-    are still attributed to the originating agent.
+    When ``BLOG_PLANNING_MODEL`` is set, returns a variant of ``base`` whose Ollama
+    fallback candidates are pinned to that model; otherwise returns ``base`` unchanged.
+    The override is applied per call (via :func:`_apply_stage_model_override` →
+    :func:`with_model_override`), so multi-provider failover is preserved — an Ollama
+    provider uses the planning model while a non-Ollama fallback keeps its configured
+    model — and ``base``'s agent attribution and reasoning hook carry across. Works
+    whether ``base`` is a raw failover client or the Strands model the pipeline passes.
 
     :param base: The default client the blog pipeline would otherwise use.
-    :returns: ``base``, or an attribution-preserving override pinned to
+    :returns: ``base``, or a failover-preserving variant pinning Ollama candidates to
         ``BLOG_PLANNING_MODEL``.
     """
-    model = planning_model_override()
-    if not model:
-        return base
-    inner = unwrap_client(base)
-    if isinstance(inner, OllamaLLMClient):
-        override = OllamaLLMClient(
-            model=model,
-            base_url=inner.base_url,
-            timeout=inner.timeout,
-            # Carry the reasoning sink across so a streaming-reasoning caller
-            # doesn't lose its hook on the model-pinned override.
-            on_reasoning=inner.on_reasoning,
-        )
-        # Preserve the original client's agent attribution on the override.
-        return attributed_client(override, client_agent_key(base))
-    return base
+    return _apply_stage_model_override(base, planning_model_override())
 
 
 def plan_critic_llm_client(base: LLMClient) -> LLMClient:
     """Return the LLM client to use for the plan critic.
 
-    When ``BLOG_PLAN_CRITIC_MODEL`` is set and ``base`` is Ollama-backed, returns
-    a client pinned to that model; otherwise returns ``base`` unchanged. The
+    When ``BLOG_PLAN_CRITIC_MODEL`` is set, returns a variant of ``base`` whose Ollama
+    fallback candidates are pinned to that model (via :func:`with_model_override`, so
+    multi-provider failover is preserved); otherwise returns ``base`` unchanged. The
     override preserves ``base``'s agent attribution (see :func:`planning_llm_client`).
 
     Per the architectural tenet, the critic runs on the same model as the writer
@@ -152,25 +165,10 @@ def plan_critic_llm_client(base: LLMClient) -> LLMClient:
     on later without further code changes.
 
     :param base: The default client the blog pipeline would otherwise use.
-    :returns: ``base``, or an attribution-preserving override pinned to
+    :returns: ``base``, or a failover-preserving variant pinning Ollama candidates to
         ``BLOG_PLAN_CRITIC_MODEL``.
     """
-    model = plan_critic_model_override()
-    if not model:
-        return base
-    inner = unwrap_client(base)
-    if isinstance(inner, OllamaLLMClient):
-        override = OllamaLLMClient(
-            model=model,
-            base_url=inner.base_url,
-            timeout=inner.timeout,
-            # Carry the reasoning sink across so a streaming-reasoning caller
-            # doesn't lose its hook on the model-pinned override.
-            on_reasoning=inner.on_reasoning,
-        )
-        # Preserve the original client's agent attribution on the override.
-        return attributed_client(override, client_agent_key(base))
-    return base
+    return _apply_stage_model_override(base, plan_critic_model_override())
 
 
 def build_plan_critic_agent(base: LLMClient) -> Optional[BlogPlanCriticAgent]:

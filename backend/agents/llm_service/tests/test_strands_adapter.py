@@ -566,6 +566,7 @@ def test_get_strands_model_does_not_alias_distinct_agent_keys(monkeypatch) -> No
     """Two agents that resolve to the same model get distinct cached adapters,
     each carrying its own agent_key — so the shared cache can't attribute one
     agent's calls to another."""
+    from llm_service import provider_store as ps
     from llm_service.strands_provider import (
         _clear_strands_model_cache_for_testing,
         get_strands_model,
@@ -574,6 +575,14 @@ def test_get_strands_model_does_not_alias_distinct_agent_keys(monkeypatch) -> No
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("LLM_MODEL", "shared-model")
     monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
+    # The provider list is the sole source of LLM resolution — seed a local Ollama
+    # entry so get_client resolves (the shared model resolver still drives model_id).
+    _entry = ps.ProviderEntry(
+        id=1, label="e", provider="ollama", model="", base_url="http://localhost:11434",
+        api_key="", sort_order=1, limit_exceeded=False, limit_type="", reset_at=None,
+    )
+    monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: [_entry])
+    monkeypatch.setattr(ps, "select_active_entry", lambda es, **k: es[0])
     _clear_strands_model_cache_for_testing()
     try:
         m_a = get_strands_model("agent_a")

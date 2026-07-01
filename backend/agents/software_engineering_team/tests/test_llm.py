@@ -18,6 +18,7 @@ from llm_service import (
     get_client,
     unwrap_client,
 )
+from llm_service.factory import FailoverLLMClient
 
 
 def test_ollama_429_raises_rate_limit_error_after_retries() -> None:
@@ -245,8 +246,27 @@ def test_get_llm_for_agent_dummy_provider_returns_dummy_client() -> None:
     assert isinstance(client, DummyLLMClient)
 
 
-def test_get_llm_for_agent_per_agent_env_overrides() -> None:
-    """LLM_MODEL_<agent_key> overrides global and default."""
+@pytest.fixture
+def _ollama_provider_list(monkeypatch):
+    """Seed a blank-model local-Ollama entry so get_client resolves via the provider
+    list (its sole source). A blank entry model defers to the shared per-agent model
+    resolvers, so the LLM_MODEL_<agent> / LLM_MODEL / agent-default assertions hold."""
+    from llm_service import provider_store as ps
+
+    entry = ps.ProviderEntry(
+        id=1, label="e", provider="ollama", model="", base_url="http://localhost:11434",
+        api_key="", sort_order=1, limit_exceeded=False, limit_type="", reset_at=None,
+    )
+    monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: [entry])
+    monkeypatch.setattr(ps, "select_active_entry", lambda es, **k: es[0])
+
+
+def test_get_llm_for_agent_per_agent_env_overrides(_ollama_provider_list) -> None:
+    """LLM_MODEL_<agent_key> overrides global and default (blank entry model).
+
+    The failover client resolves the concrete model lazily on first attribute access,
+    so ``.model`` is read inside the env context.
+    """
     clear_client_cache()
     with patch.dict(
         os.environ,
@@ -258,12 +278,12 @@ def test_get_llm_for_agent_per_agent_env_overrides() -> None:
         clear=False,
     ):
         client = get_client("backend")
-    assert isinstance(unwrap_client(client), OllamaLLMClient)
-    assert client.model == "custom-model"
+        assert isinstance(unwrap_client(client), FailoverLLMClient)
+        assert client.model == "custom-model"
 
 
-def test_get_llm_for_agent_global_fallback() -> None:
-    """When no per-agent env, LLM_MODEL is used."""
+def test_get_llm_for_agent_global_fallback(_ollama_provider_list) -> None:
+    """When no per-agent env, LLM_MODEL is used (blank entry model)."""
     clear_client_cache()
     with patch.dict(
         os.environ,
@@ -271,12 +291,12 @@ def test_get_llm_for_agent_global_fallback() -> None:
         clear=False,
     ):
         client = get_client("backend")
-    assert isinstance(unwrap_client(client), OllamaLLMClient)
-    assert client.model == "qwen3.5:397b-cloud"
+        assert isinstance(unwrap_client(client), FailoverLLMClient)
+        assert client.model == "qwen3.5:397b-cloud"
 
 
-def test_get_llm_for_agent_uses_default_when_no_env() -> None:
-    """When no env overrides, agent default (e.g. deepseek-v4-pro:cloud for backend) is used."""
+def test_get_llm_for_agent_uses_default_when_no_env(_ollama_provider_list) -> None:
+    """When no env overrides, the agent default (e.g. deepseek-v4-pro:cloud for backend) is used."""
     clear_client_cache()
     with patch.dict(
         os.environ,
@@ -288,12 +308,14 @@ def test_get_llm_for_agent_uses_default_when_no_env() -> None:
         clear=False,
     ):
         client = get_client("backend")
-    assert isinstance(unwrap_client(client), OllamaLLMClient)
-    assert client.model == "deepseek-v4-pro:cloud"
+        assert isinstance(unwrap_client(client), FailoverLLMClient)
+        assert client.model == "deepseek-v4-pro:cloud"
 
 
-def test_get_client_cache_returns_same_instance() -> None:
-    """Two calls for same agent with same config return the same cached Ollama client instance."""
+def test_get_client_resolves_same_model_across_calls(_ollama_provider_list) -> None:
+    """Two calls for the same agent resolve to the same model. (The underlying
+    provider-client caching is covered by the llm_service failover/factory suites;
+    each get_client returns a fresh failover wrapper over the shared cached client.)"""
     clear_client_cache()
     with patch.dict(
         os.environ,
@@ -302,8 +324,8 @@ def test_get_client_cache_returns_same_instance() -> None:
     ):
         client1 = get_client("backend")
         client2 = get_client("backend")
-    # Each call returns a fresh attribution wrapper over the shared cached client.
-    assert unwrap_client(client1) is unwrap_client(client2)
+        assert isinstance(unwrap_client(client1), FailoverLLMClient)
+        assert client1.model == client2.model == "cached-model"
 
 
 def test_extract_task_assignment_from_content_recovers_tasks() -> None:

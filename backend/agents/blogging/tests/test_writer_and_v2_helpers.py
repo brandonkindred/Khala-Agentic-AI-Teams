@@ -207,6 +207,30 @@ def test_v2_planning_llm_client_passthrough(monkeypatch) -> None:
     assert build_plan_critic_agent(base) is None
 
 
+def test_v2_planning_llm_client_override_keeps_failover(monkeypatch) -> None:
+    """With BLOG_PLANNING_MODEL / BLOG_PLAN_CRITIC_MODEL set, the helpers return a
+    failover-preserving variant that pins the model (rather than collapsing to a
+    single non-failover client)."""
+    from agent_implementations.blog_writing_process_v2 import (
+        plan_critic_llm_client,
+        planning_llm_client,
+    )
+
+    from llm_service.factory import FailoverLLMClient
+
+    base = FailoverLLMClient(lambda: [], lambda e, r, mo=None: None, lambda e, x: None)
+
+    monkeypatch.setenv("BLOG_PLANNING_MODEL", "planning:70b")
+    planning = planning_llm_client(base)
+    assert isinstance(planning, FailoverLLMClient)
+    assert planning is not base
+    assert planning._model_override == "planning:70b"
+
+    monkeypatch.setenv("BLOG_PLAN_CRITIC_MODEL", "critic:34b")
+    critic = plan_critic_llm_client(base)
+    assert critic._model_override == "critic:34b"
+
+
 def test_v2_build_plan_critic_agent_when_enabled(monkeypatch) -> None:
     from agent_implementations.blog_writing_process_v2 import (
         build_plan_critic_agent,

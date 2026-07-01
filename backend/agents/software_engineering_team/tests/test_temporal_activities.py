@@ -213,6 +213,11 @@ def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job
 
     js.create_job("pp-j", repo_path=str(tmp_path))
 
+    # get_client("spec_intake") is evaluated as an argument to parse_spec_with_llm
+    # before the patched boom runs; use the dummy provider so it returns a client
+    # (rather than raising LLMNotConfiguredError, which would mask the RuntimeError).
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+
     def boom(*a, **kw):
         raise RuntimeError("check failed")
 
