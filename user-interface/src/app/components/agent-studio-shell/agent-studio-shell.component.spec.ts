@@ -5,6 +5,7 @@ import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-cata
 import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
+import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 
@@ -26,6 +27,11 @@ class StubAgentCatalogComponent {
 @Component({ selector: 'app-agent-provisioning-dashboard', standalone: true, template: '' })
 class StubProvisioningDashboardComponent {}
 
+/** Stub the Stage-4 persona component so the shell's final-stage tests don't pull
+ *  in its API services / dialog. */
+@Component({ selector: 'app-agent-studio-persona', standalone: true, template: '' })
+class StubPersonaComponent {}
+
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
@@ -41,6 +47,10 @@ describe('AgentStudioShellComponent', () => {
       .overrideComponent(AgentStudioBuildAgentComponent, {
         remove: { imports: [AgentCatalogComponent, AgentProvisioningDashboardComponent] },
         add: { imports: [StubAgentCatalogComponent, StubProvisioningDashboardComponent] },
+      })
+      .overrideComponent(AgentStudioShellComponent, {
+        remove: { imports: [AgentStudioPersonaComponent] },
+        add: { imports: [StubPersonaComponent] },
       })
       .compileComponents();
 

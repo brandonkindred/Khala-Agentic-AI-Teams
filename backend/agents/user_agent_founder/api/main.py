@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
+from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
@@ -22,7 +24,8 @@ from user_agent_founder.store import (
     get_founder_store,
     get_persona_store,
 )
-from user_agent_founder.targets import ADAPTERS, get_adapter
+from user_agent_founder.targets import ADAPTERS, AGENTIC_TEAM_PREFIX, get_adapter
+from user_agent_founder.targets.agentic_team import PROVISIONING_PREFIX, UNIFIED_API_BASE
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +98,15 @@ class StartRunRequest(BaseModel):
             "uniqueness across repeat runs."
         ),
     )
+    process_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Process the persona should drive, for agentic-team targets "
+            "(target_team_key='agentic_team:<id>'). The AgenticTeamAdapter runs "
+            "this process via the team's test-pipeline. Ignored by the "
+            "software-engineering target, which has no process concept."
+        ),
+    )
 
 
 class StartRunResponse(BaseModel):
@@ -125,6 +137,7 @@ class RunStatusResponse(BaseModel):
     target_team_key: str = DEFAULT_TARGET_TEAM_KEY
     persona_id: Optional[str] = None
     project_name: Optional[str] = None
+    process_id: Optional[str] = None
     created_at: str
     updated_at: str
     error: Optional[str] = None
@@ -197,7 +210,15 @@ def _dispatch_founder_run(run_id: str) -> str:
     agent = _build_agent_for_run(run_id)
     run = store.get_run(run_id)
     team_key = (run.target_team_key if run is not None else None) or DEFAULT_TARGET_TEAM_KEY
-    adapter = get_adapter(team_key)
+    # Thread the run's process_id (and spec, for the resume window) into the
+    # adapter: this path passes a non-None adapter to run_workflow, so its own
+    # construction fallback never runs — an agentic run would otherwise reach
+    # start_build with process_id=None.
+    adapter = get_adapter(
+        team_key,
+        process_id=run.process_id if run is not None else None,
+        spec=run.spec_content if run is not None else None,
+    )
     thread = threading.Thread(
         target=run_workflow,
         args=(run_id, store, agent, adapter),
@@ -252,11 +273,35 @@ def start_founder_workflow(
 
     req = request or StartRunRequest()
     # Validate up-front so an unknown key returns 400 instead of crashing the
-    # background dispatch thread later.
+    # background dispatch thread later. ``get_adapter`` parses agentic-team keys
+    # ("agentic_team:<id>") as well as the static registry keys.
     try:
-        get_adapter(req.target_team_key)
+        get_adapter(req.target_team_key, process_id=req.process_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # An agentic-team run drives a specific process; enforce the Stage-3 → Stage-4
+    # gate server-side (not just in the UI) so a direct caller or a stale handoff
+    # can't start a persona test against a missing/draft/archived process.
+    if req.target_team_key.startswith(AGENTIC_TEAM_PREFIX):
+        if not req.process_id or not req.process_id.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="process_id is required when target_team_key is an agentic team",
+            )
+        team_id = req.target_team_key[len(AGENTIC_TEAM_PREFIX) :]
+        status = _agentic_process_status(team_id, req.process_id)
+        # ``None`` means the provisioning service was unreachable: stay best-effort
+        # and allow (an outage must not hard-block starts; a truly unrunnable
+        # process surfaces as a run failure). A *known* non-complete status is a
+        # gate violation and is rejected.
+        if status is not None and status != "complete":
+            detail = (
+                f"team {team_id} or process {req.process_id} not found"
+                if status == "not_found"
+                else f"process {req.process_id} is not testable (status: {status})"
+            )
+            raise HTTPException(status_code=422, detail=detail)
 
     persona = get_persona_store().get_persona(req.persona_id)
     if persona is None:
@@ -270,6 +315,7 @@ def start_founder_workflow(
         run_id=run_id,
         persona_id=persona.persona_id,
         project_name=project_name,
+        process_id=req.process_id,
     )
 
     job_store.create_job(
@@ -317,6 +363,7 @@ def get_run_status(run_id: str) -> RunStatusResponse:
         target_team_key=run.target_team_key,
         persona_id=run.persona_id,
         project_name=run.project_name,
+        process_id=run.process_id,
         created_at=run.created_at,
         updated_at=run.updated_at,
         error=run.error,
@@ -498,18 +545,186 @@ def delete_persona(persona_id: str) -> Response:
     return Response(status_code=204)
 
 
+# These cross-service checks run **inline** on ``/start`` and ``/testable-teams``,
+# so they block the request thread. They are best-effort (a slow/unresponsive
+# provisioning service must not hard-block), so the timeout is kept tight to bound
+# the worst-case added latency rather than the 30s used on the founder's own build
+# calls. 5s total / 3s connect: long enough to ride out a brief hiccup, short
+# enough that a dead provisioning service degrades the endpoint by seconds, not
+# tens of seconds.
+_BEST_EFFORT_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
+
+
+def _provisioning_base() -> str:
+    """Base URL for the agentic-team-provisioning service over the unified API."""
+    # rstrip so a trailing-slash env value can't produce ``//api/...``.
+    return f"{UNIFIED_API_BASE.rstrip('/')}{PROVISIONING_PREFIX}"
+
+
+def _fetch_agentic_team(client: httpx.Client, team_id: str) -> tuple[int, dict]:
+    """GET one agentic team's detail. Returns ``(status_code, team_dict)``.
+
+    Preconditions: ``client`` is an open httpx client.
+    Postconditions: ``team_dict`` is the response's ``.team`` object on a 2xx
+        (``{}`` if absent), and ``{}`` on an HTTP error. ``team_id`` is
+        percent-encoded into the path (defense-in-depth against traversal even
+        though callers validate it). Propagates transport exceptions to the
+        caller (each caller decides how to degrade).
+    """
+    resp = client.get(f"{_provisioning_base()}/teams/{quote(team_id, safe='')}")
+    if resp.status_code >= 400:
+        return resp.status_code, {}
+    data = resp.json()
+    if not isinstance(data, dict):  # a list/scalar body has no .get("team")
+        return resp.status_code, {}
+    team = data.get("team")
+    # Enforce the documented dict contract: a truthy *non-dict* ``team`` (e.g. a
+    # list from an API shape change) would otherwise be returned verbatim and
+    # AttributeError in callers that do ``team.get(...)``.
+    return resp.status_code, team if isinstance(team, dict) else {}
+
+
+def _agentic_process_status(team_id: str, process_id: str) -> Optional[str]:
+    """Return the status of ``process_id`` on an agentic team, cross-service.
+
+    Postconditions: returns the process's ``status`` string (e.g. ``"complete"``,
+        ``"draft"``, ``"archived"``) when the team+process resolve; the synthetic
+        ``"not_found"`` (distinct from any real ``process_status`` value) when the
+        team is definitively **not found** (``404``) or the process isn't on it;
+        and ``None`` when the status can't be determined — a transport failure
+        **or** a non-404 HTTP error (``5xx``, auth ``401/403``, rate-limit) —
+        which the caller treats as "cannot determine" and must not hard-block on
+        (best-effort). A transient ``503`` is thus an outage, not a gate
+        violation. Never raises.
+    """
+    try:
+        with httpx.Client(timeout=_BEST_EFFORT_TIMEOUT) as client:
+            code, team = _fetch_agentic_team(client, team_id)
+        if code == 404:
+            return "not_found"  # definitively not found ⇒ a real gate rejection
+        if code >= 400:
+            return None  # 5xx/auth/transient ⇒ undeterminable, don't hard-block
+        for proc in team.get("processes") or []:
+            if proc.get("process_id") == process_id:
+                return proc.get("status") or "unknown"
+        return "not_found"
+    except Exception:
+        logger.warning(
+            "Could not verify agentic process status for team %s / process %s",
+            team_id,
+            process_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _list_agentic_testable_teams() -> list[TestableTeam]:
+    """Enumerate agentic teams that have at least one ``complete`` process.
+
+    Cross-service, best-effort: queries the agentic-team-provisioning service
+    over the unified API. ``GET /teams`` is expected to return a **JSON list** of
+    team summaries (``{team_id, name, process_count, ...}``); any other shape
+    (e.g. an object envelope) is logged and treated as empty. The "≥1 complete
+    process" filter is applied here, server-side, so the dropdown the frontend
+    consumes is ready to use and the Stage-3 → Stage-4 gate (a complete process
+    is required to test) is honored.
+
+    Postconditions: returns one :class:`TestableTeam` per agentic team with a
+        ``complete`` process, keyed ``"agentic_team:<team_id>"``, in the order the
+        ``/teams`` list returned them. Best-effort and **partial-failure
+        tolerant**: a per-team detail fetch that errors or raises skips only that
+        team (the others are kept), and a top-level failure (e.g. the list call
+        itself) returns ``[]``. The per-team detail fetches — the N+1 hot spot —
+        run concurrently in a bounded thread pool to keep total latency near a
+        single round-trip rather than the sum of all of them. Failures are
+        logged, never raised.
+    """
+    try:
+        with httpx.Client(timeout=_BEST_EFFORT_TIMEOUT) as client:
+            resp = client.get(f"{_provisioning_base()}/teams")
+            if resp.status_code >= 400:
+                logger.warning("Could not list agentic teams: HTTP %s", resp.status_code)
+                return []
+            summaries = resp.json()
+            if not isinstance(summaries, list):
+                logger.warning(
+                    "Unexpected /teams response shape (%s); skipping agentic teams",
+                    type(summaries).__name__,
+                )
+                return []
+            # Candidates: a real team_id whose summary doesn't *explicitly* report
+            # zero processes. A missing/None ``process_count`` is not a reliable
+            # "no processes" signal, so keep it and let the detail check decide.
+            # Filter to dicts first so a single non-dict element (e.g. a stray
+            # string) can't raise AttributeError on ``.get`` and discard *every*
+            # valid team via the outer except.
+            candidates = [
+                s
+                for s in summaries
+                if isinstance(s, dict) and s.get("team_id") and s.get("process_count") != 0
+            ]
+            if not candidates:
+                return []
+
+            def _eligible(summary: dict) -> "TestableTeam | None":
+                team_id = summary["team_id"]
+                # Guard each detail fetch so one flaky/timing-out team doesn't
+                # discard the others (it contributes None, which is filtered out).
+                try:
+                    code, team = _fetch_agentic_team(client, team_id)
+                except Exception:
+                    logger.warning(
+                        "Could not fetch agentic team %s detail; skipping", team_id, exc_info=True
+                    )
+                    return None
+                if code >= 400:
+                    return None
+                processes = team.get("processes") or []
+                if any(p.get("status") == "complete" for p in processes):
+                    return TestableTeam(
+                        team_key=f"agentic_team:{team_id}",
+                        display_name=team.get("name") or summary.get("name") or team_id,
+                    )
+                return None
+
+            # httpx.Client is thread-safe for concurrent requests; ``pool.map``
+            # preserves input order so the dropdown stays stable.
+            with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as pool:
+                results = list(pool.map(_eligible, candidates))
+            return [t for t in results if t is not None]
+    except Exception:
+        logger.warning("Could not enumerate agentic testable teams", exc_info=True)
+        return []
+
+
 @app.get("/testable-teams", response_model=TestableTeamsResponse)
 def list_testable_teams() -> TestableTeamsResponse:
-    """List the target teams a persona can test, derived from targets.ADAPTERS."""
+    """List the target teams a persona can test.
+
+    Combines the static registry targets (``targets.ADAPTERS``, e.g. Software
+    Engineering) with the dynamic agentic teams that have a ``complete`` process
+    (:func:`_list_agentic_testable_teams`). The agentic-team filter is applied
+    server-side so the frontend does no filtering.
+    """
     try:
         from unified_api.config import TEAM_CONFIGS
     except Exception:
+        logger.warning("Could not import TEAM_CONFIGS; using default display names", exc_info=True)
+        TEAM_CONFIGS = {}
+    # Guard the shape too: if the import succeeds but TEAM_CONFIGS isn't a dict
+    # (e.g. a module/None after a refactor), the ``.get`` below would 500. Degrade
+    # to generated display names instead.
+    if not isinstance(TEAM_CONFIGS, dict):
+        logger.warning("TEAM_CONFIGS is not a dict (%s); using default display names", type(TEAM_CONFIGS).__name__)
         TEAM_CONFIGS = {}
     teams: list[TestableTeam] = []
     for team_key in ADAPTERS:
         cfg = TEAM_CONFIGS.get(team_key)
-        display_name = cfg.name if cfg is not None else team_key.replace("_", " ").title()
+        # getattr (not ``cfg.name``) so an unexpected config object shape degrades
+        # to the generated display name instead of crashing the endpoint.
+        display_name = getattr(cfg, "name", None) or team_key.replace("_", " ").title()
         teams.append(TestableTeam(team_key=team_key, display_name=display_name))
+    teams.extend(_list_agentic_testable_teams())
     return TestableTeamsResponse(teams=teams)
 
 
