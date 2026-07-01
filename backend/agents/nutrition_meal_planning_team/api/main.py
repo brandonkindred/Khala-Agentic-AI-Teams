@@ -73,7 +73,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-orchestrator = NutritionMealPlanningOrchestrator()
+_orchestrator: Optional[NutritionMealPlanningOrchestrator] = None
+
+
+def get_orchestrator() -> NutritionMealPlanningOrchestrator:
+    """Get or create the orchestrator singleton.
+
+    Lazy (deferred past module import) so the container can start — and every
+    route, including ones that don't touch an LLM, can serve — even when no
+    LLM provider is configured yet. The Strands model is itself built with
+    ``lazy=True``: resolving it (via ``get_strands_model`` -> ``get_client``)
+    is what raises ``LLMNotConfiguredError`` when the Postgres provider list
+    is empty, and that error should fail the individual request/job that
+    actually needs an LLM, not orchestrator construction or process startup.
+    """
+    global _orchestrator
+    if _orchestrator is None:
+        from llm_service import get_strands_model
+
+        _orchestrator = NutritionMealPlanningOrchestrator(
+            llm_model=get_strands_model("nutrition_meal_planning", lazy=True)
+        )
+    return _orchestrator
 
 
 @app.get("/health")
@@ -113,7 +134,7 @@ def post_chat_route(body: ChatRequest):
     # Persist the user message
     append_message(client_id, "user", body.message)
 
-    response = orchestrator.handle_chat(body)
+    response = get_orchestrator().handle_chat(body)
 
     # Persist the assistant response
     append_message(
@@ -151,7 +172,7 @@ def clear_chat_history(client_id: str):
 @app.get("/profile/{client_id}", response_model=ClientProfile)
 def get_profile_route(client_id: str):
     """Get client profile. Returns 404 if not found."""
-    profile = orchestrator.get_profile(client_id)
+    profile = get_orchestrator().get_profile(client_id)
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile
@@ -160,7 +181,7 @@ def get_profile_route(client_id: str):
 @app.put("/profile/{client_id}", response_model=ClientProfile)
 def put_profile_route(client_id: str, body: ProfileUpdateRequest):
     """Update client profile. Intake agent validates/completes; profile is saved."""
-    return orchestrator.update_profile(client_id, body)
+    return get_orchestrator().update_profile(client_id, body)
 
 
 @app.patch("/profile/{client_id}/biometrics", response_model=ClientProfile)
@@ -171,7 +192,7 @@ def patch_biometrics_route(client_id: str, body: BiometricPatchRequest):
     coerced to canonical units before validation. Every changed
     field writes a row to ``nutrition_biometric_log``.
     """
-    return orchestrator.patch_biometrics(client_id, body)
+    return get_orchestrator().patch_biometrics(client_id, body)
 
 
 @app.get(
@@ -188,7 +209,9 @@ def get_biometrics_history_route(
 
     Optional ``field`` and ``since`` (ISO timestamp) narrow the query.
     """
-    return orchestrator.get_biometric_history(client_id, field=field, since_iso=since, limit=limit)
+    return get_orchestrator().get_biometric_history(
+        client_id, field=field, since_iso=since, limit=limit
+    )
 
 
 @app.patch("/profile/{client_id}/clinical", response_model=ClientProfile)
@@ -199,7 +222,7 @@ def patch_clinical_route(client_id: str, body: ClinicalPatchRequest):
     Unrecognized strings land in the ``*_freetext`` lists on the
     clinical sub-object.
     """
-    return orchestrator.patch_clinical(client_id, body)
+    return get_orchestrator().patch_clinical(client_id, body)
 
 
 @app.put("/profile/{client_id}/clinical-overrides", response_model=ClientProfile)
@@ -210,7 +233,7 @@ def put_clinician_overrides_route(client_id: str, body: ClinicianOverrideRequest
     boundary via the platform's security gateway; this route itself
     does not re-check auth.
     """
-    return orchestrator.put_clinician_overrides(client_id, body)
+    return get_orchestrator().put_clinician_overrides(client_id, body)
 
 
 @app.get("/profile/{client_id}/completeness", response_model=CompletenessResponse)
@@ -220,7 +243,7 @@ def get_profile_completeness_route(client_id: str):
     Drives UI gating. Never 404s — an unknown client returns a
     response with ``no_profile`` in blockers.
     """
-    return orchestrator.get_completeness(client_id)
+    return get_orchestrator().get_completeness(client_id)
 
 
 # --- SPEC-006: restriction resolution routes ----------------------------
@@ -239,7 +262,7 @@ def get_restrictions_route(client_id: str):
     to ``RestrictionResolution()``).
     """
     try:
-        return orchestrator.get_restrictions(client_id)
+        return get_orchestrator().get_restrictions(client_id)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
@@ -255,7 +278,7 @@ def resolve_ambiguous_route(client_id: str, body: ResolveAmbiguousRequest):
     Subsequent reads no longer re-ask for the same ``raw``.
     """
     try:
-        return orchestrator.resolve_ambiguous(client_id, body)
+        return get_orchestrator().resolve_ambiguous(client_id, body)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
@@ -274,7 +297,7 @@ def reresolve_restrictions_route(client_id: str):
     unlimited.
     """
     try:
-        return orchestrator.reresolve_restrictions(client_id)
+        return get_orchestrator().reresolve_restrictions(client_id)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
@@ -285,7 +308,7 @@ def _run_nutrition_plan_job(job_id: str, body: NutritionPlanRequest) -> None:
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = orchestrator.get_nutrition_plan(body)
+        result = get_orchestrator().get_nutrition_plan(body)
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
@@ -305,7 +328,7 @@ def _run_nutrition_regenerate_job(job_id: str, client_id: str) -> None:
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = orchestrator.regenerate_nutrition_plan(client_id)
+        result = get_orchestrator().regenerate_nutrition_plan(client_id)
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
@@ -326,7 +349,7 @@ def _run_meal_plan_job(job_id: str, body: MealPlanRequest) -> None:
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = orchestrator.get_meal_plan(body)
+        result = get_orchestrator().get_meal_plan(body)
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
@@ -379,7 +402,7 @@ def get_plan_nutrition_rationale_route(client_id: str):
     designed for the "why these numbers?" UI panel. Returns 404 if
     no profile exists yet.
     """
-    payload = orchestrator.get_rationale(client_id)
+    payload = get_orchestrator().get_rationale(client_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     return payload
@@ -415,7 +438,7 @@ def get_job_route(job_id: str):
 @app.post("/feedback", response_model=FeedbackResponse)
 def post_feedback_route(body: FeedbackRequest):
     """Submit feedback for a recommendation (rating, would_make_again, notes)."""
-    return orchestrator.submit_feedback(body)
+    return get_orchestrator().submit_feedback(body)
 
 
 @app.get("/history/meals", response_model=MealHistoryResponse)
@@ -423,7 +446,7 @@ def get_history_meals_route(client_id: Optional[str] = None):
     """Get past recommendations and feedback for the client."""
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id required")
-    return orchestrator.get_meal_history(client_id)
+    return get_orchestrator().get_meal_history(client_id)
 
 
 # --- SPEC-015 §4.4: pantry routes (NUTRITION_PANTRY) ---------------------
