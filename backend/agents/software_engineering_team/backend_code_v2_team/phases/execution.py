@@ -25,7 +25,6 @@ from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.phases.execution import (
     ReviewDependencies,
-    _dedup_issues,
     _run_general_microtask_impl,
     _write_microtask_files,
     run_execution_impl,
@@ -68,9 +67,6 @@ __all__ = [
     "ToolAgentRunner",
     "run_execution",
     "run_execution_with_review_gates",
-    "_dedup_issues",
-    "_write_microtask_files",
-    "_run_general_microtask",
 ]
 
 

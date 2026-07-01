@@ -31,16 +31,9 @@ from software_engineering_team.shared.prompts import (
 from software_engineering_team.shared.repo_writer import write_repo_text_files
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
+from software_engineering_team.tests.test_helpers import init_repo_with_existing_development
 
 # --- helpers ---------------------------------------------------------------
-
-
-class _StubAgent:
-    def __init__(self, resp: str) -> None:
-        self._resp = resp
-
-    def __call__(self, _prompt: str) -> str:
-        return self._resp
 
 
 def _runner(resp: str, *, on_prompt=None) -> LlmRunner:
@@ -95,6 +88,7 @@ _FRONTEND_PROFILE = StackProfile(
 
 
 def test_conventions_for_specific_and_default():
+    """Conventions for specific and default."""
     assert _BACKEND_PROFILE.conventions_for("java") == "JAVA"
     assert _BACKEND_PROFILE.conventions_for("python") == "PY"
     assert _BACKEND_PROFILE.conventions_for("cobol") == "PY"  # falls back to _default
@@ -105,6 +99,7 @@ def test_conventions_for_specific_and_default():
 
 
 def test_build_planning_prompt_substitutes_and_preserves_brace_value():
+    """Build planning prompt substitutes and preserves brace value."""
     out = build_planning_prompt(
         team_kind="frontend",
         tool_agent_domains="- general — x",
@@ -120,6 +115,7 @@ def test_build_planning_prompt_substitutes_and_preserves_brace_value():
 
 
 def test_build_execution_prompt_slot_gating():
+    """Build execution prompt slot gating."""
     be = build_execution_prompt(
         engineer_intro="You are BE.",
         coding_standards="\nCS\n",
@@ -143,6 +139,7 @@ def test_build_execution_prompt_slot_gating():
 
 
 def test_build_problem_solving_single_issue_slot_gating():
+    """Build problem solving single issue slot gating."""
     be = build_problem_solving_single_issue_prompt(
         coding_standards="\nCS\n",
         has_language_conventions=True,
@@ -163,6 +160,7 @@ def test_build_problem_solving_single_issue_slot_gating():
 
 
 def test_build_context_includes_architecture_and_code():
+    """Build context includes architecture and code."""
     arch = SystemArchitecture(overview="ARCH-OVERVIEW")
     out = sh_plan.build_context(
         _task(),
@@ -179,6 +177,7 @@ def test_build_context_includes_architecture_and_code():
 
 
 def test_build_context_skips_placeholder_code():
+    """Build context skips placeholder code."""
     out = sh_plan.build_context(
         _task(),
         None,
@@ -192,6 +191,7 @@ def test_build_context_skips_placeholder_code():
 
 
 def test_parse_planning_output_fallback_and_skip():
+    """Parse planning output fallback and skip."""
     raw = {
         "microtasks": [
             {"id": "m1", "tool_agent": "not-a-real-agent"},  # ValueError -> GENERAL
@@ -210,6 +210,7 @@ def test_parse_planning_output_fallback_and_skip():
 
 
 def test_run_general_microtask_impl_gates_conventions():
+    """Run general microtask impl gates conventions."""
     seen_prompt = {}
 
     files = sh_exec._run_general_microtask_impl(
@@ -231,6 +232,7 @@ def test_run_general_microtask_impl_gates_conventions():
 
 
 def test_run_general_microtask_impl_omits_conventions_for_frontend():
+    """Run general microtask impl omits conventions for frontend."""
     files = sh_exec._run_general_microtask_impl(
         llm=object(),
         microtask=SimpleNamespace(description="do it", title="t"),
@@ -248,6 +250,7 @@ def test_run_general_microtask_impl_omits_conventions_for_frontend():
 
 
 def test_dedup_issues_removes_repeats():
+    """Dedup issues removes repeats."""
     seen: set = set()
     a = SimpleNamespace(file_path="f.py", description="bug")
     b = SimpleNamespace(file_path="f.py", description="bug")
@@ -259,6 +262,8 @@ def test_dedup_issues_removes_repeats():
 
 
 def test_run_execution_impl_filters_and_handles_failure():
+    """Run execution impl filters and handles failure."""
+
     def raising_runner(_inp):
         raise RuntimeError("boom")
 
@@ -296,6 +301,7 @@ def test_run_execution_impl_filters_and_handles_failure():
 
 
 def test_ensure_readme_prepends_title(tmp_path: Path):
+    """Ensure readme prepends title."""
     readme = tmp_path / "README.md"
     readme.write_text("existing body without heading\n", encoding="utf-8")
     sh_setup._ensure_readme_with_title(tmp_path, "My Project")
@@ -305,6 +311,7 @@ def test_ensure_readme_prepends_title(tmp_path: Path):
 
 
 def test_commit_scaffolding_empty_is_noop():
+    """Commit scaffolding empty is noop."""
     calls = []
     sh_setup._commit_scaffolding(
         Path("/tmp"), set(), commit_paths=lambda *a, **k: calls.append(a) or (True, "")
@@ -313,6 +320,7 @@ def test_commit_scaffolding_empty_is_noop():
 
 
 def test_commit_scaffolding_logs_when_not_committed(tmp_path: Path, caplog):
+    """Commit scaffolding logs when not committed."""
     with caplog.at_level("WARNING"):
         sh_setup._commit_scaffolding(
             tmp_path, {"a.txt"}, commit_paths=lambda *a, **k: (False, "rejected by hook")
@@ -321,6 +329,8 @@ def test_commit_scaffolding_logs_when_not_committed(tmp_path: Path, caplog):
 
 
 def test_commit_scaffolding_swallows_exception(tmp_path: Path, caplog):
+    """Commit scaffolding swallows exception."""
+
     def _raise(*_a, **_k):
         raise RuntimeError("git down")
 
@@ -330,6 +340,7 @@ def test_commit_scaffolding_swallows_exception(tmp_path: Path, caplog):
 
 
 def test_configure_quality_tooling_impl_commits_scaffolding(tmp_path: Path):
+    """Configure quality tooling impl commits scaffolding."""
     committed = {}
 
     def ensure_lint(path: Path, written: set) -> bool:
@@ -355,6 +366,7 @@ def test_configure_quality_tooling_impl_commits_scaffolding(tmp_path: Path):
 
 
 def test_run_setup_impl_initializes_new_repo(tmp_path: Path):
+    """Run setup impl initializes new repo."""
     repo = tmp_path / "proj"
 
     def _cqt(_path: Path):
@@ -365,16 +377,16 @@ def test_run_setup_impl_initializes_new_repo(tmp_path: Path):
     )
     assert result.repo_initialized is True
     assert result.linting_configured and result.testing_configured
-    # A real git repo was created on the development branch.
+    # A real git repo was created on the development branch. Use rev-parse
+    # (not `branch --show-current`) for portability with older Git.
     branch = subprocess.run(
-        ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, capture_output=True, text=True
     )
     assert branch.stdout.strip() == "development"
 
 
 def test_run_setup_impl_on_existing_repo(tmp_path: Path):
-    from software_engineering_team.tests.test_helpers import init_repo_with_existing_development
-
+    """Run setup impl on existing repo."""
     init_repo_with_existing_development(tmp_path)
     calls = {"n": 0}
 
@@ -392,6 +404,8 @@ def test_run_setup_impl_on_existing_repo(tmp_path: Path):
 
 
 def test_ensure_readme_logs_when_commit_raises(tmp_path: Path, monkeypatch, caplog):
+    """Ensure readme logs when commit raises."""
+
     def _raise(*_a, **_k):
         raise RuntimeError("no git")
 
@@ -404,12 +418,15 @@ def test_ensure_readme_logs_when_commit_raises(tmp_path: Path, monkeypatch, capl
 
 
 def test_write_microtask_files_strips_leading_slash(tmp_path: Path):
+    """Write microtask files strips leading slash."""
     sh_exec._write_microtask_files(tmp_path, {"/pkg/mod.py": "content", "top.txt": "t"})
     assert (tmp_path / "pkg" / "mod.py").read_text(encoding="utf-8") == "content"
     assert (tmp_path / "top.txt").read_text(encoding="utf-8") == "t"
 
 
 def test_run_execution_impl_runner_success_and_general_fallback(tmp_path: Path):
+    """Run execution impl runner success and general fallback."""
+
     def good_runner(_inp):
         return SimpleNamespace(files={"gen.py": "x"}, summary="done")
 
@@ -445,7 +462,8 @@ def test_run_execution_impl_runner_success_and_general_fallback(tmp_path: Path):
     assert all(m.status == be_models.MicrotaskStatus.COMPLETED for m in result.microtasks)
 
 
-def test_run_planning_impl_appends_tool_agent_recommendations(monkeypatch):
+def test_run_planning_impl_appends_tool_agent_recommendations():
+    """Run planning impl appends tool agent recommendations."""
     template = (
         "## MICROTASKS ##\n---\nid: mt-1\ntitle: t\ndescription: d\ntool_agent: general\n"
         "depends_on:\n---\n## END MICROTASKS ##\n## LANGUAGE ##\npython\n## END LANGUAGE ##\n"
@@ -490,6 +508,7 @@ def test_run_planning_impl_appends_tool_agent_recommendations(monkeypatch):
 
 
 def test_llm_runner_run_stringifies_and_strips():
+    """Llm runner run stringifies and strips."""
     captured = {}
 
     def factory(*, model=None):
@@ -508,6 +527,7 @@ def test_llm_runner_run_stringifies_and_strips():
 
 
 def test_write_repo_text_files_rejects_traversal(tmp_path: Path):
+    """Write repo text files rejects traversal."""
     write_repo_text_files(tmp_path, {"/pkg/mod.py": "content", "top.txt": "t"})
     assert (tmp_path / "pkg" / "mod.py").read_text(encoding="utf-8") == "content"
     assert (tmp_path / "top.txt").read_text(encoding="utf-8") == "t"

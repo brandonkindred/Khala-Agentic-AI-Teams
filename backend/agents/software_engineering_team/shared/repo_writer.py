@@ -336,6 +336,8 @@ def write_repo_text_files(repo_path: Path, files: Dict[str, str]) -> None:
     root = Path(repo_path).resolve()
     for rel_path, content in files.items():
         safe_rel_path = rel_path.lstrip("/")
+        if not safe_rel_path:
+            raise ValueError(f"File path must not be empty: {rel_path!r}")
         full_path = (root / safe_rel_path).resolve()
         # Containment via ``parents`` avoids the ``str.startswith`` sibling-prefix
         # pitfall (e.g. ``/repo`` vs ``/repo-evil``).

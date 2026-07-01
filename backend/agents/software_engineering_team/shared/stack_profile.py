@@ -62,6 +62,16 @@ class StackProfile:
     detect_language: Callable[[Path, Task], str]
     """Infer the project's language/stack from the repo and task."""
 
+    def __post_init__(self) -> None:
+        """Enforce the ``conventions_by_language`` invariant at construction.
+
+        Preconditions: none.
+        Postconditions: raises ``ValueError`` if ``conventions_by_language`` lacks
+        a ``"_default"`` key, so :meth:`conventions_for` can never ``KeyError``.
+        """
+        if "_default" not in self.conventions_by_language:
+            raise ValueError("conventions_by_language must contain a '_default' key")
+
     def conventions_for(self, language: str) -> str:
         """Return the conventions text for ``language``.
 

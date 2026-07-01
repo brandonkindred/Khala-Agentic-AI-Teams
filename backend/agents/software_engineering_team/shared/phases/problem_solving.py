@@ -179,6 +179,8 @@ def run_batch_coding_fixes_impl(
         )
 
     parsed = parse_batch_fix_template(raw)
+    if not isinstance(parsed, dict):  # defensive: a malformed parser result must not crash
+        parsed = {}
     fixed_files = parsed.get("files") or {}
     issues_addressed = parsed.get("issues_addressed") or []
     summary = parsed.get("summary") or f"Batch fixed {len(fixed_files)} file(s)"
@@ -322,6 +324,8 @@ def _fix_issues_one_at_a_time_impl(
                 break
 
             parsed = parse_single(raw)
+            if not isinstance(parsed, dict):  # defensive: malformed parser result
+                parsed = {}
             fixed_files = parsed.get("files") or {}
             if not fixed_files:
                 if parsed.get("resolved"):
