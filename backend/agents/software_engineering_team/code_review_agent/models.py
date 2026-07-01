@@ -237,6 +237,13 @@ class ChunkReviewInput(BaseModel):
         description="Role/criteria profile selecting which reviewer persona and checklist the "
         "chunk is judged against. Defaults to the standard code review.",
     )
+    sibling_surface: str = Field(
+        default="",
+        description="Top-level symbols (functions/classes/exports) defined by the OTHER changed "
+        "files in this submission that are not in this chunk, one 'path: names' line per file "
+        "(capped). Lets the reviewer flag this chunk's references to a sibling symbol that was "
+        "renamed or removed, which a bounded single-chunk view could otherwise miss.",
+    )
 
 
 class ChunkReviewOutput(BaseModel):
