@@ -36,6 +36,7 @@ from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.context_sizing import (
+    CODE_REVIEW_SIBLING_SURFACE_CHARS,
     compute_code_review_arch_overview_chars,
     compute_code_review_existing_codebase_chars,
     compute_code_review_map_chunk_chars,
@@ -55,10 +56,12 @@ CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review 
 # duplicating the literal (it is unique to this prompt template).
 CODE_TO_REVIEW_HEADER = "**Code to review:**"
 
-# Absolute cap on the sibling-surface context block (chars). It carries only
-# symbol names, so a small budget is plenty; the cap keeps the prompt bounded
-# even when many sibling files changed.
-_SIBLING_SURFACE_MAX_CHARS = 2_000
+# Absolute cap on the sibling-surface context block (chars), shared with the
+# coordinator so the value reserved in the chunk budget, hashed into the cache
+# key, and rendered into the prompt can never diverge. The coordinator already
+# caps the surface to this length before hashing/passing it; the slice below is
+# a defensive no-op for any caller that builds ChunkReviewInput directly.
+_SIBLING_SURFACE_MAX_CHARS = CODE_REVIEW_SIBLING_SURFACE_CHARS
 
 
 class ChunkReviewAgent:

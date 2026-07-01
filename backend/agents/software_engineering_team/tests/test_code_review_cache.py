@@ -33,6 +33,7 @@ from code_review_agent.models import CodeReviewInput, ReviewProfile
 
 from llm_service import LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.shared.context_sizing import CODE_REVIEW_SIBLING_SURFACE_CHARS
 
 # The coordinator's chunk-review prompt is the only LLM call carrying this
 # header (see ``chunk_reviewer._run_chunk_review``); the reduce-phase synthesis
@@ -278,11 +279,12 @@ class _FailFullThenBisectClient(DummyLLMClient):
         return dict(_APPROVED)
 
 
-def test_bisected_recovery_outcome_is_not_cached() -> None:
+def test_bisected_recovery_outcome_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     """A chunk that only succeeds via bisection is re-attempted next cycle, not cached."""
-    # One chunk (<= the map budget so it isn't pre-split) but >= 2x the min split
-    # size (2 x 8000) so recovery can bisect the single over-large segment.
-    body = "y = 1\n" * 2_900  # ~17.4k chars across thousands of lines
+    # Lower the bisect floor so a modest single chunk (well under the map budget,
+    # so it isn't pre-split) is still large enough to bisect during recovery.
+    monkeypatch.setenv("CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS", "2000")
+    body = "y = 1\n" * 1_600  # ~9.6k chars across thousands of lines (>= 2 x 2000)
     content = "S_MARK_START\n" + body + "E_MARK_END\n"
     data = _one_file_input(content=content)
 
@@ -387,6 +389,42 @@ def test_symbol_surface_extracts_py_and_ts_symbols() -> None:
     assert coord._symbol_surface(ts) == ["alpha", "beta", "epsilon", "gamma"]
 
 
+def test_symbol_surface_excludes_indented_python_defs() -> None:
+    """Only column-zero def/class count; indented methods/nested defs are not
+    top-level symbols and must not be advertised as siblings."""
+    content = (
+        "class C:\n"
+        "    def method(self):\n"  # indented → not top-level
+        "        def nested():\n"  # nested → not top-level
+        "            pass\n"
+        "def top():\n"  # column-zero → top-level
+        "    pass\n"
+    )
+    assert coord._symbol_surface(content) == ["C", "top"]
+
+
+def test_half_sibling_surface_falls_back_without_map() -> None:
+    """With no surface map (a direct caller), a bisected half keeps the parent's surface."""
+    from code_review_agent.models import FileSegment, ReviewChunk
+
+    half = ReviewChunk(segments=[FileSegment(path="app/a.py", content="def a(): pass")])
+    assert mapping._half_sibling_surface(half, None, "parent surface") == "parent surface"
+    # With the map available it recomputes for the half instead.
+    surface = {"app/a.py": ["a"], "app/b.py": ["foo"]}
+    assert mapping._half_sibling_surface(half, surface, "parent surface") == "app/b.py: foo"
+
+
+def test_sibling_surface_is_capped_to_the_shared_limit() -> None:
+    """A large sibling surface is truncated to CODE_REVIEW_SIBLING_SURFACE_CHARS,
+    so the cache key hashes exactly the (capped) bytes the prompt will carry."""
+    from code_review_agent.models import FileSegment, ReviewChunk
+
+    surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
+    chunk = ReviewChunk(segments=[FileSegment(path="app/self.py", content="x")])
+    out = coord._sibling_surface(chunk, surface)
+    assert len(out) <= CODE_REVIEW_SIBLING_SURFACE_CHARS
+
+
 def test_surface_by_path_skips_headerless_and_symbolless() -> None:
     """Only named blocks with a non-empty surface appear in the map."""
     blocks = [
@@ -419,6 +457,46 @@ def test_sibling_surface_appears_in_chunk_prompt() -> None:
     a_prompt = next(p for p in client.map_prompts if "def a_func" in p)
     assert "app/b.py: foo" in a_prompt
     assert "Other files changed in this submission" in a_prompt
+
+
+class _FailFullCaptureHalvesClient(DummyLLMClient):
+    """Fails the combined multi-file chunk (both defs present); captures & approves
+    each bisected half (only one def present)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self.map_prompts: List[str] = []
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        with self._lock:
+            if _MAP_MARKER in prompt:
+                self.map_prompts.append(prompt)
+        if "def a_func" in prompt and "def b_func" in prompt:
+            raise LLMSemanticExhaustionError("combined chunk too big")
+        return dict(_APPROVED)
+
+
+def test_bisected_multifile_chunk_recomputes_sibling_surface() -> None:
+    """When a two-file chunk bisects, each half is given the *other* file's surface.
+
+    The combined chunk excluded both files from its sibling surface; after the
+    split each half must recompute so the half reviewing app/a.py now sees
+    app/b.py's exported symbols (the cross-file break vector).
+    """
+    # Small files so both land in a single chunk (a multi-segment chunk bisects
+    # by segment regardless of size).
+    a = "def a_func():\n    return b_func()\n"
+    b = "def b_func():\n    return 1\n"
+    client = _FailFullCaptureHalvesClient()
+
+    run_coordinator(client, _two_file_input(a, b))
+
+    # The half reviewing a.py carries 'def a_func' but not 'def b_func'; with the
+    # recompute it now lists b.py's surface (before the fix it inherited the
+    # combined chunk's empty sibling surface).
+    a_half = next(p for p in client.map_prompts if "def a_func" in p and "def b_func" not in p)
+    assert "app/b.py: b_func" in a_half
 
 
 def test_sibling_rename_invalidates_dependent_chunk() -> None:

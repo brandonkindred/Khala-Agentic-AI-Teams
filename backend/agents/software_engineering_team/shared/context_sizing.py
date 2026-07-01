@@ -33,6 +33,13 @@ CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS = 16_000  # CODE_REVIEW_SPEC_EXCERPT_CHARS, f
 CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS = 4_000  # CODE_REVIEW_ARCH_OVERVIEW_CHARS, floor 500
 CODE_REVIEW_EXISTING_ABS_CHARS = 8_000  # CODE_REVIEW_EXISTING_CHARS, floor 500
 
+# Cap on the cross-file "sibling surface" block added to every map prompt (the
+# top-level symbols the other changed files define/export). Reserved in the
+# per-chunk budget below and used by the chunk reviewer + coordinator to bound
+# the block, so a single constant keeps the reservation and the truncation in
+# sync (the sibling surface carries only symbol names, so a small cap suffices).
+CODE_REVIEW_SIBLING_SURFACE_CHARS = 2_000
+
 
 def compute_max_chunk_chars(
     context_tokens: int,
@@ -77,7 +84,8 @@ def compute_max_chunk_chars(
 def compute_code_review_chunk_chars(llm: LLMClient) -> int:
     """
     Max chars per code review chunk. Reserves for CODE_REVIEW_PROMPT (~2K),
-    task (~1K), and the scaled spec/arch/existing excerpts that are in every chunk.
+    task (~1K), the scaled spec/arch/existing excerpts that are in every chunk,
+    and the cross-file sibling-surface block (``CODE_REVIEW_SIBLING_SURFACE_CHARS``).
 
     Postconditions:
         - The context-derived size is bounded by the absolute map-call ceiling
@@ -90,7 +98,9 @@ def compute_code_review_chunk_chars(llm: LLMClient) -> int:
     arch_chars = compute_code_review_arch_overview_chars(llm)
     existing_chars = compute_code_review_existing_codebase_chars(llm)
     excerpt_tokens = int((spec_chars + arch_chars + existing_chars) / CHARS_PER_TOKEN)
-    reserved_prompt = 3000 + excerpt_tokens  # prompt + task + spec/arch/existing excerpts
+    sibling_tokens = int(CODE_REVIEW_SIBLING_SURFACE_CHARS / CHARS_PER_TOKEN)
+    # prompt + task + spec/arch/existing excerpts + the cross-file sibling surface
+    reserved_prompt = 3000 + excerpt_tokens + sibling_tokens
     derived = compute_max_chunk_chars(
         ctx,
         reserved_prompt_tokens=reserved_prompt,
