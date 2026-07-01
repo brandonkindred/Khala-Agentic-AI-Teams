@@ -226,10 +226,10 @@ export class AgentStudioPersonaComponent implements OnInit {
             return;
           }
           this.team.set(resp.team);
-          // Guard `processes` with ?? [] so a malformed team (schema mismatch /
-          // backend bug omitting the field) degrades gracefully instead of
-          // throwing on .filter() and breaking the view.
-          const complete = (resp.team.processes ?? []).filter((p) => p.status === 'complete');
+          // Signals are synchronous, so `completeProcesses` (derived from
+          // `team`) is already up to date here — read it instead of
+          // re-filtering `resp.team.processes` a second time.
+          const complete = this.completeProcesses();
           const current = this.selectedProcessId();
           // Drop a handoff-seeded selection that isn't a *complete* process: the
           // <select> only lists complete ones (so it'd show the placeholder) and
@@ -435,12 +435,16 @@ export class AgentStudioPersonaComponent implements OnInit {
     }
     this.dialogOpen = true;
     // Close the dialog if the component is destroyed (e.g. the stepper moves to
-    // another stage) so it isn't orphaned in the overlay.
-    this.destroyRef.onDestroy(() => ref.close());
+    // another stage) so it isn't orphaned in the overlay. Capture the cleanup
+    // function and call it once the dialog closes normally — otherwise every
+    // open/close cycle over the component's lifetime registers one more
+    // onDestroy callback that's never removed.
+    const removeOnDestroy = this.destroyRef.onDestroy(() => ref.close());
     ref
       .afterClosed()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((result) => {
+        removeOnDestroy();
         this.dialogOpen = false;
         if (!result) {
           return;

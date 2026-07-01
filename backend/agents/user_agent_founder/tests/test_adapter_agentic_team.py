@@ -128,7 +128,10 @@ class _FakeHttpxClient:
         for needle, resp in self.post_responses.items():
             if needle in url:
                 return resp
-        return _FakeResponse(200, {"run_id": "default-run"})
+        # No needle matched: fail loudly rather than silently returning a
+        # plausible-looking 200. A test that forgets to register a URL should
+        # fail on the missing mock, not pass on an accidental default body.
+        raise AssertionError(f"_FakeHttpxClient.post: no post_responses entry matches {url!r}")
 
     def get(self, url: str, *, timeout: Any = None) -> _FakeResponse:
         self.gets.append({"url": url})
@@ -139,7 +142,9 @@ class _FakeHttpxClient:
                     return queue[-1]
                 self._get_indices[needle] = idx + 1
                 return queue[idx]
-        return _FakeResponse(200, {"status": "completed"})
+        # No needle matched: fail loudly (see post() above) rather than masking
+        # a missing get_responses entry with a fake "completed" status.
+        raise AssertionError(f"_FakeHttpxClient.get: no get_responses entry matches {url!r}")
 
 
 @pytest.fixture

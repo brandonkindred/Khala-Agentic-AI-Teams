@@ -387,10 +387,26 @@ describe('AgentStudioPersonaComponent', () => {
   it('closes an open persona dialog when the component is destroyed', () => {
     build({ dialogResult: undefined });
     fixture.detectChanges();
+    // Hold afterClosed pending so the dialog is genuinely still open (not
+    // already closed) when the component is destroyed — build()'s default
+    // `of(dialogResult)` mock resolves synchronously, which would exercise the
+    // "already closed" cleanup path instead of the "still open" force-close path.
+    dialog.open.mockReturnValueOnce({ afterClosed: () => new Subject(), close: dialogClose });
     component.newPersona();
     expect(dialogClose).not.toHaveBeenCalled();
     fixture.destroy();
     expect(dialogClose).toHaveBeenCalled();
+  });
+
+  it('does not force-close the dialog on destroy once it has already closed normally', () => {
+    // The onDestroy force-close hook is removed once afterClosed fires, so a
+    // dialog that already closed (e.g. cancelled) must not be double-closed.
+    build({ dialogResult: undefined });
+    fixture.detectChanges();
+    component.newPersona();
+    expect(dialogClose).not.toHaveBeenCalled();
+    fixture.destroy();
+    expect(dialogClose).not.toHaveBeenCalled();
   });
 
   it('finish-in-compose jumps to Stage 3', () => {
