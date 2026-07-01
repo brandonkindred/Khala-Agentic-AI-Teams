@@ -8,6 +8,12 @@ until the first actual LLM call so the service can start and serve the
 
 from unittest.mock import patch
 
+import pytest
+
+from llm_service import LLMNotConfiguredError
+
+from ..models import AssistantRequest
+from ..orchestrator.agent import PersonalAssistantOrchestrator
 from ..shared.llm import LLMClient, _LazyPALLMClient, get_llm_client
 
 
@@ -69,3 +75,42 @@ def test_eager_default_resolves_immediately():
         result = get_llm_client("personal_assistant")
         assert result is sentinel
         resolve.assert_called_once_with("personal_assistant")
+
+
+class _UnconfiguredLLM(LLMClient):
+    """Stands in for the lazy client when no provider is configured: every call
+    raises ``LLMNotConfiguredError`` (as ``get_client`` does on an empty list)."""
+
+    def __init__(self):
+        super().__init__()
+        self._provider = "mock"
+
+    def _ollama_complete(self, prompt: str, **kwargs) -> str:
+        raise LLMNotConfiguredError("No LLM provider is configured.")
+
+    def complete(self, prompt: str, **kwargs) -> str:
+        raise LLMNotConfiguredError("No LLM provider is configured.")
+
+    def complete_json(self, prompt: str, **kwargs):
+        raise LLMNotConfiguredError("No LLM provider is configured.")
+
+    def get_max_context_tokens(self) -> int:
+        return 4096
+
+
+def test_handle_request_propagates_missing_provider():
+    """A missing provider must fail the run (propagate), not be swallowed into a
+    completed job with a degraded response."""
+    orch = PersonalAssistantOrchestrator(_UnconfiguredLLM())
+    request = AssistantRequest(
+        request_id="req-1", user_id="u1", message="what's on my calendar today?"
+    )
+    with pytest.raises(LLMNotConfiguredError):
+        orch.handle_request(request)
+
+
+def test_classify_intent_does_not_swallow_missing_provider():
+    """The intent-classification catch-all must re-raise ``LLMNotConfiguredError``."""
+    orch = PersonalAssistantOrchestrator(_UnconfiguredLLM())
+    with pytest.raises(LLMNotConfiguredError):
+        orch.classify_intent("hello")
