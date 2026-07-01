@@ -960,6 +960,14 @@ def _review_model_fingerprint(llm: LLMClient) -> str:
     try:
         model = resolve_code_review_model(llm)
     except Exception:
+        # Best-effort: never let a fingerprinting failure abort a review. Log it
+        # so an unexpected model-resolution failure (import/config mistake) is
+        # visible to operators rather than silently degrading cache keys.
+        logger.debug(
+            "CodeReviewCoordinator: model fingerprint resolution failed; "
+            "falling back to client type name",
+            exc_info=True,
+        )
         return type(llm).__name__
     for attr in ("model_id", "model_name", "model"):
         value = getattr(model, attr, None)
@@ -978,7 +986,9 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
 
     Preconditions:
         - ``base_input`` is the shared ``ChunkReviewInput`` field dict built in
-          ``run_coordinator`` (JSON-serializable; ``profile`` is a ``ReviewProfile``).
+          ``run_coordinator``. Every value must be natively JSON-serializable
+          (str/number/bool/list/dict/None) except ``profile``, which is a
+          ``ReviewProfile`` normalized to its ``.value`` here.
 
     Postconditions:
         - Returns a hex digest that changes whenever any shared review input
@@ -987,6 +997,10 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
           changed profile, task context, or model. Deterministic and stable
           across runs (``sort_keys`` + enum ``.value`` normalization), so a hit
           for an unchanged chunk survives across coordinator calls in a process.
+        - Raises ``TypeError`` if a future change puts a non-serializable value
+          in ``base_input``: the key is failed loud rather than coerced via
+          ``str()`` (which could be non-deterministic and silently break the
+          cache) — a precondition violation surfaces instead of hiding.
     """
     profile = base_input.get("profile")
     normalized = {
@@ -996,7 +1010,7 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     }
     normalized["profile"] = getattr(profile, "value", profile)
     normalized["__model__"] = model_fingerprint
-    payload = json.dumps(normalized, sort_keys=True, default=str)
+    payload = json.dumps(normalized, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

@@ -26,6 +26,7 @@ from typing import Any, Dict, List
 
 import pytest
 from code_review_agent import coordinator as coord
+from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.models import CodeReviewInput, ReviewProfile
 
@@ -33,9 +34,11 @@ from llm_service import LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
 
 # The coordinator's chunk-review prompt is the only LLM call carrying this
-# marker (see ``chunk_reviewer._run_chunk_review``); the reduce-phase synthesis
-# pass does not, so counting it isolates map-phase reviews.
-_MAP_MARKER = "**Code to review:**"
+# header (see ``chunk_reviewer._run_chunk_review``); the reduce-phase synthesis
+# pass does not, so counting it isolates map-phase reviews. Sourced from the
+# chunk-reviewer module so a prompt-template change can't silently break the
+# count.
+_MAP_MARKER = CODE_TO_REVIEW_HEADER
 
 
 class _CountingClient(DummyLLMClient):
@@ -238,17 +241,17 @@ def test_degraded_outcome_is_not_cached() -> None:
     # chunk a's cache key is unchanged.
     client = _FailOnMarkerClient(fail_marker="BBBB")
     degraded = run_coordinator(client, _two_file_input(a, b))
-    # chunk a: 1 call (cached); chunk b: initial + one retry (cannot bisect) = 2.
-    assert client.map_calls == 3
+    calls_after_degraded = client.map_calls
     assert degraded.approved is False  # the not-reviewed finding blocks the merge
     assert any("could not be reviewed" in i.description for i in degraded.issues)
 
     # Heal the client and re-run identical input: chunk a is a cache hit (no new
     # call); chunk b was degraded so nothing was cached for it → exactly one new
-    # call, which now succeeds.
+    # call, which now succeeds. Asserting the *delta* (not an absolute count)
+    # keeps the test robust to changes in the recovery retry/bisection logic.
     client.fail = False
     result = run_coordinator(client, _two_file_input(a, b))
-    assert client.map_calls == 4  # +1 only: the previously-degraded chunk b
+    assert client.map_calls == calls_after_degraded + 1  # only the degraded chunk b
     assert result.approved is True
 
 

@@ -50,6 +50,11 @@ logger = logging.getLogger(__name__)
 
 CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review only the code below. Report issues with file_path set to the path provided for this chunk.\n"
 
+# Header that precedes the code block in every chunk-review prompt. Exposed as a
+# named constant so callers/tests can identify a map-phase review prompt without
+# duplicating the literal (it is unique to this prompt template).
+CODE_TO_REVIEW_HEADER = "**Code to review:**"
+
 
 class ChunkReviewAgent:
     """Reviews one chunk of code. Used by CodeReviewCoordinator for large codebases.
@@ -175,7 +180,7 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     context_parts.extend(
         [
             "",
-            "**Code to review:**",
+            CODE_TO_REVIEW_HEADER,
             "```",
             code_chunk,
             "```",
