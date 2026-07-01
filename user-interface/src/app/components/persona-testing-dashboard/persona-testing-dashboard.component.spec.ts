@@ -85,6 +85,21 @@ describe('PersonaTestingDashboardComponent', () => {
     expect(component).toBeTruthy();
   });
 
+  it('filters agentic_team entries out of the testable-teams list', () => {
+    // The legacy start dialog can't supply process_id, so agentic teams (which
+    // require one) must not be offered here — only static targets remain.
+    apiStub.getTestableTeams.mockReturnValue(
+      of({
+        teams: [
+          { team_key: 'software_engineering', display_name: 'Software Engineering' },
+          { team_key: 'agentic_team:abc', display_name: 'Acme' },
+        ],
+      }),
+    );
+    component.ngOnInit();
+    expect(component.teams.map((t) => t.team_key)).toEqual(['software_engineering']);
+  });
+
   it('routes stop to JobActionsService with user_agent_founder source', () => {
     component.stopRun(sampleRun(), new Event('click'));
     expect(jobActionsSpy.stop).toHaveBeenCalledWith('user_agent_founder', 'run-abc');
