@@ -303,9 +303,20 @@ def test_start_review_swallows_errors():
 def test_configured_owner_repo_reads_meta():
     with patch(
         "unified_api.integrations_store.get_github_config_meta",
-        return_value={"owner": "acme", "repo": "widget"},
+        return_value={"enabled": True, "owner": "acme", "repo": "widget"},
     ):
         assert gh._configured_owner_repo() == ("acme", "widget")
+
+
+def test_configured_owner_repo_empty_when_disabled():
+    """A disabled integration reports as unconfigured even with owner/repo/PAT still
+    saved from before it was turned off — the webhook must not treat a disabled
+    integration as a valid review target."""
+    with patch(
+        "unified_api.integrations_store.get_github_config_meta",
+        return_value={"enabled": False, "owner": "acme", "repo": "widget"},
+    ):
+        assert gh._configured_owner_repo() == ("", "")
 
 
 # ---------------------------------------------------------------------------

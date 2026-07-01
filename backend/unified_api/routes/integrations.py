@@ -616,6 +616,11 @@ async def github_events(request: Request) -> Any:
           the ``X-Hub-Signature-256`` HMAC is verified against the raw body and a mismatch
           raises ``HTTPException(401)``; with no secret configured, verification is skipped
           (logged) to ease first-time setup — mirroring the Slack events handler.
+        - Fails closed on a credential-store outage: if the secret is stored only in
+          Postgres and that store is unreachable, this raises ``HTTPException(503)``
+          rather than silently skipping verification — an unreachable store must never
+          be treated the same as "no secret configured", or a forged payload could pass
+          unverified for the duration of the outage.
         - ``ping`` deliveries return ``{"ok": true}`` after verification.
         - A non-JSON body raises ``HTTPException(400)``; otherwise the event is dispatched
           to :func:`dispatch_github_event` (which never raises) and ``{"ok": true}`` is
@@ -625,16 +630,27 @@ async def github_events(request: Request) -> Any:
         dispatch_github_event,
         verify_github_signature,
     )
-    from unified_api.integrations_store import get_github_webhook_secret
+    from unified_api.integrations_store import get_github_webhook_secret_status
 
     body = await request.body()
     event_type = request.headers.get("X-GitHub-Event", "").strip()
     signature = request.headers.get("X-Hub-Signature-256", "")
 
-    secret = await asyncio.to_thread(get_github_webhook_secret)
+    secret, secret_store_reachable = await asyncio.to_thread(get_github_webhook_secret_status)
     if secret:
         if not verify_github_signature(secret, body, signature):
             raise HTTPException(status_code=401, detail="Invalid GitHub signature")
+    elif not secret_store_reachable:
+        # Fail closed: we cannot tell whether a secret is actually configured, so
+        # refuse rather than silently skip verification (see docstring above).
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Cannot reach the GitHub credential store (Postgres); webhook signature "
+                "verification is temporarily unavailable. Restore the database connection "
+                "and retry."
+            ),
+        )
     else:
         logger.warning("GitHub webhook secret not configured — skipping signature verification")
 

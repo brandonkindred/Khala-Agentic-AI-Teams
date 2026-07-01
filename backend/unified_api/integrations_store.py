@@ -595,13 +595,41 @@ def get_github_webhook_secret() -> str | None:
         the ``GITHUB_WEBHOOK_SECRET`` environment variable. Returns ``None`` when neither
         is set (so the caller can decide whether to skip signature verification). The
         credential read never raises (``get_credential_status`` swallows its own errors);
-        a store outage yields the env fallback or ``None``.
+        a store outage yields the env fallback or ``None``. Does NOT distinguish "not
+        configured" from "store unreachable" — callers that must fail closed on an
+        outage (e.g. the webhook route) should use
+        :func:`get_github_webhook_secret_status` instead.
     """
     secret, _ = get_credential_status(_GITHUB_SERVICE, "webhook_secret")
     if secret:
         return secret
     env_secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()
     return env_secret or None
+
+
+def get_github_webhook_secret_status() -> tuple[str | None, bool]:
+    """Return ``(secret_or_None, store_reachable)`` for the webhook signature check.
+
+    Preconditions: none.
+    Postconditions: returns the stored secret (or the ``GITHUB_WEBHOOK_SECRET`` env
+        fallback) paired with whether the credential store was reachable. Unlike
+        :func:`get_github_webhook_secret`, this lets the caller distinguish "no secret is
+        configured" (``store_reachable=True``, secret ``None`` — first-time setup, safe
+        to skip verification) from "the store could not be read" (``store_reachable=
+        False``, secret ``None`` — a transient Postgres outage that must NOT be treated
+        as "no secret configured", since that would silently disable signature
+        verification and let a forged webhook payload through for the duration of the
+        outage). The env var is checked before reporting unreachability, so a
+        secret configured purely via env var is never blocked by a Postgres outage.
+        Never raises.
+    """
+    secret, store_reachable = get_credential_status(_GITHUB_SERVICE, "webhook_secret")
+    if secret:
+        return secret, True
+    env_secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()
+    if env_secret:
+        return env_secret, True
+    return None, store_reachable
 
 
 def set_github_config(

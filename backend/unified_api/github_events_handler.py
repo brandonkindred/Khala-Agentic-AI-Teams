@@ -220,17 +220,24 @@ def process_review_request(owner: str, repo: str, pr_number: int, comment_id: in
 
 
 def _configured_owner_repo() -> tuple[str, str]:
-    """Return the configured (owner, repo), or ("", "") if unavailable.
+    """Return the configured (owner, repo) when the integration is enabled, else ("", "").
 
     Preconditions: none.
     Postconditions: returns the stripped owner/repo from the GitHub config settings
-        (JSON only — no credential read). Returns ``("", "")`` when nothing is configured
-        or the settings read fails. Never raises.
+        (JSON only — no credential read) ONLY when ``enabled`` is true. A disabled
+        integration reports as unconfigured even if owner/repo/PAT are still saved from
+        before it was turned off (the PUT path preserves them on disable), so the
+        webhook path never submits review work — and never adds the 👀 acknowledgement
+        reaction — for an integration the operator turned off. Returns ``("", "")`` when
+        nothing is configured, the integration is disabled, or the settings read fails.
+        Never raises.
     """
     try:
         from unified_api.integrations_store import get_github_config_meta
 
         meta = get_github_config_meta()
+        if not meta.get("enabled"):
+            return "", ""
         return str(meta.get("owner", "")).strip(), str(meta.get("repo", "")).strip()
     except Exception:
         logger.exception("GitHub webhook: failed to read configured owner/repo")

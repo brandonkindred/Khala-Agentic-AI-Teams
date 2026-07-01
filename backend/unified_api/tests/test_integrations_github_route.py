@@ -855,7 +855,7 @@ def _sign(secret: str, body: bytes) -> str:
 def test_github_events_ping_returns_ok():
     """A ping event with a valid signature short-circuits to {"ok": true}."""
     body = b'{"zen": "Keep it simple."}'
-    with patch("unified_api.integrations_store.get_github_webhook_secret", return_value="whsec"):
+    with patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)):
         resp = client.post(
             _EVENTS,
             content=body,
@@ -867,7 +867,7 @@ def test_github_events_ping_returns_ok():
 
 def test_github_events_rejects_bad_signature():
     body = b'{"action":"created"}'
-    with patch("unified_api.integrations_store.get_github_webhook_secret", return_value="whsec"):
+    with patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)):
         resp = client.post(
             _EVENTS,
             content=body,
@@ -878,10 +878,11 @@ def test_github_events_rejects_bad_signature():
 
 
 def test_github_events_skips_verification_without_secret():
-    """With no secret configured, an unsigned valid payload is dispatched (eased setup)."""
+    """With no secret configured (store reachable, genuinely unset), an unsigned valid
+    payload is dispatched (eased first-time setup)."""
     body = b'{"action":"created"}'
     with (
-        patch("unified_api.integrations_store.get_github_webhook_secret", return_value=None),
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=(None, True)),
         patch("unified_api.github_events_handler.dispatch_github_event") as disp,
     ):
         resp = client.post(_EVENTS, content=body, headers={"X-GitHub-Event": "issue_comment"})
@@ -890,10 +891,26 @@ def test_github_events_skips_verification_without_secret():
     disp.assert_called_once()
 
 
+def test_github_events_fails_closed_when_secret_store_unreachable():
+    """No secret found AND the store is unreachable (vs. genuinely unconfigured) must
+    reject with 503, never silently skip verification — an unreachable store could be
+    hiding a real stored secret, and treating that the same as "not configured" would
+    let a forged, unsigned payload through for the duration of the outage."""
+    body = b'{"action":"created"}'
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=(None, False)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(_EVENTS, content=body, headers={"X-GitHub-Event": "issue_comment"})
+    assert resp.status_code == 503
+    assert "credential store" in resp.json()["detail"].lower()
+    disp.assert_not_called()
+
+
 def test_github_events_dispatches_valid_signed_comment():
     body = b'{"action":"created","issue":{"number":42}}'
     with (
-        patch("unified_api.integrations_store.get_github_webhook_secret", return_value="whsec"),
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)),
         patch("unified_api.github_events_handler.dispatch_github_event") as disp,
     ):
         resp = client.post(
@@ -911,7 +928,7 @@ def test_github_events_dispatches_valid_signed_comment():
 
 def test_github_events_returns_400_on_invalid_json():
     body = b"not json"
-    with patch("unified_api.integrations_store.get_github_webhook_secret", return_value="whsec"):
+    with patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)):
         resp = client.post(
             _EVENTS,
             content=body,
