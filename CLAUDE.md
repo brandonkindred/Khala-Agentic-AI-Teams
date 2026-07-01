@@ -157,12 +157,14 @@ The `product_delivery` team (`backend/agents/product_delivery/`, mounted at `/ap
 ### LLM Integration
 
 `backend/agents/llm_service/` provides a unified client that supports:
-- **Ollama** (local inference or Cloud API via `OLLAMA_API_KEY`) — including thinking mode
-- **Claude** (via the official `anthropic` Python SDK) — streaming, adaptive thinking + `output_config.effort`; key from `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY`, default model `claude-opus-4-8`
+- **Ollama** (local inference or Cloud API) — including thinking mode
+- **Claude** (via the official `anthropic` Python SDK) — streaming, adaptive thinking + `output_config.effort`; default model `claude-opus-4-8`
 
-Provider/model/keys are selectable via env vars **or** the LLM Provider settings UI (`/llm-config` → `PUT /api/llm-config`), which persists them Fernet-encrypted in shared Postgres so every team container reads them through `shared_postgres.secrets` / `llm_service.runtime_config` (resolution order: runtime → env → default).
+**The Postgres-backed ordered provider list is the SOLE source of LLM resolution.** The LLM Provider settings UI (`/llm-config`) manages an **ordered list of provider entries** (`/api/llm-config/providers` → `llm_provider_configs` table via `llm_service.provider_store`), most→least preferred; each entry carries its own provider/model/base URL and its **own API key** (Fernet-encrypted; no environment fallback for keys). `get_client` selects the most-preferred entry that isn't usage-limited; on a 429 a `FailoverLLMClient` marks the entry (with a `reset_at`) and retries the same call on the next available provider, resetting an entry automatically once its limit window passes. Tuning vars: `LLM_FAILOVER_FAST_429`, `LLM_FAILOVER_RATE_WINDOW_S`, `LLM_FAILOVER_WEEKLY_WINDOW_S` (see `docs/ENV_VARS.md`).
 
-Environment variables for LLM: `LLM_PROVIDER` (`ollama`/`claude`/`dummy`), `LLM_BASE_URL`, `LLM_MODEL`, `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY`
+When the list is empty (or `POSTGRES_HOST` unset) and the provider is not `dummy`, `get_client` raises `LLMNotConfiguredError` — there is **no legacy single-provider env fallback**. In an agent run this fails the job; the Angular UI shows a "No LLMs configured" dialog whose "Setup LLM" button routes to `/llm-config`. The only override is `LLM_PROVIDER=dummy`, the no-LLM test/dev harness, which pre-empts the list. The `LLM_MODEL`/`LLM_BASE_URL` env vars now only supply *defaults* for an entry's blank model/base URL — they no longer configure a live provider on their own.
+
+Environment variables for LLM: `LLM_PROVIDER` (`ollama`/`claude`/`dummy`; only `dummy` is load-bearing — it selects the no-LLM harness), `LLM_BASE_URL`, `LLM_MODEL` (blank-entry-field defaults only)
 
 ## Code Style
 
@@ -189,9 +191,8 @@ Core vars only. The complete reference — every var, defaults, backoff math, fa
 
 | Variable | Purpose |
 |---|---|
-| `OLLAMA_API_KEY` | Required for Ollama Cloud API |
-| `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | LLM provider selection (`ollama`/`claude`/`dummy`), server URL, model name |
-| `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY` | Anthropic API key — required for `LLM_PROVIDER=claude` |
+| `LLM_PROVIDER` | `dummy` selects the no-LLM test/dev harness (the only load-bearing value); otherwise the Postgres provider list is the sole source. |
+| `LLM_BASE_URL` / `LLM_MODEL` | Default base URL / model for a provider-list entry whose field is blank (no longer configures a live provider on their own). |
 | `POSTGRES_HOST` (+ `_PORT`/`_USER`/`_PASSWORD`/`_DB`) | Required for migrated teams; enables Postgres-backed stores via `shared_postgres`; no SQLite fallback |
 | `JOB_SERVICE_URL` | Central job service; required by every team's `JobServiceClient` |
 | `TEMPORAL_ADDRESS` (+ `TEMPORAL_NAMESPACE`/`TEMPORAL_TASK_QUEUE`) | Enables Temporal mode when set |
