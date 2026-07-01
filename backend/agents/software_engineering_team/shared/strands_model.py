@@ -18,7 +18,8 @@ This module collapses the pattern to one definition.
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from llm_service import get_strands_model
 
@@ -73,3 +74,55 @@ def resolve_text_mode_strands_model(llm: Any) -> Any:
     legible to a grep.
     """
     return resolve_strands_model(llm, response_format="text")
+
+
+def run_strands_agent(agent_factory: Callable[..., Any], model: Any, prompt: str) -> str:
+    """Run a one-shot Strands agent on ``prompt`` and return its stripped text.
+
+    The single definition of the build-agent → stringify → strip incantation,
+    shared by :meth:`LlmRunner.run` (the code-v2 phases) and
+    ``ToolAgentBase._run_agent`` (the tool agents), so output coercion lives in
+    one place instead of being copied at both call sites.
+
+    Preconditions:
+        ``agent_factory(model=model)`` returns a callable accepting ``prompt``.
+    Postconditions:
+        Returns ``str(agent(prompt)).strip()``; any exception raised while
+        building or running the agent propagates to the caller.
+    """
+    return str(agent_factory(model=model)(prompt)).strip()
+
+
+@dataclass(frozen=True)
+class LlmRunner:
+    """Bundle the two LLM-call collaborators the shared code-v2 phase impls need.
+
+    The shared phase implementations run a one-shot Strands ``Agent`` on a prompt
+    and read back its text. That is always the same three-step incantation —
+    resolve the model, build the agent, stringify+strip the result — and it needs
+    two injectable collaborators so the *team* module stays the monkeypatch
+    boundary for tests: the ``Agent`` class (``agent_factory``) and the model
+    resolver (``resolve_model``). Bundling them here collapses that repeated pair
+    (and the incantation) to a single ``runner`` parameter + :meth:`run` call.
+
+    Invariants:
+        ``agent_factory`` and ``resolve_model`` are callables; the instance is
+        immutable (``frozen=True``). Build it at call time from the team module's
+        (possibly monkeypatched) globals — do NOT cache one at module import, or
+        a later ``monkeypatch.setattr`` on those globals will not take effect.
+    """
+
+    agent_factory: Callable[..., Any]
+    resolve_model: Callable[[Any], Any]
+
+    def run(self, llm: Any, prompt: str) -> str:
+        """Resolve the model, run the agent on ``prompt``, and return stripped text.
+
+        Preconditions:
+            ``prompt`` is a non-empty string; ``llm`` is a Strands ``Model``, an
+            ``LLMClient``, or ``None`` (see :func:`resolve_strands_model`).
+        Postconditions:
+            Returns ``str(agent(prompt)).strip()``. Any exception raised by the
+            agent/model propagates to the caller (callers handle it locally).
+        """
+        return run_strands_agent(self.agent_factory, self.resolve_model(llm), prompt)

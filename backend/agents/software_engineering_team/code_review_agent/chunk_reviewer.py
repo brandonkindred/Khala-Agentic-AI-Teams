@@ -39,6 +39,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_existing_codebase_chars,
     compute_code_review_map_chunk_chars,
+    compute_code_review_sibling_surface_chars,
     compute_code_review_spec_excerpt_chars,
 )
 
@@ -50,9 +51,44 @@ logger = logging.getLogger(__name__)
 
 CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review only the code below. Report issues with file_path set to the path provided for this chunk.\n"
 
+# Header that precedes the code block in every chunk-review prompt. Exposed as a
+# named constant so callers/tests can identify a map-phase review prompt without
+# duplicating the literal (it is unique to this prompt template).
+CODE_TO_REVIEW_HEADER = "**Code to review:**"
+
 
 class ChunkReviewAgent:
-    """Reviews one chunk of code. Used by CodeReviewCoordinator for large codebases.
+    """The map step of the map-reduce code review: review exactly one chunk.
+
+    How it is used:
+        The public entry point ``coordinator.run_coordinator`` splits a
+        submission into bounded ``ReviewChunk``s and, in its map phase, calls
+        ``run`` once per chunk (in parallel), then reduces the per-chunk results
+        into one verdict. Callers do not construct the prompt themselves::
+
+            agent = ChunkReviewAgent(llm)
+            out = agent.run(ChunkReviewInput(code_chunk=chunk.content, ...))
+            # out.approved, out.issues, out.summary, ...
+
+    Input (``ChunkReviewInput``):
+        ``code_chunk`` is the rendered chunk (one or more files, already sized to
+        the model's context by the coordinator) plus optional task/spec/
+        architecture/existing-codebase context and the sibling surface. The code
+        is reviewed verbatim; only the context excerpts are defensively capped.
+
+    Output (``ChunkReviewOutput``):
+        This chunk's findings only — ``approved`` (no critical/high issues),
+        ``issues`` (raw dicts the coordinator normalizes and re-anchors),
+        ``summary``, and the ``spec_compliance_notes``/``suggested_commit_message``
+        passthroughs. It never re-anchors line numbers, dedupes, or applies the
+        approval gate — those are the coordinator's reduce phase.
+
+    Constraints:
+        - Reviews a single chunk, not the whole codebase; cross-chunk and
+          whole-submission concerns (dedupe, false-positive verification, final
+          verdict) belong to the coordinator.
+        - The caller must have bounded ``code_chunk`` to the map budget; this
+          agent re-applies caps to context but never truncates the code.
 
     Invariants:
         - Stateless apart from the injected ``llm`` handle: every ``run`` call
@@ -162,6 +198,25 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         )
     if architecture_overview:
         context_parts.extend(["", "**Architecture:**", architecture_overview])
+    # Defensive slice: the coordinator already caps the surface to this same
+    # env-configurable length before hashing/passing it, so this is a no-op for
+    # coordinator-built inputs and a guard for any direct ChunkReviewInput caller.
+    sibling_surface = (input_data.sibling_surface or "")[
+        : compute_code_review_sibling_surface_chars()
+    ]
+    if sibling_surface:
+        context_parts.extend(
+            [
+                "",
+                "**Other files changed in this submission (top-level symbols they define/export):**",
+                "Flag any reference in the code below to a symbol that a sibling file was "
+                "expected to provide but no longer does (e.g. a renamed or removed function, "
+                "class, or export). Do not flag symbols that are still present.",
+                "---",
+                sibling_surface,
+                "---",
+            ]
+        )
     if existing_codebase_excerpt:
         context_parts.extend(
             [
@@ -175,7 +230,7 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     context_parts.extend(
         [
             "",
-            "**Code to review:**",
+            CODE_TO_REVIEW_HEADER,
             "```",
             code_chunk,
             "```",
