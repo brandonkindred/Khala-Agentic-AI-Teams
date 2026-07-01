@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from llm_service import LLMNotConfiguredError
+
 from ..models import Reservation, ReservationType
 from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
@@ -222,6 +224,8 @@ class ReservationAgent:
                 objective="parse reservation request",
             )
             return data
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to parse reservation request (JSON extraction failed):\n%s", e)
             return {}

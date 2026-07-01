@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from llm_service import LLMNotConfiguredError
+
 from ..models import EmailDraft, EmailMessage
 from ..shared.credential_store import CredentialStore, IMAPCredentials, OAuthCredentials
 from ..shared.llm import JSONExtractionFailure, LLMClient
@@ -144,6 +146,8 @@ class EmailAgent:
                 think=False,
                 objective="summarize email",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to summarize email (JSON extraction failed):\n%s", e)
             return EmailSummary(
@@ -224,6 +228,8 @@ class EmailAgent:
                 prompt, temperature=0.1, think=False, objective="extract events from email"
             )
             return data.get("events", [])
+        except LLMNotConfiguredError:
+            raise
         except Exception as e:
             logger.error("Failed to extract events: %s", e)
             return []
@@ -293,6 +299,8 @@ class EmailAgent:
             data = self.llm.complete_json(
                 prompt, temperature=0.4, think=False, objective="draft email"
             )
+        except LLMNotConfiguredError:
+            raise
         except Exception as e:
             logger.error("Failed to draft email: %s", e)
             return DraftResult(
@@ -328,6 +336,8 @@ class EmailAgent:
                 prompt, temperature=0.5, think=False, objective="generate quick replies"
             )
             return data.get("replies", [])
+        except LLMNotConfiguredError:
+            raise
         except Exception as e:
             logger.error("Failed to generate quick replies: %s", e)
             return []

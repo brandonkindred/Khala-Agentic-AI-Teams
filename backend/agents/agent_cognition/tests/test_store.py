@@ -8,7 +8,7 @@ test so cases are independent.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -672,7 +672,17 @@ def test_mark_period_stale_no_summary_returns_true_and_flags_nothing() -> None:
 # ---------------------------------------------------------------------------
 # prune_events
 # ---------------------------------------------------------------------------
-def test_prune_events_deletes_only_summarized_nonstale_past_cutoff() -> None:
+def test_prune_events_deletes_only_summarized_nonstale_past_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Freeze the prune clock so the 30-day retention cutoff is deterministic:
+    # event ``d`` at _MID_DAY must stay *newer* than the cutoff regardless of the
+    # real wall-clock date. Pinned to 15 days after _MID_DAY (cutoff = _MID_DAY −
+    # 15d), keeping ``d`` inside the window while the 2020 events fall well past
+    # it. Without this the test drifts and fails once real time crosses
+    # _MID_DAY + 30 days.
+    monkeypatch.setattr(store, "_now", lambda: _MID_DAY + timedelta(days=15))
+
     # Append all events first, then compute their day summaries (computed_at in
     # the future ⇒ every event is folded), so prune is purely gated on the
     # summary state below.

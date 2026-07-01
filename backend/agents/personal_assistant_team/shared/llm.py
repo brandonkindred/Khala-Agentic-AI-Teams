@@ -411,14 +411,63 @@ class _PAStrandsWrapper(LLMClient):
         return 4096
 
 
+class _LazyPALLMClient(LLMClient):
+    """Defers LLM provider resolution until the first actual LLM call.
+
+    Resolving a provider eagerly (e.g. at module import) fails hard with
+    ``LLMNotConfiguredError`` when no provider is configured, which would crash
+    container startup before the service can serve health checks or the
+    ``/llm-config`` setup flow. This wrapper lets the orchestrator and its
+    specialist agents construct without a live provider; the real
+    ``_PAStrandsWrapper`` is built on the first invocation, so a missing
+    provider fails the individual agent *run* rather than process startup.
+
+    Preconditions: ``agent_key`` is either None or a known agent key.
+    Invariants: the backing client is resolved at most once (cached).
+    """
+
+    def __init__(self, agent_key: Optional[str] = None):
+        self._agent_key = agent_key
+        self._delegate: Optional[LLMClient] = None
+
+    def _resolve(self) -> LLMClient:
+        if self._delegate is None:
+            self._delegate = get_llm_client_with_pa_exceptions(self._agent_key)
+        return self._delegate
+
+    def _ollama_complete(self, prompt: str, **kwargs: Any) -> str:
+        return self._resolve()._ollama_complete(prompt, **kwargs)
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        return self._resolve().complete(prompt, **kwargs)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        return self._resolve().complete_json(prompt, **kwargs)
+
+    def get_max_context_tokens(self) -> int:
+        return self._resolve().get_max_context_tokens()
+
+
 def get_llm_client_with_pa_exceptions(agent_key: Optional[str] = None) -> LLMClient:
     """Return a Strands-Agent-backed client that raises JSONExtractionFailure on parse errors."""
     agent = Agent(model=get_strands_model(agent_key))
     return _PAStrandsWrapper(agent)
 
 
-def get_llm_client(agent_key: Optional[str] = None) -> LLMClient:
-    """Return PA wrapper around Strands Agent (raises JSONExtractionFailure on parse errors)."""
+def get_llm_client(agent_key: Optional[str] = None, *, lazy: bool = False) -> LLMClient:
+    """Return PA wrapper around Strands Agent (raises JSONExtractionFailure on parse errors).
+
+    :param lazy: When True, defer provider resolution until the first LLM call.
+        Use this at module/import scope so a missing provider does not crash
+        startup — the agent run fails instead, matching the documented no-LLM
+        behavior. When False (default), resolve the provider eagerly.
+
+    Preconditions: ``agent_key`` is None or a known agent key.
+    Postconditions: returns an ``LLMClient``; with ``lazy=True`` no provider
+    resolution occurs until the returned client is first invoked.
+    """
+    if lazy:
+        return _LazyPALLMClient(agent_key)
     return get_llm_client_with_pa_exceptions(agent_key)
 
 
