@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any, Literal, Optional, Sequence, Union
+from typing import Annotated, Any, Iterator, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
@@ -306,10 +306,78 @@ class Predicate(_SpecNode):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Boolean predicate combinators. A rule's ``when`` may be a single ``Predicate``
+# (leaf) or a nested ``all_of`` / ``any_of`` tree, so a confirmation-stacked
+# entry (trend ∧ pullback ∧ volume) is expressible as ONE rule and compiles
+# deterministically — the engine evaluates the tree (see
+# ``executor.predicate_evaluator.evaluate_tree``); the compiled code emits no
+# predicate logic. Combinators carry no operators of their own, only children.
+# ---------------------------------------------------------------------------
+
+
+class AllOf(_SpecNode):
+    """Conjunction: satisfied only when EVERY child predicate/tree is satisfied.
+
+    Invariants: ``of`` carries ≥2 children — a 1-child ``all_of`` is just the
+    child, so it is rejected to keep the tree in a single canonical shape.
+    """
+
+    kind: Literal["all_of"] = "all_of"
+    of: list["PredicateTree"] = Field(min_length=2)
+
+
+class AnyOf(_SpecNode):
+    """Disjunction: satisfied when ANY child predicate/tree is satisfied.
+
+    Invariants: ``of`` carries ≥2 children (see :class:`AllOf`).
+    """
+
+    kind: Literal["any_of"] = "any_of"
+    of: list["PredicateTree"] = Field(min_length=2)
+
+
+# A predicate position in a rule's ``when``: a single comparison or a nested
+# boolean tree. ``Predicate`` (no ``kind``, ``extra="forbid"``) and the
+# combinators (``kind`` + ``of``, ``extra="forbid"``) are mutually exclusive
+# shapes, so this plain union dispatches unambiguously without an explicit
+# discriminator — a leaf dict never validates as a combinator and vice versa.
+PredicateTree = Union[Predicate, AllOf, AnyOf]
+
+
+def iter_leaf_predicates(node: "PredicateTree") -> Iterator[Predicate]:
+    """Yield every leaf ``Predicate`` in ``node`` (depth-first, left-to-right).
+
+    Preconditions: ``node`` is a ``Predicate`` / ``AllOf`` / ``AnyOf``.
+    Postconditions: yields each leaf once; a bare ``Predicate`` yields itself.
+    Single source of the tree recursion, reused by the compiler, the readiness
+    gate, the engine's indicator collection, and the conformance fixtures so
+    "what predicates does this ``when`` contain" is answered in exactly one place.
+    """
+    if isinstance(node, Predicate):
+        yield node
+        return
+    for child in node.of:
+        yield from iter_leaf_predicates(child)
+
+
+def iter_tree_indicator_refs(node: "PredicateTree") -> Iterator[IndicatorRef]:
+    """Yield every ``IndicatorRef`` on either side of any leaf predicate in ``node``.
+
+    Preconditions: ``node`` is a ``PredicateTree``.
+    Postconditions: yields refs in leaf order; the same ref may appear more than
+    once (callers dedupe by ``sig_id`` where needed).
+    """
+    for pred in iter_leaf_predicates(node):
+        for side in (pred.lhs, pred.rhs):
+            if isinstance(side, IndicatorRef):
+                yield side
+
+
 class EntryRule(_SpecNode):
     kind: Literal["entry"] = "entry"
     side: Literal["long", "short"] = "long"
-    when: Predicate
+    when: "PredicateTree"
     note: str = ""
 
 
@@ -476,7 +544,99 @@ class ScaledTakeProfitRule(_SpecNode):
 
 class SignalExitRule(_SpecNode):
     kind: Literal["signal_exit"] = "signal_exit"
-    when: Predicate
+    when: "PredicateTree"
+    note: str = ""
+
+
+class BracketStopLeg(_SpecNode):
+    """Stop-loss leg of an :class:`OcoBracketRule`.
+
+    ``pct`` is the protective distance off the entry reference price as a
+    positive fraction (``0.03`` = 3%), bounded ``< 1.0`` so a long's resolved
+    level ``ref * (1 - pct)`` stays strictly positive (the leg is side-agnostic,
+    the same reasoning as :class:`StopLossRule`). ``style`` mirrors
+    :class:`StopLossRule`: ``"market"`` materializes a plain STOP child;
+    ``"limit"`` materializes a STOP_LIMIT whose limit sits ``limit_offset_pct``
+    (of the stop level) on the protective side. The bracket stop is always
+    entry-anchored (static) — a trailing basis would re-price the resting child
+    every bar — so there is no ``basis`` field.
+
+    Preconditions: ``pct`` in ``(0, 1)``; ``limit_offset_pct`` in ``(0, 1)`` and
+    set iff ``style == "limit"``.
+    Postconditions: a validated leg whose ``style`` / ``limit_offset_pct`` are
+    mutually consistent.
+    """
+
+    pct: float = Field(gt=0, lt=1.0)
+    style: Literal["market", "limit"] = "market"
+    limit_offset_pct: Optional[float] = Field(default=None, gt=0, lt=1.0)
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _validate_limit_style(self):
+        """Tie ``limit_offset_pct`` to ``style`` (same coupling as
+        :meth:`StopLossRule._validate_limit_style`, minus the basis restriction —
+        a bracket stop has no trailing basis to forbid).
+
+        Preconditions: ``style`` is a valid Literal (Pydantic-enforced).
+        Postconditions: returns ``self`` when consistent; raises ``ValueError``
+        when ``style == "limit"`` lacks ``limit_offset_pct`` or when
+        ``limit_offset_pct`` is set without ``style == "limit"``.
+        """
+        if self.style == "limit":
+            if self.limit_offset_pct is None:
+                raise ValueError(
+                    "BracketStopLeg.style='limit' requires limit_offset_pct "
+                    "(the limit's distance from the stop level, as a fraction)"
+                )
+        elif self.limit_offset_pct is not None:
+            raise ValueError("BracketStopLeg.limit_offset_pct is only valid when style='limit'")
+        return self
+
+
+class BracketTakeProfitLeg(_SpecNode):
+    """Take-profit leg of an :class:`OcoBracketRule`.
+
+    ``pct`` is the favourable-move target off the entry reference price as a
+    positive fraction in ``(0, 1)``; the direction is implied by the position
+    side (``+pct`` for a long, ``−pct`` for a short). Materializes a resting LIMIT
+    child that fills at its exact limit price (the OCO bracket's defining
+    advantage over the bar-by-bar ``take_profit`` market close).
+
+    ``pct`` is bounded ``< 1.0`` for the same side-agnostic reason as
+    :class:`BracketStopLeg` / :class:`StopLossRule`: a short's resolved target is
+    ``ref * (1 - pct)``, which is strictly positive only when ``pct < 1.0`` (at
+    ``pct >= 1.0`` it collapses to a non-positive, never-filling limit). A
+    long-only strategy wanting a >100% target can still author it via the
+    standalone ``take_profit`` rule, which is not side-agnostic.
+    """
+
+    pct: float = Field(gt=0, lt=1.0)
+    note: str = ""
+
+
+class OcoBracketRule(_SpecNode):
+    """One-cancels-other bracket: a protective stop leg and a profit-target leg
+    attached to the entry order as a single OCO group.
+
+    On entry-fill the engine materializes the two legs into resting opposite-side
+    child orders (a STOP / STOP_LIMIT and a LIMIT) sharing one ``oco_group_id``;
+    when either fills the engine cancels its sibling
+    (``OrderBook.oco_cancel_siblings``). Unlike the independent ``stop_loss`` /
+    ``take_profit`` rules — which the engine evaluates bar-by-bar and closes at
+    market — a bracket's take-profit rests as a LIMIT and fills at its exact
+    price. The bracket is a *full-position* OCO: whichever leg fills closes the
+    whole position.
+
+    Invariants (enforced at the :class:`StrategySpec` level): a spec carries at
+    most one bracket, and a bracket is the sole engine-handled *price* exit (no
+    ``stop_loss`` / ``take_profit`` / ``scaled_take_profit`` alongside it). A
+    ``signal_exit`` may coexist as a secondary discretionary trigger.
+    """
+
+    kind: Literal["oco_bracket"] = "oco_bracket"
+    stop_loss: "BracketStopLeg"
+    take_profit: "BracketTakeProfitLeg"
     note: str = ""
 
 
@@ -517,13 +677,26 @@ def is_full_position_exit(rule: Any) -> bool:
     full-position membership so a new exit kind is classified in one place.
     Preconditions: ``rule`` is an ``ExitRule`` member.
     Postconditions: ``True`` iff ``rule`` is a stop-loss, take-profit, signal exit,
-    or a ``ScaledTakeProfitRule`` whose rungs sum to 1.0.
+    OCO bracket, or a ``ScaledTakeProfitRule`` whose rungs sum to 1.0.
     """
-    if isinstance(rule, (StopLossRule, TakeProfitRule, SignalExitRule)):
+    if isinstance(rule, (StopLossRule, TakeProfitRule, SignalExitRule, OcoBracketRule)):
         return True
     if isinstance(rule, ScaledTakeProfitRule):
         return ladder_closes_full_position(rule)
     return False
+
+
+def is_bracket_exit(rule: Any) -> bool:
+    """Whether ``rule`` is an engine-native OCO bracket (vs. a bar-by-bar exit).
+
+    A bracket is attached to the entry order and materialized by the engine into
+    resting OCO children; the bar-by-bar exit dispatcher must NOT also evaluate
+    it (dual emission). Canonical single source of the "is this the attach-to-
+    entry bracket kind" test shared by the entry dispatcher and the gates.
+    Preconditions: ``rule`` is an ``ExitRule`` member.
+    Postconditions: ``True`` iff ``rule`` is an ``OcoBracketRule``.
+    """
+    return isinstance(rule, OcoBracketRule)
 
 
 def is_engine_handled_exit(rule: Any) -> bool:
@@ -619,13 +792,22 @@ def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[flo
     surfaced via ``stop_limit_unfilled_triggers`` telemetry, not by treating the
     rule as "no stop" (which would inject a redundant second stop).
 
+    An ``OcoBracketRule``'s stop leg also counts: it is a static (entry-anchored)
+    stop that caps loss for either side at its ``pct``, so a short carrying a
+    bracket already has an effective stop and must not get the redundant 100%
+    auto-stop injection.
+
     Preconditions: ``side`` is ``"long"`` or ``"short"``.
-    Postconditions: returns the first matching ``StopLossRule.pct`` as a float,
-    else ``None``.
+    Postconditions: returns the first matching stop fraction as a float — a
+    side-compatible ``StopLossRule.pct`` or an ``OcoBracketRule`` stop-leg
+    ``pct`` — else ``None``.
     """
     for r in exit_rules:
         if isinstance(r, StopLossRule) and stop_caps_side(r.basis, side):
             return float(r.pct)
+        if isinstance(r, OcoBracketRule):
+            # The bracket stop is entry-anchored (static), so it caps both sides.
+            return float(r.stop_loss.pct)
     return None
 
 
@@ -633,7 +815,7 @@ def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[flo
 # take-profit) plus signal-based exits.  The union is intentionally limited
 # to price-, P&L-, and signal-based exits.
 ExitRule = Annotated[
-    Union[StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule],
+    Union[StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule, OcoBracketRule],
     Field(discriminator="kind"),
 ]
 
@@ -674,12 +856,17 @@ SizingRule = Annotated[
 # Resolve forward refs so union members are usable from outside the module.
 IndicatorRef.model_rebuild()
 Predicate.model_rebuild()
+AllOf.model_rebuild()
+AnyOf.model_rebuild()
 EntryRule.model_rebuild()
 StopLossRule.model_rebuild()
 TakeProfitRule.model_rebuild()
 TakeProfitLevel.model_rebuild()
 ScaledTakeProfitRule.model_rebuild()
 SignalExitRule.model_rebuild()
+BracketStopLeg.model_rebuild()
+BracketTakeProfitLeg.model_rebuild()
+OcoBracketRule.model_rebuild()
 FixedFractionSizing.model_rebuild()
 VolatilityTargetSizing.model_rebuild()
 FixedNotionalSizing.model_rebuild()
@@ -688,6 +875,7 @@ FixedNotionalSizing.model_rebuild()
 # TypeAdapters expose discriminator dispatch for callers that need to
 # validate a raw dict without pre-selecting the concrete class.
 IndicatorRefAdapter: TypeAdapter = TypeAdapter(IndicatorRef)
+PredicateTreeAdapter: TypeAdapter = TypeAdapter(PredicateTree)
 EntryRuleAdapter: TypeAdapter = TypeAdapter(EntryRule)
 ExitRuleAdapter: TypeAdapter = TypeAdapter(ExitRule)
 SizingRuleAdapter: TypeAdapter = TypeAdapter(SizingRule)
@@ -791,6 +979,31 @@ def _format_predicate(p: Predicate) -> str:
     return f"{_format_side(p.lhs)} {_OP_SYMBOL[p.op]} {_format_side(p.rhs)}"
 
 
+def format_predicate_tree(node: "PredicateTree", *, leaf_formatter=_format_predicate) -> str:
+    """Render a predicate tree, parameterised by the per-leaf renderer.
+
+    A leaf ``Predicate`` renders via ``leaf_formatter`` (default: the prose
+    ``_format_predicate``); an ``all_of`` / ``any_of`` renders as a parenthesised
+    ``(c1 and c2 …)`` / ``(c1 or c2 …)`` so the boolean structure is unambiguous.
+
+    The single source of the tree-walk: prompt rendering uses the default prose
+    leaf, while the alignment gate passes its own ``repr``-style leaf renderer —
+    so neither re-implements the recursion.
+
+    Preconditions: ``node`` is a ``Predicate`` / ``AllOf`` / ``AnyOf``;
+    ``leaf_formatter`` maps a ``Predicate`` to ``str``.
+    Postconditions: returns a non-empty string.
+    """
+    if isinstance(node, Predicate):
+        return leaf_formatter(node)
+    joiner = " and " if isinstance(node, AllOf) else " or "
+    return (
+        "("
+        + joiner.join(format_predicate_tree(child, leaf_formatter=leaf_formatter) for child in node.of)
+        + ")"
+    )
+
+
 _STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
     "trailing_high": "trailing-high ",
     "trailing_low": "trailing-low ",
@@ -798,10 +1011,17 @@ _STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
 
 
 def _format_rule(
-    rule: Union[EntryRule, StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule],
+    rule: Union[
+        EntryRule,
+        StopLossRule,
+        TakeProfitRule,
+        ScaledTakeProfitRule,
+        SignalExitRule,
+        OcoBracketRule,
+    ],
 ) -> str:
     if isinstance(rule, EntryRule):
-        return f"{rule.side} when {_format_predicate(rule.when)}"
+        return f"{rule.side} when {format_predicate_tree(rule.when)}"
     if isinstance(rule, StopLossRule):
         prefix = _STOP_LOSS_BASIS_PREFIX.get(rule.basis, "")
         base = f"{prefix}stop loss {_format_number(rule.pct * 100)}%"
@@ -817,7 +1037,13 @@ def _format_rule(
         )
         return f"scaled take profit ({rungs})"
     if isinstance(rule, SignalExitRule):
-        return f"exit when {_format_predicate(rule.when)}"
+        return f"exit when {format_predicate_tree(rule.when)}"
+    if isinstance(rule, OcoBracketRule):
+        sl = rule.stop_loss
+        stop = f"stop {_format_number(sl.pct * 100)}%"
+        if sl.style == "limit":
+            stop = f"{stop} (limit, {_format_number(sl.limit_offset_pct * 100)}% offset)"
+        return f"OCO bracket: {stop} / target {_format_number(rule.take_profit.pct * 100)}%"
     raise TypeError(f"unknown rule variant: {type(rule).__name__}")
 
 

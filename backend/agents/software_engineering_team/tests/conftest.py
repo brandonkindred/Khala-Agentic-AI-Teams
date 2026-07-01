@@ -29,6 +29,12 @@ os.environ.setdefault("JOB_SERVICE_URL", "http://127.0.0.1:1")
 # schedule.  Mirrored here because this team overrides pytest's rootdir, so the
 # matching default in ``backend/conftest.py`` is not auto-discovered.
 os.environ.setdefault("LLM_RATE_LIMIT_MAX_RETRIES", "0")
+# The provider list is the sole source of LLM resolution — get_client raises
+# LLMNotConfiguredError with no list configured. SE unit tests construct agents
+# (whose __init__ builds a Strands model via get_client) without a real provider,
+# so default to the ``dummy`` no-LLM harness. Tests that need a specific provider
+# override this via monkeypatch / patch.dict.
+os.environ.setdefault("LLM_PROVIDER", "dummy")
 
 # Re-export the in-memory FakeJobServiceClient + ``fake_job_client`` fixture so
 # unit tests in this team can use them.  The SE team's ``pyproject.toml``

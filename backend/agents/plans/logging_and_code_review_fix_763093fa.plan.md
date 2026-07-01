@@ -124,7 +124,7 @@ if not review_result.approved:
             issue.file_path or "n/a", issue.suggestion or "none",
         )
     if review_result.summary:
-        logger.info("  Review summary: %s", review_result.summary[:300])
+        logger.info("  Review summary: %s", review_result.summary)
 ```
 
 ### 5. DummyLLMClient: Add Code Review Pattern (`[shared/llm.py](software_engineering_team/shared/llm.py)`)

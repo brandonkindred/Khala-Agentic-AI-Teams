@@ -308,6 +308,56 @@ def test_rule4_no_exit_rules_is_critical() -> None:
     assert any("No exit rules" in c for c in _critical(results))
 
 
+def test_rule4_oco_bracket_only_is_exit_complete() -> None:
+    """An ``oco_bracket`` is engine-closable (its legs attach to the entry and
+    materialize into a resting OCO group), so a bracket-only spec is exit-complete
+    — Rule 4 must not flag it as missing an exit."""
+    from investment_team.strategy_lab.spec_dsl import (
+        BracketStopLeg,
+        BracketTakeProfitLeg,
+        OcoBracketRule,
+    )
+
+    spec = _spec(
+        exit_=[
+            OcoBracketRule(
+                stop_loss=BracketStopLeg(pct=0.03),
+                take_profit=BracketTakeProfitLeg(pct=0.06),
+            )
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("No exit rules" in c or "no rule of kind" in c for c in _critical(results))
+
+
+def test_rule4_oco_bracket_on_custom_code_spec_is_critical() -> None:
+    """A bracket only attaches to engine-managed entries, so it is inert when the
+    spec later runs with ``requires_custom_code=True`` (entries route through
+    strategy code). The orchestrator flips that flag post-construction via
+    ``model_copy`` (which Pydantic does not re-validate), so the readiness gate —
+    re-run on the flipped spec — must flag the bracket-bearing custom-code spec as
+    not exit-complete."""
+    from investment_team.strategy_lab.spec_dsl import (
+        BracketStopLeg,
+        BracketTakeProfitLeg,
+        OcoBracketRule,
+    )
+
+    base = _spec(
+        exit_=[
+            OcoBracketRule(
+                stop_loss=BracketStopLeg(pct=0.03),
+                take_profit=BracketTakeProfitLeg(pct=0.06),
+            )
+        ]
+    )
+    # Mirror the orchestrator's trial-compile flip — ``model_copy(update=...)``
+    # bypasses the StrategySpec validator that would otherwise reject this.
+    flipped = base.model_copy(update={"requires_custom_code": True})
+    results = SpecReadinessGate().validate(flipped, backtest_config=_config())
+    assert "exit_completeness:bracket_requires_engine_entries" in _rule_ids(results)
+
+
 def test_rule4_partial_scaled_ladder_as_sole_exit_is_critical() -> None:
     """A laddered take-profit summing to < 1.0 with no other full-position exit
     leaves the residual open forever — must be flagged critical."""
@@ -1583,3 +1633,135 @@ def test_sizing_coherence_rel_tol_default_and_overrides(monkeypatch) -> None:
     assert _sizing_coherence_rel_tol() == 0.05
     monkeypatch.setenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", "-1")
     assert _sizing_coherence_rel_tol() == 0.05
+
+
+# ---------------------------------------------------------------------------
+# all_of / any_of combinators — multi-confirmation entries (issue #990).
+# ---------------------------------------------------------------------------
+
+
+def test_all_of_multi_confirmation_entry_is_accepted() -> None:
+    """A well-formed multi-confirmation ``all_of`` entry passes Rule 2 (the
+    entry ``when`` may now be a combinator, not only a single Predicate) and
+    raises no critical."""
+    from investment_team.strategy_lab.spec_dsl import AllOf
+
+    entry = [
+        EntryRule(
+            side="long",
+            when=AllOf(
+                of=[
+                    Predicate(
+                        lhs="bar.close",
+                        op=">",
+                        rhs=IndicatorRef(name="sma", params={"period": 200}),
+                    ),
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=40.0
+                    ),
+                ]
+            ),
+        )
+    ]
+    spec = _spec(
+        hypothesis="Long when price is above the 200-SMA trend AND RSI(14) shows a pullback.",
+        entry=entry,
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not _critical(results)
+
+
+def test_all_of_with_unreachable_leg_flagged_unreachable() -> None:
+    """An ``all_of`` entry with an always-false leg (RSI > 100, a bounded
+    oscillator) can never fire — the conjunction is unreachable, so the entry
+    is flagged critical (same routing as a single always-false entry predicate)."""
+    from investment_team.strategy_lab.spec_dsl import AllOf
+
+    entry = [
+        EntryRule(
+            side="long",
+            when=AllOf(
+                of=[
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=100.0
+                    ),
+                    Predicate(
+                        lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 50})
+                    ),
+                ]
+            ),
+        )
+    ]
+    spec = _spec(
+        hypothesis="Long on AAPL when RSI is impossibly high and trend confirms.", entry=entry
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert "predicate:unreachable" in _rule_ids(results)
+
+
+def test_any_of_all_legs_unreachable_flagged() -> None:
+    """An ``any_of`` entry whose every leg is always-false is unreachable."""
+    from investment_team.strategy_lab.spec_dsl import AnyOf
+
+    entry = [
+        EntryRule(
+            side="long",
+            when=AnyOf(
+                of=[
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=100.0
+                    ),
+                    Predicate(
+                        lhs=IndicatorRef(name="adx", params={"period": 14}), op=">", rhs=100.0
+                    ),
+                ]
+            ),
+        )
+    ]
+    spec = _spec(hypothesis="Long on AAPL when either oscillator is impossibly high.", entry=entry)
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert "predicate:unreachable" in _rule_ids(results)
+
+
+def test_any_of_one_reachable_leg_not_flagged() -> None:
+    """An ``any_of`` with one always-false and one reachable leg is reachable
+    (the OR can still fire), so it is NOT flagged unreachable."""
+    from investment_team.strategy_lab.spec_dsl import AnyOf
+
+    entry = [
+        EntryRule(
+            side="long",
+            when=AnyOf(
+                of=[
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=100.0
+                    ),
+                    Predicate(
+                        lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0
+                    ),
+                ]
+            ),
+        )
+    ]
+    spec = _spec(
+        hypothesis="Long on AAPL when RSI is impossibly high OR shows a real pullback.", entry=entry
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert "predicate:unreachable" not in _rule_ids(results)
+
+
+def test_malformed_when_is_skipped_not_crashed() -> None:
+    """A malformed ``when`` (not a Predicate/AllOf/AnyOf — reachable via
+    model_construct / legacy load / mutation) must be reported by Rule 2 and
+    SKIPPED by the indicator-validity / reachability tree walkers, not crash
+    them. ``validate()`` runs all rules in one pass, so the guard in
+    ``_iter_rule_whens`` is what keeps the later rules from hitting ``.of`` on a
+    non-tree value."""
+    spec = _spec()
+    # Bypass validation to plant a malformed ``when`` on the entry rule.
+    object.__setattr__(spec.entry_rules[0], "when", "garbage")
+
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+
+    # Completed without raising, and Rule 2 flagged the malformed entry rule.
+    assert any(not r.passed and r.severity == "critical" for r in results)

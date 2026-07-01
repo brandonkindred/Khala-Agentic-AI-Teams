@@ -25,9 +25,12 @@ from investment_team.models import (
     StrategySpec,
 )
 from investment_team.strategy_lab.spec_dsl import (
+    BracketStopLeg,
+    BracketTakeProfitLeg,
     EntryRule,
     FixedFractionSizing,
     IndicatorRef,
+    OcoBracketRule,
     Predicate,
     SignalExitRule,
     StopLossRule,
@@ -286,6 +289,41 @@ def test_short_with_effective_stop_is_not_auto_injected() -> None:
         exit_rules=[stop],
     )
     assert service._exit_rules == [stop]
+
+
+def _oco_bracket() -> OcoBracketRule:
+    return OcoBracketRule(
+        stop_loss=BracketStopLeg(pct=0.03),
+        take_profit=BracketTakeProfitLeg(pct=0.06),
+    )
+
+
+def test_short_with_engine_managed_bracket_is_not_auto_injected() -> None:
+    """On the engine-managed entry path an ``oco_bracket`` attaches its stop leg to
+    the engine-emitted entry, so it bounds the short's loss and suppresses the
+    redundant 100% auto-stop."""
+    service = TradingService(
+        strategy_code=_NOOP_STRATEGY_CODE,
+        config=_config(),
+        entry_rules=[EntryRule(side="short", when=Predicate(lhs="bar.close", op=">", rhs=0.0))],
+        sizing=FixedFractionSizing(fraction=0.02),
+        exit_rules=[_oco_bracket()],
+    )
+    assert not _has_full_loss_short_stop(service._exit_rules)
+
+
+def test_custom_code_bracket_still_auto_injects_short_stop() -> None:
+    """On the custom-code path (entry_rules=None) the entry dispatcher never
+    attaches the bracket, so it provides no engine-enforced loss cap. The
+    short-safety auto-stop MUST still be injected — otherwise a custom-code short
+    under a bracket spec would run uncapped."""
+    service = TradingService(
+        strategy_code=_NOOP_STRATEGY_CODE,
+        config=_config(),
+        entry_rules=None,
+        exit_rules=[_oco_bracket()],
+    )
+    assert _has_full_loss_short_stop(service._exit_rules)
 
 
 def test_long_only_spec_is_not_auto_injected() -> None:

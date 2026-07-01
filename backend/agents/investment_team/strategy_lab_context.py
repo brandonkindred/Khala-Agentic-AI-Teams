@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Iterable, List, Optional
 
 from .models import StrategyLabRecord
+from .strategy_lab.spec_dsl import AllOf, AnyOf, Predicate, iter_leaf_predicates
 
 _CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
     "stocks",
@@ -32,6 +33,10 @@ _PROMPT_ASSET_CLASSES: tuple[str, ...] = tuple(
 # import this rather than the underscore-prefixed internal tuple.
 PROMPT_ASSET_CLASSES: tuple[str, ...] = _PROMPT_ASSET_CLASSES
 
+# Explore-mode diversity steering: the recent-window stocks share above which
+# equities count as "relatively heavy" and the anti-concentration nudge fires.
+_STOCK_CONCENTRATION_THRESHOLD: float = 0.35
+
 # Backtest statuses for cycles that short-circuited *before* running a backtest.
 # Their persisted ``strategy.asset_class`` may be a coerced placeholder (an
 # unsupported class like ``bonds`` is canonicalized to ``stocks`` for schema
@@ -45,18 +50,42 @@ PROMPT_ASSET_CLASSES: tuple[str, ...] = _PROMPT_ASSET_CLASSES
 # ``_build_short_circuit_record`` (the pre-backtest exit path). Keep it in sync
 # with the ``short_circuit_status`` values in ``strategy_lab/orchestrator.py``:
 # spec_unimplementable, spec_validation, code_synthesis, design_not_ready,
-# budget_exhausted. The in-memory ``ConvergenceTracker`` skips all of these via
-# ``count_asset_class=False`` at the call site; this set is the persisted-record
-# equivalent for ``prior_records`` rebuilt after a restart.
+# design_stalled, budget_exhausted. The in-memory ``ConvergenceTracker`` skips
+# all of these via ``count_asset_class=False`` at the call site; this set is the
+# persisted-record equivalent for ``prior_records`` rebuilt after a restart.
+# ``design_stalled`` matters as much as the rest: a stalled cycle persists
+# ``compute_metrics([], ...)`` placeholder metrics (0% return/win rate), so
+# counting it as executed would drag down both the asset-class steering and the
+# performance-attribution buckets below.
 _NON_EXECUTED_BACKTEST_STATUSES: frozenset[str] = frozenset(
     {
         "failed: spec_unimplementable",
         "failed: spec_validation",
         "failed: code_synthesis",
         "failed: design_not_ready",
+        "failed: design_stalled",
         "failed: budget_exhausted",
     }
 )
+
+
+def _is_executed_record(record: StrategyLabRecord) -> bool:
+    """True when a record ran a real backtest (not a pre-backtest short-circuit).
+
+    Single source of truth for the executed/non-executed split shared by
+    :func:`asset_class_mix_hint` (diversity steering) and :func:`_executed_records`
+    (performance attribution), so the two never disagree on which records count.
+    Records persisted before ``BacktestRecord.status`` existed default to
+    ``"completed"``, so legacy rows count as executed.
+
+    Preconditions: ``record.backtest`` exposes a ``status`` (or none, treated as
+    ``"completed"``).
+    Postconditions: returns ``True`` iff the status is not in
+    ``_NON_EXECUTED_BACKTEST_STATUSES``.
+    """
+    return (
+        str(getattr(record.backtest, "status", "completed")) not in _NON_EXECUTED_BACKTEST_STATUSES
+    )
 
 
 def normalize_asset_class(ac: object) -> str:
@@ -223,6 +252,288 @@ def format_prior_results(records: List[StrategyLabRecord], *, max_records: int =
     return "\n\n".join(lines)
 
 
+def _leaf_predicates(when: object) -> list:
+    """Flatten a rule's ``when`` to its leaf predicates, defensively.
+
+    A single ``Predicate`` → ``[when]``; an ``all_of`` / ``any_of`` tree → its
+    leaf predicates in order; any other / malformed shape → ``[]`` so the caller
+    can fall back to a top-level read. Never raises — this feeds prompt-context
+    formatting, not a correctness gate.
+
+    Postconditions: returns a list of ``Predicate`` (possibly empty); each
+    element exposes ``lhs`` / ``rhs`` / ``op``.
+    """
+    if isinstance(when, Predicate):
+        return [when]
+    if isinstance(when, (AllOf, AnyOf)):
+        return list(iter_leaf_predicates(when))
+    return []
+
+
+def _entry_archetype(strategy: object) -> str:
+    """Classify a strategy's entry rules into a coarse, comparable archetype label.
+
+    The label names the signal family the entry keys on (the indicator(s) named
+    in the predicate, or ``"price_level"`` for a pure price/threshold compare),
+    suffixed ``_crossover`` when the comparison is a cross. Within one predicate
+    the two sides' indicators are ``+``-joined (e.g. ``"ema+sma_crossover"`` for
+    an EMA/SMA cross); multiple entry rules are ``,``-joined into the sorted set
+    of their distinct archetypes (e.g. ``"macd,rsi"``). Using two separators
+    keeps the per-predicate grouping unambiguous when rules are combined — e.g.
+    ``"ema+sma_crossover,rsi"`` reads as one EMA/SMA cross plus a separate RSI
+    rule, not three loose tokens.
+
+    The signal family can sit on *either* side of the predicate: ``rsi < 30``
+    keys on the left-hand side, while the prompt-recommended
+    ``bar.close cross_above ema`` keys on the right. Both sides are inspected so
+    EMA/SMA/VWAP breakouts written in the latter form keep their indicator
+    family instead of all collapsing into ``"price_level"``.
+
+    A multi-confirmation ``when`` (an ``all_of`` / ``any_of`` tree) is flattened
+    to its leaf predicates: the indicator families across **all** legs are
+    gathered (e.g. ``"rsi+sma"`` for a trend ∧ pullback entry) and the
+    ``_crossover`` suffix applies when **any** leg is a cross. Without this, a
+    combinator entry would carry no top-level ``lhs``/``op`` and collapse to
+    ``"unknown"``, corrupting prior-result attribution for the very
+    multi-confirmation strategies this bucketing is meant to compare.
+
+    Preconditions:
+      - ``strategy`` exposes an ``entry_rules`` iterable; each rule exposes a
+        ``when`` that is a single ``Predicate`` or an ``all_of`` / ``any_of``
+        tree of them, with sides that are each an ``IndicatorRef`` (carrying
+        ``name``), a price-ref ``str``, or a numeric threshold. Missing/odd
+        shapes degrade to ``"unknown"`` rather than raising — this is
+        prompt-context formatting, never a correctness gate.
+    Postconditions:
+      - Returns a non-empty string. No entry rules → ``"none"``.
+    """
+    rules = list(getattr(strategy, "entry_rules", None) or [])
+    if not rules:
+        return "none"
+    tokens: set[str] = set()
+    for rule in rules:
+        when = getattr(rule, "when", None)
+        leaves = _leaf_predicates(when)
+        if leaves:
+            sides = [side for leaf in leaves for side in (leaf.lhs, leaf.rhs)]
+            crossover = any(
+                str(getattr(leaf, "op", "")) in ("cross_above", "cross_below") for leaf in leaves
+            )
+        else:
+            # Unrecognised / malformed ``when`` — degrade exactly as before,
+            # reading whatever top-level fields it happens to carry.
+            sides = [getattr(when, "lhs", None), getattr(when, "rhs", None)]
+            crossover = str(getattr(when, "op", "")) in ("cross_above", "cross_below")
+        names = sorted({str(n) for s in sides if (n := getattr(s, "name", None))})
+        if names:
+            base = "+".join(names)
+        elif any(isinstance(s, str) or isinstance(s, (int, float)) for s in sides):
+            base = "price_level"
+        else:
+            base = "unknown"
+        if crossover:
+            base = f"{base}_crossover"
+        tokens.add(base)
+    # ``,`` between rules, ``+`` within a predicate (set above) — distinct
+    # separators so a combined label stays unambiguous about which indicators
+    # share a predicate.
+    return ",".join(sorted(tokens))
+
+
+def _exit_archetypes(strategy: object) -> List[str]:
+    """Classify a strategy's exit rules into the distinct exit-type labels present.
+
+    A record contributes to *each* exit bucket it uses, so a spec carrying both a
+    trailing stop and a take-profit is counted under both — enabling
+    "trailing stops vs fixed take-profits" comparisons in the attribution.
+
+    Label map: ``stop_loss`` with a trailing ``basis`` → ``"trailing_stop"``,
+    ``stop_loss`` on ``entry_price`` → ``"fixed_stop"``, ``take_profit`` →
+    ``"take_profit"``, ``scaled_take_profit`` → ``"scaled_tp"``, ``signal_exit``
+    → ``"signal_exit"``; any other/unknown ``kind`` passes through verbatim.
+
+    Preconditions:
+      - ``strategy`` exposes an ``exit_rules`` iterable; each rule exposes a
+        ``kind`` (and, for stops, a ``basis``). Odd shapes degrade gracefully.
+    Postconditions:
+      - Returns a sorted list of distinct labels. No exit rules → ``["none"]``.
+    """
+    rules = list(getattr(strategy, "exit_rules", None) or [])
+    if not rules:
+        return ["none"]
+    labels: set[str] = set()
+    for rule in rules:
+        kind = str(getattr(rule, "kind", "") or "unknown")
+        if kind == "stop_loss":
+            basis = str(getattr(rule, "basis", "") or "")
+            labels.add("trailing_stop" if basis.startswith("trailing") else "fixed_stop")
+        elif kind == "take_profit":
+            labels.add("take_profit")
+        elif kind == "scaled_take_profit":
+            labels.add("scaled_tp")
+        elif kind == "signal_exit":
+            labels.add("signal_exit")
+        else:
+            labels.add(kind)
+    return sorted(labels)
+
+
+def _executed_records(
+    records: List[StrategyLabRecord], *, max_records: int
+) -> List[StrategyLabRecord]:
+    """The last ``max_records`` executed records, in chronological order.
+
+    Drops pre-backtest short-circuits with :func:`_is_executed_record` and
+    *then* tail-trims — the same order as :func:`asset_class_mix_hint` — so a
+    window full of recent non-executed rows never crowds out older real
+    backtests. (Trimming first, then filtering, would let 50 recent
+    short-circuits hide every executed run behind them.)
+
+    Preconditions: ``max_records >= 0``.
+    Postconditions: returns the last ``max_records`` records satisfying
+    :func:`_is_executed_record`, in ``created_at`` order
+    (``max_records == 0`` → empty list).
+    """
+    ordered = sorted(records, key=lambda x: x.created_at)
+    executed = [r for r in ordered if _is_executed_record(r)]
+    # ``executed[-0:]`` is ``executed[0:]`` (the whole list), so the zero case
+    # must be handled explicitly rather than via the slice.
+    return executed[-max_records:] if max_records else []
+
+
+def _has_parseable_design(strategy: object) -> bool:
+    """True when a strategy's structured rules can be meaningfully bucketed.
+
+    Legacy pre-migration specs stored prose entry/exit rules; on load,
+    ``_coerce_legacy_strategy_spec_dict`` moves them into ``unparsed_rules`` and
+    sets ``requires_redesign=True``, leaving ``entry_rules``/``exit_rules`` empty
+    and the sizing at its schema default. Attributing such a record's real
+    returns to ``entry:none`` / ``exit:none`` / the default sizing bucket would
+    tell the designer that "none" is a winning archetype rather than that the
+    design is simply unknown — so these records are excluded from the
+    entry/exit/sizing dimensions (their genuine ``asset_class`` still counts).
+
+    Preconditions: ``strategy`` may expose ``requires_redesign`` (bool) and
+    ``unparsed_rules`` (list); absent attributes are treated as parseable.
+    Postconditions: returns ``False`` iff the spec requires redesign or carries
+    any unparsed rules.
+    """
+    return not getattr(strategy, "requires_redesign", False) and not getattr(
+        strategy, "unparsed_rules", None
+    )
+
+
+def aggregate_prior_results(
+    records: List[StrategyLabRecord], *, max_records: int = 50
+) -> dict[tuple[str, str], dict]:
+    """Aggregate prior lab records into per-dimension performance attribution.
+
+    Buckets the executed records *marginally* along four independent dimensions —
+    ``asset_class``, ``entry`` archetype, ``exit`` archetype, and ``sizing`` kind —
+    and reports the mean win rate, mean annualized return, and sample size for each
+    bucket value. Marginal (rather than composite 4-tuple) bucketing keeps the
+    samples large enough to be informative on a diverse history.
+
+    Preconditions:
+      - ``records`` is a list of ``StrategyLabRecord``; ``max_records >= 0``.
+    Postconditions:
+      - Returns ``{(dimension, value): {"win_rate", "annual_return", "n"}}``.
+      - Empty / all-non-executed / ``max_records == 0`` input → ``{}``.
+      - Every value dict has ``n >= 1`` and means equal to the arithmetic mean of
+        the contributing records' ``win_rate_pct`` / ``annualized_return_pct``.
+      - A record with a parseable design contributes to exactly one
+        ``asset_class``/``entry``/``sizing`` bucket and to one ``exit`` bucket
+        per distinct exit type it uses. A redesign-pending / unparsed-rules
+        record contributes to its ``asset_class`` bucket only (see
+        :func:`_has_parseable_design`).
+    """
+    executed = _executed_records(records, max_records=max_records)
+    if not executed:
+        return {}
+
+    # bucket_key -> [sum_win_rate, sum_annual_return, count]
+    acc: dict[tuple[str, str], list[float]] = {}
+
+    def _add(dimension: str, value: str, win_rate: float, annual_return: float) -> None:
+        slot = acc.setdefault((dimension, value), [0.0, 0.0, 0.0])
+        slot[0] += win_rate
+        slot[1] += annual_return
+        slot[2] += 1.0
+
+    for r in executed:
+        res = r.backtest.result
+        win = float(res.win_rate_pct)
+        ann = float(res.annualized_return_pct)
+        strat = r.strategy
+        # asset_class is genuine even for legacy redesign-pending rows, so it
+        # always counts; the structured design dimensions only count when the
+        # spec actually carries parseable rules (see _has_parseable_design).
+        _add("asset_class", normalize_asset_class(strat.asset_class), win, ann)
+        if _has_parseable_design(strat):
+            _add("entry", _entry_archetype(strat), win, ann)
+            _add("sizing", str(getattr(strat.sizing, "kind", "") or "unknown"), win, ann)
+            for exit_label in _exit_archetypes(strat):
+                _add("exit", exit_label, win, ann)
+
+    return {
+        key: {"win_rate": sw / n, "annual_return": sa / n, "n": int(n)}
+        for key, (sw, sa, n) in acc.items()
+    }
+
+
+_ATTRIBUTION_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("asset_class", "Asset class"),
+    ("entry", "Entry archetype"),
+    ("exit", "Exit type"),
+    ("sizing", "Position sizing"),
+)
+
+
+def format_prior_attribution(
+    records: List[StrategyLabRecord], *, max_records: int = 50, thin_n: int = 3
+) -> str:
+    """Render per-dimension attribution as a compact "what has worked" digest.
+
+    Wraps :func:`aggregate_prior_results`, grouping buckets by dimension and
+    sorting each group by mean annualized return (descending) so the
+    highest-scoring regions of the design space lead. Every line shows the sample
+    size ``n`` — and a ``(thin sample)`` flag below ``thin_n`` — so the designer
+    can exploit strong buckets without over-fitting to a single record.
+
+    Preconditions: ``records`` is a list of ``StrategyLabRecord``; ``thin_n >= 1``.
+    Postconditions:
+      - Returns a non-empty string. Empty / all-non-executed input → a short
+        "not enough history" sentinel.
+      - Every rendered bucket line contains its ``n=`` sample size.
+    """
+    assert thin_n >= 1, f"thin_n must be >= 1, got {thin_n}"
+    agg = aggregate_prior_results(records, max_records=max_records)
+    if not agg:
+        return "Not enough executed history yet to attribute performance."
+
+    # Group buckets by dimension in a single pass over ``agg`` rather than
+    # re-scanning it once per dimension.
+    by_dim: dict[str, list[tuple[str, dict]]] = {}
+    for (dim, value), stats in agg.items():
+        by_dim.setdefault(dim, []).append((value, stats))
+
+    sections: List[str] = []
+    for dim_key, dim_label in _ATTRIBUTION_DIMENSIONS:
+        rows = by_dim.get(dim_key)
+        if not rows:
+            continue
+        rows.sort(key=lambda kv: kv[1]["annual_return"], reverse=True)
+        lines = [f"- {dim_label}:"]
+        for value, stats in rows:
+            thin = "  (thin sample)" if stats["n"] < thin_n else ""
+            lines.append(
+                f"    - {value}: win {stats['win_rate']:.1f}%, "
+                f"annual {stats['annual_return']:.1f}%, n={stats['n']}{thin}"
+            )
+        sections.append("\n".join(lines))
+    return "\n".join(sections)
+
+
 def _or_join(items: List[str]) -> str:
     """Render a list as an Oxford-style ``a, b, or c`` menu (single item → itself)."""
     if not items:
@@ -232,24 +543,101 @@ def _or_join(items: List[str]) -> str:
     return ", ".join(items[:-1]) + ", or " + items[-1]
 
 
+def _edge_exploitation_steer(
+    records: List[StrategyLabRecord], allowed: List[str], menu: str, *, tail: int
+) -> str:
+    """Steer toward the allowed asset class with the best demonstrated edge.
+
+    The objective-aware counterpart to the diversity nudge. Ranks the marginal
+    ``asset_class`` attribution buckets from :func:`aggregate_prior_results`
+    (restricted to ``allowed``) by mean annualized return, then mean win rate as
+    the dual-objective tie-break, and names the leader so the designer leans into
+    its edge rather than rotating away from it.
+
+    The edge map is bounded to the same ``tail`` window of executed records that
+    the caller's recent-counts line uses, so the steering can never name a class
+    that has dropped out of the recent window the counts report.
+
+    Preconditions: ``allowed`` is non-empty; ``menu`` is its rendered list;
+    ``tail >= 1``.
+    Postconditions: returns a non-empty string. When no per-class edge is
+    attributable yet (legacy / unparsed history), returns neutral menu text
+    rather than fabricating a preference.
+    """
+    assert allowed, "allowed must be non-empty"
+    assert menu, "menu must be provided"
+    assert tail >= 1, f"tail must be >= 1, got {tail}"
+    agg = aggregate_prior_results(records, max_records=tail)
+    buckets = sorted(
+        (
+            (value, stats)
+            for (dim, value), stats in agg.items()
+            if dim == "asset_class" and value in allowed
+        ),
+        key=lambda kv: (kv[1]["annual_return"], kv[1]["win_rate"]),
+        reverse=True,
+    )
+    if not buckets:
+        return (
+            f"No per-class edge attributable yet — choose **asset_class** from {menu}: "
+            "pick the class that best fits your strongest multi-signal edge."
+        )
+    top_value, top_stats = buckets[0]
+    return (
+        "Objective is return/win-rate — **lean into your demonstrated edge**: "
+        f"{top_value} scores best so far (annual {top_stats['annual_return']:.1f}%, "
+        f"win {top_stats['win_rate']:.1f}%, n={top_stats['n']}). Prefer the "
+        "highest-scoring class when a coherent thesis fits rather than rotating away "
+        "from it; pick another class only when your edge there is clearly stronger."
+    )
+
+
 def asset_class_mix_hint(
     records: List[StrategyLabRecord],
     *,
     tail: int = 24,
     exclude: Optional[List[str]] = None,
+    mode: str = "explore",
 ) -> str:
-    """Steer the LLM toward a balanced mix of asset classes across lab runs.
+    """Steer the LLM's asset-class choice, objective-aware.
+
+    ``mode`` selects how the hint steers once executed history exists:
+
+    - ``"exploit"`` — the run's objective is to maximize return/win rate, so
+      steer **toward** the asset class with the best demonstrated edge (highest
+      mean annualized return, win rate as the dual-objective tie-break) drawn
+      from :func:`aggregate_prior_results`, rather than rotating away from a
+      class the agent is winning in.
+    - ``"explore"`` (default) — portfolio-diversity steering: nudge **away**
+      from an over-represented class (the anti-equities concentration nudge) and
+      toward the least-used / underrepresented classes. The default preserves
+      the historical hint for callers that have not opted into objective-aware
+      steering; the design agent passes ``exploit`` explicitly via its own
+      ``STRATEGY_LAB_DIVERSITY_MODE`` resolution.
 
     ``exclude`` (optional) names asset classes the design agent is forbidden to
     pick this run — the complement of a user's allowed-category selection. It is
     typed ``List[str]`` (not ``Iterable[str]``) deliberately: ``str`` is itself
     iterable, so an ``Iterable[str]`` annotation would silently accept a bare
     string and iterate its characters. When provided, the menu, recent-class
-    counts, and underrepresented-class steering are all restricted to the
-    still-allowed classes so the hint never nudges the model toward a class the
-    run is not permitted to use. When ``exclude`` is ``None`` / empty the output
-    is identical to the unconstrained hint.
+    counts, and all steering (both modes) are restricted to the still-allowed
+    classes so the hint never nudges the model toward a class the run is not
+    permitted to use. When ``exclude`` is ``None`` / empty the output spans the
+    full ideation-valid set.
+
+    Preconditions:
+      - ``mode in {"exploit", "explore"}`` (callers resolve unknown values to a
+        default before calling).
+    Postconditions:
+      - Returns a non-empty string. With no records / no executed backtests the
+        output is the neutral menu text, identical across modes (no edge or
+        concentration to steer on yet).
+      - ``explore`` output is identical to the historical diversity hint.
+      - ``exploit`` output never emits the anti-equities rotation nudge; it
+        names the highest-scoring allowed class when an attributable per-class
+        edge exists, else stays neutral.
     """
+    assert mode in ("exploit", "explore"), f"mode must be 'exploit' or 'explore', got {mode!r}"
     allowed = [c for c in PROMPT_ASSET_CLASSES if c not in set(exclude or ())]
     if not allowed:
         # Defensive: an exclusion covering every class would leave nothing to
@@ -269,24 +657,15 @@ def asset_class_mix_hint(
             f"{stocks_nudge}pick the class that best fits your multi-signal story."
         )
 
-    ordered = sorted(records, key=lambda x: x.created_at)
-    # Exclude only cycles that short-circuited *before* running a backtest
-    # (``_NON_EXECUTED_BACKTEST_STATUSES``): their ``strategy.asset_class`` may
-    # be a coerced placeholder (an unsupported class like ``bonds`` mapped to
-    # ``stocks`` for schema validity before the redesign route), so counting
-    # them would let a rejected, never-backtested design pollute the stock
-    # history and skew the diversity steering. Executed-but-losing cycles
-    # (status ``failed`` / ``failed: max_refinement_rounds``) DID run a backtest
-    # with a genuine canonical class and must keep counting — otherwise
-    # repeated failed futures/forex/etc. runs would be omitted from steering.
-    # Records persisted before ``BacktestRecord.status`` existed default to
-    # ``"completed"``, so legacy rows are unaffected.
-    executed = [
-        r
-        for r in ordered
-        if str(getattr(r.backtest, "status", "completed")) not in _NON_EXECUTED_BACKTEST_STATUSES
-    ]
-    sample = executed[-tail:] if len(executed) > tail else executed
+    # Steer on the most recent executed backtests only. ``_executed_records``
+    # drops cycles that short-circuited *before* running a backtest (their
+    # ``strategy.asset_class`` may be a coerced placeholder like ``bonds`` →
+    # ``stocks`` that would pollute the diversity picture) and tail-trims to the
+    # window afterwards. Executed-but-losing cycles (status ``failed`` /
+    # ``failed: max_refinement_rounds``) DID run a real backtest with a genuine
+    # canonical class and keep counting; legacy rows without a status default to
+    # ``"completed"`` and are unaffected.
+    sample = _executed_records(records, max_records=tail)
     if not sample:
         return (
             "No executed lab backtests yet. Choose **asset_class** from "
@@ -314,23 +693,32 @@ def asset_class_mix_hint(
             counts["stocks"] += 1
 
     n_sample = len(sample)
-    stock_share = counts.get("stocks", 0) / n_sample if n_sample else 0.0
-    min_n = min(counts.values())
-    underrep = [c for c, n in counts.items() if n == min_n]
-
     parts: List[str] = [
         "Recent asset-class counts (last "
         f"{n_sample} strategies): " + ", ".join(f"{k}={v}" for k, v in counts.items()) + "."
     ]
-    if "stocks" in counts and stock_share > 0.35 and n_sample >= 2:
-        non_stock = [c for c in allowed if c != "stocks"]
-        if non_stock:
-            parts.append(
-                "Equities are relatively heavy in this window — **strongly prefer** "
-                f"{_or_join(non_stock)} for this run if you can state coherent rules."
-            )
-    parts.append(
-        "Underrepresented line(s) to favor when ties: "
-        f"{', '.join(underrep)} — use one of these **unless** your thesis clearly requires a different class."
-    )
+    if mode == "explore":
+        # Portfolio-diversity steering: push away from an over-represented class
+        # and toward the least-used ones.
+        stock_share = counts.get("stocks", 0) / n_sample if n_sample else 0.0
+        min_n = min(counts.values())
+        underrep = [c for c, n in counts.items() if n == min_n]
+        if "stocks" in counts and stock_share > _STOCK_CONCENTRATION_THRESHOLD and n_sample >= 2:
+            non_stock = [c for c in allowed if c != "stocks"]
+            if non_stock:
+                parts.append(
+                    "Equities are relatively heavy in this window — **strongly prefer** "
+                    f"{_or_join(non_stock)} for this run if you can state coherent rules."
+                )
+        parts.append(
+            "Underrepresented line(s) to favor when ties: "
+            f"{', '.join(underrep)} — use one of these **unless** your thesis clearly requires a different class."
+        )
+        return " ".join(parts)
+
+    # mode == "exploit": objective is return/win-rate, so steer toward the
+    # class with the best demonstrated edge instead of forcing rotation. Bound
+    # the edge map to the same ``tail`` window as the recent-counts line above
+    # so the steering can never name a class that has dropped out of it.
+    parts.append(_edge_exploitation_steer(records, allowed, menu, tail=tail))
     return " ".join(parts)

@@ -160,7 +160,7 @@ class PipelineRunner:
             "step_id": step.step_id,
             "step_name": step.name,
             "agent_name": agent_name,
-            "input": prev_output[:500],
+            "input": prev_output,
             "output": output,
             "status": "completed",
         }
@@ -183,7 +183,7 @@ class PipelineRunner:
             "step_id": step.step_id,
             "step_name": step.name,
             "agent_name": "",
-            "input": prev_output[:500],
+            "input": prev_output,
             "output": "",
             "status": "waiting_for_input",
         }
@@ -243,7 +243,7 @@ class PipelineRunner:
             "step_id": step.step_id,
             "step_name": step.name,
             "agent_name": agent_name,
-            "input": prev_output[:500],
+            "input": prev_output,
             "output": f"Decision: {decision}",
             "status": "completed",
         }

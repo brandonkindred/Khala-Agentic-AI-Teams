@@ -404,7 +404,7 @@ The design phase produces UX wireframes, UI specifications, and design system to
 
 ## 8. DevOps Team Pipeline
 
-The `DevOpsTeamLeadAgent` orchestrates a contract-first, multi-agent DevOps pipeline with hard gates. It replaces the legacy monolithic `devops_agent/` with role-separated agents and independent review gates.
+The `DevOpsTeamLeadAgent` orchestrates a contract-first, multi-agent DevOps pipeline with hard gates, using role-separated agents and independent review gates (superseding an earlier monolithic DevOps agent).
 
 ```mermaid
 flowchart TB

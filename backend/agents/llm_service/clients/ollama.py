@@ -210,14 +210,15 @@ def _thinking_downgrade_enabled() -> bool:
 
 
 def _ollama_bearer_auth_headers() -> dict[str, str]:
-    """Return the Authorization Bearer header for an Ollama Cloud request.
+    """Return the Authorization Bearer header for the model-listing Ollama request.
 
-    Single source of truth for Ollama auth, shared by the module-level
-    ``list_ollama_models`` (/api/tags) and ``OllamaLLMClient._ollama_auth_headers``
-    (the /api/show and /v1/chat/completions paths), so the listing and chat paths
-    can never authenticate differently. Resolves the Ollama Cloud key via
-    :func:`llm_config.resolve_ollama_api_key` (runtime config set through the
-    settings UI, falling back to ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY``).
+    Serves the module-level ``list_ollama_models`` (/api/tags) only. The key is
+    resolved via :func:`llm_config.resolve_ollama_api_key` (runtime config set through
+    the settings UI, falling back to ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY``). The
+    per-request chat/embedding paths do NOT share this helper —
+    :meth:`OllamaLLMClient._ollama_auth_headers` authenticates with the provider
+    entry's own key exclusively (no env fallback), so the two paths resolve auth
+    independently by design.
 
     Preconditions: none.
     Postconditions: returns ``{"Authorization": "Bearer <key>"}`` when a key is
@@ -419,6 +420,8 @@ class OllamaLLMClient(LLMClient):
         base_url: str = "https://ollama.com",
         timeout: float = 900.0,
         on_reasoning: Optional[Callable[[str], None]] = None,
+        rate_limit_max_retries: Optional[int] = None,
+        api_key: str = "",
     ) -> None:
         """Construct an Ollama-backed LLM client.
 
@@ -427,7 +430,19 @@ class OllamaLLMClient(LLMClient):
         the model's thinking live (e.g. to a job record / UI) without changing the
         return contract. Best-effort: a hook exception never affects the LLM call.
 
-        Preconditions: ``on_reasoning`` is callable or ``None``.
+        ``rate_limit_max_retries`` overrides the in-place 429 backoff retry budget
+        (normally from ``LLM_RATE_LIMIT_MAX_RETRIES``). The multi-provider failover
+        path passes ``0`` so a 429 raises immediately and hands off to the next
+        provider instead of sleeping minutes; ``None`` keeps the env-configured
+        schedule.
+
+        ``api_key`` is this client's Ollama Cloud key (a fallback-list entry's own
+        stored key). It authenticates every request with NO environment fallback —
+        the provider list is the sole source and each entry is self-contained. An
+        empty key means no Authorization header (a local Ollama endpoint needs none).
+
+        Preconditions: ``on_reasoning`` is callable or ``None``;
+            ``rate_limit_max_retries`` is ``None`` or ``>= 0``.
         Postconditions: when set, the hook receives every reasoning delta of every
             streamed response in arrival order; otherwise reasoning handling is
             unchanged.
@@ -436,6 +451,10 @@ class OllamaLLMClient(LLMClient):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.on_reasoning = on_reasoning
+        self._rate_limit_max_retries_override = (
+            max(0, int(rate_limit_max_retries)) if rate_limit_max_retries is not None else None
+        )
+        self._api_key_override = (api_key or "").strip()
         self._model_num_ctx: Optional[int] = None
         # Provisional num_ctx fallback (set only when /api/show cannot be resolved),
         # with the wall-clock time it was recorded. Never written to _model_num_ctx.
@@ -489,16 +508,34 @@ class OllamaLLMClient(LLMClient):
             logger.debug("Failed to record LLM telemetry", exc_info=True)
 
     def _ollama_auth_headers(self) -> dict[str, str]:
-        """Return Authorization Bearer header for Ollama Cloud.
+        """Return the Authorization Bearer header for this client's Ollama requests.
 
-        Thin wrapper over the module-level :func:`_ollama_bearer_auth_headers` so the
-        chat path and the /api/tags listing path share one auth implementation and
-        cannot drift. Resolves the key via :func:`llm_config.resolve_ollama_api_key`
-        so a key set through the settings UI (runtime config) takes effect, falling
-        back to the ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY`` env vars. Empty -> no
-        header (local Ollama needs none).
+        The client authenticates ONLY with its own ``api_key`` (a fallback-list
+        entry's stored key) — there is no environment fallback, because the provider
+        list is the sole source of LLM configuration and each entry is self-contained.
+        An empty key -> no header (a local Ollama endpoint needs none; a Cloud entry
+        must carry its own key, enforced by the route's credentials guard). This is
+        deliberately NOT the module-level :func:`_ollama_bearer_auth_headers`, which
+        keeps an env fallback for the operator-only ``/ollama-models`` browse utility.
+
+        Preconditions: none. Postconditions: returns ``{"Authorization": "Bearer
+            <key>"}`` when this client has a non-empty key, else ``{}``. Never raises.
         """
-        return _ollama_bearer_auth_headers()
+        key = self._api_key_override
+        return {"Authorization": f"Bearer {key}"} if key else {}
+
+    def _rate_limit_retry_config(self) -> "tuple[int, float, float]":
+        """Return the 429 backoff config, applying this client's retry override.
+
+        Postconditions: returns ``(max_retries, initial, cap)`` from
+            :func:`parse_rate_limit_retry_config`, with ``max_retries`` replaced by
+            this client's ``rate_limit_max_retries`` override when one was given
+            (the failover path passes ``0`` for immediate hand-off). Never raises.
+        """
+        max_retries, initial, cap = parse_rate_limit_retry_config()
+        if self._rate_limit_max_retries_override is not None:
+            max_retries = self._rate_limit_max_retries_override
+        return max_retries, initial, cap
 
     def _fetch_model_num_ctx(self) -> int:
         """Resolve the model's num_ctx from the known-model table, env, or Ollama /api/show.
@@ -1276,7 +1313,7 @@ class OllamaLLMClient(LLMClient):
                                 ):
                                     hint = " If using Ollama Cloud with qwen3.5, try passing think=False."
                                 last_error = LLMTemporaryError(
-                                    f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}.{hint}",
+                                    f"LLM server error {status} after {attempt + 1} attempt(s): {response.text}.{hint}",
                                     status_code=status,
                                 )
                                 if _retry_transient_step(
@@ -1292,7 +1329,7 @@ class OllamaLLMClient(LLMClient):
                                 )
                                 raise last_error
                             if 400 <= status < 500:
-                                err_text = response.text[:500]
+                                err_text = response.text
                                 self._log_llm_server_error(
                                     status,
                                     response.text,
@@ -1304,7 +1341,7 @@ class OllamaLLMClient(LLMClient):
                                     "not found" in err_text.lower() or "model" in err_text.lower()
                                 ):
                                     raise LLMPermanentError(
-                                        f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text[:200]}",
+                                        f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text}",
                                         status_code=status,
                                     )
                                 if status == 401:
@@ -1314,7 +1351,7 @@ class OllamaLLMClient(LLMClient):
                                         else " Check that the key is valid and not expired."
                                     )
                                     raise LLMPermanentError(
-                                        f"LLM unauthorized (401): {err_text[:200]}.{auth_hint}",
+                                        f"LLM unauthorized (401): {err_text}.{auth_hint}",
                                         status_code=status,
                                     )
                                 raise LLMPermanentError(
@@ -1328,7 +1365,7 @@ class OllamaLLMClient(LLMClient):
                                 reason="unexpected status",
                             )
                             raise LLMPermanentError(
-                                f"Unexpected LLM response status {status}: {response.text[:200]}",
+                                f"Unexpected LLM response status {status}: {response.text}",
                                 status_code=status,
                             )
             except LLMPermanentError:
@@ -1574,7 +1611,7 @@ class OllamaLLMClient(LLMClient):
     ) -> Dict[str, Any]:
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
-        rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
+        rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
@@ -1818,7 +1855,7 @@ class OllamaLLMClient(LLMClient):
     ) -> str:
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
-        rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
+        rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
@@ -2005,7 +2042,7 @@ class OllamaLLMClient(LLMClient):
             raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
-        rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
+        rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(

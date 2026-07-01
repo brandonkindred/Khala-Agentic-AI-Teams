@@ -145,7 +145,7 @@ class TechLeadAgent:
         parts.append(f"# Development Plan: {requirements.title}\n")
         parts.append("\n## Overview\n")
         parts.append(
-            f"This development plan covers {requirements.description[:200]}{'...' if len(requirements.description) > 200 else ''}\n"
+            f"This development plan covers {requirements.description}\n"
         )
 
         # Hierarchy summary
@@ -438,11 +438,11 @@ class TechLeadAgent:
                     f"- **id:** {t.id} | **type:** {t.type} | **title:** {t.title} | **status:** {t.status} | **assignee:** {t.assignee}"
                 )
                 task_lines.append(
-                    f"  **description:** {t.description[:500]}{'...' if len(t.description) > 500 else ''}"
+                    f"  **description:** {t.description}"
                 )
                 if t.requirements:
                     task_lines.append(
-                        f"  **requirements:** {t.requirements[:300]}{'...' if len(t.requirements) > 300 else ''}"
+                        f"  **requirements:** {t.requirements}"
                     )
                 if t.acceptance_criteria:
                     task_lines.append(
@@ -721,6 +721,15 @@ class TechLeadAgent:
         Review completed work against the spec after receiving a task update.
         Identifies gaps in spec coverage and creates new tasks to fill them.
         Returns a list of new Task objects (may be empty).
+
+        Note: this senior-architecture review is intentionally NOT routed through
+        the shared code-review engine (``code_review_agent``). Unlike the other
+        review gates, it does not judge a code diff into a pass/fail issue list —
+        it reads task summaries and a codebase summary and emits gap ``Task``s, so
+        routing it through an issue-based engine would change *what* it produces.
+        The ``senior_architecture`` profile vocabulary is centralized in
+        ``code_review_agent.profiles`` for any future caller that does review a
+        diff from a senior-architecture perspective.
         """
         if getattr(task_update, "failure_class", None) == "llm_connectivity":
             logger.info(
@@ -928,7 +937,7 @@ class TechLeadAgent:
                 "Tech Lead: should_update_docs=%s for task %s (%s)%s",
                 should_update,
                 task_update.task_id,
-                rationale[:100] if rationale else "N/A",
+                rationale if rationale else "N/A",
                 " (forced: README missing, empty, or minimal)"
                 if force_docs_because_readme_empty
                 else "",
@@ -952,7 +961,7 @@ class TechLeadAgent:
             logger.info(
                 "Tech Lead: Documentation Agent completed for task %s: %s",
                 task_update.task_id,
-                doc_result.summary[:200] if doc_result.summary else "no summary",
+                doc_result.summary if doc_result.summary else "no summary",
             )
 
         except Exception as e:

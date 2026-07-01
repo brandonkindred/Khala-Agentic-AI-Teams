@@ -210,7 +210,7 @@ def run_backtest(
         logger.warning(
             "backtest for %s ended with error (%s) and no trades",
             strategy.strategy_id,
-            service_result.error[:200],
+            service_result.error,
         )
 
     update: Dict[str, object] = {}

@@ -30,6 +30,7 @@ from software_engineering_team.shared.review_utils import (
 from software_engineering_team.shared.review_utils import (
     run_documentation_self_review as _shared_run_documentation_self_review,
 )
+from software_engineering_team.shared.security_service import is_blocking
 from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 
 from ..models import (
@@ -201,7 +202,7 @@ def run_review(
             ReviewIssue(
                 source="build",
                 severity="critical",
-                description=f"Build failed: {build_msg[:300]}",
+                description=f"Build failed: {build_msg}",
                 recommendation="Fix compilation/test errors before proceeding.",
             )
         )
@@ -332,7 +333,7 @@ def run_review(
             except Exception as exc:
                 logger.warning("[%s] Tool agent %s review() failed: %s", task_id, kind.value, exc)
 
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
+    critical_or_high = [i for i in issues if is_blocking(i.severity)]
     passed = build_ok and len(critical_or_high) == 0
 
     summary = f"Review: build={'OK' if build_ok else 'FAIL'}, lint={'OK' if lint_ok else 'FAIL'}, {len(issues)} issues ({len(critical_or_high)} critical/high)."
@@ -389,7 +390,7 @@ def run_microtask_review(
             ReviewIssue(
                 source="build",
                 severity="critical",
-                description=f"Build failed after microtask {microtask_id}: {build_msg[:300]}",
+                description=f"Build failed after microtask {microtask_id}: {build_msg}",
                 recommendation="Fix build errors before proceeding.",
             )
         )
@@ -543,7 +544,7 @@ def run_microtask_review(
                     exc,
                 )
 
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
+    critical_or_high = [i for i in issues if is_blocking(i.severity)]
     passed = build_ok and lint_ok and len(critical_or_high) == 0
 
     summary = f"Microtask {microtask_id} review: build={'OK' if build_ok else 'FAIL'}, lint={'OK' if lint_ok else 'FAIL'}, {len(issues)} issues ({len(critical_or_high)} critical/high). {'PASSED' if passed else 'FAILED'}"
@@ -601,7 +602,7 @@ def run_code_review_phase(
             ReviewIssue(
                 source="build",
                 severity="critical",
-                description=f"Build failed after microtask {microtask_id}: {build_msg[:300]}",
+                description=f"Build failed after microtask {microtask_id}: {build_msg}",
                 recommendation="Fix build errors before proceeding.",
             )
         )
@@ -684,7 +685,7 @@ def run_code_review_phase(
             detail_callback("Running code review...")
         issues.extend(_run_llm_review(llm=llm, task=task, files=files))
 
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
+    critical_or_high = [i for i in issues if is_blocking(i.severity)]
     passed = build_ok and lint_ok and len(critical_or_high) == 0
 
     summary = f"Code review phase for {microtask_id}: build={'OK' if build_ok else 'FAIL'}, lint={'OK' if lint_ok else 'FAIL'}, {len(issues)} issues ({len(critical_or_high)} critical/high). {'PASSED' if passed else 'FAILED'}"
@@ -816,7 +817,7 @@ def _run_agent_testing_phase(
             )
         )
 
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
+    critical_or_high = [i for i in issues if is_blocking(i.severity)]
     passed = len(critical_or_high) == 0
 
     summary = f"{spec.phase_label} phase for {microtask_id}: {len(issues)} issues ({len(critical_or_high)} critical/high). {'PASSED' if passed else 'FAILED'}"
@@ -974,7 +975,7 @@ def run_documentation_review_phase(
                     exc,
                 )
 
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
+    critical_or_high = [i for i in issues if is_blocking(i.severity)]
     passed = len(critical_or_high) == 0
 
     summary = f"Documentation review phase for {microtask_id}: {len(issues)} issues ({len(critical_or_high)} critical/high). {'PASSED' if passed else 'FAILED'}"

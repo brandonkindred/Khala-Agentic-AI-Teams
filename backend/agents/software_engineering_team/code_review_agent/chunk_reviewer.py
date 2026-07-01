@@ -44,7 +44,7 @@ from software_engineering_team.shared.context_sizing import (
 
 from .model_resolution import resolve_code_review_model
 from .models import ChunkReviewInput, ChunkReviewOutput
-from .prompts import CODE_REVIEW_PROMPT
+from .profiles import build_review_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     language = input_data.language.strip().lower() if input_data.language else ""
     if not language:
         # Fallback guess for legacy callers that did not declare a language.
-        language = "python" if "def " in code_chunk[:500] else "typescript"
+        language = "python" if "def " in code_chunk else "typescript"
 
     context_parts = [CHUNK_REVIEW_NOTE]
     if input_data.segment_note:
@@ -183,8 +183,8 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     )
 
     prompt = "\n".join(context_parts)
-    _model = resolve_code_review_model(llm)
-    agent = Agent(model=_model, system_prompt=CODE_REVIEW_PROMPT)
+    model = resolve_code_review_model(llm)
+    agent = Agent(model=model, system_prompt=build_review_system_prompt(input_data.profile))
     result = agent(prompt)
     raw = str(result).strip()
     data = json.loads(raw)

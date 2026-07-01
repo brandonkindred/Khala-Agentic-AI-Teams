@@ -6,11 +6,11 @@ Generates structured open questions with options (aligned with agency expectatio
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from planning_v3_team.models import ClientContext, OpenQuestion, OpenQuestionOption
+from planning_v3_team.spec_digest import map_reduce, parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +86,68 @@ Respond with JSON only (no markdown):
 """
 
 
+def _requirements_map_factory(
+    problem: str,
+) -> Callable[[str, Any, int, int], Optional[Dict[str, Any]]]:
+    """Build the map step. ``problem`` (small) is prepended to every section so each
+    section's question generation stays problem-aware.
+
+    Contract: the returned callable expects an ``llm_service.LLMClient`` exposing
+    ``complete_text(prompt, *, objective, temperature, think)`` (see
+    ``llm_service.interface``); the ``think``/``objective`` kwargs are part of that
+    interface and validated in tests via ``create_autospec(LLMClient)``.
+    """
+
+    def _map(section: str, llm: Any, idx: int, total: int) -> Optional[Dict[str, Any]]:
+        input_text = f"Problem: {problem}\nBrief/Spec section:\n{section}"
+        response = llm.complete_text(
+            REQUIREMENTS_PROMPT.format(input_text=input_text),
+            temperature=0.0,
+            think=True,
+            objective=f"derive requirements/open questions (section {idx + 1}/{total})",
+        )
+        return parse_json_response(response)
+
+    return _map
+
+
+def _requirements_reduce(parts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Reduce step: merge per-section questions, deduped by id and by question text."""
+    questions: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+    seen_text: set = set()
+    for p in parts:
+        raw = p.get("questions")
+        if not isinstance(raw, list):
+            continue
+        for q in raw:
+            if not isinstance(q, dict):
+                continue  # skip malformed entries (e.g. bare strings) instead of crashing
+            qid = (q.get("id") or "").strip()
+            qtext = (q.get("question_text") or "").strip().lower()
+            if (qid and qid in seen_ids) or (qtext and qtext in seen_text):
+                continue
+            if not qid:
+                # Synthesize a unique id so id-less questions don't all collapse to the
+                # build loop's default "q" (which would yield duplicate OpenQuestion ids).
+                qid = f"q_{len(questions) + 1}"
+                q = {**q, "id": qid}  # copy, don't mutate the caller's dict
+            seen_ids.add(qid)
+            if qtext:
+                seen_text.add(qtext)
+            questions.append(q)
+    return {"questions": questions[:10]}  # keep existing cap
+
+
 def run_requirements(
     context: Dict[str, Any],
     llm: Any,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Run requirements phase: generate open questions (RPO/RTO, SLAs, compliance, etc.).
+
+    The whole brief+spec is digested via section-aware map-reduce (see
+    ``planning_v3_team.spec_digest``); no input is truncated.
 
     Returns (context_update, artifacts). artifacts includes open_questions.
     """
@@ -101,45 +157,46 @@ def run_requirements(
     brief = context.get("initial_brief") or ""
     spec = context.get("spec_content") or ""
     problem = (client_context.problem_summary if client_context else "") or ""
-    input_text = f"Brief: {brief[:2000]}\nSpec: {spec[:2000]}\nProblem: {problem}"
+    if brief and spec:
+        material = f"Brief:\n{brief}\n\nSpec:\n{spec}"
+    else:
+        material = brief or spec or problem or "No brief or spec provided."
+
+    data = map_reduce(
+        material,
+        llm,
+        content_description="client brief and specification",
+        map_fn=_requirements_map_factory(problem),
+        reduce_fn=_requirements_reduce,
+        fallback={"questions": []},
+    )
 
     open_questions: List[OpenQuestion] = []
-    try:
-        response = llm.complete_text(
-            REQUIREMENTS_PROMPT.format(input_text=input_text),
-            temperature=0.0,
-            think=True,
-            objective="derive requirements and open questions",
-        )
-        text = (response or "").strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.strip()
-        data = json.loads(text)
-        for q in data.get("questions", [])[:10]:
-            opts = [
-                OpenQuestionOption(
-                    id=o.get("id", ""),
-                    label=o.get("label", ""),
-                    is_default=o.get("is_default", False),
-                )
-                for o in q.get("options", [])
-            ]
-            open_questions.append(
-                OpenQuestion(
-                    id=q.get("id", "q"),
-                    question_text=q.get("question_text", ""),
-                    context=q.get("context"),
-                    category=q.get("category", "general"),
-                    priority=q.get("priority", "medium"),
-                    options=opts,
-                    source="planning_v3",
-                )
+    for q in data.get("questions", []):
+        raw_opts = q.get("options")
+        opts = [
+            OpenQuestionOption(
+                id=o.get("id", ""),
+                label=o.get("label", ""),
+                is_default=o.get("is_default", False),
             )
-    except (json.JSONDecodeError, TypeError, AttributeError) as e:
-        logger.warning("Requirements LLM parse failed: %s", e)
+            for o in (raw_opts if isinstance(raw_opts, list) else [])
+            if isinstance(o, dict)
+        ]
+        open_questions.append(
+            OpenQuestion(
+                id=q.get("id", "q"),
+                question_text=q.get("question_text", ""),
+                context=q.get("context"),
+                category=q.get("category", "general"),
+                priority=q.get("priority", "medium"),
+                options=opts,
+                source="planning_v3",
+            )
+        )
+
+    # Empty result (map-reduce fallback, or no questions produced) ⇒ default questions.
+    if not open_questions:
         open_questions = _default_requirements_questions()
 
     context_update: Dict[str, Any] = {"open_questions": open_questions}

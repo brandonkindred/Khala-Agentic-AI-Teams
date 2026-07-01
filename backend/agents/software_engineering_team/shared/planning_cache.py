@@ -53,7 +53,7 @@ def compute_planning_cache_key(
                 "delivery_strategy": project_overview.get("delivery_strategy"),
                 "features_and_functionality_doc": (
                     project_overview.get("features_and_functionality_doc") or ""
-                )[:2000],
+                ),
             },
             sort_keys=True,
         )

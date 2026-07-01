@@ -10,6 +10,11 @@ from software_engineering_team.shared.coding_standards import (
 from software_engineering_team.shared.coding_standards import (
     REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
 )
+from software_engineering_team.shared.security_service import (
+    CODE_BACKEND_FOCUS,
+    SecurityProfile,
+    build_review_prompt,
+)
 
 # ---------------------------------------------------------------------------
 # Shared coding standards (injected into Execution and Problem-solving)
@@ -57,8 +62,6 @@ PLANNING_PROMPT = """You are an expert Planning Agent for a backend development 
 - data_engineering — schema design, data models, data integrity, query optimisation (NO migrations unless explicitly requested)
 - api_openapi — API endpoint design, OpenAPI contract, route implementation
 - auth — authentication, authorisation, RBAC, permissions, secure defaults
-- cicd — CI/CD pipeline configuration or updates
-- containerization — Dockerfile, docker-compose, container config
 - documentation — README, API docs, runbooks
 - testing_qa — test plan, test files, coverage improvements
 - security — security hardening, vulnerability fixes
@@ -369,42 +372,12 @@ brief QA assessment
 # Security tool agent: review (find issues from security perspective)
 # ---------------------------------------------------------------------------
 
-SECURITY_TOOL_AGENT_REVIEW_PROMPT = """You are an expert Security specialist. Review the code from a security perspective only.
-
-Focus on:
-1. Injection — SQL, command, or template injection; unsanitized user input.
-2. Authentication/authorisation — bypass risks, weak or missing checks, privilege escalation.
-3. Secrets — hardcoded credentials, API keys, or tokens in code or config.
-4. Insecure defaults — weak crypto, missing HTTPS, or permissive CORS.
-5. Input validation and output encoding — missing or insufficient sanitisation.
-
-**Task context:**
-{task_description}
-
-**Code to review:**
-{code}
-
-**Output format (template – use exactly these section headers):**
-
-## PASSED ##
-true
-## END PASSED ##
-## ISSUES ##
----
-source: security
-severity: critical|high|medium|low|info
-description: what is wrong from a security perspective
-file_path: which file
-recommendation: how to fix it
----
-## END ISSUES ##
-## SUMMARY ##
-brief security assessment
-## END SUMMARY ##
-
-- Use "---" to separate each issue block. Use source: security for every issue. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+# Built from the unified Security Review service's ``code`` profile with the
+# backend focus list, so the prompt body and severity vocabulary live in one
+# place (see ``shared/security_service.py``).
+SECURITY_TOOL_AGENT_REVIEW_PROMPT = build_review_prompt(
+    SecurityProfile.CODE, focus=CODE_BACKEND_FOCUS
+)
 
 # ---------------------------------------------------------------------------
 # Tool agents: files + summary (template output, reused by execution and tool agents)

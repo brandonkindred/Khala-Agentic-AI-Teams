@@ -217,3 +217,80 @@ def test_research_agent_synthesize_overview_no_references() -> None:
     a = ResearchAgent(llm_client=DummyLLMClient())
     out = a._synthesize_overview(ResearchBriefInput(brief="x", max_results=5), references=[])
     assert out is None
+
+
+def _doc(n: int):
+    from blog_research_agent.models import SourceDocument
+
+    return SourceDocument(
+        url=HttpUrl(f"https://example.com/{n}"),
+        title=f"Doc {n}",
+        content="content " * 20,
+        publish_date=None,
+        domain="example.com",
+        language="en",
+        metadata={},
+    )
+
+
+def test_score_documents_propagates_attribution_into_workers(monkeypatch) -> None:
+    """Regression: the per-document scoring fan-out must run inside a copy of the
+    caller's context so LLM attribution / request-id reach the worker threads
+    (raw ThreadPoolExecutor submission used to drop them)."""
+    from blog_research_agent.agent import ResearchAgent
+    from blog_research_agent.models import ResearchBriefInput
+
+    from llm_service import (
+        DummyLLMClient,
+        bind_request_id,
+        current_attribution,
+        current_request_id,
+        llm_attribution,
+    )
+
+    a = ResearchAgent(llm_client=DummyLLMClient())
+    seen: list[tuple[str, str]] = []
+
+    def fake_score_one(self, doc, brief_input):
+        seen.append((current_attribution().team, current_request_id()))
+        return (doc, 1.0, 1.0, 1.0, "blog")
+
+    monkeypatch.setattr(ResearchAgent, "_score_one_document", fake_score_one)
+
+    docs = [_doc(0), _doc(1), _doc(2)]
+    with llm_attribution(team="blogging"), bind_request_id("req-score-123"):
+        a._score_documents(docs, ResearchBriefInput(brief="x", max_results=5))
+
+    assert seen == [("blogging", "req-score-123")] * 3
+
+
+def test_summarize_documents_propagates_attribution_into_workers(monkeypatch) -> None:
+    """Same contract for the per-document summarization fan-out."""
+    from blog_research_agent.agent import ResearchAgent
+    from blog_research_agent.models import ResearchBriefInput, ResearchReference
+
+    from llm_service import (
+        DummyLLMClient,
+        bind_request_id,
+        current_attribution,
+        current_request_id,
+        llm_attribution,
+    )
+
+    a = ResearchAgent(llm_client=DummyLLMClient())
+    seen: list[tuple[str, str]] = []
+
+    def fake_summarize_one(self, item, brief_input):
+        seen.append((current_attribution().team, current_request_id()))
+        doc = item[0]
+        return ResearchReference(
+            title=doc.title, url=doc.url, domain=doc.domain, summary="s", key_points=[]
+        )
+
+    monkeypatch.setattr(ResearchAgent, "_summarize_one_document", fake_summarize_one)
+
+    scored = [(_doc(i), 1.0, 1.0, 1.0, "blog") for i in range(3)]
+    with llm_attribution(team="blogging"), bind_request_id("req-sum-456"):
+        a._summarize_documents(scored, ResearchBriefInput(brief="x", max_results=5))
+
+    assert seen == [("blogging", "req-sum-456")] * 3

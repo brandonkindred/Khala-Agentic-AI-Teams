@@ -620,6 +620,32 @@ class TestCICDPipelineAgent:
         assert ".github/workflows/ci.yml" in out.artifacts
         assert out.required_gates_present
 
+    def test_run_surfaces_frontend_pipeline_artifact(self) -> None:
+        """As the single CI/CD owner, the agent carries frontend workflow artifacts too."""
+        from devops_team.cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
+
+        client = _StubClient(
+            {
+                "artifacts": {".github/workflows/frontend.yml": "on: pull_request"},
+                "pipeline_job_graph_summary": "install -> lint -> build -> test -> preview",
+                "required_gates_present": True,
+                "summary": "frontend pipeline created",
+            }
+        )
+        agent = CICDPipelineAgent(client)
+        out = agent.run(CICDPipelineAgentInput(task_spec=_base_task_spec()))
+        assert ".github/workflows/frontend.yml" in out.artifacts
+
+    def test_prompt_covers_frontend_concerns(self) -> None:
+        """The merged prompt owns frontend CI/CD (preview env, bundle, source maps)."""
+        from devops_team.cicd_pipeline_agent.prompts import CICD_PIPELINE_PROMPT
+
+        lowered = CICD_PIPELINE_PROMPT.lower()
+        assert "preview environment" in lowered
+        assert "bundle-size" in lowered or "bundle size" in lowered
+        assert "source map" in lowered
+        assert "frontend.yml" in lowered
+
 
 class TestDeploymentStrategyAgent:
     def test_run_returns_strategy(self) -> None:
@@ -678,6 +704,26 @@ class TestDevSecOpsReviewAgent:
         out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
         assert out.approved
 
+    def test_explicit_null_approved_fails_closed(self) -> None:
+        """A present-but-null ``approved`` is an explicit non-approval (fail
+        closed), even with no blocking findings — matching legacy semantics."""
+        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+
+        client = _StubClient({"approved": None, "findings": [], "summary": "unsure"})
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert not out.approved
+
+    def test_absent_approved_defers_to_findings(self) -> None:
+        """An absent ``approved`` key defers to the finding-derived default:
+        no blocking findings -> approved."""
+        from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+
+        client = _StubClient({"findings": [], "summary": "no opinion"})
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved
+
 
 class TestDevOpsTestValidationAgent:
     def test_aggregates_gates(self) -> None:
@@ -721,36 +767,294 @@ class TestDevOpsTestValidationAgent:
         out = agent.run(DevOpsTestValidationInput(acceptance_criteria=[], tool_results={}))
         assert not out.approved
 
+    def test_delegates_to_unified_qa_agent(self) -> None:
+        from devops_team.test_validation_agent import DevOpsTestValidationAgent
+        from qa_agent import QAExpertAgent
 
-class TestChangeReviewAgent:
-    def test_approves(self) -> None:
-        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
+        assert isinstance(agent._qa, QAExpertAgent)
 
-        client = _StubClient({"approved": True, "findings": [], "summary": "ok"})
-        agent = ChangeReviewAgent(client)
-        out = agent.run(ChangeReviewInput(task_description="test", artifacts={}))
-        assert out.approved
+    def test_preserves_devops_model_routing_key(self, monkeypatch) -> None:
+        """A non-Strands client resolves the model under the 'devops' routing
+        key (the pre-refactor key), not the QA agent's default 'qa'."""
+        from devops_team.test_validation_agent import DevOpsTestValidationAgent
+        from devops_team.test_validation_agent import agent as agent_mod
 
-    def test_blocks_on_finding(self) -> None:
-        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+        captured: Dict[str, Any] = {}
+
+        def _fake_get_strands_model(key: str) -> Any:
+            captured["key"] = key
+            return DummyLLMClient()  # a Strands Model — used directly downstream
+
+        monkeypatch.setattr(agent_mod, "get_strands_model", _fake_get_strands_model)
+        DevOpsTestValidationAgent(object())  # non-None, non-Strands -> resolves via key
+        assert captured["key"] == "devops"
+
+    def test_qa_delegation_exception_fails_closed(self) -> None:
+        """If the delegated QA agent raises, the shim returns a fail-closed
+        result instead of propagating the exception to the orchestrator."""
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
+
+        def _boom(_inp: Any) -> Any:
+            raise RuntimeError("LLM unavailable")
+
+        agent._qa.run = _boom  # type: ignore[assignment]
+        out = agent.run(DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={}))
+        assert out.approved is False
+        assert out.quality_gates.get("test_validation") == "fail"
+        assert "LLM unavailable" in out.summary
+
+    def test_maps_evidence_and_trace_through(self) -> None:
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
 
         client = _StubClient(
             {
                 "approved": True,
-                "findings": [
+                "quality_gates": {"unit_tests": "pass"},
+                "acceptance_trace": [
+                    {"criterion": "c1", "implementation_refs": ["app.py"], "tests": []}
+                ],
+                "validation_evidence": [
+                    {"gate": "unit_tests", "status": "pass", "detail": "12 passed"}
+                ],
+                "summary": "ok",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
+        )
+        assert out.acceptance_trace and out.acceptance_trace[0]["criterion"] == "c1"
+        assert out.evidence and out.evidence[0].gate == "unit_tests"
+        assert out.evidence[0].status == "pass"
+
+    def test_unknown_gate_status_coerced_to_not_run(self) -> None:
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"unit_tests": "flaky"},  # not a valid GateStatus
+                "summary": "ok",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=[], tool_results={})
+        )
+        assert out.quality_gates["unit_tests"] == "not_run"
+
+    def test_unapproved_without_fail_gate_fails_closed(self) -> None:
+        """An unapproved validation with no failing gate must synthesize one so
+        the gate-only DevOps pipeline still blocks (fail closed)."""
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": False,  # unapproved but no "fail" gate present
+                "quality_gates": {"unit_tests": "not_run"},
+                "summary": "could not validate",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
+        )
+        assert not out.approved
+        assert any(v == "fail" for v in out.quality_gates.values())
+
+    def test_approved_does_not_synthesize_fail_gate(self) -> None:
+        from devops_team.test_validation_agent import (
+            DevOpsTestValidationAgent,
+            DevOpsTestValidationInput,
+        )
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"unit_tests": "pass"},
+                "summary": "ok",
+            }
+        )
+        out = DevOpsTestValidationAgent(client).run(
+            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
+        )
+        assert out.approved
+        assert "test_validation" not in out.quality_gates
+
+
+class TestChangeReviewAgent:
+    # The gate now routes through the shared code-review engine with the
+    # ``devops_maintainability`` profile, so stubs return the engine's flat
+    # issue shape ({approved, issues, summary}); the adapter maps those issues
+    # to ``ReviewFinding`` and re-derives approval from blocking severities.
+
+    def test_requires_client(self) -> None:
+        """Constructing with a None client fails fast via an explicit ValueError."""
+        from devops_team.change_review_agent import ChangeReviewAgent
+
+        with pytest.raises(ValueError):
+            ChangeReviewAgent(None)
+
+    def test_empty_artifacts_approve_without_engine(self) -> None:
+        """No artifacts => nothing to block on and the engine is never invoked.
+
+        Uses a tripwire client that raises if the engine touches it, so the
+        short-circuit is verified rather than merely tolerated.
+        """
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        class _TripWireClient(DummyLLMClient):
+            def complete_json(self, *a, **kw):  # type: ignore[override]
+                raise AssertionError("engine must not be called when artifacts are empty")
+
+            def chat_json_round(self, *a, **kw):  # type: ignore[override]
+                raise AssertionError("engine must not be called when artifacts are empty")
+
+        agent = ChangeReviewAgent(_TripWireClient())
+        out = agent.run(ChangeReviewInput(task_description="test", artifacts={}))
+        assert out.approved
+        assert out.findings == []
+
+    def test_approves_when_engine_finds_nothing(self) -> None:
+        """A clean engine result yields approval with no findings."""
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        client = _StubClient({"approved": True, "issues": [], "summary": "ok"})
+        agent = ChangeReviewAgent(client)
+        out = agent.run(
+            ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
+        )
+        assert out.approved
+        assert out.findings == []
+
+    def test_blocks_on_high_severity_finding(self) -> None:
+        """A high-severity engine issue maps to a blocking ReviewFinding and the
+        blocking rule overrides the engine's approved flag."""
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        client = _StubClient(
+            {
+                "approved": True,  # engine flag is overridden by the blocking rule
+                "issues": [
                     {
-                        "finding_id": "F1",
-                        "severity": "medium",
-                        "blocking": True,
-                        "issue": "brittle",
+                        "severity": "high",
+                        "category": "brittle-automation",
+                        "file_path": "Dockerfile",
+                        "description": "latest tag pinned nowhere",
+                        "suggestion": "pin a digest",
                     }
                 ],
                 "summary": "blocked",
             }
         )
         agent = ChangeReviewAgent(client)
-        out = agent.run(ChangeReviewInput(task_description="test", artifacts={}))
+        out = agent.run(
+            ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x:latest\n"})
+        )
         assert not out.approved
+        assert len(out.findings) == 1
+        assert out.findings[0].blocking
+        assert out.findings[0].severity == "high"
+
+    def test_engine_unavailable_degrades_to_approved(self, monkeypatch) -> None:
+        """A CodeReviewUnavailableError degrades the gate to approved (no findings)
+        rather than crashing the DevOps pipeline."""
+        from code_review_agent import CodeReviewUnavailableError
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        class _RaisingEngine:
+            def __init__(self, exc):
+                self._exc = exc
+
+            def __call__(self, _llm):
+                return self
+
+            def run(self, _input):
+                raise self._exc
+
+        monkeypatch.setattr(
+            "devops_team.change_review_agent.agent.CodeReviewAgent",
+            _RaisingEngine(CodeReviewUnavailableError("engine down")),
+        )
+        agent = ChangeReviewAgent(_StubClient({}))
+        out = agent.run(
+            ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
+        )
+        assert out.approved
+        assert out.findings == []
+        assert "unavailable" in out.summary.lower()
+
+    def test_engine_programming_error_propagates(self, monkeypatch) -> None:
+        """An unexpected engine error (e.g. TypeError) is not masked — it propagates."""
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        class _RaisingEngine:
+            def __call__(self, _llm):
+                return self
+
+            def run(self, _input):
+                raise TypeError("boom")
+
+        monkeypatch.setattr(
+            "devops_team.change_review_agent.agent.CodeReviewAgent", _RaisingEngine()
+        )
+        agent = ChangeReviewAgent(_StubClient({}))
+        with pytest.raises(TypeError):
+            agent.run(
+                ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
+            )
+
+    def test_unrecognized_severity_maps_to_low_with_warning(self, caplog) -> None:
+        """_normalize_severity maps an unrecognized value to 'low' and warns.
+
+        (The engine sanitizes severities to its known set, so this defensive
+        branch is exercised at the helper level rather than through ``run``.)"""
+        import logging
+
+        from devops_team.change_review_agent.agent import _normalize_severity
+
+        with caplog.at_level(logging.WARNING):
+            assert _normalize_severity("catastrophic") == "low"
+        assert "unrecognized severity" in caplog.text.lower()
+
+    def test_info_severity_maps_to_low_and_does_not_block(self) -> None:
+        """An engine 'info' severity maps to ReviewFinding 'low' and does not block."""
+        from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
+        client = _StubClient(
+            {
+                "approved": True,
+                "issues": [
+                    {
+                        "severity": "info",
+                        "category": "maintainability",
+                        "file_path": "Dockerfile",
+                        "description": "consider a comment",
+                        "suggestion": "add one",
+                    }
+                ],
+                "summary": "fyi",
+            }
+        )
+        agent = ChangeReviewAgent(client)
+        out = agent.run(
+            ChangeReviewInput(task_description="test", artifacts={"Dockerfile": "FROM x\n"})
+        )
+        assert out.approved
+        assert out.findings[0].severity == "low"
+        assert not out.findings[0].blocking
 
 
 class TestDocumentationRunbookAgent:
@@ -842,20 +1146,17 @@ class TestDevOpsTeamLeadAgentIntegration:
         This test runs the full pipeline twice on the same lead-agent
         instance — the second run exercises every cached sub-agent for a
         second time, which is exactly the failure mode that bug caused."""
-        import itertools
-
-        # Chain two happy-path scripts together so one client can serve
-        # both pipeline runs without having to be swapped mid-run.
-        chained = _ScriptedClient(
-            list(
-                itertools.chain.from_iterable(
-                    [
-                        [r for r in _scripted_llm_for_happy_path()._responses],
-                        [r for r in _scripted_llm_for_happy_path()._responses],
-                    ]
-                )
-            )
-        )
+        # Chain two happy-path scripts together so one client can serve both
+        # pipeline runs without having to be swapped mid-run. One happy-path run
+        # makes exactly 8 scripted LLM calls (the infra-debug agent's tool path
+        # fails without an LLM call, so the script's trailing entry is never
+        # consumed in a single run). Trim each run's script to those 8 responses
+        # so the two runs stay aligned end-to-end; leaving the unconsumed 9th
+        # entry in would shift run 2 by one and feed change_review — which now
+        # routes through the stricter shared review engine — a non-conforming
+        # response that it correctly rejects.
+        per_run = _scripted_llm_for_happy_path()._responses[:8]
+        chained = _ScriptedClient(per_run + per_run)
         agent = DevOpsTeamLeadAgent(chained)
         for i in range(2):
             pkg = agent.run(_base_task_spec())
@@ -923,6 +1224,54 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert "Quality gates failed" in (result.failure_reason or "")
         assert result.completion_package is not None
         assert result.completion_package.status == "blocked"
+
+    def test_security_gate_not_masked_by_stale_validation_pass(self) -> None:
+        """A validation-agent-supplied ``security_review: "pass"`` must not mask
+        a blocking DevSecOps review: the gate is force-assigned from the
+        DevSecOps + policy result, not preserved via setdefault."""
+        mock_llm = _ScriptedClient(
+            [
+                {"approved_for_execution": True},
+                {"artifacts": {}, "summary": "iac"},
+                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
+                {
+                    "artifacts": {},
+                    "summary": "deploy",
+                    "strategy": "rolling",
+                    "rollback_plan": ["rb"],
+                },
+                {
+                    "approved": False,
+                    "findings": [
+                        {
+                            "finding_id": "F1",
+                            "severity": "high",
+                            "blocking": True,
+                            "issue": "bad iam",
+                        }
+                    ],
+                    "summary": "blocked",
+                },
+                {"approved": True, "findings": [], "summary": "ok"},
+                # Validation agent wrongly reports the security gate as passing.
+                {
+                    "approved": True,
+                    "quality_gates": {"iac_validate": "pass", "security_review": "pass"},
+                    "summary": "ok",
+                },
+            ]
+        )
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = agent.run_workflow(
+                repo_path=Path(tmp),
+                task_description="Deploy service",
+                requirements="Include prod approval gate and rollback plan",
+                task_id="devops-sec-mask",
+            )
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.quality_gates["security_review"] == "fail"
 
     def test_completion_package_has_acceptance_trace(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()

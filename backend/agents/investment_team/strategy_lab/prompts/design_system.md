@@ -59,12 +59,13 @@ Bare bar fields are addressed by the string literals `"bar.close"`, `"bar.high"`
 
 ### Rule kinds
 
-- **`entry_rules`**: list of objects with `{"kind": "entry", "side": "long"|"short", "when": Predicate, "note": str}`.
+- **`entry_rules`**: list of objects with `{"kind": "entry", "side": "long"|"short", "when": Predicate | all_of/any_of tree, "note": str}`. `when` is a single `Predicate` or a boolean combinator (see "Multi-confirmation entries" below) — use one `all_of` rule for a confirmation-stacked AND-thesis, NOT several OR'd entry rules.
 - **`exit_rules`**: list of one or more of:
   - `{"kind": "stop_loss", "pct": 0<float<=1.0, "basis": "entry_price"|"trailing_high"|"trailing_low", "style": "market"|"limit", "limit_offset_pct": 0<float<1.0, "note": str}` — `pct` is a fraction (`0.03` = 3%), not a percent. `style` defaults to `"market"` (a guaranteed close); set `style: "limit"` ONLY to author a stop-limit exit that protects the fill price at the cost of execution (it may gap through unfilled and leave the position open — see the stop-order semantics reference). `style: "limit"` REQUIRES `limit_offset_pct` (the limit's distance from the stop, as a fraction, strictly `0<…<1.0`), requires `pct < 1.0` (a 100% stop has no valid limit), and is only allowed with `basis: "entry_price"`. Omit `style` and `limit_offset_pct` for an ordinary market stop.
   - `{"kind": "take_profit", "pct": float>0, "note": str}` — `pct` is a fraction. Closes the WHOLE position at one target.
   - `{"kind": "scaled_take_profit", "levels": [{"pct": float>0, "qty_fraction": 0<float<=1.0, "note": str}, …], "note": str}` — a **laddered** take-profit: close a *fraction* of the position at each of several successively higher targets, letting the remainder run. Each rung's `qty_fraction` is the fraction of the ORIGINAL entry quantity to close at that rung. Constraints: rung `pct` values must be **strictly increasing** (each a higher target) and the `qty_fraction` values must **sum to ≤ 1.0** — the remainder `(1 − Σ qty_fraction)` is left open for your stop-loss / trailing-stop / signal exits to close. Use this (instead of a single `take_profit`) when the hypothesis wants to *harvest partial profit at staged targets while letting a runner ride a trailing stop* — e.g. sell 50% at +5%, 30% at +10%, and let the last 20% trail. Symmetric for shorts (targets are `−pct` off entry). Pair it with a `stop_loss` (ideally `trailing_high`/`trailing_low`) so the un-laddered remainder still has a protective exit. If the `qty_fraction` values sum to **exactly 1.0** there is no remainder — the ladder closes the full position over its rungs — so an additional protective exit is optional rather than required.
-  - `{"kind": "signal_exit", "when": Predicate, "note": str}`.
+  - `{"kind": "signal_exit", "when": Predicate | all_of/any_of tree, "note": str}` — `when` may also be a boolean combinator (same shapes as entry `when`).
+  - `{"kind": "oco_bracket", "stop_loss": {"pct": 0<float<1.0, "style"?: "market"|"limit", "limit_offset_pct"?: 0<float<1.0, "note": str}, "take_profit": {"pct": 0<float<1.0, "note": str}, "note": str}` — a broker-style **OCO bracket**: a protective stop leg and a profit-target leg attached to the entry order as ONE one-cancels-other group. On entry-fill the engine rests BOTH as opposite-side child orders sharing an OCO group; whichever fills first closes the WHOLE position and cancels the other. Unlike the bar-by-bar `take_profit` (which closes at the next bar's market open once the target is crossed), the bracket's take-profit rests as a **LIMIT and fills at its exact target price** — that resting-limit execution is the reason to choose a bracket over independent `stop_loss` + `take_profit` rules. Both legs are fractions off the entry reference price (long: stop below / target above entry; short: the signs flip). `stop_loss.style` is **optional and defaults to `"market"`** (the `?` marks both it and `limit_offset_pct` as conditional): `"market"` rests a STOP; `"limit"` rests a STOP_LIMIT and REQUIRES `limit_offset_pct` (the limit's distance from the stop, strictly `0<…<1.0`). **Omit both `style` and `limit_offset_pct` for an ordinary market bracket stop**, and only set `limit_offset_pct` together with `style: "limit"`. **Constraints:** a spec carries at most ONE `oco_bracket`, and a bracket must be the **SOLE price exit** — do NOT combine it with `stop_loss` / `take_profit` / `scaled_take_profit` (the spec is rejected). A `signal_exit` MAY accompany the bracket as a secondary discretionary trigger.
   Bar-counting "time stops" are deliberately NOT a supported kind — real traders close on price, P&L, or signal reversal, not on an arbitrary "exit after N bars" trigger.
   A `trailing_high` / `trailing_low` stop ratchets its trigger in the favorable direction as price moves your way and, by design, lifts the protective level **above entry** once a long is in profit (below entry for a short) — that is correct gain-locking behavior, not a defect. See the stop-order semantics reference in the system prompt.
 - **`sizing`** (single object, not a list):
@@ -77,6 +78,38 @@ A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
 - `op ∈ {"<", ">", "<=", ">=", "==", "cross_above", "cross_below"}` (the literal symbol, not name aliases).
 - `lhs` is either an `IndicatorRef` or one of the bar-field literals `"bar.close"` / `"bar.high"` / `"bar.low"` / `"bar.volume"`.
 - `rhs` is either an `IndicatorRef`, a bar-field literal (same four), or a plain numeric constant (e.g. `30`, `70.0`).
+
+### Multi-confirmation entries — `all_of` / `any_of` (the win-rate lever)
+
+Win rate is driven by **entry selectivity**, and a single `Predicate` cannot express the confirmation-stacked setups (trend filter ∧ pullback ∧ volume confirmation) that lift hit rate. A rule's `when` may therefore be **either** a single `Predicate` **or** a boolean combinator that nests predicates (and other combinators):
+
+- `{"kind": "all_of", "of": [ <predicate-or-tree>, … ]}` — **AND**: fires only when EVERY child fires. This is how you encode a genuine multi-confirmation entry as ONE rule.
+- `{"kind": "any_of", "of": [ <predicate-or-tree>, … ]}` — **OR**: fires when ANY child fires.
+
+Each combinator needs **≥2 children**; children may themselves be `all_of` / `any_of`, so arbitrary AND/OR logic nests. The engine evaluates the tree deterministically and the spec **compiles** — a multi-confirmation entry is fully expressible in the DSL and stays `requires_custom_code: false`.
+
+Worked multi-confirmation entry (long only when the trend, a pullback, AND volume all confirm):
+
+```json
+{
+  "kind": "entry", "side": "long",
+  "when": {"kind": "all_of", "of": [
+    {"lhs": "bar.close", "op": ">", "rhs": {"name": "sma", "params": {"period": 200}}},
+    {"lhs": {"name": "rsi", "params": {"period": 14}}, "op": "<", "rhs": 40},
+    {"lhs": "bar.volume", "op": ">", "rhs": {"name": "sma", "params": {"period": 20}, "source": "volume"}}
+  ]}
+}
+```
+
+Prefer ONE `all_of` entry rule over multiple separate `entry_rules` for an AND-thesis: separate `entry_rules` are OR'd (any one firing enters), which *loosens* the trigger and lowers win rate — the opposite of what you want. Use `any_of` (or multiple `entry_rules`) only when you genuinely mean OR.
+
+### Exit design for win rate
+
+Realized win rate is set by your EXIT geometry as much as your entry. To lift the fraction of trades that close green WITHOUT falling into the tight-take-profit / wide-stop negative-expectancy trap noted above:
+
+- **Bank partials early with a `scaled_take_profit`.** Closing a meaningful fraction (e.g. 40–50%) of the position at a modest first target books a realized gain on most trades that move your way at all, which directly lifts the hit rate. Ladder additional rungs at higher targets for the trades that keep running.
+- **Let a runner ride a trailing stop.** Leave the un-laddered remainder (`1 − Σ qty_fraction`) open and protect it with a `stop_loss` on a `trailing_high` (long) / `trailing_low` (short) basis. The trailing stop ratchets the protective level in your favor as price moves your way (locking in gain), so the runner preserves the return the early partials would otherwise cap.
+- This pairing — **partials early + trailing runner** — is the win-rate-friendly default for a trend/momentum thesis: it raises realized win rate while keeping the average winner large enough that `reward_risk` still clears the break-even win rate your FORECAST step must defend. Banking a take-profit *smaller than your stop across the WHOLE position* is the trap; banking *part* of the position early while a trailing runner carries the rest is not.
 
 ### Worked structured example (mean-reversion RSI strategy)
 
@@ -102,6 +135,108 @@ A `Predicate` is `{"lhs": <side>, "op": <op>, "rhs": <side>}` where:
   "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
   "risk_limits": {"max_position_pct": 5},
   "rationale": "..."
+}
+```
+
+The single-predicate example above is the *minimum* legal shape — it is NOT the bar to clear. The dual objective wants regime-aware, multi-confirmation, expectancy-justified specs. The two exemplars below are the standard to design to.
+
+### Expert-grade exemplar 1 — regime-filtered trend pullback (stocks)
+
+A long-only trend-pullback: trade only with the primary uptrend (`close > SMA(200)`), require trend *strength* (`ADX > 20`) and a *volume*-confirmed pullback (`RSI(14) < 40` on above-average volume) — a four-way `all_of` that lifts entry selectivity, hence win rate. Exits bank partials early and let a trailing runner ride, so realized win rate is high without the tight-TP/wide-stop trap. The `expectancy_forecast` is shown self-consistent.
+
+```json
+{
+  "asset_class": "stocks",
+  "hypothesis": "In a confirmed uptrend (close above the 200-day SMA with ADX>20 showing trend strength), a shallow RSI pullback bought on above-average volume resumes the trend with a high hit rate. Three independent confirmations (trend, strength, volume) make the entry selective enough to defend a ~58% win rate.",
+  "signal_definition": "Trend filter SMA(200), trend-strength filter ADX(14)>20, pullback trigger RSI(14)<40, and volume confirmation (volume above its 20-day average) combined as a single AND-stacked entry.",
+  "timeframe": "1d",
+  "entry_rules": [{
+    "kind": "entry", "side": "long",
+    "when": {"kind": "all_of", "of": [
+      {"lhs": "bar.close", "op": ">", "rhs": {"name": "sma", "params": {"period": 200}}},
+      {"lhs": {"name": "adx", "params": {"period": 14}}, "op": ">", "rhs": 20},
+      {"lhs": {"name": "rsi", "params": {"period": 14}}, "op": "<", "rhs": 40},
+      {"lhs": "bar.volume", "op": ">", "rhs": {"name": "sma", "params": {"period": 20}, "source": "volume"}}
+    ]}
+  }],
+  "exit_rules": [
+    {"kind": "scaled_take_profit", "levels": [
+      {"pct": 0.04, "qty_fraction": 0.5, "note": "bank half at +4%"},
+      {"pct": 0.08, "qty_fraction": 0.3, "note": "bank 30% more at +8%"}
+    ], "note": "harvest partials, leave 20% to run"},
+    {"kind": "stop_loss", "pct": 0.05, "basis": "trailing_high", "note": "trailing runner protects the remainder and locks gains"}
+  ],
+  "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
+  "target_symbols": [],
+  "risk_limits": {"max_position_pct": 5, "stop_loss_pct": 5},
+  "speculative": false,
+  "expectancy_forecast": {
+    "forecast_win_rate": 0.58,
+    "reward_risk": 1.1,
+    "trades_per_year": 25,
+    "projected_annual_return_pct": 16.0,
+    "consistency_note": "reward:risk 1.1 needs >47.6% wins to break even; the 4-confirmation entry defends ~58%. 0.58 x 5.5% avg win - 0.42 x 5% avg loss ~ +1.1%/trade x ~25 trades ~ +27% gross, ~16% net after costs."
+  },
+  "rationale": "Stocks is the highest-edge class in the priors and a confirmed-uptrend pullback is the canonical high-win-rate setup there. Partials early plus a trailing runner lift realized win rate while keeping the average winner large enough that the 1.1 reward:risk clears its 47.6% break-even — so the (return, win-rate) pair holds with positive post-cost expectancy."
+}
+```
+
+### Expert-grade exemplar 2 — volatility-regime breakout (crypto)
+
+A contrasting profile: a breakout wins *less often* but with a larger reward:risk. It enters on a Bollinger-upper breakout, gated by trend strength (`ADX>25`) and a broader uptrend (`close > SMA(50)`). The forecast shows a *coherent* sub-50% win rate — positive expectancy comes from reward:risk, not hit rate — which the self-review must recognize as valid, not flag.
+
+```json
+{
+  "asset_class": "crypto",
+  "hypothesis": "When price breaks its upper Bollinger band while ADX>25 confirms an energetic trend and price holds above the 50-day SMA, a volatility-expansion breakout follows through. Breakouts are right less than half the time but the winners run far past the stop, so positive expectancy comes from a ~1.5 reward:risk, not from win rate.",
+  "signal_definition": "Breakout trigger close crossing above Bollinger(20, 2.0) upper band, trend-strength gate ADX(14)>25, and a broader-uptrend gate close>SMA(50), AND-stacked.",
+  "timeframe": "1d",
+  "entry_rules": [{
+    "kind": "entry", "side": "long",
+    "when": {"kind": "all_of", "of": [
+      {"lhs": "bar.close", "op": "cross_above", "rhs": {"name": "bollinger", "params": {"period": 20, "num_std": 2.0, "band": "upper"}}},
+      {"lhs": {"name": "adx", "params": {"period": 14}}, "op": ">", "rhs": 25},
+      {"lhs": "bar.close", "op": ">", "rhs": {"name": "sma", "params": {"period": 50}}}
+    ]}
+  }],
+  "exit_rules": [
+    {"kind": "scaled_take_profit", "levels": [
+      {"pct": 0.06, "qty_fraction": 0.5, "note": "bank half at +6%"},
+      {"pct": 0.15, "qty_fraction": 0.25, "note": "bank 25% more at +15%"}
+    ], "note": "let 25% run on the trailing stop"},
+    {"kind": "stop_loss", "pct": 0.06, "basis": "trailing_high", "note": "tight trailing stop; breakout failure exits fast"}
+  ],
+  "sizing": {"kind": "fixed_fraction", "fraction": 0.015},
+  "target_symbols": [],
+  "risk_limits": {"max_position_pct": 4, "stop_loss_pct": 6},
+  "speculative": false,
+  "expectancy_forecast": {
+    "forecast_win_rate": 0.48,
+    "reward_risk": 1.5,
+    "trades_per_year": 30,
+    "projected_annual_return_pct": 20.0,
+    "consistency_note": "reward:risk 1.5 needs only 40% wins to break even; 48% clears it. 0.48 x 9% avg win - 0.52 x 6% avg loss ~ +1.2%/trade x ~30 trades ~ +36% gross, ~20% net after costs. The sub-50% win rate is coherent, not a defect."
+  },
+  "rationale": "Differs from the stock pullback by design — breakout, not pullback; crypto, not equities; expectancy from reward:risk, not hit rate. The forecast is deliberately a coherent sub-50% win rate so the win rate is not chased at expectancy's expense."
+}
+```
+
+### Worked OCO bracket exit
+
+Use an `oco_bracket` when you want a resting limit take-profit paired with a
+protective stop as one OCO unit (the target fills at its exact price; whichever
+leg hits first cancels the other). The bracket is the sole price exit — no
+separate `stop_loss` / `take_profit`. The stop leg below omits `style`, so it
+defaults to `"market"` (a plain protective STOP); add `"style": "limit"` with a
+`limit_offset_pct` for a STOP_LIMIT instead:
+
+```json
+{
+  "exit_rules": [
+    {"kind": "oco_bracket",
+     "stop_loss": {"pct": 0.03},
+     "take_profit": {"pct": 0.06}}
+  ]
 }
 ```
 
@@ -156,17 +291,17 @@ Every indicator AND every filter / condition you NAME in `hypothesis` or `signal
 
 The reviewer will reject specs whose prose makes claims the rules cannot test. **Critical engine semantics you must internalize before resolving a mismatch:**
 
-- A `Predicate` has exactly ONE `lhs`, ONE `op`, ONE `rhs`. The DSL has **no** `AND` / `OR` combinator inside a predicate.
-- `entry_rules` is evaluated as **OR**: the engine enters as soon as the FIRST listed rule's predicate fires. Adding a second entry rule does NOT tighten the condition — it broadens it.
-- There is no way to express "long when ADX > 25 **AND** close > SMA200" as two separate `entry_rules`. Doing so would make the engine enter on `ADX > 25 OR close > SMA200`, which is a different (looser) strategy than the one your prose describes.
+- A single `Predicate` has exactly ONE `lhs`, ONE `op`, ONE `rhs` — no boolean operator inside it. But a rule's `when` may be an **`all_of` / `any_of` combinator** (see "Multi-confirmation entries"), so a multi-condition trigger IS expressible — as one rule whose `when` is an `all_of` tree.
+- Separate `entry_rules` are evaluated as **OR**: the engine enters as soon as the FIRST listed rule fires. Adding a second entry rule does NOT tighten the condition — it broadens it.
+- So "long when ADX > 25 **AND** close > SMA200" is **one** entry rule with `"when": {"kind": "all_of", "of": [ADX>25, close>SMA200]}` — NOT two separate `entry_rules` (which would enter on `ADX > 25 OR close > SMA200`, a looser strategy than your prose).
 
-Three correct ways to resolve a mismatch:
+**Win rate is driven by entry selectivity — a confirmation-stacked setup (trend filter ∧ pullback ∧ volume confirmation) is exactly how expert traders raise their hit rate. Encode the full conjunction; do NOT discard confirmations to fit a single predicate.** Three correct ways to resolve a mismatch:
 
-1. **Pick the single most discriminating predicate** and put it in one `entry_rule`. Document the other conditions in `signal_definition` only if they are loose context (regime narrative), NOT if they are part of the entry trigger. If the reviewer asks "does the rule test what the prose claims?", the honest answer must be yes.
-2. **Trim the prose** so it only names filters the single entry predicate genuinely implements. If your thesis was "ADX > 25 AND close > SMA200" but you can only encode one, rewrite the hypothesis around whichever predicate you kept.
-3. **Mark the spec `requires_custom_code: true`** if and only if the strategy genuinely cannot be expressed with the single-predicate DSL form. This is an escape hatch, not a default — most strategies should be expressible in the DSL after step 1 or 2.
+1. **Encode the multi-confirmation trigger as one `all_of` entry rule** (the preferred resolution). Every condition you name in the prose becomes a structured predicate inside the tree, so the rule tests exactly what the prose claims and the spec stays compilable (`requires_custom_code: false`). This is the win-rate lever — reach for it rather than dropping legs.
+2. **Keep the single most selective predicate** *only* when your edge genuinely reduces to one dominant condition. Then document any remaining conditions in `signal_definition` only if they are loose context (regime narrative), NOT part of the entry trigger — and trim the prose so it names only what the rule implements.
+3. **Mark the spec `requires_custom_code: true`** ONLY for logic the combinator still cannot express — cross-asset / pairs state or path-dependent state (see the `requires_custom_code` section). A plain multi-confirmation AND/OR is NOT one of these: use `all_of` / `any_of`.
 
-Pick whichever option best matches your real signal — DO NOT silently encode an AND-thesis as multiple OR'd entry rules, and DO NOT leave the mismatch unresolved on the next round.
+Pick whichever option best matches your real signal — DO NOT silently encode an AND-thesis as multiple OR'd entry rules (that *loosens* the trigger and lowers win rate; use one `all_of`), and DO NOT leave the mismatch unresolved on the next round.
 
 ## Mathematical coherence of risk and sizing (mandatory)
 
@@ -194,21 +329,20 @@ Whenever your hypothesis or signal definition names specific tickers (e.g. "QQQ 
 
 ## `requires_custom_code`
 
-**Absent / `false` is the strong default. Setting it `true` is rare.**
+**Absent / `false` is the strong default — including for multi-confirmation entries, which the `all_of` / `any_of` combinator expresses and the compiler handles. Setting it `true` is rare and reserved for logic the DSL genuinely cannot express.**
 
-The deterministic compiler covers the **entire** indicator catalogue, **all** comparison operators (`<`, `>`, `<=`, `>=`, `==`, `cross_above`, `cross_below`), and **all** sources above, so a strategy whose entry and exit triggers are each a single `Predicate` is almost always compilable — custom code buys you nothing there, and it does NOT unlock indicator-of-indicator, arithmetic, or multi-condition predicates (the DSL has no such forms regardless of this flag).
+The deterministic compiler covers the **entire** indicator catalogue, **all** comparison operators (`<`, `>`, `<=`, `>=`, `==`, `cross_above`, `cross_below`), **all** sources above, **and** `all_of` / `any_of` predicate trees — so a strategy whose entry and exit triggers are single predicates *or multi-confirmation combinator trees* is compilable with `false`. Custom code buys you nothing there, and it does NOT unlock indicator-of-indicator or arithmetic predicates (the DSL has no such forms regardless of this flag). **A confirmation-stacked entry is NOT a reason to set this flag** — encode it as one `all_of` rule (see "Multi-confirmation entries") and leave `requires_custom_code` false.
 
-A few coherence constraints still can't be compiled even with single-predicate rules — `volatility_target` sizing requires exactly one referenced `atr` indicator, and `macd` requires `fast < slow`. **You do not set `requires_custom_code` for these:** keep the spec honest and well-formed (give `volatility_target` its ATR; keep MACD `fast < slow`). If a spec is otherwise un-compilable the pipeline detects it and falls back to synthesis on its own — so never flip this flag just to dodge a sizing/parameter-coherence fix.
+A few coherence constraints still can't be compiled — `volatility_target` sizing requires exactly one referenced `atr` indicator, and `macd` requires `fast < slow`. **You do not set `requires_custom_code` for these:** keep the spec honest and well-formed (give `volatility_target` its ATR; keep MACD `fast < slow`). If a spec is otherwise un-compilable the pipeline detects it and falls back to synthesis on its own — so never flip this flag just to dodge a sizing/parameter-coherence fix.
 
-Set `requires_custom_code: true` ONLY for a genuine capability gap the single-predicate DSL cannot express even after applying resolution steps 1–2 above, namely:
+Set `requires_custom_code: true` ONLY for a genuine capability gap the DSL — combinators included — cannot express, namely:
 
-- Multi-leg `AND` / `OR` entry logic that is the real, irreducible signal (not "I want a second filter" — that is steps 1–2, not custom code).
 - Cross-asset / pairs state (e.g. "long GLD only while USO is below its 50-day SMA").
 - Path-dependent state the engine does not model (custom trailing logic, bar-count regimes, etc.).
 
-"I want indicator-of-indicator" or "I want one more confirmation filter" is **not** a trigger — restructure per steps 1–2 instead.
+"I want indicator-of-indicator" or "I want a multi-confirmation entry" is **not** a trigger — the former has no DSL form (restructure it away); the latter is exactly what `all_of` / `any_of` is for.
 
-**Cost of choosing it:** custom code skips the deterministic compiler and must instead pass the predicate-conformance shadow gate, which shadow-runs your `on_bar` against the engine's own verdicts. If the generated code drifts from the spec, it is refined and — if it still drifts after the retry budget — demoted and the backtest is flagged as having run on non-conforming code. A compilable single-predicate spec avoids that entire failure surface. When you do set it, a separate code-synthesis step generates the Python — you still do not write code.
+**Cost of choosing it:** custom code skips the deterministic compiler and must instead pass the predicate-conformance shadow gate, which shadow-runs your `on_bar` against the engine's own verdicts. If the generated code drifts from the spec, it is refined and — if it still drifts after the retry budget — demoted and the backtest is flagged as having run on non-conforming code. A compilable spec (single-predicate or combinator) avoids that entire failure surface. When you do set it, a separate code-synthesis step generates the Python — you still do not write code.
 
 ## Required output shape
 

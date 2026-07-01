@@ -64,7 +64,7 @@ def test_errors_constructors_and_str() -> None:
     assert isinstance(LLMUnreachableError("x"), LLMError)
 
     parse = LLMJsonParseError("bad json", response_preview="x" * 1000, phase="planning")
-    assert len(parse.response_preview) == 500
+    assert len(parse.response_preview) == 1000
 
     rese = ResearchError("nope", sources_found=3)
     assert rese.phase == "research"

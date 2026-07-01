@@ -91,7 +91,7 @@ isProject: false
     - One structured line summarizing counts:
       - `"Backend problem-solving context: qa_issues=%d, security_issues=%d, code_review_issues=%d"`.
     - And/or a short multi-line log of the generated header:
-      - `logger.info("Backend problem-solving header for LLM:\n%s", header[:800])`.
+      - `logger.info("Backend problem-solving header for LLM:\n%s", header)`.
   - This captures the **exact text** you prepend to the LLM prompt when fixing issues, without re-logging the entire template/spec.
 - **Frontend** (`FrontendExpertAgent.run`):
   - Mirror the same pattern when `has_issues` is true, using the Angular-specific problem-solving header from `_ANGULAR_PROBLEM_SOLVING_INSTRUCTIONS`.

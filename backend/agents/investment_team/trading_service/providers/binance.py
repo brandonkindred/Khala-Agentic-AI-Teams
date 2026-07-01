@@ -128,7 +128,7 @@ class BinanceAdapter:
 
                     raise ProviderRegionBlocked("binance REST returned HTTP 451 (region blocked)")
                 if resp.status_code != 200:
-                    raise ProviderError(f"binance REST error {resp.status_code}: {resp.text[:200]}")
+                    raise ProviderError(f"binance REST error {resp.status_code}: {resp.text}")
                 data = resp.json()
                 if not data:
                     break

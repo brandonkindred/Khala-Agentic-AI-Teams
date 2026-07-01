@@ -22,7 +22,7 @@ def test_load_agent_anatomy_text_non_empty():
 def test_get_anatomy_prompt_preamble_includes_spec():
     pre = get_anatomy_prompt_preamble()
     assert "AGENT_ANATOMY.md" in pre or "anatomy" in pre.lower()
-    assert load_agent_anatomy_text()[:200] in pre
+    assert load_agent_anatomy_text() in pre
 
 
 def test_copy_anatomy_bundle_to_directory(tmp_path: Path):

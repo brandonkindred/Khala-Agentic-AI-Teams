@@ -64,7 +64,7 @@ def _parse_json(raw: str, fallback: object) -> object:
     try:
         return json.loads(stripped)
     except (json.JSONDecodeError, ValueError):
-        logger.warning("Could not parse agent JSON output; using fallback. Raw: %s", raw[:200])
+        logger.warning("Could not parse agent JSON output; using fallback. Raw: %s", raw)
         return fallback
 
 

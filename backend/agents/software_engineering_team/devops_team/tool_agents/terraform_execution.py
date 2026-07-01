@@ -73,7 +73,7 @@ class TerraformExecutionToolAgent:
 
         findings: List[str] = []
         if not result.success:
-            findings.append(result.error_summary or result.stderr[:500])
+            findings.append(result.error_summary or result.stderr)
 
         plan_summary = ""
         if input_data.command == "plan" and result.success:

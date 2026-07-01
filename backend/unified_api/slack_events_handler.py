@@ -231,7 +231,7 @@ def _call_team_assistant(team_prefix: str, conversation_id: str | None, message:
             resp = client.post(path, params=params, json={"message": message}, timeout=120)
             if resp.status_code == 200:
                 return resp.json()
-            logger.warning("Team assistant %s returned %s: %s", path, resp.status_code, resp.text[:200])
+            logger.warning("Team assistant %s returned %s: %s", path, resp.status_code, resp.text)
             return None
     except Exception:
         logger.debug("ASGI transport failed, trying localhost HTTP", exc_info=True)
@@ -243,7 +243,7 @@ def _call_team_assistant(team_prefix: str, conversation_id: str | None, message:
             resp = client.post(path, params=params, json={"message": message}, timeout=120)
             if resp.status_code == 200:
                 return resp.json()
-            logger.warning("Team assistant HTTP %s returned %s: %s", path, resp.status_code, resp.text[:200])
+            logger.warning("Team assistant HTTP %s returned %s: %s", path, resp.status_code, resp.text)
     except Exception:
         logger.exception("Team assistant HTTP call failed for %s", path)
     return None

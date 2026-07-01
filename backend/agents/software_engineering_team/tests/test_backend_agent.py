@@ -142,16 +142,43 @@ def test_is_pytest_assertion_failure() -> None:
     assert not _is_pytest_assertion_failure("ImportError: cannot import")
 
 
-def test_build_error_signature_uses_tail_for_assertion_failures() -> None:
-    """_build_error_signature uses last 1200 chars for pytest_assertion, first 800 otherwise."""
-    assertion_err = "[pytest_assertion] failed\n" + "x" * 1500
-    sig = _build_error_signature(assertion_err)
-    assert len(sig) == 1200  # last 1200 chars
-    assert "x" in sig
-    generic_err = "ImportError: foo\n" + "y" * 1000
-    sig2 = _build_error_signature(generic_err)
-    assert sig2.startswith("ImportError")
-    assert len(sig2) <= 800
+def test_build_error_signature_normalizes_volatile_lines() -> None:
+    """Two failures differing only in volatile noise collapse to one signature,
+    and the real error message is preserved (no length truncation)."""
+    err_a = (
+        "AssertionError: assert 200 == 401\n"
+        "tmp file /tmp/pytest-of-alice/pytest-12/test_a0/conftest.py\n"
+        "at 2026-06-28T10:11:12.345Z connected to localhost:8080\n"
+        "<object at 0x7f3a1c2d4e50> finished in 1.23s\n"
+    )
+    err_b = (
+        "AssertionError: assert 200 == 401\n"
+        "tmp file /tmp/pytest-of-bob/pytest-99/test_a0/conftest.py\n"
+        "at 2026-06-28T22:33:44.999Z connected to localhost:8081\n"
+        "<object at 0x55ffaa00bb11> finished in 9.87s\n"
+    )
+    # Same underlying failure, only volatile lines differ -> identical signature.
+    assert _build_error_signature(err_a) == _build_error_signature(err_b)
+    # A DIFFERENT failing file under a temp tree must NOT collapse: the trailing
+    # path components (e.g. test_b0/other.py) are preserved as a distinguishing tail.
+    err_c = (
+        "AssertionError: assert 200 == 401\n"
+        "tmp file /tmp/pytest-of-carol/pytest-7/test_b0/other.py\n"
+        "at 2026-06-28T01:02:03.000Z connected to localhost:8082\n"
+        "<object at 0x12345678> finished in 0.01s\n"
+    )
+    assert _build_error_signature(err_a) != _build_error_signature(err_c)
+    # The real, stable error text survives normalization.
+    assert "AssertionError: assert 200 == 401" in _build_error_signature(err_a)
+    # No length truncation: a long stable body is retained in full.
+    long_err = "ImportError: cannot import name 'X' " + "details " * 300
+    assert "details details" in _build_error_signature(long_err)
+    # Random temp-file basenames (NamedTemporaryFile/mkstemp) are normalized, so the
+    # SAME failure referencing a different random temp file collapses to one signature
+    # rather than defeating loop detection.
+    t1 = "OperationalError near /tmp/tmpa1b2c3.db: disk I/O error"
+    t2 = "OperationalError near /tmp/tmpx9y8z7w.db: disk I/O error"
+    assert _build_error_signature(t1) == _build_error_signature(t2)
 
 
 def test_build_code_review_issues_for_missing_test_routes_returns_targeted_issue() -> None:

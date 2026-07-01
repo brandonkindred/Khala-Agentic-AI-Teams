@@ -3377,7 +3377,7 @@ Previously Answered Questions:
                 )
             return decisions
         except Exception as exc:
-            logger.warning("SOP spec extraction failed, will ask all questions: %s", str(exc)[:200])
+            logger.warning("SOP spec extraction failed, will ask all questions: %s", str(exc))
             return []
 
     def _generate_spec_aware_options(
@@ -3420,7 +3420,7 @@ Previously Answered Questions:
             return options
         except Exception as exc:
             logger.warning(
-                "Spec-aware option generation failed for %s: %s", q_def["sop_id"], str(exc)[:200]
+                "Spec-aware option generation failed for %s: %s", q_def["sop_id"], str(exc)
             )
             return []
 
@@ -3555,14 +3555,14 @@ Previously Answered Questions:
                 logger.info(
                     "SOP Phase 1: Sub-phase '%s' assessed as COMPLETE: %s",
                     sub_phase.value,
-                    str(parsed.get("completeness_rationale", ""))[:200],
+                    str(parsed.get("completeness_rationale", "")),
                 )
                 return True, []
 
             logger.info(
                 "SOP Phase 1: Sub-phase '%s' has GAPS: %s",
                 sub_phase.value,
-                str(parsed.get("completeness_rationale", ""))[:200],
+                str(parsed.get("completeness_rationale", "")),
             )
 
             # Parse follow-up questions
@@ -3654,7 +3654,7 @@ Previously Answered Questions:
             return False, follow_ups
         except Exception as exc:
             logger.error(
-                "Sub-phase gap analysis failed for '%s': %s", sub_phase.value, str(exc)[:200]
+                "Sub-phase gap analysis failed for '%s': %s", sub_phase.value, str(exc)
             )
             return True, []  # On failure, consider complete to avoid blocking
 
@@ -3919,7 +3919,7 @@ Previously Answered Questions:
                     summary=str(parsed.get("summary", "")),
                 )
         except Exception as exc:
-            logger.warning("SOP Phase 2 architecture analysis failed: %s", str(exc)[:200])
+            logger.warning("SOP Phase 2 architecture analysis failed: %s", str(exc))
 
         # Step 2: Generate approval questions
         if arch_result.architecture_type or arch_result.tool_gaps:
@@ -3938,7 +3938,7 @@ Previously Answered Questions:
                         self._apply_architecture_approval(arch_result, answered)
                         self._record_answers(repo_path, answered, iteration=0)
                 except Exception as exc:
-                    logger.warning("SOP Phase 2 approval communication failed: %s", str(exc)[:200])
+                    logger.warning("SOP Phase 2 approval communication failed: %s", str(exc))
 
         # Step 3: Save architecture document
         product_analysis_dir = repo_path / PRODUCT_ANALYSIS_SUBDIR
@@ -3974,7 +3974,7 @@ Previously Answered Questions:
                     id="opt_approve",
                     label=f"Approve {arch_result.architecture_type} architecture",
                     is_default=True,
-                    rationale=arch_result.architecture_rationale[:200]
+                    rationale=arch_result.architecture_rationale
                     if arch_result.architecture_rationale
                     else "",
                     confidence=0.8,
@@ -3991,7 +3991,7 @@ Previously Answered Questions:
                 OpenQuestion(
                     id="arch_type_approval",
                     question_text=f"We recommend a {arch_result.architecture_type} architecture. Do you approve?",
-                    context=arch_result.architecture_rationale[:500]
+                    context=arch_result.architecture_rationale
                     if arch_result.architecture_rationale
                     else "",
                     category="architecture",
@@ -4125,7 +4125,7 @@ Previously Answered Questions:
         except Exception as e:
             logger.warning(
                 "Context constraints discovery LLM failed, using fallback: %s",
-                str(e)[:200],
+                str(e),
             )
             return _context_discovery_fallback_questions()
 
@@ -4276,7 +4276,7 @@ Previously Answered Questions:
         except Exception as e:
             logger.warning(
                 "Question consolidation failed, using original list: %s",
-                str(e)[:200],
+                str(e),
             )
             return list(open_questions)
 
@@ -4332,7 +4332,7 @@ Previously Answered Questions:
         except Exception as e:
             logger.warning(
                 "Question-answer alignment review failed, using original list: %s",
-                str(e)[:200],
+                str(e),
             )
             return list(open_questions)
 
@@ -4384,7 +4384,7 @@ Previously Answered Questions:
         except Exception as e:
             logger.warning(
                 "Recommendation generation failed, leaving recommendations empty: %s",
-                str(e)[:200],
+                str(e),
             )
             return list(open_questions)
 

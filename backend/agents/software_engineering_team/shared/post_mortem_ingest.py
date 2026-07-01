@@ -46,7 +46,7 @@ def learning_from_failure(
         from software_engineering_team.shared.learnings_store import upsert_learning
 
         pattern = f"Recovery failure in {agent_name}"
-        trigger = (str(error) or task_description or "")[:500]
+        trigger = (str(error) or task_description or "")
         measure = (
             counter_measure
             or "Simplify or split the task/prompt; review LLM_MAX_TOKENS and model context size; "

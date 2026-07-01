@@ -1195,7 +1195,7 @@ def _run_real_data_backtest(
             status_code=422,
             detail=(
                 f"Strategy code attempted to access look-ahead data: "
-                f"{(service_result.error or '')[:500]}"
+                f"{(service_result.error or '')}"
             ),
         )
     if service_result.error:
@@ -1205,7 +1205,7 @@ def _run_real_data_backtest(
         # reported as a successful backtest.
         raise HTTPException(
             status_code=422,
-            detail=f"Strategy code execution failed: {service_result.error[:500]}",
+            detail=f"Strategy code execution failed: {service_result.error}",
         )
 
     logger.info(
@@ -1521,7 +1521,7 @@ def _run_one_strategy_lab_cycle(
             logger.warning("Paper trading step skipped due to missing market data: %s", exc)
             record.paper_trading_status = "skipped"
             record.paper_trading_skipped_reason = "no_market_data"
-            _emit("paper_trading_skipped", {"reason": "no_market_data", "detail": str(exc)[:200]})
+            _emit("paper_trading_skipped", {"reason": "no_market_data", "detail": str(exc)})
         except Exception as exc:
             logger.warning("Paper trading step failed (non-fatal): %s", exc)
             record.paper_trading_status = "failed"
@@ -1698,7 +1698,7 @@ def _strategy_lab_worker(
                     return None, {
                         "skipped": True,
                         "skipped_reason": "expert_failed",
-                        "error": str(exc)[:500],
+                        "error": str(exc),
                     }
             finally:
                 provider.close()
@@ -1783,7 +1783,7 @@ def _strategy_lab_worker(
                 signal_brief_storage = {
                     "skipped": True,
                     "skipped_reason": "brief_failed",
-                    "error": str(exc)[:500],
+                    "error": str(exc),
                 }
                 _publish(
                     "batch_warning",
@@ -1921,7 +1921,7 @@ def _strategy_lab_worker(
                                     {
                                         "cycle_index": cn,
                                         "batch_index": batch_num,
-                                        "error": str(exc)[:500],
+                                        "error": str(exc),
                                         "exception_type": type(exc).__name__,
                                     }
                                 )
@@ -1938,7 +1938,7 @@ def _strategy_lab_worker(
                                     "cycle_index": cn,
                                     "batch_index": batch_num,
                                     "reason": type(exc).__name__,
-                                    "error": str(exc)[:500],
+                                    "error": str(exc),
                                 },
                             )
 
@@ -1972,7 +1972,7 @@ def _strategy_lab_worker(
                                     {
                                         "cycle_index": _idx + 1,
                                         "batch_index": batch_num,
-                                        "error": str(exc)[:500],
+                                        "error": str(exc),
                                         "exception_type": type(exc).__name__,
                                         "reason": "tracker_merge_failed",
                                     }
@@ -1989,7 +1989,7 @@ def _strategy_lab_worker(
                                     "cycle_index": _idx + 1,
                                     "batch_index": batch_num,
                                     "reason": "tracker_merge_failed",
-                                    "error": str(exc)[:500],
+                                    "error": str(exc),
                                 },
                             )
 
@@ -2055,8 +2055,8 @@ def _strategy_lab_worker(
 
     except Exception as exc:
         logger.exception("Strategy lab worker failed for run %s", run_id)
-        _update_run({"status": "failed", "error": str(exc)[:500], "current_cycle": None})
-        _publish("error", {"detail": str(exc)[:500]})
+        _update_run({"status": "failed", "error": str(exc), "current_cycle": None})
+        _publish("error", {"detail": str(exc)})
     finally:
         # Schedule cleanup of _active_runs entry. Catastrophic worker-level
         # failures ("failed") get a longer window so UI polls that arrive
@@ -3235,7 +3235,7 @@ def _run_live_paper_trading_background(
             session.provider_id = run_result.provider_id
             session.terminated_reason = run_result.terminated_reason
             session.warnings = run_result.warnings
-            session.error = (run_result.error or "")[:500] or None
+            session.error = (run_result.error or "") or None
             session.symbols_traded = symbols
             session.data_source = f"live:{run_result.provider_id}"
             # Issue #376 — surface the warm-up snapshot fingerprint on the
@@ -3268,7 +3268,7 @@ def _run_live_paper_trading_background(
             if raw is not None:
                 session = PaperTradingSession.parse_persisted(raw)
                 session.status = PaperTradingStatus.FAILED
-                session.error = str(exc)[:500]
+                session.error = str(exc)
                 session.completed_at = datetime.now(tz=timezone.utc).isoformat()
                 _paper_trading_sessions[session_id] = session
     finally:

@@ -120,6 +120,23 @@ class LLMPermanentError(LLMError):
     """Raised for 4xx errors (except 429) or malformed responses. Do not retry."""
 
 
+class LLMNotConfiguredError(LLMPermanentError):
+    """Raised by ``get_client`` when no LLM provider is configured.
+
+    The Postgres-backed provider list is the sole source of LLM resolution (the
+    ``dummy`` provider is the only override). When the list is empty — or Postgres
+    is unset — and the provider is not ``dummy``, there is no client to build, so
+    this is raised. It subclasses :class:`LLMPermanentError` deliberately: it is
+    non-retryable, so orchestrator retry loops fail the job immediately (never
+    burning the backoff schedule) rather than treating it as transient. The
+    operator resolves it by adding a provider in the LLM Provider settings
+    (``/llm-config``).
+
+    Invariants:
+        - Never raised on the ``dummy`` path (that pre-empts the list).
+    """
+
+
 class LLMJsonParseError(LLMPermanentError):
     """Raised when LLM returned a 200 response but the content is not valid JSON."""
 
