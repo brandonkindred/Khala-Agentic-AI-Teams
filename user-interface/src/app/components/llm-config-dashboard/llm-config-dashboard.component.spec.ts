@@ -599,7 +599,27 @@ describe('LlmConfigDashboardComponent', () => {
     expect(component.providersError).toBeNull();
   });
 
-  it('refreshes `now` every 30s so a limit badge stays live without user interaction', () => {
+  it('ignores startAdd/startEdit while a save is already in flight (no cross-entity context switch)', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(listResponse([entry({ id: 1 }), entry({ id: 2 })])),
+    );
+    component.loadProviders();
+    component.providersSaving = true; // a previous mutation is still pending
+    component.providersError = 'entry 1 failed to save';
+
+    component.startAdd();
+    expect(component.addForm).toBeNull(); // form did not open
+    expect(component.providersError).toBe('entry 1 failed to save'); // not cleared
+
+    component.startEdit(component.providers[1]);
+    expect(component.editingId).toBeNull(); // did not switch to entry 2
+    expect(component.providersError).toBe('entry 1 failed to save'); // not cleared
+  });
+
+  it('refreshes `now` every 30s while a provider is limited, so its badge stays live', () => {
+    // The tick is gated on a limited provider existing (see next test) — set one up
+    // before the fixture's ngOnInit runs.
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 1, limit_exceeded: true })])));
     vi.useFakeTimers();
     try {
       // Re-create the component under fake timers so its ngOnInit interval is captured.
@@ -614,7 +634,23 @@ describe('LlmConfigDashboardComponent', () => {
     }
   });
 
+  it('skips the tick when no provider is currently limited (avoids a needless CD pass)', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 1, limit_exceeded: false })])));
+    vi.useFakeTimers();
+    try {
+      fixture = TestBed.createComponent(LlmConfigDashboardComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+      const before = component.now;
+      vi.advanceTimersByTime(30_000);
+      expect(component.now).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stops the reset-time timer on destroy', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 1, limit_exceeded: true })])));
     vi.useFakeTimers();
     try {
       fixture = TestBed.createComponent(LlmConfigDashboardComponent);

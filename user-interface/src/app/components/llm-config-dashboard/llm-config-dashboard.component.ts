@@ -133,7 +133,13 @@ export class LlmConfigDashboardComponent implements OnInit {
   ngOnInit(): void {
     this.loadConfig();
     this.loadProviders();
-    const timer = setInterval(() => (this.now = Date.now()), 30_000);
+    // Skip the tick (and the change-detection pass it triggers) when nothing is
+    // currently limited — resetInfo's output can't change if no badge is showing.
+    const timer = setInterval(() => {
+      if (this.providers.some((p) => p.limit_exceeded)) {
+        this.now = Date.now();
+      }
+    }, 30_000);
     this.destroyRef.onDestroy(() => clearInterval(timer));
   }
 
@@ -189,6 +195,13 @@ export class LlmConfigDashboardComponent implements OnInit {
 
   /** Open the add-provider form with sensible defaults. */
   startAdd(): void {
+    // Opening a new form while another mutation is in flight would clear
+    // providersError now, only for that mutation's error handler to set it again
+    // later — attributed to a form the operator has already moved on from. The
+    // trigger button is also disabled in the template while saving (belt-and-suspenders).
+    if (this.providersSaving) {
+      return;
+    }
     this.editingId = null;
     this.addForm = { ...emptyProviderForm(), base_url: OLLAMA_LOCAL_DEFAULT };
     this.providersError = null;
@@ -225,6 +238,11 @@ export class LlmConfigDashboardComponent implements OnInit {
 
   /** Begin inline editing of an entry (keys are never pre-filled). */
   startEdit(entry: LlmProviderEntry): void {
+    // Same race as startAdd: don't switch context (and clear providersError) while
+    // another entry's mutation is still in flight. See startAdd for the scenario.
+    if (this.providersSaving) {
+      return;
+    }
     this.addForm = null;
     this.editingId = entry.id;
     this.editForm = {

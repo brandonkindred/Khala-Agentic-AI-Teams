@@ -137,7 +137,8 @@
                 }
               </div>
               <div class="provider-actions">
-                <button mat-icon-button type="button" (click)="startEdit(entry)" aria-label="Edit provider">
+                <button mat-icon-button type="button" (click)="startEdit(entry)" aria-label="Edit provider"
+                  [disabled]="providersSaving">
                   <mat-icon aria-hidden="true">edit</mat-icon>
                 </button>
                 <button mat-icon-button type="button" (click)="removeProvider(entry)" aria-label="Remove provider"
@@ -185,7 +186,8 @@
           </div>
         </div>
       } @else {
-        <button mat-stroked-button type="button" class="add-provider-btn" (click)="startAdd()" [disabled]="!storageAvailable">
+        <button mat-stroked-button type="button" class="add-provider-btn" (click)="startAdd()"
+          [disabled]="!storageAvailable || providersSaving">
           <mat-icon aria-hidden="true">add</mat-icon> Add provider
         </button>
       }
