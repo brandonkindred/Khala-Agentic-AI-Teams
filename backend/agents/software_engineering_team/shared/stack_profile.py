@@ -19,9 +19,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Any, Callable, Dict, Protocol
 
 from software_engineering_team.shared.models import Task
+
+
+class PhaseModels(Protocol):
+    """The team-local model/enum surface the shared code-v2 phase impls consume.
+
+    Each team passes its own ``models`` module (``backend_code_v2_team.models`` /
+    ``frontend_code_v2_team.models``) into the shared phase implementations, which
+    read these symbols off it. Naming the surface here — instead of typing the
+    parameter as an opaque ``ModuleType`` — makes the real dependency explicit in
+    every signature and lets a type checker flag a renamed or removed model at
+    the call site, rather than deferring the failure to a runtime
+    ``AttributeError`` on the first execution of that code path.
+
+    The members are the team's classes/enums used as values (constructed or
+    compared), so they are typed ``type[Any]``. A plain module satisfies this
+    Protocol structurally, so passing the team ``models`` module is unchanged at
+    runtime.
+    """
+
+    DeliverResult: type[Any]
+    DocumentationPhaseResult: type[Any]
+    ExecutionResult: type[Any]
+    Microtask: type[Any]
+    MicrotaskStatus: type[Any]
+    Phase: type[Any]
+    PlanningResult: type[Any]
+    ProblemSolvingResult: type[Any]
+    ToolAgentInput: type[Any]
+    ToolAgentKind: type[Any]
+    ToolAgentPhaseInput: type[Any]
 
 
 @dataclass(frozen=True)
@@ -51,13 +81,15 @@ class StackProfile:
     conventions_by_language: Dict[str, str]
     """Map of language → conventions text; must include a ``"_default"`` entry."""
 
-    execution_has_language_conventions: bool
-    """Whether this stack's ``EXECUTION_PROMPT`` carries a ``{language_conventions}``
-    slot (backend: True, frontend: False)."""
+    has_language_conventions: bool
+    """Whether this stack's ``EXECUTION_PROMPT`` and
+    ``PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT`` carry a ``{language_conventions}``
+    slot (backend: True, frontend: False).
 
-    problem_solving_has_language_conventions: bool
-    """Whether this stack's ``PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT`` carries a
-    ``{language_conventions}`` slot (backend: True, frontend: False)."""
+    A single flag drives both prompts: the two were always set together, and a
+    stack either injects language conventions into its LLM prompts or it does
+    not. Keeping one field means the profile cannot disagree with itself about
+    whether the ``{language_conventions}`` slot is present."""
 
     detect_language: Callable[[Path, Task], str]
     """Infer the project's language/stack from the repo and task."""

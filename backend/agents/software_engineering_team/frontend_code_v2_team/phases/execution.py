@@ -261,7 +261,23 @@ def run_execution_with_review_gates(
                 mt.output_files = files
 
             microtask_files = dict(mt.output_files)
-            _write_microtask_files(repo_path, microtask_files)
+            # Track files this microtask introduced for rollback on failure.
+            microtask_file_keys = set(microtask_files.keys())
+            # Route the initial write through the same guarded helper the review
+            # cycles use, so an unsafe path in the first emission is a handled
+            # REVIEW_FAILED (rolled back + recorded in review_failed_ids so
+            # dependents SKIP) rather than a bare FAILED that skips that bookkeeping.
+            if not write_microtask_output_or_fail(
+                repo_path,
+                microtask_files,
+                mt=mt,
+                task_id=task_id,
+                review_failed_ids=review_failed_ids,
+                all_files=all_files,
+                microtask_file_keys=microtask_file_keys,
+                review_failed_status=MicrotaskStatus.REVIEW_FAILED,
+            ):
+                continue
             all_files.update(microtask_files)
 
         except Exception as exc:
@@ -277,8 +293,6 @@ def run_execution_with_review_gates(
         phase_failed = False
         total_cycles = 0
         max_total_cycles = config.max_retries * 3
-        # Track files this microtask introduced for rollback on failure
-        microtask_file_keys = set(microtask_files.keys())
         # Initialize review results so they're always defined for max-cycles check
         sec_review = ReviewResult(passed=True, summary="")
 

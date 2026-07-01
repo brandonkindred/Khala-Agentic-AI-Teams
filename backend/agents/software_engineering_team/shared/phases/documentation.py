@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from types import ModuleType
 from typing import Any, Dict
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.repo_writer import UnsafeRepoPathError
 from software_engineering_team.shared.repo_writer import write_repo_text_files as _write_files
+from software_engineering_team.shared.stack_profile import PhaseModels
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ def run_documentation_phase_impl(
     tool_agents: Dict[Any, Any],
     max_iterations: int,
     *,
-    models: ModuleType,
+    models: PhaseModels,
 ) -> Any:
     """Review all documentation and iterate until no issues remain.
 

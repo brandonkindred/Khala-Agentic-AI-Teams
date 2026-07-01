@@ -14,12 +14,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
-from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
@@ -61,7 +60,7 @@ def build_context(
     return "\n".join(parts)
 
 
-def parse_planning_output(raw: Dict[str, Any], language: str, *, models: ModuleType) -> Any:
+def parse_planning_output(raw: Dict[str, Any], language: str, *, models: PhaseModels) -> Any:
     """Convert the parsed LLM response into a PlanningResult.
 
     Preconditions:
@@ -112,7 +111,7 @@ def run_planning_impl(
     profile: StackProfile,
     planning_prompt: str,
     parse_planning_template: Callable[[str], Dict[str, Any]],
-    models: ModuleType,
+    models: PhaseModels,
     runner: LlmRunner,
 ) -> Any:
     """Execute the Planning phase and return a PlanningResult.
@@ -200,7 +199,7 @@ def plan_fixes_impl(  # pragma: no cover  # integration-only: LLM-driven re-plan
     language: str,
     planning_fixes_prompt: str,
     parse_planning_template: Callable[[str], Dict[str, Any]],
-    models: ModuleType,
+    models: PhaseModels,
     runner: LlmRunner,
 ) -> List[Any]:
     """Create microtasks to fix unresolved review issues (escalation from problem-solving).

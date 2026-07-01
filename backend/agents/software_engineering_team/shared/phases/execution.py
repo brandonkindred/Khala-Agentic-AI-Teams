@@ -17,13 +17,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_writer import UnsafeRepoPathError, write_repo_text_files
-from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
@@ -135,7 +134,7 @@ def _run_general_microtask_impl(
 
     Preconditions:
         ``execution_prompt`` carries a ``{language_conventions}`` slot iff
-        ``profile.execution_has_language_conventions``.
+        ``profile.has_language_conventions``.
     Postconditions:
         Returns the parsed ``{path: content}`` map (possibly empty).
     """
@@ -149,7 +148,7 @@ def _run_general_microtask_impl(
         existing_code=existing_code[:8000] if existing_code else "(none)",
         architecture_context=arch_ctx or "(none)",
     )
-    if profile.execution_has_language_conventions:
+    if profile.has_language_conventions:
         fmt["language_conventions"] = profile.conventions_for(language)
     prompt = execution_prompt.format(**fmt)
     raw = runner.run(llm, prompt)
@@ -170,7 +169,7 @@ def run_execution_impl(
     tool_runners: Optional[Dict[Any, Any]],
     progress_callback: Optional[Callable[[int, int, int, str, str, str], None]],
     only_microtask_ids: Optional[List[str]],
-    models: ModuleType,
+    models: PhaseModels,
     run_general_microtask: Callable[..., Dict[str, str]],
 ) -> Any:
     """Execute microtasks in dependency order (non-gated).

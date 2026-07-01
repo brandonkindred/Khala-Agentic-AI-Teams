@@ -212,7 +212,7 @@ def _run_phase_fixes(
         task_id=task_id,
         single_issue_prompt=PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT,
         parse_single=parse_problem_solving_single_issue_template,
-        has_language_conventions=PROFILE.problem_solving_has_language_conventions,
+        has_language_conventions=PROFILE.has_language_conventions,
         runner=_llm_runner(),
         microtask_id=microtask_id,
         phase_name=phase_name,

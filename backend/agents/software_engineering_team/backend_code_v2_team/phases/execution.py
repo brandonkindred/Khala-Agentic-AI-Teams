@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from strands import Agent
 
@@ -132,6 +132,49 @@ def run_execution(
     )
 
 
+def _generate_microtask_files(
+    *,
+    llm: LLMClient,
+    mt: Any,
+    task: Task,
+    planning_result: PlanningResult,
+    repo_path: Path,
+    existing_code: str,
+    architecture: Any,
+    runners: Dict[Any, Any],
+) -> Dict[str, str]:
+    """Produce a microtask's output files via its tool-runner or the general coder.
+
+    Preconditions:
+        ``runners`` maps ToolAgentKind → callable(ToolAgentInput); a microtask
+        whose ``tool_agent`` has no runner falls back to ``_run_general_microtask``.
+    Postconditions:
+        Returns the ``{path: content}`` map and sets ``mt.output_files`` (and
+        ``mt.notes`` on the tool-runner path). Never writes to disk.
+    """
+    runner = runners.get(mt.tool_agent)
+    if runner is not None:
+        inp = ToolAgentInput(
+            microtask=mt,
+            repo_path=str(repo_path),
+            existing_code=existing_code[:6000] if existing_code else "",
+            language=planning_result.language,
+        )
+        out = runner(inp)
+        mt.output_files = out.files
+        mt.notes = out.summary
+    else:
+        mt.output_files = _run_general_microtask(
+            llm=llm,
+            microtask=mt,
+            task=task,
+            language=planning_result.language,
+            existing_code=existing_code,
+            architecture=architecture,
+        )
+    return dict(mt.output_files)
+
+
 def run_execution_with_review_gates(
     *,
     llm: LLMClient,
@@ -244,30 +287,33 @@ def run_execution_with_review_gates(
 
         # ── Phase 1: Coding ───────────────────────────────────────────────────
         try:
-            runner = runners.get(mt.tool_agent)
-            if runner is not None:
-                inp = ToolAgentInput(
-                    microtask=mt,
-                    repo_path=str(repo_path),
-                    existing_code=existing_code[:6000] if existing_code else "",
-                    language=planning_result.language,
-                )
-                out = runner(inp)
-                mt.output_files = out.files
-                mt.notes = out.summary
-            else:
-                files = _run_general_microtask(
-                    llm=llm,
-                    microtask=mt,
-                    task=task,
-                    language=planning_result.language,
-                    existing_code=existing_code,
-                    architecture=architecture,
-                )
-                mt.output_files = files
-
-            microtask_files = dict(mt.output_files)
-            _write_microtask_files(repo_path, microtask_files)
+            microtask_files = _generate_microtask_files(
+                llm=llm,
+                mt=mt,
+                task=task,
+                planning_result=planning_result,
+                repo_path=repo_path,
+                existing_code=existing_code,
+                architecture=architecture,
+                runners=runners,
+            )
+            # Track files this microtask introduced for rollback on failure.
+            microtask_file_keys = set(microtask_files.keys())
+            # Route the initial write through the same guarded helper the review
+            # cycles use, so an unsafe path in the first emission is a handled
+            # REVIEW_FAILED (rolled back + recorded in review_failed_ids so
+            # dependents SKIP) rather than a bare FAILED that skips that bookkeeping.
+            if not write_microtask_output_or_fail(
+                repo_path,
+                microtask_files,
+                mt=mt,
+                task_id=task_id,
+                review_failed_ids=review_failed_ids,
+                all_files=all_files,
+                microtask_file_keys=microtask_file_keys,
+                review_failed_status=MicrotaskStatus.REVIEW_FAILED,
+            ):
+                continue
             all_files.update(microtask_files)
 
         except Exception as exc:
@@ -285,8 +331,6 @@ def run_execution_with_review_gates(
         max_total_cycles = (
             config.code_review_max_retries + config.qa_max_retries + config.security_max_retries
         )
-        # Track files this microtask introduced for rollback on failure
-        microtask_file_keys = set(microtask_files.keys())
         # Initialize phase results so they're always defined for max-cycles check
         cr_result = PhaseReviewResult(passed=True, phase_name="code_review")
         qa_result = PhaseReviewResult(passed=True, phase_name="qa")

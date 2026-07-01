@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from types import ModuleType
 from typing import Any, Dict, Optional
 
 from software_engineering_team.shared.deliver_utils import (
@@ -22,6 +21,7 @@ from software_engineering_team.shared.deliver_utils import (
     deliver_inline_merge,
     prepare_handoff_branch,
 )
+from software_engineering_team.shared.stack_profile import PhaseModels
 
 
 def run_deliver_impl(
@@ -37,7 +37,7 @@ def run_deliver_impl(
     merge_to_development: bool,
     ops: DeliverGitOps,
     commit_msg_template: str,
-    models: ModuleType,
+    models: PhaseModels,
     logger: logging.Logger,
 ) -> Any:
     """Create feature branch, write files, commit, merge to development.

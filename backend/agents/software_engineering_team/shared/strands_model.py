@@ -76,6 +76,23 @@ def resolve_text_mode_strands_model(llm: Any) -> Any:
     return resolve_strands_model(llm, response_format="text")
 
 
+def run_strands_agent(agent_factory: Callable[..., Any], model: Any, prompt: str) -> str:
+    """Run a one-shot Strands agent on ``prompt`` and return its stripped text.
+
+    The single definition of the build-agent → stringify → strip incantation,
+    shared by :meth:`LlmRunner.run` (the code-v2 phases) and
+    ``ToolAgentBase._run_agent`` (the tool agents), so output coercion lives in
+    one place instead of being copied at both call sites.
+
+    Preconditions:
+        ``agent_factory(model=model)`` returns a callable accepting ``prompt``.
+    Postconditions:
+        Returns ``str(agent(prompt)).strip()``; any exception raised while
+        building or running the agent propagates to the caller.
+    """
+    return str(agent_factory(model=model)(prompt)).strip()
+
+
 @dataclass(frozen=True)
 class LlmRunner:
     """Bundle the two LLM-call collaborators the shared code-v2 phase impls need.
@@ -108,4 +125,4 @@ class LlmRunner:
             Returns ``str(agent(prompt)).strip()``. Any exception raised by the
             agent/model propagates to the caller (callers handle it locally).
         """
-        return str(self.agent_factory(model=self.resolve_model(llm))(prompt)).strip()
+        return run_strands_agent(self.agent_factory, self.resolve_model(llm), prompt)

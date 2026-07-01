@@ -70,8 +70,7 @@ _BACKEND_PROFILE = StackProfile(
     planning_language_label="Language",
     planning_progress_label="language",
     conventions_by_language={"java": "JAVA", "_default": "PY"},
-    execution_has_language_conventions=True,
-    problem_solving_has_language_conventions=True,
+    has_language_conventions=True,
     detect_language=lambda _p, _t: "python",
 )
 
@@ -81,8 +80,7 @@ _FRONTEND_PROFILE = StackProfile(
     planning_language_label="Language/stack",
     planning_progress_label="stack",
     conventions_by_language={"_default": "TS"},
-    execution_has_language_conventions=False,
-    problem_solving_has_language_conventions=False,
+    has_language_conventions=False,
     detect_language=lambda _p, _t: "typescript",
 )
 
@@ -664,3 +662,82 @@ def test_fix_issues_one_at_a_time_impl_resolves_then_reports_unresolved():
     assert merged["a.py"] == "fixed"
     assert len(fixes) == 1 and fixes[0]["fix"] == "s"
     assert len(unresolved) == 1
+
+
+# --- prompt byte-identity regression lock --------------------------------
+
+
+# SHA-256 of each team's prompt constant, captured after the consolidation was
+# verified to reproduce the pre-refactor templates byte-for-byte. Byte-identical
+# prompt output is an acceptance criterion of that refactor, so this test locks
+# the six constants against silent drift. If you INTENTIONALLY change a template
+# or builder, regenerate a digest with:
+#     python -c "import hashlib; from software_engineering_team.<team>_code_v2_team \
+#         import prompts as p; print(hashlib.sha256(p.<NAME>.encode()).hexdigest())"
+_EXPECTED_PROMPT_DIGESTS = {
+    (
+        "backend",
+        "PLANNING_PROMPT",
+    ): "a32179389eda2720e8a9b55e014f96f88c4364ce12b158d344dc62018d5a0476",
+    (
+        "backend",
+        "EXECUTION_PROMPT",
+    ): "3d8e69ceda009a143a2af73a0ebbe9e44247d222a7bacf88553d558a2837d062",
+    (
+        "backend",
+        "PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT",
+    ): "be85517553575e102470ad987d8d18a19aa8e28e546a8ee1fe5877b85b1070ed",
+    (
+        "frontend",
+        "PLANNING_PROMPT",
+    ): "aaca2421d786e2f4c612b14030528f4a63a0ba714b67bf936af900bf59ad0a60",
+    (
+        "frontend",
+        "EXECUTION_PROMPT",
+    ): "790512ed71fb7a072d63f4473a1587a3076509cec86297c7d0fed3b9062f153f",
+    (
+        "frontend",
+        "PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT",
+    ): "b1e2f622a4f01011142e99086b9f7bb510372bd9a5a66ff8ac3bfea70ebac3d4",
+}
+
+
+@pytest.mark.parametrize(("team", "name"), sorted(_EXPECTED_PROMPT_DIGESTS))
+def test_prompt_constants_are_byte_stable(team: str, name: str):
+    """Each team's built prompt constant must stay byte-for-byte stable.
+
+    Guards the refactor's byte-identity acceptance criterion: a change to the
+    shared builders or templates that alters any team prompt fails here.
+    """
+    import hashlib
+    import importlib
+
+    prompts = importlib.import_module(f"software_engineering_team.{team}_code_v2_team.prompts")
+    actual = hashlib.sha256(getattr(prompts, name).encode("utf-8")).hexdigest()
+    assert actual == _EXPECTED_PROMPT_DIGESTS[(team, name)], (
+        f"{team} {name} changed; if intentional, update its digest in _EXPECTED_PROMPT_DIGESTS."
+    )
+
+
+# --- write_repo_text_files: root / dot / traversal rejection -------------
+
+
+@pytest.mark.parametrize("bad_key", [".", "a/..", "sub/../..", "..", "/"])
+def test_write_repo_text_files_rejects_root_and_traversal(tmp_path: Path, bad_key: str):
+    """A key that resolves to (or escapes) the repo root raises UnsafeRepoPathError.
+
+    Regression for the case where such a key slipped past the containment guard
+    and reached ``write_text`` on the repo directory, raising a bare
+    ``IsADirectoryError`` that the ``except UnsafeRepoPathError`` handlers missed.
+    """
+    with pytest.raises(UnsafeRepoPathError):
+        write_repo_text_files(tmp_path, {bad_key: "x"})
+    # Nothing was written and the repo root is still an empty directory.
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_repo_text_files_writes_nested_and_strips_leading_slash(tmp_path: Path):
+    """Valid nested and leading-slash keys are written under the repo root."""
+    write_repo_text_files(tmp_path, {"/pkg/mod.py": "a", "top.txt": "b"})
+    assert (tmp_path / "pkg" / "mod.py").read_text(encoding="utf-8") == "a"
+    assert (tmp_path / "top.txt").read_text(encoding="utf-8") == "b"

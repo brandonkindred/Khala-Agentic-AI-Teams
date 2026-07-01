@@ -18,12 +18,11 @@ phase-specific fix functions (which interlock with the out-of-scope backend
 from __future__ import annotations
 
 import logging
-from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
-from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
@@ -107,7 +106,7 @@ def run_batch_coding_fixes_impl(
     phase_name: str,
     detail_callback: Optional[Callable[[str], None]],
     profile: StackProfile,
-    models: ModuleType,
+    models: PhaseModels,
     batch_fix_prompt: str,
     parse_batch_fix_template: Callable[[str], Dict[str, Any]],
     runner: LlmRunner,
@@ -416,7 +415,7 @@ def run_problem_solving_impl(
     repo_path: str,
     tool_agents: Optional[Dict[Any, Any]],
     profile: StackProfile,
-    models: ModuleType,
+    models: PhaseModels,
     single_issue_prompt: str,
     parse_single: Callable[[str], Dict[str, Any]],
     runner: LlmRunner,
@@ -451,7 +450,7 @@ def run_problem_solving_impl(
         task_id=task_id,
         single_issue_prompt=single_issue_prompt,
         parse_single=parse_single,
-        has_language_conventions=profile.problem_solving_has_language_conventions,
+        has_language_conventions=profile.has_language_conventions,
         runner=runner,
     )
     summary_parts: List[str] = []
@@ -510,7 +509,7 @@ def run_problem_solving_for_microtask_impl(
     task_id: str,
     detail_callback: Optional[Callable[[str], None]],
     profile: StackProfile,
-    models: ModuleType,
+    models: PhaseModels,
     single_issue_prompt: str,
     parse_single: Callable[[str], Dict[str, Any]],
     runner: LlmRunner,
@@ -548,7 +547,7 @@ def run_problem_solving_for_microtask_impl(
         task_id=task_id,
         single_issue_prompt=single_issue_prompt,
         parse_single=parse_single,
-        has_language_conventions=profile.problem_solving_has_language_conventions,
+        has_language_conventions=profile.has_language_conventions,
         runner=runner,
         microtask_id=microtask_id,
         detail_callback=detail_callback,

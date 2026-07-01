@@ -12,18 +12,18 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from .git_utils import write_files_and_commit
+from .git_utils import (
+    UnsafeRepoPathError,  # noqa: F401  re-exported: code-v2 phases import it from here
+    resolve_safe_repo_path,
+    write_files_and_commit,
+)
 
 logger = logging.getLogger(__name__)
 
-
-class UnsafeRepoPathError(ValueError):
-    """Raised by :func:`write_repo_text_files` for a path that escapes the repo.
-
-    Subclasses ``ValueError`` for backward compatibility; the dedicated type lets
-    callers catch *only* an unsafe-path rejection (traversal or empty key) and
-    convert it into a handled failure, without masking unrelated ``ValueError``s.
-    """
+# ``UnsafeRepoPathError`` and ``resolve_safe_repo_path`` are defined alongside
+# the shared path guard in ``git_utils`` so the guard and its error type live in
+# one place; ``UnsafeRepoPathError`` is re-exported here (via the import above)
+# because the code-v2 phases import it from ``repo_writer``.
 
 
 # Distinct error message when agent produced no file changes (LLM returned empty files dict)
@@ -338,20 +338,14 @@ def write_repo_text_files(repo_path: Path, files: Dict[str, str]) -> None:
         content.
     Postconditions:
         Each file is written under ``repo_path`` (parents created). A leading
-        ``/`` is stripped; any key that resolves outside ``repo_path`` (e.g. via
-        ``..``) raises ``ValueError`` before that file is written.
+        ``/`` is stripped; any key that is empty, resolves to the repo root, or
+        escapes it (e.g. via ``..``) raises ``UnsafeRepoPathError`` before that
+        file is written.
     Invariants:
-        No file is ever written outside ``repo_path.resolve()``.
+        No file is ever written at or outside ``repo_path.resolve()``.
     """
     root = Path(repo_path).resolve()
     for rel_path, content in files.items():
-        safe_rel_path = rel_path.lstrip("/")
-        if not safe_rel_path:
-            raise UnsafeRepoPathError(f"File path must not be empty: {rel_path!r}")
-        full_path = (root / safe_rel_path).resolve()
-        # Containment via ``parents`` avoids the ``str.startswith`` sibling-prefix
-        # pitfall (e.g. ``/repo`` vs ``/repo-evil``).
-        if full_path != root and root not in full_path.parents:
-            raise UnsafeRepoPathError(f"Path traversal detected: {rel_path}")
+        full_path = resolve_safe_repo_path(root, rel_path)
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")

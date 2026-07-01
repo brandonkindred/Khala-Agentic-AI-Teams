@@ -61,7 +61,6 @@ PROFILE = StackProfile(
     planning_language_label="Language/stack",
     planning_progress_label="stack",
     conventions_by_language={"_default": TYPESCRIPT_CONVENTIONS},
-    execution_has_language_conventions=False,
-    problem_solving_has_language_conventions=False,
+    has_language_conventions=False,
     detect_language=_detect_language,
 )
