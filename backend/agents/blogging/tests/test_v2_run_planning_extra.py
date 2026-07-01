@@ -228,23 +228,19 @@ def test_extract_plan_keywords_returns_filtered_unique() -> None:
 def test_planning_llm_client_overrides_when_model_set(monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
 
-    sink = lambda _t: None  # noqa: E731 - stand-in reasoning callback
+    from llm_service.factory import FailoverLLMClient
 
-    class _FakeOllama:
-        def __init__(self, model="m", base_url="http://x", timeout=10, on_reasoning=None):
-            self.model = model
-            self.base_url = base_url
-            self.timeout = timeout
-            self.on_reasoning = on_reasoning
-
-    monkeypatch.setattr(v2, "OllamaLLMClient", _FakeOllama)
     monkeypatch.setattr(v2, "planning_model_override", lambda: "override-model")
-    base = _FakeOllama(model="orig", on_reasoning=sink)
+    # In production the blog base client is always a FailoverLLMClient; the override
+    # is applied per call to Ollama candidates so multi-provider failover is preserved.
+    base = FailoverLLMClient(lambda: [], lambda e, r, mo=None: None, lambda e, x: None)
     out = v2.planning_llm_client(base)
-    assert isinstance(out, _FakeOllama)
-    assert out.model == "override-model"
-    # The reasoning sink is carried across to the model-pinned override.
-    assert out.on_reasoning is sink
+    assert isinstance(out, FailoverLLMClient)
+    assert out is not base
+    assert out._model_override == "override-model"
+    # The same load/build closures are reused, so agent attribution and the reasoning
+    # hook captured at get_client time carry across unchanged.
+    assert out._build is base._build and out._load_candidates is base._load_candidates
 
 
 def test_planning_llm_client_no_override_returns_base(monkeypatch) -> None:
@@ -258,23 +254,16 @@ def test_planning_llm_client_no_override_returns_base(monkeypatch) -> None:
 def test_plan_critic_llm_client_overrides_when_model_set(monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
 
-    sink = lambda _t: None  # noqa: E731 - stand-in reasoning callback
+    from llm_service.factory import FailoverLLMClient
 
-    class _FakeOllama:
-        def __init__(self, model="m", base_url="http://x", timeout=10, on_reasoning=None):
-            self.model = model
-            self.base_url = base_url
-            self.timeout = timeout
-            self.on_reasoning = on_reasoning
-
-    monkeypatch.setattr(v2, "OllamaLLMClient", _FakeOllama)
     monkeypatch.setattr(v2, "plan_critic_model_override", lambda: "critic-model")
-    base = _FakeOllama(model="orig", on_reasoning=sink)
+    base = FailoverLLMClient(lambda: [], lambda e, r, mo=None: None, lambda e, x: None)
     out = v2.plan_critic_llm_client(base)
-    assert isinstance(out, _FakeOllama)
-    assert out.model == "critic-model"
-    # The reasoning sink is carried across to the model-pinned override.
-    assert out.on_reasoning is sink
+    assert isinstance(out, FailoverLLMClient)
+    assert out is not base
+    assert out._model_override == "critic-model"
+    # The same load/build closures are reused, so attribution + reasoning hook carry across.
+    assert out._build is base._build and out._load_candidates is base._load_candidates
 
 
 def test_plan_critic_llm_client_no_override_returns_base(monkeypatch) -> None:
@@ -283,6 +272,51 @@ def test_plan_critic_llm_client_no_override_returns_base(monkeypatch) -> None:
     monkeypatch.setattr(v2, "plan_critic_model_override", lambda: "")
     sentinel = object()
     assert v2.plan_critic_llm_client(sentinel) is sentinel
+
+
+def test_planning_llm_client_override_reaches_strands_backing(monkeypatch) -> None:
+    """End-to-end: the pipeline passes a Strands LLMClientModel, so the override must
+    reach the backing failover client (rebuilding the model) rather than no-op."""
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    from llm_service import LLMClientModel
+    from llm_service.factory import FailoverLLMClient
+
+    monkeypatch.setattr(v2, "planning_model_override", lambda: "override-model")
+    backing = FailoverLLMClient(lambda: [], lambda e, r, mo=None: None, lambda e, x: None)
+    model = LLMClientModel(backing, agent_key="blog", response_format="text")
+    out = v2.planning_llm_client(model)
+    assert isinstance(out, LLMClientModel)
+    assert out is not model
+    assert isinstance(out.client, FailoverLLMClient)
+    assert out.client._model_override == "override-model"
+    # The rebuilt model carries the original config (e.g. response format).
+    assert out.get_config()["response_format"] == "text"
+
+
+def test_plan_critic_llm_client_override_reaches_strands_backing(monkeypatch) -> None:
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    from llm_service import LLMClientModel
+    from llm_service.factory import FailoverLLMClient
+
+    monkeypatch.setattr(v2, "plan_critic_model_override", lambda: "critic-model")
+    backing = FailoverLLMClient(lambda: [], lambda e, r, mo=None: None, lambda e, x: None)
+    out = v2.plan_critic_llm_client(LLMClientModel(backing, agent_key="blog"))
+    assert isinstance(out, LLMClientModel)
+    assert out.client._model_override == "critic-model"
+
+
+def test_planning_llm_client_strands_dummy_backing_unchanged(monkeypatch) -> None:
+    """A Strands model over a Dummy backing has no failover client to pin, so the
+    same model instance is returned (no needless rebuild)."""
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    from llm_service import DummyLLMClient, LLMClientModel
+
+    monkeypatch.setattr(v2, "planning_model_override", lambda: "override-model")
+    model = LLMClientModel(DummyLLMClient(), agent_key="blog")
+    assert v2.planning_llm_client(model) is model
 
 
 def test_build_plan_critic_agent_disabled_returns_none(monkeypatch) -> None:
