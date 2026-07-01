@@ -12,9 +12,12 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { Subject, catchError, of, switchMap, tap } from 'rxjs';
+import { Subject, catchError, debounceTime, of, switchMap, tap } from 'rxjs';
 import { AgentCatalogApiService } from '../../services/agent-catalog-api.service';
 import type { AgentSummary } from '../../models/agent-catalog.model';
+
+/** Debounce (ms) between the last keystroke and the catalog search request. */
+export const SEARCH_DEBOUNCE_MS = 300;
 
 export interface AddAgentFromRegistryDialogData {
   /** Manifest ids already on this team's roster, so they render as "Added". */
@@ -64,9 +67,10 @@ export class AddAgentFromRegistryDialogComponent implements OnInit {
   readonly error = signal<string | null>(null);
 
   /**
-   * Search pipeline. Feeding every query through one `switchMap` cancels the
-   * prior in-flight `listAgents` request, so a slow earlier response can't land
-   * after (and clobber) a newer query's results — the out-of-order race a plain
+   * Search pipeline. `debounceTime` collapses a burst of keystrokes into a single
+   * request instead of one per character, and `switchMap` cancels the prior
+   * in-flight `listAgents` request so a slow earlier response can't land after
+   * (and clobber) a newer query's results — the out-of-order race a plain
    * per-call `.subscribe` is prone to.
    */
   private readonly searchInput = new Subject<void>();
@@ -74,6 +78,7 @@ export class AddAgentFromRegistryDialogComponent implements OnInit {
   constructor() {
     this.searchInput
       .pipe(
+        debounceTime(SEARCH_DEBOUNCE_MS),
         tap(() => {
           this.loading.set(true);
           this.error.set(null);

@@ -1,6 +1,6 @@
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
@@ -120,6 +120,25 @@ describe('AgentStudioComposeTeamComponent', () => {
     expect(state.rosterFullyStaffed()).toBe(false);
     expect(state.composeProcessStatus()).toBeNull();
     expect(api.getTeam).toHaveBeenCalledWith('t-1');
+  });
+
+  it('switching teams rapidly cannot apply a stale earlier response (switchMap)', () => {
+    // First team's fetch is held pending on a Subject; the second resolves
+    // immediately. switchMap must cancel the first so its late response is dropped.
+    const slow = new Subject<{ team: AgenticTeam }>();
+    api.getTeam
+      .mockReturnValueOnce(slow.asObservable())
+      .mockReturnValueOnce(of({ team: team({ team_id: 't-2', name: 'Second' }) }));
+    fixture.detectChanges();
+
+    component.selectTeam('t-1'); // fetch pending on `slow`
+    component.selectTeam('t-2'); // resolves immediately → team = Second; cancels t-1
+
+    // The stale t-1 response arrives late — it must be ignored.
+    slow.next({ team: team({ team_id: 't-1', name: 'First (stale)' }) });
+    slow.complete();
+
+    expect(component.team()?.team_id).toBe('t-2');
   });
 
   it('auto-selects the sole process on a freshly loaded team', () => {

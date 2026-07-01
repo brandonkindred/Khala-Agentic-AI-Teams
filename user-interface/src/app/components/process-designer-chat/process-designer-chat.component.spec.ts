@@ -2,9 +2,12 @@ import { SimpleChange } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
-import { of, throwError } from 'rxjs';
+import { MatDialog } from '@angular/material/dialog';
+import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { ProcessDesignerChatComponent } from './process-designer-chat.component';
+import { AddAgentFromRegistryDialogComponent } from './add-agent-from-registry-dialog.component';
+import { ConfirmDialogComponent } from '../../shared/confirm-dialog/confirm-dialog.component';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import type { AgenticTeam, AgenticTeamAgent, RosterValidationResult } from '../../models';
 
@@ -133,6 +136,24 @@ describe('ProcessDesignerChatComponent', () => {
     expect(seen).toEqual([validation()]);
   });
 
+  it('surfaces an error and stops loading when listTeamAgents fails', () => {
+    api.listTeamAgents.mockReturnValueOnce(throwError(() => ({ error: { detail: 'boom' } })));
+    component.refreshRoster();
+    expect(component.rosterActionError()).toBe('boom');
+    expect(component.rosterLoading()).toBe(false);
+  });
+
+  it('keeps rosterLoading true until validateRoster resolves', () => {
+    const pendingValidation = new Subject<RosterValidationResult>();
+    api.validateRoster.mockReturnValueOnce(pendingValidation.asObservable());
+    component.refreshRoster();
+    // listTeamAgents (of) resolved synchronously, but validation is still pending.
+    expect(component.rosterLoading()).toBe(true);
+    pendingValidation.next(validation());
+    pendingValidation.complete();
+    expect(component.rosterLoading()).toBe(false);
+  });
+
   it('emits rosterChanged with null when validation fails', () => {
     api.validateRoster.mockReturnValueOnce(throwError(() => new Error('boom')));
     const seen: (RosterValidationResult | null)[] = [];
@@ -161,14 +182,26 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.rosterActionError()).toBe('nope');
   });
 
-  it('openAddFromRegistry passes existing manifest ids so the dialog can mark them added', () => {
+  it('openAddFromRegistry opens the dialog with the roster registry manifest ids', () => {
     component.rosterAgents.set([
       agent({ agent_name: 'a', source: 'registry', manifest_id: 'reg.a' }),
       agent({ agent_name: 'b', source: 'generated', manifest_id: null }),
     ]);
-    // Exercise the open path without asserting on the real MatDialog internals —
-    // it must not throw, and it must not touch the API until the dialog closes.
-    expect(() => component.openAddFromRegistry()).not.toThrow();
+    // Spy on the component's OWN injected MatDialog: standalone components that
+    // import MatDialogModule register it at their environment injector, so it's a
+    // different instance than TestBed.inject(MatDialog).
+    const dialogSpy = vi
+      .spyOn((component as unknown as { dialog: MatDialog }).dialog, 'open')
+      .mockReturnValue({ afterClosed: () => of(undefined) } as never);
+
+    component.openAddFromRegistry();
+
+    // Only the registry-source agent's manifest id is forwarded (generated has none).
+    expect(dialogSpy).toHaveBeenCalledWith(AddAgentFromRegistryDialogComponent, {
+      data: { existingManifestIds: ['reg.a'] },
+      width: '480px',
+    });
+    // No API call until a manifest id is chosen.
     expect(api.addAgentFromRegistry).not.toHaveBeenCalled();
   });
 
@@ -179,31 +212,48 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.form.getRawValue().message).toBe('Suggest an additional agent for this team.');
   });
 
-  // ── Delete ────────────────────────────────────────────────────────────────
+  // ── Delete (Material confirm dialog) ────────────────────────────────────────
 
-  it('deleteAgent removes the agent when confirmed', () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    component.deleteAgent(agent({ agent_name: 'Writer' }), new Event('click'));
-    expect(api.removeTeamAgent).toHaveBeenCalledWith('t-1', 'Writer');
-  });
+  it('deleteAgent opens a danger confirm dialog naming the agent', () => {
+    const dialogSpy = vi
+      .spyOn((component as unknown as { dialog: MatDialog }).dialog, 'open')
+      .mockReturnValue({ afterClosed: () => of(false) } as never);
 
-  it('deleteAgent does nothing when not confirmed', () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
     component.deleteAgent(agent({ agent_name: 'Writer' }), new Event('click'));
+
+    expect(dialogSpy).toHaveBeenCalledWith(
+      ConfirmDialogComponent,
+      expect.objectContaining({
+        data: expect.objectContaining({
+          message: 'Remove "Writer" from the roster?',
+          confirmLabel: 'Remove',
+          variant: 'danger',
+        }),
+      }),
+    );
+    // Cancelled (afterClosed → false): no removal.
     expect(api.removeTeamAgent).not.toHaveBeenCalled();
   });
 
-  it('deleteAgent surfaces an error', () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
+  it('onDeleteAgentConfirmed removes the agent when confirmed', () => {
+    component.onDeleteAgentConfirmed(agent({ agent_name: 'Writer' }), true);
+    expect(api.removeTeamAgent).toHaveBeenCalledWith('t-1', 'Writer');
+  });
+
+  it('onDeleteAgentConfirmed does nothing when cancelled', () => {
+    component.onDeleteAgentConfirmed(agent({ agent_name: 'Writer' }), false);
+    expect(api.removeTeamAgent).not.toHaveBeenCalled();
+  });
+
+  it('onDeleteAgentConfirmed surfaces an error', () => {
     api.removeTeamAgent.mockReturnValueOnce(throwError(() => ({ error: { detail: 'cannot remove' } })));
-    component.deleteAgent(agent({ agent_name: 'Writer' }), new Event('click'));
+    component.onDeleteAgentConfirmed(agent({ agent_name: 'Writer' }), true);
     expect(component.rosterActionError()).toBe('cannot remove');
   });
 
-  it('deleteAgent clears an in-progress edit on the deleted agent', () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
+  it('onDeleteAgentConfirmed clears an in-progress edit on the deleted agent', () => {
     component.editingAgent.set('Writer');
-    component.deleteAgent(agent({ agent_name: 'Writer' }), new Event('click'));
+    component.onDeleteAgentConfirmed(agent({ agent_name: 'Writer' }), true);
     expect(component.editingAgent()).toBeNull();
   });
 

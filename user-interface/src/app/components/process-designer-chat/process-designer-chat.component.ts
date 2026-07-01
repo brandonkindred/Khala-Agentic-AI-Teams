@@ -31,6 +31,10 @@ import {
   type AddAgentFromRegistryDialogData,
   type AddAgentFromRegistryDialogResult,
 } from './add-agent-from-registry-dialog.component';
+import {
+  ConfirmDialogComponent,
+  type ConfirmDialogData,
+} from '../../shared/confirm-dialog/confirm-dialog.component';
 import type {
   AgenticTeam,
   AgenticTeamAgent,
@@ -211,22 +215,31 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
 
   refreshRoster(): void {
     this.rosterLoading.set(true);
+    this.rosterActionError.set(null);
     this.api.listTeamAgents(this.team.team_id).subscribe({
       next: (agents) => {
         this.rosterAgents.set(agents);
-        this.rosterLoading.set(false);
+        // Keep the loading indicator up until validation also resolves — the
+        // roster isn't "fully loaded" until its staffing gaps are known.
         this.api.validateRoster(this.team.team_id).subscribe({
           next: (result) => {
             this.rosterValidation.set(result);
+            this.rosterLoading.set(false);
             this.rosterChanged.emit(result);
           },
           error: () => {
             this.rosterValidation.set(null);
+            this.rosterLoading.set(false);
             this.rosterChanged.emit(null);
           },
         });
       },
-      error: () => this.rosterLoading.set(false),
+      error: (err) => {
+        // Surface the failure instead of silently leaving a stale roster: the
+        // user needs to know their view may be out of date.
+        this.rosterLoading.set(false);
+        this.rosterActionError.set(err?.error?.detail ?? 'Failed to load roster');
+      },
     });
   }
 
@@ -279,7 +292,28 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
 
   deleteAgent(agent: AgenticTeamAgent, event: Event): void {
     event.stopPropagation();
-    const confirmed = window.confirm(`Remove "${agent.agent_name}" from the roster?`);
+    // Use the shared Material confirm dialog (danger variant) rather than the
+    // native window.confirm, so a destructive roster removal matches the rest of
+    // the app's theming and Cancel-focused destructive-prompt convention.
+    const ref = this.dialog.open<
+      ConfirmDialogComponent,
+      ConfirmDialogData,
+      boolean
+    >(ConfirmDialogComponent, {
+      data: {
+        title: 'Remove agent',
+        message: `Remove "${agent.agent_name}" from the roster?`,
+        confirmLabel: 'Remove',
+        cancelLabel: 'Cancel',
+        variant: 'danger',
+      },
+      width: '420px',
+    });
+    ref.afterClosed().subscribe((confirmed) => this.onDeleteAgentConfirmed(agent, confirmed));
+  }
+
+  /** Public for unit tests; invoked by `deleteAgent` after the confirm dialog closes. */
+  onDeleteAgentConfirmed(agent: AgenticTeamAgent, confirmed: boolean | undefined): void {
     if (!confirmed) return;
     this.rosterActionError.set(null);
     this.api.removeTeamAgent(this.team.team_id, agent.agent_name).subscribe({

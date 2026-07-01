@@ -9,6 +9,7 @@ import {
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { Subject, catchError, map, of, switchMap } from 'rxjs';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -80,6 +81,38 @@ export class AgentStudioComposeTeamComponent implements OnInit {
     description: ['', [Validators.maxLength(1000)]],
   });
 
+  /**
+   * Team-fetch stream. Routing every `getTeam` (team select, roster-change
+   * re-sync) through one `switchMap` cancels a prior in-flight fetch, so
+   * switching teams rapidly can't let an earlier team's response land after a
+   * later one and overwrite `team` with stale data.
+   */
+  private readonly teamFetch = new Subject<string>();
+
+  constructor() {
+    this.teamFetch
+      .pipe(
+        switchMap((teamId) =>
+          this.api.getTeam(teamId).pipe(
+            map((resp) => ({ ok: true as const, team: resp?.team ?? null })),
+            catchError(() => of({ ok: false as const, team: null })),
+          ),
+        ),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((res) => {
+        if (!res.ok) {
+          this.teamLoadError.set('Could not load this team.');
+          return;
+        }
+        if (!res.team) {
+          this.teamLoadError.set('Team not found.');
+          return;
+        }
+        this.applyTeam(res.team);
+      });
+  }
+
   ngOnInit(): void {
     this.loadTeams();
     const teamId = this.selectedTeamId();
@@ -118,19 +151,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
 
   private loadTeam(teamId: string): void {
     this.teamLoadError.set(null);
-    this.api
-      .getTeam(teamId)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (resp) => {
-          if (!resp || !resp.team) {
-            this.teamLoadError.set('Team not found.');
-            return;
-          }
-          this.applyTeam(resp.team);
-        },
-        error: () => this.teamLoadError.set('Could not load this team.'),
-      });
+    this.teamFetch.next(teamId);
   }
 
   private applyTeam(team: AgenticTeam): void {
@@ -165,14 +186,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
     // status stay in sync without a manual reload.
     const teamId = this.selectedTeamId();
     if (!teamId) return;
-    this.api
-      .getTeam(teamId)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (resp) => {
-          if (resp?.team) this.applyTeam(resp.team);
-        },
-      });
+    this.teamFetch.next(teamId);
   }
 
   toggleCreateForm(): void {
