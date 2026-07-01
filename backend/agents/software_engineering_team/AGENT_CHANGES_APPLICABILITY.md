@@ -82,6 +82,10 @@ The following changes were implemented to reduce max cycles exceeded and erroneo
 
 ### 3. DevOps Agent (`devops_agent/agent.py`)
 
+> **Note:** The legacy monolithic `devops_agent/` package has been removed; the live
+> DevOps path is now `devops_team/` (`DevOpsTeamLeadAgent`). This section is retained
+> for historical context only and refers to code no longer in the tree.
+
 **Workflow:** No feature branches. Plans, generates YAML/Dockerfile, writes directly to repo, runs build verification. Loop: generate → validate → write → verify.
 
 | Fix | Apply? | Details |
