@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import uuid4
 
+from llm_service import LLMNotConfiguredError
+
 from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
 from ..tools.web_fetch import WebFetchTool
@@ -259,6 +261,8 @@ class DealFinderAgent:
             )
             deal.relevance_score = float(data.get("relevance_score", 0.5))
             deal.matching_preferences = data.get("matching_preferences", [])
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.warning("Failed to score deal (JSON extraction failed):\n%s", e)
             deal.relevance_score = 0.5
@@ -354,6 +358,8 @@ class DealFinderAgent:
                 objective="generate deal search queries",
             )
             queries = data.get("queries", [])
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to generate queries (JSON extraction failed):\n%s", e)
             queries = [{"query": "best deals today", "priority": "medium"}]
