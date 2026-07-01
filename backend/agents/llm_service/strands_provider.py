@@ -25,8 +25,9 @@ from .strands_adapter import LLMClientModel
 
 logger = logging.getLogger(__name__)
 
-# Key: (provider, model_id, base_url, response_format, agent_key, key_fingerprint).
-_model_cache: dict[tuple[str, str, str, str, Optional[str], str], LLMClientModel] = {}
+# Key: (provider, model_id, base_url, response_format, agent_key, key_fingerprint,
+# provider_list_fingerprint).
+_model_cache: dict[tuple[str, str, str, str, Optional[str], str, str], LLMClientModel] = {}
 _cache_lock = threading.Lock()
 
 
@@ -133,7 +134,8 @@ def get_strands_model(
         return LLMClientModel(
             client,
             agent_key=agent_key,
-            model_id=client_model or llm_config.resolve_model_for_provider(agent_key, provider=provider),
+            model_id=client_model
+            or llm_config.resolve_model_for_provider(agent_key, provider=provider),
             response_format=response_format,
         )
 
@@ -152,7 +154,20 @@ def get_strands_model(
     # the wrong provider's client; without the fingerprint, a rotated key would keep
     # being served by a model wrapping a stale client.
     key_fingerprint = _active_provider_key_fingerprint(provider)
-    cache_key = (provider, model_id, base_url, response_format, agent_key, key_fingerprint)
+    # Fold the multi-provider fallback list's structural fingerprint into the key so
+    # enabling/editing/reordering the list rebuilds this adapter even in worker
+    # processes that never handled the API mutation (and so never ran
+    # clear_client_cache) — the list state is independent of provider/model/key, so
+    # without this a warm adapter would keep its legacy backing client and ignore the
+    # newly enabled failover until restart. Volatile limit-state is excluded, so a 429
+    # marking does not churn the cache. Best-effort: a read failure yields "none".
+    try:
+        from . import provider_store
+
+        list_fp = provider_store.list_fingerprint()
+    except Exception:  # noqa: BLE001 - cache-key augmentation must never break model creation
+        list_fp = "none"
+    cache_key = (provider, model_id, base_url, response_format, agent_key, key_fingerprint, list_fp)
 
     with _cache_lock:
         if cache_key not in _model_cache:

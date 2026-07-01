@@ -108,7 +108,6 @@ include = [
     "software_engineering_team*",
     "architect-agents*",
     "tech_lead_agent*",
-    "devops_agent*",
     "security_agent*",
     "backend_agent*",
     "qa_agent*",

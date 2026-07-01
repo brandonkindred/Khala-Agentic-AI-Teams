@@ -349,7 +349,6 @@ software_engineering_team/
 ├── git_setup_agent/
 ├── architect-agents/      # ArchitectureExpertAgent + Enterprise Orchestrator
 ├── tech_lead_agent/
-├── devops_agent/          # Legacy (retained, no longer routed to)
 ├── devops_team/           # DevOps Engineering Team (MVP: 9 core agents, 5 tool agents)
 │   ├── orchestrator.py    # DevOpsTeamLeadAgent
 │   ├── models.py          # Shared contracts (DevOpsTaskSpec, DevOpsCompletionPackage, etc.)
@@ -436,7 +435,7 @@ Each agent has:
 
 ## DevOps Engineering Team (`devops_team/`)
 
-The `devops_team/` package replaces the legacy monolithic `devops_agent/` with a contract-first, multi-agent DevOps engineering team modeled after `frontend_team/`. It implements the **MVP fleet** (9 core agents + 5 tool agents) with hard gates, environment-aware safety, and structured completion packages.
+The `devops_team/` package is the contract-first, multi-agent DevOps engineering team modeled after `frontend_team/`, and is the sole DevOps path (superseding an earlier monolithic DevOps agent). It implements the **MVP fleet** (9 core agents + 5 tool agents) with hard gates, environment-aware safety, and structured completion packages.
 
 ### Design Principles
 
@@ -564,7 +563,7 @@ notes:
 
 ### Backward Compatibility
 
-The `DevOpsTeamLeadAgent` provides a `run_workflow()` method that accepts the same parameters as the legacy `DevOpsExpertAgent.run_workflow()`. When called by the Tech Lead's `trigger_devops_for_backend/frontend`, it constructs a `DevOpsTaskSpec` internally (adding defaults for rollback, security, approval gates) and runs the full pipeline. The legacy `devops_agent/` and `devops_review_agent/` packages remain in the codebase but are no longer routed to by the main orchestrator.
+The `DevOpsTeamLeadAgent` provides a `run_workflow()` method that accepts the same parameters as the earlier DevOps agent's `run_workflow()`. When called by the Tech Lead's `trigger_devops_for_backend/frontend`, it constructs a `DevOpsTaskSpec` internally (adding defaults for rollback, security, approval gates) and runs the full pipeline.
 
 ### Expanded Team (Phase 2, not yet implemented)
 

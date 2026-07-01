@@ -7,7 +7,6 @@ These agents run after backend and frontend workers complete. Tech Lead triggers
 from __future__ import annotations
 
 # Re-exports for discoverability
-from devops_agent import DevOpsExpertAgent, DevOpsInput
 from technical_writers.documentation_agent import DocumentationAgent, DocumentationInput
 
 # Integration agent (in-package)
@@ -19,8 +18,6 @@ __all__ = [
     "IntegrationInput",
     "IntegrationIssue",
     "IntegrationOutput",
-    "DevOpsExpertAgent",
-    "DevOpsInput",
     "DocumentationAgent",
     "DocumentationInput",
 ]

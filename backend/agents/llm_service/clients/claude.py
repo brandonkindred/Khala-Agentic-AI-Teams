@@ -203,14 +203,22 @@ class ClaudeLLMClient(LLMClient):
         timeout: float = 900.0,
         max_retries: int = 2,
         on_reasoning: Optional[Callable[[str], None]] = None,
+        rate_limit_max_retries: Optional[int] = None,
     ) -> None:
         """Construct a Claude client.
 
+        ``rate_limit_max_retries`` overrides the in-place 429 backoff retry budget
+        (normally from ``LLM_RATE_LIMIT_MAX_RETRIES``); distinct from ``max_retries``,
+        which configures the Anthropic SDK's own transport retries. The multi-provider
+        failover path passes ``0`` so a 429 raises immediately and hands off to the
+        next provider instead of sleeping minutes; ``None`` keeps the env schedule.
+
         Preconditions: ``model`` is a non-empty Claude model id (validated with an
             explicit ``ValueError`` so it survives ``python -O``); ``timeout`` > 0;
-            ``max_retries`` >= 0; ``on_reasoning`` is callable or ``None``.
-            ``api_key`` may be empty here — it is validated on first use so the
-            client can be constructed in environments that resolve the key lazily.
+            ``max_retries`` >= 0; ``rate_limit_max_retries`` is ``None`` or ``>= 0``;
+            ``on_reasoning`` is callable or ``None``. ``api_key`` may be empty here —
+            it is validated on first use so the client can be constructed in
+            environments that resolve the key lazily.
         Postconditions: a ready client; when ``on_reasoning`` is set, thinking-token
             deltas are streamed to it during each call (mirrors the Ollama client).
         """
@@ -220,6 +228,9 @@ class ClaudeLLMClient(LLMClient):
         self.api_key = api_key or ""
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
+        self._rate_limit_max_retries_override = (
+            max(0, int(rate_limit_max_retries)) if rate_limit_max_retries is not None else None
+        )
         self.on_reasoning = on_reasoning
         self._client: Any = None
         # Cached reference to the imported ``anthropic`` module, populated alongside
@@ -454,6 +465,8 @@ class ClaudeLLMClient(LLMClient):
             errors propagate immediately.
         """
         max_retries, initial, cap = parse_rate_limit_retry_config()
+        if self._rate_limit_max_retries_override is not None:
+            max_retries = self._rate_limit_max_retries_override
         rate_limit_attempt = 0
         while True:
             try:

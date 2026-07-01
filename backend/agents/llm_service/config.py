@@ -60,6 +60,15 @@ ENV_LLM_RATE_LIMIT_MAX_RETRIES = "LLM_RATE_LIMIT_MAX_RETRIES"
 ENV_LLM_RATE_LIMIT_BACKOFF_INITIAL = "LLM_RATE_LIMIT_BACKOFF_INITIAL"
 ENV_LLM_RATE_LIMIT_BACKOFF_MAX = "LLM_RATE_LIMIT_BACKOFF_MAX"
 ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER = "LLM_RATE_LIMIT_HONOR_RETRY_AFTER"
+# Multi-provider failover (see llm_service/provider_store.py + factory.FailoverLLMClient).
+# When more than one provider is configured, a 429 on one provider hands off to the
+# next instead of burning the slow LLM_RATE_LIMIT_* backoff in place. FAST_429 (default
+# on) makes the failover-chain clients raise the 429 immediately (zero in-place
+# rate-limit retries) so the hand-off isn't delayed by minutes. The *_WINDOW_S vars are
+# the fallback reset windows used to compute reset_at when a 429 carries no Retry-After.
+ENV_LLM_FAILOVER_FAST_429 = "LLM_FAILOVER_FAST_429"
+ENV_LLM_FAILOVER_RATE_WINDOW_S = "LLM_FAILOVER_RATE_WINDOW_S"
+ENV_LLM_FAILOVER_WEEKLY_WINDOW_S = "LLM_FAILOVER_WEEKLY_WINDOW_S"
 ENV_LLM_MAX_CONCURRENCY = "LLM_MAX_CONCURRENCY"
 ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
 # No dedicated resolver: read directly by resolve_think_for_model below (it picks
@@ -115,9 +124,11 @@ CLAUDE_MODEL_SUGGESTIONS: list[str] = list(KNOWN_CLAUDE_CONTEXT.keys())
 
 # Invariant: the default model must itself have a known context window (and thus
 # appear in the suggestion list), so it never falls back to DEFAULT_CLAUDE_CONTEXT.
-assert (
-    DEFAULT_CLAUDE_MODEL in KNOWN_CLAUDE_CONTEXT
-), "DEFAULT_CLAUDE_MODEL must be a key in KNOWN_CLAUDE_CONTEXT"
+# An explicit raise (not a bare ``assert``) so the check survives ``python -O``.
+if DEFAULT_CLAUDE_MODEL not in KNOWN_CLAUDE_CONTEXT:
+    raise RuntimeError(
+        f"DEFAULT_CLAUDE_MODEL {DEFAULT_CLAUDE_MODEL!r} must be a key in KNOWN_CLAUDE_CONTEXT"
+    )
 
 # ---------------------------------------------------------------------------
 # Known model context (tokens) – used when /api/show is unavailable or not called
@@ -383,6 +394,53 @@ def resolve_max_tokens() -> int:
     except (TypeError, ValueError):
         return 0
     return val if val > 0 else 0
+
+
+# Fallback reset windows (seconds) when a 429 carries no Retry-After. Weekly is
+# long so a weekly-exhausted provider isn't retried hourly; rate is ~1h.
+_DEFAULT_FAILOVER_RATE_WINDOW_S = 3600.0
+_DEFAULT_FAILOVER_WEEKLY_WINDOW_S = 7 * 24 * 3600.0
+
+
+def failover_fast_429_enabled() -> bool:
+    """True when failover-chain clients should fail fast on 429 (default on).
+
+    Postconditions: returns the boolean value of ``LLM_FAILOVER_FAST_429`` (default
+        True when unset/blank). When True the factory builds failover-chain provider
+        clients with a zero in-place rate-limit retry budget so a 429 hands off to
+        the next provider immediately instead of sleeping minutes. Never raises.
+    """
+    # ``env_flag_enabled`` is already a default-on toggle (unset/blank -> True; only
+    # an explicit false/0/no -> False) reading the env once.
+    return _env_flag_enabled(ENV_LLM_FAILOVER_FAST_429)
+
+
+def _resolve_positive_window(env_name: str, default: float) -> float:
+    """Return a positive seconds value from ``env_name``, else ``default``.
+
+    Postconditions: returns ``> 0``; a missing/unparseable/non-positive env yields
+        ``default``. Never raises.
+    """
+    val = _parse_float(env_name, default)
+    return val if val > 0 else default
+
+
+def failover_rate_window_seconds() -> float:
+    """Fallback reset window for a non-weekly 429 with no Retry-After (default 1h).
+
+    Postconditions: returns ``> 0`` seconds. Never raises.
+    """
+    return _resolve_positive_window(ENV_LLM_FAILOVER_RATE_WINDOW_S, _DEFAULT_FAILOVER_RATE_WINDOW_S)
+
+
+def failover_weekly_window_seconds() -> float:
+    """Fallback reset window for a weekly-limit 429 with no Retry-After (default 7d).
+
+    Postconditions: returns ``> 0`` seconds. Never raises.
+    """
+    return _resolve_positive_window(
+        ENV_LLM_FAILOVER_WEEKLY_WINDOW_S, _DEFAULT_FAILOVER_WEEKLY_WINDOW_S
+    )
 
 
 def _looks_like_claude_model(model: str) -> bool:
