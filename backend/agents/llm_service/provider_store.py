@@ -569,12 +569,21 @@ def mark_exhausted(entry_id: int, *, limit_type: str, reset_at: datetime) -> Non
 def reset_entry(entry_id: int) -> None:
     """Clear the limit-state of one entry (its reset window has elapsed).
 
-    Conditional on ``limit_exceeded=TRUE`` so concurrent resets from multiple
-    containers are no-ops rather than redundant writes.
+    Conditional on ``limit_exceeded=TRUE`` AND the *stored* ``reset_at`` actually
+    being in the past (``reset_at <= NOW()``). The reset-time guard is what makes
+    this safe across containers: a worker acting on a TTL-cached list with a
+    now-expired ``reset_at`` must NOT clear a mark that another worker has since
+    refreshed with a *future* ``reset_at`` (which would put a still-limited provider
+    back into rotation). Comparing against the DB clock means such a stale reset
+    matches zero rows and no-ops instead. (A ``NULL`` ``reset_at`` — a provider
+    limited without a known window — never satisfies ``reset_at <= NOW()``, so it is
+    left limited until explicitly re-marked or edited, matching
+    :func:`select_active_entry`, which never treats a ``NULL`` window as expired.)
 
     Preconditions: Postgres enabled. Postconditions: the entry has
-        ``limit_exceeded=FALSE``, ``limit_type=''``, ``reset_at=NULL`` (when it was
-        marked); the cache is cleared. A failure is logged and swallowed.
+        ``limit_exceeded=FALSE``, ``limit_type=''``, ``reset_at=NULL`` iff it was
+        marked with a now-expired window; a fresher future mark is preserved; the
+        cache is cleared. A failure is logged and swallowed.
     """
     if not _postgres_enabled():
         return
@@ -586,7 +595,7 @@ def reset_entry(entry_id: int) -> None:
             cur.execute(
                 "UPDATE llm_provider_configs "
                 "SET limit_exceeded = FALSE, limit_type = '', reset_at = NULL, updated_at = NOW() "
-                "WHERE id = %s AND limit_exceeded = TRUE",
+                "WHERE id = %s AND limit_exceeded = TRUE AND reset_at IS NOT NULL AND reset_at <= NOW()",
                 (entry_id,),
             )
             conn.commit()

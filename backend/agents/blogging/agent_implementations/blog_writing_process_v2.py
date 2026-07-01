@@ -66,10 +66,8 @@ from validators.runner import run_validators_from_work_dir
 
 from llm_service import (
     OllamaLLMClient,
-    attributed_client,
-    client_agent_key,
     get_strands_model,
-    unwrap_client,
+    with_model_override,
 )
 from llm_service.interface import LLMClient
 
@@ -112,39 +110,26 @@ def _is_external_cancellation(exc: BaseException) -> bool:
 def planning_llm_client(base: LLMClient) -> LLMClient:
     """Return the LLM client to use for blog planning.
 
-    When ``BLOG_PLANNING_MODEL`` is set and ``base`` is Ollama-backed, returns a
-    client pinned to that model; otherwise returns ``base`` unchanged. The
-    per-model override preserves ``base``'s agent attribution (re-applies the
-    original ``agent_key`` via :func:`attributed_client`) so planning requests
-    are still attributed to the originating agent.
+    When ``BLOG_PLANNING_MODEL`` is set, returns a variant of ``base`` whose Ollama
+    fallback candidates are pinned to that model; otherwise returns ``base`` unchanged.
+    The override is applied per call (via :func:`with_model_override`), so multi-provider
+    failover is preserved — an Ollama provider uses the planning model while a non-Ollama
+    fallback keeps its configured model — and ``base``'s agent attribution and reasoning
+    hook carry across.
 
     :param base: The default client the blog pipeline would otherwise use.
-    :returns: ``base``, or an attribution-preserving override pinned to
+    :returns: ``base``, or a failover-preserving variant pinning Ollama candidates to
         ``BLOG_PLANNING_MODEL``.
     """
-    model = planning_model_override()
-    if not model:
-        return base
-    inner = unwrap_client(base)
-    if isinstance(inner, OllamaLLMClient):
-        override = OllamaLLMClient(
-            model=model,
-            base_url=inner.base_url,
-            timeout=inner.timeout,
-            # Carry the reasoning sink across so a streaming-reasoning caller
-            # doesn't lose its hook on the model-pinned override.
-            on_reasoning=inner.on_reasoning,
-        )
-        # Preserve the original client's agent attribution on the override.
-        return attributed_client(override, client_agent_key(base))
-    return base
+    return with_model_override(base, planning_model_override())
 
 
 def plan_critic_llm_client(base: LLMClient) -> LLMClient:
     """Return the LLM client to use for the plan critic.
 
-    When ``BLOG_PLAN_CRITIC_MODEL`` is set and ``base`` is Ollama-backed, returns
-    a client pinned to that model; otherwise returns ``base`` unchanged. The
+    When ``BLOG_PLAN_CRITIC_MODEL`` is set, returns a variant of ``base`` whose Ollama
+    fallback candidates are pinned to that model (via :func:`with_model_override`, so
+    multi-provider failover is preserved); otherwise returns ``base`` unchanged. The
     override preserves ``base``'s agent attribution (see :func:`planning_llm_client`).
 
     Per the architectural tenet, the critic runs on the same model as the writer
@@ -152,25 +137,10 @@ def plan_critic_llm_client(base: LLMClient) -> LLMClient:
     on later without further code changes.
 
     :param base: The default client the blog pipeline would otherwise use.
-    :returns: ``base``, or an attribution-preserving override pinned to
+    :returns: ``base``, or a failover-preserving variant pinning Ollama candidates to
         ``BLOG_PLAN_CRITIC_MODEL``.
     """
-    model = plan_critic_model_override()
-    if not model:
-        return base
-    inner = unwrap_client(base)
-    if isinstance(inner, OllamaLLMClient):
-        override = OllamaLLMClient(
-            model=model,
-            base_url=inner.base_url,
-            timeout=inner.timeout,
-            # Carry the reasoning sink across so a streaming-reasoning caller
-            # doesn't lose its hook on the model-pinned override.
-            on_reasoning=inner.on_reasoning,
-        )
-        # Preserve the original client's agent attribution on the override.
-        return attributed_client(override, client_agent_key(base))
-    return base
+    return with_model_override(base, plan_critic_model_override())
 
 
 def build_plan_critic_agent(base: LLMClient) -> Optional[BlogPlanCriticAgent]:

@@ -341,6 +341,9 @@ def test_reset_entry_is_conditional(fake_db):
     ps.reset_entry(4)
     sql, params = fake_db.executed[-1]
     assert "limit_exceeded = FALSE" in sql and "AND limit_exceeded = TRUE" in sql
+    # The reset-time guard prevents a stale worker from clearing a fresher future
+    # mark set by another container (see reset_entry docstring).
+    assert "reset_at IS NOT NULL AND reset_at <= NOW()" in sql
     assert params == (4,)
 
 

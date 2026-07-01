@@ -77,7 +77,7 @@ def _make_failover(entries, build_map):
     def load_candidates():
         return list(entries)
 
-    def build(entry, rl_override):
+    def build(entry, rl_override, model_override=None):
         builds.append((entry.id, rl_override))
         return build_map[entry.id]
 
@@ -143,7 +143,7 @@ def test_build_exception_propagates_without_failover():
 
     build_calls: list[int] = []
 
-    def build(entry, rl_override):
+    def build(entry, rl_override, model_override=None):
         build_calls.append(entry.id)
         if entry.id == 1:
             raise ValueError("invalid provider config")
@@ -161,14 +161,14 @@ def test_build_exception_propagates_without_failover():
 def test_empty_candidates_raises_not_configured():
     """An empty candidate list (the provider list emptied at runtime) has no legacy
     fallback — the sole-source contract means dispatch raises LLMNotConfiguredError."""
-    fc = FailoverLLMClient(lambda: [], lambda e, r: None, lambda e, x: None)
+    fc = FailoverLLMClient(lambda: [], lambda e, r, mo=None: None, lambda e, x: None)
     with pytest.raises(LLMNotConfiguredError):
         fc.chat("p")
 
 
 def test_getattr_on_empty_candidates_raises_not_configured():
     """Delegated attribute access with no candidates also raises (no legacy fallback)."""
-    fc = FailoverLLMClient(lambda: [], lambda e, r: None, lambda e, x: None)
+    fc = FailoverLLMClient(lambda: [], lambda e, r, mo=None: None, lambda e, x: None)
     with pytest.raises(LLMNotConfiguredError):
         _ = fc.model
 
@@ -261,7 +261,7 @@ def two_providers(monkeypatch):
     monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: list(entries))
     monkeypatch.setattr(ps, "select_active_entry", lambda es, **k: es[0])
     stubs = {1: _StubClient(model="m1"), 2: _StubClient(model="m2")}
-    monkeypatch.setattr(factory, "_build_entry_client", lambda e, ak, orx, rl: stubs[e.id])
+    monkeypatch.setattr(factory, "_build_entry_client", lambda e, ak, orx, rl, mo=None: stubs[e.id])
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     return stubs
 
@@ -452,3 +452,72 @@ def test_full_failover_path_unmocked_build(monkeypatch):
     assert calls == ["m1", "m2"]
     # The 429'd provider (entry id 1) must actually be marked exhausted.
     assert marks == [1]
+
+
+# --------------------------------------------------------------------------- #
+# Per-stage model override (e.g. BLOG_PLANNING_MODEL) — keeps failover          #
+# --------------------------------------------------------------------------- #
+
+
+def test_build_entry_client_model_override_ollama_only(monkeypatch):
+    """A model override pins an Ollama entry's model but is IGNORED for a Claude
+    entry (the override names an Ollama model), so a failover hop across provider
+    types still resolves a model valid for that provider."""
+    ollama = _build_entry_client(_full_entry("ollama", model="m", base_url="u"), None, None, None, "pinned:7b")
+    assert isinstance(ollama, OllamaLLMClient) and ollama.model == "pinned:7b"
+    claude = _build_entry_client(_full_entry("claude", model="claude-opus-4-8", api_key="sk"), None, None, None, "pinned:7b")
+    assert isinstance(claude, ClaudeLLMClient) and claude.model == "claude-opus-4-8"
+
+
+def test_failover_with_model_override_threads_to_build():
+    """with_model_override yields a variant that passes the override to every build
+    (both a generation dispatch and delegated attribute access); the original is
+    unchanged, so failover across the full candidate chain is preserved."""
+    seen: list = []
+
+    def build(entry, rl_override, model_override=None):
+        seen.append(model_override)
+        return _StubClient(result="ok", model=model_override or "default")
+
+    fc = FailoverLLMClient(lambda: [_entry(1), _entry(2)], build, lambda e, x: None)
+    fc.complete_json("p")
+    assert seen == [None]  # default: no override
+
+    pinned = fc.with_model_override("pinned:7b")
+    assert pinned is not fc
+    pinned.complete_json("p")
+    assert seen[-1] == "pinned:7b"
+    # Delegated attribute access (``.model``) also carries the override.
+    assert pinned.model == "pinned:7b"
+    # The original is untouched — a per-stage override never mutates the base client.
+    fc.complete_json("p")
+    assert seen[-1] is None
+
+
+def test_with_model_override_helper_noop_and_variant():
+    """The module-level helper: falsy model or a non-failover client returns the
+    input unchanged; a FailoverLLMClient returns a pinned variant."""
+    from llm_service.clients import DummyLLMClient
+    from llm_service.factory import with_model_override
+
+    dummy = DummyLLMClient()
+    assert with_model_override(dummy, "x") is dummy  # non-failover unchanged
+
+    fc = FailoverLLMClient(lambda: [_entry(1)], lambda e, r, mo=None: _StubClient(), lambda e, x: None)
+    assert with_model_override(fc, "") is fc  # falsy model unchanged
+    assert with_model_override(fc, None) is fc
+    variant = with_model_override(fc, "pinned:7b")
+    assert isinstance(variant, FailoverLLMClient) and variant is not fc
+
+
+def test_with_model_override_preserves_failover_and_attribution(two_providers):
+    """Through get_client: the override wraps the same failover client and keeps the
+    agent attribution (attribution outermost, failover within)."""
+    from llm_service.factory import with_model_override
+
+    base = get_client("backend")
+    assert isinstance(base, _AttributingClient)
+    pinned = with_model_override(base, "pinned:7b")
+    assert isinstance(pinned, _AttributingClient)
+    assert pinned._agent_key == base._agent_key
+    assert isinstance(unwrap_client(pinned), FailoverLLMClient)

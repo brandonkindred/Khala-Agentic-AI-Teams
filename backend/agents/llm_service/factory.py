@@ -342,6 +342,7 @@ def _build_entry_client(
     agent_key: Optional[str],
     on_reasoning: Optional[Callable[[str], None]],
     rate_limit_max_retries: Optional[int],
+    model_override: Optional[str] = None,
 ) -> Union[OllamaLLMClient, ClaudeLLMClient]:
     """Build the concrete provider client for one configured fallback entry.
 
@@ -353,16 +354,22 @@ def _build_entry_client(
     resolvers. Goes through the shared client caches except when ``on_reasoning`` is
     set (a per-caller hook must never be shared via the cache).
 
+    ``model_override``, when set, pins the model for an **Ollama** entry only (a
+    per-stage override such as the blog planning model names an Ollama model). A
+    Claude entry ignores it and keeps its configured model, so a failover hop across
+    provider types still resolves a model valid for that provider.
+
     Preconditions: ``entry.provider`` is ``"ollama"`` or ``"claude"``. Postconditions:
         returns a ready concrete client whose 429 backoff budget is
-        ``rate_limit_max_retries`` (``0`` for fast-fail failover hops). Never wraps in
-        attribution — the failover client is wrapped once by the caller.
+        ``rate_limit_max_retries`` (``0`` for fast-fail failover hops); an Ollama
+        client uses ``model_override`` (when given) in place of its configured model.
+        Never wraps in attribution — the failover client is wrapped once by the caller.
     """
     timeout = llm_config.resolve_timeout(agent_key)
     if entry.provider == "claude":
         model = entry.model.strip() or llm_config.resolve_claude_model(agent_key)
         return _build_claude_concrete(model, entry.api_key, timeout, on_reasoning, rate_limit_max_retries)
-    model = entry.model.strip() or llm_config.resolve_model(agent_key)
+    model = (model_override or "").strip() or entry.model.strip() or llm_config.resolve_model(agent_key)
     base_url = entry.base_url.strip() or llm_config.resolve_base_url()
     # The entry carries its own key (empty → no Authorization header, i.e. a local
     # Ollama endpoint). No env fallback — a Cloud entry must store its own key.
@@ -437,15 +444,34 @@ class FailoverLLMClient:
     def __init__(
         self,
         load_candidates: "Callable[[], list[provider_store.ProviderEntry]]",
-        build: "Callable[[provider_store.ProviderEntry, Optional[int]], Any]",
+        build: "Callable[[provider_store.ProviderEntry, Optional[int], Optional[str]], Any]",
         mark: "Callable[[provider_store.ProviderEntry, LLMRateLimitError], None]",
+        *,
+        model_override: Optional[str] = None,
     ) -> None:
         self._load_candidates = load_candidates
         self._build = build
         self._mark = mark
+        # Optional per-stage model override applied to Ollama candidates only (see
+        # ``with_model_override``); ``None`` = each candidate uses its configured model.
+        self._model_override = model_override
 
     def __repr__(self) -> str:
         return "FailoverLLMClient(multi-provider)"
+
+    def with_model_override(self, model: Optional[str]) -> "FailoverLLMClient":
+        """Return a shallow variant that pins Ollama candidates to ``model``.
+
+        Reuses the same load/build/mark closures (so failover, attribution, and the
+        per-call candidate snapshot are unchanged) — only the model applied to Ollama
+        candidates differs. Used for per-stage overrides (e.g. the blog planning model)
+        that must keep failing over across providers rather than collapsing to a single
+        pinned client.
+
+        Preconditions: ``model`` is a non-empty model name or ``None``. Postconditions:
+            returns a new :class:`FailoverLLMClient`; ``self`` is unmodified.
+        """
+        return FailoverLLMClient(self._load_candidates, self._build, self._mark, model_override=model)
 
     def _dispatch(self, method: str, *args: Any, **kwargs: Any) -> Any:
         candidates = self._load_candidates()
@@ -464,7 +490,7 @@ class FailoverLLMClient:
             # Non-last candidates fast-fail so the hand-off isn't delayed; the last
             # candidate keeps the configured (slow) backoff since there is no next.
             rl_override = 0 if (fast and index < last_index) else None
-            client = self._build(entry, rl_override)
+            client = self._build(entry, rl_override, self._model_override)
             try:
                 return getattr(client, method)(*args, **kwargs)
             except LLMRateLimitError as e:
@@ -496,7 +522,7 @@ class FailoverLLMClient:
         candidates = self._load_candidates()
         if not candidates:
             raise LLMNotConfiguredError(_NO_PROVIDER_MSG)
-        return getattr(self._build(candidates[0], None), name)
+        return getattr(self._build(candidates[0], None, self._model_override), name)
 
 
 # Virtual registration so ``isinstance(c, LLMClient)`` holds (mirrors
@@ -539,11 +565,38 @@ def _build_failover_client(
         start = next((i for i, e in enumerate(es) if e.id == active.id), 0)
         return es[start:]
 
-    def build(entry: "provider_store.ProviderEntry", rl_override: Optional[int]) -> Any:
-        return _build_entry_client(entry, agent_key, on_reasoning, rl_override)
+    def build(
+        entry: "provider_store.ProviderEntry",
+        rl_override: Optional[int],
+        model_override: Optional[str] = None,
+    ) -> Any:
+        return _build_entry_client(entry, agent_key, on_reasoning, rl_override, model_override)
 
     inner = FailoverLLMClient(load_candidates, build, _mark_entry_exhausted)
     return _AttributingClient(inner, agent_key) if agent_key else inner
+
+
+def with_model_override(client: Any, model: Optional[str]) -> Any:
+    """Return a variant of ``client`` that pins Ollama candidates to ``model``.
+
+    For a multi-provider client (a :class:`FailoverLLMClient`, optionally wrapped for
+    attribution), returns a variant whose Ollama fallback candidates use ``model``
+    while non-Ollama candidates keep their configured model — so per-stage model
+    overrides (e.g. the blog planning model) still fail over across providers instead
+    of collapsing to one pinned client. Agent attribution is preserved. Any other
+    client (e.g. :class:`DummyLLMClient`), or a falsy ``model``, returns ``client``
+    unchanged.
+
+    Preconditions: ``client`` is an LLM client from this module; ``model`` is a
+        non-empty model name or falsy. Postconditions: returns a client ready to use;
+        the input ``client`` is never mutated.
+    """
+    if not model:
+        return client
+    inner = unwrap_client(client)
+    if isinstance(inner, FailoverLLMClient):
+        return attributed_client(inner.with_model_override(model), client_agent_key(client))
+    return client
 
 
 def get_client(

@@ -27,6 +27,7 @@ from .factory import (
     client_agent_key,
     get_client,
     unwrap_client,
+    with_model_override,
 )
 from .interface import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
@@ -113,6 +114,7 @@ __all__ = [
     "unwrap_client",
     "client_agent_key",
     "attributed_client",
+    "with_model_override",
     "get_strands_model",
     "get_llm_config_summary",
     "LLMClient",
