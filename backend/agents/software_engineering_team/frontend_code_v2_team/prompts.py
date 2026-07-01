@@ -10,6 +10,11 @@ from software_engineering_team.shared.coding_standards import (
 from software_engineering_team.shared.coding_standards import (
     REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
 )
+from software_engineering_team.shared.prompts import (
+    build_execution_prompt,
+    build_planning_prompt,
+    build_problem_solving_single_issue_prompt,
+)
 from software_engineering_team.shared.security_service import (
     CODE_FRONTEND_FOCUS,
     SecurityProfile,
@@ -46,11 +51,7 @@ TYPESCRIPT_CONVENTIONS = """
 # Planning phase
 # ---------------------------------------------------------------------------
 
-PLANNING_PROMPT = """You are an expert Planning Agent for a frontend development team.
-
-**Context:** You receive a single **task** (assigned to the frontend team from the Tech Lead's plan). Your job is to produce **subtasks** (microtasks) that together implement this task. Each subtask should be small enough that a single specialist tool-agent (or a general code-generation step) can handle it. The task's acceptance criteria and detailed description define what "done" means; your subtasks must collectively satisfy them.
-
-**Available tool-agent domains you can assign microtasks to:**
+_PLANNING_TOOL_AGENT_DOMAINS = """\
 - state_management — state shape, stores, data flow (e.g. NgRx, Redux, signals)
 - auth — login UI, auth guards, token handling, permissions in UI
 - api_openapi — API client code, service layer, request/response types
@@ -64,38 +65,23 @@ PLANNING_PROMPT = """You are an expert Planning Agent for a frontend development
 - performance — bundle size, code splitting, lazy loading, caching
 - architecture — folder structure, routing, state management patterns, API client patterns
 - linter — lint rules, format fixes
-- general — anything else (default code generation)
+- general — anything else (default code generation)"""
 
-**Input you receive:**
-- Task description and requirements
-- Optional project spec, architecture, existing code context
-- Target stack (e.g. angular, react, typescript, javascript)
-
-**Output format (template – use exactly these section headers):**
-
-## MICROTASKS ##
----
-id: mt-<short-kebab>
-title: short title
-description: what to do (2-4 sentences)
-tool_agent: <domain from list above>
-depends_on: mt-other-id|mt-another-id
----
-## END MICROTASKS ##
-## LANGUAGE ##
-{detected_language}
-## END LANGUAGE ##
-## SUMMARY ##
-1-2 sentence overview of the plan
-## END SUMMARY ##
-
+_PLANNING_RULES = """\
 Rules:
 - Emit 2-10 microtasks. Prefer smaller, focused microtasks.
 - Include at least one testing_qa microtask unless the task is pure docs/config.
 - Dependency order matters: list prerequisites in depends_on (pipe-separated IDs).
 - For LANGUAGE use one of: angular, react, vue, typescript, javascript. Use the stack specified in the input or detected from the project.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+- Do not use JSON. Use only the template above. No explanatory text before or after."""
+
+PLANNING_PROMPT = build_planning_prompt(
+    team_kind="frontend",
+    tool_agent_domains=_PLANNING_TOOL_AGENT_DOMAINS,
+    language_input_line="Target stack (e.g. angular, react, typescript, javascript)",
+    language_output="{detected_language}",
+    planning_rules=_PLANNING_RULES,
+)
 
 PLANNING_FIXES_FOR_ISSUES_PROMPT = """You are an expert Planning Agent for a frontend team. Create microtasks that implement fixes for the following unresolved review issues.
 
@@ -132,52 +118,17 @@ depends_on:
 # Execution phase
 # ---------------------------------------------------------------------------
 
-EXECUTION_PROMPT = (
-    """You are an expert Senior Frontend Engineer implementing production-quality UI code.
-
-"""
-    + _PRIORITY_FRAMEWORK
-    + """
-"""
-    + FRONTEND_CODING_STANDARDS
-    + """
-
-**Your task:**
-Implement the microtask described below. Produce complete, runnable component/service files.
-
-**Microtask:**
-{microtask_description}
-
-**Requirements:**
-{requirements}
-
-**Existing codebase (if any):**
-{existing_code}
-
-**Architecture context (if any):**
-{architecture_context}
-
-**File path rules:**
+_EXECUTION_PATH_RULES = """\
 - Use paths relative to the project root (e.g. `src/app/component.ts`, `src/styles.scss`)
 - Do NOT include `frontend/` prefix in paths — you are already in the frontend project
-- Example: use `src/app/app.component.ts`, NOT `frontend/src/app/app.component.ts`
+- Example: use `src/app/app.component.ts`, NOT `frontend/src/app/app.component.ts`"""
 
-**Output format (template – use exactly these markers):**
-
-For each file, write:
-## FILE path/to/file.ext ##
-<full file content>
-## FILE path/to/next.ext ##
-<full file content>
-## SUMMARY ##
-what you implemented
-## END SUMMARY ##
-
-- Use "## FILE <path> ##" at the start of each file; the next "## FILE " or "## SUMMARY ##" ends the previous file.
-- Do not put the exact line "## FILE " or "## SUMMARY ##" inside file content (use a comment placeholder if needed).
-- All imports must be valid; all referenced modules must be included.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+EXECUTION_PROMPT = build_execution_prompt(
+    engineer_intro="You are an expert Senior Frontend Engineer implementing production-quality UI code.",
+    coding_standards=FRONTEND_CODING_STANDARDS,
+    has_language_conventions=False,
+    file_noun="component/service files",
+    path_rules=_EXECUTION_PATH_RULES,
 )
 
 # ---------------------------------------------------------------------------
@@ -272,44 +223,15 @@ overview of all fixes
 """
 )
 
-PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = (
-    """You are an expert Problem-Solving Specialist. Fix exactly ONE issue.
-
-"""
-    + FRONTEND_CODING_STANDARDS
-    + """
-
-**Single issue to fix:**
-- Source: {source}
-- Severity: {severity}
-- Description: {description}
-- File: {file_path}
-- Recommendation: {recommendation}
-
-**Relevant code (only the file(s) involved):**
-{current_code}
-
-**Your steps:**
-1. Identify the root cause of this issue.
-2. Implement the fix by outputting the complete updated file(s).
-
-**Output format (template – use exactly these markers):**
-
-## ROOT_CAUSE ##
-One or two sentences: why this issue occurs.
-## END ROOT_CAUSE ##
+_SINGLE_ISSUE_FILE_OUTPUT_BLOCK = """\
 ## FILE path/to/file.ext ##
 <full updated file content>
-## RESOLVED ##
-true
-## END RESOLVED ##
-## SUMMARY ##
-one sentence: what you changed
-## END SUMMARY ##
-
-- Output only the file(s) you change. Use "## FILE <path> ##" for each.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+
+PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = build_problem_solving_single_issue_prompt(
+    coding_standards=FRONTEND_CODING_STANDARDS,
+    has_language_conventions=False,
+    file_output_block=_SINGLE_ISSUE_FILE_OUTPUT_BLOCK,
 )
 
 # ---------------------------------------------------------------------------

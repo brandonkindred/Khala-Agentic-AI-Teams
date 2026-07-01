@@ -10,6 +10,11 @@ from software_engineering_team.shared.coding_standards import (
 from software_engineering_team.shared.coding_standards import (
     REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
 )
+from software_engineering_team.shared.prompts import (
+    build_execution_prompt,
+    build_planning_prompt,
+    build_problem_solving_single_issue_prompt,
+)
 from software_engineering_team.shared.security_service import (
     CODE_BACKEND_FOCUS,
     SecurityProfile,
@@ -54,49 +59,30 @@ JAVA_CONVENTIONS = """
 # Planning phase
 # ---------------------------------------------------------------------------
 
-PLANNING_PROMPT = """You are an expert Planning Agent for a backend development team.
-
-**Context:** You receive a single **task** (assigned to the backend team from the Tech Lead's plan). Your job is to produce **subtasks** (microtasks) that together implement this task. Each subtask should be small enough that a single specialist tool-agent (or a general code-generation step) can handle it. The task's acceptance criteria and detailed description define what "done" means; your subtasks must collectively satisfy them.
-
-**Available tool-agent domains you can assign microtasks to:**
+_PLANNING_TOOL_AGENT_DOMAINS = """\
 - data_engineering — schema design, data models, data integrity, query optimisation (NO migrations unless explicitly requested)
 - api_openapi — API endpoint design, OpenAPI contract, route implementation
 - auth — authentication, authorisation, RBAC, permissions, secure defaults
 - documentation — README, API docs, runbooks
 - testing_qa — test plan, test files, coverage improvements
 - security — security hardening, vulnerability fixes
-- general — anything else (default code generation)
+- general — anything else (default code generation)"""
 
-**Input you receive:**
-- Task description and requirements
-- Optional project spec, architecture, existing code context
-- Target language (python or java)
-
-**Output format (template – use exactly these section headers):**
-
-## MICROTASKS ##
----
-id: mt-<short-kebab>
-title: short title
-description: what to do (2-4 sentences)
-tool_agent: <domain from list above>
-depends_on: mt-other-id|mt-another-id
----
-## END MICROTASKS ##
-## LANGUAGE ##
-python
-## END LANGUAGE ##
-## SUMMARY ##
-1-2 sentence overview of the plan
-## END SUMMARY ##
-
+_PLANNING_RULES = """\
 Rules:
 - Emit 2-10 microtasks. Prefer smaller, focused microtasks over large monolithic ones.
 - Include at least one testing_qa microtask unless the task is pure docs/config.
 - Dependency order matters: list prerequisites in depends_on (pipe-separated IDs).
 - Do NOT create migration microtasks (Alembic, Flyway, etc.) for greenfield projects. Migrations are only needed when modifying an existing database schema. If the project is new, create models/schemas directly without migration infrastructure.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+- Do not use JSON. Use only the template above. No explanatory text before or after."""
+
+PLANNING_PROMPT = build_planning_prompt(
+    team_kind="backend",
+    tool_agent_domains=_PLANNING_TOOL_AGENT_DOMAINS,
+    language_input_line="Target language (python or java)",
+    language_output="python",
+    planning_rules=_PLANNING_RULES,
+)
 
 # Planning fix microtasks for unresolved review issues (escalation from problem-solving).
 PLANNING_FIXES_FOR_ISSUES_PROMPT = """You are an expert Planning Agent. The problem-solving phase could not fix these issues automatically. Create microtasks that implement the fixes.
@@ -138,54 +124,17 @@ depends_on:
 # Execution phase
 # ---------------------------------------------------------------------------
 
-EXECUTION_PROMPT = (
-    """You are an expert Senior Backend Software Engineer implementing production-quality code.
-
-"""
-    + _PRIORITY_FRAMEWORK
-    + """
-"""
-    + CODING_STANDARDS
-    + """
-
-{language_conventions}
-
-**Your task:**
-Implement the microtask described below. Produce complete, runnable code files.
-
-**Microtask:**
-{microtask_description}
-
-**Requirements:**
-{requirements}
-
-**Existing codebase (if any):**
-{existing_code}
-
-**Architecture context (if any):**
-{architecture_context}
-
-**File path rules:**
+_EXECUTION_PATH_RULES = """\
 - Use paths relative to the project root (e.g. `src/main.py`, `src/services/user_service.py`)
 - Do NOT include `backend/` prefix in paths — you are already in the backend project
-- Example: use `src/main.py`, NOT `backend/src/main.py`
+- Example: use `src/main.py`, NOT `backend/src/main.py`"""
 
-**Output format (template – use exactly these markers):**
-
-For each file, write:
-## FILE path/to/file.ext ##
-<full file content>
-## FILE path/to/next.ext ##
-<full file content>
-## SUMMARY ##
-what you implemented
-## END SUMMARY ##
-
-- Use "## FILE <path> ##" at the start of each file; the next "## FILE " or "## SUMMARY ##" ends the previous file.
-- Do not put the exact line "## FILE " or "## SUMMARY ##" inside file content (use a comment placeholder if needed).
-- All imports must be valid; all referenced modules must be included.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+EXECUTION_PROMPT = build_execution_prompt(
+    engineer_intro="You are an expert Senior Backend Software Engineer implementing production-quality code.",
+    coding_standards=CODING_STANDARDS,
+    has_language_conventions=True,
+    file_noun="code files",
+    path_rules=_EXECUTION_PATH_RULES,
 )
 
 # ---------------------------------------------------------------------------
@@ -283,48 +232,17 @@ overview of all fixes
 )
 
 # Single-issue problem-solving: one issue at a time to keep prompts small.
-PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = (
-    """You are an expert Problem-Solving Specialist. Fix exactly ONE issue.
-
-"""
-    + CODING_STANDARDS
-    + """
-
-{language_conventions}
-
-**Single issue to fix:**
-- Source: {source}
-- Severity: {severity}
-- Description: {description}
-- File: {file_path}
-- Recommendation: {recommendation}
-
-**Relevant code (only the file(s) involved):**
-{current_code}
-
-**Your steps:**
-1. Identify the root cause of this issue.
-2. Implement the fix by outputting the complete updated file(s).
-
-**Output format (template – use exactly these markers):**
-
-## ROOT_CAUSE ##
-One or two sentences: why this issue occurs.
-## END ROOT_CAUSE ##
+_SINGLE_ISSUE_FILE_OUTPUT_BLOCK = """\
 ## FILE path/to/file.ext ##
 <full updated file content>
 ## FILE path/to/next.ext ##
 <content if you need to change more than one file>
-## RESOLVED ##
-true
-## END RESOLVED ##
-## SUMMARY ##
-one sentence: what you changed
-## END SUMMARY ##
-
-- Output only the file(s) you change. Use "## FILE <path> ##" for each.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+
+PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = build_problem_solving_single_issue_prompt(
+    coding_standards=CODING_STANDARDS,
+    has_language_conventions=True,
+    file_output_block=_SINGLE_ISSUE_FILE_OUTPUT_BLOCK,
 )
 
 # ---------------------------------------------------------------------------

@@ -3,20 +3,39 @@ Execution phase: run each microtask via tool agents or general code gen.
 
 No code from frontend_team is used. Uses template-based output parsing.
 Supports per-microtask review gates with configurable retry behavior.
+
+The non-gated helpers (issue dedup, review-dependency container, file writer,
+general microtask coder, and ``run_execution``) are shared across the code-v2
+teams (see ``shared/phases/execution.py``); this module wires in the frontend
+team's models/prompt/profile and keeps the gated
+``run_execution_with_review_gates`` orchestration, which interlocks with the
+frontend ``review.py``.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
-from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+from software_engineering_team.shared.phases.execution import (
+    ReviewDependencies,
+    _run_general_microtask_impl,
+    _write_microtask_files,
+    run_execution_impl,
+    write_microtask_output_or_fail,
+)
+from software_engineering_team.shared.repo_writer import UnsafeRepoPathError
+from software_engineering_team.shared.strands_model import (
+    LlmRunner,
+    resolve_text_mode_strands_model,
+)
 
+from .. import models as _models
 from ..models import (
     ExecutionResult,
     Microtask,
@@ -24,7 +43,6 @@ from ..models import (
     MicrotaskReviewFailedError,
     MicrotaskStatus,
     PlanningResult,
-    ReviewIssue,
     ReviewResult,
     ToolAgentInput,
     ToolAgentKind,
@@ -32,44 +50,24 @@ from ..models import (
 )
 from ..output_templates import parse_files_and_summary_template
 from ..prompts import EXECUTION_PROMPT
+from ._profile import PROFILE
 
 logger = logging.getLogger(__name__)
 
 ToolAgentRunner = Callable[[ToolAgentInput], ToolAgentOutput]
 
 
-def _dedup_issues(
-    issues: List[ReviewIssue], seen: set[tuple[str, str]]
-) -> List[ReviewIssue]:
-    """Remove duplicate issues across review cycles based on (file_path, description)."""
-    unique: List[ReviewIssue] = []
-    for issue in issues:
-        key = (issue.file_path or "", issue.description or "")
-        if key not in seen:
-            seen.add(key)
-            unique.append(issue)
-    return unique
+def _llm_runner() -> LlmRunner:
+    """Build the LLM runner from this module's globals so tests can monkeypatch them."""
+    return LlmRunner(agent_factory=Agent, resolve_model=resolve_text_mode_strands_model)
 
 
-class ReviewDependencies:
-    """Container for all review-related agents and callbacks."""
-
-    def __init__(
-        self,
-        *,
-        build_verifier: Optional[Callable[..., Tuple[bool, str]]] = None,
-        qa_agent: Any = None,
-        security_agent: Any = None,
-        code_review_agent: Any = None,
-        linting_tool_agent: Any = None,
-        tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
-    ) -> None:
-        self.build_verifier = build_verifier
-        self.qa_agent = qa_agent
-        self.security_agent = security_agent
-        self.code_review_agent = code_review_agent
-        self.linting_tool_agent = linting_tool_agent
-        self.tool_agents = tool_agents or {}
+__all__ = [
+    "ReviewDependencies",
+    "ToolAgentRunner",
+    "run_execution",
+    "run_execution_with_review_gates",
+]
 
 
 def _run_general_microtask(
@@ -81,21 +79,23 @@ def _run_general_microtask(
     existing_code: str,
     architecture: Optional[SystemArchitecture],
 ) -> Dict[str, str]:
-    """Use the LLM to implement a general (non-specialist) microtask."""
-    arch_ctx = ""
-    if architecture:
-        arch_ctx = architecture.overview
-    prompt = EXECUTION_PROMPT.format(
-        microtask_description=microtask.description or microtask.title,
-        requirements=task.requirements or task.description,
-        existing_code=existing_code[:8000] if existing_code else "(none)",
-        architecture_context=arch_ctx or "(none)",
-    )
-    raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
-    data = parse_files_and_summary_template(raw)
-    files = data.get("files") or {}
+    """Use the LLM to implement a general (non-specialist) microtask (frontend models).
 
-    return files
+    Delegates to the shared implementation; keeps ``Agent`` /
+    ``resolve_text_mode_strands_model`` as this module's LLM boundary.
+    """
+    return _run_general_microtask_impl(
+        llm=llm,
+        microtask=microtask,
+        task=task,
+        language=language,
+        existing_code=existing_code,
+        architecture=architecture,
+        execution_prompt=EXECUTION_PROMPT,
+        parse_files_and_summary=parse_files_and_summary_template,
+        profile=PROFILE,
+        runner=_llm_runner(),
+    )
 
 
 def run_execution(
@@ -110,102 +110,24 @@ def run_execution(
     progress_callback: Optional[Callable[[int, int, int, str, str, str], None]] = None,
     only_microtask_ids: Optional[List[str]] = None,
 ) -> ExecutionResult:
+    """Execute microtasks in dependency order (frontend models).
+
+    Delegates the non-gated loop to ``run_execution_impl``; see that shared
+    implementation for the full contract.
     """
-    Execute microtasks in dependency order.
-
-    tool_runners maps ToolAgentKind to callable(ToolAgentInput) -> ToolAgentOutput.
-    For microtasks whose tool_agent has no runner, fall back to general LLM code gen.
-    ``progress_callback(current_index, completed, total, title, microtask_phase, phase_detail)`` is called during execution.
-    ``current_index`` is the 1-based index of the currently executing microtask.
-    ``microtask_phase`` is one of: "coding", "review", "problem_solving", "completed".
-    ``phase_detail`` provides human-readable detail about the current action.
-    """
-    runners = tool_runners or {}
-    all_files: Dict[str, str] = {}
-    microtasks = list(planning_result.microtasks)
-    if only_microtask_ids is not None:
-        id_set = set(only_microtask_ids)
-        microtasks = [mt for mt in microtasks if mt.id in id_set]
-    completed_ids: set[str] = set()
-    total = len(microtasks)
-
-    for idx, mt in enumerate(microtasks):
-        deps_met = all(d in completed_ids for d in mt.depends_on)
-        if not deps_met:
-            logger.warning(
-                "[%s] Microtask %s has unmet deps %s — running anyway",
-                task.id,
-                mt.id,
-                mt.depends_on,
-            )
-
-        mt.status = MicrotaskStatus.IN_PROGRESS
-        logger.info(
-            "[%s] Execution: microtask %d/%d — %s (%s)",
-            task.id,
-            idx + 1,
-            total,
-            mt.id,
-            mt.tool_agent.value,
-        )
-
-        if progress_callback:
-            progress_callback(
-                idx + 1,
-                len(completed_ids),
-                total,
-                mt.title or mt.id,
-                "coding",
-                "Generating code...",
-            )
-
-        try:
-            runner = runners.get(mt.tool_agent)
-            if runner is not None:
-                inp = ToolAgentInput(
-                    microtask=mt,
-                    repo_path=str(repo_path),
-                    existing_code=existing_code[:6000] if existing_code else "",
-                    language=planning_result.language,
-                )
-                out = runner(inp)
-                mt.output_files = out.files
-                mt.notes = out.summary
-            else:
-                files = _run_general_microtask(
-                    llm=llm,
-                    microtask=mt,
-                    task=task,
-                    language=planning_result.language,
-                    existing_code=existing_code,
-                    architecture=architecture,
-                )
-                mt.output_files = files
-
-            all_files.update(mt.output_files)
-            mt.status = MicrotaskStatus.COMPLETED
-            completed_ids.add(mt.id)
-        except Exception as exc:
-            logger.error("[%s] Microtask %s failed: %s", task.id, mt.id, exc)
-            mt.status = MicrotaskStatus.FAILED
-            mt.notes = str(exc)
-
-        if progress_callback:
-            progress_callback(
-                idx + 1, len(completed_ids), total, mt.title or mt.id, "completed", ""
-            )
-
-    summary = f"Executed {len(completed_ids)}/{total} microtasks; {len(all_files)} files produced."
-    return ExecutionResult(files=all_files, microtasks=microtasks, summary=summary)
-
-
-def _write_microtask_files(repo_path: Path, files: Dict[str, str]) -> None:
-    """Write microtask output files to the repository."""
-    for rel_path, content in files.items():
-        safe_rel_path = rel_path.lstrip("/")
-        file_path = repo_path / safe_rel_path
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(content, encoding="utf-8")
+    return run_execution_impl(
+        llm=llm,
+        task=task,
+        planning_result=planning_result,
+        repo_path=repo_path,
+        architecture=architecture,
+        existing_code=existing_code,
+        tool_runners=tool_runners,
+        progress_callback=progress_callback,
+        only_microtask_ids=only_microtask_ids,
+        models=_models,
+        run_general_microtask=_run_general_microtask,
+    )
 
 
 def run_execution_with_review_gates(
@@ -339,7 +261,23 @@ def run_execution_with_review_gates(
                 mt.output_files = files
 
             microtask_files = dict(mt.output_files)
-            _write_microtask_files(repo_path, microtask_files)
+            # Track files this microtask introduced for rollback on failure.
+            microtask_file_keys = set(microtask_files.keys())
+            # Route the initial write through the same guarded helper the review
+            # cycles use, so an unsafe path in the first emission is a handled
+            # REVIEW_FAILED (rolled back + recorded in review_failed_ids so
+            # dependents SKIP) rather than a bare FAILED that skips that bookkeeping.
+            if not write_microtask_output_or_fail(
+                repo_path,
+                microtask_files,
+                mt=mt,
+                task_id=task_id,
+                review_failed_ids=review_failed_ids,
+                all_files=all_files,
+                microtask_file_keys=microtask_file_keys,
+                review_failed_status=MicrotaskStatus.REVIEW_FAILED,
+            ):
+                continue
             all_files.update(microtask_files)
 
         except Exception as exc:
@@ -355,8 +293,6 @@ def run_execution_with_review_gates(
         phase_failed = False
         total_cycles = 0
         max_total_cycles = config.max_retries * 3
-        # Track files this microtask introduced for rollback on failure
-        microtask_file_keys = set(microtask_files.keys())
         # Initialize review results so they're always defined for max-cycles check
         sec_review = ReviewResult(passed=True, summary="")
 
@@ -437,7 +373,18 @@ def run_execution_with_review_gates(
                 )
 
                 microtask_files = ps_result.files
-                _write_microtask_files(repo_path, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    microtask_file_keys=microtask_file_keys,
+                    review_failed_status=MicrotaskStatus.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
                 mt.output_files = microtask_files
                 all_files.update(microtask_files)
 
@@ -551,7 +498,18 @@ def run_execution_with_review_gates(
                 )
 
                 microtask_files = ps_result.files
-                _write_microtask_files(repo_path, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    microtask_file_keys=microtask_file_keys,
+                    review_failed_status=MicrotaskStatus.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
                 mt.output_files = microtask_files
                 all_files.update(microtask_files)
 
@@ -624,7 +582,18 @@ def run_execution_with_review_gates(
                 )
 
                 microtask_files = ps_result.files
-                _write_microtask_files(repo_path, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    microtask_file_keys=microtask_file_keys,
+                    review_failed_status=MicrotaskStatus.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
                 mt.output_files = microtask_files
                 all_files.update(microtask_files)
 
@@ -651,8 +620,7 @@ def run_execution_with_review_gates(
                 all_files.pop(fk, None)
             # Security failures always stop regardless of on_failure setting
             _force_stop = config.on_failure == "stop" or (
-                getattr(config, "security_failure_always_stops", True)
-                and not sec_review.passed
+                getattr(config, "security_failure_always_stops", True) and not sec_review.passed
             )
             if _force_stop:
                 raise MicrotaskReviewFailedError(
@@ -720,11 +688,21 @@ def run_execution_with_review_gates(
             )
 
             # Update files with refined documentation
+            # A rejected (unsafe) doc path is best-effort: log and skip it — the
+            # microtask still completes.
             if self_review_result.documentation:
-                microtask_files.update(self_review_result.documentation)
-                _write_microtask_files(repo_path, self_review_result.documentation)
-                mt.output_files = microtask_files
-                all_files.update(self_review_result.documentation)
+                try:
+                    _write_microtask_files(repo_path, self_review_result.documentation)
+                    microtask_files.update(self_review_result.documentation)
+                    mt.output_files = microtask_files
+                    all_files.update(self_review_result.documentation)
+                except UnsafeRepoPathError as exc:
+                    logger.warning(
+                        "[%s] Microtask %s: unsafe documentation path rejected, skipping: %s",
+                        task_id,
+                        mt.id,
+                        exc,
+                    )
 
             logger.info(
                 "[%s] Microtask %s: documentation self-review complete after %d iterations (score: %.2f)",
