@@ -203,6 +203,65 @@ def test_run_coordinator_with_multi_file_code_merges_chunk_summaries() -> None:
     assert "Chunk 2" in result.summary
 
 
+class _CompactionCountingClient(DummyLLMClient):
+    """Counts LLM compaction calls (``complete`` with the compactor prompt).
+
+    Chunk review still flows through the inherited dummy behavior; only the
+    compaction path (``compact_text`` → ``_compact_single`` → ``complete``) is
+    tallied, identified by the fixed compactor-prompt marker.
+    """
+
+    _COMPACTOR_MARKER = "precise technical content compactor"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.compaction_calls = 0
+        self._lock = threading.Lock()
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:  # type: ignore[override]
+        if self._COMPACTOR_MARKER in prompt:
+            with self._lock:
+                self.compaction_calls += 1
+            return "COMPACTED"
+        return super().complete(prompt, **kwargs)
+
+
+def test_shared_context_compaction_is_memoized_across_runs() -> None:
+    """The oversized spec/architecture/existing-codebase are compacted once and
+    reused on the next coordinator run (the review→fix→re-review loop passes the
+    same shared context each cycle)."""
+    from software_engineering_team.shared.models import SystemArchitecture
+
+    over_budget = "specification detail line. " * 4000  # well over any budget
+    arch = SystemArchitecture(
+        overview="architecture overview line. " * 4000,
+        architecture_document="# Arch",
+        components=[],
+        decisions=[],
+        diagrams={},
+    )
+
+    def _make_input() -> CodeReviewInput:
+        return CodeReviewInput(
+            code="### app/main.py ###\n" + ("x" * 500),
+            task_description="Add feature",
+            language="python",
+            spec_content=over_budget,
+            architecture=arch,
+            existing_codebase="prior codebase line. " * 4000,
+        )
+
+    client = _CompactionCountingClient()
+
+    run_coordinator(client, _make_input())
+    first_run_calls = client.compaction_calls
+    assert first_run_calls > 0  # compaction actually fired on the cold run
+
+    run_coordinator(client, _make_input())
+    # Second run reuses the memoized compactions — no additional compaction calls.
+    assert client.compaction_calls == first_run_calls
+
+
 def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
     """Coordinator merges issues across chunks; a single critical issue
     propagates to ``approved=False``."""

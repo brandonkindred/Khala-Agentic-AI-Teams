@@ -121,6 +121,17 @@ rate window otherwise. The provider list is the sole source of LLM resolution: w
 `POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError` (there
 is no single-provider env fallback).
 
+### LLM_COMPACTION_CACHE_SIZE
+Capacity of the process-global memoization cache for `compact_text` (`llm_service/compaction.py`),
+default **256**. `compact_text` compacts oversized text (spec, architecture overview, existing
+codebase, etc.) with an LLM; the result is deterministic given `(model, budget, content)`, so it is
+cached in a bounded LRU keyed on that triple and reused on repeated identical calls — most notably
+the code review agent's review→fix→re-review loop, which hands the same shared context to every task
+and every cycle. Only genuine full compactions are cached; every fallback path (LLM failure, empty
+result, or a chunked run with any degraded chunk) is retried rather than frozen. Set to `0` to
+disable the cache (pure passthrough); a value below 0 is floored to 0, and unparseable values fall
+back to the default.
+
 ---
 
 ## Temporal, Security, and Logging
