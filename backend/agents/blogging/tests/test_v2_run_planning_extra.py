@@ -274,6 +274,51 @@ def test_plan_critic_llm_client_no_override_returns_base(monkeypatch) -> None:
     assert v2.plan_critic_llm_client(sentinel) is sentinel
 
 
+def test_planning_llm_client_override_reaches_strands_backing(monkeypatch) -> None:
+    """End-to-end: the pipeline passes a Strands LLMClientModel, so the override must
+    reach the backing failover client (rebuilding the model) rather than no-op."""
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    from llm_service import LLMClientModel
+    from llm_service.factory import FailoverLLMClient
+
+    monkeypatch.setattr(v2, "planning_model_override", lambda: "override-model")
+    backing = FailoverLLMClient(lambda: [], lambda e, r, mo=None: None, lambda e, x: None)
+    model = LLMClientModel(backing, agent_key="blog", response_format="text")
+    out = v2.planning_llm_client(model)
+    assert isinstance(out, LLMClientModel)
+    assert out is not model
+    assert isinstance(out.client, FailoverLLMClient)
+    assert out.client._model_override == "override-model"
+    # The rebuilt model carries the original config (e.g. response format).
+    assert out.get_config()["response_format"] == "text"
+
+
+def test_plan_critic_llm_client_override_reaches_strands_backing(monkeypatch) -> None:
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    from llm_service import LLMClientModel
+    from llm_service.factory import FailoverLLMClient
+
+    monkeypatch.setattr(v2, "plan_critic_model_override", lambda: "critic-model")
+    backing = FailoverLLMClient(lambda: [], lambda e, r, mo=None: None, lambda e, x: None)
+    out = v2.plan_critic_llm_client(LLMClientModel(backing, agent_key="blog"))
+    assert isinstance(out, LLMClientModel)
+    assert out.client._model_override == "critic-model"
+
+
+def test_planning_llm_client_strands_dummy_backing_unchanged(monkeypatch) -> None:
+    """A Strands model over a Dummy backing has no failover client to pin, so the
+    same model instance is returned (no needless rebuild)."""
+    import agent_implementations.blog_writing_process_v2 as v2
+
+    from llm_service import DummyLLMClient, LLMClientModel
+
+    monkeypatch.setattr(v2, "planning_model_override", lambda: "override-model")
+    model = LLMClientModel(DummyLLMClient(), agent_key="blog")
+    assert v2.planning_llm_client(model) is model
+
+
 def test_build_plan_critic_agent_disabled_returns_none(monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
 
