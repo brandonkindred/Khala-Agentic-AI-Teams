@@ -114,3 +114,38 @@ def test_classify_intent_does_not_swallow_missing_provider():
     orch = PersonalAssistantOrchestrator(_UnconfiguredLLM())
     with pytest.raises(LLMNotConfiguredError):
         orch.classify_intent("hello")
+
+
+def test_specialist_agent_does_not_swallow_missing_provider(tmp_path):
+    """Direct specialist-agent LLM calls must re-raise ``LLMNotConfiguredError``
+    rather than returning a degraded success (the direct-endpoint path)."""
+    from ..task_agent.agent import TaskAgent
+    from ..task_agent.models import AddItemsFromTextRequest
+
+    agent = TaskAgent(llm=_UnconfiguredLLM(), storage_dir=str(tmp_path))
+    with pytest.raises(LLMNotConfiguredError):
+        agent.add_items_from_text(
+            AddItemsFromTextRequest(user_id="u1", list_id="l1", text="milk, bread")
+        )
+
+
+def test_endpoint_returns_503_when_no_provider(tmp_path, monkeypatch):
+    """The FastAPI exception handler maps a propagated ``LLMNotConfiguredError``
+    to a 503 with an ``llm_not_configured`` marker."""
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    from ..api.main import _llm_not_configured_handler
+
+    async def _run():
+        request = Request({"type": "http", "method": "POST", "headers": [], "path": "/x"})
+        return await _llm_not_configured_handler(
+            request, LLMNotConfiguredError("No LLM provider is configured.")
+        )
+
+    import asyncio
+
+    response = asyncio.run(_run())
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 503
+    assert b"llm_not_configured" in response.body

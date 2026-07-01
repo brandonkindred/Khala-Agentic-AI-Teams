@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from llm_service import LLMNotConfiguredError
+
 from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
 from .models import (
@@ -124,6 +126,8 @@ class DocGeneratorAgent:
                 think=False,
                 objective="generate process doc",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to generate process doc (JSON extraction failed):\n%s", e)
             return GeneratedDocument(
@@ -185,6 +189,8 @@ class DocGeneratorAgent:
                 think=False,
                 objective="generate checklist",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to generate checklist (JSON extraction failed):\n%s", e)
             return GeneratedChecklist(
@@ -239,6 +245,8 @@ class DocGeneratorAgent:
                 think=False,
                 objective="generate template",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to generate template (JSON extraction failed):\n%s", e)
             return GeneratedTemplate(
@@ -314,6 +322,8 @@ class DocGeneratorAgent:
                 think=False,
                 objective="generate SOP",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to generate SOP (JSON extraction failed):\n%s", e)
             return GeneratedDocument(
@@ -383,6 +393,8 @@ class DocGeneratorAgent:
                 think=False,
                 objective="generate meeting agenda",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to generate meeting agenda (JSON extraction failed):\n%s", e)
             return GeneratedDocument(
