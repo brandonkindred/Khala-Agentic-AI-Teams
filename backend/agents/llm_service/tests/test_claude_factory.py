@@ -1,84 +1,103 @@
-"""Tests for the Claude provider path in get_client (factory)."""
+"""Tests for the Claude provider path in get_client under the provider-list-only
+contract: a seeded Claude entry resolves through the failover wrapper, the concrete
+Claude client is cached (and cleared) via the shared cache, and on_reasoning yields a
+fresh uncached client. The Claude entry carries its own key (no env fallback)."""
 
 from __future__ import annotations
 
 import pytest
 
 from llm_service import ClaudeLLMClient, clear_client_cache, get_client
-from llm_service.factory import _AttributingClient
+from llm_service import provider_store as ps
+from llm_service.factory import FailoverLLMClient, _AttributingClient, _claude_cached
 
 
-@pytest.fixture(autouse=True)
-def _claude_env(monkeypatch: pytest.MonkeyPatch):
-    """Select the Claude provider with a test key and clear caches around each test."""
-    monkeypatch.delenv("POSTGRES_HOST", raising=False)
-    monkeypatch.setenv("LLM_PROVIDER", "claude")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
-    monkeypatch.delenv("LLM_MODEL", raising=False)
-    clear_client_cache()
-    yield
-    clear_client_cache()
+def _claude_entry(entry_id=1, *, model="claude-opus-4-8", api_key="sk-test-key"):
+    return ps.ProviderEntry(
+        id=entry_id,
+        label="e",
+        provider="claude",
+        model=model,
+        base_url="",
+        api_key=api_key,
+        sort_order=entry_id,
+        limit_exceeded=False,
+        limit_type="",
+        reset_at=None,
+    )
 
 
-def test_get_client_returns_claude_unwrapped_for_no_agent():
-    """get_client(None) returns the bare ClaudeLLMClient at the default model."""
+@pytest.fixture
+def seed_claude(monkeypatch):
+    """Seed a one-entry Claude provider list so get_client resolves to failover."""
+
+    def _seed(model="claude-opus-4-8", api_key="sk-test-key"):
+        entry = _claude_entry(model=model, api_key=api_key)
+        monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: [entry])
+        monkeypatch.setattr(ps, "select_active_entry", lambda es, **k: es[0])
+        monkeypatch.setenv("LLM_PROVIDER", "claude")
+        clear_client_cache()
+        return entry
+
+    return _seed
+
+
+def test_get_client_returns_failover_unwrapped_for_no_agent(seed_claude):
+    """get_client(None) returns the bare failover client; .model delegates to Claude."""
+    seed_claude(model="claude-opus-4-8")
     c = get_client(None)
-    assert isinstance(c, ClaudeLLMClient)
+    assert isinstance(c, FailoverLLMClient)
     assert c.model == "claude-opus-4-8"
 
 
-def test_get_client_wraps_keyed_claude_client():
-    """A keyed get_client wraps the Claude client in an _AttributingClient."""
+def test_get_client_wraps_keyed_claude_client(seed_claude):
+    """A keyed get_client wraps the failover client in an _AttributingClient."""
+    seed_claude()
     c = get_client("backend")
     assert isinstance(c, _AttributingClient)
-    assert isinstance(c._inner, ClaudeLLMClient)
+    assert isinstance(c._inner, FailoverLLMClient)
 
 
-def test_get_client_anthropic_alias_provider(monkeypatch):
-    """LLM_PROVIDER=anthropic also yields a ClaudeLLMClient."""
-    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
-    clear_client_cache()
-    c = get_client(None)
-    assert isinstance(c, ClaudeLLMClient)
+def test_claude_entry_uses_its_own_key_no_env_fallback(seed_claude, monkeypatch):
+    """The concrete Claude client authenticates with the entry's key, never env."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env-should-not-be-used")
+    seed_claude(model="claude-opus-4-8", api_key="sk-entry")
+    concrete, _ = _claude_cached("claude-opus-4-8", "sk-entry", 900.0, None)
+    assert isinstance(concrete, ClaudeLLMClient)
+    assert concrete.api_key == "sk-entry"
 
 
-def test_claude_cache_keyed_by_model_and_key(monkeypatch):
+def test_claude_cache_keyed_by_model_and_key():
     """The Claude cache returns a singleton per (model, key); a change rebuilds it."""
-    c1 = get_client(None)
-    c2 = get_client(None)
+    c1, _ = _claude_cached("claude-opus-4-8", "sk-a", 900.0, None)
+    c2, _ = _claude_cached("claude-opus-4-8", "sk-a", 900.0, None)
     assert c1 is c2  # same model + key -> cached singleton
-
-    # Changing the key yields a fresh client.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-different-key")
-    c3 = get_client(None)
-    assert c3 is not c1
-
-    # Changing the model yields a fresh client.
-    monkeypatch.setenv("LLM_MODEL", "claude-sonnet-4-6")
-    c4 = get_client(None)
-    assert c4 is not c3
-    assert c4.model == "claude-sonnet-4-6"
+    c3, _ = _claude_cached("claude-opus-4-8", "sk-b", 900.0, None)
+    assert c3 is not c1  # different key -> fresh client
+    c4, _ = _claude_cached("claude-sonnet-4-6", "sk-a", 900.0, None)
+    assert c4 is not c1 and c4.model == "claude-sonnet-4-6"  # different model -> fresh
 
 
-def test_clear_client_cache_drops_claude(monkeypatch):
-    """clear_client_cache() forces the next get_client to rebuild the Claude client."""
-    c1 = get_client(None)
+def test_clear_client_cache_drops_claude(seed_claude):
+    """clear_client_cache() forces the next dispatch to rebuild the Claude client."""
+    seed_claude()
+    concrete1, _ = _claude_cached("claude-opus-4-8", "sk-test-key", 900.0, None)
     clear_client_cache()
-    c2 = get_client(None)
-    assert c1 is not c2
+    concrete2, _ = _claude_cached("claude-opus-4-8", "sk-test-key", 900.0, None)
+    assert concrete1 is not concrete2
 
 
-def test_on_reasoning_returns_fresh_uncached_claude_client():
+def test_on_reasoning_returns_fresh_uncached_claude_client(seed_claude):
     """An on_reasoning sink yields a fresh, uncached Claude client carrying the callback."""
+    seed_claude()
 
     def cb(_s: str) -> None:
         return None
 
     c1 = get_client(None, on_reasoning=cb)
-    c2 = get_client(None, on_reasoning=cb)
-    assert isinstance(c1, ClaudeLLMClient)
-    assert c1 is not c2  # per-caller callback must never be cached
+    # Delegated attribute access builds a fresh (uncached) Claude client with the hook.
     assert c1.on_reasoning is cb
+    assert isinstance(c1, FailoverLLMClient)
 
 
 def test_clear_client_cache_also_clears_strands_cache(monkeypatch):

@@ -1,5 +1,6 @@
 import { Routes } from '@angular/router';
 import { AppShellComponent } from './components/app-shell/app-shell.component';
+import { llmConfiguredGuard } from './core/llm-configured.guard';
 
 // All feature routes are lazily loaded so the initial bundle ships only the app
 // shell; each dashboard (and its Angular Material deps) is fetched on first
@@ -8,6 +9,9 @@ export const routes: Routes = [
   {
     path: '',
     component: AppShellComponent,
+    // Prompt the operator to configure an LLM when the provider list is empty
+    // (runs on every top-level navigation; self-skips /llm-config; never blocks).
+    canActivateChild: [llmConfiguredGuard],
     children: [
       { path: '', redirectTo: '/dashboard', pathMatch: 'full' },
       {

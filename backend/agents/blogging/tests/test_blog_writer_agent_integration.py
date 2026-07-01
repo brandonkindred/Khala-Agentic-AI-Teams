@@ -24,6 +24,7 @@ from shared.content_plan import (
 )
 
 from llm_service import (
+    LLMNotConfiguredError,
     LLMPermanentError,
     LLMTemporaryError,
     OllamaLLMClient,
@@ -95,7 +96,10 @@ def test_writer_agent_with_ollama_produces_real_content() -> None:
     Run the writer agent with the configured Ollama LLM and verify the output
     contains real blog-like content using fuzzy rules (length, structure, sentences).
     """
-    client = get_client("blog")
+    try:
+        client = get_client("blog")
+    except LLMNotConfiguredError:
+        pytest.skip("No LLM provider configured; integration test expects an Ollama provider entry")
     if not isinstance(unwrap_client(client), OllamaLLMClient):
         pytest.skip("LLM client is not Ollama; integration test expects Ollama")
 
