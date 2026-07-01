@@ -27,7 +27,9 @@ from software_engineering_team.shared.phases.execution import (
     _run_general_microtask_impl,
     _write_microtask_files,
     run_execution_impl,
+    write_microtask_output_or_fail,
 )
+from software_engineering_team.shared.repo_writer import UnsafeRepoPathError
 from software_engineering_team.shared.strands_model import (
     LlmRunner,
     resolve_text_mode_strands_model,
@@ -357,7 +359,18 @@ def run_execution_with_review_gates(
                 )
 
                 microtask_files = ps_result.files
-                _write_microtask_files(repo_path, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    microtask_file_keys=microtask_file_keys,
+                    review_failed_status=MicrotaskStatus.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
                 mt.output_files = microtask_files
                 all_files.update(microtask_files)
 
@@ -471,7 +484,18 @@ def run_execution_with_review_gates(
                 )
 
                 microtask_files = ps_result.files
-                _write_microtask_files(repo_path, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    microtask_file_keys=microtask_file_keys,
+                    review_failed_status=MicrotaskStatus.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
                 mt.output_files = microtask_files
                 all_files.update(microtask_files)
 
@@ -544,7 +568,18 @@ def run_execution_with_review_gates(
                 )
 
                 microtask_files = ps_result.files
-                _write_microtask_files(repo_path, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    microtask_file_keys=microtask_file_keys,
+                    review_failed_status=MicrotaskStatus.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
                 mt.output_files = microtask_files
                 all_files.update(microtask_files)
 
@@ -639,11 +674,21 @@ def run_execution_with_review_gates(
             )
 
             # Update files with refined documentation
+            # A rejected (unsafe) doc path is best-effort: log and skip it — the
+            # microtask still completes.
             if self_review_result.documentation:
-                microtask_files.update(self_review_result.documentation)
-                _write_microtask_files(repo_path, self_review_result.documentation)
-                mt.output_files = microtask_files
-                all_files.update(self_review_result.documentation)
+                try:
+                    _write_microtask_files(repo_path, self_review_result.documentation)
+                    microtask_files.update(self_review_result.documentation)
+                    mt.output_files = microtask_files
+                    all_files.update(self_review_result.documentation)
+                except UnsafeRepoPathError as exc:
+                    logger.warning(
+                        "[%s] Microtask %s: unsafe documentation path rejected, skipping: %s",
+                        task_id,
+                        mt.id,
+                        exc,
+                    )
 
             logger.info(
                 "[%s] Microtask %s: documentation self-review complete after %d iterations (score: %.2f)",

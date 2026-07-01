@@ -16,6 +16,16 @@ from .git_utils import write_files_and_commit
 
 logger = logging.getLogger(__name__)
 
+
+class UnsafeRepoPathError(ValueError):
+    """Raised by :func:`write_repo_text_files` for a path that escapes the repo.
+
+    Subclasses ``ValueError`` for backward compatibility; the dedicated type lets
+    callers catch *only* an unsafe-path rejection (traversal or empty key) and
+    convert it into a handled failure, without masking unrelated ``ValueError``s.
+    """
+
+
 # Distinct error message when agent produced no file changes (LLM returned empty files dict)
 NO_FILES_TO_WRITE_MSG = "No files to write"
 
@@ -337,11 +347,11 @@ def write_repo_text_files(repo_path: Path, files: Dict[str, str]) -> None:
     for rel_path, content in files.items():
         safe_rel_path = rel_path.lstrip("/")
         if not safe_rel_path:
-            raise ValueError(f"File path must not be empty: {rel_path!r}")
+            raise UnsafeRepoPathError(f"File path must not be empty: {rel_path!r}")
         full_path = (root / safe_rel_path).resolve()
         # Containment via ``parents`` avoids the ``str.startswith`` sibling-prefix
         # pitfall (e.g. ``/repo`` vs ``/repo-evil``).
         if full_path != root and root not in full_path.parents:
-            raise ValueError(f"Path traversal detected: {rel_path}")
+            raise UnsafeRepoPathError(f"Path traversal detected: {rel_path}")
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")

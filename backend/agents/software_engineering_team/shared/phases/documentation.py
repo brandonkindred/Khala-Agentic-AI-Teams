@@ -16,6 +16,7 @@ from typing import Any, Dict
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.repo_writer import UnsafeRepoPathError
 from software_engineering_team.shared.repo_writer import write_repo_text_files as _write_files
 
 logger = logging.getLogger(__name__)
@@ -124,8 +125,16 @@ def run_documentation_phase_impl(
             break
 
         if fix_result.files:
+            try:
+                _write_files(repo_path, fix_result.files)
+            except UnsafeRepoPathError as exc:
+                logger.warning(
+                    "[%s] Documentation fix produced an unsafe file path; stopping: %s",
+                    task_id,
+                    exc,
+                )
+                break
             current_files.update(fix_result.files)
-            _write_files(repo_path, fix_result.files)
             total_issues_fixed += len(issues)
             logger.info(
                 "[%s] Documentation fixed %d issue(s), updated %d file(s)",

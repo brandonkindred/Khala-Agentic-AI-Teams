@@ -28,7 +28,10 @@ from software_engineering_team.shared.prompts import (
     build_planning_prompt,
     build_problem_solving_single_issue_prompt,
 )
-from software_engineering_team.shared.repo_writer import write_repo_text_files
+from software_engineering_team.shared.repo_writer import (
+    UnsafeRepoPathError,
+    write_repo_text_files,
+)
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
 from software_engineering_team.tests.test_helpers import init_repo_with_existing_development
@@ -532,10 +535,57 @@ def test_write_repo_text_files_rejects_traversal(tmp_path: Path):
     assert (tmp_path / "pkg" / "mod.py").read_text(encoding="utf-8") == "content"
     assert (tmp_path / "top.txt").read_text(encoding="utf-8") == "t"
 
-    with pytest.raises(ValueError, match="Path traversal"):
+    with pytest.raises(UnsafeRepoPathError, match="Path traversal"):
         write_repo_text_files(tmp_path, {"../escape.py": "x"})
     # A sibling-prefixed directory must not be mistaken for containment.
     assert not (tmp_path.parent / "escape.py").exists()
+
+
+def test_write_repo_text_files_rejects_empty_path(tmp_path: Path):
+    """Write repo text files rejects an empty relative path."""
+    with pytest.raises(UnsafeRepoPathError, match="must not be empty"):
+        write_repo_text_files(tmp_path, {"/": "x"})
+
+
+def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
+    """Write microtask output helper: writes on a safe path, review-fails on unsafe."""
+    mt = SimpleNamespace(id="mt-1", status="in_progress", notes="")
+    review_failed_ids: set = set()
+    all_files = {"kept.py": "k", "gen.py": "g"}
+
+    # Safe path → writes and returns True.
+    ok = sh_exec.write_microtask_output_or_fail(
+        tmp_path,
+        {"gen.py": "g2"},
+        mt=mt,
+        task_id="t1",
+        review_failed_ids=review_failed_ids,
+        all_files=all_files,
+        microtask_file_keys={"gen.py"},
+        review_failed_status="REVIEW_FAILED",
+    )
+    assert ok is True
+    assert (tmp_path / "gen.py").read_text(encoding="utf-8") == "g2"
+    assert not review_failed_ids
+
+    # Unsafe path → no exception, marks review-failed, rolls back this microtask's keys.
+    rejected = sh_exec.write_microtask_output_or_fail(
+        tmp_path,
+        {"../evil.py": "x"},
+        mt=mt,
+        task_id="t1",
+        review_failed_ids=review_failed_ids,
+        all_files=all_files,
+        microtask_file_keys={"gen.py"},
+        review_failed_status="REVIEW_FAILED",
+    )
+    assert rejected is False
+    assert mt.status == "REVIEW_FAILED"
+    assert "mt-1" in review_failed_ids
+    assert (
+        "gen.py" not in all_files and "kept.py" in all_files
+    )  # only this microtask's keys rolled back
+    assert not (tmp_path.parent / "evil.py").exists()
 
 
 def _issue(**kw):

@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
-from software_engineering_team.shared.repo_writer import write_repo_text_files
+from software_engineering_team.shared.repo_writer import UnsafeRepoPathError, write_repo_text_files
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.strands_model import LlmRunner
 
@@ -74,6 +74,48 @@ class ReviewDependencies:
 # Writing microtask output files is the same guarded operation as the
 # documentation phase's writer — both delegate to the one shared implementation.
 _write_microtask_files = write_repo_text_files
+
+
+def write_microtask_output_or_fail(
+    repo_path: Path,
+    files: Dict[str, str],
+    *,
+    mt: Any,
+    task_id: str,
+    review_failed_ids: set,
+    all_files: Dict[str, str],
+    microtask_file_keys: set,
+    review_failed_status: Any,
+) -> bool:
+    """Write a microtask's output files, converting a rejected path into a failure.
+
+    Shared by both teams' ``run_execution_with_review_gates`` review-cycle write
+    sites. A safe write returns ``True``. An :class:`UnsafeRepoPathError` (an LLM
+    fix emitted a traversal/empty path) is turned into a handled review failure:
+    the microtask is marked with ``review_failed_status``, its files are rolled
+    back out of ``all_files``, and the function returns ``False`` so the caller
+    stops processing this microtask instead of letting the exception abort the run.
+
+    Preconditions:
+        ``review_failed_status`` is the team's ``MicrotaskStatus.REVIEW_FAILED``;
+        ``microtask_file_keys`` are the keys this microtask contributed to
+        ``all_files``.
+    Postconditions:
+        On success the files are on disk and ``True`` is returned. On rejection no
+        unsafe file is written, ``mt`` is marked review-failed and its keys removed
+        from ``all_files``, and ``False`` is returned. Never raises for an unsafe path.
+    """
+    try:
+        _write_microtask_files(repo_path, files)
+        return True
+    except UnsafeRepoPathError as exc:
+        logger.warning("[%s] Microtask %s: unsafe output path rejected: %s", task_id, mt.id, exc)
+        mt.status = review_failed_status
+        mt.notes = f"Rejected unsafe output path: {exc}"
+        review_failed_ids.add(mt.id)
+        for fk in microtask_file_keys:
+            all_files.pop(fk, None)
+        return False
 
 
 def _run_general_microtask_impl(
