@@ -1,4 +1,13 @@
-import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  OnInit,
+  computed,
+  inject,
+  signal,
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -50,6 +59,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   private readonly state = inject(AgentStudioStateService);
   private readonly api = inject(AgenticTeamApiService);
   private readonly fb = inject(FormBuilder);
+  private readonly destroyRef = inject(DestroyRef);
 
   readonly teams = signal<AgenticTeamSummary[]>([]);
   readonly teamsLoading = signal(false);
@@ -81,7 +91,10 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   private loadTeams(): void {
     this.teamsLoading.set(true);
     this.teamsError.set(null);
-    this.api.listTeams().subscribe({
+    this.api
+      .listTeams()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (teams) => {
         this.teamsLoading.set(false);
         this.teams.set(teams);
@@ -90,7 +103,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
         this.teamsLoading.set(false);
         this.teamsError.set(err?.error?.detail ?? 'Failed to load teams');
       },
-    });
+      });
   }
 
   /** Select an existing team as the Stage-3 subject (clears any prior process gate state). */
@@ -105,16 +118,19 @@ export class AgentStudioComposeTeamComponent implements OnInit {
 
   private loadTeam(teamId: string): void {
     this.teamLoadError.set(null);
-    this.api.getTeam(teamId).subscribe({
-      next: (resp) => {
-        if (!resp || !resp.team) {
-          this.teamLoadError.set('Team not found.');
-          return;
-        }
-        this.applyTeam(resp.team);
-      },
-      error: () => this.teamLoadError.set('Could not load this team.'),
-    });
+    this.api
+      .getTeam(teamId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          if (!resp || !resp.team) {
+            this.teamLoadError.set('Team not found.');
+            return;
+          }
+          this.applyTeam(resp.team);
+        },
+        error: () => this.teamLoadError.set('Could not load this team.'),
+      });
   }
 
   private applyTeam(team: AgenticTeam): void {
@@ -149,11 +165,14 @@ export class AgentStudioComposeTeamComponent implements OnInit {
     // status stay in sync without a manual reload.
     const teamId = this.selectedTeamId();
     if (!teamId) return;
-    this.api.getTeam(teamId).subscribe({
-      next: (resp) => {
-        if (resp?.team) this.applyTeam(resp.team);
-      },
-    });
+    this.api
+      .getTeam(teamId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          if (resp?.team) this.applyTeam(resp.team);
+        },
+      });
   }
 
   toggleCreateForm(): void {
@@ -169,18 +188,21 @@ export class AgentStudioComposeTeamComponent implements OnInit {
     this.creating.set(true);
     this.createError.set(null);
     const { name, description } = this.form.getRawValue();
-    this.api.createTeam({ name, description }).subscribe({
-      next: (resp) => {
-        this.creating.set(false);
-        this.showCreateForm.set(false);
-        this.form.reset({ name: '', description: '' });
-        this.loadTeams();
-        this.selectTeam(resp.team_id);
-      },
-      error: (err) => {
-        this.creating.set(false);
-        this.createError.set(err?.error?.detail ?? 'Failed to create team');
-      },
-    });
+    this.api
+      .createTeam({ name, description })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (resp) => {
+          this.creating.set(false);
+          this.showCreateForm.set(false);
+          this.form.reset({ name: '', description: '' });
+          this.loadTeams();
+          this.selectTeam(resp.team_id);
+        },
+        error: (err) => {
+          this.creating.set(false);
+          this.createError.set(err?.error?.detail ?? 'Failed to create team');
+        },
+      });
   }
 }

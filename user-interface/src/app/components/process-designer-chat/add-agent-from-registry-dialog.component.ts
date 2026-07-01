@@ -1,4 +1,5 @@
-import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import {
@@ -11,6 +12,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { Subject, catchError, of, switchMap, tap } from 'rxjs';
 import { AgentCatalogApiService } from '../../services/agent-catalog-api.service';
 import type { AgentSummary } from '../../models/agent-catalog.model';
 
@@ -49,6 +51,7 @@ export type AddAgentFromRegistryDialogResult = string;
 })
 export class AddAgentFromRegistryDialogComponent implements OnInit {
   private readonly api = inject(AgentCatalogApiService);
+  private readonly destroyRef = inject(DestroyRef);
   readonly data = inject<AddAgentFromRegistryDialogData>(MAT_DIALOG_DATA);
   readonly ref =
     inject<MatDialogRef<AddAgentFromRegistryDialogComponent, AddAgentFromRegistryDialogResult>>(
@@ -60,6 +63,42 @@ export class AddAgentFromRegistryDialogComponent implements OnInit {
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
 
+  /**
+   * Search pipeline. Feeding every query through one `switchMap` cancels the
+   * prior in-flight `listAgents` request, so a slow earlier response can't land
+   * after (and clobber) a newer query's results — the out-of-order race a plain
+   * per-call `.subscribe` is prone to.
+   */
+  private readonly searchInput = new Subject<void>();
+
+  constructor() {
+    this.searchInput
+      .pipe(
+        tap(() => {
+          this.loading.set(true);
+          this.error.set(null);
+        }),
+        switchMap(() => {
+          const q = this.query().trim();
+          return this.api.listAgents(q ? { q } : {}).pipe(
+            catchError(() => {
+              this.loading.set(false);
+              this.error.set('Could not search the agent catalog.');
+              return of<AgentSummary[] | null>(null);
+            }),
+          );
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((agents) => {
+        // `null` is the error sentinel from `catchError` — leave the prior
+        // results (and the error banner) in place rather than blanking the list.
+        if (agents === null) return;
+        this.loading.set(false);
+        this.results.set(agents);
+      });
+  }
+
   ngOnInit(): void {
     this.search();
   }
@@ -69,20 +108,9 @@ export class AddAgentFromRegistryDialogComponent implements OnInit {
     this.search();
   }
 
+  /** Kick off a (debounced, cancellation-safe) catalog search for the current query. */
   search(): void {
-    this.loading.set(true);
-    this.error.set(null);
-    const q = this.query().trim();
-    this.api.listAgents(q ? { q } : {}).subscribe({
-      next: (agents) => {
-        this.loading.set(false);
-        this.results.set(agents);
-      },
-      error: () => {
-        this.loading.set(false);
-        this.error.set('Could not search the agent catalog.');
-      },
-    });
+    this.searchInput.next();
   }
 
   isAlreadyOnRoster(agentId: string): boolean {

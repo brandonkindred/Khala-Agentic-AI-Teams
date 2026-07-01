@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { MAT_DIALOG_DATA, MatDialogRef } from '@angular/material/dialog';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import {
   AddAgentFromRegistryDialogComponent,
@@ -57,6 +57,28 @@ describe('AddAgentFromRegistryDialogComponent', () => {
     expect(listAgents).toHaveBeenLastCalledWith({ q: 'seo' });
   });
 
+  it('a slow earlier response cannot clobber a newer query (switchMap cancels it)', () => {
+    // First query resolves via a Subject we control; the second resolves
+    // immediately. switchMap must unsubscribe the first so its late emission
+    // is dropped rather than overwriting the newer results.
+    const slow = new Subject<AgentSummary[]>();
+    const listAgents = vi
+      .fn()
+      .mockReturnValueOnce(slow.asObservable())
+      .mockReturnValueOnce(of([summary('new.1', 'New')]));
+    const { fixture } = configure({ existingManifestIds: [] }, listAgents);
+    const c = fixture.componentInstance;
+
+    c.onQueryChange('a'); // fires the 'a' request (pending on `slow`)
+    c.onQueryChange('ab'); // fires the 'ab' request → resolves to New; cancels 'a'
+
+    // The stale 'a' response arrives late — it must be ignored.
+    slow.next([summary('stale.1', 'Stale')]);
+    slow.complete();
+
+    expect(c.results().map((r) => r.id)).toEqual(['new.1']);
+  });
+
   it('closes with the chosen manifest id', () => {
     const listAgents = vi.fn().mockReturnValue(of([summary('a.1', 'Planner')]));
     const { fixture, ref } = configure({ existingManifestIds: [] }, listAgents);
@@ -81,11 +103,20 @@ describe('AddAgentFromRegistryDialogComponent', () => {
     expect(ref.close).toHaveBeenCalledWith();
   });
 
-  it('surfaces a search error', () => {
-    const listAgents = vi.fn().mockReturnValue(throwError(() => new Error('boom')));
+  it('surfaces a search error and keeps the prior results', () => {
+    const listAgents = vi
+      .fn()
+      .mockReturnValueOnce(of([summary('a.1')]))
+      .mockReturnValueOnce(throwError(() => new Error('boom')));
     const { fixture } = configure({ existingManifestIds: [] }, listAgents);
-    fixture.detectChanges();
-    expect(fixture.componentInstance.error()).toBe('Could not search the agent catalog.');
-    expect(fixture.componentInstance.loading()).toBe(false);
+    const c = fixture.componentInstance;
+    fixture.detectChanges(); // init search succeeds → one result
+    expect(c.results()).toHaveLength(1);
+
+    c.onQueryChange('zzz'); // this search errors
+    expect(c.error()).toBe('Could not search the agent catalog.');
+    expect(c.loading()).toBe(false);
+    // Prior results are preserved rather than blanked on error.
+    expect(c.results()).toHaveLength(1);
   });
 });

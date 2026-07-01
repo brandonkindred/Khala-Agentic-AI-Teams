@@ -10,6 +10,7 @@ from typing import Any, Callable, List, Optional
 
 from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 
 from agent_registry.models import AgentManifest
 from agentic_team_provisioning.agent_env_provisioning import schedule_provision_step_agents
@@ -369,6 +370,37 @@ def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> Non
         )
 
 
+def _reregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> None:
+    """Best-effort: refresh a generated agent's in-process manifest after an in-place edit.
+
+    The inline-edit route (``update_roster_agent``) keeps the same ``agent_name`` — so
+    the manifest ``id`` (keyed on ``team_id + agent_name``) is stable — but changes
+    ``role``, which ``build_agent_manifest`` projects into the manifest ``summary``.
+    Re-registering the rebuilt manifest overwrites the entry in place so the Agent
+    Console catalog / ``/api/agents/{id}/invoke`` route reflect the edit, instead of
+    serving the stale pre-edit summary until an unrelated chat-save re-registers the
+    whole roster. Registry-source agents are never re-registered here (their manifest
+    is owned by the catalog, not this team).
+
+    Preconditions: ``agent.source == SOURCE_GENERATED`` (caller checks).
+    Postconditions: the agent's manifest is (re)registered if the registry is
+        reachable. A registry failure is logged, **never raised** — so this
+        best-effort refresh can neither 500 the request nor roll back the committed
+        roster edit (mirrors ``register_team_manifests``).
+    """
+    try:
+        from agent_registry import get_registry
+
+        get_registry().register(build_agent_manifest(team_id, agent))
+    except Exception:
+        logger.warning(
+            "Failed to re-register edited generated manifest for agent %s in team %s",
+            agent.agent_name,
+            team_id,
+            exc_info=True,
+        )
+
+
 def _generated_manifest_cleanup(team_id: str) -> Callable[[Optional[AgenticTeamAgent]], None]:
     """Build the registry-cleanup hook shared by the add (``on_replaced``) and delete
     (``on_deleted``) routes.
@@ -465,8 +497,12 @@ def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
 
     Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
     Postconditions: ``200`` with the updated agent persisted in place (all other
-        roster rows unchanged); ``404`` if the team is unknown or no roster entry
-        has that name (roster unchanged).
+        roster rows unchanged), and — for a ``generated`` agent — its in-process
+        registry manifest refreshed so the catalog/invoke surfaces reflect the edit;
+        ``404`` if the team is unknown or no roster entry has that name (roster
+        unchanged); ``422`` if the merged row would violate the ``AgenticTeamAgent``
+        contract (e.g. an explicit ``role: null``), so a malformed edit can't persist
+        a row that later fails to deserialize (roster unchanged).
     """
     team = _store.get_team(team_id)
     if not team:
@@ -475,9 +511,23 @@ def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
     if current is None:
         raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
 
+    # Re-validate the merged row rather than ``model_copy(update=...)`` (which skips
+    # validation): ``UpdateAgentRequest`` fields are ``Optional`` for partial-update
+    # semantics, so an explicit ``{"role": null}`` would otherwise write a row whose
+    # required ``role`` is ``None`` and 500 every later ``model_validate`` of the
+    # roster. Merging over ``current`` preserves ``source``/``manifest_id`` (never in
+    # the request model), so a per-team field override can't change provenance.
     updates = req.model_dump(exclude_unset=True)
-    updated = current.model_copy(update=updates)
+    try:
+        updated = AgenticTeamAgent.model_validate({**current.model_dump(), **updates})
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid agent update: {e.errors()}")
     _store.add_or_replace_team_agent(team_id, updated)
+    # Keep the live registry in lockstep for a generated agent whose projected
+    # summary (its role) may have changed — mirrors the from-registry/DELETE routes'
+    # registry reconciliation, which the plain in-place upsert would otherwise skip.
+    if updated.source == SOURCE_GENERATED:
+        _reregister_generated_manifest(team_id, updated)
     return updated
 
 

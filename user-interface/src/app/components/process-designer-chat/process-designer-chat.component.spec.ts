@@ -1,3 +1,4 @@
+import { SimpleChange } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
@@ -92,6 +93,37 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component).toBeTruthy();
     expect(api.listTeamAgents).toHaveBeenCalledWith('t-1');
     expect(component.rosterAgents()).toHaveLength(1);
+  });
+
+  // ── ngOnChanges: restart only on team identity change (loop guard) ──────────
+  //
+  // An embedding stage (Agent Studio Stage 3) re-fetches the team after roster
+  // edits and rebinds [team] to a freshly-parsed object with the SAME team_id.
+  // Restarting the conversation on reference change alone would reset the chat
+  // and re-emit rosterChanged, driving the parent into an unbounded
+  // getTeam→rebind→restart loop. ngOnChanges must key off team_id, not identity.
+
+  it('does NOT restart the conversation when [team] is a new object with the same team_id', () => {
+    const initialCreateCalls = api.createConversation.mock.calls.length; // 1 from init
+    const prev = component.team;
+    const next = team({ team_id: 't-1', name: 'Growth Pod (refetched)' }); // new ref, same id
+    component.team = next;
+    component.ngOnChanges({
+      team: new SimpleChange(prev, next, false),
+    });
+    expect(api.createConversation.mock.calls.length).toBe(initialCreateCalls); // no restart
+  });
+
+  it('DOES restart the conversation when [team] changes to a different team_id', () => {
+    const initialCreateCalls = api.createConversation.mock.calls.length;
+    const prev = component.team;
+    const next = team({ team_id: 't-2' });
+    component.team = next;
+    component.ngOnChanges({
+      team: new SimpleChange(prev, next, false),
+    });
+    expect(api.createConversation.mock.calls.length).toBe(initialCreateCalls + 1);
+    expect(api.createConversation).toHaveBeenLastCalledWith('t-2');
   });
 
   it('emits rosterChanged with the validation result on a successful refresh', () => {

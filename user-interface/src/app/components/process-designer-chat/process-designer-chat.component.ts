@@ -125,7 +125,18 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   ngOnChanges(changes: SimpleChanges): void {
-    if (changes['team'] && !changes['team'].firstChange) {
+    const teamChange = changes['team'];
+    // Restart the conversation only when the team *identity* changes, not on
+    // every new object reference. An embedding stage (Agent Studio Stage 3)
+    // re-fetches the team after roster edits and hands us a freshly-parsed
+    // object with the same team_id; restarting on reference-equality alone would
+    // reset the chat — and, because that restart re-emits `rosterChanged`, drive
+    // the parent into an unbounded getTeam→re-render→restart loop.
+    if (
+      teamChange &&
+      !teamChange.firstChange &&
+      teamChange.previousValue?.team_id !== teamChange.currentValue?.team_id
+    ) {
       this.startConversation();
     }
   }

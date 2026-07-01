@@ -504,6 +504,64 @@ def test_update_agent_empty_body_is_a_noop(client: TestClient) -> None:
     assert body["skills"] == ["studio", "seo"]
 
 
+def test_update_agent_explicit_null_role_rejected_422(client: TestClient) -> None:
+    """An explicit ``{"role": null}`` is rejected with 422 (not persisted).
+
+    Regression: ``role`` is required on ``AgenticTeamAgent`` but optional on
+    ``UpdateAgentRequest``; without re-validation, ``model_copy`` would write
+    ``role=None`` and every subsequent roster read would fail ``model_validate``.
+    The re-validated merge rejects it up front and leaves the roster unchanged.
+    """
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+
+    resp = client.put(f"/teams/{team_id}/agents/blogging.planner", json={"role": None})
+    assert resp.status_code == 422
+
+    # The roster is unchanged and still readable (no corrupt row was written).
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert roster[0]["role"] == "Plans SEO-aware blog outlines"
+
+
+def test_update_generated_agent_reregisters_manifest_with_new_summary(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Editing a generated agent's role refreshes its live registry manifest in place
+    (its ``summary`` = the new role), instead of leaving the stale pre-edit summary."""
+    from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+    team_id = _new_team()
+    gen = AgenticTeamAgent(agent_name="Writer", role="Writes drafts", skills=["seo"], source="generated")
+    AgenticTeamStore().save_team_agents(team_id, [gen])
+    manifest = build_agent_manifest(team_id, gen)
+    registry.register(manifest)  # simulate the LLM save path's install
+    assert registry.get(manifest.id).summary == "Writes drafts"
+
+    resp = client.put(f"/teams/{team_id}/agents/Writer", json={"role": "Edits and publishes"})
+    assert resp.status_code == 200
+    # Same id (name unchanged), refreshed summary — catalog/invoke now reflect the edit.
+    assert registry.get(manifest.id).summary == "Edits and publishes"
+
+
+def test_update_registry_agent_does_not_register_a_generated_wrapper(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Editing a registry-source agent must not install a generated wrapper manifest
+    for it (its manifest stays owned by the catalog)."""
+    from agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+
+    resp = client.put(f"/teams/{team_id}/agents/blogging.planner", json={"role": "Team-specific role"})
+    assert resp.status_code == 200
+    assert resp.json()["source"] == "registry"
+    # No generated wrapper was registered for the registry agent's team-namespaced id.
+    assert registry.get(manifest_agent_id(team_id, "blogging.planner")) is None
+    # The original catalog manifest is untouched.
+    assert registry.get("blogging.planner") is _PLANNER
+
+
 @pytest.mark.parametrize("bad_name", ["", "   "])
 def test_roster_agent_from_manifest_rejects_blank_name(bad_name: str) -> None:
     """DbC precondition: a manifest with a blank name fails fast rather than being
