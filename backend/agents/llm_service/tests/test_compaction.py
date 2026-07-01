@@ -124,6 +124,16 @@ def test_different_text_is_a_cache_miss() -> None:
     assert client.calls == 2
 
 
+def test_different_content_description_is_a_cache_miss() -> None:
+    # content_description feeds the compaction prompt, so the same text under a
+    # different label must recompute rather than reuse the earlier summary.
+    client = _CountingClient()
+    text = "L" * 200
+    compact_text(text, 50, client, "specification")
+    compact_text(text, 50, client, "existing codebase")
+    assert client.calls == 2
+
+
 def test_different_model_is_a_cache_miss() -> None:
     text = "m" * 200
     m1 = _CountingClient(model_id="model-1")
@@ -271,8 +281,9 @@ def test_model_fingerprint_survives_attribute_that_raises() -> None:
 
 def test_cache_key_is_stable_and_input_sensitive() -> None:
     client = _CountingClient(model_id="m")
-    k1 = _compaction_cache_key("text", 100, client)
-    k2 = _compaction_cache_key("text", 100, client)
+    k1 = _compaction_cache_key("text", 100, "spec", client)
+    k2 = _compaction_cache_key("text", 100, "spec", client)
     assert k1 == k2
-    assert k1 != _compaction_cache_key("other", 100, client)
-    assert k1 != _compaction_cache_key("text", 200, client)
+    assert k1 != _compaction_cache_key("other", 100, "spec", client)
+    assert k1 != _compaction_cache_key("text", 200, "spec", client)
+    assert k1 != _compaction_cache_key("text", 100, "architecture", client)

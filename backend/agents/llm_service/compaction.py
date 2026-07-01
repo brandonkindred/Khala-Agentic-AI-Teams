@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 # The same spec/architecture/existing-codebase text is handed to ``compact_text``
 # on every task and every review->fix->re-review cycle of a run, so the identical
 # (expensive, deterministic) LLM compaction is otherwise recomputed constantly.
-# A bounded LRU keyed on (model, budget, content-hash) turns those repeated,
-# identical compactions into a single call per distinct input. It is guarded by a
+# A bounded LRU keyed on (model, budget, description, content-hash) turns those
+# repeated, identical compactions into a single call per distinct input. Guarded by a
 # lock because callers (e.g. the code review coordinator's map phase) may compact
 # from worker threads. ``0`` disables the cache (pure passthrough).
 DEFAULT_COMPACTION_CACHE_SIZE = 256  # LLM_COMPACTION_CACHE_SIZE, floor 0
@@ -85,11 +85,18 @@ def _model_fingerprint(llm: "LLMClient") -> str:
     """Best-effort stable identifier for the model a compaction will run on.
 
     Postconditions:
-        - Returns a string that changes when the resolved model changes, so a
-          result compacted by one model is never served for another (the LLM
-          provider list can fail over mid-process). Never raises: any failure to
-          resolve a model identifier falls back to the client's type name. The
-          value is identity-only — it is hashed into the cache key, never published.
+        - Returns a string that changes when the *currently preferred* model
+          changes, so switching the configured provider/model (e.g. Ollama →
+          Claude) does not serve a cache entry across grossly different models.
+          Never raises: any failure to resolve a model identifier falls back to
+          the client's type name. The value is identity-only — it is hashed into
+          the cache key, never published.
+        - Best-effort only for a failover client: the identifier is read from the
+          most-preferred provider at call time, which may differ from the entry
+          that ultimately answers if the preferred one 429s mid-call and a
+          fallback fills in. This is deliberately tolerated — every configured
+          provider produces a valid, budget-bounded compaction of the same input,
+          so reusing one within a configured provider list is acceptable.
     """
     for attr in ("model_id", "model_name", "model"):
         try:
@@ -101,15 +108,20 @@ def _model_fingerprint(llm: "LLMClient") -> str:
     return type(llm).__name__
 
 
-def _compaction_cache_key(text: str, max_chars: int, llm: "LLMClient") -> str:
-    """Key a compaction by its exact inputs: model + budget + content hash.
+def _compaction_cache_key(
+    text: str, max_chars: int, content_description: str, llm: "LLMClient"
+) -> str:
+    """Key a compaction by its exact inputs: model + budget + label + content hash.
 
     Postconditions:
-        - Two calls collide only when their model fingerprint, budget, and raw
-          input text are all identical, so a hit is byte-identical to what a
-          fresh compaction of the same inputs would return.
+        - Two calls collide only when their model fingerprint, budget,
+          ``content_description``, and raw input text are all identical, so a hit
+          is byte-identical to what a fresh compaction of the same inputs would
+          return. ``content_description`` is part of the key because it is
+          interpolated into the compaction prompt (``_compact_single``), so the
+          same text under a different label can produce a different summary.
     """
-    payload = f"{_model_fingerprint(llm)}\x00{max_chars}\x00{text}"
+    payload = f"{_model_fingerprint(llm)}\x00{max_chars}\x00{content_description}\x00{text}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -208,7 +220,8 @@ def compact_text(
     Notes
     -----
     Results are memoized in a bounded, process-global LRU keyed on
-    ``(model, max_chars, content-hash)`` (see ``LLM_COMPACTION_CACHE_SIZE``), so a
+    ``(model, max_chars, content_description, content-hash)`` (see
+    ``LLM_COMPACTION_CACHE_SIZE``), so a
     repeated call with the same inputs reuses the earlier compaction instead of
     re-invoking the LLM. Compaction is deterministic given those inputs, so a
     cache hit is byte-identical to what a fresh call would return. Only genuine
@@ -225,7 +238,7 @@ def compact_text(
         # deterministic for callers/tests that assert on it).
         return _compact_uncached(text, max_chars, llm, content_description)[0]
 
-    key = _compaction_cache_key(text, max_chars, llm)
+    key = _compaction_cache_key(text, max_chars, content_description, llm)
     with _COMPACTION_CACHE_LOCK:
         hit = _COMPACTION_CACHE.get(key)
         if hit is not None:
