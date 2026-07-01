@@ -39,7 +39,7 @@ from llm_service import (
 )
 from shared_concurrency import parallel_map
 from software_engineering_team.shared.context_sizing import (
-    CODE_REVIEW_SIBLING_SURFACE_CHARS,
+    compute_code_review_sibling_surface_chars,
     parse_env_int,
 )
 
@@ -549,7 +549,7 @@ def _sibling_surface(chunk: ReviewChunk, surface_by_path: Dict[str, List[str]]) 
         for path in sorted(surface_by_path)
         if path not in own_paths
     ]
-    return "\n".join(lines)[:CODE_REVIEW_SIBLING_SURFACE_CHARS]
+    return "\n".join(lines)[: compute_code_review_sibling_surface_chars()]
 
 
 def _half_sibling_surface(
@@ -669,7 +669,11 @@ def _cached_review_chunk(
         hit = _CHUNK_OUTCOME_CACHE.get(key)
         if hit is not None:
             _CHUNK_OUTCOME_CACHE.move_to_end(key)
-            return hit.clone()
+    if hit is not None:
+        # Clone outside the lock: a stored entry is never mutated in place, so the
+        # captured reference stays valid even if another thread evicts it, and the
+        # deep copy no longer serializes other workers on the cache lock.
+        return hit.clone()
 
     outcome = _review_chunk_with_recovery(
         reviewer, chunk, base_input, sibling_surface, surface_by_path
@@ -685,8 +689,11 @@ def _cached_review_chunk(
     # reduced-fidelity result on later identical cycles instead of retrying the
     # full chunk — so we skip it and let the next cycle re-attempt full context.
     if not outcome.not_reviewed_issues and len(outcome.approved_flags) == 1:
+        # Clone before acquiring the lock so the deep copy doesn't serialize other
+        # workers; ``outcome`` is a local not yet shared, so this is race-free.
+        stored = outcome.clone()
         with _CHUNK_OUTCOME_CACHE_LOCK:
-            _CHUNK_OUTCOME_CACHE[key] = outcome.clone()
+            _CHUNK_OUTCOME_CACHE[key] = stored
             _CHUNK_OUTCOME_CACHE.move_to_end(key)
             while len(_CHUNK_OUTCOME_CACHE) > capacity:
                 _CHUNK_OUTCOME_CACHE.popitem(last=False)

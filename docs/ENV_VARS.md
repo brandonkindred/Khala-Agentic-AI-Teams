@@ -308,6 +308,16 @@ Absolute ceilings on the spec / architecture-overview / existing-codebase
 excerpts repeated in every review map call. Defaults `16000` / `4000` / `8000`,
 floors `1000` / `500` / `500`.
 
+### CODE_REVIEW_SIBLING_SURFACE_CHARS
+Cap (chars) on the cross-file "sibling surface" block added to every map prompt —
+the top-level symbols (Python `def`/`class`, TS/JS exports) defined by the *other*
+changed files in the submission, shown so the reviewer can flag a reference to a
+symbol a sibling renamed or removed. Default `2000`, floor `0` (`0` drops the
+block). This single value is reserved in the per-chunk code budget
+(`compute_code_review_chunk_chars`), used to truncate `_sibling_surface`, and
+sliced in the prompt, so the reservation, the cache key, and the prompt can never
+diverge.
+
 ### CODE_REVIEW_MAP_PARALLELISM
 Max concurrent review LLM calls per review run, shared by both phases: the map
 phase (chunk reviews) and the later false-positive verification phase (one call

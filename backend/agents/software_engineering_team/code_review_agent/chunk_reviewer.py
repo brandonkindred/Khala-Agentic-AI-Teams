@@ -36,10 +36,10 @@ from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.context_sizing import (
-    CODE_REVIEW_SIBLING_SURFACE_CHARS,
     compute_code_review_arch_overview_chars,
     compute_code_review_existing_codebase_chars,
     compute_code_review_map_chunk_chars,
+    compute_code_review_sibling_surface_chars,
     compute_code_review_spec_excerpt_chars,
 )
 
@@ -56,22 +56,15 @@ CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review 
 # duplicating the literal (it is unique to this prompt template).
 CODE_TO_REVIEW_HEADER = "**Code to review:**"
 
-# Absolute cap on the sibling-surface context block (chars), shared with the
-# coordinator so the value reserved in the chunk budget, hashed into the cache
-# key, and rendered into the prompt can never diverge. The coordinator already
-# caps the surface to this length before hashing/passing it; the slice below is
-# a defensive no-op for any caller that builds ChunkReviewInput directly.
-_SIBLING_SURFACE_MAX_CHARS = CODE_REVIEW_SIBLING_SURFACE_CHARS
-
 
 class ChunkReviewAgent:
     """The map step of the map-reduce code review: review exactly one chunk.
 
     How it is used:
-        The coordinator (``coordinator.run_coordinator`` → ``mapping._map_chunks``)
-        splits a submission into bounded ``ReviewChunk``s and calls ``run`` once
-        per chunk (in parallel), then reduces the per-chunk results into one
-        verdict. Callers do not construct the prompt themselves::
+        The public entry point ``coordinator.run_coordinator`` splits a
+        submission into bounded ``ReviewChunk``s and, in its map phase, calls
+        ``run`` once per chunk (in parallel), then reduces the per-chunk results
+        into one verdict. Callers do not construct the prompt themselves::
 
             agent = ChunkReviewAgent(llm)
             out = agent.run(ChunkReviewInput(code_chunk=chunk.content, ...))
@@ -205,7 +198,12 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         )
     if architecture_overview:
         context_parts.extend(["", "**Architecture:**", architecture_overview])
-    sibling_surface = (input_data.sibling_surface or "")[:_SIBLING_SURFACE_MAX_CHARS]
+    # Defensive slice: the coordinator already caps the surface to this same
+    # env-configurable length before hashing/passing it, so this is a no-op for
+    # coordinator-built inputs and a guard for any direct ChunkReviewInput caller.
+    sibling_surface = (input_data.sibling_surface or "")[
+        : compute_code_review_sibling_surface_chars()
+    ]
     if sibling_surface:
         context_parts.extend(
             [

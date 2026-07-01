@@ -41,6 +41,8 @@ os.environ.setdefault("LLM_PROVIDER", "dummy")
 # overrides pytest's rootdir, which means ``backend/conftest.py`` is not
 # auto-discovered here, so we pull the fixture in explicitly (and re-register
 # the ``integration`` marker / default-skip behaviour for the same reason).
+from code_review_agent.coordinator import clear_chunk_outcome_cache  # noqa: E402
+
 from job_service_client_fake import fake_job_client  # noqa: F401, E402
 from llm_service import DummyLLMClient  # noqa: E402
 
@@ -72,8 +74,6 @@ def _reset_code_review_chunk_cache():
     hash the same. Clearing an empty cache is trivially cheap, so this runs for
     every SE test unconditionally.
     """
-    from code_review_agent.coordinator import clear_chunk_outcome_cache
-
     clear_chunk_outcome_cache()
     yield
     clear_chunk_outcome_cache()

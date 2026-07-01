@@ -33,7 +33,9 @@ from code_review_agent.models import CodeReviewInput, ReviewProfile
 
 from llm_service import LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared.context_sizing import CODE_REVIEW_SIBLING_SURFACE_CHARS
+from software_engineering_team.shared.context_sizing import (
+    compute_code_review_sibling_surface_chars,
+)
 
 # The coordinator's chunk-review prompt is the only LLM call carrying this
 # header (see ``chunk_reviewer._run_chunk_review``); the reduce-phase synthesis
@@ -415,14 +417,28 @@ def test_half_sibling_surface_falls_back_without_map() -> None:
 
 
 def test_sibling_surface_is_capped_to_the_shared_limit() -> None:
-    """A large sibling surface is truncated to CODE_REVIEW_SIBLING_SURFACE_CHARS,
-    so the cache key hashes exactly the (capped) bytes the prompt will carry."""
+    """A large sibling surface is truncated to the shared cap, so the cache key
+    hashes exactly the (capped) bytes the prompt will carry."""
     from code_review_agent.models import FileSegment, ReviewChunk
 
     surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
     chunk = ReviewChunk(segments=[FileSegment(path="app/self.py", content="x")])
     out = coord._sibling_surface(chunk, surface)
-    assert len(out) <= CODE_REVIEW_SIBLING_SURFACE_CHARS
+    assert len(out) <= compute_code_review_sibling_surface_chars()
+
+
+def test_sibling_surface_cap_is_env_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CODE_REVIEW_SIBLING_SURFACE_CHARS tunes the cap without code changes."""
+    from code_review_agent.models import FileSegment, ReviewChunk
+
+    surface = {f"app/f{i}.py": [f"sym{j}" for j in range(40)] for i in range(200)}
+    chunk = ReviewChunk(segments=[FileSegment(path="app/self.py", content="x")])
+
+    monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "50")
+    assert len(coord._sibling_surface(chunk, surface)) <= 50
+
+    monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "0")
+    assert coord._sibling_surface(chunk, surface) == ""  # 0 drops the block
 
 
 def test_surface_by_path_skips_headerless_and_symbolless() -> None:
