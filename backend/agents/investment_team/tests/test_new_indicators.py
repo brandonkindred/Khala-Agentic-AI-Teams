@@ -391,6 +391,7 @@ def test_flat_window_neutral_conventions() -> None:
         ("roc", {"period": 1}),
         ("roc", {"period": 401}),
         ("cci", {"period": 1}),
+        ("cci", {"period": 401}),
         ("williams_r", {"period": 1}),
         ("williams_r", {"period": 201}),
         ("obv", {"period": 5}),  # OBV takes no params

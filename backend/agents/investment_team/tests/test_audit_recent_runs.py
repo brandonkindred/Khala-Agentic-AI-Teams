@@ -684,12 +684,13 @@ class TestCheckNarrativeFidelity:
             ("the Money Flow Index was overbought", "money flow"),
             ("a sharp Rate of Change spike", "rate of change"),
             ("Williams %R turned up", "williams"),
+            ("the williams_r value crossed -80", "williams_r"),
         ],
     )
     def test_fail_phantom_prose_form(self, prose: str, concept: str) -> None:
-        # Prose long-forms (not just the DSL token / acronym) must be detected:
-        # "williams_r" never appears verbatim in a narrative, and "On-Balance
-        # Volume" / "Money Flow Index" / "Rate of Change" would evade a token match.
+        # Both prose long-forms ("On-Balance Volume" / "Money Flow Index" /
+        # "Rate of Change" / "Williams %R") and the exact DSL identifier
+        # ("williams_r") must be detected as phantom mentions.
         from investment_team.scripts.audit_recent_runs import check_narrative_fidelity
 
         rec = _synthetic_record(analysis_narrative=prose)

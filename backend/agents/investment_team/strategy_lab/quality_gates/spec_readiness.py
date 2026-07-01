@@ -237,7 +237,7 @@ _INDICATOR_REQUIRED_PARAMS: dict[str, frozenset[str]] = {
 _CONCEPT_TERMS = re.compile(
     r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|stochastic|adx|vwap|"
     r"donchian|keltner|obv|on[\s-]balance\s+volume|mfi|money\s+flow|roc|"
-    r"rate\s+of\s+change|cci|williams)\b",
+    r"rate\s+of\s+change|cci|williams_r|williams)\b",
     re.IGNORECASE,
 )
 # Map each prose concept to the set of DSL indicator names that satisfy it.
@@ -264,6 +264,7 @@ _CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
     "roc": frozenset({"roc"}),
     "rate of change": frozenset({"roc"}),
     "cci": frozenset({"cci"}),
+    "williams_r": frozenset({"williams_r"}),
     "williams": frozenset({"williams_r"}),
 }
 

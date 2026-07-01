@@ -45,16 +45,16 @@ _RISK_LIMIT_KEYS = frozenset(_RISK_LIMIT_TIGHTEN_DIR.keys())
 # Indicator concept vocabulary for narrative mentions, mirrored from
 # ``spec_readiness`` as a decoupled literal copy (the audit imports no gate/DSL
 # modules at runtime). The regex matches both DSL tokens *and* the common prose
-# forms ("on-balance volume", "money flow", "rate of change", "williams", …), and
-# the map resolves each match to the DSL indicator(s) it names — so a narrative
-# that name-drops an indicator in prose can't slip past ``check_narrative_fidelity``
-# just because it avoided the exact DSL identifier (``williams_r`` never appears in
-# prose at all). ``tests/test_audit_recent_runs.py`` asserts both stay byte-for-byte
-# in sync with ``spec_readiness`` and that the map covers every ``IndicatorName``.
+# forms ("on-balance volume", "money flow", "rate of change", "williams"/
+# "williams_r", …), and the map resolves each match to the DSL indicator(s) it
+# names — so a narrative that name-drops an indicator can't slip past
+# ``check_narrative_fidelity`` whether it uses prose or the exact DSL identifier.
+# ``tests/test_audit_recent_runs.py`` asserts both stay byte-for-byte in sync with
+# ``spec_readiness`` and that the map covers every ``IndicatorName``.
 _CONCEPT_TERMS = re.compile(
     r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|stochastic|adx|vwap|"
     r"donchian|keltner|obv|on[\s-]balance\s+volume|mfi|money\s+flow|roc|"
-    r"rate\s+of\s+change|cci|williams)\b",
+    r"rate\s+of\s+change|cci|williams_r|williams)\b",
     re.IGNORECASE,
 )
 _CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
@@ -78,6 +78,7 @@ _CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
     "roc": frozenset({"roc"}),
     "rate of change": frozenset({"roc"}),
     "cci": frozenset({"cci"}),
+    "williams_r": frozenset({"williams_r"}),
     "williams": frozenset({"williams_r"}),
 }
 
