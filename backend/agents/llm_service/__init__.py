@@ -20,7 +20,7 @@ from .attribution import (
 )
 from .backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient
-from .compaction import compact_text
+from .compaction import clear_compaction_cache, compact_text
 from .factory import (
     attributed_client,
     clear_client_cache,
@@ -105,6 +105,7 @@ __all__ = [
     "call_llm_with_retries",
     "call_llm_with_retries_async",
     "compact_text",
+    "clear_compaction_cache",
     "extract_json_from_response",
     "generate_structured",
     "generate_text",
