@@ -12,9 +12,19 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from .git_utils import write_files_and_commit
+from .git_utils import (
+    UnsafeRepoPathError,  # noqa: F401  re-exported: code-v2 phases import it from here
+    resolve_safe_repo_path,
+    write_files_and_commit,
+)
 
 logger = logging.getLogger(__name__)
+
+# ``UnsafeRepoPathError`` and ``resolve_safe_repo_path`` are defined alongside
+# the shared path guard in ``git_utils`` so the guard and its error type live in
+# one place; ``UnsafeRepoPathError`` is re-exported here (via the import above)
+# because the code-v2 phases import it from ``repo_writer``.
+
 
 # Distinct error message when agent produced no file changes (LLM returned empty files dict)
 NO_FILES_TO_WRITE_MSG = "No files to write"
@@ -315,3 +325,33 @@ def write_agent_output(
         )
 
     return write_files_and_commit(Path(repo_path).resolve(), validated_files, commit_message)
+
+
+def write_repo_text_files(repo_path: Path, files: Dict[str, str]) -> None:
+    """Write text files under ``repo_path``, rejecting path-traversal escapes.
+
+    Shared by the code-v2 documentation and execution phases (which previously
+    each carried an identical ``_write_files`` / ``_write_microtask_files``).
+
+    Preconditions:
+        ``repo_path`` is a directory; ``files`` maps relative paths to text
+        content.
+    Postconditions:
+        Each file is written under ``repo_path`` (parents created). A leading
+        ``/`` is stripped. The batch is atomic with respect to path validation:
+        if any key is empty, resolves to the repo root, or escapes it (e.g. via
+        ``..``), ``UnsafeRepoPathError`` is raised *before any file is written*,
+        so a rejected batch never leaves a partial write in the working tree.
+    Invariants:
+        No file is ever written at or outside ``repo_path.resolve()``.
+    """
+    root = Path(repo_path).resolve()
+    # Resolve+validate every path first, then write: a rejected key must not
+    # leave earlier files of the same batch partially written on disk (they
+    # would otherwise be swept up by a later ``git add -A``).
+    resolved = [
+        (resolve_safe_repo_path(root, rel_path), content) for rel_path, content in files.items()
+    ]
+    for full_path, content in resolved:
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_text(content, encoding="utf-8")
