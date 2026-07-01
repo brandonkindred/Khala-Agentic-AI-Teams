@@ -1061,15 +1061,15 @@ def test_infra_failure_is_detected_through_exception_chain() -> None:
 def test_large_failing_file_bisects_then_raises_with_ranges() -> None:
     """A single big segment that keeps failing bisects by lines until the
     floor, then the run raises naming an unreviewed range."""
-    n_lines = 425
+    # One chunk (below the map cap) but above the bisect floor, and every half
+    # still carries the failure marker. Size to the middle of that window from
+    # the live budget so the test stays valid if the map budget shifts (e.g. the
+    # sibling-surface reservation).
+    budget = compute_code_review_map_chunk_chars(DummyLLMClient())
+    line_len = 41  # 40-char body + "\n"
+    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
     content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
-    # One chunk (below the map cap) but above the bisect floor, and every
-    # half still carries the failure marker.
-    assert (
-        2 * MIN_SPLIT_SEGMENT_CHARS
-        <= len(content)
-        < compute_code_review_map_chunk_chars(DummyLLMClient())
-    )
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
     client = _SelectiveRaiser("FAILME")
     with pytest.raises(CodeReviewUnavailableError) as excinfo:
         run_coordinator(
