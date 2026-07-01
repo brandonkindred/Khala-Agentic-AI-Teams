@@ -3,6 +3,11 @@ Planning phase: decompose a task into microtasks and assign tool agents.
 
 No code from ``backend_agent`` is used.
 Uses template-based output (not JSON) so parsing works across model providers.
+
+The planning logic is shared across the code-v2 teams (see
+``shared/phases/planning.py``); this module wires in the backend team's models,
+prompts, and stack profile. ``_detect_language`` / ``_parse_planning_output``
+are re-exported here for callers and tests.
 """
 
 from __future__ import annotations
@@ -11,92 +16,39 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from strands import Agent
-
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task
-from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
-
-from ..models import (
-    Microtask,
-    MicrotaskStatus,
-    Phase,
-    PlanningResult,
-    ReviewIssue,
-    ToolAgentKind,
-    ToolAgentPhaseInput,
+from software_engineering_team.shared.phases.planning import (
+    parse_planning_output,
+    plan_fixes_impl,
+    run_planning_impl,
 )
+
+from .. import models as _models
+from ..models import Microtask, PlanningResult, ReviewIssue, ToolAgentKind
 from ..output_templates import parse_planning_template
 from ..prompts import PLANNING_FIXES_FOR_ISSUES_PROMPT, PLANNING_PROMPT
+from ._profile import PROFILE, _detect_language
 
 logger = logging.getLogger(__name__)
 
-
-def _detect_language(repo_path: Path, task: Task) -> str:
-    """Infer whether the project is Python or Java from the repo."""
-    if repo_path.is_dir():
-        if any(repo_path.rglob("pom.xml")) or any(repo_path.rglob("build.gradle")):
-            return "java"
-        if any(repo_path.rglob("requirements.txt")) or any(repo_path.rglob("pyproject.toml")):
-            return "python"
-        if any(repo_path.rglob("*.java")):
-            return "java"
-    desc = (task.description or "").lower() + " " + (task.requirements or "").lower()
-    if "spring" in desc or "java" in desc or "maven" in desc or "gradle" in desc:
-        return "java"
-    return "python"
-
-
-def _build_context(
-    task: Task,
-    architecture: Optional[SystemArchitecture],
-    existing_code: str,
-    language: str,
-) -> str:
-    """Build the full prompt context for the planning LLM call."""
-    parts: List[str] = [
-        PLANNING_PROMPT,
-        "",
-        "---",
-        "",
-        f"**Task title:** {task.title or task.id}",
-        f"**Task description:** {task.description}",
-        f"**Requirements:** {task.requirements or 'N/A'}",
-        f"**Acceptance criteria:** {', '.join(task.acceptance_criteria) if task.acceptance_criteria else 'N/A'}",
-        f"**Language:** {language}",
-    ]
-    if architecture:
-        parts.extend(["", "**Architecture overview:**", architecture.overview[:3000]])
-    if existing_code and existing_code != "# No code files found":
-        parts.extend(["", "**Existing codebase (excerpt):**", existing_code[:6000]])
-    return "\n".join(parts)
+__all__ = [
+    "run_planning",
+    "plan_fixes_for_unresolved_issues",
+    "_detect_language",
+    "_parse_planning_output",
+]
 
 
 def _parse_planning_output(raw: Dict[str, Any], language: str) -> PlanningResult:
-    """Convert the LLM JSON response into a PlanningResult."""
-    microtasks: List[Microtask] = []
-    for mt in raw.get("microtasks") or []:
-        if not isinstance(mt, dict) or not mt.get("id"):
-            continue
-        try:
-            kind = ToolAgentKind(mt.get("tool_agent", "general"))
-        except ValueError:
-            kind = ToolAgentKind.GENERAL
-        microtasks.append(
-            Microtask(
-                id=mt["id"],
-                title=mt.get("title", ""),
-                description=mt.get("description", ""),
-                tool_agent=kind,
-                status=MicrotaskStatus.PENDING,
-                depends_on=mt.get("depends_on") or [],
-            )
-        )
-    return PlanningResult(
-        microtasks=microtasks,
-        language=raw.get("language") or language,
-        summary=raw.get("summary", ""),
-    )
+    """Convert the parsed LLM response into a PlanningResult (backend models).
+
+    Preconditions:
+        ``raw`` is the parsed planning template; ``language`` is the detected language.
+    Postconditions:
+        Returns a backend ``PlanningResult``; see the shared implementation.
+    """
+    return parse_planning_output(raw, language, models=_models)
 
 
 def run_planning(
@@ -113,52 +65,24 @@ def run_planning(
 
     If tool_agents is provided, each tool agent's plan() is called after LLM planning
     to enrich microtask recommendations (appended to result summary).
+
+    Preconditions:
+        ``repo_path`` is a filesystem path; ``task`` is the assigned task.
+    Postconditions:
+        Returns a ``PlanningResult`` with at least one microtask.
     """
-    language = _detect_language(repo_path, task)
-    prompt = _build_context(task, architecture, existing_code, language)
-
-    logger.info("[%s] Planning phase: generating microtasks (language=%s)", task.id, language)
-    raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
-    raw_parsed = parse_planning_template(raw)
-    result = _parse_planning_output(raw_parsed, language)
-    logger.info(
-        "[%s] Planning phase: produced %d microtasks — %s",
-        task.id,
-        len(result.microtasks),
-        result.summary[:120] if result.summary else "",
+    return run_planning_impl(
+        llm=llm,
+        task=task,
+        repo_path=repo_path,
+        architecture=architecture,
+        existing_code=existing_code,
+        tool_agents=tool_agents,
+        profile=PROFILE,
+        planning_prompt=PLANNING_PROMPT,
+        parse_planning_template=parse_planning_template,
+        models=_models,
     )
-
-    if tool_agents:
-        phase_inp = ToolAgentPhaseInput(
-            phase=Phase.PLANNING,
-            repo_path=str(repo_path),
-            language=language,
-            task_title=task.title or "",
-            task_description=task.description or "",
-        )
-        for kind, agent in tool_agents.items():
-            if not hasattr(agent, "plan"):
-                continue
-            try:
-                out = agent.plan(phase_inp)
-                if out.recommendations:
-                    result.summary = (
-                        (result.summary or "").rstrip() + "\n" + " ".join(out.recommendations)
-                    )
-            except Exception as e:
-                logger.warning("[%s] Tool agent %s plan() failed: %s", task.id, kind.value, e)
-
-    if not result.microtasks:
-        result.microtasks = [
-            Microtask(
-                id="mt-implement-task",
-                title=task.title or "Implement task",
-                description=task.description or "Implement the full task as described.",
-                tool_agent=ToolAgentKind.GENERAL,
-            )
-        ]
-        result.summary = result.summary or "Single-microtask fallback."
-    return result
 
 
 def plan_fixes_for_unresolved_issues(  # pragma: no cover  # integration-only: LLM-driven re-plan for escalated issues
@@ -176,24 +100,16 @@ def plan_fixes_for_unresolved_issues(  # pragma: no cover  # integration-only: L
     MAX_ITERATIONS_PER_ISSUE attempts per issue. Returns new microtasks that
     the execution phase can run to implement the fixes.
     """
-    if not unresolved_issues:
-        return []
-    task_id = task.id
-    issues_text = "\n".join(
-        f"- [{i.severity}] {i.description} (file: {i.file_path or 'N/A'}) → {i.recommendation}"
-        for i in unresolved_issues
-    )
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:15])[:8000]
-    prompt = PLANNING_FIXES_FOR_ISSUES_PROMPT.format(
-        issues_text=issues_text,
-        existing_code=code_text or "(no code)",
+    microtasks = plan_fixes_impl(
+        llm=llm,
+        task=task,
+        unresolved_issues=unresolved_issues,
+        current_files=current_files,
         language=language,
+        planning_fixes_prompt=PLANNING_FIXES_FOR_ISSUES_PROMPT,
+        parse_planning_template=parse_planning_template,
+        models=_models,
     )
-    logger.info(
-        "[%s] Planning fix microtasks for %d unresolved issues", task_id, len(unresolved_issues)
-    )
-    raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
-    raw_parsed = parse_planning_template(raw)
-    result = _parse_planning_output(raw_parsed, language)
-    logger.info("[%s] Planned %d fix microtasks", task_id, len(result.microtasks))
-    return result.microtasks
+    if unresolved_issues:
+        logger.info("[%s] Planned %d fix microtasks", task.id, len(microtasks))
+    return microtasks

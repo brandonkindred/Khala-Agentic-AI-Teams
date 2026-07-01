@@ -1,0 +1,143 @@
+"""
+Shared Deliver-phase implementation for the code-v2 teams.
+
+The backend and frontend deliver phases differed only in docstrings. The real
+git work already lives in ``shared/deliver_utils.py`` (via ``DeliverGitOps``);
+this collapses the remaining orchestration wrapper into one place.
+
+Git callables are supplied by the caller through ``ops`` (a ``DeliverGitOps``)
+so the team module remains the monkeypatch boundary for tests — this module
+never imports git functions directly.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Dict, Optional
+
+from software_engineering_team.shared.deliver_utils import (
+    DeliverGitOps,
+    deliver_inline_merge,
+    prepare_handoff_branch,
+)
+
+
+def run_deliver_impl(
+    *,
+    task_id: str,
+    repo_path: Path,
+    files: Dict[str, str],
+    summary: str,
+    task_title: str,
+    tool_agents: Optional[Dict[Any, Any]],
+    task_description: str,
+    feature_branch_name: Optional[str],
+    merge_to_development: bool,
+    ops: DeliverGitOps,
+    commit_msg_template: str,
+    models: ModuleType,
+    logger: logging.Logger,
+) -> Any:
+    """Create feature branch, write files, commit, merge to development.
+
+    If the Git branch management agent is present, delegate all git operations to it
+    (merge to development when feature_branch_name is set, or create/write/commit/merge
+    when not). When merge_to_development is False, prepare and commit the feature branch
+    but leave it unmerged for an external Tech Lead review.
+
+    Preconditions:
+        ``ops`` bundles the (possibly test-patched) git callables; ``models``
+        exposes ``DeliverResult``, ``Phase``, ``ToolAgentKind``, and
+        ``ToolAgentPhaseInput``; ``commit_msg_template`` has ``{scope}`` and
+        ``{summary}`` slots.
+    Postconditions:
+        Returns a ``DeliverResult``. When there are no files to deliver, returns
+        early with ``summary="No files to deliver."`` and no git side effects.
+    """
+    deliver_result_cls = models.DeliverResult
+    phase_enum = models.Phase
+    tool_agent_kind_enum = models.ToolAgentKind
+    phase_input_cls = models.ToolAgentPhaseInput
+
+    result = deliver_result_cls()
+    deliver_files = dict(files)
+
+    if tool_agents:  # pragma: no cover  # integration-only: dispatches tool agents that run real git/build/deploy
+        phase_inp = phase_input_cls(
+            phase=phase_enum.DELIVER,
+            repo_path=str(repo_path),
+            current_files=deliver_files,
+            task_title=task_title,
+            task_description=task_description,
+            task_id=task_id,
+        )
+        for kind, agent in tool_agents.items():
+            if kind == tool_agent_kind_enum.GIT_BRANCH_MANAGEMENT:
+                continue
+            if not hasattr(agent, "deliver"):
+                continue
+            try:
+                out = agent.deliver(phase_inp)
+                if out.files:
+                    deliver_files.update(out.files)
+            except Exception as exc:
+                logger.warning("[%s] Tool agent %s deliver() failed: %s", task_id, kind.value, exc)
+
+    if not deliver_files:
+        result.summary = "No files to deliver."
+        return result
+    result.delivered_files = sorted(deliver_files)
+
+    if not merge_to_development:
+        return prepare_handoff_branch(
+            task_id=task_id,
+            repo_path=repo_path,
+            deliver_files=deliver_files,
+            summary=summary,
+            task_title=task_title,
+            feature_branch_name=feature_branch_name,
+            commit_msg_template=commit_msg_template,
+            ops=ops,
+            logger=logger,
+        )
+
+    if tool_agents:  # pragma: no cover  # integration-only: dispatches tool agents that run real git/build/deploy
+        git_agent = tool_agents.get(tool_agent_kind_enum.GIT_BRANCH_MANAGEMENT)
+        if git_agent is not None and hasattr(git_agent, "deliver"):
+            phase_inp = phase_input_cls(
+                phase=phase_enum.DELIVER,
+                repo_path=str(repo_path),
+                current_files=deliver_files,
+                task_title=task_title,
+                task_description=task_description,
+                task_id=task_id,
+                feature_branch_name=feature_branch_name,
+            )
+            try:
+                out = git_agent.deliver(phase_inp)
+                result.merged = out.success
+                result.branch_ready = bool(out.success)
+                result.summary = out.summary or result.summary
+                result.branch_name = feature_branch_name or ""
+                if out.success:
+                    result.commit_messages.append(out.summary or "Merged to development")
+                    result.delivered_files = sorted(deliver_files)
+                logger.info("[%s] Deliver (Git agent): %s", task_id, result.summary)
+                return result
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Git agent deliver() failed, falling back to inline: %s", task_id, exc
+                )
+
+    return deliver_inline_merge(
+        task_id=task_id,
+        repo_path=repo_path,
+        deliver_files=deliver_files,
+        summary=summary,
+        task_title=task_title,
+        commit_msg_template=commit_msg_template,
+        ops=ops,
+        logger=logger,
+    )

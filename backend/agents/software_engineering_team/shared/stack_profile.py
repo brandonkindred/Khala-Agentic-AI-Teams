@@ -1,0 +1,75 @@
+"""
+Stack profile for the code-v2 teams.
+
+``backend_code_v2_team`` and ``frontend_code_v2_team`` run structurally
+identical phase logic that differs only in a handful of stack-specific knobs:
+which language conventions to inject, how to label the detected language, and
+how to detect it. :class:`StackProfile` captures those knobs as data + one
+callable so the shared phase implementations can be written once and selected
+per team — mirroring the ``SecurityProfile`` pattern in
+``shared/security_service.py``.
+
+This module holds **only** the dataclass — it imports nothing from either team,
+so the ``shared → team → shared`` import cycle cannot form. Each team constructs
+its own frozen instance (see ``<team>/phases/_profile.py``), passing its own
+``detect_language`` and convention constants.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict
+
+from software_engineering_team.shared.models import Task
+
+
+@dataclass(frozen=True)
+class StackProfile:
+    """Stack-specific configuration selecting backend vs frontend phase behavior.
+
+    Invariants:
+        - ``conventions_by_language`` always contains a ``"_default"`` key.
+        - ``name`` and ``default_language`` are non-empty.
+        - The instance is immutable (``frozen=True``); all fields are pure data
+          except ``detect_language``, which is a pure inference callable.
+    """
+
+    name: str
+    """Human-readable stack name used in log lines (e.g. ``"backend"``)."""
+
+    default_language: str
+    """Fallback language when detection yields nothing (e.g. ``"python"``)."""
+
+    planning_language_label: str
+    """Label for the language line in the planning context (``"Language"`` /
+    ``"Language/stack"``)."""
+
+    planning_progress_label: str
+    """Token used in the planning progress log (``"language"`` / ``"stack"``)."""
+
+    conventions_by_language: Dict[str, str]
+    """Map of language → conventions text; must include a ``"_default"`` entry."""
+
+    execution_has_language_conventions: bool
+    """Whether this stack's ``EXECUTION_PROMPT`` carries a ``{language_conventions}``
+    slot (backend: True, frontend: False)."""
+
+    problem_solving_has_language_conventions: bool
+    """Whether this stack's ``PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT`` carries a
+    ``{language_conventions}`` slot (backend: True, frontend: False)."""
+
+    detect_language: Callable[[Path, Task], str]
+    """Infer the project's language/stack from the repo and task."""
+
+    def conventions_for(self, language: str) -> str:
+        """Return the conventions text for ``language``.
+
+        Preconditions:
+            ``language`` is a string; ``conventions_by_language`` has a
+            ``"_default"`` entry (enforced by the class invariant).
+        Postconditions:
+            Returns the entry for ``language`` if present, else the
+            ``"_default"`` entry. Pure; no side effects.
+        """
+        return self.conventions_by_language.get(language, self.conventions_by_language["_default"])
