@@ -15,6 +15,15 @@ Safety contract (see ``coordinator`` module docstring for the whole pipeline):
 - Only fully-reviewed outcomes are cached; degraded outcomes never are. A cache
   hit reproduces identical findings/verdicts (deep clone on store and retrieve),
   and a miss simply recomputes, so correctness never depends on a hit.
+
+Known limitations:
+- The sibling surface is a names-only, cross-file-only, best-effort heuristic, so
+  a same-file cross-chunk rename or a sibling whose signature/contract changed but
+  whose symbol name did not do not shift a cached chunk's key. This is a limit of
+  the per-chunk map scope, not the cache: an uncached re-review is equally blind
+  (a chunk's prompt never carries a sibling chunk's body, only names from other
+  files), and the whole-submission false-positive pass — which always re-runs and
+  can only remove findings — keeps the fail-safe intact.
 """
 
 from __future__ import annotations
