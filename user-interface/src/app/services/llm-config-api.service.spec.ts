@@ -27,56 +27,6 @@ describe('LlmConfigApiService', () => {
     expect(service).toBeTruthy();
   });
 
-  it('getConfig issues GET /api/llm-config', () => {
-    const mock = { provider: 'ollama', model: 'm', ollama_base_url: 'https://ollama.com' };
-    service.getConfig().subscribe((res) => expect(res).toEqual(mock));
-    const req = httpMock.expectOne(baseUrl);
-    expect(req.request.method).toBe('GET');
-    req.flush(mock);
-  });
-
-  it('updateConfig issues PUT /api/llm-config with body', () => {
-    const body = { provider: 'claude' as const, model: 'claude-opus-4-8', claude_api_key: 'sk' };
-    service.updateConfig(body).subscribe();
-    const req = httpMock.expectOne(baseUrl);
-    expect(req.request.method).toBe('PUT');
-    expect(req.request.body).toEqual(body);
-    req.flush({ provider: 'claude', model: 'claude-opus-4-8' });
-  });
-
-  it('getOllamaModels issues GET /api/llm-config/ollama-models', () => {
-    const mock = { models: ['llama3.2'], base_url: 'https://ollama.com', source: 'live' as const };
-    service.getOllamaModels().subscribe((res) => expect(res).toEqual(mock));
-    const req = httpMock.expectOne(`${baseUrl}/ollama-models`);
-    expect(req.request.method).toBe('GET');
-    req.flush(mock);
-  });
-
-  it('getConfig propagates an HTTP error to the observable', () => {
-    let captured: HttpErrorResponse | undefined;
-    service.getConfig().subscribe({
-      next: () => fail('expected an error, not a value'),
-      error: (err: HttpErrorResponse) => (captured = err),
-    });
-    const req = httpMock.expectOne(baseUrl);
-    req.flush('error', { status: 500, statusText: 'Server Error' });
-    expect(captured).toBeInstanceOf(HttpErrorResponse);
-    expect(captured?.status).toBe(500);
-  });
-
-  it('updateConfig propagates an HTTP error to the observable', () => {
-    const body = { provider: 'claude' as const, model: 'claude-opus-4-8', claude_api_key: 'sk' };
-    let captured: HttpErrorResponse | undefined;
-    service.updateConfig(body).subscribe({
-      next: () => fail('expected an error, not a value'),
-      error: (err: HttpErrorResponse) => (captured = err),
-    });
-    const req = httpMock.expectOne(baseUrl);
-    req.flush('error', { status: 500, statusText: 'Server Error' });
-    expect(captured).toBeInstanceOf(HttpErrorResponse);
-    expect(captured?.status).toBe(500);
-  });
-
   it('listProviders issues GET /api/llm-config/providers', () => {
     const mock = { providers: [], storage_available: true, storage_status: 'available' };
     service.listProviders().subscribe((res) => expect(res).toEqual(mock));

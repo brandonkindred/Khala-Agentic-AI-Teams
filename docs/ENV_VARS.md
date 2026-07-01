@@ -13,30 +13,35 @@ floor/ceiling unless a row states otherwise. Per-row notes call out only the cas
 
 ## LLM Client and Thinking
 
+> **The Postgres-backed provider list is the sole source of LLM resolution.** Each provider entry
+> (managed at `/api/llm-config/providers`) carries its own provider/model/base URL and its **own API
+> key** — there is no environment fallback for keys. The variables below no longer configure a live
+> provider on their own: `LLM_PROVIDER=dummy` selects the no-LLM harness, and `LLM_BASE_URL`/`LLM_MODEL`
+> only supply *defaults* for an entry whose corresponding field is left blank. With an empty list (or
+> `POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError`.
+
 ### OLLAMA_API_KEY
-Required for Ollama Cloud API.
+Used only by the operator "browse Ollama models" utility (`GET /api/llm-config/ollama-models`) to
+authenticate a listing against Ollama Cloud. It does **not** authenticate agent requests — a provider
+entry uses its own stored key.
 
 ### LLM_PROVIDER
-LLM provider selection: `dummy`, `ollama` (default), or `claude` (alias `anthropic`). Resolved per call
-as runtime config (the LLM Provider settings UI) → this env var → `ollama`.
+`dummy` selects the no-LLM test/dev harness (a hard override that pre-empts the provider list). Any other
+value (`ollama`/`claude`) means "not dummy" → resolve from the provider list; it no longer selects a live
+single provider on its own.
 
 ### LLM_BASE_URL
-LLM server URL (Ollama). Local (`http://host:11434`) or Ollama Cloud (`https://ollama.com`, default).
+Default Ollama server URL for a provider-list entry whose `base_url` is blank. Local
+(`http://host:11434`) or Ollama Cloud (`https://ollama.com`, default).
 
 ### LLM_MODEL
-Model name. For `LLM_PROVIDER=claude`, defaults to `claude-opus-4-8` when unset.
-
-### LLM_CLAUDE_API_KEY / ANTHROPIC_API_KEY
-Anthropic API key, **required for `LLM_PROVIDER=claude`**. `LLM_CLAUDE_API_KEY` is the Khala-namespaced
-name and wins; `ANTHROPIC_API_KEY` (the SDK's own convention) is the fallback. The runtime value set via
-the LLM Provider settings UI takes precedence over both. The Claude client uses the official `anthropic`
-Python SDK with streaming, adaptive thinking + `output_config.effort`, and never sends `temperature`/`top_p`.
+Default model for a provider-list entry whose `model` is blank. For a Claude entry, defaults to
+`claude-opus-4-8` when unset.
 
 ### LLM_RUNTIME_CONFIG_TTL_S
-TTL (seconds, default `30`) for the cross-container runtime LLM config written by the settings UI
-(`PUT /api/llm-config`) into the shared `encrypted_integration_credentials` table. Each team container
-caches the resolved provider/model/keys for this window, so a UI change propagates everywhere within the
-TTL. Garbage → default; negative floors to `0` (read-through every call). No effect when Postgres is unset.
+TTL (seconds, default `30`) for the cross-container runtime config cache backing the resolvers that
+supply entry defaults (model/base URL). Each team container caches resolved defaults for this window.
+Garbage → default; negative floors to `0` (read-through every call). No effect when Postgres is unset.
 
 ### LLM_NUM_CTX_FALLBACK_TTL_S
 TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's
@@ -112,8 +117,9 @@ configured backoff (nowhere left to fail over to), so a single-entry list behave
 `LLM_FAILOVER_RATE_WINDOW_S` (default `3600`) and `LLM_FAILOVER_WEEKLY_WINDOW_S` (default `604800` =
 7 days) are the fallback reset windows used to compute `reset_at` only when the 429 carries no
 `Retry-After`; the weekly window is used when the error matches the Ollama weekly-limit message, the
-rate window otherwise. With an empty list (or `POSTGRES_HOST` unset) the legacy single-provider
-resolution (`LLM_PROVIDER`/`LLM_MODEL`/keys → env) is used unchanged.
+rate window otherwise. The provider list is the sole source of LLM resolution: with an empty list (or
+`POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError` (there
+is no single-provider env fallback).
 
 ---
 

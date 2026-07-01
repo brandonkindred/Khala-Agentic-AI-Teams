@@ -2,20 +2,11 @@
   <header class="page-header">
     <h1><mat-icon>tune</mat-icon> LLM Provider</h1>
     <p class="subtitle">
-      Choose the model provider used by every agent team. Equivalent to the
-      <code>LLM_PROVIDER</code> / <code>LLM_MODEL</code> environment variables.
+      Manage the ordered list of LLM providers used by every agent team. Agents use the
+      most-preferred provider that isn't usage-limited and fall back to the next on a 429.
     </p>
   </header>
 
-  @if (loading) {
-    <div class="loading"><mat-spinner diameter="32"></mat-spinner> <span>Loading…</span></div>
-  }
-
-  @if (error) {
-    <div class="banner banner-error" role="alert">
-      <mat-icon>error_outline</mat-icon> <span>{{ error }}</span>
-    </div>
-  }
   @if (success) {
     <div class="banner banner-success" role="status">
       <mat-icon>check_circle_outline</mat-icon> <span>{{ success }}</span>
@@ -25,9 +16,9 @@
     <div class="banner banner-warn" role="alert">
       <mat-icon>warning_amber</mat-icon>
       @if (storageStatus === 'unreachable') {
-        <span>Postgres is configured but currently unreachable — settings can't be saved until the database connection is restored.</span>
+        <span>Postgres is configured but currently unreachable — providers can't be saved until the database connection is restored.</span>
       } @else {
-        <span>Postgres is not configured — settings can't be saved here. Configure the provider via environment variables.</span>
+        <span>Postgres is not configured — providers can't be saved. Set the Postgres environment variables to configure LLM providers.</span>
       }
     </div>
   }
@@ -53,8 +44,7 @@
 
       @if (!providersLoading && providers.length === 0) {
         <p class="empty-note">
-          No fallback providers configured. Add one below to enable multi-provider fallback,
-          or the single default provider configured further down is used.
+          No LLM providers configured. Add one below so agents have a model to run.
         </p>
       }
 
@@ -193,103 +183,4 @@
       }
     </mat-card-content>
   </mat-card>
-
-  @if (!loading) {
-    <mat-card class="config-card">
-      <mat-card-content>
-        <section class="field-group">
-          <div class="field-label" id="provider-label">Default provider (used when no fallback providers are configured)</div>
-          <mat-radio-group
-            [ngModel]="provider"
-            (ngModelChange)="onProviderChange($event)"
-            class="provider-radio"
-            aria-labelledby="provider-label"
-          >
-            <mat-radio-button value="ollama">Ollama</mat-radio-button>
-            <mat-radio-button value="claude">Claude (Anthropic)</mat-radio-button>
-          </mat-radio-group>
-        </section>
-
-        @if (provider === 'ollama') {
-          <section class="field-group">
-            <div class="field-label" id="ollama-mode-label">Ollama mode</div>
-            <mat-radio-group
-              [ngModel]="ollamaMode"
-              (ngModelChange)="onOllamaModeChange($event)"
-              class="provider-radio"
-              aria-labelledby="ollama-mode-label"
-            >
-              <mat-radio-button value="local">Local</mat-radio-button>
-              <mat-radio-button value="cloud">Cloud</mat-radio-button>
-            </mat-radio-group>
-          </section>
-
-          @if (ollamaMode === 'local') {
-            <mat-form-field appearance="outline" class="full">
-              <mat-label>Base URL</mat-label>
-              <input matInput name="ollamaBaseUrl" [(ngModel)]="ollamaBaseUrl" placeholder="http://localhost:11434" />
-            </mat-form-field>
-          } @else {
-            <mat-form-field appearance="outline" class="full">
-              <mat-label>Ollama Cloud API key</mat-label>
-              <input
-                matInput
-                type="password"
-                name="ollamaApiKey"
-                [(ngModel)]="ollamaApiKey"
-                autocomplete="off"
-                [placeholder]="ollamaApiKeyConfigured ? '•••••••• (configured — leave blank to keep)' : 'Enter API key'"
-              />
-            </mat-form-field>
-          }
-        }
-
-        @if (provider === 'claude') {
-          <mat-form-field appearance="outline" class="full">
-            <mat-label>Anthropic API key</mat-label>
-            <input
-              matInput
-              type="password"
-              name="claudeApiKey"
-              [(ngModel)]="claudeApiKey"
-              autocomplete="off"
-              [placeholder]="claudeApiKeyConfigured ? '•••••••• (configured — leave blank to keep)' : 'Enter API key'"
-            />
-          </mat-form-field>
-        }
-
-        <mat-form-field appearance="outline" class="full">
-          <mat-label>Model</mat-label>
-          <input
-            matInput
-            name="model"
-            [(ngModel)]="model"
-            [matAutocomplete]="modelAuto"
-            placeholder="Model id"
-          />
-          @if (ollamaModelsLoading) {
-            <mat-spinner matSuffix diameter="18"></mat-spinner>
-          }
-          <mat-autocomplete #modelAuto="matAutocomplete">
-            @for (m of modelOptions; track m) {
-              <mat-option [value]="m">{{ m }}</mat-option>
-            }
-          </mat-autocomplete>
-        </mat-form-field>
-
-        @if (ollamaModelsLoading) {
-          <p class="model-note" role="status">Loading available models…</p>
-        } @else if (modelNote) {
-          <p class="model-note" role="status">{{ modelNote }}</p>
-        }
-      </mat-card-content>
-
-      <mat-card-actions align="end">
-        <button mat-button type="button" (click)="loadConfig()" [disabled]="saving || loading">Reset</button>
-        <button mat-flat-button color="primary" type="button" (click)="save()" [disabled]="saving || !storageAvailable">
-          @if (saving) { <mat-spinner diameter="18"></mat-spinner> } @else { Save }
-        </button>
-      </mat-card-actions>
-    </mat-card>
-  }
 </div>

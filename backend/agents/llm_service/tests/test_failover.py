@@ -15,7 +15,6 @@ from llm_service.factory import (
     FailoverLLMClient,
     _AttributingClient,
     _build_entry_client,
-    _build_legacy_concrete,
     _mark_entry_exhausted,
     get_client,
     unwrap_client,
@@ -23,6 +22,7 @@ from llm_service.factory import (
 from llm_service.interface import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMClient,
+    LLMNotConfiguredError,
     LLMPermanentError,
     LLMRateLimitError,
 )
@@ -84,10 +84,7 @@ def _make_failover(entries, build_map):
     def mark(entry, err):
         marks.append((entry.id, err))
 
-    def default_build():
-        return _StubClient(result="default")
-
-    fc = FailoverLLMClient(load_candidates, build, mark, default_build)
+    fc = FailoverLLMClient(load_candidates, build, mark)
     return fc, builds, marks
 
 
@@ -155,28 +152,25 @@ def test_build_exception_propagates_without_failover():
     def mark(entry, err):
         raise AssertionError("mark must not be called for a build failure")
 
-    def default_build():
-        raise AssertionError("default_build must not be reached")
-
-    fc = FailoverLLMClient(load_candidates, build, mark, default_build)
+    fc = FailoverLLMClient(load_candidates, build, mark)
     with pytest.raises(ValueError, match="invalid provider config"):
         fc.complete_json("p")
     assert build_calls == [1]  # no attempt made on the second candidate
 
 
-def test_empty_candidates_uses_default_build():
-    def load_candidates():
-        return []
+def test_empty_candidates_raises_not_configured():
+    """An empty candidate list (the provider list emptied at runtime) has no legacy
+    fallback — the sole-source contract means dispatch raises LLMNotConfiguredError."""
+    fc = FailoverLLMClient(lambda: [], lambda e, r: None, lambda e, x: None)
+    with pytest.raises(LLMNotConfiguredError):
+        fc.chat("p")
 
-    built = {"n": 0}
 
-    def default_build():
-        built["n"] += 1
-        return _StubClient(result="fallback")
-
-    fc = FailoverLLMClient(load_candidates, lambda e, r: None, lambda e, x: None, default_build)
-    assert fc.chat("p") == "fallback"
-    assert built["n"] == 1
+def test_getattr_on_empty_candidates_raises_not_configured():
+    """Delegated attribute access with no candidates also raises (no legacy fallback)."""
+    fc = FailoverLLMClient(lambda: [], lambda e, r: None, lambda e, x: None)
+    with pytest.raises(LLMNotConfiguredError):
+        _ = fc.model
 
 
 def test_getattr_delegates_to_active_client():
@@ -298,15 +292,32 @@ def test_strands_unwrap_path_routes_through_failover(two_providers):
     assert unwrap_client(c).chat("p") == "from-second"
 
 
-def test_get_client_no_entries_falls_through_to_legacy(monkeypatch):
+def test_get_client_no_entries_raises_not_configured(monkeypatch):
+    """The provider list is the sole source: an empty list (non-dummy provider) has
+    no legacy fallback, so get_client raises LLMNotConfiguredError."""
     monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: [])
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    monkeypatch.setenv("LLM_MODEL", "legacy-model")
-    c = get_client("backend")
-    # Legacy path: attribution-wrapped concrete Ollama client, not failover.
-    assert isinstance(c, _AttributingClient)
-    assert not isinstance(c._inner, FailoverLLMClient)
-    assert c.model == "legacy-model"
+    monkeypatch.setenv("LLM_MODEL", "would-be-legacy-model")
+    with pytest.raises(LLMNotConfiguredError):
+        get_client("backend")
+
+
+def test_get_client_claude_no_entries_raises_not_configured(monkeypatch):
+    """Same for provider=claude: no single-provider Claude fallback remains."""
+    monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: [])
+    monkeypatch.setenv("LLM_PROVIDER", "claude")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    with pytest.raises(LLMNotConfiguredError):
+        get_client("backend")
+
+
+def test_get_client_dummy_still_pre_empts_empty_list(monkeypatch):
+    """dummy is a hard override — it returns a DummyLLMClient even with an empty list."""
+    from llm_service.clients import DummyLLMClient
+
+    monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: [])
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    assert isinstance(get_client("backend"), DummyLLMClient)
 
 
 # --------------------------------------------------------------------------- #
@@ -381,27 +392,26 @@ def test_build_entry_client_on_reasoning_is_fresh(monkeypatch):
     assert isinstance(c, OllamaLLMClient) and c.on_reasoning is sink
 
 
-def test_build_legacy_concrete_ollama(monkeypatch):
-    monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    monkeypatch.setenv("LLM_MODEL", "legacy")
-    c = _build_legacy_concrete(None, None)
-    assert isinstance(c, OllamaLLMClient) and c.model == "legacy"
+def test_build_entry_client_claude_empty_key_no_env_fallback(monkeypatch):
+    """An entry with an empty api_key does NOT inherit ANTHROPIC_API_KEY from env —
+    entries are self-contained for credentials (the route guard blocks keyless Claude,
+    but the factory must not silently pull the env key either)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env-should-not-be-used")
+    monkeypatch.setenv("LLM_CLAUDE_API_KEY", "sk-env-should-not-be-used")
+    e = _full_entry("claude", model="claude-opus-4-8", api_key="")
+    c = _build_entry_client(e, None, None, None)
+    assert isinstance(c, ClaudeLLMClient) and c.api_key == ""
 
 
-def test_build_legacy_concrete_claude(monkeypatch):
-    monkeypatch.setenv("LLM_PROVIDER", "claude")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
-    monkeypatch.setenv("LLM_MODEL", "claude-opus-4-8")
-    c = _build_legacy_concrete(None, None)
-    assert isinstance(c, ClaudeLLMClient)
-
-
-def test_build_legacy_concrete_on_reasoning(monkeypatch):
-    monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    monkeypatch.setenv("LLM_MODEL", "m")
-    sink = lambda _t: None  # noqa: E731
-    c = _build_legacy_concrete(None, sink)
-    assert c.on_reasoning is sink
+def test_build_entry_client_ollama_empty_key_no_env_fallback(monkeypatch):
+    """An Ollama entry with an empty api_key does NOT inherit OLLAMA_API_KEY from env."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "sk-env-should-not-be-used")
+    monkeypatch.setenv("LLM_OLLAMA_API_KEY", "sk-env-should-not-be-used")
+    e = _full_entry("ollama", model="m", base_url="https://ollama.com", api_key="")
+    c = _build_entry_client(e, None, None, None)
+    assert isinstance(c, OllamaLLMClient) and c._api_key_override == ""
+    # No Authorization header is sent — the entry carries no key.
+    assert "Authorization" not in c._ollama_auth_headers()
 
 
 def test_full_failover_path_unmocked_build(monkeypatch):

@@ -438,12 +438,10 @@ class OllamaLLMClient(LLMClient):
         provider instead of sleeping minutes; ``None`` keeps the env-configured
         schedule.
 
-        ``api_key`` is an optional per-client Ollama Cloud key. When non-empty it
-        authenticates this client's requests (used by the multi-provider fallback
-        list so a Cloud entry authenticates with its own stored key); when empty the
-        client falls back to the globally-resolved key
-        (``llm_config.resolve_ollama_api_key``), preserving the single-provider
-        behavior.
+        ``api_key`` is this client's Ollama Cloud key (a fallback-list entry's own
+        stored key). It authenticates every request with NO environment fallback —
+        the provider list is the sole source and each entry is self-contained. An
+        empty key means no Authorization header (a local Ollama endpoint needs none).
 
         Preconditions: ``on_reasoning`` is callable or ``None``;
             ``rate_limit_max_retries`` is ``None`` or ``>= 0``.
@@ -512,17 +510,21 @@ class OllamaLLMClient(LLMClient):
             logger.debug("Failed to record LLM telemetry", exc_info=True)
 
     def _ollama_auth_headers(self) -> dict[str, str]:
-        """Return Authorization Bearer header for Ollama Cloud.
+        """Return the Authorization Bearer header for this client's Ollama requests.
 
-        Thin wrapper over the module-level :func:`_ollama_bearer_auth_headers` so the
-        chat path and the /api/tags listing path share one auth implementation and
-        cannot drift. Resolves the key via :func:`llm_config.resolve_ollama_api_key`
-        so a key set through the settings UI (runtime config) takes effect, falling
-        back to the ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY`` env vars. A per-client
-        ``api_key`` (a fallback-list Cloud entry's own key) overrides that global
-        resolution. Empty -> no header (local Ollama needs none).
+        The client authenticates ONLY with its own ``api_key`` (a fallback-list
+        entry's stored key) — there is no environment fallback, because the provider
+        list is the sole source of LLM configuration and each entry is self-contained.
+        An empty key -> no header (a local Ollama endpoint needs none; a Cloud entry
+        must carry its own key, enforced by the route's credentials guard). This is
+        deliberately NOT the module-level :func:`_ollama_bearer_auth_headers`, which
+        keeps an env fallback for the operator-only ``/ollama-models`` browse utility.
+
+        Preconditions: none. Postconditions: returns ``{"Authorization": "Bearer
+            <key>"}`` when this client has a non-empty key, else ``{}``. Never raises.
         """
-        return _ollama_bearer_auth_headers(self._api_key_override)
+        key = self._api_key_override
+        return {"Authorization": f"Bearer {key}"} if key else {}
 
     def _rate_limit_retry_config(self) -> "tuple[int, float, float]":
         """Return the 429 backoff config, applying this client's retry override.

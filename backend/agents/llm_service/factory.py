@@ -29,10 +29,22 @@ from . import config as llm_config
 from . import provider_store
 from .attribution import llm_attribution
 from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient
-from .interface import OLLAMA_WEEKLY_LIMIT_MESSAGE, LLMClient, LLMRateLimitError
+from .interface import (
+    OLLAMA_WEEKLY_LIMIT_MESSAGE,
+    LLMClient,
+    LLMNotConfiguredError,
+    LLMRateLimitError,
+)
 from .util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
+
+# Shared message for the "no LLM configured" failure — the provider list is the sole
+# source of LLM resolution (``dummy`` aside), so an empty list means no client to build.
+_NO_PROVIDER_MSG = (
+    "No LLM provider is configured. Add a provider in the LLM Provider settings "
+    "(/llm-config) to run agents."
+)
 
 # Cache keys carry a 4th element — the rate-limit retry override (``-1`` for "use the
 # env schedule", ``0`` for the failover fast-fail clients) — so a fast-fail failover
@@ -333,57 +345,28 @@ def _build_entry_client(
 ) -> Union[OllamaLLMClient, ClaudeLLMClient]:
     """Build the concrete provider client for one configured fallback entry.
 
-    Empty ``model``/``base_url``/``api_key`` fields fall back to the env/default
-    resolvers (so an operator can configure a Claude entry that relies on the
-    ``ANTHROPIC_API_KEY`` env, or an Ollama entry that uses the default base URL).
-    Goes through the shared client caches except when ``on_reasoning`` is set (a
-    per-caller hook must never be shared via the cache).
+    The entry is self-contained for credentials: its ``api_key`` authenticates the
+    client with NO environment fallback (a Claude or Ollama-Cloud entry must carry
+    its own key — enforced at write time by the route's credentials guard; a local
+    Ollama entry resolves to ``""`` → no Authorization header). Empty non-secret
+    fields (``model``/``base_url``) fall back to the provider defaults via the shared
+    resolvers. Goes through the shared client caches except when ``on_reasoning`` is
+    set (a per-caller hook must never be shared via the cache).
 
-    Preconditions: ``entry.provider`` is ``"ollama"``/``"claude"`` (``"anthropic"``
-        accepted as a Claude alias). Postconditions: returns a ready concrete client
-        whose 429 backoff budget is ``rate_limit_max_retries`` (``0`` for fast-fail
-        failover hops). Never wraps in attribution — the failover client is wrapped
-        once by the caller.
+    Preconditions: ``entry.provider`` is ``"ollama"`` or ``"claude"``. Postconditions:
+        returns a ready concrete client whose 429 backoff budget is
+        ``rate_limit_max_retries`` (``0`` for fast-fail failover hops). Never wraps in
+        attribution — the failover client is wrapped once by the caller.
     """
     timeout = llm_config.resolve_timeout(agent_key)
-    if entry.provider in ("claude", "anthropic"):
+    if entry.provider == "claude":
         model = entry.model.strip() or llm_config.resolve_claude_model(agent_key)
-        api_key = entry.api_key or llm_config.resolve_claude_api_key()
-        return _build_claude_concrete(model, api_key, timeout, on_reasoning, rate_limit_max_retries)
+        return _build_claude_concrete(model, entry.api_key, timeout, on_reasoning, rate_limit_max_retries)
     model = entry.model.strip() or llm_config.resolve_model(agent_key)
     base_url = entry.base_url.strip() or llm_config.resolve_base_url()
-    # The entry's own key authenticates a Cloud entry; empty falls back to the
-    # globally-resolved key — made explicit here to mirror the Claude branch above
-    # (OllamaLLMClient would also resolve it internally when given an empty key, but
-    # resolving at the call site keeps the two branches symmetric and the contract
-    # clear). A local Ollama entry resolves to "" → no Authorization header.
-    api_key = entry.api_key or llm_config.resolve_ollama_api_key()
-    return _build_ollama_concrete(model, base_url, timeout, on_reasoning, rate_limit_max_retries, api_key)
-
-
-def _build_legacy_concrete(
-    agent_key: Optional[str], on_reasoning: Optional[Callable[[str], None]]
-) -> Union[OllamaLLMClient, ClaudeLLMClient]:
-    """Build the legacy (flat-key/env) concrete client, unwrapped.
-
-    Used as the failover client's fallback when the configured list is emptied at
-    runtime (so an in-flight call still reaches a provider). Mirrors the resolution
-    of the non-failover :func:`get_client` path without the attribution wrapper.
-
-    Preconditions: ``agent_key`` is a non-empty key or ``None``; ``on_reasoning`` is
-        callable or ``None``.
-    Postconditions: returns a ready concrete provider client per
-        :func:`llm_config.resolve_provider`. Never raises for a resolvable config.
-    """
-    provider = llm_config.resolve_provider()
-    timeout = llm_config.resolve_timeout(agent_key)
-    if provider in ("claude", "anthropic"):
-        model = llm_config.resolve_claude_model(agent_key)
-        api_key = llm_config.resolve_claude_api_key()
-        return _build_claude_concrete(model, api_key, timeout, on_reasoning, None)
-    model = llm_config.resolve_model(agent_key)
-    base_url = llm_config.resolve_base_url()
-    return _build_ollama_concrete(model, base_url, timeout, on_reasoning, None)
+    # The entry carries its own key (empty → no Authorization header, i.e. a local
+    # Ollama endpoint). No env fallback — a Cloud entry must store its own key.
+    return _build_ollama_concrete(model, base_url, timeout, on_reasoning, rate_limit_max_retries, entry.api_key)
 
 
 def _mark_entry_exhausted(entry: "provider_store.ProviderEntry", err: LLMRateLimitError) -> None:
@@ -456,12 +439,10 @@ class FailoverLLMClient:
         load_candidates: "Callable[[], list[provider_store.ProviderEntry]]",
         build: "Callable[[provider_store.ProviderEntry, Optional[int]], Any]",
         mark: "Callable[[provider_store.ProviderEntry, LLMRateLimitError], None]",
-        default_build: Callable[[], Any],
     ) -> None:
         self._load_candidates = load_candidates
         self._build = build
         self._mark = mark
-        self._default_build = default_build
 
     def __repr__(self) -> str:
         return "FailoverLLMClient(multi-provider)"
@@ -469,9 +450,9 @@ class FailoverLLMClient:
     def _dispatch(self, method: str, *args: Any, **kwargs: Any) -> Any:
         candidates = self._load_candidates()
         if not candidates:
-            # The list was emptied at runtime — fall back to the legacy client so the
-            # in-flight call still reaches a provider.
-            return getattr(self._default_build(), method)(*args, **kwargs)
+            # The list was emptied at runtime — there is no legacy fallback, so the
+            # provider list is the sole source. Fail the call explicitly.
+            raise LLMNotConfiguredError(_NO_PROVIDER_MSG)
         fast = llm_config.failover_fast_429_enabled()
         last_index = len(candidates) - 1
         attempted: set[int] = set()
@@ -493,8 +474,8 @@ class FailoverLLMClient:
         if last_error is not None:
             raise last_error
         # Unreachable for a non-empty candidate list (every entry either returns or
-        # raises a 429), but keep a safe fallback rather than returning None.
-        return getattr(self._default_build(), method)(*args, **kwargs)
+        # raises a 429), but fail loudly rather than returning None.
+        raise LLMNotConfiguredError(_NO_PROVIDER_MSG)
 
     def complete_json(self, *args: Any, **kwargs: Any) -> Any:
         return self._dispatch("complete_json", *args, **kwargs)
@@ -513,8 +494,9 @@ class FailoverLLMClient:
         # the active provider client (``.model``, ``get_max_context_tokens``, the
         # Strands surface, ...) so the wrapper duck-types as its current provider.
         candidates = self._load_candidates()
-        base = self._build(candidates[0], None) if candidates else self._default_build()
-        return getattr(base, name)
+        if not candidates:
+            raise LLMNotConfiguredError(_NO_PROVIDER_MSG)
+        return getattr(self._build(candidates[0], None), name)
 
 
 # Virtual registration so ``isinstance(c, LLMClient)`` holds (mirrors
@@ -529,20 +511,20 @@ def _build_failover_client(
     """Return a wrapped :class:`FailoverLLMClient` when a provider list is configured.
 
     Returns ``None`` when Postgres is disabled or the list is empty, so
-    :func:`get_client` falls through to the legacy single-provider path (full
-    back-compat). Otherwise returns the failover client wrapped in an
+    :func:`get_client` raises :class:`LLMNotConfiguredError` (the provider list is the
+    sole source of LLM resolution). Otherwise returns the failover client wrapped in an
     :class:`_AttributingClient` when ``agent_key`` is truthy (attribution outermost,
     so a retried provider still attributes to the same agent).
 
     Preconditions: ``agent_key`` is a non-empty key or ``None``; ``on_reasoning`` is
         callable or ``None``.
-    Postconditions: ``None`` -> caller uses the legacy path; non-``None`` is ready to
-        use. Never raises (a store read failure yields ``None``).
+    Postconditions: ``None`` -> caller raises ``LLMNotConfiguredError``; non-``None``
+        is ready to use. Never raises (a store read failure yields ``None``).
     """
     try:
         entries = provider_store.load_ordered_entries()
-    except Exception as e:  # noqa: BLE001 - provider list is best-effort; legacy is the fallback
-        logger.debug("provider list read failed, using legacy path: %s", e)
+    except Exception as e:  # noqa: BLE001 - a store read failure yields None -> caller raises
+        logger.debug("provider list read failed: %s", e)
         return None
     if not entries:
         return None
@@ -560,12 +542,7 @@ def _build_failover_client(
     def build(entry: "provider_store.ProviderEntry", rl_override: Optional[int]) -> Any:
         return _build_entry_client(entry, agent_key, on_reasoning, rl_override)
 
-    inner = FailoverLLMClient(
-        load_candidates,
-        build,
-        _mark_entry_exhausted,
-        lambda: _build_legacy_concrete(agent_key, on_reasoning),
-    )
+    inner = FailoverLLMClient(load_candidates, build, _mark_entry_exhausted)
     return _AttributingClient(inner, agent_key) if agent_key else inner
 
 
@@ -573,128 +550,47 @@ def get_client(
     agent_key: Optional[str] = None,
     *,
     on_reasoning: Optional[Callable[[str], None]] = None,
-) -> Union[DummyLLMClient, OllamaLLMClient, "_AttributingClient"]:
+) -> Union[DummyLLMClient, "_AttributingClient", "FailoverLLMClient"]:
     """
-    Return an LLM client for the given agent key or default.
+    Return an LLM client for the given agent key.
 
-    Model resolution is provider-specific:
-    - Ollama/dummy: LLM_MODEL_<agent_key>, then LLM_MODEL, then
-      AGENT_DEFAULT_MODELS[agent_key], then fallback.
-    - Claude: ``resolve_claude_model`` — LLM_MODEL_<agent_key> (per-agent env) ->
-      runtime UI (Claude-specific) -> LLM_MODEL (global env) -> DEFAULT_CLAUDE_MODEL.
-      The env candidates are heuristic-validated as Claude ids and skipped otherwise.
-    Provider selection (LLM_PROVIDER, runtime config -> env -> "ollama"):
-    - "dummy" -> DummyLLMClient.
-    - "claude"/"anthropic" -> ClaudeLLMClient (cached by model, api-key fingerprint, timeout).
-    - "ollama" (or unset) -> OllamaLLMClient (cached by model, base_url, timeout).
+    The Postgres-backed ordered provider list (see :mod:`llm_service.provider_store`)
+    is the SOLE source of LLM resolution. Resolution order:
 
-    When an ordered multi-provider list is configured (see
-    :mod:`llm_service.provider_store`), the returned client is a
-    :class:`FailoverLLMClient` (wrapped in :class:`_AttributingClient` for a keyed
-    call) that selects the most-preferred non-exhausted provider and fails over to
-    the next on a 429. The list is consulted only when Postgres is enabled and
-    non-empty; otherwise this falls through to the single-provider path below
-    (full back-compat). The ``dummy`` provider is a hard override that pre-empts the
-    list (tests / no-LLM dev).
+    - ``LLM_PROVIDER=dummy`` -> :class:`DummyLLMClient` (a hard override that pre-empts
+      the list, for tests / no-LLM dev — never touches Postgres).
+    - Otherwise, when the list is non-empty, a :class:`FailoverLLMClient` (wrapped in
+      :class:`_AttributingClient` for a keyed call) that selects the most-preferred
+      non-exhausted provider and fails over to the next on a 429. Each entry is
+      self-contained: it carries its own model/base URL/key (blank non-secret fields
+      fall back to provider defaults; keys have no env fallback).
+    - When the list is empty (or Postgres is unset), :class:`LLMNotConfiguredError` is
+      raised — there is no legacy single-provider fallback. The operator configures a
+      provider in the LLM Provider settings (``/llm-config``).
 
-    ``on_reasoning`` is an optional per-caller thinking-token sink. When provided,
-    a FRESH (uncached) provider client (Ollama or Claude) is returned so the
-    callback never leaks into the shared cache; the cached singleton path is used
-    only when it is ``None``. The dummy provider produces no reasoning, so the hook
-    is irrelevant there.
-
-    When ``agent_key`` is provided, the returned object is an
-    :class:`_AttributingClient` wrapper that binds that agent identity onto the
-    attribution context around every generation call (so logs/telemetry attribute
-    the call to the agent); the underlying client it delegates to is still the
-    cached singleton. When ``agent_key`` is ``None`` the cached client is returned
-    directly. The dummy provider is always returned unwrapped.
+    ``on_reasoning`` is an optional per-caller thinking-token sink threaded into each
+    per-entry client so the callback never leaks into the shared cache. When
+    ``agent_key`` is provided, the returned object is an :class:`_AttributingClient`
+    wrapper binding that agent identity onto the attribution context around every
+    generation call. The dummy provider is always returned unwrapped.
 
     Preconditions: ``on_reasoning`` is callable or ``None``.
-    Postconditions: with ``on_reasoning is None`` the wrapped/underlying client is
-        the cached singleton for (model, base_url, timeout); otherwise it is a
-        distinct, uncached client carrying the hook.
+    Postconditions: returns a ready client, or raises :class:`LLMNotConfiguredError`
+        when no provider is configured (and the provider is not ``dummy``).
     """
-    provider = llm_config.resolve_provider()
-    if provider == "dummy":
+    if llm_config.resolve_provider() == "dummy":
         # The dummy stub is returned unwrapped: it doubles as a Strands ``Model``
-        # (passed directly to ``strands.Agent``) and records no telemetry, so
-        # there is no attribution to bind. Dummy is a hard override — it pre-empts
-        # the provider list so no-LLM tests/dev never touch Postgres.
+        # (passed directly to ``strands.Agent``) and records no telemetry, so there is
+        # no attribution to bind. Dummy is a hard override — it pre-empts the provider
+        # list so no-LLM tests/dev never touch Postgres.
         return DummyLLMClient()
 
-    # Multi-provider failover (Postgres-backed ordered list). Returns None when the
-    # list is disabled/empty, falling through to the legacy single-provider path.
+    # The provider list is the sole source: build a failover client from it, or raise
+    # when it is empty/disabled (no legacy single-provider fallback).
     failover = _build_failover_client(agent_key, on_reasoning=on_reasoning)
     if failover is not None:
         return failover
-
-    if provider in ("claude", "anthropic"):
-        return _get_claude_client(agent_key, on_reasoning=on_reasoning)
-
-    model = llm_config.resolve_model(agent_key)
-    base_url = llm_config.resolve_base_url()
-    timeout = llm_config.resolve_timeout(agent_key)
-
-    if on_reasoning is not None:
-        # Uncached: a per-job/per-caller callback must not be shared via the cache.
-        client = OllamaLLMClient(
-            model=model, base_url=base_url, timeout=timeout, on_reasoning=on_reasoning
-        )
-        return _AttributingClient(client, agent_key) if agent_key else client
-
-    client, miss = _ollama_cached(model, base_url, timeout, None)
-    if miss:
-        # Log the effective config once, on a genuine cache miss (a new client was
-        # just built) — independent of agent_key, so it fires whether or not a keyed
-        # wrapper is returned, and never on a cache hit.
-        logger.info("LLM config: %s", llm_config.get_llm_config_summary())
-
-    # Falsy agent_key (None or "") binds nothing — return the raw client, matching
-    # the on_reasoning branch above. Wrapping with an empty key would bind
-    # ``llm_attribution(agent_key="")``, which (since "" overrides rather than
-    # inherits) would clobber an enclosing orchestrator's agent_key with ``-``.
-    return _AttributingClient(client, agent_key) if agent_key else client
-
-
-def _get_claude_client(
-    agent_key: Optional[str],
-    *,
-    on_reasoning: Optional[Callable[[str], None]] = None,
-) -> Union[ClaudeLLMClient, "_AttributingClient"]:
-    """Build/cache a :class:`ClaudeLLMClient` for ``agent_key``.
-
-    Cached by ``(model, api_key_fingerprint, timeout_ms)`` so a model, key, or
-    timeout change yields a fresh client (the timeout dimension mirrors the Ollama
-    cache key and avoids a stale-timeout client if ``resolve_timeout`` ever becomes
-    per-agent; it is quantized to integer milliseconds so float jitter never
-    fragments the cache). Wrapped in :class:`_AttributingClient` when ``agent_key``
-    is truthy, mirroring the Ollama path.
-
-    ``on_reasoning`` (a per-caller thinking-token sink) forces a FRESH, uncached
-    client so the callback never leaks into the shared cache — mirroring the Ollama
-    path; the cached singleton is used only when it is ``None``.
-
-    Postconditions: returns a ready client; with ``on_reasoning is None`` the
-        underlying ``ClaudeLLMClient`` is the cached singleton for its
-        (model, key, timeout) tuple, otherwise a distinct uncached client.
-    """
-    model = llm_config.resolve_claude_model(agent_key)
-    api_key = llm_config.resolve_claude_api_key()
-    timeout = llm_config.resolve_timeout(agent_key)
-    if on_reasoning is not None:
-        # Uncached: a per-job/per-caller callback must not be shared via the cache.
-        client = ClaudeLLMClient(
-            model=model, api_key=api_key, timeout=timeout, on_reasoning=on_reasoning
-        )
-        return _AttributingClient(client, agent_key) if agent_key else client
-    client, miss = _claude_cached(model, api_key, timeout, None)
-    if miss:
-        # Log the effective config once, on a genuine cache miss (a new client was
-        # just built) — independent of agent_key, so it fires whether or not a keyed
-        # wrapper is returned, and never on a cache hit.
-        logger.info("LLM config: %s", llm_config.get_llm_config_summary())
-    return _AttributingClient(client, agent_key) if agent_key else client
+    raise LLMNotConfiguredError(_NO_PROVIDER_MSG)
 
 
 def clear_client_cache() -> None:

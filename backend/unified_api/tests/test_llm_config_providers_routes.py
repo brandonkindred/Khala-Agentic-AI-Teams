@@ -301,3 +301,75 @@ def test_mutations_require_postgres(app_client, monkeypatch):
     assert client.put("/api/llm-config/providers/1", json={"label": "x"}).status_code == 503
     assert client.delete("/api/llm-config/providers/1").status_code == 503
     assert client.put("/api/llm-config/providers/order", json={"ids": [1]}).status_code == 503
+
+
+# --------------------------------------------------------------------------- #
+# Entry credentials guard: an entry must carry its OWN key — NO env fallback   #
+# (the provider list is the sole source; a keyless Claude/Cloud entry is       #
+# unusable at call time, so persisting one is rejected).                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_create_claude_without_key_is_400_even_with_env_key(app_client, monkeypatch):
+    """A Claude entry with an empty api_key is rejected even when ANTHROPIC_API_KEY is
+    set in env — entries are self-contained, there is no env fallback at call time."""
+    client, _state = app_client
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    monkeypatch.setenv("LLM_CLAUDE_API_KEY", "sk-env")
+    resp = client.post("/api/llm-config/providers", json={"label": "C", "provider": "claude"})
+    assert resp.status_code == 400
+    assert "without an API key" in resp.json()["detail"]
+
+
+def test_create_ollama_cloud_without_key_is_400_even_with_env_key(app_client, monkeypatch):
+    """An Ollama-Cloud entry with an empty api_key is rejected even when OLLAMA_API_KEY
+    is set in env — no env fallback for the entry's own key."""
+    client, _state = app_client
+    monkeypatch.setenv("OLLAMA_API_KEY", "sk-env")
+    monkeypatch.setenv("LLM_OLLAMA_API_KEY", "sk-env")
+    resp = client.post(
+        "/api/llm-config/providers",
+        json={"label": "Cloud", "provider": "ollama", "base_url": "https://ollama.com"},
+    )
+    assert resp.status_code == 400
+    assert "Ollama Cloud" in resp.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# /ollama-models — the browse utility endpoint (kept; single-provider config    #
+# GET/PUT was removed).                                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_ollama_models_live_listing(app_client, monkeypatch):
+    """A non-empty live listing from /api/tags is returned verbatim with source=live."""
+    client, _state = app_client
+    monkeypatch.setattr(route, "list_ollama_models", lambda: ["llama3.2", "qwen3-coder:480b-cloud"])
+    resp = client.get("/api/llm-config/ollama-models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "live"
+    assert body["models"] == ["llama3.2", "qwen3-coder:480b-cloud"]
+    # base_url reflects the resolved effective endpoint (cloud default with no env).
+    assert body["base_url"] == "https://ollama.com"
+
+
+def test_ollama_models_falls_back_to_curated(app_client, monkeypatch):
+    """An empty live listing degrades to the curated suggestions (source=fallback)."""
+    client, _state = app_client
+    monkeypatch.setattr(route, "list_ollama_models", lambda: [])
+    resp = client.get("/api/llm-config/ollama-models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "fallback"
+    assert body["models"] == list(route._OLLAMA_MODEL_SUGGESTIONS)
+    assert body["models"]  # non-empty curated fallback
+
+
+def test_ollama_models_base_url_reflects_resolved_endpoint(app_client, monkeypatch):
+    """The reported base_url tracks the resolved Ollama endpoint (env override here)."""
+    client, _state = app_client
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
+    monkeypatch.setattr(route, "list_ollama_models", lambda: ["llama3.1"])
+    body = client.get("/api/llm-config/ollama-models").json()
+    assert body["base_url"] == "http://localhost:11434"

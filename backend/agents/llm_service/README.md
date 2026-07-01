@@ -4,23 +4,23 @@ Single backend LLM layer used by all agent teams. Provides a provider-agnostic i
 
 ## Providers
 
-Selected by `LLM_PROVIDER` (resolved per call): runtime config (UI) → env → default `ollama`.
+The Postgres-backed **provider list is the sole source of LLM resolution** (see below). `LLM_PROVIDER=dummy` is the only override — a hard-coded no-LLM harness that pre-empts the list.
 
 | Provider | Client | Notes |
 |----------|--------|-------|
-| `ollama` (default) | `OllamaLLMClient` | Local (`LLM_BASE_URL=http://host:11434`) or Ollama Cloud (`https://ollama.com` + `OLLAMA_API_KEY`). |
-| `claude` (alias `anthropic`) | `ClaudeLLMClient` | Uses the **official `anthropic` Python SDK** (streaming + `get_final_message()`). Default model `claude-opus-4-8`; key from `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY`. Adaptive thinking + `output_config.effort`; never sends `temperature`/`top_p`. |
-| `dummy` | `DummyLLMClient` | Heuristic stub for tests; also a Strands `Model`. |
+| `ollama` | `OllamaLLMClient` | Local (`base_url=http://host:11434`) or Ollama Cloud (`https://ollama.com`, entry carries its own key). |
+| `claude` | `ClaudeLLMClient` | Uses the **official `anthropic` Python SDK** (streaming + `get_final_message()`). Default model `claude-opus-4-8`; entry carries its own key. Adaptive thinking + `output_config.effort`; never sends `temperature`/`top_p`. |
+| `dummy` | `DummyLLMClient` | Heuristic stub for tests; also a Strands `Model`. `LLM_PROVIDER=dummy` pre-empts the list. |
 
-### Runtime configuration (settings UI)
+### Provider list (settings UI) — the sole source of LLM resolution
 
-`PUT /api/llm-config` (unified API) stores provider/model/keys Fernet-encrypted in the shared `encrypted_integration_credentials` table under the `llm_config` service. Every team container reads them back through `shared_postgres.secrets` → `llm_service.runtime_config` — **no dependency on `unified_api`** — because all containers share the Fernet key (`INTEGRATION_ENCRYPTION_KEY` env, or `$AGENT_CACHE/integration.key` on the shared volume) and the same Postgres. Runtime reads are cached for `LLM_RUNTIME_CONFIG_TTL_S` seconds (default 30), so a UI change reaches every container within the TTL; the PUT endpoint also clears the local client cache immediately. Requires Postgres — env vars remain the fallback when it is unset.
+The settings UI manages an **ordered list of provider entries** (`GET/POST/PUT/DELETE /api/llm-config/providers` + `PUT /api/llm-config/providers/order`), persisted in the dedicated `llm_provider_configs` table by `llm_service.provider_store`. All containers share the Fernet key (`INTEGRATION_ENCRYPTION_KEY` env, or `$AGENT_CACHE/integration.key` on the shared volume) and the same Postgres, so every team container reads the list back with **no dependency on `unified_api`**. Entries are ordered most→least preferred and are **self-contained**: each carries its own provider/model/base URL and its **own API key** — there is no environment fallback for keys (a keyless Claude / Ollama-Cloud entry is rejected at write time). Blank non-secret fields (model/base URL) fall back to provider defaults via the shared resolvers.
 
-### Multi-provider fallback list
+`get_client` resolves the active provider via `provider_store.resolve_active_provider_config`: the first entry that is **not** usage-limited wins; an entry whose `reset_at` has passed is reset and used; when **all** are limited the entry with the soonest reset time is returned — the `FailoverLLMClient` still attempts the call on it, and if that 429s it marks the entry and tries the next provider, ultimately re-raising the last `LLMRateLimitError` once every provider is exhausted. `get_client` returns a `FailoverLLMClient` (wrapped in `_AttributingClient` for a keyed call) that, on an `LLMRateLimitError`, marks the current entry exhausted (computing `reset_at` from the 429's `Retry-After` or a fallback window, with a lightweight `weekly`/`rate` `limit_type`) and retries the **same** call on the next available provider. `unwrap_client` deliberately stops at the `FailoverLLMClient` (peeling only the attribution wrapper) so the Strands adapter's `unwrap_client(client).chat` dispatch still routes through failover.
 
-The settings UI also manages an **ordered list of provider entries** (`GET/POST/PUT/DELETE /api/llm-config/providers` + `PUT /api/llm-config/providers/order`), persisted in the dedicated `llm_provider_configs` table by `llm_service.provider_store` (same Fernet key for the API key, same no-`unified_api`-dependency rule as `runtime_config`). Entries are ordered most→least preferred.
+When the list is empty (or Postgres unset) and the provider is not `dummy`, `get_client` raises **`LLMNotConfiguredError`** — there is no legacy single-provider env fallback. In an agent run this fails the job; the Angular UI shows a "No LLMs configured" dialog whose "Setup LLM" button routes to `/llm-config`. Latency/window tuning: `LLM_FAILOVER_FAST_429`, `LLM_FAILOVER_RATE_WINDOW_S`, `LLM_FAILOVER_WEEKLY_WINDOW_S` (see `docs/ENV_VARS.md`).
 
-`get_client` resolves the active provider via `provider_store.resolve_active_provider_config`: the first entry that is **not** usage-limited wins; an entry whose `reset_at` has passed is reset and used; when **all** are limited the entry with the soonest reset time is returned (so the call still targets a configured provider rather than the env default) — the `FailoverLLMClient` will attempt the call on it, and if that 429s it marks the entry and tries the next provider, ultimately re-raising the last `LLMRateLimitError` once every provider is exhausted. When a list is configured, `get_client` returns a `FailoverLLMClient` (wrapped in `_AttributingClient` for a keyed call) that, on an `LLMRateLimitError`, marks the current entry exhausted (computing `reset_at` from the 429's `Retry-After` or a fallback window, with a lightweight `weekly`/`rate` `limit_type`) and retries the **same** call on the next available provider. `unwrap_client` deliberately stops at the `FailoverLLMClient` (peeling only the attribution wrapper) so the Strands adapter's `unwrap_client(client).chat` dispatch still routes through failover. With an empty list (or Postgres unset) `get_client` falls through to the single-provider resolution above, unchanged. Latency/window tuning: `LLM_FAILOVER_FAST_429`, `LLM_FAILOVER_RATE_WINDOW_S`, `LLM_FAILOVER_WEEKLY_WINDOW_S` (see `docs/ENV_VARS.md`).
+> **Migration note:** any pre-existing `llm_provider_configs` row that previously relied on the env key fallback (a Claude / Ollama-Cloud entry with an empty stored key) must have its key re-entered — such an entry now fails at call time with an auth error rather than pulling `ANTHROPIC_API_KEY` / `OLLAMA_API_KEY` from the environment.
 
 ## Usage
 
@@ -134,12 +134,11 @@ for the design rationale and migration notes.
 
 | Variable | Meaning |
 |----------|---------|
-| `LLM_PROVIDER` | `dummy`, `ollama` (default), or `claude` (alias `anthropic`) |
-| `LLM_MODEL` | Model name |
-| `LLM_MODEL_<agent_key>` | Per-agent model override |
-| `LLM_BASE_URL` | Ollama base URL (default `https://ollama.com`) |
-| `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY` | **Required for `LLM_PROVIDER=claude`.** Anthropic API key (the first is Khala-namespaced; the second is the SDK convention, used as a fallback). |
-| `LLM_RUNTIME_CONFIG_TTL_S` | TTL (seconds, default 30) for the runtime provider config the LLM Provider settings UI writes (see "Runtime configuration" below) |
+| `LLM_PROVIDER` | Only `dummy` is load-bearing (the no-LLM harness, pre-empts the list); other values just mean "not dummy" → use the provider list |
+| `LLM_MODEL` | Default model for a provider-list entry whose `model` is blank |
+| `LLM_MODEL_<agent_key>` | Per-agent default model (applies to a blank entry model) |
+| `LLM_BASE_URL` | Default Ollama base URL for a provider-list entry whose `base_url` is blank |
+| `LLM_RUNTIME_CONFIG_TTL_S` | TTL (seconds, default 30) for the runtime cache backing the entry-default resolvers |
 | `LLM_TIMEOUT` | Request timeout in seconds (default 900 / 15 min; all calls use streaming) |
 | `LLM_CONTEXT_SIZE` | Override context size |
 | `LLM_MAX_TOKENS` | Max output tokens |
