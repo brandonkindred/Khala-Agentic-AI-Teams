@@ -9,8 +9,8 @@ Supports:
 
 The actual review is the existing PR-review flow (``POST /api/integrations/github/review-pr``
 → coding-team ``/review-pr``); this module only recognizes the command and starts it.
-All heavy work runs in a background thread so the webhook returns a fast 2xx, matching
-GitHub's delivery-timeout expectation.
+All heavy work runs on a bounded background thread pool so the webhook returns a fast
+2xx, matching GitHub's delivery-timeout expectation.
 """
 
 from __future__ import annotations
@@ -19,10 +19,32 @@ import hashlib
 import hmac
 import logging
 import re
-import threading
+from concurrent import futures
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Bounds webhook-triggered review work to a fixed pool instead of spawning an
+# unbounded OS thread per delivery (a burst of "@khala review" comments would
+# otherwise create one thread each). Mirrors the pattern already used for the
+# health-check probe pool in unified_api/main.py (`_get_probe_executor`).
+_DISPATCH_EXECUTOR: futures.ThreadPoolExecutor | None = None
+
+
+def _get_dispatch_executor() -> futures.ThreadPoolExecutor:
+    """Return the shared bounded executor for webhook-triggered review work.
+
+    Preconditions: none.
+    Postconditions: returns a process-wide ``ThreadPoolExecutor`` (max_workers=4),
+        created lazily on first use. Recreates it if a prior instance was already shut
+        down, so tests that shut it down between runs don't leave the module unusable.
+        Never raises.
+    """
+    global _DISPATCH_EXECUTOR
+    if _DISPATCH_EXECUTOR is None or getattr(_DISPATCH_EXECUTOR, "_shutdown", False):
+        _DISPATCH_EXECUTOR = futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="gh-webhook-review")
+    return _DISPATCH_EXECUTOR
+
 
 # Commenters whose association with the repo authorizes a review trigger. Outside
 # contributors (CONTRIBUTOR / FIRST_TIMER / NONE / ...) are intentionally excluded so a
@@ -108,7 +130,7 @@ def _comment_is_from_bot(comment: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Review trigger (runs in a background thread)
+# Review trigger (runs on the bounded dispatch executor)
 # ---------------------------------------------------------------------------
 
 
@@ -159,6 +181,11 @@ def _start_review(pr_number: int, token: str | None) -> None:
     Postconditions: forwards to the same ``_start_pr_review`` path used by
         ``POST /api/integrations/github/review-pr``. Errors are logged, not raised — the
         webhook has already returned 200 and there is no client to surface them to.
+        Runs on a bounded executor worker thread (see :func:`_get_dispatch_executor`),
+        which has no event loop of its own, so a fresh ``asyncio.run()`` per call is the
+        standard way to run this one coroutine to completion — the same shape as
+        ``asyncio.to_thread``/``loop.run_in_executor`` — and does not create N
+        concurrently-running loops beyond the pool's ``max_workers`` bound.
     """
     try:
         import asyncio
@@ -223,9 +250,10 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any]) -> None:
 
     Preconditions: ``event_type`` is the value of the ``X-GitHub-Event`` header;
         ``payload`` is the parsed webhook body (already signature-verified by the route).
-    Postconditions: spawns a daemon thread running :func:`process_review_request` exactly
-        once when every condition above holds; any unmet condition is a silent no-op.
-        Never raises (it returns before the thread does any I/O).
+    Postconditions: submits :func:`process_review_request` to the bounded dispatch
+        executor (see :func:`_get_dispatch_executor`) exactly once when every condition
+        above holds; any unmet condition is a silent no-op. Never raises (it returns
+        before the submitted work does any I/O).
     """
     if event_type != "issue_comment":
         return
@@ -272,8 +300,4 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any]) -> None:
     comment_id = comment.get("id")
     comment_id = comment_id if isinstance(comment_id, int) else 0
 
-    threading.Thread(
-        target=process_review_request,
-        args=(repo_owner, repo_name, pr_number, comment_id),
-        daemon=True,
-    ).start()
+    _get_dispatch_executor().submit(process_review_request, repo_owner, repo_name, pr_number, comment_id)

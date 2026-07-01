@@ -127,23 +127,19 @@ def _comment_payload(**over):
     return payload
 
 
-class _SyncThread:
-    """Thread stand-in that runs the target synchronously on start()."""
+class _SyncExecutor:
+    """Executor stand-in that runs submitted work synchronously (no thread pool)."""
 
-    def __init__(self, target=None, args=(), daemon=None):
-        self._target = target
-        self._args = args
-
-    def start(self):
-        self._target(*self._args)
+    def submit(self, fn, *args):
+        fn(*args)
 
 
 def _dispatch(payload, event_type="issue_comment", cfg=("acme", "widget")):
-    """Run dispatch with process_review_request + Thread patched; return the mock."""
+    """Run dispatch with process_review_request + the dispatch executor patched; return the mock."""
     proc = MagicMock()
     with (
         patch(f"{_H}.process_review_request", proc),
-        patch(f"{_H}.threading.Thread", _SyncThread),
+        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
         patch(f"{_H}._configured_owner_repo", return_value=cfg),
     ):
         gh.dispatch_github_event(event_type, payload)
@@ -310,3 +306,43 @@ def test_configured_owner_repo_reads_meta():
         return_value={"owner": "acme", "repo": "widget"},
     ):
         assert gh._configured_owner_repo() == ("acme", "widget")
+
+
+# ---------------------------------------------------------------------------
+# _get_dispatch_executor: bounded pool, lazily created and reused
+# ---------------------------------------------------------------------------
+
+
+def test_get_dispatch_executor_reuses_same_instance():
+    gh._DISPATCH_EXECUTOR = None
+    try:
+        first = gh._get_dispatch_executor()
+        second = gh._get_dispatch_executor()
+        assert first is second
+    finally:
+        first.shutdown(wait=False, cancel_futures=True)
+        gh._DISPATCH_EXECUTOR = None
+
+
+def test_get_dispatch_executor_recreates_after_shutdown():
+    gh._DISPATCH_EXECUTOR = None
+    try:
+        first = gh._get_dispatch_executor()
+        first.shutdown(wait=False, cancel_futures=True)
+        second = gh._get_dispatch_executor()
+        assert second is not first
+    finally:
+        gh._get_dispatch_executor().shutdown(wait=False, cancel_futures=True)
+        gh._DISPATCH_EXECUTOR = None
+
+
+def test_dispatch_submits_to_bounded_executor_not_raw_thread():
+    """dispatch_github_event submits via the bounded executor, not an ad-hoc thread."""
+    fake_executor = MagicMock()
+    with (
+        patch(f"{_H}._get_dispatch_executor", return_value=fake_executor),
+        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
+        patch(f"{_H}.process_review_request") as proc,
+    ):
+        gh.dispatch_github_event("issue_comment", _comment_payload())
+    fake_executor.submit.assert_called_once_with(proc, "acme", "widget", 42, 999)

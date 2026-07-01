@@ -258,7 +258,12 @@ class TestClientCommentReaction:
         def handler(_req: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"id": 1, "content": "eyes"})
 
-        _client_with(handler).create_comment_reaction("acme", "widget", 555, content="eyes")
+        result = _client_with(handler).create_comment_reaction(
+            "acme", "widget", 555, content="eyes"
+        )
+        # No exception on a 200 (vs. the 201 the happy-path test exercises), and the
+        # documented contract is a bare None return either way.
+        assert result is None
 
     def test_raises_on_error(self) -> None:
         def handler(_req: httpx.Request) -> httpx.Response:
