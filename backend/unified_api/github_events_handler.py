@@ -115,6 +115,7 @@ def _comment_is_from_bot(comment: dict[str, Any]) -> bool:
 def _resolve_github_token() -> str | None:
     """Return the configured GitHub PAT, or ``None`` if unavailable.
 
+    Preconditions: none.
     Postconditions: reads the encrypted PAT via the credential store; never raises.
     """
     try:

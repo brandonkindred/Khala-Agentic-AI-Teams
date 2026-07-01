@@ -98,6 +98,12 @@ export interface GitHubConfigResponse {
   repo: string;
   default_label: string;
   /**
+   * True when a webhook signing secret is configured (stored credential or
+   * GITHUB_WEBHOOK_SECRET env var), used to verify "@khala review" PR-comment
+   * webhooks delivered to POST /api/integrations/github/events.
+   */
+  webhook_secret_configured?: boolean;
+  /**
    * True when Postgres (the PAT store) is configured but unreachable, so
    * `token_configured` may read false only because the store is down. Lets the
    * UI warn instead of showing a bare "not connected".
@@ -113,6 +119,8 @@ export interface GitHubConfigUpdate {
   token: string;
   default_label: string;
   repo_path: string;
+  /** GitHub webhook signing secret; omitted/empty preserves the existing one. */
+  webhook_secret?: string;
 }
 
 /** A single issue this issue is blocked by (a GitHub "blocked by" dependency). */
