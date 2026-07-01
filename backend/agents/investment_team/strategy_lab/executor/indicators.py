@@ -276,7 +276,14 @@ def donchian_channels(
     low: pd.Series,
     period: int = 20,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """Donchian channel: upper (rolling-max high), middle (midpoint), lower (rolling-min low)."""
+    """Donchian channel: upper (rolling-max high), middle (midpoint), lower (rolling-min low).
+
+    Preconditions: ``high``/``low`` are coercible OHLC series of equal length;
+    ``period >= 1``.
+    Postconditions: three same-length series; each is NaN for the first
+    ``period - 1`` rows, then ``upper`` is the trailing-``period`` highest high,
+    ``lower`` the lowest low, and ``middle`` their midpoint.
+    """
     high = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
     upper = high.rolling(window=period).max()
@@ -303,6 +310,12 @@ def keltner_channels(
     no warm-up gate would let the static coverage probe / direct Series consumers see
     Keltner values during the runtime warm-up window and mark predicates active a few
     bars early.)
+
+    Preconditions: ``high``/``low``/``close`` are coercible OHLC series of equal
+    length; ``period >= 1``; ``atr_period >= 1``.
+    Postconditions: three same-length series, NaN until ``max(period, atr_period + 1)``
+    bars exist; thereafter ``middle`` is the windowed close-EMA and the bands are
+    ``middle ± multiplier × ATR(atr_period)``.
     """
     high = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
@@ -327,7 +340,13 @@ def keltner_channels(
 
 
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
-    """On-Balance Volume: cumulative volume signed by the close-to-close direction."""
+    """On-Balance Volume: cumulative volume signed by the close-to-close direction.
+
+    Preconditions: ``close``/``volume`` are coercible series of equal length.
+    Postconditions: a same-length cumulative series; each step adds ``volume`` on
+    an up-close, subtracts it on a down-close, and is unchanged on a flat close
+    (the first bar contributes 0, having no prior close).
+    """
     close = _coerce_series(close, "close")
     volume = _coerce_series(volume, "volume")
     direction = np.sign(close.diff()).fillna(0.0)
@@ -341,7 +360,14 @@ def mfi(
     volume: pd.Series,
     period: int = 14,
 ) -> pd.Series:
-    """Money Flow Index (0–100): volume-weighted RSI of typical price."""
+    """Money Flow Index (0–100): volume-weighted RSI of typical price.
+
+    Preconditions: ``high``/``low``/``close``/``volume`` are coercible series of
+    equal length; ``period >= 1``.
+    Postconditions: a same-length series in ``[0, 100]``, NaN until ``period + 1``
+    bars exist; a full window with no down-flow yields 100 (or 50 when there is no
+    flow at all), mirroring ``rsi``'s zero-denominator convention.
+    """
     high = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
     close = _coerce_series(close, "close")
@@ -365,14 +391,18 @@ def mfi(
     # and rsi(). Built with pandas-native ``mask``/``where`` so the boolean masks
     # stay index-aligned with ``pos_sum``/``neg_sum``. Warm-up rows (neg_sum NaN,
     # so ``neg_sum == 0`` is False) fall through ``where`` to NaN and keep it.
-    fill_values = (
-        pd.Series(50.0, index=result.index).mask(pos_sum > 0, 100.0).where(neg_sum == 0)
-    )
+    fill_values = pd.Series(50.0, index=result.index).mask(pos_sum > 0, 100.0).where(neg_sum == 0)
     return result.fillna(fill_values)
 
 
 def roc(series: pd.Series, period: int = 12) -> pd.Series:
-    """Rate of Change (percent) over ``period`` bars."""
+    """Rate of Change (percent) over ``period`` bars.
+
+    Preconditions: ``series`` is coercible; ``period >= 1``.
+    Postconditions: a same-length series, NaN for the first ``period`` rows;
+    thereafter ``100 × (price − price[−period]) / price[−period]``, or ``0.0``
+    when the reference price is exactly 0 (avoids division by zero).
+    """
     series = _coerce_series(series)
     prev = series.shift(period)
     result = (series - prev) / prev.replace(0, np.nan) * 100
@@ -387,7 +417,14 @@ def cci(
     close: pd.Series,
     period: int = 20,
 ) -> pd.Series:
-    """Commodity Channel Index: typical-price deviation scaled by 0.015 × mean deviation."""
+    """Commodity Channel Index: typical-price deviation scaled by 0.015 × mean deviation.
+
+    Preconditions: ``high``/``low``/``close`` are coercible OHLC series of equal
+    length; ``period >= 1``.
+    Postconditions: a same-length series, NaN for the first ``period - 1`` rows;
+    thereafter ``(tp − sma_tp) / (0.015 × mean_deviation)`` over the trailing
+    ``period`` typical prices, or ``0.0`` on a flat window (zero mean deviation).
+    """
     high = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
     close = _coerce_series(close, "close")
@@ -413,7 +450,14 @@ def williams_r(
     close: pd.Series,
     period: int = 14,
 ) -> pd.Series:
-    """Williams %R (−100–0): close position within the trailing high/low range."""
+    """Williams %R (−100–0): close position within the trailing high/low range.
+
+    Preconditions: ``high``/``low``/``close`` are coercible OHLC series of equal
+    length; ``period >= 1``.
+    Postconditions: a same-length series in ``[−100, 0]``, NaN for the first
+    ``period - 1`` rows; thereafter ``−100 × (highest_high − close) / range``, or
+    ``−50.0`` (neutral) when the high-low range is 0.
+    """
     high = _coerce_series(high, "high")
     low = _coerce_series(low, "low")
     close = _coerce_series(close, "close")

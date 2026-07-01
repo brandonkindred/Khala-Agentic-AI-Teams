@@ -1097,14 +1097,18 @@ def test_strategy_context_ingest_bar_trims_to_shared_window() -> None:
     ctx._history = {}
     for i in range(STREAMING_WINDOW_BARS + 10):
         ctx._ingest_bar(
-            Bar(symbol="TEST", timestamp=f"t{i}", open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0)
+            Bar(
+                symbol="TEST", timestamp=f"t{i}", open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0
+            )
         )
     assert len(ctx._history["TEST"]) == STREAMING_WINDOW_BARS
     # The retained tail is the most recent bars, not the earliest.
     assert ctx._history["TEST"][-1].timestamp == f"t{STREAMING_WINDOW_BARS + 9}"
 
 
-@pytest.mark.parametrize("name,period", [("donchian", 14), ("williams_r", 14), ("cci", 14), ("mfi", 14)])
+@pytest.mark.parametrize(
+    "name,period", [("donchian", 14), ("williams_r", 14), ("cci", 14), ("mfi", 14)]
+)
 def test_windowed_deque_cache_keys_are_symbol_scoped(name: str, period: int) -> None:
     """Two symbol-tagged streams sharing one registry must not cross-contaminate.
 
@@ -1135,7 +1139,56 @@ def test_windowed_deque_cache_keys_are_symbol_scoped(name: str, period: int) -> 
     getattr(reg, name)(bars_a, period)  # populate the AAPL slot first
     shared = getattr(reg, name)(bars_b, period)  # MSFT slot on the SAME registry
     fresh = getattr(IndicatorRegistry(), name)(bars_b, period)  # ground truth
-    assert shared == pytest.approx(fresh), f"{name}: shared-registry result diverged from a fresh one"
+    assert shared == pytest.approx(fresh), (
+        f"{name}: shared-registry result diverged from a fresh one"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,call",
+    [
+        ("keltner", lambda reg, bars: reg.keltner(bars, 14, 10, 2.0)),
+        ("roc", lambda reg, bars: reg.roc(bars, 12)),
+        ("obv", lambda reg, bars: reg.obv(bars)),
+    ],
+)
+def test_recompute_indicator_cache_keys_are_symbol_scoped(name, call) -> None:
+    """keltner/roc/obv keep no per-call deque and fully recompute on a cache miss,
+    so they cannot corrupt state across symbols the way the deque indicators can —
+    but their cache slots must still be per-symbol so a shared ``IndicatorRegistry``
+    keeps disjoint slots (matching :meth:`macd` and the deque siblings
+    donchian/mfi/cci/williams_r) instead of two symbols thrashing one slot.
+    """
+    bars_a = _series(21, seed=41)
+    bars_b = _series(21, seed=42)
+    for b in bars_a:
+        b.symbol = "AAPL"
+    for b in bars_b:
+        b.symbol = "MSFT"
+
+    reg = IndicatorRegistry()
+    call(reg, bars_a)  # AAPL slot
+    call(reg, bars_b)  # MSFT slot on the SAME registry
+    slots = [k for k in reg._state if k[0] == name]
+    symbols_seen = {k[1] for k in slots}
+    assert symbols_seen == {"AAPL", "MSFT"}, (
+        f"{name}: expected disjoint per-symbol slots, got {slots}"
+    )
+
+
+def test_indicator_method_map_covers_every_dsl_name() -> None:
+    """The compiler's DSL-name → helper-method map must cover every ``IndicatorName``.
+
+    A missing entry ``KeyError``s at emit time the first time a spec uses the new
+    indicator — after validation and the readiness gate already accepted it. The
+    compiler enforces this with a load-time ``raise`` (mirroring the identical
+    guard on ``code_conformance._INDICATOR_ALLOWED_CALL_NAMES``); this test states
+    the contract explicitly and localises a drift to a named assertion.
+    """
+    from investment_team.strategy_lab.spec_dsl import IndicatorName
+    from investment_team.strategy_lab.synthesis.compiler import _INDICATOR_METHOD_NAME
+
+    assert set(_INDICATOR_METHOD_NAME) == set(IndicatorName.__args__)
 
 
 def test_compute_indicator_series_obv_bounded_to_runtime_window() -> None:
@@ -1186,7 +1239,14 @@ def test_compute_indicator_series_obv_bounded_to_runtime_window() -> None:
     # … and is strictly less than the full-history OBV it would report unbounded
     # (the dropped early bars each contributed +1 to a full-history cumulative sum).
     rising_bars = [
-        _Bar(timestamp=f"t{i}", open=100.0 + i, high=100.5 + i, low=99.5 + i, close=100.0 + i, volume=1.0)
+        _Bar(
+            timestamp=f"t{i}",
+            open=100.0 + i,
+            high=100.5 + i,
+            low=99.5 + i,
+            close=100.0 + i,
+            volume=1.0,
+        )
         for i in range(n)
     ]
     full_history = IndicatorRegistry().obv(rising_bars)

@@ -1122,7 +1122,12 @@ class IndicatorRegistry:
         """
         if not bars or len(bars) < max(period, atr_period + 1):
             return None
-        key = ("keltner", period, atr_period, multiplier)
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd` and the sibling
+        # new indicators (donchian/mfi/cci/williams_r).
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("keltner", symbol, period, atr_period, multiplier)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
@@ -1168,7 +1173,13 @@ class IndicatorRegistry:
         """
         if not bars:
             return None
-        key = ("obv",)
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd` and the sibling
+        # new indicators (donchian/mfi/cci/williams_r). ``vwap`` predates this
+        # convention and stays symbol-less; the new indicators are uniform.
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("obv", symbol)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
@@ -1259,7 +1270,12 @@ class IndicatorRegistry:
         """
         if not bars or len(bars) < period + 1:
             return None
-        key = ("roc", period, source)
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd` and the sibling
+        # new indicators (donchian/mfi/cci/williams_r).
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("roc", symbol, period, source)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):

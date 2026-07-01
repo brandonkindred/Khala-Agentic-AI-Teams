@@ -189,6 +189,35 @@ def test_rules_term_missing_from_hypothesis_emits_warning() -> None:
     )
 
 
+def test_new_indicator_vocabulary_is_recognised_in_consistency_check() -> None:
+    """The channel/volume/momentum indicators added to the catalogue must be
+    recognised by the hypothesis-vs-rules consistency vocabulary.
+
+    Otherwise a hypothesis that name-drops e.g. Donchian, Williams %R or money
+    flow while the rules use a different indicator would slip past this check —
+    the same gap the older nine-indicator vocabulary would have left.
+    """
+    spec = _spec(
+        hypothesis="Donchian breakout confirmed by Williams %R and money flow",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+                ),
+            ),
+        ],
+        exit_=[StopLossRule(pct=0.03)],
+    )
+    results = StrategySpecValidator().validate(spec)
+    warnings = _warnings(results)
+    lowered = " ".join(warnings).lower()
+    assert any("Hypothesis/rules consistency" in w for w in warnings), warnings
+    assert "donchian" in lowered
+    assert "williams" in lowered
+    assert "money flow" in lowered
+
+
 def test_aligned_hypothesis_and_rules_emit_no_consistency_warning() -> None:
     """When hypothesis and rules share concept vocabulary, no warning fires."""
     spec = _spec(

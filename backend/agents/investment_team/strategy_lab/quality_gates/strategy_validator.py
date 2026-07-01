@@ -28,10 +28,17 @@ _ASSET_MISMATCH: dict[str, re.Pattern[str]] = {
 
 # Recognised indicator/concept vocabulary for the hypothesis-vs-rules
 # consistency gate. Word-boundary anchored so substrings like "thematic"
-# don't accidentally match "ema".
+# don't accidentally match "ema". This vocabulary is deliberately broader than
+# the narrative-fidelity gate's — it also carries strategy-concept words
+# (breakout, mean reversion, momentum, volatility, volume) — but it must still
+# recognise every DSL indicator name, so the channel/volume/momentum additions
+# are mirrored here. ``williams_r`` precedes ``williams`` so the exact DSL token
+# is captured rather than the bare prose alias.
 _CONCEPT_TERMS = re.compile(
     r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|breakout|"
-    r"mean\s+reversion|momentum|volatility|volume|vwap|stochastic|adx|obv)\b",
+    r"mean\s+reversion|momentum|volatility|volume|vwap|stochastic|adx|obv|"
+    r"on[\s-]balance\s+volume|donchian|keltner|mfi|money\s+flow|roc|"
+    r"rate\s+of\s+change|cci|williams_r|williams)\b",
     re.IGNORECASE,
 )
 
