@@ -677,6 +677,74 @@ class TestCheckNarrativeFidelity:
         assert result.status == "FAIL"
         assert "donchian" in result.details
 
+    def test_pass_indicator_nested_in_boolean_tree(self) -> None:
+        # A confirmation-stacked entry expresses its signals as an all_of/any_of
+        # tree, nesting the indicators under ``of``. The phantom check must see
+        # those nested indicators — otherwise a narrative that names one is
+        # wrongly flagged phantom and the audit fails a valid run.
+        from investment_team.scripts.audit_recent_runs import check_narrative_fidelity
+
+        rec = _synthetic_record(
+            analysis_narrative="A moving average trend filter confirmed the momentum entry."
+        )
+        rec["strategy"]["entry_rules"] = [
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "kind": "all_of",
+                    "of": [
+                        {
+                            "lhs": {"name": "sma", "params": {"period": 50}, "source": "close"},
+                            "op": "<",
+                            "rhs": {"name": "sma", "params": {"period": 20}, "source": "close"},
+                        },
+                        {
+                            "lhs": {"name": "rsi", "params": {"period": 14}, "source": "close"},
+                            "op": "<",
+                            "rhs": 30,
+                        },
+                    ],
+                },
+                "note": "trend + momentum",
+            },
+        ]
+        # "moving average" resolves to {sma, ema}; sma is nested in the all_of.
+        assert check_narrative_fidelity(rec).status == "PASS"
+
+    def test_fail_phantom_still_fires_for_indicator_absent_from_tree(self) -> None:
+        # The recursion must not blunt real phantom detection: an indicator that
+        # appears in neither the top level nor any nested branch of the tree is
+        # still a phantom when the narrative names it.
+        from investment_team.scripts.audit_recent_runs import check_narrative_fidelity
+
+        rec = _synthetic_record(analysis_narrative="The MACD histogram drove the signal.")
+        rec["strategy"]["entry_rules"] = [
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "kind": "any_of",
+                    "of": [
+                        {
+                            "lhs": {"name": "sma", "params": {"period": 20}, "source": "close"},
+                            "op": ">",
+                            "rhs": {"name": "sma", "params": {"period": 50}, "source": "close"},
+                        },
+                        {
+                            "lhs": {"name": "rsi", "params": {"period": 14}, "source": "close"},
+                            "op": ">",
+                            "rhs": 70,
+                        },
+                    ],
+                },
+                "note": "trend or momentum",
+            },
+        ]
+        result = check_narrative_fidelity(rec)
+        assert result.status == "FAIL"
+        assert "macd" in result.details
+
     @pytest.mark.parametrize(
         "prose,concept",
         [

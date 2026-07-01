@@ -484,6 +484,19 @@ def _collect_spec_indicators(record: Dict[str, Any]) -> set[str]:
     def _extract_from_predicate(pred: Any) -> None:
         if not isinstance(pred, dict):
             return
+        # A ``when`` position is either a leaf comparison (lhs/op/rhs) or a
+        # boolean combinator (``all_of``/``any_of`` with an ``of`` list of
+        # child trees). Confirmation-stacked entries — the DSL's flagship
+        # multi-signal form — nest their indicators under ``of``, so recurse
+        # into the children before reading lhs/rhs; otherwise a narrative that
+        # names a nested indicator is wrongly flagged phantom. The audit walks
+        # the raw record dict (it is deliberately decoupled from the DSL), so
+        # it dispatches on the dict shape rather than importing the tree walker.
+        children = pred.get("of")
+        if isinstance(children, list):
+            for child in children:
+                _extract_from_predicate(child)
+            return
         lhs = pred.get("lhs")
         if isinstance(lhs, dict) and lhs.get("name"):
             indicators.add(lhs["name"].lower())
