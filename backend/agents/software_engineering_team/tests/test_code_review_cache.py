@@ -26,6 +26,7 @@ from typing import Any, Dict, List
 
 import pytest
 from code_review_agent import coordinator as coord
+from code_review_agent import mapping
 from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.models import CodeReviewInput, ReviewProfile
@@ -273,8 +274,8 @@ def test_model_fingerprint_prefers_model_id(monkeypatch: pytest.MonkeyPatch) -> 
     class _Model:
         model_id = "claude-x"
 
-    monkeypatch.setattr(coord, "resolve_code_review_model", lambda _llm: _Model())
-    assert coord._review_model_fingerprint(object()) == "claude-x"
+    monkeypatch.setattr(mapping, "resolve_code_review_model", lambda _llm: _Model())
+    assert mapping._review_model_fingerprint(object()) == "claude-x"
 
 
 def test_model_fingerprint_falls_back_to_config_then_typename(
@@ -285,14 +286,14 @@ def test_model_fingerprint_falls_back_to_config_then_typename(
     class _ConfigModel:
         config = {"model": "cfg-model"}
 
-    monkeypatch.setattr(coord, "resolve_code_review_model", lambda _llm: _ConfigModel())
-    assert coord._review_model_fingerprint(object()) == "cfg-model"
+    monkeypatch.setattr(mapping, "resolve_code_review_model", lambda _llm: _ConfigModel())
+    assert mapping._review_model_fingerprint(object()) == "cfg-model"
 
     class _Bare:
         pass
 
-    monkeypatch.setattr(coord, "resolve_code_review_model", lambda _llm: _Bare())
-    assert coord._review_model_fingerprint(object()) == "_Bare"
+    monkeypatch.setattr(mapping, "resolve_code_review_model", lambda _llm: _Bare())
+    assert mapping._review_model_fingerprint(object()) == "_Bare"
 
 
 def test_model_fingerprint_falls_back_when_resolution_raises(
@@ -303,8 +304,8 @@ def test_model_fingerprint_falls_back_when_resolution_raises(
     def _boom(_llm: Any) -> Any:
         raise RuntimeError("no model")
 
-    monkeypatch.setattr(coord, "resolve_code_review_model", _boom)
-    assert coord._review_model_fingerprint(_CountingClient(_APPROVED)) == "_CountingClient"
+    monkeypatch.setattr(mapping, "resolve_code_review_model", _boom)
+    assert mapping._review_model_fingerprint(_CountingClient(_APPROVED)) == "_CountingClient"
 
 
 class _PromptCapturingClient(DummyLLMClient):

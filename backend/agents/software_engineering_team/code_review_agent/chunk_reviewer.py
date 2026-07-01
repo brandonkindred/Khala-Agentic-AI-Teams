@@ -62,7 +62,37 @@ _SIBLING_SURFACE_MAX_CHARS = 2_000
 
 
 class ChunkReviewAgent:
-    """Reviews one chunk of code. Used by CodeReviewCoordinator for large codebases.
+    """The map step of the map-reduce code review: review exactly one chunk.
+
+    How it is used:
+        The coordinator (``coordinator.run_coordinator`` → ``mapping._map_chunks``)
+        splits a submission into bounded ``ReviewChunk``s and calls ``run`` once
+        per chunk (in parallel), then reduces the per-chunk results into one
+        verdict. Callers do not construct the prompt themselves::
+
+            agent = ChunkReviewAgent(llm)
+            out = agent.run(ChunkReviewInput(code_chunk=chunk.content, ...))
+            # out.approved, out.issues, out.summary, ...
+
+    Input (``ChunkReviewInput``):
+        ``code_chunk`` is the rendered chunk (one or more files, already sized to
+        the model's context by the coordinator) plus optional task/spec/
+        architecture/existing-codebase context and the sibling surface. The code
+        is reviewed verbatim; only the context excerpts are defensively capped.
+
+    Output (``ChunkReviewOutput``):
+        This chunk's findings only — ``approved`` (no critical/high issues),
+        ``issues`` (raw dicts the coordinator normalizes and re-anchors),
+        ``summary``, and the ``spec_compliance_notes``/``suggested_commit_message``
+        passthroughs. It never re-anchors line numbers, dedupes, or applies the
+        approval gate — those are the coordinator's reduce phase.
+
+    Constraints:
+        - Reviews a single chunk, not the whole codebase; cross-chunk and
+          whole-submission concerns (dedupe, false-positive verification, final
+          verdict) belong to the coordinator.
+        - The caller must have bounded ``code_chunk`` to the map budget; this
+          agent re-applies caps to context but never truncates the code.
 
     Invariants:
         - Stateless apart from the injected ``llm`` handle: every ``run`` call
