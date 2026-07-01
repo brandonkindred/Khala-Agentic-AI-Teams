@@ -1060,10 +1060,11 @@ def test_retention_window_constant_is_single_source_of_truth() -> None:
     """Every trailing-window bound derives from the one ``STREAMING_WINDOW_BARS``.
 
     Cumulative indicators (vwap, obv) re-base to the window start, so the audit walk,
-    the streaming-history deque, the compiler's cumulative-history depth, and the
-    conformance shadow context must all use the same retention ceiling. This guards
-    against a future edit reintroducing a private ``500`` literal at one site and
-    silently diverging validation from runtime.
+    the streaming-history deque, the compiler's cumulative-history depth, the
+    conformance shadow context, and the *production* ``StrategyContext`` must all use
+    the same retention ceiling. This guards against a future edit reintroducing a
+    private ``500`` literal at one site and silently diverging validation from
+    runtime — including the production context itself, not just the validation layers.
     """
     from investment_team.strategy_lab.executor.predicate_evaluator import (
         _SERIES_WINDOW,
@@ -1071,10 +1072,69 @@ def test_retention_window_constant_is_single_source_of_truth() -> None:
     )
     from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
     from investment_team.strategy_lab.synthesis.compiler import _VWAP_HISTORY
+    from investment_team.trading_service.strategy.contract import (
+        STREAMING_WINDOW_BARS as _CONTRACT_WINDOW,
+    )
 
     assert _SERIES_WINDOW == STREAMING_WINDOW_BARS
     assert _VWAP_HISTORY == STREAMING_WINDOW_BARS
     assert StreamingHistoryView()._max_bars == STREAMING_WINDOW_BARS
+    assert _CONTRACT_WINDOW == STREAMING_WINDOW_BARS
+
+
+def test_strategy_context_ingest_bar_trims_to_shared_window() -> None:
+    """The production context's history bound is the shared constant, not a literal.
+
+    Directly exercises ``StrategyContext._ingest_bar`` rather than just comparing
+    constants, so a future refactor that keeps the imported name but stops using it
+    in ``_ingest_bar`` (e.g. reverting to a stray literal) is still caught.
+    """
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+    from investment_team.trading_service.strategy.contract import Bar, StrategyContext
+
+    ctx = StrategyContext.__new__(StrategyContext)
+    ctx._history = {}
+    for i in range(STREAMING_WINDOW_BARS + 10):
+        ctx._ingest_bar(
+            Bar(symbol="TEST", timestamp=f"t{i}", open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0)
+        )
+    assert len(ctx._history["TEST"]) == STREAMING_WINDOW_BARS
+    # The retained tail is the most recent bars, not the earliest.
+    assert ctx._history["TEST"][-1].timestamp == f"t{STREAMING_WINDOW_BARS + 9}"
+
+
+@pytest.mark.parametrize("name,period", [("donchian", 14), ("williams_r", 14), ("cci", 14), ("mfi", 14)])
+def test_windowed_deque_cache_keys_are_symbol_scoped(name: str, period: int) -> None:
+    """Two symbol-tagged streams sharing one registry must not cross-contaminate.
+
+    ``donchian``/``williams_r``/``cci``/``mfi`` each keep a bounded deque of
+    per-bar contributions across calls (an incremental cache), so the cache key
+    must include ``bars[-1].symbol`` — exactly like ``macd`` already does —
+    or two different symbols sharing one ``IndicatorRegistry`` could silently
+    append one symbol's bar onto another symbol's cached window.
+    """
+    bars_a = _series(21, seed=41)
+    bars_b = _series(21, seed=42)
+    for b in bars_a:
+        b.symbol = "AAPL"
+    for b in bars_b:
+        b.symbol = "MSFT"
+    # Force a coincident close on a bar the close-leg fallback could latch onto.
+    bars_b[-2] = _Bar(
+        timestamp=bars_b[-2].timestamp,
+        open=bars_a[-1].close,
+        high=bars_a[-1].close + 1,
+        low=bars_a[-1].close - 1,
+        close=bars_a[-1].close,
+        volume=bars_b[-2].volume,
+        symbol="MSFT",
+    )
+
+    reg = IndicatorRegistry()
+    getattr(reg, name)(bars_a, period)  # populate the AAPL slot first
+    shared = getattr(reg, name)(bars_b, period)  # MSFT slot on the SAME registry
+    fresh = getattr(IndicatorRegistry(), name)(bars_b, period)  # ground truth
+    assert shared == pytest.approx(fresh), f"{name}: shared-registry result diverged from a fresh one"
 
 
 def test_compute_indicator_series_obv_bounded_to_runtime_window() -> None:

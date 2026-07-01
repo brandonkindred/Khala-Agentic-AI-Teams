@@ -1057,7 +1057,11 @@ class IndicatorRegistry:
         """
         if not bars or len(bars) < period:
             return None
-        key = ("donchian", period)
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd`.
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("donchian", symbol, period)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
@@ -1197,7 +1201,11 @@ class IndicatorRegistry:
         """
         if not bars or len(bars) < period + 1:
             return None
-        key = ("mfi", period)
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd`.
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("mfi", symbol, period)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
@@ -1280,7 +1288,11 @@ class IndicatorRegistry:
         """
         if not bars or len(bars) < period:
             return None
-        key = ("cci", period)
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd`.
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("cci", symbol, period)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
@@ -1318,7 +1330,11 @@ class IndicatorRegistry:
         """
         if not bars or len(bars) < period:
             return None
-        key = ("williams_r", period)
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd`.
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("williams_r", symbol, period)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):

@@ -158,6 +158,16 @@ class StreamingHarness:
         )
         if os.path.exists(registry_src):
             shutil.copy2(registry_src, os.path.join(tmp, "_streaming_indicators.py"))
+        # ``contract.py``'s history-retention bound imports this constant (see
+        # ``contract.py``'s own sandbox-first/package-fallback import); it is
+        # stdlib-only like ``streaming.py``, so it copies in unmodified.
+        window_src = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "strategy_lab",
+            "runtime_window.py",
+        )
+        if os.path.exists(window_src):
+            shutil.copy2(window_src, os.path.join(tmp, "runtime_window.py"))
         if os.path.exists(indicators_impl_src) and os.path.exists(scalar_api_src):
             shutil.copy2(indicators_impl_src, os.path.join(tmp, "_indicators_impl.py"))
             shutil.copy2(scalar_api_src, os.path.join(tmp, "indicators.py"))

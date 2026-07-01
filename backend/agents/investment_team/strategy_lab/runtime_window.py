@@ -5,6 +5,9 @@ the most recent :data:`STREAMING_WINDOW_BARS` bars per symbol. Every layer that 
 compute indicators over the *same* trailing window the runtime traded on references
 this one constant instead of a private literal:
 
+* ``trading_service.strategy.contract.StrategyContext._ingest_bar`` — the production
+  retention cap (imported sandbox-first / package-fallback, since this module is
+  also copied flat into the strategy subprocess by ``StreamingHarness``).
 * ``executor.predicate_evaluator`` — the alignment/coverage walk (``_SERIES_WINDOW``)
   and the ``StreamingHistoryView`` deque (``max_bars``).
 * ``synthesis.compiler`` — the history depth requested for cumulative indicators
@@ -19,6 +22,5 @@ class of divergence unrepresentable.
 
 from __future__ import annotations
 
-# Trailing bars retained per symbol by the engine/shadow context. Mirrors the
-# production ``StrategyContext._ingest_bar`` cap; keep them equal.
+# Trailing bars retained per symbol by the engine/shadow context.
 STREAMING_WINDOW_BARS: int = 500
