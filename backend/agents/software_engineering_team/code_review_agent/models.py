@@ -265,6 +265,14 @@ class ChunkReviewOutput(BaseModel):
     )
 
 
+# Canonical severity threshold for "can this finding block approval?" — the
+# single source of truth shared by the deterministic approval gate
+# (``coordinator._reconcile_approval``) and the false-positive verification
+# gate (``false_positive_filter.filter_false_positives``), so the two can
+# never drift apart into disagreeing about which severities matter.
+BLOCKING_SEVERITIES: frozenset[str] = frozenset({"critical", "high"})
+
+
 class CodeReviewIssue(BaseModel):
     """A single issue found during code review."""
 

@@ -3,8 +3,10 @@
 Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 ``ReviewChunk``s (``chunking``) → per-chunk LLM review with retry/bisect
 recovery and the map-phase cache (``mapping``) → false-positive verification
-(each genuine finding is re-checked against the *whole* submission, since a
-chunk reviewer saw only a slice, and confirmed false positives are dropped — see
+(each genuine, blocking-severity (critical/high) finding is re-checked against
+the *whole* submission, since a chunk reviewer saw only a slice, and confirmed
+false positives are dropped; non-blocking findings skip verification entirely
+since they can never affect the approval gate below — see
 ``false_positive_filter``) → deterministic merge (dedupe, severity gate, safety
 nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
@@ -98,6 +100,7 @@ from .mapping import (
     clear_chunk_outcome_cache,
 )
 from .models import (
+    BLOCKING_SEVERITIES,
     CodeReviewInput,
     CodeReviewIssue,
     CodeReviewOutput,
@@ -189,7 +192,7 @@ def _reconcile_approval(
           it mixes every chunk's text, so synthesizing a rejection from it
           could attribute an approving chunk's words to a rejecting chunk.
     """
-    critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
+    critical_or_high = [i for i in issues if i.severity in BLOCKING_SEVERITIES]
     approved = llm_approved and not critical_or_high
     if not approved and not critical_or_high:
         if issues:
@@ -273,12 +276,15 @@ def run_coordinator(
           degraded finding rejects the merged review, so unreviewed code never
           passes the gate as approved; no covered line is silently dropped.
         - ``approved is False`` implies at least one critical/high issue.
-        - Every genuine reviewer finding is re-checked against the whole
-          submission and dropped only when the verifier confirms it is a false
-          positive; when that removes the last critical/high finding the gate
-          approves (a chunk-local false positive never blocks the merge). The
-          check is fail-safe — any verifier failure keeps the findings — and
-          never touches the not-reviewed coverage findings.
+        - Every genuine, blocking-severity (critical/high) reviewer finding is
+          re-checked against the whole submission and dropped only when the
+          verifier confirms it is a false positive; when that removes the last
+          critical/high finding the gate approves (a chunk-local false
+          positive never blocks the merge). Non-blocking (medium/low/info)
+          findings skip verification entirely and reach the output unverified,
+          since they could never affect the approval gate. The check is
+          fail-safe — any verifier failure keeps the findings — and never
+          touches the not-reviewed coverage findings.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
         - When ``progress_callback`` is provided, it is invoked with
@@ -386,14 +392,17 @@ def run_coordinator(
             unreviewed=[i.description for i in (outcome.not_reviewed_issues + outcome.issues)],
         )
 
-    # False-positive verification: re-check each genuine reviewer finding against
-    # the *whole* submission. Each chunk review saw only a bounded slice, so a
-    # finding can be wrong because the resolving code lived in a part of the file
-    # (or another file) it never saw. The filter reads the real code and drops
-    # only the findings it confirms are false positives. Coverage/safety findings
-    # (``not_reviewed_issues``, empty-file notices) are never passed in, so the
-    # gate's anti-loop nets stay intact; on any verifier failure the findings are
-    # kept (fail-safe).
+    # False-positive verification: re-check each genuine, blocking-severity
+    # (models.BLOCKING_SEVERITIES) reviewer finding against the *whole*
+    # submission. Each chunk review saw only a bounded slice, so a finding can
+    # be wrong because the resolving code lived in a part of the file (or
+    # another file) it never saw. The filter reads the real code and drops
+    # only the findings it confirms are false positives. A medium/low/info
+    # finding can never flip this gate's verdict, so it skips verification
+    # entirely (see false_positive_filter's module docstring). Coverage/safety
+    # findings (``not_reviewed_issues``, empty-file notices) are never passed
+    # in, so the gate's anti-loop nets stay intact; on any verifier failure the
+    # findings are kept (fail-safe).
     genuine_issues = _dedupe_issues(outcome.issues)
     notify_review_progress(
         progress_callback,

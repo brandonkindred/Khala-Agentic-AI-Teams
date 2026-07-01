@@ -81,9 +81,11 @@ class _VerdictStub(DummyLLMClient):
         super().__init__()
         self._verdicts = verdicts
         self._chunk_issues = chunk_issues
+        self.verify_calls = 0
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
         if "verdicts" in prompt.lower():
+            self.verify_calls += 1
             return {"verdicts": self._verdicts}
         if self._chunk_issues is not None:
             return {
@@ -114,6 +116,24 @@ class _BadJsonStub(DummyLLMClient):
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:  # type: ignore[override]
         if "verdicts" in prompt.lower():
             return "not a json object"
+        return super().complete_json(prompt, **kwargs)
+
+
+class _CountingVerifyStub(DummyLLMClient):
+    """Counts verification calls without ever confirming a false positive.
+
+    Used to assert a precise "N verification calls were made" bound (rather
+    than just "the output equals the input"), including the zero-calls case.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.verify_calls = 0
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+        if "verdicts" in prompt.lower():
+            self.verify_calls += 1
+            return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
         return super().complete_json(prompt, **kwargs)
 
 
@@ -603,19 +623,7 @@ def test_filter_skips_when_no_readable_files() -> None:
 def test_filter_keeps_unresolved_path_without_llm_call() -> None:
     """A finding whose cited file is absent from the submission is kept WITHOUT a
     verification call — the verifier would have no primary file to read."""
-
-    class CountingStub(DummyLLMClient):
-        def __init__(self) -> None:
-            super().__init__()
-            self.verify_calls = 0
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
-            if "verdicts" in prompt.lower():
-                self.verify_calls += 1
-                return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            return super().complete_json(prompt, **kwargs)
-
-    stub = CountingStub()
+    stub = _CountingVerifyStub()
     # Submission has app/main.py; the finding cites a file that isn't there.
     ghost = _issue(file_path="ghost.py")
     out = filter_false_positives(stub, _input(files={"app/main.py": "x = 1\n"}), [ghost])
@@ -747,7 +755,65 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
 
 def test_filter_empty_issue_list() -> None:
     """An empty finding list returns empty without invoking the verifier."""
-    assert filter_false_positives(_RaisingStub(), _input(), []) == []
+    stub = _CountingVerifyStub()
+    assert filter_false_positives(stub, _input(), []) == []
+    assert stub.verify_calls == 0
+
+
+# --------------------------------------------------------------------------- severity gate
+
+
+def test_filter_skips_nonblocking_only_findings_without_llm_call() -> None:
+    """A submission whose findings are all medium/low/info never calls the
+    verifier — none of them could ever flip the deterministic approval gate."""
+    stub = _CountingVerifyStub()
+    issues = [
+        _issue(severity="medium", description="medium finding"),
+        _issue(severity="low", description="low finding"),
+        _issue(severity="info", description="info finding"),
+    ]
+    out = filter_false_positives(stub, _input(), issues)
+    assert out == issues
+    assert stub.verify_calls == 0
+
+
+def test_filter_skips_nonblocking_findings_across_multiple_files() -> None:
+    """Non-blocking findings spread across several files still cost zero
+    verification calls total — the severity gate applies before grouping."""
+    stub = _CountingVerifyStub()
+    issues = [
+        _issue(file_path="a.py", severity="medium", description="a-medium"),
+        _issue(file_path="b.py", severity="low", description="b-low"),
+        _issue(file_path="c.py", severity="info", description="c-info"),
+    ]
+    inp = _input(files={"a.py": "x=1\n", "b.py": "y=2\n", "c.py": "z=3\n"})
+    out = filter_false_positives(stub, inp, issues)
+    assert out == issues
+    assert stub.verify_calls == 0
+
+
+def test_filter_sends_only_blocking_finding_from_mixed_severity_group() -> None:
+    """One file with a critical and an info finding sends ONLY the critical
+    one through verification; the info finding's text never reaches the
+    verification prompt and it survives untouched regardless of the verdict."""
+    seen_prompts: List[str] = []
+
+    class _RecordingStub(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" in prompt.lower():
+                seen_prompts.append(prompt)
+                return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            return super().complete_json(prompt, **kwargs)
+
+    critical = _issue(severity="critical", description="SQL injection risk", line=1)
+    info = _issue(severity="info", description="consider renaming this variable", line=2)
+    out = filter_false_positives(_RecordingStub(), _input(), [critical, info])
+
+    assert info in out  # untouched: never a verification candidate
+    assert critical not in out  # verified, confirmed false positive, dropped
+    assert len(seen_prompts) == 1
+    assert "consider renaming" not in seen_prompts[0]  # info finding never sent to the LLM
+    assert "SQL injection" in seen_prompts[0]
 
 
 # --------------------------------------------------------------------------- coordinator integration
@@ -802,3 +868,20 @@ def test_run_coordinator_disabled_filter_keeps_issue(monkeypatch) -> None:
     out = run_coordinator(stub, _input(files={"app/main.py": "def bar():\n    return foo()\n"}))
     assert out.approved is False
     assert any(i.description == "foo undefined" for i in out.issues)
+
+
+def test_run_coordinator_skips_verification_for_nonblocking_only_findings() -> None:
+    """End-to-end: a chunk review whose only findings are medium/info never
+    triggers a false-positive verification call; the deterministic gate
+    auto-approves and every non-blocking finding is still reported."""
+    stub = _VerdictStub(
+        verdicts=[],
+        chunk_issues=[
+            {**_CHUNK_ISSUE, "severity": "medium", "description": "medium finding"},
+            {**_CHUNK_ISSUE, "severity": "info", "description": "info finding"},
+        ],
+    )
+    out = run_coordinator(stub, _input(files={"app/main.py": "def bar():\n    return foo()\n"}))
+    assert out.approved is True
+    assert stub.verify_calls == 0
+    assert {i.description for i in out.issues} == {"medium finding", "info finding"}

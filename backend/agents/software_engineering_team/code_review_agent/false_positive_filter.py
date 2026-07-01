@@ -7,13 +7,14 @@ codebase. That blind spot manufactures false positives — a finding like
 X" can be wrong because the defining/using/test code lives in a part of the file
 (or another file) the chunk reviewer never saw.
 
-This module re-checks each genuine reviewer finding against the *whole*
-submission before it reaches the developer. The verification agent is given read
-access to every file under review via tools (``read_file``, ``list_files``,
-``search_codebase``, ``find_function_at_line``), so it can pull up exactly the
-code needed to confirm or refute a finding rather than guessing from a single chunk.
+This module re-checks each genuine, blocking-severity (critical/high) reviewer
+finding against the *whole* submission before it reaches the developer. The
+verification agent is given read access to every file under review via tools
+(``read_file``, ``list_files``, ``search_codebase``, ``find_function_at_line``),
+so it can pull up exactly the code needed to confirm or refute a finding rather
+than guessing from a single chunk.
 
-Two invariants hold:
+Three invariants hold:
 
     - **Fail-safe.** A finding is dropped ONLY on an explicit, confident
       false-positive verdict. Anything the verifier cannot assess — a finding
@@ -29,6 +30,21 @@ Two invariants hold:
       findings and empty-file notices are filtered separately and can never be
       removed as "false positives", so the gate's anti-loop safety nets are
       untouched.
+
+    - **Only blocking (critical/high) findings are sent to verification.**
+      The coordinator's deterministic approval gate
+      (``coordinator._reconcile_approval``) only ever blocks approval on
+      ``critical``/``high`` severity findings — a ``medium``/``low``/``info``
+      finding can never flip the verdict. Spending a tool-equipped agentic LLM
+      call verifying one would therefore be pure cost with zero possible
+      effect on the outcome, so this module never makes one: only findings
+      whose severity is in ``models.BLOCKING_SEVERITIES`` are candidates for
+      verification. Every non-blocking finding bypasses verification entirely
+      (no LLM call, no risk of an ambiguous/erroring verdict) and is returned
+      in :func:`filter_false_positives`'s output exactly as given, in its
+      original relative order. This is purely additive to the Fail-safe
+      invariant above: it can only ever keep MORE findings unverified-but-
+      present than before, never drop one that would have been kept.
 """
 
 from __future__ import annotations
@@ -51,7 +67,7 @@ from shared_env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
 from .model_resolution import resolve_code_review_model
-from .models import CodeReviewInput, CodeReviewIssue
+from .models import BLOCKING_SEVERITIES, CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -843,13 +859,20 @@ def filter_false_positives(
         - Returns a list that is ``issues`` with zero or more entries removed;
           the surviving entries are the exact same objects in their original
           relative order (nothing is added, reordered, or mutated).
+        - Only findings whose severity is in ``models.BLOCKING_SEVERITIES``
+          (``critical``/``high``) are candidates for removal; every
+          ``medium``/``low``/``info`` finding is never sent through
+          verification (no LLM call for it) and is always present in the
+          result unchanged, since it could never flip the deterministic
+          approval gate anyway.
         - A finding is removed ONLY when the verifier returned an explicit,
           non-low-confidence false-positive verdict for it. A finding with a
           blank file path, a path absent from the submission, an unparsable
           verdict, or any error is kept (fail-safe).
         - Returns ``issues`` unchanged (no LLM call) when the filter is disabled
-          via ``CODE_REVIEW_FALSE_POSITIVE_FILTER``, when no finding has a file
-          path, or when the submission exposes no readable files.
+          via ``CODE_REVIEW_FALSE_POSITIVE_FILTER``, when no finding is both
+          blocking-severity and has a non-blank file path, or when the
+          submission exposes no readable files.
         - Never raises: any setup failure (index build, model resolution,
           context sizing) or per-group verification failure logs a warning and
           keeps the affected findings, so verification can never break the
@@ -858,7 +881,15 @@ def filter_false_positives(
     if not env_flag_enabled(_FILTER_ENV):
         return list(issues)
 
-    verifiable = [i for i in issues if (i.file_path or "").strip()]
+    # Only a blocking (critical/high) finding can ever flip
+    # ``coordinator._reconcile_approval``'s verdict, so a medium/low/info
+    # finding is never worth a verification call — it bypasses this module
+    # entirely and survives untouched via the ``kept = [... if id(i) not in
+    # removed]`` step in ``_verify_and_filter`` (its id never enters
+    # ``removed`` because it never enters ``verifiable``/``groups``).
+    verifiable = [
+        i for i in issues if (i.file_path or "").strip() and i.severity in BLOCKING_SEVERITIES
+    ]
     if not verifiable:
         return list(issues)
 
@@ -887,11 +918,13 @@ def _verify_and_filter(
 
     Preconditions:
         - ``verifiable`` is the subset of ``issues`` with a non-blank file path
+          AND blocking severity (``severity in models.BLOCKING_SEVERITIES``)
           (already computed by the caller).
 
     Postconditions:
         - Same removal contract as :func:`filter_false_positives`, minus the
-          env-toggle and blank-path early returns the caller already handled.
+          env-toggle and blank-path/non-blocking-severity early returns the
+          caller already handled.
     """
     index = CodebaseIndex.from_input(input_data)
     if not index.files:

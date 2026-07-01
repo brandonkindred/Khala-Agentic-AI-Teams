@@ -332,9 +332,12 @@ diverge.
 ### CODE_REVIEW_MAP_PARALLELISM
 Max concurrent review LLM calls per review run, shared by both phases: the map
 phase (chunk reviews) and the later false-positive verification phase (one call
-per cited file). The two phases run sequentially, so this is a single budget,
-not two. Default `4`, floor `1` (`1` runs both phases' calls sequentially).
-Results merge in deterministic order regardless of completion order.
+per cited file that has at least one blocking-severity (critical/high) finding
+— a file whose findings are all medium/low/info is skipped entirely, since
+none of them could ever affect the approval gate). The two phases run
+sequentially, so this is a single budget, not two. Default `4`, floor `1` (`1`
+runs both phases' calls sequentially). Results merge in deterministic order
+regardless of completion order.
 
 ### CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS
 A failing chunk smaller than twice this is retried once as-is instead of being
@@ -368,15 +371,19 @@ edit leaves the surface — and the cached chunk — unchanged.
 
 ### CODE_REVIEW_FALSE_POSITIVE_FILTER
 Default-on toggle for the false-positive verification pass. After the map-reduce
-review merges its findings, each genuine finding is re-checked against the
-*whole* submission — the verifier has read access to every file under review
-(`read_file`/`list_files`/`search_codebase` tools), so it can confirm a finding
-the bounded chunk reviewer flagged in isolation (e.g. "symbol never defined")
-against the real cross-file code and drop it when it is a false positive.
-Fail-safe: a finding is removed only on an explicit, confident false-positive
-verdict; any ambiguity or verifier error keeps the finding, and the not-reviewed
-coverage findings are never removed. Set to `false`/`0`/`no` to disable the pass
-(any other value, or unset, leaves it enabled).
+review merges its findings, each genuine finding with blocking severity
+(`critical`/`high`) is re-checked against the *whole* submission — the verifier
+has read access to every file under review (`read_file`/`list_files`/
+`search_codebase` tools), so it can confirm a finding the bounded chunk
+reviewer flagged in isolation (e.g. "symbol never defined") against the real
+cross-file code and drop it when it is a false positive. A `medium`/`low`/
+`info` finding can never affect the review's approval verdict, so it is never
+sent through this re-check — it is reported as-is with no verification LLM
+call spent on it. Fail-safe: a finding is removed only on an explicit,
+confident false-positive verdict; any ambiguity or verifier error keeps the
+finding, and the not-reviewed coverage findings are never removed. Set to
+`false`/`0`/`no` to disable the pass (any other value, or unset, leaves it
+enabled).
 
 ---
 
