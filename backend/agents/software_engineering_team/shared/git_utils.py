@@ -255,13 +255,23 @@ def write_files_and_commit(
     Write files to repo, git add, and commit on the current branch.
     files_dict: { "path/relative/to/repo": "content" }
 
-    Returns (success, message).
+    Returns (success, message). An unsafe path (empty, repo-root, or traversal)
+    is reported as ``(False, ...)`` rather than raised, so callers that unpack
+    ``(success, message)`` run their normal write-failure/cleanup path instead
+    of aborting on an exception. Validation happens before any file is written,
+    so a rejected batch leaves nothing partially written.
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return False, "Not a git repository"
-    for file_path, content in files_dict.items():
-        full_path = resolve_safe_repo_path(path, file_path)
+    try:
+        resolved = [
+            (resolve_safe_repo_path(path, file_path), content)
+            for file_path, content in files_dict.items()
+        ]
+    except UnsafeRepoPathError as exc:
+        return False, f"Unsafe file path rejected: {exc}"
+    for full_path, content in resolved:
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
     code, out = _run_git(path, ["git", "add", "-A"])

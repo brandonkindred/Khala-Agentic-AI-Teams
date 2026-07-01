@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from software_engineering_team.backend_code_v2_team import models as be_models
+from software_engineering_team.shared.git_utils import write_files_and_commit
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskStatus, TaskType
 from software_engineering_team.shared.phases import execution as sh_exec
 from software_engineering_team.shared.phases import planning as sh_plan
@@ -741,3 +742,28 @@ def test_write_repo_text_files_writes_nested_and_strips_leading_slash(tmp_path: 
     write_repo_text_files(tmp_path, {"/pkg/mod.py": "a", "top.txt": "b"})
     assert (tmp_path / "pkg" / "mod.py").read_text(encoding="utf-8") == "a"
     assert (tmp_path / "top.txt").read_text(encoding="utf-8") == "b"
+
+
+def test_write_repo_text_files_is_atomic_on_reject(tmp_path: Path):
+    """A batch with a later unsafe key writes none of its files (atomic reject).
+
+    Regression: paths are validated before any write, so a valid key preceding
+    an unsafe one is not left partially written in the working tree.
+    """
+    with pytest.raises(UnsafeRepoPathError):
+        write_repo_text_files(tmp_path, {"good.py": "x", "../bad.py": "y"})
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_files_and_commit_reports_unsafe_path_as_failure(tmp_path: Path):
+    """write_files_and_commit returns (False, msg) on an unsafe path, not a raise.
+
+    Its contract is ``(success, message)`` and callers unpack it; an unsafe key
+    must route into the write-failure path rather than abort with an exception,
+    and no file of the batch may be written.
+    """
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    ok, msg = write_files_and_commit(tmp_path, {"good.py": "x", "../bad.py": "y"}, "msg")
+    assert ok is False
+    assert "unsafe" in msg.lower()
+    assert not (tmp_path / "good.py").exists()

@@ -338,14 +338,20 @@ def write_repo_text_files(repo_path: Path, files: Dict[str, str]) -> None:
         content.
     Postconditions:
         Each file is written under ``repo_path`` (parents created). A leading
-        ``/`` is stripped; any key that is empty, resolves to the repo root, or
-        escapes it (e.g. via ``..``) raises ``UnsafeRepoPathError`` before that
-        file is written.
+        ``/`` is stripped. The batch is atomic with respect to path validation:
+        if any key is empty, resolves to the repo root, or escapes it (e.g. via
+        ``..``), ``UnsafeRepoPathError`` is raised *before any file is written*,
+        so a rejected batch never leaves a partial write in the working tree.
     Invariants:
         No file is ever written at or outside ``repo_path.resolve()``.
     """
     root = Path(repo_path).resolve()
-    for rel_path, content in files.items():
-        full_path = resolve_safe_repo_path(root, rel_path)
+    # Resolve+validate every path first, then write: a rejected key must not
+    # leave earlier files of the same batch partially written on disk (they
+    # would otherwise be swept up by a later ``git add -A``).
+    resolved = [
+        (resolve_safe_repo_path(root, rel_path), content) for rel_path, content in files.items()
+    ]
+    for full_path, content in resolved:
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
