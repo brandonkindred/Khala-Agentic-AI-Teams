@@ -622,8 +622,10 @@ async def github_events(request: Request) -> Any:
           be treated the same as "no secret configured", or a forged payload could pass
           unverified for the duration of the outage.
         - ``ping`` deliveries return ``{"ok": true}`` after verification.
-        - A non-JSON body raises ``HTTPException(400)``; otherwise the event is dispatched
-          to :func:`dispatch_github_event` (which never raises) and ``{"ok": true}`` is
+        - A non-JSON body raises ``HTTPException(400)``; otherwise the event (with the
+          ``X-GitHub-Delivery`` header, used by :func:`dispatch_github_event` to skip a
+          redelivery of the same delivery ID) is dispatched to
+          :func:`dispatch_github_event` (which never raises) and ``{"ok": true}`` is
           returned. Returns before any review work runs.
     """
     from unified_api.github_events_handler import (
@@ -663,7 +665,8 @@ async def github_events(request: Request) -> Any:
     except (json.JSONDecodeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
 
-    dispatch_github_event(event_type, payload)
+    delivery_id = request.headers.get("X-GitHub-Delivery", "").strip()
+    dispatch_github_event(event_type, payload, delivery_id)
     return {"ok": True}
 
 

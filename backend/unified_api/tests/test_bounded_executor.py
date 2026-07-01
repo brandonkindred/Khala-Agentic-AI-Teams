@@ -43,6 +43,20 @@ def test_get_or_recreate_executor_recreates_after_shutdown():
         second.shutdown(wait=False, cancel_futures=True)
 
 
+class _NoShutdownAttr:
+    """Stand-in for a ThreadPoolExecutor whose `_shutdown` attribute is absent —
+    simulates a future CPython release removing/renaming that private attribute."""
+
+
+def test_get_or_recreate_executor_degrades_gracefully_without_shutdown_attr():
+    """If `_shutdown` ever disappears from ThreadPoolExecutor, getattr's default (False)
+    means this function treats the object as still live rather than raising an
+    AttributeError — the documented graceful-degradation behavior."""
+    fake = _NoShutdownAttr()
+    result = get_or_recreate_executor(fake, max_workers=2, thread_name_prefix="t")
+    assert result is fake  # treated as "still live", not recreated; never raises
+
+
 def test_submit_safely_calls_submit_with_args():
     fake_executor = MagicMock()
     fn = MagicMock()

@@ -7,6 +7,8 @@ from concurrent import futures
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 _backend = Path(__file__).resolve().parent.parent.parent
 if str(_backend) not in sys.path:
     sys.path.insert(0, str(_backend))
@@ -373,3 +375,87 @@ def test_dispatch_never_raises_when_executor_is_shut_down():
     ):
         gh.dispatch_github_event("issue_comment", _comment_payload())  # must not raise
     proc.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _is_duplicate_delivery / redelivery dedup
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_seen_deliveries():
+    """Reset the module-level dedup table so tests can't leak state into each other."""
+    gh._SEEN_DELIVERY_IDS.clear()
+    yield
+    gh._SEEN_DELIVERY_IDS.clear()
+
+
+def test_is_duplicate_delivery_empty_id_never_duplicate():
+    assert gh._is_duplicate_delivery("") is False
+    assert gh._is_duplicate_delivery("") is False
+    assert gh._SEEN_DELIVERY_IDS == {}
+
+
+def test_is_duplicate_delivery_first_seen_then_duplicate():
+    assert gh._is_duplicate_delivery("d-1") is False
+    assert gh._is_duplicate_delivery("d-1") is True
+
+
+def test_is_duplicate_delivery_distinct_ids_independent():
+    assert gh._is_duplicate_delivery("d-1") is False
+    assert gh._is_duplicate_delivery("d-2") is False
+    assert gh._is_duplicate_delivery("d-1") is True
+    assert gh._is_duplicate_delivery("d-2") is True
+
+
+def test_is_duplicate_delivery_expires_after_ttl():
+    with patch(f"{_H}.time.monotonic", return_value=1000.0):
+        assert gh._is_duplicate_delivery("d-1") is False
+    with patch(f"{_H}.time.monotonic", return_value=1000.0 + gh._SEEN_DELIVERY_TTL_S + 1):
+        # TTL elapsed: pruned and treated as a fresh delivery, not a duplicate.
+        assert gh._is_duplicate_delivery("d-1") is False
+
+
+def test_is_duplicate_delivery_caps_table_size():
+    for i in range(gh._SEEN_DELIVERY_MAX_ENTRIES + 10):
+        gh._is_duplicate_delivery(f"d-{i}")
+    assert len(gh._SEEN_DELIVERY_IDS) <= gh._SEEN_DELIVERY_MAX_ENTRIES
+
+
+def test_dispatch_ignores_redelivered_delivery_id():
+    """The same delivery_id twice must only submit review work once."""
+    proc = MagicMock()
+    with (
+        patch(f"{_H}.process_review_request", proc),
+        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
+        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
+    ):
+        gh.dispatch_github_event("issue_comment", _comment_payload(), "delivery-1")
+        gh.dispatch_github_event("issue_comment", _comment_payload(), "delivery-1")
+    proc.assert_called_once_with("acme", "widget", 42, 999)
+
+
+def test_dispatch_distinct_delivery_ids_both_processed():
+    proc = MagicMock()
+    with (
+        patch(f"{_H}.process_review_request", proc),
+        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
+        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
+    ):
+        gh.dispatch_github_event("issue_comment", _comment_payload(), "delivery-1")
+        gh.dispatch_github_event("issue_comment", _comment_payload(), "delivery-2")
+    assert proc.call_count == 2
+
+
+def test_dispatch_without_delivery_id_never_deduped():
+    """No X-GitHub-Delivery header (delivery_id="") must not suppress repeated triggers —
+    only a real, matching delivery ID counts as a redelivery."""
+    proc = MagicMock()
+    with (
+        patch(f"{_H}.process_review_request", proc),
+        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
+        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
+    ):
+        gh.dispatch_github_event("issue_comment", _comment_payload())
+        gh.dispatch_github_event("issue_comment", _comment_payload())
+    assert proc.call_count == 2

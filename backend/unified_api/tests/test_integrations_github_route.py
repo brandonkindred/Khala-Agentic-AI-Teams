@@ -918,17 +918,23 @@ def test_github_events_dispatches_valid_signed_comment():
             content=body,
             headers={
                 "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Delivery": "delivery-123",
                 "X-Hub-Signature-256": _sign("whsec", body),
             },
         )
     assert resp.status_code == 200
     disp.assert_called_once()
     assert disp.call_args[0][0] == "issue_comment"
+    assert disp.call_args[0][1] == {"action": "created", "issue": {"number": 42}}
+    assert disp.call_args[0][2] == "delivery-123"
 
 
 def test_github_events_returns_400_on_invalid_json():
     body = b"not json"
-    with patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)):
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
         resp = client.post(
             _EVENTS,
             content=body,
@@ -939,6 +945,7 @@ def test_github_events_returns_400_on_invalid_json():
         )
     assert resp.status_code == 400
     assert "Invalid JSON" in resp.json()["detail"]
+    disp.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

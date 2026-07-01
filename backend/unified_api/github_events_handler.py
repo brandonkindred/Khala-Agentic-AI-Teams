@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import logging
 import re
+import time
 from concurrent import futures
 from typing import Any
 
@@ -41,7 +42,14 @@ def _get_dispatch_executor() -> futures.ThreadPoolExecutor:
     Postconditions: returns a process-wide ``ThreadPoolExecutor`` (max_workers=4),
         created lazily on first use. Recreates it if a prior instance was already shut
         down, so tests that shut it down between runs don't leave the module unusable.
-        Never raises.
+        Never raises. The check-then-assign on ``_DISPATCH_EXECUTOR`` is not
+        thread-locked: this is safe because the only caller, :func:`dispatch_github_event`,
+        is invoked synchronously from the async ``github_events`` route handler — i.e.
+        always on the single asyncio event-loop thread, with no ``await`` in between —
+        so two calls can never interleave. If a future caller ever invoked this from a
+        second OS thread, the worst case is two callers both observing ``None``/shut-down
+        and each creating a throwaway executor (one gets discarded) — wasted construction,
+        not a correctness bug.
     """
     global _DISPATCH_EXECUTOR
     _DISPATCH_EXECUTOR = get_or_recreate_executor(
@@ -189,7 +197,12 @@ def _start_review(pr_number: int, token: str | None) -> None:
         which has no event loop of its own, so a fresh ``asyncio.run()`` per call is the
         standard way to run this one coroutine to completion — the same shape as
         ``asyncio.to_thread``/``loop.run_in_executor`` — and does not create N
-        concurrently-running loops beyond the pool's ``max_workers`` bound.
+        concurrently-running loops beyond the pool's ``max_workers`` bound. A persistent
+        per-thread loop (``asyncio.new_event_loop()`` + ``run_until_complete`` reused
+        across calls) would save the loop create/destroy cost, but "@khala review"
+        comments are a low-volume, human-triggered path, not a hot loop — the added
+        lifecycle management (loop cleanup on thread exit, cross-call state) isn't worth
+        it for a per-call cost measured in microseconds.
     """
     try:
         import asyncio
@@ -248,7 +261,48 @@ def _configured_owner_repo() -> tuple[str, str]:
         return "", ""
 
 
-def dispatch_github_event(event_type: str, payload: dict[str, Any]) -> None:
+# Best-effort de-dup of GitHub webhook redeliveries by the `X-GitHub-Delivery` header.
+# GitHub retries a delivery (same ID) on a non-2xx response or a timeout; without this,
+# a retried "@khala review" comment would start a second review job for the same PR.
+# In-memory only — bounded (TTL + max-entries) so it can't grow unbounded, but it does
+# NOT catch a redelivery landing on a different worker process in a multi-worker
+# deployment (each process has its own table). Reduces, does not eliminate, duplicates.
+_SEEN_DELIVERY_IDS: dict[str, float] = {}
+_SEEN_DELIVERY_TTL_S = 600.0
+_SEEN_DELIVERY_MAX_ENTRIES = 1000
+
+
+def _is_duplicate_delivery(delivery_id: str) -> bool:
+    """Return ``True`` if ``delivery_id`` was already processed within the TTL window.
+
+    Preconditions: ``delivery_id`` is the (possibly empty) ``X-GitHub-Delivery`` header
+        value.
+    Postconditions: an empty ``delivery_id`` is never treated as a duplicate (returns
+        ``False``, recording nothing) — GitHub always sends this header on a real
+        delivery, so an empty value signals an unusual/test request, not a redelivery.
+        Otherwise, prunes expired entries, then returns ``True`` (recording nothing
+        further) if ``delivery_id`` is already tracked; else records it — expiring after
+        ``_SEEN_DELIVERY_TTL_S`` — and returns ``False``. Caps memory by dropping the
+        oldest half of entries once the table exceeds ``_SEEN_DELIVERY_MAX_ENTRIES``.
+        Never raises.
+    """
+    if not delivery_id:
+        return False
+    now = time.monotonic()
+    for seen_id, expires_at in list(_SEEN_DELIVERY_IDS.items()):
+        if expires_at < now:
+            _SEEN_DELIVERY_IDS.pop(seen_id, None)
+    if delivery_id in _SEEN_DELIVERY_IDS:
+        return True
+    _SEEN_DELIVERY_IDS[delivery_id] = now + _SEEN_DELIVERY_TTL_S
+    if len(_SEEN_DELIVERY_IDS) > _SEEN_DELIVERY_MAX_ENTRIES:
+        oldest = sorted(_SEEN_DELIVERY_IDS.items(), key=lambda kv: kv[1])[: _SEEN_DELIVERY_MAX_ENTRIES // 2]
+        for seen_id, _ in oldest:
+            _SEEN_DELIVERY_IDS.pop(seen_id, None)
+    return False
+
+
+def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id: str = "") -> None:
     """Validate an ``issue_comment`` webhook and trigger a review when warranted.
 
     Acts only when ALL hold:
@@ -258,9 +312,12 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any]) -> None:
     - the body contains ``@khala review``
     - the commenter's ``author_association`` is OWNER/MEMBER/COLLABORATOR
     - the repository matches the configured owner/repo (never review an arbitrary repo)
+    - ``delivery_id`` (the ``X-GitHub-Delivery`` header) has not already been processed
+      within the dedup TTL — see :func:`_is_duplicate_delivery`
 
     Preconditions: ``event_type`` is the value of the ``X-GitHub-Event`` header;
-        ``payload`` is the parsed webhook body (already signature-verified by the route).
+        ``payload`` is the parsed webhook body (already signature-verified by the route);
+        ``delivery_id`` is the ``X-GitHub-Delivery`` header value, or ``""`` if absent.
     Postconditions: submits :func:`process_review_request` to the bounded dispatch
         executor (see :func:`_get_dispatch_executor`) exactly once when every condition
         above holds; any unmet condition is a silent no-op. Never raises (it returns
@@ -313,6 +370,10 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any]) -> None:
         return
     comment_id = comment.get("id")
     comment_id = comment_id if isinstance(comment_id, int) else 0
+
+    if _is_duplicate_delivery(delivery_id):
+        logger.info("GitHub webhook: ignoring redelivered delivery %s", delivery_id)
+        return
 
     submit_safely(
         _get_dispatch_executor(),

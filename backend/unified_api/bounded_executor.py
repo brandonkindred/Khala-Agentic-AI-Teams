@@ -35,6 +35,18 @@ def get_or_recreate_executor(
         own the module-level singleton slot — each integration keeps its own variable
         (sized independently) and must store the return value back into it; this
         function only decides "is it still live?", it does not manage global state.
+
+        ``_shutdown`` risk: it is a private ``ThreadPoolExecutor`` attribute, not part of
+        the documented API, and could disappear in a future CPython release.
+        ``getattr(current, "_shutdown", False)`` degrades gracefully if it does — a
+        missing attribute reads as "not shut down", so this function would incorrectly
+        reuse a truly-shut-down executor rather than crash. That reused executor's
+        ``.submit()`` would then raise ``RuntimeError``, which callers going through
+        :func:`submit_safely` already catch and log — so the practical failure mode is
+        "briefly stops recreating the pool after a shutdown", not a crash. Verified by
+        ``test_get_or_recreate_executor_degrades_gracefully_without_shutdown_attr`` in
+        ``tests/test_bounded_executor.py``, which exercises exactly this "attribute
+        missing" case against a double lacking ``_shutdown``.
     """
     if current is not None and not getattr(current, "_shutdown", False):
         return current
