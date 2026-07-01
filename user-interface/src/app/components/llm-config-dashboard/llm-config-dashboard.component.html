@@ -2,20 +2,11 @@
   <header class="page-header">
     <h1><mat-icon>tune</mat-icon> LLM Provider</h1>
     <p class="subtitle">
-      Choose the model provider used by every agent team. Equivalent to the
-      <code>LLM_PROVIDER</code> / <code>LLM_MODEL</code> environment variables.
+      Manage the ordered list of LLM providers used by every agent team. Agents use the
+      most-preferred provider that isn't usage-limited and fall back to the next on a 429.
     </p>
   </header>
 
-  @if (loading) {
-    <div class="loading"><mat-spinner diameter="32"></mat-spinner> <span>Loading…</span></div>
-  }
-
-  @if (error) {
-    <div class="banner banner-error" role="alert">
-      <mat-icon>error_outline</mat-icon> <span>{{ error }}</span>
-    </div>
-  }
   @if (success) {
     <div class="banner banner-success" role="status">
       <mat-icon>check_circle_outline</mat-icon> <span>{{ success }}</span>
@@ -25,109 +16,171 @@
     <div class="banner banner-warn" role="alert">
       <mat-icon>warning_amber</mat-icon>
       @if (storageStatus === 'unreachable') {
-        <span>Postgres is configured but currently unreachable — settings can't be saved until the database connection is restored.</span>
+        <span>Postgres is configured but currently unreachable — providers can't be saved until the database connection is restored.</span>
       } @else {
-        <span>Postgres is not configured — settings can't be saved here. Configure the provider via environment variables.</span>
+        <span>Postgres is not configured — providers can't be saved. Set the Postgres environment variables to configure LLM providers.</span>
       }
     </div>
   }
 
-  @if (!loading) {
-    <mat-card class="config-card">
-      <mat-card-content>
-        <section class="field-group">
-          <div class="field-label" id="provider-label">Provider</div>
-          <mat-radio-group
-            [ngModel]="provider"
-            (ngModelChange)="onProviderChange($event)"
-            class="provider-radio"
-            aria-labelledby="provider-label"
-          >
-            <mat-radio-button value="ollama">Ollama</mat-radio-button>
-            <mat-radio-button value="claude">Claude (Anthropic)</mat-radio-button>
-          </mat-radio-group>
-        </section>
+  <mat-card class="config-card providers-card">
+    <mat-card-header>
+      <mat-card-title>Provider fallback order</mat-card-title>
+      <mat-card-subtitle>
+        Most preferred first. When a provider hits its usage limit, agents fall back to the
+        next available one; a limited provider is reused automatically once its limit resets.
+        Drag to reorder.
+      </mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+      @if (providersLoading) {
+        <div class="loading"><mat-spinner diameter="24"></mat-spinner> <span>Loading providers…</span></div>
+      }
+      @if (providersError) {
+        <div class="banner banner-error" role="alert">
+          <mat-icon aria-hidden="true">error_outline</mat-icon> <span>{{ providersError }}</span>
+        </div>
+      }
 
-        @if (provider === 'ollama') {
-          <section class="field-group">
-            <div class="field-label" id="ollama-mode-label">Ollama mode</div>
-            <mat-radio-group
-              [ngModel]="ollamaMode"
-              (ngModelChange)="onOllamaModeChange($event)"
-              class="provider-radio"
-              aria-labelledby="ollama-mode-label"
-            >
-              <mat-radio-button value="local">Local</mat-radio-button>
-              <mat-radio-button value="cloud">Cloud</mat-radio-button>
-            </mat-radio-group>
-          </section>
+      @if (!providersLoading && providers.length === 0) {
+        <p class="empty-note">
+          No LLM providers configured. Add one below so agents have a model to run.
+        </p>
+      }
 
-          @if (ollamaMode === 'local') {
-            <mat-form-field appearance="outline" class="full">
-              <mat-label>Base URL</mat-label>
-              <input matInput name="ollamaBaseUrl" [(ngModel)]="ollamaBaseUrl" placeholder="http://localhost:11434" />
-            </mat-form-field>
-          } @else {
-            <mat-form-field appearance="outline" class="full">
-              <mat-label>Ollama Cloud API key</mat-label>
-              <input
-                matInput
-                type="password"
-                name="ollamaApiKey"
-                [(ngModel)]="ollamaApiKey"
-                autocomplete="off"
-                [placeholder]="ollamaApiKeyConfigured ? '•••••••• (configured — leave blank to keep)' : 'Enter API key'"
-              />
-            </mat-form-field>
-          }
-        }
-
-        @if (provider === 'claude') {
-          <mat-form-field appearance="outline" class="full">
-            <mat-label>Anthropic API key</mat-label>
-            <input
-              matInput
-              type="password"
-              name="claudeApiKey"
-              [(ngModel)]="claudeApiKey"
-              autocomplete="off"
-              [placeholder]="claudeApiKeyConfigured ? '•••••••• (configured — leave blank to keep)' : 'Enter API key'"
-            />
-          </mat-form-field>
-        }
-
-        <mat-form-field appearance="outline" class="full">
-          <mat-label>Model</mat-label>
-          <input
-            matInput
-            name="model"
-            [(ngModel)]="model"
-            [matAutocomplete]="modelAuto"
-            placeholder="Model id"
-          />
-          @if (ollamaModelsLoading) {
-            <mat-spinner matSuffix diameter="18"></mat-spinner>
-          }
-          <mat-autocomplete #modelAuto="matAutocomplete">
-            @for (m of modelOptions; track m) {
-              <mat-option [value]="m">{{ m }}</mat-option>
+      <div
+        cdkDropList
+        cdkDropListOrientation="vertical"
+        [cdkDropListDisabled]="providersSaving"
+        class="provider-list"
+        (cdkDropListDropped)="onProviderDrop($event)"
+      >
+        @for (entry of providers; track entry.id) {
+          <div class="provider-item" cdkDrag>
+            @if (editingId === entry.id) {
+              <div class="provider-form" data-testid="edit-form">
+                <mat-form-field appearance="outline">
+                  <mat-label>Label</mat-label>
+                  <input matInput name="editLabel" [(ngModel)]="editForm.label" />
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Provider</mat-label>
+                  <mat-select name="editProvider" [(ngModel)]="editForm.provider">
+                    <mat-option value="ollama">Ollama</mat-option>
+                    <mat-option value="claude">Claude (Anthropic)</mat-option>
+                  </mat-select>
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Model</mat-label>
+                  <input matInput name="editModel" [(ngModel)]="editForm.model" placeholder="Model id (optional)" />
+                </mat-form-field>
+                @if (editForm.provider === 'ollama') {
+                  <mat-form-field appearance="outline">
+                    <mat-label>Base URL</mat-label>
+                    <input matInput name="editBaseUrl" [(ngModel)]="editForm.base_url" placeholder="http://localhost:11434" />
+                  </mat-form-field>
+                }
+                <mat-form-field appearance="outline">
+                  <mat-label>API key</mat-label>
+                  <input
+                    matInput
+                    type="password"
+                    autocomplete="off"
+                    name="editApiKey"
+                    [(ngModel)]="editForm.api_key"
+                    [placeholder]="entry.api_key_configured ? '•••••••• (configured — leave blank to keep)' : 'Enter API key'"
+                  />
+                </mat-form-field>
+                @if (entry.api_key_configured && !editForm.api_key.trim()) {
+                  <mat-checkbox name="editClearApiKey" [(ngModel)]="editForm.clear_api_key">
+                    Clear stored key (e.g. switching to a keyless local Ollama)
+                  </mat-checkbox>
+                }
+                <div class="form-actions">
+                  <button mat-button type="button" (click)="cancelEdit()">Cancel</button>
+                  <button mat-flat-button color="primary" type="button" (click)="submitEdit()" [disabled]="providersSaving">
+                    Save
+                  </button>
+                </div>
+              </div>
+            } @else {
+              <mat-icon class="drag-handle" cdkDragHandle aria-label="Drag to reorder">drag_indicator</mat-icon>
+              <div class="provider-main">
+                <span class="provider-order">{{ $index + 1 }}</span>
+                <span class="provider-label">{{ entry.label }}</span>
+                <span class="provider-type">{{ entry.provider }}</span>
+                @if (entry.model) {
+                  <span class="provider-model">{{ entry.model }}</span>
+                }
+                @if (entry.api_key_configured) {
+                  <span class="key-badge" matTooltip="API key configured" aria-label="API key configured">
+                    <mat-icon aria-hidden="true">key</mat-icon>
+                  </span>
+                }
+                @if (entry.limit_exceeded) {
+                  <span class="limit-badge" [matTooltip]="entry.limit_type || 'usage limit'">
+                    <mat-icon aria-hidden="true">block</mat-icon> limit exceeded
+                    @if (resetInfo(entry, now)) {
+                      <span class="reset">· {{ resetInfo(entry, now) }}</span>
+                    }
+                  </span>
+                }
+              </div>
+              <div class="provider-actions">
+                <button mat-icon-button type="button" (click)="startEdit(entry)" aria-label="Edit provider"
+                  [disabled]="providersSaving">
+                  <mat-icon aria-hidden="true">edit</mat-icon>
+                </button>
+                <button mat-icon-button type="button" (click)="removeProvider(entry)" aria-label="Remove provider"
+                  [disabled]="providersSaving">
+                  <mat-icon aria-hidden="true">delete</mat-icon>
+                </button>
+              </div>
             }
-          </mat-autocomplete>
-        </mat-form-field>
-
-        @if (ollamaModelsLoading) {
-          <p class="model-note" role="status">Loading available models…</p>
-        } @else if (modelNote) {
-          <p class="model-note" role="status">{{ modelNote }}</p>
+          </div>
         }
-      </mat-card-content>
+      </div>
 
-      <mat-card-actions align="end">
-        <button mat-button type="button" (click)="loadConfig()" [disabled]="saving || loading">Reset</button>
-        <button mat-flat-button color="primary" type="button" (click)="save()" [disabled]="saving || !storageAvailable">
-          @if (saving) { <mat-spinner diameter="18"></mat-spinner> } @else { Save }
+      @if (addForm) {
+        <div class="provider-form" data-testid="add-form">
+          <mat-form-field appearance="outline">
+            <mat-label>Label</mat-label>
+            <input matInput name="addLabel" [(ngModel)]="addForm.label" placeholder="e.g. Anthropic API" />
+          </mat-form-field>
+          <mat-form-field appearance="outline">
+            <mat-label>Provider</mat-label>
+            <mat-select name="addProvider" [(ngModel)]="addForm.provider">
+              <mat-option value="ollama">Ollama</mat-option>
+              <mat-option value="claude">Claude (Anthropic)</mat-option>
+            </mat-select>
+          </mat-form-field>
+          <mat-form-field appearance="outline">
+            <mat-label>Model</mat-label>
+            <input matInput name="addModel" [(ngModel)]="addForm.model" placeholder="Model id (optional)" />
+          </mat-form-field>
+          @if (addForm.provider === 'ollama') {
+            <mat-form-field appearance="outline">
+              <mat-label>Base URL</mat-label>
+              <input matInput name="addBaseUrl" [(ngModel)]="addForm.base_url" placeholder="http://localhost:11434" />
+            </mat-form-field>
+          }
+          <mat-form-field appearance="outline">
+            <mat-label>API key</mat-label>
+            <input matInput type="password" autocomplete="off" name="addApiKey" [(ngModel)]="addForm.api_key" placeholder="Enter API key" />
+          </mat-form-field>
+          <div class="form-actions">
+            <button mat-button type="button" (click)="cancelAdd()">Cancel</button>
+            <button mat-flat-button color="primary" type="button" (click)="submitAdd()" [disabled]="providersSaving">
+              Add provider
+            </button>
+          </div>
+        </div>
+      } @else {
+        <button mat-stroked-button type="button" class="add-provider-btn" (click)="startAdd()"
+          [disabled]="!storageAvailable || providersSaving">
+          <mat-icon aria-hidden="true">add</mat-icon> Add provider
         </button>
-      </mat-card-actions>
-    </mat-card>
-  }
+      }
+    </mat-card-content>
+  </mat-card>
 </div>
