@@ -1108,6 +1108,13 @@ class IndicatorRegistry:
         true range (``total / period``), NOT a Wilder/EMA smoothing — so the
         Keltner ATR leg and a standalone ``atr`` indicator return the same value
         and the compiler's inline helper agrees bit-for-bit.
+
+        Unlike the pure-windowed indicators (``donchian``/``williams_r``/``cci``/
+        ``mfi``), this method keeps no per-call deque: its dominant cost is the
+        shared :func:`windowed_ema` basis, which is inherently O(period) because the
+        EMA seed slides with the window and cannot be cached locally without
+        changing that shared helper. Caching only the small ``atr_period`` true-range
+        leg would not remove that dominant cost, so it is intentionally left plain.
         """
         if not bars or len(bars) < max(period, atr_period + 1):
             return None
@@ -1182,7 +1189,11 @@ class IndicatorRegistry:
         (each money-flow term compares typical price against the prior bar).
         Post: the volume-weighted RSI of typical price over the trailing
         ``period`` bars. Mirrors :meth:`rsi`'s zero-denominator convention:
-        all-positive flow → 100, no flow at all → 50.
+        all-positive flow → 100, no flow at all → 50. Keeps a bounded deque of
+        per-bar ``(positive, negative)`` money-flow contributions (like
+        :meth:`donchian`) so the warm ``expand``/``slide`` path appends one term
+        instead of rewalking the window each call; ``pos``/``neg`` are still summed
+        over the deque in oldest-to-newest order, so the value is identical.
         """
         if not bars or len(bars) < period + 1:
             return None
@@ -1191,24 +1202,37 @@ class IndicatorRegistry:
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
-        pos = 0.0
-        neg = 0.0
-        for i in range(len(bars) - period, len(bars)):
-            cur = bars[i]
-            prev = bars[i - 1]
+
+        def _flow(cur: Any, prev: Any) -> Tuple[float, float]:
+            # (positive, negative) raw money flow: the term is signed by whether
+            # the typical price rose or fell vs. the prior bar; a flat move is zero.
             tp = (float(cur.high) + float(cur.low) + float(cur.close)) / 3.0
             tp_prev = (float(prev.high) + float(prev.low) + float(prev.close)) / 3.0
             rmf = tp * float(cur.volume)
             if tp > tp_prev:
-                pos += rmf
-            elif tp < tp_prev:
-                neg += rmf
+                return (rmf, 0.0)
+            if tp < tp_prev:
+                return (0.0, rmf)
+            return (0.0, 0.0)
+
+        flows: Optional[Deque[Tuple[float, float]]] = None
+        if state is not None and "flows" in state:
+            kind = self._advance_kind(state, bars, fp)
+            if kind in ("expand", "slide"):
+                flows = state["flows"]
+                flows.append(_flow(bars[-1], bars[-2]))
+        if flows is None:
+            flows = deque(maxlen=period)
+            for i in range(len(bars) - period, len(bars)):
+                flows.append(_flow(bars[i], bars[i - 1]))
+        pos = sum(f[0] for f in flows)
+        neg = sum(f[1] for f in flows)
         if neg == 0:
             value: float = 100.0 if pos > 0 else 50.0
         else:
             ratio = pos / neg
             value = 100.0 - (100.0 / (1.0 + ratio))
-        self._state[key] = {"fp": fp, "value": value}
+        self._state[key] = {"fp": fp, "value": value, "flows": flows}
         return value
 
     # ----- ROC -----------------------------------------------------------
@@ -1247,7 +1271,12 @@ class IndicatorRegistry:
         Post: ``(tp − sma_tp) / (0.015 × mean_deviation)`` over the trailing
         ``period`` typical prices, where ``mean_deviation`` is the mean absolute
         deviation from ``sma_tp``; ``0.0`` when that deviation is 0 (a flat
-        window has no defined CCI).
+        window has no defined CCI). Keeps a bounded typical-price deque (like
+        :meth:`donchian`) so the warm ``expand``/``slide`` path appends one value
+        instead of rebuilding the window each call; the SMA and mean-deviation are
+        still summed over the deque in oldest-to-newest order, so the value is
+        identical (mean absolute deviation has no incremental form — it depends on
+        the SMA, which shifts as the window slides).
         """
         if not bars or len(bars) < period:
             return None
@@ -1256,12 +1285,22 @@ class IndicatorRegistry:
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
-        tps = [(float(b.high) + float(b.low) + float(b.close)) / 3.0 for b in bars[-period:]]
+        tps: Optional[Deque[float]] = None
+        if state is not None and "tps" in state:
+            kind = self._advance_kind(state, bars, fp)
+            if kind in ("expand", "slide"):
+                tps = state["tps"]
+                last = bars[-1]
+                tps.append((float(last.high) + float(last.low) + float(last.close)) / 3.0)
+        if tps is None:
+            tps = deque(maxlen=period)
+            for b in bars[-period:]:
+                tps.append((float(b.high) + float(b.low) + float(b.close)) / 3.0)
         sma_tp = sum(tps) / period
         mean_dev = sum(abs(t - sma_tp) for t in tps) / period
         cur_tp = tps[-1]
         value = 0.0 if mean_dev == 0 else (cur_tp - sma_tp) / (0.015 * mean_dev)
-        self._state[key] = {"fp": fp, "value": value}
+        self._state[key] = {"fp": fp, "value": value, "tps": tps}
         return value
 
     # ----- Williams %R ---------------------------------------------------
@@ -1272,7 +1311,10 @@ class IndicatorRegistry:
         Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
         Post: ``−100 × (highest_high − close) / (highest_high − lowest_low)``
         over the trailing ``period`` bars; ``−50.0`` (neutral) when the range is
-        0, mirroring :meth:`stochastic`'s flat-window convention.
+        0, mirroring :meth:`stochastic`'s flat-window convention. Keeps a bounded
+        ``(high, low)`` deque (like :meth:`donchian`) so the warm ``expand``/``slide``
+        path appends one bar instead of re-slicing ``bars[-period:]`` each call; the
+        extrema are still recomputed over the deque, so the value is identical.
         """
         if not bars or len(bars) < period:
             return None
@@ -1281,11 +1323,20 @@ class IndicatorRegistry:
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
-        window = bars[-period:]
-        highest = max(float(b.high) for b in window)
-        lowest = min(float(b.low) for b in window)
+        hl: Optional[Deque[Tuple[float, float]]] = None
+        if state is not None and "hl" in state:
+            kind = self._advance_kind(state, bars, fp)
+            if kind in ("expand", "slide"):
+                hl = state["hl"]
+                hl.append((float(bars[-1].high), float(bars[-1].low)))
+        if hl is None:
+            hl = deque(maxlen=period)
+            for b in bars[-period:]:
+                hl.append((float(b.high), float(b.low)))
+        highest = max(t[0] for t in hl)
+        lowest = min(t[1] for t in hl)
         rng = highest - lowest
         close = float(bars[-1].close)
         value = -50.0 if rng == 0 else -100.0 * (highest - close) / rng
-        self._state[key] = {"fp": fp, "value": value}
+        self._state[key] = {"fp": fp, "value": value, "hl": hl}
         return value

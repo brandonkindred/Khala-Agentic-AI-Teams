@@ -36,6 +36,7 @@ import json
 import textwrap
 from typing import Any, List, Tuple
 
+from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
     EntryRule,
     IndicatorRef,
@@ -79,11 +80,11 @@ _INDICATOR_METHOD_NAME: dict[str, str] = {
 
 _MIN_WINDOW: int = 20
 
-# VWAP requests the deepest retained history. Sandbox VWAP is
+# VWAP (and OBV) request the deepest retained history. Both are
 # cumulative-over-the-series, not rolling, so a smaller request would
-# silently change signal semantics; 500 matches the harness retention
-# ceiling in ``StrategyContext._ingest_bar``.
-_VWAP_HISTORY: int = 500
+# silently change signal semantics; this mirrors the harness retention
+# ceiling in ``StrategyContext._ingest_bar`` via the shared constant.
+_VWAP_HISTORY: int = STREAMING_WINDOW_BARS
 
 
 def compile_strategy(spec: Any) -> str:

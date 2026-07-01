@@ -20,6 +20,7 @@ from typing import Any, Dict, Literal, Optional, Protocol, Sequence, Tuple
 import pandas as pd
 
 from ..indicators.streaming import IndicatorRegistry
+from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
     AllOf,
     AnyOf,
@@ -280,12 +281,12 @@ def evaluate_signal_exit_rules(
 # ---------------------------------------------------------------------------
 
 
-# Trailing-window bound for the alignment/coverage walk. Matches the engine's
-# ``StreamingHistoryView`` retention ceiling (``max_bars=500``) and the compiler's
-# ``_VWAP_HISTORY`` history depth, so cumulative indicators (``vwap``, ``obv`` —
-# which re-base to the window start) compute over the same trailing window the
-# runtime traded on, instead of diverging once history exceeds the bound.
-_SERIES_WINDOW: int = 500
+# Trailing-window bound for the alignment/coverage walk — the engine's retention
+# ceiling, shared with ``StreamingHistoryView.max_bars``, the compiler's
+# ``_VWAP_HISTORY``, and the conformance shadow context. Cumulative indicators
+# (``vwap``, ``obv``) re-base to the window start, so all sites derive from the one
+# ``STREAMING_WINDOW_BARS`` constant to keep validation and runtime windows identical.
+_SERIES_WINDOW: int = STREAMING_WINDOW_BARS
 
 
 class _FrameBar:
@@ -540,12 +541,13 @@ class StreamingHistoryView:
     backfills correctly and a sparsely-queried ref catches up without a stale
     read. The counter is never recycled within a process.
 
-    The deque is bounded to ``max_bars`` (default 500, matching the
-    ``StrategyContext._ingest_bar`` retention ceiling — engine and sandbox must
-    compute MACD/VWAP over the same trailing window for the conformance gate).
+    The deque is bounded to ``max_bars`` (default :data:`STREAMING_WINDOW_BARS`,
+    matching the ``StrategyContext._ingest_bar`` retention ceiling — engine and
+    sandbox must compute MACD/VWAP over the same trailing window for the
+    conformance gate).
     """
 
-    def __init__(self, max_bars: int = 500) -> None:
+    def __init__(self, max_bars: int = STREAMING_WINDOW_BARS) -> None:
         self._bars: deque[BarRecord] = deque(maxlen=max_bars)
         self._max_bars = max_bars
         self._append_counter: int = 0

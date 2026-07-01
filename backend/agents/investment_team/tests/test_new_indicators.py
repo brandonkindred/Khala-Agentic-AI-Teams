@@ -1056,6 +1056,27 @@ def test_compute_indicator_series_matches_registry_tail(case) -> None:
     assert float(series.iloc[-1]) == pytest.approx(expected, rel=0, abs=1e-9)
 
 
+def test_retention_window_constant_is_single_source_of_truth() -> None:
+    """Every trailing-window bound derives from the one ``STREAMING_WINDOW_BARS``.
+
+    Cumulative indicators (vwap, obv) re-base to the window start, so the audit walk,
+    the streaming-history deque, the compiler's cumulative-history depth, and the
+    conformance shadow context must all use the same retention ceiling. This guards
+    against a future edit reintroducing a private ``500`` literal at one site and
+    silently diverging validation from runtime.
+    """
+    from investment_team.strategy_lab.executor.predicate_evaluator import (
+        _SERIES_WINDOW,
+        StreamingHistoryView,
+    )
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+    from investment_team.strategy_lab.synthesis.compiler import _VWAP_HISTORY
+
+    assert _SERIES_WINDOW == STREAMING_WINDOW_BARS
+    assert _VWAP_HISTORY == STREAMING_WINDOW_BARS
+    assert StreamingHistoryView()._max_bars == STREAMING_WINDOW_BARS
+
+
 def test_compute_indicator_series_obv_bounded_to_runtime_window() -> None:
     """OBV is cumulative, so the audit walk must bound to the runtime's trailing window.
 
