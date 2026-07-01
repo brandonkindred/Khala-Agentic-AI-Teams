@@ -577,4 +577,55 @@ describe('LlmConfigDashboardComponent', () => {
     component.cancelEdit();
     expect(component.editingId).toBeNull();
   });
+
+  it('clears a stale providersError when opening or dismissing a form', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 9 })])));
+    component.loadProviders();
+
+    component.providersError = 'stale error';
+    component.startAdd();
+    expect(component.providersError).toBeNull();
+
+    component.providersError = 'stale error';
+    component.cancelAdd();
+    expect(component.providersError).toBeNull();
+
+    component.providersError = 'stale error';
+    component.startEdit(component.providers[0]);
+    expect(component.providersError).toBeNull();
+
+    component.providersError = 'stale error';
+    component.cancelEdit();
+    expect(component.providersError).toBeNull();
+  });
+
+  it('refreshes `now` every 30s so a limit badge stays live without user interaction', () => {
+    vi.useFakeTimers();
+    try {
+      // Re-create the component under fake timers so its ngOnInit interval is captured.
+      fixture = TestBed.createComponent(LlmConfigDashboardComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+      const before = component.now;
+      vi.advanceTimersByTime(30_000);
+      expect(component.now).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops the reset-time timer on destroy', () => {
+    vi.useFakeTimers();
+    try {
+      fixture = TestBed.createComponent(LlmConfigDashboardComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+      fixture.destroy();
+      const before = component.now;
+      vi.advanceTimersByTime(60_000);
+      expect(component.now).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

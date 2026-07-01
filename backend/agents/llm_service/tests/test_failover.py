@@ -64,14 +64,15 @@ class _StubClient:
     chat = _run
 
 
-def _make_failover(entries, build_map, *, marks=None):
+def _make_failover(entries, build_map):
     """Build a FailoverLLMClient over `entries`, dispatching to `build_map[id]`.
 
-    `build_map` maps entry id -> stub client. Records (entry_id, rl_override) of
-    each build into `builds`, and (entry_id, err) into `marks`.
+    `build_map` maps entry id -> stub client. Returns `(client, builds, marks)`:
+    `builds` records (entry_id, rl_override) of each build call; `marks` records
+    (entry_id, err) of each usage-limit mark.
     """
     builds: list[tuple] = []
-    marks = marks if marks is not None else []
+    marks: list[tuple] = []
 
     def load_candidates():
         return list(entries)
@@ -91,6 +92,7 @@ def _make_failover(entries, build_map, *, marks=None):
 
 
 def test_first_candidate_success_no_mark():
+    """The first (most-preferred) candidate succeeding: no failover, no mark."""
     e1, e2 = _entry(1), _entry(2)
     c1 = _StubClient(result="ok")
     fc, builds, marks = _make_failover([e1, e2], {1: c1, 2: _StubClient()})
@@ -131,6 +133,35 @@ def test_non_rate_limit_error_propagates_without_failover():
     with pytest.raises(LLMPermanentError):
         fc.complete_text("p")
     assert marks == [] and c2.calls == 0
+
+
+def test_build_exception_propagates_without_failover():
+    """``build()`` raising (e.g. an invalid provider config) is distinct from a client
+    METHOD raising: it happens outside the try/except LLMRateLimitError block in
+    _dispatch, so it propagates immediately — no failover, no mark, no next candidate."""
+    e1, e2 = _entry(1), _entry(2)
+
+    def load_candidates():
+        return [e1, e2]
+
+    build_calls: list[int] = []
+
+    def build(entry, rl_override):
+        build_calls.append(entry.id)
+        if entry.id == 1:
+            raise ValueError("invalid provider config")
+        return _StubClient(result="should-not-reach")
+
+    def mark(entry, err):
+        raise AssertionError("mark must not be called for a build failure")
+
+    def default_build():
+        raise AssertionError("default_build must not be reached")
+
+    fc = FailoverLLMClient(load_candidates, build, mark, default_build)
+    with pytest.raises(ValueError, match="invalid provider config"):
+        fc.complete_json("p")
+    assert build_calls == [1]  # no attempt made on the second candidate
 
 
 def test_empty_candidates_uses_default_build():

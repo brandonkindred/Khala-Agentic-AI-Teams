@@ -130,8 +130,8 @@
                 @if (entry.limit_exceeded) {
                   <span class="limit-badge" [matTooltip]="entry.limit_type || 'usage limit'">
                     <mat-icon aria-hidden="true">block</mat-icon> limit exceeded
-                    @if (resetInfo(entry)) {
-                      <span class="reset">· {{ resetInfo(entry) }}</span>
+                    @if (resetInfo(entry, now)) {
+                      <span class="reset">· {{ resetInfo(entry, now) }}</span>
                     }
                   </span>
                 }

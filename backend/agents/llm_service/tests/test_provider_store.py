@@ -125,6 +125,7 @@ def _row(entry: ps.ProviderEntry, ciphertext: str = ""):
 
 
 def test_select_first_healthy_wins():
+    """With no entry usage-limited, the most-preferred (first) entry is selected."""
     sel = ps.select_active_entry([_entry(1), _entry(2)], now=NOW)
     assert sel.id == 1
 

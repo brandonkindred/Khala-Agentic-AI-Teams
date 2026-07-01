@@ -126,9 +126,15 @@ export class LlmConfigDashboardComponent implements OnInit {
   editingId: number | null = null;
   editForm: ProviderForm = emptyProviderForm();
 
+  /** Clock tick for the reset-time badges (`resetInfo`); refreshed every 30s so a
+   * limited entry's "resets in ~Xm" stays live without the operator interacting. */
+  now = Date.now();
+
   ngOnInit(): void {
     this.loadConfig();
     this.loadProviders();
+    const timer = setInterval(() => (this.now = Date.now()), 30_000);
+    this.destroyRef.onDestroy(() => clearInterval(timer));
   }
 
   /** Load the ordered provider list. */
@@ -185,10 +191,12 @@ export class LlmConfigDashboardComponent implements OnInit {
   startAdd(): void {
     this.editingId = null;
     this.addForm = { ...emptyProviderForm(), base_url: OLLAMA_LOCAL_DEFAULT };
+    this.providersError = null;
   }
 
   cancelAdd(): void {
     this.addForm = null;
+    this.providersError = null;
   }
 
   /** Submit the add-provider form. */
@@ -227,10 +235,12 @@ export class LlmConfigDashboardComponent implements OnInit {
       api_key: '',
       clear_api_key: false,
     };
+    this.providersError = null;
   }
 
   cancelEdit(): void {
     this.editingId = null;
+    this.providersError = null;
   }
 
   /**
