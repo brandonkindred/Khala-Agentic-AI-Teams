@@ -18,14 +18,33 @@ could be reviewed at all; an unexpected error (a defect in the reviewer code,
 not a known LLM content failure) propagates unchanged so it fails closed rather
 than being masked — the review never renders an approving verdict on code it
 did not see.
+
+Map-phase cache: the review→fix→re-review loop re-invokes the whole coordinator
+after every batch fix, but a fix only mutates the files that had issues, so most
+chunks are byte-identical to the previous cycle. A process-global, bounded LRU
+(``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE``) keyed on the chunk's exact LLM input
+(``chunk.content`` + segment notes) plus a context fingerprint (the shared
+task/spec/architecture/profile inputs and the resolved review model) reuses the
+prior map-phase ``_ChunkOutcome`` for any unchanged chunk, so only chunks the
+fix actually touched go back through the LLM. The cache is scoped to the map
+phase only: the false-positive *verification* pass always re-runs on the current
+submission (a finding can flip because a *different*, changed chunk altered
+cross-file context, and verification reads the whole codebase), so no safety
+guarantee is weakened. Only fully-reviewed outcomes are cached — degraded "not
+reviewed" outcomes are never stored, so a transient failure is retried for real
+next cycle. The cache is best-effort: a miss simply recomputes, so correctness
+never depends on a hit, and any change to code, context, or model invalidates
+the key.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -51,6 +70,7 @@ from software_engineering_team.shared.context_sizing import (
 from .chunk_reviewer import ChunkReviewAgent
 from .code_boundaries import preferred_break_lines
 from .false_positive_filter import filter_false_positives
+from .model_resolution import resolve_code_review_model
 from .models import (
     ChunkReviewInput,
     CodeReviewInput,
@@ -103,6 +123,34 @@ def _max_bisect_depth() -> int:
 
 def _map_parallelism() -> int:
     return parse_env_int("CODE_REVIEW_MAP_PARALLELISM", DEFAULT_MAP_PARALLELISM, 1)
+
+
+# Process-global map-phase outcome cache (see module docstring). Bounded LRU
+# keyed on a content+context+model hash; guarded by a lock because the map phase
+# fans chunks out across worker threads. ``0`` disables it (pure passthrough).
+DEFAULT_CHUNK_OUTCOME_CACHE_SIZE = 512  # CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE, floor 0
+
+_CHUNK_OUTCOME_CACHE: "OrderedDict[str, _ChunkOutcome]" = OrderedDict()
+_CHUNK_OUTCOME_CACHE_LOCK = threading.Lock()
+
+
+def _chunk_outcome_cache_size() -> int:
+    return parse_env_int(
+        "CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", DEFAULT_CHUNK_OUTCOME_CACHE_SIZE, 0
+    )
+
+
+def clear_chunk_outcome_cache() -> None:
+    """Drop every cached map-phase outcome.
+
+    Postconditions:
+        - The process-global cache is empty; the next review of any chunk is a
+          guaranteed miss. Intended for tests (the cache persists across
+          ``run_coordinator`` calls by design) and for callers that must force a
+          cold review.
+    """
+    with _CHUNK_OUTCOME_CACHE_LOCK:
+        _CHUNK_OUTCOME_CACHE.clear()
 
 
 def parse_code_into_file_blocks(code: str) -> List[Tuple[str, str]]:
@@ -568,6 +616,26 @@ class _ChunkOutcome:
         self.commit_messages.extend(other.commit_messages)
         self.approved_flags.extend(other.approved_flags)
 
+    def clone(self) -> "_ChunkOutcome":
+        """Return a deep, independent copy.
+
+        Postconditions:
+            - The returned outcome shares no mutable state with ``self``: the
+              lists are fresh and every ``CodeReviewIssue`` is deep-copied. This
+              is what makes the map-phase cache safe — a cached entry is stored
+              and served as a clone, so downstream mutation (dedupe, line
+              re-anchoring, false-positive filtering, ``absorb``) can never
+              corrupt it and every hit reproduces identical findings/verdicts.
+        """
+        return _ChunkOutcome(
+            issues=[i.model_copy(deep=True) for i in self.issues],
+            not_reviewed_issues=[i.model_copy(deep=True) for i in self.not_reviewed_issues],
+            summaries=list(self.summaries),
+            spec_notes=list(self.spec_notes),
+            commit_messages=list(self.commit_messages),
+            approved_flags=list(self.approved_flags),
+        )
+
 
 def _bisect_segment(seg: FileSegment) -> Optional[Tuple[FileSegment, FileSegment]]:
     """Split one segment into two halves on a line boundary.
@@ -876,6 +944,127 @@ def _review_chunk_with_recovery(
     )
 
 
+def _review_model_fingerprint(llm: LLMClient) -> str:
+    """Best-effort stable identifier for the model chunk reviews will run on.
+
+    Preconditions:
+        - ``llm`` is the client that will be handed to ``ChunkReviewAgent``.
+
+    Postconditions:
+        - Returns a string that changes when the resolved review model changes,
+          so it can invalidate the map-phase cache (a cached outcome from one
+          model is never served for another). Never raises: any failure to
+          resolve the model falls back to the client's type name. The value is
+          identity-only — it is hashed into the cache key, never published.
+    """
+    try:
+        model = resolve_code_review_model(llm)
+    except Exception:
+        return type(llm).__name__
+    for attr in ("model_id", "model_name", "model"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    config = getattr(model, "config", None)
+    if isinstance(config, dict):
+        candidate = config.get("model_id") or config.get("model")
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return type(model).__name__
+
+
+def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
+    """Hash the review inputs shared by every chunk in one coordinator run.
+
+    Preconditions:
+        - ``base_input`` is the shared ``ChunkReviewInput`` field dict built in
+          ``run_coordinator`` (JSON-serializable; ``profile`` is a ``ReviewProfile``).
+
+    Postconditions:
+        - Returns a hex digest that changes whenever any shared review input
+          (task/spec/architecture/acceptance/user-decisions/language/profile) or
+          the resolved model changes, so the map-phase cache invalidates on a
+          changed profile, task context, or model. Deterministic and stable
+          across runs (``sort_keys`` + enum ``.value`` normalization), so a hit
+          for an unchanged chunk survives across coordinator calls in a process.
+    """
+    profile = base_input.get("profile")
+    normalized = {
+        key: (getattr(value, "value", value))
+        for key, value in base_input.items()
+        if key != "profile"
+    }
+    normalized["profile"] = getattr(profile, "value", profile)
+    normalized["__model__"] = model_fingerprint
+    payload = json.dumps(normalized, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _chunk_cache_key(chunk: ReviewChunk, context_fp: str) -> str:
+    """Key one chunk's map-phase review by its exact LLM input plus context.
+
+    Postconditions:
+        - Combines the chunk's rendered content and segment notes (the bytes the
+          reviewer actually sees) with the run's context fingerprint, so two
+          chunks collide only when their LLM inputs are byte-identical.
+    """
+    body = f"{context_fp}\x00{chunk.content}\x00{_segment_notes(chunk)}"
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _cached_review_chunk(
+    reviewer: ChunkReviewAgent,
+    chunk: ReviewChunk,
+    base_input: Dict,
+    context_fp: str,
+) -> _ChunkOutcome:
+    """Review one chunk, reusing a cached map-phase outcome when unchanged.
+
+    Preconditions:
+        - Same as ``_review_chunk_with_recovery`` for ``base_input``.
+        - ``context_fp`` is the run's ``_context_fingerprint`` (folds in the
+          shared context and the resolved model).
+
+    Postconditions:
+        - When caching is disabled (``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` ==
+          0) this is a pure passthrough to ``_review_chunk_with_recovery`` —
+          behavior is identical to no cache at all.
+        - On a hit, returns a deep clone of the stored outcome (never the shared
+          instance), so the caller may mutate it freely; findings/verdicts are
+          reproduced identically.
+        - On a miss, runs the real review and — only when the outcome is a fully
+          reviewed chunk (no ``not_reviewed_issues`` and at least one
+          ``approved_flags`` entry) — stores a clone under the chunk key,
+          evicting the oldest entry past capacity. Degraded outcomes are never
+          cached, so a transient failure is retried for real next cycle.
+        - Never suppresses ``_review_chunk_with_recovery``'s exceptions
+          (infrastructure failure, unexpected defect): they propagate unchanged.
+    """
+    capacity = _chunk_outcome_cache_size()
+    if capacity <= 0:
+        return _review_chunk_with_recovery(reviewer, chunk, base_input)
+
+    key = _chunk_cache_key(chunk, context_fp)
+    with _CHUNK_OUTCOME_CACHE_LOCK:
+        hit = _CHUNK_OUTCOME_CACHE.get(key)
+        if hit is not None:
+            _CHUNK_OUTCOME_CACHE.move_to_end(key)
+            return hit.clone()
+
+    outcome = _review_chunk_with_recovery(reviewer, chunk, base_input)
+
+    # Only cache a fully-reviewed chunk. A degraded (not-reviewed) outcome must
+    # be retried for real next cycle, and an outcome with no LLM verdict never
+    # represents a settled review.
+    if not outcome.not_reviewed_issues and outcome.approved_flags:
+        with _CHUNK_OUTCOME_CACHE_LOCK:
+            _CHUNK_OUTCOME_CACHE[key] = outcome.clone()
+            _CHUNK_OUTCOME_CACHE.move_to_end(key)
+            while len(_CHUNK_OUTCOME_CACHE) > capacity:
+                _CHUNK_OUTCOME_CACHE.popitem(last=False)
+    return outcome
+
+
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
     """Dedupe issues by (file_path, line, description).
 
@@ -988,6 +1177,7 @@ def _map_chunks(
     chunk_reviewer: ChunkReviewAgent,
     chunks: List[ReviewChunk],
     base_input: Dict,
+    context_fp: str,
     progress_callback: Optional[ReviewProgressCallback] = None,
 ) -> List[_ChunkOutcome]:
     """Review all chunks, fanning out independent map calls.
@@ -998,6 +1188,10 @@ def _map_chunks(
           model per call, so the only object shared across workers is the
           injected LLM client, whose central implementations guard their own
           state (clients injected here must support concurrent calls).
+        - ``context_fp`` is the run's ``_context_fingerprint``; each chunk is
+          reviewed through ``_cached_review_chunk``, which reuses a prior
+          map-phase outcome when the chunk's LLM input and this fingerprint are
+          both unchanged (a miss simply recomputes, so results are identical).
 
     Postconditions:
         - Returns one outcome per chunk in input order. A content failure that
@@ -1024,7 +1218,7 @@ def _map_chunks(
     abandoned = threading.Event()
 
     def _run_one(chunk: ReviewChunk) -> _ChunkOutcome:
-        outcome = _review_chunk_with_recovery(chunk_reviewer, chunk, base_input)
+        outcome = _cached_review_chunk(chunk_reviewer, chunk, base_input, context_fp)
         with progress_lock:
             if not abandoned.is_set():
                 completed_count[0] += 1
@@ -1171,9 +1365,14 @@ def run_coordinator(
         "profile": input_data.profile,
     }
 
+    # Fingerprint the shared context + resolved model once per run so unchanged
+    # chunks reuse their prior map-phase outcome (see module docstring). Computed
+    # here (not per chunk) because it is identical for every chunk in this run.
+    context_fp = _context_fingerprint(base_input, _review_model_fingerprint(llm))
+
     chunk_reviewer = ChunkReviewAgent(llm)
     outcome = _ChunkOutcome()
-    for per_chunk in _map_chunks(chunk_reviewer, chunks, base_input, progress_callback):
+    for per_chunk in _map_chunks(chunk_reviewer, chunks, base_input, context_fp, progress_callback):
         outcome.absorb(per_chunk)
 
     # Total-failure guard: individual chunks degrade gracefully to a

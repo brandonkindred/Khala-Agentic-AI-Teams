@@ -303,6 +303,22 @@ Max bisect-and-retry recursion depth for a failing review chunk before the run
 fails with `CodeReviewUnavailableError`. Default `3`, floor `0` (`0` disables
 bisection; a chunk then gets only the single same-input retry).
 
+### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
+Max entries in the coordinator's process-global map-phase outcome cache. The
+review→fix→re-review loop re-invokes the whole coordinator after every batch fix,
+but a fix only mutates the files that had issues — so most chunks are byte-identical
+to the previous cycle. The cache reuses the prior map-phase result for any chunk
+whose exact LLM input (rendered `### path ###` content + segment notes) and context
+fingerprint (task/spec/architecture/acceptance/profile inputs plus the resolved
+review model) are unchanged, so only the chunks the fix actually touched go back
+through the LLM. Default `512`, floor `0` (`0` disables the cache entirely — every
+chunk is reviewed from scratch). Only fully-reviewed chunk outcomes are cached;
+degraded "not reviewed" outcomes are never stored, so a transient failure is
+retried for real next cycle. The cache covers the **map phase only** — the
+false-positive verification pass always re-runs against the current whole
+submission, so no coverage or fail-safe guarantee is weakened, and a changed
+profile, task context, or model invalidates the key.
+
 ### CODE_REVIEW_FALSE_POSITIVE_FILTER
 Default-on toggle for the false-positive verification pass. After the map-reduce
 review merges its findings, each genuine finding is re-checked against the

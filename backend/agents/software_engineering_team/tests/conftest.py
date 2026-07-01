@@ -53,6 +53,26 @@ def patched_job_store(monkeypatch, fake_job_client):  # noqa: F811 (pytest fixtu
     return fake_job_client
 
 
+@pytest.fixture(autouse=True)
+def _reset_code_review_chunk_cache():
+    """Clear the coordinator's process-global map-phase cache around every test.
+
+    The cache persists across ``run_coordinator`` calls by design (that is what
+    lets the review→fix→re-review loop skip unchanged chunks). Tests, however,
+    drive the coordinator with scripted clients that return different output for
+    byte-identical input across tests — the exact non-determinism the cache
+    assumes never happens in production. Without a reset, one test's cached
+    outcome would be served to the next test whose chunk content and context
+    hash the same. Clearing an empty cache is trivially cheap, so this runs for
+    every SE test unconditionally.
+    """
+    from code_review_agent.coordinator import clear_chunk_outcome_cache
+
+    clear_chunk_outcome_cache()
+    yield
+    clear_chunk_outcome_cache()
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
