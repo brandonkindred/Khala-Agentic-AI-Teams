@@ -1,5 +1,6 @@
 import { Injectable, computed, signal } from '@angular/core';
 import { AgentStudioHandoffState, STUDIO_STAGES, StudioStageStatus } from '../models/agent-studio.model';
+import type { ProcessStatus } from '../models/agentic-team.model';
 
 /** Total number of stages in the journey. */
 const STAGE_COUNT = STUDIO_STAGES.length;
@@ -23,6 +24,10 @@ export class AgentStudioStateService {
   readonly personaId = signal<string | null>(null);
   /** Stage-1 build slot — the agent being authored (becomes registryAgentId on save). */
   readonly draftAgentId = signal<string | null>(null);
+  /** Stage-3 gate: whether the composed team's roster fully covers its process needs. */
+  readonly rosterFullyStaffed = signal(false);
+  /** Stage-3 gate: status of the process selected as the Stage-4 handoff target. */
+  readonly composeProcessStatus = signal<ProcessStatus | null>(null);
 
   // ── Stepper position ───────────────────────────────────────────────────────
   private readonly _activeStage = signal(0);
@@ -118,6 +123,12 @@ export class AgentStudioStateService {
   setDraftAgentId(id: string | null): void {
     this.draftAgentId.set(id);
   }
+  setRosterFullyStaffed(staffed: boolean): void {
+    this.rosterFullyStaffed.set(staffed);
+  }
+  setComposeProcessStatus(status: ProcessStatus | null): void {
+    this.composeProcessStatus.set(status);
+  }
 
   /**
    * Reset the session — clear handoff state and return to Stage 1.
@@ -129,6 +140,8 @@ export class AgentStudioStateService {
     this.processId.set(null);
     this.personaId.set(null);
     this.draftAgentId.set(null);
+    this.rosterFullyStaffed.set(false);
+    this.composeProcessStatus.set(null);
     this._activeStage.set(0);
     this._maxReachedStage.set(0);
   }

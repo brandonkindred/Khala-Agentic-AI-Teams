@@ -44,6 +44,9 @@
       @case ('test') {
         <app-agent-studio-test-agent />
       }
+      @case ('compose') {
+        <app-agent-studio-compose-team />
+      }
       @case ('personas') {
         <app-agent-studio-persona />
       }
@@ -73,6 +76,8 @@
         type="button"
         class="studio__continue"
         [disabled]="forwardDisabled()"
+        [matTooltip]="composeForwardDisabledReason() ?? ''"
+        [matTooltipDisabled]="!composeForwardDisabledReason()"
         (click)="onContinue()"
       >
         {{ activeStageDef().forwardLabel ?? 'Continue' }}

@@ -6,6 +6,7 @@ import type {
   AgenticTeamSummary,
   AgenticTeamDetailResponse,
   AgenticTeamAgent,
+  AddAgentFromRegistryRequest,
   CreateAgenticTeamRequest,
   CreateAgenticTeamResponse,
   AgenticConversationStateResponse,
@@ -20,6 +21,7 @@ import type {
   TestChatSessionDetail,
   TestChatMessage,
   TestPipelineRun,
+  UpdateAgentRequest,
 } from '../models';
 
 @Injectable({ providedIn: 'root' })
@@ -53,6 +55,25 @@ export class AgenticTeamApiService {
   /** Validate whether the roster fully covers the team's process needs. */
   validateRoster(teamId: string): Observable<RosterValidationResult> {
     return this.http.get<RosterValidationResult>(`${this.base}/teams/${teamId}/roster/validation`);
+  }
+
+  /** Add a registered agent to the roster, projected from its manifest (spec §3, Stage 3). */
+  addAgentFromRegistry(teamId: string, manifestId: string): Observable<AgenticTeamAgent> {
+    const req: AddAgentFromRegistryRequest = { manifest_id: manifestId };
+    return this.http.post<AgenticTeamAgent>(`${this.base}/teams/${teamId}/agents/from-registry`, req);
+  }
+
+  /** Remove a single agent from the team roster by name. */
+  removeTeamAgent(teamId: string, agentName: string): Observable<void> {
+    return this.http.delete<void>(`${this.base}/teams/${teamId}/agents/${encodeURIComponent(agentName)}`);
+  }
+
+  /** Inline-edit a roster agent's fields for this team (only supplied fields change). */
+  updateTeamAgent(teamId: string, agentName: string, updates: UpdateAgentRequest): Observable<AgenticTeamAgent> {
+    return this.http.put<AgenticTeamAgent>(
+      `${this.base}/teams/${teamId}/agents/${encodeURIComponent(agentName)}`,
+      updates,
+    );
   }
 
   // Processes

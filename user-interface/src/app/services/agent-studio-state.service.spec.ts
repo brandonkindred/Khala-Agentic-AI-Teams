@@ -104,4 +104,24 @@ describe('AgentStudioStateService', () => {
       draftAgentId: null,
     });
   });
+
+  it('starts with the Stage-3 gate signals unstaffed/unset', () => {
+    expect(service.rosterFullyStaffed()).toBe(false);
+    expect(service.composeProcessStatus()).toBeNull();
+  });
+
+  it('setRosterFullyStaffed / setComposeProcessStatus update the Stage-3 gate signals', () => {
+    service.setRosterFullyStaffed(true);
+    service.setComposeProcessStatus('complete');
+    expect(service.rosterFullyStaffed()).toBe(true);
+    expect(service.composeProcessStatus()).toBe('complete');
+  });
+
+  it('reset clears the Stage-3 gate signals', () => {
+    service.setRosterFullyStaffed(true);
+    service.setComposeProcessStatus('complete');
+    service.reset();
+    expect(service.rosterFullyStaffed()).toBe(false);
+    expect(service.composeProcessStatus()).toBeNull();
+  });
 });

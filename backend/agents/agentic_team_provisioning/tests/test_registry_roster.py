@@ -439,6 +439,71 @@ def test_from_registry_replace_unregister_failure_still_returns_201(
     assert resp.json()["source"] == "registry"
 
 
+def test_update_agent_edits_only_supplied_fields(client: TestClient) -> None:
+    """PUT edits the supplied fields and leaves the rest of the row untouched."""
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+
+    resp = client.put(
+        f"/teams/{team_id}/agents/blogging.planner",
+        json={"role": "Custom role for this team", "skills": ["custom-skill"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["role"] == "Custom role for this team"
+    assert body["skills"] == ["custom-skill"]
+    # Untouched fields keep their projected values.
+    assert body["tools"] == ["web.search", "draft"]
+    assert body["expertise"] == ["blogging"]
+    # source/manifest_id are fixed — never changed by this route.
+    assert body["source"] == "registry"
+    assert body["manifest_id"] == "blogging.planner"
+
+    # Persisted.
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert roster[0]["role"] == "Custom role for this team"
+
+
+def test_update_agent_edits_generated_agent(client: TestClient) -> None:
+    """A generated agent's fields (its only definition) are fully editable."""
+    team_id = _new_team()
+    AgenticTeamStore().save_team_agents(
+        team_id, [AgenticTeamAgent(agent_name="Writer", role="Writes", skills=["seo"])]
+    )
+
+    resp = client.put(f"/teams/{team_id}/agents/Writer", json={"tools": ["Slack API"]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tools"] == ["Slack API"]
+    assert body["role"] == "Writes"  # unset field kept
+    assert body["source"] == "generated"
+
+
+def test_update_agent_unknown_agent_404(client: TestClient) -> None:
+    """Editing an agent not on the roster is a 404 (roster unchanged)."""
+    team_id = _new_team()
+    resp = client.put(f"/teams/{team_id}/agents/ghost", json={"role": "x"})
+    assert resp.status_code == 404
+
+
+def test_update_agent_unknown_team_404(client: TestClient) -> None:
+    """Editing an agent on an unknown team is a 404."""
+    resp = client.put("/teams/missing/agents/whoever", json={"role": "x"})
+    assert resp.status_code == 404
+
+
+def test_update_agent_empty_body_is_a_noop(client: TestClient) -> None:
+    """An empty request body changes nothing (every field is optional/unset)."""
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+
+    resp = client.put(f"/teams/{team_id}/agents/blogging.planner", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["role"] == "Plans SEO-aware blog outlines"
+    assert body["skills"] == ["studio", "seo"]
+
+
 @pytest.mark.parametrize("bad_name", ["", "   "])
 def test_roster_agent_from_manifest_rejects_blank_name(bad_name: str) -> None:
     """DbC precondition: a manifest with a blank name fails fast rather than being

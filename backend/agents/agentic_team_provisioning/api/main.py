@@ -61,6 +61,7 @@ from agentic_team_provisioning.models import (
     TestChatSession,
     TestChatSessionDetail,
     TestPipelineRun,
+    UpdateAgentRequest,
     UpdateFormRecordRequest,
 )
 from agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
@@ -449,6 +450,35 @@ def remove_agent_from_roster(team_id: str, agent_name: str):
     if deleted is None:
         raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
     return Response(status_code=204)
+
+
+@app.put("/teams/{team_id}/agents/{agent_name:path}", response_model=AgenticTeamAgent)
+def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
+    """Inline-edit a roster agent's projected fields for this team (spec §3, Stage 3).
+
+    Every field on ``req`` is optional; only the ones supplied overwrite the
+    existing row (unset fields keep their current value). Works for either
+    ``source`` — a ``generated`` agent's fields are its only definition, and a
+    ``registry`` agent's fields may be overridden per-team without touching the
+    catalog manifest it was projected from; ``source``/``manifest_id`` themselves
+    are never changed by this route.
+
+    Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
+    Postconditions: ``200`` with the updated agent persisted in place (all other
+        roster rows unchanged); ``404`` if the team is unknown or no roster entry
+        has that name (roster unchanged).
+    """
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    current = next((a for a in team.agents if a.agent_name == agent_name), None)
+    if current is None:
+        raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
+
+    updates = req.model_dump(exclude_unset=True)
+    updated = current.model_copy(update=updates)
+    _store.add_or_replace_team_agent(team_id, updated)
+    return updated
 
 
 # ---------------------------------------------------------------------------
