@@ -44,7 +44,7 @@ os.environ.setdefault("LLM_PROVIDER", "dummy")
 from code_review_agent.coordinator import clear_chunk_outcome_cache  # noqa: E402
 
 from job_service_client_fake import fake_job_client  # noqa: F401, E402
-from llm_service import DummyLLMClient  # noqa: E402
+from llm_service import DummyLLMClient, clear_compaction_cache  # noqa: E402
 
 
 @pytest.fixture
@@ -63,20 +63,22 @@ def patched_job_store(monkeypatch, fake_job_client):  # noqa: F811 (pytest fixtu
 
 @pytest.fixture(autouse=True)
 def _reset_code_review_chunk_cache():
-    """Clear the coordinator's process-global map-phase cache around every test.
+    """Clear the process-global map-phase and compaction caches around every test.
 
-    The cache persists across ``run_coordinator`` calls by design (that is what
-    lets the review→fix→re-review loop skip unchanged chunks). Tests, however,
-    drive the coordinator with scripted clients that return different output for
-    byte-identical input across tests — the exact non-determinism the cache
-    assumes never happens in production. Without a reset, one test's cached
-    outcome would be served to the next test whose chunk content and context
-    hash the same. Clearing an empty cache is trivially cheap, so this runs for
-    every SE test unconditionally.
+    Both caches persist across calls by design (that is what lets the
+    review→fix→re-review loop skip unchanged chunks and reuse the compacted
+    spec/architecture). Tests, however, drive the coordinator with scripted
+    clients that return different output for byte-identical input across tests —
+    the exact non-determinism the caches assume never happens in production.
+    Without a reset, one test's cached outcome would be served to the next test
+    whose chunk content and context hash the same. Clearing empty caches is
+    trivially cheap, so this runs for every SE test unconditionally.
     """
     clear_chunk_outcome_cache()
+    clear_compaction_cache()
     yield
     clear_chunk_outcome_cache()
+    clear_compaction_cache()
 
 
 def pytest_configure(config: pytest.Config) -> None:

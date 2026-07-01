@@ -23,13 +23,95 @@ Usage::
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from typing import TYPE_CHECKING, List
+import os
+import threading
+from collections import OrderedDict
+from typing import TYPE_CHECKING, List, Tuple
 
 if TYPE_CHECKING:
     from .interface import LLMClient
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Process-global compaction memo cache
+# ---------------------------------------------------------------------------
+# The same spec/architecture/existing-codebase text is handed to ``compact_text``
+# on every task and every review->fix->re-review cycle of a run, so the identical
+# (expensive, deterministic) LLM compaction is otherwise recomputed constantly.
+# A bounded LRU keyed on (model, budget, content-hash) turns those repeated,
+# identical compactions into a single call per distinct input. It is guarded by a
+# lock because callers (e.g. the code review coordinator's map phase) may compact
+# from worker threads. ``0`` disables the cache (pure passthrough).
+DEFAULT_COMPACTION_CACHE_SIZE = 256  # LLM_COMPACTION_CACHE_SIZE, floor 0
+
+_COMPACTION_CACHE: "OrderedDict[str, str]" = OrderedDict()
+_COMPACTION_CACHE_LOCK = threading.Lock()
+
+
+def _compaction_cache_size() -> int:
+    """Resolve the compaction cache capacity from the environment.
+
+    Postconditions:
+        - Returns ``DEFAULT_COMPACTION_CACHE_SIZE`` when ``LLM_COMPACTION_CACHE_SIZE``
+          is unset or unparseable, and never returns a negative value (a
+          configured value below 0 is floored to 0, which disables the cache).
+    """
+    raw = os.getenv("LLM_COMPACTION_CACHE_SIZE")
+    if raw is None:
+        return DEFAULT_COMPACTION_CACHE_SIZE
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_COMPACTION_CACHE_SIZE
+    return max(0, value)
+
+
+def clear_compaction_cache() -> None:
+    """Drop every memoized compaction result.
+
+    Postconditions:
+        - The process-global cache is empty; the next ``compact_text`` call for
+          any input is a guaranteed miss. Intended for tests (the cache persists
+          across calls by design) and callers that must force a cold compaction.
+    """
+    with _COMPACTION_CACHE_LOCK:
+        _COMPACTION_CACHE.clear()
+
+
+def _model_fingerprint(llm: "LLMClient") -> str:
+    """Best-effort stable identifier for the model a compaction will run on.
+
+    Postconditions:
+        - Returns a string that changes when the resolved model changes, so a
+          result compacted by one model is never served for another (the LLM
+          provider list can fail over mid-process). Never raises: any failure to
+          resolve a model identifier falls back to the client's type name. The
+          value is identity-only — it is hashed into the cache key, never published.
+    """
+    for attr in ("model_id", "model_name", "model"):
+        try:
+            value = getattr(llm, attr, None)
+        except Exception:
+            value = None
+        if isinstance(value, str) and value:
+            return value
+    return type(llm).__name__
+
+
+def _compaction_cache_key(text: str, max_chars: int, llm: "LLMClient") -> str:
+    """Key a compaction by its exact inputs: model + budget + content hash.
+
+    Postconditions:
+        - Two calls collide only when their model fingerprint, budget, and raw
+          input text are all identical, so a hit is byte-identical to what a
+          fresh compaction of the same inputs would return.
+    """
+    payload = f"{_model_fingerprint(llm)}\x00{max_chars}\x00{text}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
 
 # Very conservative chars-per-token for chunk sizing.  Web-fetched content,
 # HTML residue, and non-English text can tokenize at <2 chars/token.
@@ -122,10 +204,63 @@ def compact_text(
     str
         The original text if it fits, or a compacted version produced by the LLM.
         On any LLM failure the original text is returned so callers never lose data.
+
+    Notes
+    -----
+    Results are memoized in a bounded, process-global LRU keyed on
+    ``(model, max_chars, content-hash)`` (see ``LLM_COMPACTION_CACHE_SIZE``), so a
+    repeated call with the same inputs reuses the earlier compaction instead of
+    re-invoking the LLM. Compaction is deterministic given those inputs, so a
+    cache hit is byte-identical to what a fresh call would return. Only genuine
+    full compactions are cached — every fallback path (LLM failure, empty result,
+    or a chunked run with any degraded chunk) is retried on the next call rather
+    than frozen.
     """
     if not text or len(text) <= max_chars:
         return text or ""
 
+    capacity = _compaction_cache_size()
+    if capacity <= 0:
+        # Cache disabled — pure passthrough (keeps the number of LLM invocations
+        # deterministic for callers/tests that assert on it).
+        return _compact_uncached(text, max_chars, llm, content_description)[0]
+
+    key = _compaction_cache_key(text, max_chars, llm)
+    with _COMPACTION_CACHE_LOCK:
+        hit = _COMPACTION_CACHE.get(key)
+        if hit is not None:
+            _COMPACTION_CACHE.move_to_end(key)
+    if hit is not None:
+        return hit
+
+    result, cacheable = _compact_uncached(text, max_chars, llm, content_description)
+    if cacheable:
+        with _COMPACTION_CACHE_LOCK:
+            _COMPACTION_CACHE[key] = result
+            _COMPACTION_CACHE.move_to_end(key)
+            while len(_COMPACTION_CACHE) > capacity:
+                _COMPACTION_CACHE.popitem(last=False)
+    return result
+
+
+def _compact_uncached(
+    text: str,
+    max_chars: int,
+    llm: "LLMClient",
+    content_description: str,
+) -> Tuple[str, bool]:
+    """Compact *text* without consulting the memo cache.
+
+    Preconditions:
+        - ``len(text) > max_chars`` — callers handle the fits-as-is case first.
+
+    Postconditions:
+        - Returns ``(result, cacheable)``. ``cacheable`` is ``True`` only when
+          ``result`` is a genuine LLM compaction of the full input; it is
+          ``False`` for every fallback path (LLM failure, empty compaction, or a
+          chunked run in which any chunk fell back to a raw slice), so a degraded
+          result is retried on the next call rather than frozen in the cache.
+    """
     overage = len(text) - max_chars
     logger.info(
         "Compacting %s: %d chars over budget (%d chars → target %d chars)",
@@ -148,11 +283,11 @@ def compact_text(
                     len(result),
                     max_chars,
                 )
-                return result
+                return result, True
             logger.warning(
                 "Compaction returned empty for %s, returning original", content_description
             )
-            return text
+            return text, False
 
         # Text is too large for one call — chunk, compact each, concatenate.
         chunks = _split_into_chunks(text, chunk_chars)
@@ -166,6 +301,7 @@ def compact_text(
         )
 
         compacted_parts: List[str] = []
+        all_chunks_ok = True
         for i, chunk in enumerate(chunks):
             try:
                 part = _compact_single(
@@ -174,7 +310,13 @@ def compact_text(
                     llm,
                     f"{content_description} (chunk {i + 1}/{num_chunks})",
                 )
-                compacted_parts.append(part if part else chunk[:per_chunk_target])
+                if part:
+                    compacted_parts.append(part)
+                else:
+                    # Empty compaction for this chunk — fall back to a raw slice
+                    # and mark the aggregate un-cacheable so it is retried.
+                    all_chunks_ok = False
+                    compacted_parts.append(chunk[:per_chunk_target])
             except Exception:
                 logger.warning(
                     "Chunk %d/%d compaction failed for %s, using truncated chunk",
@@ -183,6 +325,7 @@ def compact_text(
                     content_description,
                     exc_info=True,
                 )
+                all_chunks_ok = False
                 compacted_parts.append(chunk[:per_chunk_target])
 
         result = "\n\n".join(compacted_parts)
@@ -193,10 +336,10 @@ def compact_text(
             num_chunks,
             max_chars,
         )
-        return result
+        return result, all_chunks_ok
 
     except Exception:
         logger.warning(
             "Compaction failed for %s, returning original text", content_description, exc_info=True
         )
-        return text
+        return text, False
