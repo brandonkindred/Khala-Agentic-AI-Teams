@@ -170,7 +170,7 @@ Environment variables for LLM: `LLM_PROVIDER` (`ollama`/`claude`/`dummy`), `LLM_
 
 - **Python**: Ruff, line-length 120, Python 3.10 target. Pre-commit hooks enforce this.
 - Ignored rules: E501, N802/N806, B904, SIM108
-- Known first-party modules: `shared`, `backend_agent`, `frontend_team`, `devops_agent`, `qa_agent`
+- Known first-party modules: `shared`, `backend_agent`, `frontend_team`, `qa_agent`
 - Per-file ignores exist for tests and `agent_implementations/`
 - **TypeScript**: Angular style; SCSS for styling
 

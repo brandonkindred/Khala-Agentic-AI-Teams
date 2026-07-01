@@ -2,7 +2,6 @@
 
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from backend_agent import BackendExpertAgent, BackendInput
-from devops_agent import DevOpsExpertAgent, DevOpsInput
 from qa_agent import QAExpertAgent, QAInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 from tech_lead_agent import TechLeadAgent, TechLeadInput
@@ -60,7 +59,6 @@ Build a REST API for task management.
 
     # Run each specialist for their assigned tasks
     agent_map = {
-        "devops": DevOpsExpertAgent(llm),
         "backend": BackendExpertAgent(llm),
         "security": CybersecurityExpertAgent(llm),
         "qa": QAExpertAgent(llm),
@@ -72,16 +70,7 @@ Build a REST API for task management.
             continue
 
         agent = agent_map[task.assignee]
-        if task.assignee == "devops":
-            result = agent.run(
-                DevOpsInput(
-                    task_description=task.description,
-                    requirements=task.requirements,
-                    architecture=architecture,
-                )
-            )
-            assert result.summary or result.pipeline_yaml or result.iac_content
-        elif task.assignee == "backend":
+        if task.assignee == "backend":
             result = agent.run(
                 BackendInput(
                     task_description=task.description,

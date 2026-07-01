@@ -22,7 +22,6 @@ import _path_setup  # noqa: F401
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from backend_agent import BackendExpertAgent, BackendInput
 from backend_agent.agent import _read_openapi_spec_from_repo
-from devops_agent import DevOpsExpertAgent, DevOpsInput
 from qa_agent import QAExpertAgent, QAInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 from tech_lead_agent import TechLeadAgent, TechLeadInput
@@ -94,7 +93,6 @@ def main() -> None:
 
     # 3. Execute tasks by specialist
     agent_map = {
-        "devops": DevOpsExpertAgent(get_client("devops")),
         "security": CybersecurityExpertAgent(get_client("security")),
         "backend": BackendExpertAgent(get_client("backend")),
         "qa": QAExpertAgent(get_client("qa")),
@@ -126,23 +124,26 @@ def main() -> None:
             )
             continue
 
+        # DevOps execution moved to devops_team (DevOpsTeamLeadAgent), which runs through
+        # the API/orchestrator (repo-based run_workflow) rather than this simple agent.run()
+        # CLI demo. Surface the skip explicitly so devops tasks (e.g. Dockerfile/CI work) are
+        # not silently dropped while the run still reports a completed pipeline.
+        if task.assignee == "devops":
+            logger.warning(
+                "=== Task %s (%s) -> devops - skipped in CLI demo; run DevOps via "
+                "devops_team through the API/orchestrator ===",
+                task.id,
+                task.type.value,
+            )
+            continue
+
         if task.assignee not in agent_map:
             continue
 
         logger.info("=== Task %s (%s) -> %s ===", task.id, task.type.value, task.assignee)
         agent = agent_map[task.assignee]
 
-        if task.assignee == "devops":
-            result = agent.run(
-                DevOpsInput(
-                    task_description=task.description,
-                    requirements=task.requirements,
-                    architecture=architecture,
-                )
-            )
-            logger.info("DevOps: %s", result.summary[:150] if result.summary else "Done")
-
-        elif task.assignee == "backend":
+        if task.assignee == "backend":
             api_spec = _read_openapi_spec_from_repo(Path.cwd())
             result = agent.run(
                 BackendInput(
