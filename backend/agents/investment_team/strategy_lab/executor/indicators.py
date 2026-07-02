@@ -353,6 +353,53 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     return (direction * volume).cumsum()
 
 
+def _windowed_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    """OBV re-based to the trailing ``STREAMING_WINDOW_BARS`` window (coverage probe only).
+
+    Preconditions: ``close``/``volume`` are coercible series of equal length.
+    Postconditions: a same-length series equal, at bar ``t``, to the signed-volume
+    sum over the trailing ``STREAMING_WINDOW_BARS`` bars — ``full_obv[t] -
+    full_obv[t - window]`` (the shifted term is 0 during warm-up, so the value
+    equals full-history OBV until the window fills, exactly as the runtime
+    accumulates from the first bar). The unbounded :func:`obv` grows without limit
+    over long histories, so the probe would otherwise judge absolute-threshold OBV
+    predicates on values the runtime (bounded ``StreamingHistoryView``) never sees.
+    """
+    # Imported lazily: this wrapper is only reached from the coverage probe (a
+    # package context), never in the flat strategy sandbox where this module is
+    # copied without its parent package.
+    from ..runtime_window import STREAMING_WINDOW_BARS
+
+    full = obv(close, volume)
+    return full - full.shift(STREAMING_WINDOW_BARS).fillna(0.0)
+
+
+def _windowed_vwap(
+    high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series
+) -> pd.Series:
+    """VWAP re-based to the trailing ``STREAMING_WINDOW_BARS`` window (coverage probe only).
+
+    Preconditions/Postconditions: as :func:`_windowed_obv`, but VWAP is a ratio of
+    cumulative sums, so numerator and denominator are each re-based to the window
+    start before dividing. Keeps the probe's VWAP aligned with the runtime's
+    windowed value instead of an unbounded no-reset cumulative.
+    """
+    # Lazy import — probe-only path; see :func:`_windowed_obv`.
+    from ..runtime_window import STREAMING_WINDOW_BARS
+
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
+    volume = _coerce_series(volume, "volume")
+    typical_price = (high + low + close) / 3
+    cum_tp_vol = (typical_price * volume).cumsum()
+    cum_vol = volume.cumsum()
+    w = STREAMING_WINDOW_BARS
+    num = cum_tp_vol - cum_tp_vol.shift(w).fillna(0.0)
+    den = (cum_vol - cum_vol.shift(w).fillna(0.0)).replace(0, np.nan)
+    return num / den
+
+
 def mfi(
     high: pd.Series,
     low: pd.Series,
@@ -547,7 +594,10 @@ INDICATORS: Mapping[str, IndicatorSpec] = MappingProxyType(
             tuple_arity=None,
         ),
         "vwap": IndicatorSpec(
-            helper=vwap,
+            # Windowed wrapper: the probe must judge VWAP predicates on the same
+            # trailing-window value the runtime trades on, not an unbounded
+            # full-history cumulative (see :func:`_windowed_vwap`).
+            helper=_windowed_vwap,
             data_inputs=("high", "low", "close", "volume"),
             kwarg_names=(),
             tuple_arity=None,
@@ -585,7 +635,10 @@ INDICATORS: Mapping[str, IndicatorSpec] = MappingProxyType(
             float_kwargs=frozenset({"multiplier"}),
         ),
         "obv": IndicatorSpec(
-            helper=obv,
+            # Windowed wrapper, mirroring vwap: bound the cumulative to the
+            # runtime's trailing window so the probe doesn't judge OBV predicates
+            # on an unbounded full-history value (see :func:`_windowed_obv`).
+            helper=_windowed_obv,
             data_inputs=("close", "volume"),
             kwarg_names=(),
             tuple_arity=None,

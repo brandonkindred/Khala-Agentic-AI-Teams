@@ -38,6 +38,7 @@ from typing import Any, List, Tuple
 
 from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
+    _INDICATOR_PARAM_SPECS,
     EntryRule,
     IndicatorName,
     IndicatorRef,
@@ -45,6 +46,13 @@ from ..spec_dsl import (
     VolatilityTargetSizing,
     is_entry_anchored_exit,
     iter_tree_indicator_refs,
+)
+
+# Indicators that accept a ``source`` override, derived from the DSL param specs
+# so the emitted ``_src`` helper is requested for exactly the source-aware
+# indicators — no hand-maintained tuple to drift from ``allow_source``.
+_SOURCE_AWARE_NAMES: frozenset[str] = frozenset(
+    name for name, spec in _INDICATOR_PARAM_SPECS.items() if spec.get("allow_source")
 )
 
 
@@ -158,9 +166,7 @@ def compile_strategy(spec: Any) -> str:
 
     indicator_bindings = _build_indicator_bindings(indicator_refs)
     used_helper_names = sorted({_INDICATOR_METHOD_NAME[ref.name] for ref in indicator_refs})
-    needs_source_helper = any(
-        ref.name in ("sma", "ema", "rsi", "macd", "bollinger", "roc") for ref in indicator_refs
-    )
+    needs_source_helper = any(ref.name in _SOURCE_AWARE_NAMES for ref in indicator_refs)
 
     # ``history_depth`` (request) and ``warmup_min`` (gate) are decoupled
     # so VWAP's cumulative-style depth request doesn't bind the warm-up

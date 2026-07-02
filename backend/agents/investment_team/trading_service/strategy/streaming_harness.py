@@ -158,16 +158,19 @@ class StreamingHarness:
         )
         if os.path.exists(registry_src):
             shutil.copy2(registry_src, os.path.join(tmp, "_streaming_indicators.py"))
-        # ``contract.py``'s history-retention bound imports this constant (see
-        # ``contract.py``'s own sandbox-first/package-fallback import); it is
-        # stdlib-only like ``streaming.py``, so it copies in unmodified.
+        # ``contract.py`` (copied unconditionally above) imports this constant at
+        # module top for its history-retention bound, so ``runtime_window`` is a
+        # MANDATORY sandbox dependency, not an optional one: copy it
+        # unconditionally so a missing source fails loudly here at harness start
+        # rather than as an obscure relative-import crash inside every strategy
+        # subprocess. It is stdlib-only like ``streaming.py`` and copies in
+        # unmodified.
         window_src = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
             "strategy_lab",
             "runtime_window.py",
         )
-        if os.path.exists(window_src):
-            shutil.copy2(window_src, os.path.join(tmp, "runtime_window.py"))
+        shutil.copy2(window_src, os.path.join(tmp, "runtime_window.py"))
         if os.path.exists(indicators_impl_src) and os.path.exists(scalar_api_src):
             shutil.copy2(indicators_impl_src, os.path.join(tmp, "_indicators_impl.py"))
             shutil.copy2(scalar_api_src, os.path.join(tmp, "indicators.py"))

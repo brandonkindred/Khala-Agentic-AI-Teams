@@ -570,6 +570,14 @@ def indicator_value(
         return reg.cci(ohlc, period=int(params.get("period", 20)))
     if name == "williams_r":
         return reg.williams_r(ohlc, period=int(params.get("period", 14)))
+    if name == "vwap":
+        return reg.vwap(ohlc)
 
-    # name == "vwap" (only remaining valid name)
-    return reg.vwap(ohlc)
+    # ``name`` passed the ``_VALID_INDICATORS`` precondition above, so reaching
+    # here means a name was added to that table without a dispatch branch. Fail
+    # loudly rather than silently returning VWAP's value (a consistent-but-wrong
+    # result the conformance shadow and live sandbox would both accept).
+    raise ValueError(
+        f"indicator_value: no dispatch branch for {name!r} (in _VALID_INDICATORS "
+        "but unhandled — add a branch above)."
+    )

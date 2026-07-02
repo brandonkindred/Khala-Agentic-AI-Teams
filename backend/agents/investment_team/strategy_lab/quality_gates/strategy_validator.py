@@ -7,7 +7,7 @@ from typing import ClassVar, List
 
 from ...models import StrategySpec
 from ...strategy_lab_context import normalize_asset_class
-from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
+from ..spec_dsl import format_rules_for_prompt, format_sizing_rule, iter_tree_indicator_refs
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
 GATE = "strategy_spec_validator"
@@ -63,6 +63,25 @@ def _concept_mentions(text: str) -> list[tuple[str, frozenset[str]]]:
         term = re.sub(r"\s+", " ", m.group(0).lower())
         mentions.append((term, _CONCEPT_TO_INDICATOR_NAMES.get(term, frozenset({term}))))
     return mentions
+
+
+def _rule_indicator_names(spec: StrategySpec) -> set[str]:
+    """DSL indicator names referenced by the structured entry/exit rule predicates.
+
+    Preconditions: ``spec`` is a StrategySpec.
+    Postconditions: returns the set of ``IndicatorRef.name`` values across every
+    rule's ``when`` tree. Read from the structured refs, NOT the rendered rule
+    text, because ``format_rules_for_prompt`` renders band/output selectors as
+    underscore-suffixed tokens (``donchian_upper(20)``, ``keltner_lower(...)``)
+    that a ``\\b``-anchored concept regex cannot match — regexing the rendered
+    text would make every donchian/keltner rule look absent from its own rules.
+    """
+    names: set[str] = set()
+    for rule in list(spec.entry_rules or []) + list(spec.exit_rules or []):
+        when = getattr(rule, "when", None)
+        if when is not None:
+            names.update(ref.name for ref in iter_tree_indicator_refs(when))
+    return names
 
 
 class StrategySpecValidator(GateResultsMixin):
@@ -156,22 +175,20 @@ class StrategySpecValidator(GateResultsMixin):
             # Hypothesis-vs-rules consistency. If the hypothesis names indicator
             # concepts that no entry/exit rule references (or vice versa), the
             # operational spec and the narrative rationale are out of sync.
-            rules_text = " ".join(
-                [
-                    format_rules_for_prompt(spec.entry_rules),
-                    format_rules_for_prompt(spec.exit_rules),
-                    " ".join(spec.unparsed_rules),
-                ]
-            )
-            # Resolve each matched term to the indicator(s) it denotes before
-            # comparing, so a prose alias in the hypothesis ("on-balance volume")
-            # and the DSL token a rule renders ("obv") count as the same concept.
-            # A mention is orphaned only when NONE of its candidate indicators
-            # appears on the other side; strategy concepts with no indicator
-            # mapping (breakout/momentum/…) resolve to themselves and still
-            # compare by surface form.
+            #
+            # The rules side is built from the STRUCTURED refs (authoritative DSL
+            # names) plus a concept scan of the free-text ``unparsed_rules`` — the
+            # rendered rule text is deliberately not regexed, because band/output
+            # selectors render as underscore-suffixed tokens the concept regex
+            # cannot match. Each matched term resolves to the indicator(s) it
+            # denotes, so a prose alias in the hypothesis ("on-balance volume")
+            # and the rule's ``obv`` ref count as the same concept; a mention is
+            # orphaned only when NONE of its candidate indicators appears on the
+            # other side. Strategy concepts with no indicator mapping
+            # (breakout/momentum/…) resolve to themselves and compare by surface form.
             hyp_mentions = _concept_mentions(spec.hypothesis or "")
-            rule_mentions = _concept_mentions(rules_text)
+            rule_mentions = [(name, frozenset({name})) for name in _rule_indicator_names(spec)]
+            rule_mentions += _concept_mentions(" ".join(spec.unparsed_rules))
             hyp_concepts = frozenset().union(*(c for _, c in hyp_mentions))
             rule_concepts = frozenset().union(*(c for _, c in rule_mentions))
             orphan_in_hypothesis = {t for t, c in hyp_mentions if not (c & rule_concepts)}

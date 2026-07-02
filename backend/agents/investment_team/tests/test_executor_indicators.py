@@ -414,3 +414,45 @@ def test_stochastic_accepts_bars() -> None:
     bars = _bars(40)
     k, d = ind.stochastic(bars, bars, bars, k_period=14, d_period=3)
     assert len(k) == len(d) == 40
+
+
+def test_indicators_registry_uses_windowed_cumulative_helpers() -> None:
+    # The coverage probe must judge cumulative indicators on the runtime's
+    # trailing-window value, so the registry points obv/vwap at windowed wrappers.
+    assert ind.INDICATORS["obv"].helper is ind._windowed_obv
+    assert ind.INDICATORS["vwap"].helper is ind._windowed_vwap
+
+
+def test_windowed_obv_bounds_to_trailing_window() -> None:
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+
+    n = STREAMING_WINDOW_BARS + 50
+    close = pd.Series([100.0 + i for i in range(n)])  # strictly rising -> +1/bar
+    volume = pd.Series([1.0] * n)
+    full = ind.obv(close, volume)
+    win = ind._windowed_obv(close, volume)
+    # Full OBV grows without bound; the windowed value is capped at the window size.
+    assert full.iloc[-1] == pytest.approx(n - 1)
+    assert win.iloc[-1] == pytest.approx(STREAMING_WINDOW_BARS)
+    # Before the window fills, the two agree (nothing has slid off yet).
+    assert win.iloc[STREAMING_WINDOW_BARS - 1] == pytest.approx(
+        full.iloc[STREAMING_WINDOW_BARS - 1]
+    )
+
+
+def test_windowed_vwap_rebases_to_trailing_window() -> None:
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+
+    n = STREAMING_WINDOW_BARS + 50
+    high = pd.Series([101.0 + i for i in range(n)])
+    low = pd.Series([99.0 + i for i in range(n)])
+    close = pd.Series([100.0 + i for i in range(n)])
+    volume = pd.Series([1.0] * n)
+    full = ind.vwap(high, low, close, volume)
+    win = ind._windowed_vwap(high, low, close, volume)
+    # On a rising series the unbounded VWAP lags far below the trailing-window
+    # VWAP (which tracks the recent, higher typical prices).
+    assert win.iloc[-1] > full.iloc[-1]
+    # Windowed VWAP stays within the trailing window's typical-price range.
+    tp = (high + low + close) / 3
+    assert win.iloc[-1] == pytest.approx(tp.iloc[-STREAMING_WINDOW_BARS:].mean(), rel=1e-9)

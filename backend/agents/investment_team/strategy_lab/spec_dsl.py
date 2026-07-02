@@ -102,12 +102,16 @@ def _float_gt(threshold: float):
 
 
 def _one_of(*allowed: str):
-    allowed_set = set(allowed)
+    allowed_set = frozenset(allowed)
 
     def check(value: Any) -> None:
         if value not in allowed_set:
             raise ValueError(f"must be one of {sorted(allowed_set)} (got {value!r})")
 
+    # Expose the accepted set so downstream code can derive from the DSL rather
+    # than hardcoding a second copy (e.g. the conformance gate's Bollinger
+    # derived-band set); keep this the single source of truth.
+    check.allowed = allowed_set
     return check
 
 

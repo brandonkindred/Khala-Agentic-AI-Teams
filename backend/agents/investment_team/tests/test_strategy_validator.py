@@ -260,6 +260,38 @@ def test_prose_alias_matches_dsl_token_no_spurious_warning() -> None:
     assert not any("Hypothesis/rules consistency" in w for w in warnings), warnings
 
 
+def test_channel_indicator_rule_matches_hypothesis_no_spurious_warning() -> None:
+    """A structured donchian/keltner rule is read from the ref, not the rendered
+    text, so an aligned channel-breakout spec draws no consistency warning.
+
+    ``format_rules_for_prompt`` renders these refs band-suffixed (``donchian_upper(20)``),
+    which a ``\\b``-anchored concept regex can't match; collecting the rules-side
+    concept from the structured ref instead avoids flagging the rule as absent
+    from its own hypothesis.
+    """
+    for ind in ("donchian", "keltner"):
+        spec = _spec(
+            # No extra strategy-concept words (e.g. "breakout") — just the indicator,
+            # so an aligned spec should draw no consistency warning at all.
+            hypothesis=f"A {ind} channel strategy",
+            entry=[
+                EntryRule(
+                    side="long",
+                    when=Predicate(
+                        lhs="bar.close",
+                        op=">",
+                        rhs=IndicatorRef(name=ind, params={"band": "upper", "period": 20}),
+                    ),
+                ),
+            ],
+            exit_=[StopLossRule(pct=0.03)],
+        )
+        warnings = _warnings(StrategySpecValidator().validate(spec))
+        # The fix: the indicator is read from the structured ref, so it is never
+        # reported orphaned despite rendering as ``donchian_upper(20)``.
+        assert not any("Hypothesis/rules consistency" in w for w in warnings), (ind, warnings)
+
+
 def test_aligned_hypothesis_and_rules_emit_no_consistency_warning() -> None:
     """When hypothesis and rules share concept vocabulary, no warning fires."""
     spec = _spec(

@@ -323,10 +323,44 @@ def _oscillate_indicator_vs_number(
     ):
         return _oscillate_generic_indicator(lhs, threshold, total, op)
     if lhs.name == "roc":
-        # ROC is a momentum oscillator on a single source series, like the MAs —
-        # a trending/oscillating price drives it through the threshold.
-        return _oscillate_ma_vs_number(lhs, threshold, total, op)
+        return _oscillate_roc_vs_number(lhs, threshold, total, op)
     return None
+
+
+def _oscillate_roc_vs_number(
+    ref: IndicatorRef,
+    threshold: float,
+    total: int,
+    op: str,
+) -> List[OHLCVBar]:
+    """Build bars whose ROC (percent change over ``period``) crosses ``threshold``.
+
+    Preconditions: ``ref`` is a ``roc`` IndicatorRef; ``threshold`` is a percent.
+    Postconditions: returns ``total`` bars whose ``period``-over-``period`` percent
+    change alternates between a regime clearly above and one clearly below the
+    threshold, so both predicate states occur.
+
+    Unlike the MA path, the threshold is a PERCENT, not a price level: ROC is
+    ``100 * (close[t] - close[t-period]) / close[t-period]``. Each bar's close is
+    set directly from ``close[t-period] * (1 + roc_target/100)``, which pins the
+    interior of each regime block to that exact ROC (the block is longer than
+    ``period``, so a full trailing window falls inside one regime). ``roc_low`` is
+    floored above -100 so prices stay strictly positive.
+    """
+    period = int(ref.param("period"))
+    margin = max(abs(threshold) * 0.5, 5.0)
+    roc_high = threshold + margin
+    roc_low = max(-90.0, threshold - margin)
+    seg = max(period + 5, total // 6, 10)
+
+    # Seed the first window flat (ROC undefined until bar ``period``), then set
+    # each later close from its lagged peer at the block's target ROC.
+    closes: List[float] = [_BASE_CLOSE] * period
+    while len(closes) < total:
+        block = len(closes) // seg
+        roc_target = roc_high if block % 2 == 0 else roc_low
+        closes.append(max(0.01, closes[-period] * (1.0 + roc_target / 100.0)))
+    return [_make_bar(c) for c in closes[:total]]
 
 
 def _oscillate_ma_vs_number(

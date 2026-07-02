@@ -1559,3 +1559,174 @@ def test_conformance_compiled_bollinger_percent_b_passes() -> None:
     code = compile_strategy(_compile_spec(ref))
     results = CodeConformanceGate().check(code, _compile_spec(ref))
     assert not any("percent_b" in d.lower() for d in _crit(results)), _crit(results)
+
+
+# Custom code that follows the OLD (bad) remediation and calls the sandbox helper
+# with select= — a guaranteed TypeError (indicators.bollinger_bands has no select).
+_CC_BOLLINGER_BANDS_SELECT = textwrap.dedent("""
+    from contract import Strategy
+    from indicators import bollinger_bands
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            pb = bollinger_bands(bars, 20, 2.0, select="percent_b")
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and pb < 0.05:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+# Custom code that selects the derived band dynamically (runtime-valid, but the
+# static gate cannot resolve the literal) — the gate must abstain, not reject.
+_CC_BOLLINGER_DYNAMIC_BAND = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+        BAND = "percent_b"
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            pb = ctx.indicator("bollinger", period=20, num_std=2.0, band=self.BAND)
+            if pb is None:
+                return
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and pb < 0.05:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_rejects_bollinger_bands_select_call() -> None:
+    # The sandbox ``indicators.bollinger_bands`` helper takes no ``select`` kwarg,
+    # so a ``select=`` call is a guaranteed runtime TypeError — flag it (don't
+    # credit it) so the refinement loop fixes the call shape.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_BANDS_SELECT, _bollinger_percent_b_spec())
+    crits = _crit(results)
+    assert any("select" in d.lower() and "typeerror" in d.lower() for d in crits), crits
+
+
+def test_conformance_abstains_on_dynamic_bollinger_band() -> None:
+    # A dynamic (non-literal) band value is runtime-valid but unresolvable
+    # statically; the derived-band check must abstain rather than reject.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_DYNAMIC_BAND, _bollinger_percent_b_spec())
+    assert not any("percent_b" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def _bollinger_base_band_spec() -> StrategySpec:
+    return StrategySpec(
+        strategy_id="cc-bb-lower",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ Bollinger lower-band bounce.",
+        signal_definition="close < lower band",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close",
+                    op="<",
+                    rhs=IndicatorRef(name="bollinger", params={"band": "lower", "period": 20}),
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+        requires_custom_code=True,
+    )
+
+
+_CC_BOLLINGER_ALIASED_IMPORT = textwrap.dedent("""
+    from contract import Strategy
+    from indicators import bollinger_bands as bb
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            upper, middle, lower = bb(bars, 20, 2.0)
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and bar.close < lower:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_credits_aliased_indicators_import() -> None:
+    # ``from indicators import bollinger_bands as bb; bb(...)`` runs fine in the
+    # sandbox; the presence check must resolve the alias to the real helper name
+    # and not falsely report the indicator as unread.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_ALIASED_IMPORT, _bollinger_base_band_spec())
+    assert not any("bollinger" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def test_source_aware_names_derived_from_allow_source() -> None:
+    # The compiler's source-aware set must equal spec_dsl's allow_source flags, so
+    # a source-aware indicator can never be added without its ``_src`` helper.
+    from investment_team.strategy_lab.spec_dsl import _INDICATOR_PARAM_SPECS
+    from investment_team.strategy_lab.synthesis.compiler import _SOURCE_AWARE_NAMES
+
+    expected = {n for n, s in _INDICATOR_PARAM_SPECS.items() if s.get("allow_source")}
+    assert _SOURCE_AWARE_NAMES == expected
+
+
+def test_bollinger_derived_bands_derived_from_dsl() -> None:
+    # The gate's derived-band set is the DSL's bollinger band options minus the
+    # base bands, so a future derived band added to spec_dsl is picked up.
+    from investment_team.strategy_lab.quality_gates.code_conformance import (
+        _BOLLINGER_BASE_BANDS,
+        _BOLLINGER_DERIVED_BANDS,
+    )
+    from investment_team.strategy_lab.spec_dsl import _INDICATOR_PARAM_SPECS
+
+    allowed = _INDICATOR_PARAM_SPECS["bollinger"]["optional"]["band"][1].allowed
+    assert _BOLLINGER_DERIVED_BANDS == frozenset(allowed) - _BOLLINGER_BASE_BANDS
+    assert _BOLLINGER_DERIVED_BANDS == {"percent_b", "bandwidth"}
+    assert not (_BOLLINGER_DERIVED_BANDS & _BOLLINGER_BASE_BANDS)
+
+
+def test_indicator_value_dispatch_covers_every_valid_name() -> None:
+    # Every _VALID_INDICATORS name must reach a real dispatch branch, never the
+    # vwap default; a missing branch raises "no dispatch branch".
+    from investment_team.strategy_lab.executor.strategy_indicators import (
+        _VALID_INDICATORS,
+        indicator_value,
+    )
+
+    bars = _series(40)
+    for name in _VALID_INDICATORS:
+        try:
+            indicator_value(name, bars)
+        except ValueError as e:  # e.g. sma/ema "requires a 'period' param" is fine
+            assert "no dispatch branch" not in str(e), name
+
+
+def test_indicator_value_raises_for_undispatched_valid_name(monkeypatch) -> None:
+    import investment_team.strategy_lab.executor.strategy_indicators as si
+
+    monkeypatch.setattr(si, "_VALID_INDICATORS", set(si._VALID_INDICATORS) | {"aroon"})
+    monkeypatch.setattr(
+        si, "_INDICATOR_PARAM_VALIDATORS", {**si._INDICATOR_PARAM_VALIDATORS, "aroon": {}}
+    )
+    with pytest.raises(ValueError, match="no dispatch branch"):
+        si.indicator_value("aroon", _series(40))
