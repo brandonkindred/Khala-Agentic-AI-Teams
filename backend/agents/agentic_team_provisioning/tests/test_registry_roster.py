@@ -305,6 +305,43 @@ def test_from_registry_replacing_generated_unregisters_old_manifest(
     assert registry.get(old_manifest.id) is None  # stale generated manifest dropped
 
 
+def test_from_registry_rejects_own_generated_manifest_409(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Re-adding *this team's own* generated manifest is rejected (409), not applied.
+
+    A generated roster row has ``manifest_id=None`` but is registered under
+    ``manifest_agent_id(team_id, name)``; the manifest-id-only "already on roster"
+    guards on the callers miss it. Without this guard the from-registry projection
+    would create a registry-source row carrying that same id, and the on_replaced
+    cleanup would unregister the very manifest it points at — leaving a roster entry
+    whose manifest no longer resolves. The endpoint must refuse, leaving the roster
+    and the registered manifest untouched.
+    """
+    from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+    team_id = _new_team()
+    gen = AgenticTeamAgent(
+        agent_name="Planner", role="Plans things", skills=["x"], source="generated"
+    )
+    AgenticTeamStore().save_team_agents(team_id, [gen])
+    gen_manifest = build_agent_manifest(team_id, gen)
+    registry.register(gen_manifest)
+
+    resp = client.post(
+        f"/teams/{team_id}/agents/from-registry", json={"manifest_id": gen_manifest.id}
+    )
+    assert resp.status_code == 409
+
+    # Roster row is still the untouched generated agent, and its manifest still resolves.
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert len(roster) == 1
+    assert roster[0]["agent_name"] == "Planner"
+    assert roster[0]["source"] == "generated"
+    assert roster[0]["manifest_id"] is None
+    assert registry.get(gen_manifest.id) is not None
+
+
 def test_llm_save_preserves_registry_agents(client: TestClient, registry: _FakeRegistry) -> None:
     """A chat-driven roster save must not drop a user-added registry agent, and a
     generated agent can't overwrite one by name (registry wins the collision).
