@@ -27,7 +27,7 @@ todos:
     content: Promote the dev-pipeline models (Task/TaskStatus/TaskType/TaskAssignment/PlanningHierarchy) to shared_dev_models, git_utils + branch_utils to shared_git, and strands_model into llm_service, so coding_team stops importing software_engineering_team.shared.* entirely.
     status: pending
   - id: invert-engines
-    content: Introduce a CodeEngineProvider protocol so coding_team.orchestrator no longer imports SE's frontend/backend_code_v2 team leads, quality_gate_tools, or code_review_agent; SE injects concrete engines when calling run_coding_team_orchestrator, and unified_api injects them for the standalone coding_team app.
+    content: Introduce a CodeEngineProvider protocol so coding_team.orchestrator no longer imports SE's frontend/backend_code_v2 team leads, quality_gate_tools, or code_review_agent; SE injects concrete engines when calling run_coding_team_orchestrator, and a thin SE-backed adapter (the standalone coding-team container's entrypoint, living outside the coding_team package) injects them for standalone runs.
     status: pending
   - id: ci-coverage
     content: Add a dedicated coding_team CI test job (its 22 test files never run today) plus jobs for the new shared_* packages, wire path filters, and enforce --cov-fail-under=90 on coding_team and every new module.
@@ -322,20 +322,38 @@ extends an established seam.
    calls it (`SE/orchestrator.py:2250`, `temporal/activities.py:575`), SE passes a
    concrete provider built from its own agents — SE already owns those imports, so
    no new edge is created.
-3. **Composition root for standalone coding_team:** the unified API mounts both
-   teams (`unified_api/config.py`: `coding_team` has
-   `parent_team_key="software_engineering"`), so it is the natural place to inject
-   SE's engines into the standalone coding_team app. This keeps the SE dependency
-   at the top-level composition root, not inside `coding_team.*`. The
-   coding_team package itself imports nothing from SE.
+3. **Composition root for the standalone coding_team service.** The standalone
+   team is **not** mounted in-process by `unified_api` — it runs as its own
+   container (`docker/docker-compose.yml` `coding-team-service:8103`,
+   `TEAM_MODULE=coding_team.api.main`) that `unified_api` only **reverse-proxies**
+   over HTTP (`unified_api/main.py:114` maps `coding_team ->
+   CODING_TEAM_SERVICE_URL`; `unified_api/config.py`'s `parent_team_key` and the
+   `in_process=False` default are metadata/proxy-routing only). A Python
+   `CodeEngineProvider` object therefore **cannot** be injected from `unified_api`
+   across that process boundary — the earlier draft of this plan was wrong on that
+   point. Instead, put the composition root **inside the coding-team service
+   process but outside the `coding_team` package**: add a thin SE-backed
+   adapter/entrypoint module (e.g. `coding_team_service/main.py`) that imports both
+   `coding_team` (its app factory) and SE (the engines), builds the SE-backed
+   provider, and becomes the container's `TEAM_MODULE`. `coding_team/api/main.py`
+   becomes an app factory and `run_coding_team_orchestrator` gains the
+   `engine_provider` param the adapter supplies. This keeps `coding_team.*` free of
+   SE imports while the **service process** still has SE importable — which it
+   already must today, since the current deferred `from software_engineering_team
+   ...` imports only work because SE is installed in the coding-team container. SE's
+   own orchestrator path is unaffected: it runs inside the SE process and injects
+   its provider directly.
 4. Provider resolution stays lazy/defensive: the existing behaviour where a
    missing quality-gate seam degrades gracefully (`orchestrator.py:1929`
    `ImportError` -> skip) maps to "no provider injected -> skip gates," preserving
    today's semantics.
 
-End state: `coding_team.*` has zero `software_engineering_team` imports; SE ->
-coding_team remains (deferred, one-directional); unified_api -> {SE, coding_team}.
-Acyclic.
+End state: the `coding_team` **package** has zero `software_engineering_team`
+imports; the SE-backed provider is assembled in exactly two places, both outside
+that package — (a) the SE process when SE calls `run_coding_team_orchestrator`, and
+(b) the small `coding_team_service` adapter that is the standalone container's
+entrypoint. SE -> coding_team remains (deferred, one-directional); the package
+graph is acyclic.
 
 ## Part C — Make it verifiable and durable
 
@@ -369,6 +387,11 @@ Add an automated contract so the cycle cannot silently return:
 - Minimal fallback if adding a tool is undesirable: a unit test that walks
   `coding_team/**.py` and asserts no `software_engineering_team` import token
   appears (AST-based, ignoring strings/comments).
+
+The guard scopes to the `coding_team/` **package** only. The new
+`coding_team_service` adapter (Part B3) is the single sanctioned place that
+imports both packages, so it lives **outside** `coding_team/` and is deliberately
+exempt — that is precisely what makes it the composition root rather than a cycle.
 
 # Verification
 
