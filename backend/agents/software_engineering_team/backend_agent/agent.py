@@ -13,16 +13,7 @@ from strands import Agent
 
 from llm_service import get_client, get_strands_model
 from shared_command_runner.error_parsing import normalize_error_signature
-from software_engineering_team.shared.context_sizing import (
-    compute_existing_code_chars,
-    compute_spec_content_chars,
-)
-from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
-from software_engineering_team.shared.prompt_utils import (
-    build_problem_solving_header,
-    log_llm_prompt,
-)
-from software_engineering_team.shared.repo_utils import (
+from shared_repo_context.repo_utils import (
     BACKEND_EXTENSIONS,
     _disambiguated_key,
     is_secret_template_path,
@@ -33,8 +24,17 @@ from software_engineering_team.shared.repo_utils import (
     sanitize_path_for_text,
     truncate_for_context,
 )
-from software_engineering_team.shared.repo_utils import (
+from shared_repo_context.repo_utils import (
     int_env as _int_env,
+)
+from software_engineering_team.shared.context_sizing import (
+    compute_existing_code_chars,
+    compute_spec_content_chars,
+)
+from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
+from software_engineering_team.shared.prompt_utils import (
+    build_problem_solving_header,
+    log_llm_prompt,
 )
 from software_engineering_team.shared.task_plan import TaskPlan
 from software_engineering_team.shared.task_utils import (

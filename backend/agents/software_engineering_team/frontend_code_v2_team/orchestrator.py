@@ -11,9 +11,10 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
+from shared_repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 
@@ -100,43 +101,28 @@ class FrontendDevelopmentAgent:
 
     @staticmethod
     def _read_repo_code(repo_path: Path, max_chars: int = 30_000) -> str:
-        """Read frontend source files from repo into a single string."""
-        extensions = {
-            ".ts",
-            ".tsx",
-            ".js",
-            ".jsx",
-            ".html",
-            ".css",
-            ".scss",
-            ".json",
-            ".yaml",
-            ".yml",
-        }
-        parts: List[str] = []
-        total = 0
-        try:
-            for f in sorted(repo_path.rglob("*")):
-                if not f.is_file() or f.suffix not in extensions:
-                    continue
-                if any(
-                    skip in f.parts
-                    for skip in ("node_modules", ".git", "dist", "build", ".angular")
-                ):
-                    continue
-                try:
-                    content = f.read_text(encoding="utf-8", errors="replace")
-                except Exception:
-                    continue
-                rel = str(f.relative_to(repo_path))
-                chunk = f"--- {rel} ---\n{content}\n"
-                if total + len(chunk) > max_chars:
-                    break
-                parts.append(chunk)
-                total += len(chunk)
-        except Exception:
-            pass
-        return "\n".join(parts) if parts else "# No code files found"
+        """Read frontend source files from repo into a single string.
+
+        Delegates to the shared budgeted scanner so every per-domain reader shares
+        one implementation; the frontend extension/exclude sets are the contract.
+        """
+        return read_repo_code_budgeted(
+            repo_path,
+            extensions={
+                ".ts",
+                ".tsx",
+                ".js",
+                ".jsx",
+                ".html",
+                ".css",
+                ".scss",
+                ".json",
+                ".yaml",
+                ".yml",
+            },
+            exclude_dirs={"node_modules", ".git", "dist", "build", ".angular"},
+            max_chars=max_chars,
+        )
 
     def run_workflow(
         self,

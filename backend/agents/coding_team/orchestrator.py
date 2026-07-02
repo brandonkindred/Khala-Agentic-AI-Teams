@@ -287,7 +287,7 @@ def _build_review_evidence(summary: str, diff: str) -> str:
 
 
 # Repo-context file selection. The shared full-stack code extensions / exclude dirs live in
-# software_engineering_team.shared.repo_utils; this summariser additionally surfaces the doc and
+# shared_repo_context.repo_utils; this summariser additionally surfaces the doc and
 # config formats below (so a docs/spec task is not blind to specs, plans, and READMEs). The
 # directories it skips come from repo_utils.REPO_INSPECT_EXCLUDE_DIRS (imported in
 # `_context_file_filters`), shared with the active inspection tools so the two views of the repo
@@ -717,7 +717,7 @@ def _context_file_filters() -> tuple[frozenset[str], frozenset[str]]:
     """
     global _CONTEXT_EXTENSIONS, _CONTEXT_EXCLUDE_DIRS
     if _CONTEXT_EXTENSIONS is None or _CONTEXT_EXCLUDE_DIRS is None:
-        from software_engineering_team.shared.repo_utils import (
+        from shared_repo_context.repo_utils import (
             FULL_STACK_EXTENSIONS,
             REPO_INSPECT_EXCLUDE_DIRS,
         )

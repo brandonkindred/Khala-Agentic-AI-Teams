@@ -95,6 +95,53 @@ def read_repo_code(
     return "\n\n".join(parts) if parts else "# No code files found"
 
 
+def read_repo_code_budgeted(
+    repo_path: Path,
+    *,
+    extensions: Iterable[str],
+    exclude_dirs: Iterable[str],
+    max_chars: int,
+    empty: str = "# No code files found",
+) -> str:
+    """Read source files under *repo_path* until a character budget is hit.
+
+    The single implementation behind the per-domain ``_read_repo_code`` readers in
+    the code-v2 and ai-agent-development teams: a sorted ``rglob`` walk that emits
+    ``--- <relpath> ---\\n<content>\\n`` chunks joined by newlines and stops once
+    adding the next chunk would exceed *max_chars* (whole files only — never a
+    partial file).
+
+    Preconditions:
+        - ``repo_path`` is an existing directory ``Path``.
+        - ``extensions`` are suffixes including the leading dot (e.g. ``.py``).
+        - ``max_chars`` is a positive int.
+    Postconditions:
+        - Returns the concatenated briefing, or *empty* when no eligible file is
+          found. Files whose path contains any name in *exclude_dirs* as a path
+          component are skipped; unreadable files are skipped, not raised.
+    """
+    assert max_chars > 0, "max_chars must be positive"
+    ext_set = frozenset(extensions)
+    excl_set = frozenset(exclude_dirs)
+    parts: List[str] = []
+    total = 0
+    for f in sorted(repo_path.rglob("*")):
+        if not f.is_file() or f.suffix not in ext_set:
+            continue
+        if excl_set & set(f.parts):
+            continue
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        chunk = f"--- {f.relative_to(repo_path)} ---\n{content}\n"
+        if total + len(chunk) > max_chars:
+            break
+        parts.append(chunk)
+        total += len(chunk)
+    return "\n".join(parts) if parts else empty
+
+
 # Filename components and suffixes that may hold credentials/secrets. Files
 # matching these are excluded from the content sent to the external review model.
 _SENSITIVE_NAMES: frozenset[str] = frozenset(

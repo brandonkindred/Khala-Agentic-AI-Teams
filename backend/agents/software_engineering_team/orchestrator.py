@@ -41,6 +41,10 @@ from llm_service import (  # noqa: E402
     get_strands_model,
     llm_attribution,
 )
+from shared_repo_context.repo_utils import (  # noqa: E402
+    read_repo_code,
+    truncate_for_context,
+)
 from software_engineering_team.shared import (  # noqa: E402
     cost_tracker,
     se_events,
@@ -64,10 +68,6 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
 )
 from software_engineering_team.shared.models import TaskUpdate  # noqa: E402
 from software_engineering_team.shared.plan_dir import ensure_plan_dir  # noqa: E402
-from software_engineering_team.shared.repo_utils import (  # noqa: E402
-    read_repo_code,
-    truncate_for_context,
-)
 from software_engineering_team.shared.task_utils import task_requirements  # noqa: E402
 
 try:
