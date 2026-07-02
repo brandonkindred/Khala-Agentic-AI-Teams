@@ -164,6 +164,29 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.rosterLoading()).toBe(false);
   });
 
+  it('drops a stale refresh: an older validateRoster completing last cannot clobber the newer result', () => {
+    const v1 = new Subject<RosterValidationResult>();
+    const v2 = new Subject<RosterValidationResult>();
+    // listTeamAgents resolves synchronously (of), so both refreshes reach their
+    // (pending) validateRoster; we control completion order.
+    api.validateRoster.mockReturnValueOnce(v1.asObservable()).mockReturnValueOnce(v2.asObservable());
+    const seen: (RosterValidationResult | null)[] = [];
+    component.rosterChanged.subscribe((v) => seen.push(v));
+
+    component.refreshRoster(); // A → subscribes v1
+    component.refreshRoster(); // B → subscribes v2 (now the latest)
+
+    // B resolves first, then the stale A completes last.
+    v2.next(validation({ is_fully_staffed: false, summary: 'B' }));
+    v2.complete();
+    v1.next(validation({ is_fully_staffed: true, summary: 'A (stale)' }));
+    v1.complete();
+
+    // Only B was applied/emitted; the late stale A is ignored.
+    expect(component.rosterValidation()?.summary).toBe('B');
+    expect(seen).toEqual([expect.objectContaining({ summary: 'B' })]);
+  });
+
   it('emits rosterChanged with null when validation fails', () => {
     api.validateRoster.mockReturnValueOnce(throwError(() => new Error('boom')));
     const seen: (RosterValidationResult | null)[] = [];

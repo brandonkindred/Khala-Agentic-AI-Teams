@@ -117,6 +117,8 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   /** Name of the roster agent currently in inline-edit mode (`null` if none). */
   editingAgent = signal<string | null>(null);
   editDraft = signal<AgentEditDraft>({ role: '', skills: '', capabilities: '', tools: '', expertise: '' });
+  /** Monotonic stamp for `refreshRoster`; guards against out-of-order refresh results. */
+  private rosterRefreshSeq = 0;
 
   private conversationId: string | null = null;
 
@@ -214,20 +216,30 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   refreshRoster(): void {
+    // Sequence token: a roster mutation (add/delete/edit) can trigger a new
+    // refresh while an older one is still in flight. Stamp each refresh and drop
+    // any callback whose stamp is no longer the latest, so a slow older
+    // validateRoster can't complete last and emit a stale is_fully_staffed —
+    // which the embedding stage (Agent Studio Stage 3) would use to (wrongly)
+    // enable "Test this team →" for a roster that has since changed.
+    const seq = ++this.rosterRefreshSeq;
     this.rosterLoading.set(true);
     this.rosterActionError.set(null);
     this.api.listTeamAgents(this.team.team_id).subscribe({
       next: (agents) => {
+        if (seq !== this.rosterRefreshSeq) return; // superseded by a newer refresh
         this.rosterAgents.set(agents);
         // Keep the loading indicator up until validation also resolves — the
         // roster isn't "fully loaded" until its staffing gaps are known.
         this.api.validateRoster(this.team.team_id).subscribe({
           next: (result) => {
+            if (seq !== this.rosterRefreshSeq) return;
             this.rosterValidation.set(result);
             this.rosterLoading.set(false);
             this.rosterChanged.emit(result);
           },
           error: () => {
+            if (seq !== this.rosterRefreshSeq) return;
             this.rosterValidation.set(null);
             this.rosterLoading.set(false);
             this.rosterChanged.emit(null);
@@ -235,6 +247,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
         });
       },
       error: (err) => {
+        if (seq !== this.rosterRefreshSeq) return;
         // Surface the failure instead of silently leaving a stale roster: the
         // user needs to know their view may be out of date. Also clear the
         // validation and emit null so an embedding stage (Agent Studio Stage 3)
