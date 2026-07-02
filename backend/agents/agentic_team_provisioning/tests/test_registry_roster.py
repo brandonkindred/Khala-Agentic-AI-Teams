@@ -562,6 +562,70 @@ def test_update_registry_agent_does_not_register_a_generated_wrapper(
     assert registry.get("blogging.planner") is _PLANNER
 
 
+def test_update_team_agent_merges_over_the_lock_read_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``update_team_agent`` runs ``apply_updates`` on the row read **under the lock**,
+    not a caller snapshot — so a patch that only touches ``role`` preserves fields set
+    by an intervening write (the race Codex flagged). We simulate the intervening write
+    by mutating the stored row, then confirm the merge sees the fresh value.
+    """
+    install_fake_postgres(monkeypatch)
+    store = AgenticTeamStore()
+    team_id = store.create_team(name="Pod", description="").team_id
+    store.save_team_agents(
+        team_id, [AgenticTeamAgent(agent_name="Writer", role="old", skills=["seo"])]
+    )
+
+    seen: dict[str, list[str]] = {}
+
+    def _apply(current: AgenticTeamAgent) -> AgenticTeamAgent:
+        # The callback receives the CURRENT stored row (skills intact), and only
+        # patches role — skills must survive.
+        seen["skills"] = list(current.skills)
+        return current.model_copy(update={"role": "new"})
+
+    updated = store.update_team_agent(team_id, "Writer", _apply)
+    assert updated is not None
+    assert seen["skills"] == ["seo"]  # merge saw the fresh row, not an empty patch
+    assert updated.role == "new"
+    assert updated.skills == ["seo"]  # intervening-write field preserved
+    # Persisted.
+    roster = {a.agent_name: a for a in store.list_team_agents(team_id)}
+    assert roster["Writer"].role == "new"
+    assert roster["Writer"].skills == ["seo"]
+
+
+def test_update_team_agent_unknown_agent_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unknown agent yields ``None`` (roster unchanged); ``apply_updates`` is never
+    called."""
+    install_fake_postgres(monkeypatch)
+    store = AgenticTeamStore()
+    team_id = store.create_team(name="Pod", description="").team_id
+    called = False
+
+    def _apply(current: AgenticTeamAgent) -> AgenticTeamAgent:
+        nonlocal called
+        called = True
+        return current
+
+    assert store.update_team_agent(team_id, "ghost", _apply) is None
+    assert called is False
+
+
+def test_update_team_agent_apply_error_rolls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising ``apply_updates`` propagates and leaves the row unchanged."""
+    install_fake_postgres(monkeypatch)
+    store = AgenticTeamStore()
+    team_id = store.create_team(name="Pod", description="").team_id
+    store.save_team_agents(team_id, [AgenticTeamAgent(agent_name="Writer", role="keep")])
+
+    def _boom(current: AgenticTeamAgent) -> AgenticTeamAgent:
+        raise ValueError("bad patch")
+
+    with pytest.raises(ValueError):
+        store.update_team_agent(team_id, "Writer", _boom)
+    assert store.list_team_agents(team_id)[0].role == "keep"  # unchanged
+
+
 @pytest.mark.parametrize("bad_name", ["", "   "])
 def test_roster_agent_from_manifest_rejects_blank_name(bad_name: str) -> None:
     """DbC precondition: a manifest with a blank name fails fast rather than being

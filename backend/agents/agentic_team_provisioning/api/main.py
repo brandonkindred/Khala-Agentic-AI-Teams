@@ -503,31 +503,41 @@ def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
         unchanged); ``422`` if the merged row would violate the ``AgenticTeamAgent``
         contract (e.g. an explicit ``role: null``), so a malformed edit can't persist
         a row that later fails to deserialize (roster unchanged).
-    """
-    team = _store.get_team(team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    current = next((a for a in team.agents if a.agent_name == agent_name), None)
-    if current is None:
-        raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
 
-    # Re-validate the merged row rather than ``model_copy(update=...)`` (which skips
-    # validation): ``UpdateAgentRequest`` fields are ``Optional`` for partial-update
-    # semantics, so an explicit ``{"role": null}`` would otherwise write a row whose
-    # required ``role`` is ``None`` and 500 every later ``model_validate`` of the
-    # roster. Merging over ``current`` preserves ``source``/``manifest_id`` (never in
-    # the request model), so a per-team field override can't change provenance.
-    updates = req.model_dump(exclude_unset=True)
+    Concurrency: the read-merge-write is delegated to ``update_team_agent``, which
+        runs ``_merge`` on the current row **under the team lock** — so a concurrent
+        roster write for the same agent (e.g. a chat-save filling ``skills`` while
+        this saves a ``role`` edit) can't be clobbered by a merge over a pre-lock
+        snapshot, and stale ``source``/``manifest_id`` provenance can't be resurrected.
+    """
+    if not _store.get_team(team_id):
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    def _merge(current: AgenticTeamAgent) -> AgenticTeamAgent:
+        # Re-validate the merged row rather than ``model_copy(update=...)`` (which
+        # skips validation): ``UpdateAgentRequest`` fields are ``Optional`` for
+        # partial-update semantics, so an explicit ``{"role": null}`` would otherwise
+        # write a row whose required ``role`` is ``None`` and 500 every later
+        # ``model_validate`` of the roster. Merging over the lock-read ``current``
+        # preserves ``source``/``manifest_id`` (never in the request model), so a
+        # per-team field override can't change provenance. Raises ``ValidationError``
+        # on a bad patch — caught below and surfaced as ``422`` (the store rolls back).
+        updates = req.model_dump(exclude_unset=True)
+        return AgenticTeamAgent.model_validate({**current.model_dump(), **updates})
+
+    def _reregister(updated: AgenticTeamAgent) -> None:
+        # Keep the live registry in lockstep for a generated agent whose projected
+        # summary (its role) may have changed — mirrors the from-registry/DELETE
+        # routes' registry reconciliation, run under the same lock as the write.
+        if updated.source == SOURCE_GENERATED:
+            _reregister_generated_manifest(team_id, updated)
+
     try:
-        updated = AgenticTeamAgent.model_validate({**current.model_dump(), **updates})
+        updated = _store.update_team_agent(team_id, agent_name, _merge, on_updated=_reregister)
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=f"Invalid agent update: {e.errors()}")
-    _store.add_or_replace_team_agent(team_id, updated)
-    # Keep the live registry in lockstep for a generated agent whose projected
-    # summary (its role) may have changed — mirrors the from-registry/DELETE routes'
-    # registry reconciliation, which the plain in-place upsert would otherwise skip.
-    if updated.source == SOURCE_GENERATED:
-        _reregister_generated_manifest(team_id, updated)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Agent not on roster: {agent_name}")
     return updated
 
 

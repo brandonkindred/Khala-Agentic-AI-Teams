@@ -236,8 +236,14 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       },
       error: (err) => {
         // Surface the failure instead of silently leaving a stale roster: the
-        // user needs to know their view may be out of date.
+        // user needs to know their view may be out of date. Also clear the
+        // validation and emit null so an embedding stage (Agent Studio Stage 3)
+        // drops its "fully staffed" gate — otherwise a failed refresh after a
+        // previously-staffed load would keep "Test this team →" enabled on stale
+        // staffing (rosterFullyStaffed is only updated from rosterChanged).
         this.rosterLoading.set(false);
+        this.rosterValidation.set(null);
+        this.rosterChanged.emit(null);
         this.rosterActionError.set(err?.error?.detail ?? 'Failed to load roster');
       },
     });

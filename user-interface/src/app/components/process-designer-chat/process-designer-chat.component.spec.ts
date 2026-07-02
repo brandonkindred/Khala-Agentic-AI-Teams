@@ -136,11 +136,21 @@ describe('ProcessDesignerChatComponent', () => {
     expect(seen).toEqual([validation()]);
   });
 
-  it('surfaces an error and stops loading when listTeamAgents fails', () => {
+  it('surfaces an error, stops loading, and clears the staffing gate when listTeamAgents fails', () => {
+    // Seed a prior fully-staffed validation so we can prove the failed refresh
+    // clears it (otherwise the embedding stage keeps "Test this team" enabled).
+    component.rosterValidation.set(validation({ is_fully_staffed: true }));
+    const seen: (RosterValidationResult | null)[] = [];
+    component.rosterChanged.subscribe((v) => seen.push(v));
+
     api.listTeamAgents.mockReturnValueOnce(throwError(() => ({ error: { detail: 'boom' } })));
     component.refreshRoster();
+
     expect(component.rosterActionError()).toBe('boom');
     expect(component.rosterLoading()).toBe(false);
+    // Gate cleared: validation dropped and rosterChanged emitted null.
+    expect(component.rosterValidation()).toBeNull();
+    expect(seen).toEqual([null]);
   });
 
   it('keeps rosterLoading true until validateRoster resolves', () => {
