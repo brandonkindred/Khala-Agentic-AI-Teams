@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from coding_team import hitl
 from coding_team.activity import ActivityBridge
 from coding_team.agent_status import derive_stack_roster
+from coding_team.engine_provider import get_engine_provider
 from coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     get_job,
@@ -683,24 +684,37 @@ def _build_implementation_worker(
     agent_id: str,
     spec: StackSpec,
     llm_getter: Callable[[str], Any],
+    engine_provider: Any,
 ) -> Any:
-    """Build a v2 specialist worker for a stack."""
+    """Build a v2 specialist worker for a stack.
+
+    The concrete implementation team-lead engine comes from the injected
+    ``engine_provider`` (the software-engineering team owns those engines);
+    coding_team only resolves the text-mode LLM and wraps the result in a
+    ``V2TeamWorker``.
+
+    Preconditions: ``engine_provider`` is a live ``CodeEngineProvider``.
+    Postconditions: returns a ``V2TeamWorker`` whose ``team_lead`` came from the
+    provider. Raises ``ValueError`` for an unsupported stack and ``RuntimeError``
+    when no provider was injected.
+    """
     kind = _v2_team_kind_for_stack(spec)
     if not kind:
         raise ValueError(
             f"Unsupported coding-team stack {spec.name!r}. "
             "Only frontend_v2 and backend_v2 implementation teams are available."
         )
+    if engine_provider is None:
+        raise RuntimeError(
+            "No CodeEngineProvider is configured: coding_team needs an implementation-engine "
+            "provider (injected by the software-engineering team, or installed by the standalone "
+            "coding-team service via set_engine_provider) to build an implementation worker."
+        )
     from coding_team.v2_team_worker import V2TeamWorker
 
-    if kind == "frontend":
-        from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
-
-        team_lead = FrontendCodeV2TeamLead(_v2_text_mode_llm(llm_getter("frontend")))
-    else:
-        from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
-
-        team_lead = BackendCodeV2TeamLead(_v2_text_mode_llm(llm_getter("backend")))
+    team_lead = engine_provider.build_implementation_team_lead(
+        kind, _v2_text_mode_llm(llm_getter(kind))
+    )
     return V2TeamWorker(
         agent_id=agent_id,
         stack_spec=spec,
@@ -1053,6 +1067,7 @@ def run_coding_team_orchestrator(
     on_pause: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     progress_base: int = _DEFAULT_PROGRESS_BASE,
     progress_span: int = _DEFAULT_PROGRESS_SPAN,
+    engine_provider: Optional[Any] = None,
 ) -> None:
     """
     Run the coding_team pipeline: plan → Task Graph → groom/assign → implement → review → merge.
@@ -1067,6 +1082,10 @@ def run_coding_team_orchestrator(
     writes count as activity while the 120s liveness heartbeat does not.
     """
     assert 0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100
+    # The implementation engines (v2 team leads, quality gates, code review) are injected, not
+    # imported: prefer the provider passed explicitly (the software-engineering team supplies one
+    # per call) and fall back to the process-wide default the standalone service installs at startup.
+    engine_provider = engine_provider or get_engine_provider()
     path = Path(repo_path).resolve()
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
@@ -1235,7 +1254,9 @@ def run_coding_team_orchestrator(
     implementation_workers: List[Any] = []
     try:
         for aid, spec in zip(agent_ids, stack_specs):
-            implementation_workers.append(_build_implementation_worker(aid, spec, llm_getter))
+            implementation_workers.append(
+                _build_implementation_worker(aid, spec, llm_getter, engine_provider)
+            )
     except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
         logger.error("Failed to build coding-team implementation workers: %s", exc)
         _update(
@@ -1262,6 +1283,7 @@ def run_coding_team_orchestrator(
         agent_ids=agent_ids,
         llm_getter=llm_getter,
         resolved_questions=plan_input.resolved_questions,
+        engine_provider=engine_provider,
     )
     # Flush captured "thinking" to the job record on an interval for the UI poll.
     # beat_first surfaces any planning-phase reasoning immediately; the final flush
@@ -1351,6 +1373,7 @@ class CodingTeamSwarm:
         agent_ids: List[str],
         llm_getter: Callable[[str], Any],
         resolved_questions: Optional[List[Dict[str, Any]]] = None,
+        engine_provider: Any = None,
     ) -> None:
         self.tech_lead = tech_lead
         self.workers = workers
@@ -1359,6 +1382,8 @@ class CodingTeamSwarm:
         self.agent_ids = agent_ids
         self.agent_team_keys = {w.agent_id: _worker_team_key(w) for w in workers}
         self.llm_getter = llm_getter
+        # Injected implementation engines (build/lint/review); None → quality gates are skipped.
+        self.engine_provider = engine_provider
         # Plan-level decisions the user already answered (entry gate + Tech Lead planning), folded
         # into plan_input.resolved_questions before the swarm is built. Surfaced to both review
         # gates so a reviewer never re-raises a question the user has settled.
@@ -1859,11 +1884,15 @@ class CodingTeamSwarm:
         # record the verdict here and act on it after the try/except.
         revision_feedback: Optional[List[Dict[str, Any]]] = None
         try:
-            from software_engineering_team.quality_gate_tools import (
-                run_build_verification,
-                run_code_review,
-                run_linting,
-            )
+            provider = self.engine_provider
+            if provider is None:
+                logger.debug(
+                    "No engine provider configured; skipping quality gates for %s", task.id
+                )
+                return True
+            run_build_verification = provider.run_build_verification
+            run_linting = provider.run_linting
+            run_code_review = provider.run_code_review
 
             agent_type = _quality_gate_agent_type(swe.stack_spec.name)
 

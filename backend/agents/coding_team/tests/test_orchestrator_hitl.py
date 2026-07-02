@@ -579,7 +579,7 @@ def _stub_agents(monkeypatch, tech_lead_cls, swarm_cls):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: Worker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: Worker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", swarm_cls)
 

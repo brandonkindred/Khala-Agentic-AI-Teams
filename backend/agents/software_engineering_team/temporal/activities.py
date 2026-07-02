@@ -573,6 +573,7 @@ def execute_coding_team_activity(
         )
 
         from coding_team.orchestrator import run_coding_team_orchestrator
+        from software_engineering_team.coding_engine_provider import SECodeEngineProvider
         from software_engineering_team.orchestrator import PROGRESS_BAND_CODING
         from software_engineering_team.shared.job_store import get_job
 
@@ -605,6 +606,7 @@ def execute_coding_team_activity(
                 get_job_fn=lambda jid: get_job(jid),
                 progress_base=base,
                 progress_span=span,
+                engine_provider=SECodeEngineProvider(),
             )
         # run_coding_team_orchestrator owns its terminal status on every exit path (the heartbeat
         # callback forwards its status writes to update_job), so do not re-write COMPLETED here — it

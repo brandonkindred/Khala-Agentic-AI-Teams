@@ -2246,6 +2246,7 @@ def run_orchestrator(
             adapter_result, str(path), existing_code_summary, resolved_questions_override
         )
         from coding_team.orchestrator import run_coding_team_orchestrator
+        from software_engineering_team.coding_engine_provider import SECodeEngineProvider
 
         base, span = PROGRESS_BAND_CODING
         # get_llm deliberately NOT passed: the coding team's default getter wraps
@@ -2267,6 +2268,7 @@ def run_orchestrator(
                 get_job_fn=lambda jid: get_job(jid),
                 progress_base=base,
                 progress_span=span,
+                engine_provider=SECodeEngineProvider(),
             )
         # Emit DORA lifecycle events (deployment/lead-time/change-failure) from
         # the coding-team task graph the run persisted, and flush final cost.

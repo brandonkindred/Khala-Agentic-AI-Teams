@@ -535,7 +535,7 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
     # No job service in unit tests — skip the persistence write.
@@ -559,11 +559,34 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
 
 # ----------------------------------------------------- real quality-gate path
 
-QG = "software_engineering_team.quality_gate_tools"
+
+def _gate_provider(*, build_ok=True, review_ok=True, build_raises=False):
+    """A fake CodeEngineProvider exposing just the quality-gate methods the swarm calls."""
+    import types
+
+    class _FakeGateProvider:
+        def run_build_verification(self, *a, **k):
+            if build_raises:
+                raise RuntimeError("tool crashed")
+            return types.SimpleNamespace(success=build_ok, error="" if build_ok else "boom build")
+
+        def run_linting(self, *a, **k):
+            return None
+
+        def run_code_review(self, **k):
+            return types.SimpleNamespace(
+                approved=review_ok,
+                issues=[] if review_ok else [{"type": "review", "error": "x"}],
+            )
+
+    return _FakeGateProvider()
 
 
-def _make_real_swarm(tmp_path):
-    """A swarm WITHOUT the _run_quality_gates bypass, with one task already assigned to a1."""
+def _make_real_swarm(tmp_path, provider):
+    """A swarm WITHOUT the _run_quality_gates bypass, with one task already assigned to a1.
+
+    ``provider`` supplies the build/lint/review engines (see ``_gate_provider``).
+    """
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
         tech_lead=StubTechLead(approved=True),
@@ -572,42 +595,23 @@ def _make_real_swarm(tmp_path):
         path=Path(tmp_path),
         agent_ids=["a1"],
         llm_getter=lambda k: None,
+        engine_provider=provider,
     )
     graph.add_task("t1", title="T1")
     graph.assign_task_to_agent("t1", "a1")
     return swarm, graph
 
 
-def _patch_gates(monkeypatch, *, build_ok=True, review_ok=True, build_raises=False):
-    import types
-
-    def build(*a, **k):
-        if build_raises:
-            raise RuntimeError("tool crashed")
-        return types.SimpleNamespace(success=build_ok, error="" if build_ok else "boom build")
-
-    monkeypatch.setattr(f"{QG}.run_build_verification", build)
-    monkeypatch.setattr(f"{QG}.run_linting", lambda *a, **k: None)
-    monkeypatch.setattr(
-        f"{QG}.run_code_review",
-        lambda **k: types.SimpleNamespace(
-            approved=review_ok, issues=[] if review_ok else [{"type": "review", "error": "x"}]
-        ),
-    )
-
-
-def test_quality_gates_pass_sets_in_review(tmp_path, monkeypatch):
-    _patch_gates(monkeypatch, build_ok=True, review_ok=True)
-    swarm, graph = _make_real_swarm(tmp_path)
+def test_quality_gates_pass_sets_in_review(tmp_path):
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True, review_ok=True))
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
 
 
-def test_quality_gate_build_failure_returns_for_revision(tmp_path, monkeypatch):
-    _patch_gates(monkeypatch, build_ok=False)
-    swarm, graph = _make_real_swarm(tmp_path)
+def test_quality_gate_build_failure_returns_for_revision(tmp_path):
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=False))
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
@@ -616,33 +620,31 @@ def test_quality_gate_build_failure_returns_for_revision(tmp_path, monkeypatch):
     assert task.assigned_agent_id is None  # and unassigned
 
 
-def test_quality_gate_review_rejection_returns_for_revision(tmp_path, monkeypatch):
-    _patch_gates(monkeypatch, build_ok=True, review_ok=False)
-    swarm, graph = _make_real_swarm(tmp_path)
+def test_quality_gate_review_rejection_returns_for_revision(tmp_path):
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(review_ok=False))
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
     assert graph.get_task("t1").status == TaskStatus.TO_DO
 
 
-def test_quality_gate_tool_exception_proceeds_to_review(tmp_path, monkeypatch):
+def test_quality_gate_tool_exception_proceeds_to_review(tmp_path):
     """An unexpected quality-gate tool error is logged and the task still proceeds (best-effort)."""
-    _patch_gates(monkeypatch, build_raises=True)
-    swarm, graph = _make_real_swarm(tmp_path)
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_raises=True))
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW  # proceeded despite the tool error
 
 
-def test_quality_gate_tool_exception_logs_full_traceback(tmp_path, monkeypatch, caplog):
+def test_quality_gate_tool_exception_logs_full_traceback(tmp_path, caplog):
     """An unexpected quality-gate tool error must be logged WITH a full traceback
     (logger.exception → ERROR + exc_info), not a one-line WARNING — a silent
     summary is exactly what made the review-phase crash undebuggable."""
     import logging as _logging
 
-    _patch_gates(monkeypatch, build_raises=True)  # build() raises RuntimeError("tool crashed")
-    swarm, graph = _make_real_swarm(tmp_path)
+    # build() raises RuntimeError("tool crashed")
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_raises=True))
 
     with caplog.at_level(_logging.ERROR, logger="coding_team.orchestrator"):
         swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
@@ -666,9 +668,9 @@ def test_code_review_runs_even_if_progress_bridge_fails(tmp_path, monkeypatch):
     def _boom(*_a, **_k):
         raise RuntimeError("bridge down")
 
-    _patch_gates(monkeypatch, build_ok=True, review_ok=False)  # review rejects
+    # review rejects
     monkeypatch.setattr(orch_mod, "ActivityBridge", _boom)
-    swarm, graph = _make_real_swarm(tmp_path)
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(review_ok=False))
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
@@ -977,7 +979,7 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
         def run(self, **kw):
             pass
 
-    def _build_worker(agent_id, spec, llm_getter):
+    def _build_worker(agent_id, spec, llm_getter, engine_provider):
         captured_specs.append(spec.name)
         return StubWorker(agent_id)
 
@@ -1007,17 +1009,21 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
     assert any(update.get("stack_specs") == [orch_mod._BACKEND_V2_STACK_SPEC] for update in updates)
 
 
-def test_backend_v2_worker_uses_injected_llm_getter(monkeypatch):
-    """Backend v2 worker construction must honor the coding-team LLM injection path."""
-    from software_engineering_team import backend_code_v2_team
+def test_backend_v2_worker_uses_injected_llm_getter():
+    """Backend v2 worker construction must honor the coding-team LLM injection path.
 
+    The implementation team lead comes from the injected CodeEngineProvider, not a
+    direct software_engineering_team import.
+    """
     captured_keys: List[str] = []
 
-    class FakeBackendLead:
+    class _FakeLead:
         def __init__(self, llm):
             self.llm = llm
 
-    monkeypatch.setattr(backend_code_v2_team, "BackendCodeV2TeamLead", FakeBackendLead)
+    class _FakeProvider:
+        def build_implementation_team_lead(self, team_kind, llm):
+            return _FakeLead(llm)
 
     def _llm_getter(key: str) -> str:
         captured_keys.append(key)
@@ -1027,15 +1033,15 @@ def test_backend_v2_worker_uses_injected_llm_getter(monkeypatch):
         "backend_v2",
         StackSpec(name="backend_v2", tools_services=["Python"]),
         _llm_getter,
+        _FakeProvider(),
     )
 
     assert captured_keys == ["backend"]
     assert worker.team_lead.llm == "backend-client"
 
 
-def test_v2_worker_clones_injected_strands_model_to_text_mode(monkeypatch):
+def test_v2_worker_clones_injected_strands_model_to_text_mode():
     """Cloneable JSON-mode Strands models are passed to v2 teams in text mode."""
-    from software_engineering_team import backend_code_v2_team
 
     class _CloneableModel:
         def __init__(self, response_format: str) -> None:
@@ -1050,17 +1056,21 @@ def test_v2_worker_clones_injected_strands_model_to_text_mode(monkeypatch):
             self.clones.append(response_format)
             return _CloneableModel(response_format)
 
-    class FakeBackendLead:
+    class _FakeLead:
         def __init__(self, llm):
             self.llm = llm
 
+    class _FakeProvider:
+        def build_implementation_team_lead(self, team_kind, llm):
+            return _FakeLead(llm)
+
     model = _CloneableModel("json")
-    monkeypatch.setattr(backend_code_v2_team, "BackendCodeV2TeamLead", FakeBackendLead)
 
     worker = orch_mod._build_implementation_worker(
         "backend_v2",
         StackSpec(name="backend_v2", tools_services=["Python"]),
         lambda key: model,
+        _FakeProvider(),
     )
 
     assert model.response_format == "json"
@@ -1135,17 +1145,17 @@ def test_v2_text_mode_llm_clone_failure_without_client_uses_default(monkeypatch)
     assert result is not broken
 
 
-def test_frontend_v2_worker_uses_injected_llm_getter(monkeypatch):
+def test_frontend_v2_worker_uses_injected_llm_getter():
     """Frontend v2 worker construction must honor the coding-team LLM injection path."""
-    from software_engineering_team import frontend_code_v2_team
-
     captured_keys: List[str] = []
 
-    class FakeFrontendLead:
+    class _FakeLead:
         def __init__(self, llm):
             self.llm = llm
 
-    monkeypatch.setattr(frontend_code_v2_team, "FrontendCodeV2TeamLead", FakeFrontendLead)
+    class _FakeProvider:
+        def build_implementation_team_lead(self, team_kind, llm):
+            return _FakeLead(llm)
 
     def _llm_getter(key: str) -> str:
         captured_keys.append(key)
@@ -1155,6 +1165,7 @@ def test_frontend_v2_worker_uses_injected_llm_getter(monkeypatch):
         "frontend_v2",
         StackSpec(name="frontend_v2", tools_services=["React"]),
         _llm_getter,
+        _FakeProvider(),
     )
 
     assert captured_keys == ["frontend"]
@@ -1333,7 +1344,7 @@ def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -1397,7 +1408,7 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -1445,7 +1456,7 @@ def test_fresh_run_defaults_missing_task_id(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -1523,7 +1534,7 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -1833,7 +1844,7 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -1883,7 +1894,7 @@ def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeyp
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
@@ -2005,30 +2016,29 @@ def test_build_review_evidence_no_diff():
 # ----------------------------------------------------- live progress reporting (code review)
 
 
-def test_quality_gate_code_review_reports_live_progress(tmp_path, monkeypatch):
+def test_quality_gate_code_review_reports_live_progress(tmp_path):
     """The quality-gate code review must surface the agent's sub-step reports as
     status_text + structured current_activity (rising fraction), then clear the
     activity on completion so a stale sub-bar never lingers."""
     import types
 
-    monkeypatch.setattr(
-        f"{QG}.run_build_verification",
-        lambda *a, **k: types.SimpleNamespace(success=True, error=""),
-    )
-    monkeypatch.setattr(f"{QG}.run_linting", lambda *a, **k: None)
+    class _Provider:
+        def run_build_verification(self, *a, **k):
+            return types.SimpleNamespace(success=True, error="")
 
-    def _fake_review(**kwargs):
-        cb = kwargs.get("progress_callback")
-        assert cb is not None, "orchestrator must pass a progress callback"
-        cb("reviewing", "chunk 1/2: a.py", 0.3)
-        cb("reviewing", "chunk 2/2: b.py", 0.7)
-        cb("done", "approved=True, issues=0", 1.0)
-        return types.SimpleNamespace(approved=True, issues=[])
+        def run_linting(self, *a, **k):
+            return None
 
-    monkeypatch.setattr(f"{QG}.run_code_review", _fake_review)
+        def run_code_review(self, **kwargs):
+            cb = kwargs.get("progress_callback")
+            assert cb is not None, "orchestrator must pass a progress callback"
+            cb("reviewing", "chunk 1/2: a.py", 0.3)
+            cb("reviewing", "chunk 2/2: b.py", 0.7)
+            cb("done", "approved=True, issues=0", 1.0)
+            return types.SimpleNamespace(approved=True, issues=[])
 
     updates: List[Dict[str, Any]] = []
-    swarm, graph = _make_real_swarm(tmp_path)
+    swarm, graph = _make_real_swarm(tmp_path, _Provider())
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: updates.append(kw))
 
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
@@ -2114,7 +2124,7 @@ def test_orchestrator_does_not_stamp_activity_and_terminal_clears(tmp_path, monk
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
 
@@ -2318,7 +2328,7 @@ def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeyp
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _MergingSwarm)
 
@@ -2367,7 +2377,7 @@ def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: StubWorker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: StubWorker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
 
@@ -2639,11 +2649,24 @@ def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):
     assert tech_lead.decision_calls[-1] == ["Which DB? → Postgres", "Use TLS? → Yes"]
 
 
-def test_quality_gate_review_receives_user_decisions(tmp_path, monkeypatch):
+def test_quality_gate_review_receives_user_decisions(tmp_path):
     """The per-task quality-gate code review is also told the user's settled decisions."""
     import types
 
-    swarm, graph = _make_real_swarm(tmp_path)
+    captured: Dict[str, Any] = {}
+
+    class _Provider:
+        def run_build_verification(self, *a, **k):
+            return types.SimpleNamespace(success=True, error="")
+
+        def run_linting(self, *a, **k):
+            return None
+
+        def run_code_review(self, **kw):
+            captured["user_decisions"] = kw.get("user_decisions")
+            return types.SimpleNamespace(approved=True, issues=[])
+
+    swarm, graph = _make_real_swarm(tmp_path, _Provider())
     swarm.resolved_questions = [{"question_text": "Which DB?", "answer": "Postgres"}]
     graph.update_task(
         "t1",
@@ -2654,19 +2677,6 @@ def test_quality_gate_review_receives_user_decisions(tmp_path, monkeypatch):
             }
         ],
     )
-
-    captured: Dict[str, Any] = {}
-
-    def _fake_review(**kw):
-        captured["user_decisions"] = kw.get("user_decisions")
-        return types.SimpleNamespace(approved=True, issues=[])
-
-    monkeypatch.setattr(
-        f"{QG}.run_build_verification",
-        lambda *a, **k: types.SimpleNamespace(success=True, error=""),
-    )
-    monkeypatch.setattr(f"{QG}.run_linting", lambda *a, **k: None)
-    monkeypatch.setattr(f"{QG}.run_code_review", _fake_review)
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 

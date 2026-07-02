@@ -33,6 +33,7 @@ from coding_team.clone_workspace import (  # noqa: E402
     is_per_issue_dir,
     is_within_ephemeral_workspace,
 )
+from coding_team.engine_provider import get_engine_provider  # noqa: E402
 from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
     GitHubClient,
@@ -1468,20 +1469,21 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             except GitHubAPIError:
                 reviewer_login = ""
 
-            # Import the reviewer lazily: it pulls in strands/llm_service, and
-            # keeping it out of module import lets tests stub it cheaply.
-            from software_engineering_team.code_review_agent import CodeReviewAgent, CodeReviewInput
-
-            review_input = CodeReviewInput(
-                code=code,
-                # _build_review_code renders every line with its original
-                # line-number prefix; declaring it here (instead of letting the
-                # reviewer sniff the format) keeps issue lines verbatim.
-                pre_numbered=True,
-                task_description=f"Review pull request #{pr_number}: {pr.title}",
-                task_requirements=pr.body or "",
-                language=_infer_review_language(files),
-            )
+            # The PR reviewer is an injected engine (software_engineering_team owns
+            # it); coding_team calls it through the CodeEngineProvider so this
+            # package imports nothing from SE. The standalone service installs the
+            # provider at startup; without one, fail the job cleanly.
+            provider = get_engine_provider()
+            if provider is None:
+                _record_failure(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    job_id,
+                    "code review failed: no engine provider configured",
+                )
+                return
 
             # Same bridge as the orchestrator's review sites: shared schema,
             # coalescing, swallow-on-failure, and clear-on-exit in one place.
@@ -1494,7 +1496,17 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             )
 
             try:
-                output = CodeReviewAgent().run(review_input, progress_callback=pr_bridge)
+                output = provider.run_pr_code_review(
+                    code=code,
+                    # _build_review_code renders every line with its original
+                    # line-number prefix; declaring it here (instead of letting the
+                    # reviewer sniff the format) keeps issue lines verbatim.
+                    pre_numbered=True,
+                    task_description=f"Review pull request #{pr_number}: {pr.title}",
+                    task_requirements=pr.body or "",
+                    language=_infer_review_language(files),
+                    progress_callback=pr_bridge,
+                )
             except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
                 logger.exception("PR review agent failed: %s", e)
                 _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
