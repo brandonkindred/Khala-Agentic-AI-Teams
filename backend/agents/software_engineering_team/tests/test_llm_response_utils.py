@@ -1,4 +1,4 @@
-"""Tests for ``software_engineering_team.shared.llm_response_utils``.
+"""Tests for ``shared_llm_recovery.recovery``.
 
 Covers JSON extraction from LLM-wrapped content, markdown code-block file
 parsing, and heuristic recovery helpers.
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 
 def test_extract_task_assignment_empty() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
@@ -21,7 +21,7 @@ def test_extract_task_assignment_empty() -> None:
 
 
 def test_extract_task_assignment_no_brace() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
@@ -29,7 +29,7 @@ def test_extract_task_assignment_no_brace() -> None:
 
 
 def test_extract_task_assignment_finds_inline_json() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
@@ -44,40 +44,40 @@ def test_extract_task_assignment_finds_inline_json() -> None:
 
 
 def test_extract_task_assignment_with_thinking_blocks() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
-    text = "<think>reasoning</think>\n<thinking>more</thinking>\n<reasoning>hmm</reasoning>\n{\"tasks\":[{\"id\":\"a\"}]}"
+    text = '<think>reasoning</think>\n<thinking>more</thinking>\n<reasoning>hmm</reasoning>\n{"tasks":[{"id":"a"}]}'
     out = extract_task_assignment_from_content(text)
     assert out is not None
     assert out["tasks"]
 
 
 def test_extract_task_assignment_xml_json_tag() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
-    text = "<json>{\"tasks\": [{\"id\": \"a\"}]}</json>"
+    text = '<json>{"tasks": [{"id": "a"}]}</json>'
     out = extract_task_assignment_from_content(text)
     assert out is not None
 
 
 def test_extract_task_assignment_from_markdown_code_block() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
     # First inline match has no tasks (empty {}), should fall through to code block
-    text2 = "{ } \n```json\n{\"tasks\":[{\"id\":\"x\"}]}\n```"
+    text2 = '{ } \n```json\n{"tasks":[{"id":"x"}]}\n```'
     out = extract_task_assignment_from_content(text2)
     assert out is not None
     assert out["tasks"][0]["id"] == "x"
 
 
 def test_extract_task_assignment_no_tasks_field() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
@@ -87,7 +87,7 @@ def test_extract_task_assignment_no_tasks_field() -> None:
 
 
 def test_extract_task_assignment_malformed_braces() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
@@ -102,7 +102,7 @@ def test_extract_task_assignment_malformed_braces() -> None:
 
 
 def test_looks_like_path_basics() -> None:
-    from software_engineering_team.shared.llm_response_utils import _looks_like_path
+    from shared_llm_recovery.recovery import _looks_like_path
 
     assert _looks_like_path("src/foo.ts") is True
     assert _looks_like_path("foo.py") is True
@@ -118,13 +118,13 @@ def test_looks_like_path_basics() -> None:
 
 
 def test_extract_files_empty() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     assert extract_files_from_content("") == {}
 
 
 def test_extract_files_from_json_with_files_key() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     content = '{"files": {"a.py": "print(1)", "b.py": "print(2)"}}'
     out = extract_files_from_content(content)
@@ -132,7 +132,7 @@ def test_extract_files_from_json_with_files_key() -> None:
 
 
 def test_extract_files_skips_invalid_entries() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     content = '{"files": {"a.py": "code", "bad": "", "x": 123}}'
     out = extract_files_from_content(content)
@@ -140,7 +140,7 @@ def test_extract_files_skips_invalid_entries() -> None:
 
 
 def test_extract_files_json_in_markdown() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     content = """
 ```json
@@ -152,7 +152,7 @@ def test_extract_files_json_in_markdown() -> None:
 
 
 def test_extract_files_path_in_fence_info() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     content = """
 ```src/foo.py
@@ -164,7 +164,7 @@ def x(): pass
 
 
 def test_extract_files_path_as_first_line() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     content = """
 ```
@@ -180,7 +180,7 @@ const x = 1;
 def test_extract_files_first_line_looks_like_path() -> None:
     """Confirm the ``_looks_like_path(lines[0])`` branch where the body's
     first line is itself a path-like token."""
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     content = "```python\nsrc/main.py\ndef hi(): pass\n```"
     out = extract_files_from_content(content)
@@ -188,14 +188,14 @@ def test_extract_files_first_line_looks_like_path() -> None:
 
 
 def test_extract_files_returns_empty_on_no_match() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     out = extract_files_from_content("just plain text, no fences, no json")
     assert out == {}
 
 
 def test_extract_files_no_path_in_block_returns_empty() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     content = """
 ```python
@@ -207,7 +207,7 @@ def x(): pass
 
 
 def test_extract_files_handles_invalid_json_gracefully() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     content = "{ not json at all }"
     # Falls through to code-block patterns; nothing found
@@ -216,7 +216,7 @@ def test_extract_files_handles_invalid_json_gracefully() -> None:
 
 
 def test_extract_files_extension_as_info_only() -> None:
-    from software_engineering_team.shared.llm_response_utils import extract_files_from_content
+    from shared_llm_recovery.recovery import extract_files_from_content
 
     content = "```foo.py\nbody\n```"
     out = extract_files_from_content(content)
@@ -229,7 +229,7 @@ def test_extract_files_extension_as_info_only() -> None:
 
 
 def test_heuristic_extract_empty() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         heuristic_extract_files_from_content,
     )
 
@@ -238,7 +238,7 @@ def test_heuristic_extract_empty() -> None:
 
 
 def test_heuristic_extract_from_markdown_header() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         heuristic_extract_files_from_content,
     )
 
@@ -260,7 +260,7 @@ const y = 2;
 
 
 def test_heuristic_extract_from_file_label() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         heuristic_extract_files_from_content,
     )
 
@@ -277,7 +277,7 @@ def y():
 
 
 def test_heuristic_extract_from_standalone_path_line() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         heuristic_extract_files_from_content,
     )
 
@@ -291,7 +291,7 @@ const x = 2;
 
 
 def test_heuristic_extract_ignores_short_content() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         heuristic_extract_files_from_content,
     )
 
@@ -311,7 +311,7 @@ short
 
 
 def test_extract_single_python_block_found() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_single_python_block,
     )
 
@@ -332,7 +332,7 @@ More text.
 
 
 def test_extract_single_python_block_py_alias() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_single_python_block,
     )
 
@@ -343,7 +343,7 @@ def test_extract_single_python_block_py_alias() -> None:
 
 
 def test_extract_single_python_block_empty() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_single_python_block,
     )
 
@@ -352,7 +352,7 @@ def test_extract_single_python_block_empty() -> None:
 
 
 def test_extract_single_python_block_too_short() -> None:
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_single_python_block,
     )
 

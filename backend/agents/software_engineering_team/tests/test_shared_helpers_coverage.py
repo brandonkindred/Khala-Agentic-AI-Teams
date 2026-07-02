@@ -12,7 +12,7 @@ from __future__ import annotations
 
 
 def test_extract_task_assignment_returns_none_on_empty():
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     assert lru.extract_task_assignment_from_content("") is None
     assert lru.extract_task_assignment_from_content("not json at all") is None
@@ -20,7 +20,7 @@ def test_extract_task_assignment_returns_none_on_empty():
 
 def test_extract_task_assignment_finds_bare_json():
     """Bare JSON containing a `tasks` array round-trips through the helper."""
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     raw = '{"tasks": [{"id": "t1", "title": "x"}]}'
     out = lru.extract_task_assignment_from_content(raw)
@@ -29,20 +29,20 @@ def test_extract_task_assignment_finds_bare_json():
 
 
 def test_extract_files_from_content_empty_returns_dict():
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     out = lru.extract_files_from_content("")
     assert isinstance(out, dict)
 
 
 def test_extract_single_python_block_returns_none_when_absent():
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     assert lru.extract_single_python_block("just text") is None
 
 
 def test_extract_single_python_block_finds_fenced_python():
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     raw = "```python\ndef hello(name):\n    return f'Hi {name}'\n```"
     out = lru.extract_single_python_block(raw)
@@ -52,7 +52,7 @@ def test_extract_single_python_block_finds_fenced_python():
 
 def test_extract_single_python_block_ignores_short_body():
     """Bodies shorter than 20 chars are rejected as too small to be useful."""
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     raw = "```python\nx = 1\n```"
     assert lru.extract_single_python_block(raw) is None

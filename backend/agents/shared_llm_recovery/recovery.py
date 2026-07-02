@@ -83,6 +83,72 @@ def extract_task_assignment_from_content(content: str) -> Optional[Dict[str, Any
     return None
 
 
+def extract_json_object(content: str) -> Optional[Dict[str, Any]]:
+    """Recover the first balanced JSON *object* from raw LLM content.
+
+    Generalises the brace-scan used by ``extract_task_assignment_from_content``
+    without the ``tasks`` filter, so any agent that expects a single JSON object
+    can salvage one from prose-wrapped or think-block-polluted output. Strips
+    ``<think>``/``<thinking>``/``<reasoning>`` blocks, unwraps ``<json>...</json>``,
+    scans for the first top-level balanced ``{...}`` that parses to a ``dict``, and
+    finally falls back to JSON inside a ```` ```json ```` fence.
+
+    Preconditions:
+        - ``content`` is a ``str`` (may be empty).
+    Postconditions:
+        - Returns a ``dict`` on success, or ``None`` when nothing parses. Never
+          raises on malformed input.
+    """
+    if not content or not content.strip():
+        return None
+    stripped = content.strip()
+    stripped = re.sub(r"<think>.*?</think>", "", stripped, flags=re.DOTALL)
+    stripped = re.sub(r"<thinking>.*?</thinking>", "", stripped, flags=re.DOTALL)
+    stripped = re.sub(r"<reasoning>.*?</reasoning>", "", stripped, flags=re.DOTALL)
+    stripped = stripped.strip()
+
+    json_tag_match = re.search(r"<json>\s*([\s\S]*?)\s*</json>", stripped)
+    if json_tag_match:
+        stripped = json_tag_match.group(1).strip()
+
+    i = stripped.find("{")
+    while i != -1 and i < len(stripped):
+        if stripped[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        end = -1
+        for j in range(i, len(stripped)):
+            if stripped[j] == "{":
+                depth += 1
+            elif stripped[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end == -1:
+            i += 1
+            continue
+        try:
+            parsed = json.loads(stripped[i : end + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+        i += 1
+
+    json_match = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", content, re.IGNORECASE)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group(1).strip())
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return None
+
+
 # Extensions we treat as file paths (backend + frontend)
 _PATH_EXTENSIONS = (
     ".py",

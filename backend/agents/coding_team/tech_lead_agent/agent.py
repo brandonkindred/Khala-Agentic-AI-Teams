@@ -18,6 +18,7 @@ from coding_team.hitl import resolved_decision_lines
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts
 from llm_service import call_llm_with_retries
+from shared_llm_recovery import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +130,28 @@ def _plan_text(plan: CodingTeamPlanInput) -> str:
 
 
 def _agent_call_json(agent: Agent, prompt: str) -> Dict[str, Any]:
-    """Call a Strands Agent and parse the result as JSON."""
+    """Call a Strands Agent and parse the result as JSON.
+
+    Preconditions:
+        - ``agent`` is a callable Strands ``Agent``; ``prompt`` is a non-empty str.
+    Postconditions:
+        - Returns the parsed object. Strict ``json.loads`` is tried first (after
+          stripping a single leading/trailing ```` ``` ```` fence); on failure the
+          shared brace-scan recovery salvages a JSON object from prose- or
+          think-block-wrapped output. Raises ``json.JSONDecodeError`` only when no
+          object can be recovered.
+    """
     result = agent(prompt)
     raw = str(result).strip()
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    return json.loads(raw)
+    fenced = re.sub(r"^```(?:json)?\s*", "", raw)
+    fenced = re.sub(r"\s*```$", "", fenced)
+    try:
+        return json.loads(fenced)
+    except json.JSONDecodeError:
+        recovered = extract_json_object(raw)
+        if recovered is not None:
+            return recovered
+        raise
 
 
 class TechLeadAgent:

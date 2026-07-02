@@ -254,8 +254,16 @@ def _ollama_provider_list(monkeypatch):
     from llm_service import provider_store as ps
 
     entry = ps.ProviderEntry(
-        id=1, label="e", provider="ollama", model="", base_url="http://localhost:11434",
-        api_key="", sort_order=1, limit_exceeded=False, limit_type="", reset_at=None,
+        id=1,
+        label="e",
+        provider="ollama",
+        model="",
+        base_url="http://localhost:11434",
+        api_key="",
+        sort_order=1,
+        limit_exceeded=False,
+        limit_type="",
+        reset_at=None,
     )
     monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: [entry])
     monkeypatch.setattr(ps, "select_active_entry", lambda es, **k: es[0])
@@ -330,7 +338,7 @@ def test_get_client_resolves_same_model_across_calls(_ollama_provider_list) -> N
 
 def test_extract_task_assignment_from_content_recovers_tasks() -> None:
     """When LLM returns raw content with embedded JSON, extract_task_assignment_from_content recovers it."""
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
@@ -355,7 +363,7 @@ def test_extract_task_assignment_from_content_recovers_tasks() -> None:
 
 def test_extract_task_assignment_from_content_returns_none_for_empty() -> None:
     """extract_task_assignment_from_content returns None when no tasks in content."""
-    from software_engineering_team.shared.llm_response_utils import (
+    from shared_llm_recovery.recovery import (
         extract_task_assignment_from_content,
     )
 
