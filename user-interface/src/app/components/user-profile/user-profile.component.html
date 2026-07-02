@@ -23,6 +23,35 @@
       </mat-card-header>
       <mat-card-content>
         <form [formGroup]="form" (ngSubmit)="save()" class="up-form">
+          <div class="up-identity">
+            <app-initials-avatar
+              [name]="form.controls.display_name.value ?? ''"
+              [colorKey]="form.controls.avatar_color.value"
+              [size]="64"
+            />
+            <div class="up-identity-meta">
+              <span class="up-identity-hint">Avatar initials come from your display name.</span>
+              <div class="up-swatches" role="radiogroup" aria-label="Avatar color">
+                @for (option of avatarColors; track option.key) {
+                  <button
+                    type="button"
+                    class="up-swatch"
+                    role="radio"
+                    [attr.aria-checked]="form.controls.avatar_color.value === option.key"
+                    [class.selected]="form.controls.avatar_color.value === option.key"
+                    [attr.aria-label]="option.label"
+                    [style.backgroundColor]="'var(' + option.cssVar + ')'"
+                    (click)="selectAvatarColor(option.key)"
+                  >
+                    @if (form.controls.avatar_color.value === option.key) {
+                      <mat-icon aria-hidden="true">check</mat-icon>
+                    }
+                  </button>
+                }
+              </div>
+            </div>
+          </div>
+
           <mat-form-field appearance="outline">
             <mat-label>Display name</mat-label>
             <input matInput formControlName="display_name" autocomplete="name" />

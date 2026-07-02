@@ -316,9 +316,38 @@
 .footer-content {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   gap: 6px;
   padding: 10px 14px;
+}
+
+.footer-profile-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px; // WCAG 2.5.8 target size
+  min-height: 44px;
+  border-radius: var(--kh-radius-md);
+  color: var(--kh-text-muted);
+  transition:
+    background var(--kh-transition),
+    color var(--kh-transition);
+
+  mat-icon {
+    font-size: 22px;
+    width: 22px;
+    height: 22px;
+  }
+
+  &:hover {
+    background: var(--kh-glass-hover);
+    color: var(--kh-text-secondary);
+  }
+
+  &.active {
+    background: var(--kh-accent-muted);
+    color: var(--kh-accent);
+  }
 }
 
 // ============================================================================

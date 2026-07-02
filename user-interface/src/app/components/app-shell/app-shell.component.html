@@ -106,6 +106,17 @@
 
     <div class="sidenav-footer">
       <div class="footer-content">
+        <a
+          #navFocusable
+          routerLink="/user-profile"
+          routerLinkActive="active"
+          class="footer-profile-link"
+          aria-label="User profile"
+          matTooltip="User profile"
+          [attr.aria-current]="isActive('/user-profile') ? 'page' : null"
+        >
+          <mat-icon aria-hidden="true">account_circle</mat-icon>
+        </a>
         <app-api-status-widget />
       </div>
     </div>

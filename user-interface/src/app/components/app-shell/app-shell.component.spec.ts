@@ -56,6 +56,40 @@ describe('AppShellComponent', () => {
     vi.useRealTimers();
   });
 
+  it('renders a footer profile link that navigates to the profile page', () => {
+    const link = (fixture.nativeElement as HTMLElement).querySelector(
+      '.footer-profile-link',
+    ) as HTMLAnchorElement;
+    expect(link).toBeTruthy();
+    expect(link.getAttribute('href')).toBe('/user-profile');
+    expect(link.getAttribute('aria-label')).toBe('User profile');
+    // Not the current page by default, so no aria-current.
+    expect(link.getAttribute('aria-current')).toBeNull();
+  });
+
+  it('marks the footer profile link as current when on /user-profile', () => {
+    (component as any).router = { url: '/user-profile' };
+    fixture.detectChanges();
+    const link = (fixture.nativeElement as HTMLElement).querySelector(
+      '.footer-profile-link',
+    ) as HTMLAnchorElement;
+    expect(link.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('includes the footer profile link last in the arrow-key focus order', () => {
+    const focusables = component.navFocusableElements.toArray().map((el) => el.nativeElement);
+    expect(focusables.length).toBeGreaterThan(0);
+    const last = focusables[focusables.length - 1];
+    expect(last.classList.contains('footer-profile-link')).toBe(true);
+    // End key jumps focus to the last focusable — the footer profile link.
+    focusables[0].focus();
+    (fixture.nativeElement as HTMLElement).dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'End', bubbles: true }),
+    );
+    fixture.detectChanges();
+    expect(document.activeElement).toBe(last);
+  });
+
   it('cancelClose keeps the flyout open past the delay', () => {
     vi.useFakeTimers();
     const [firstGroup] = component.navGroups;

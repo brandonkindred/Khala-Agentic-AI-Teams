@@ -4,6 +4,7 @@ import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
 import { ApiStatusWidgetComponent } from '../api-status-widget/api-status-widget.component';
 import { BreadcrumbComponent } from '../../shared/breadcrumb/breadcrumb.component';
@@ -13,7 +14,9 @@ import { NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from '../../models/n
 /**
  * Application shell with sidebar navigation and main content area.
  * Navigation is data-driven from NAV_GROUPS with flyout panels on hover/focus
- * and favorites.
+ * and favorites. The sidenav footer pins a profile icon linking to
+ * /user-profile; it carries the #navFocusable ref, so it participates in the
+ * arrow-key nav as the last focusable element (DOM order).
  */
 @Component({
   selector: 'app-app-shell',
@@ -26,6 +29,7 @@ import { NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from '../../models/n
     MatToolbarModule,
     MatButtonModule,
     MatIconModule,
+    MatTooltipModule,
     OverlayModule,
     ApiStatusWidgetComponent,
     BreadcrumbComponent,

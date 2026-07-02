@@ -13,13 +13,13 @@
 }
 
 .up-error {
-  background: #fdecea;
-  color: #8a1c12;
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
 }
 
 .up-success {
-  background: #e8f5e9;
-  color: #1b5e20;
+  background: var(--kh-success-subtle);
+  color: var(--kh-success);
 }
 
 .up-card {
@@ -42,6 +42,58 @@
 
   mat-form-field {
     width: 100%;
+  }
+}
+
+.up-identity {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.up-identity-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.up-identity-hint {
+  color: var(--kh-text-muted);
+  font-size: 0.85rem;
+}
+
+.up-swatches {
+  display: flex;
+  gap: 0.25rem;
+}
+
+// A 28px visible circle centered inside a 44px hit target (WCAG 2.5.8).
+// The fill is bound as background-color (not the shorthand) so this
+// content-box clip survives; the transparent padding hides the rest.
+.up-swatch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 44px;
+  height: 44px;
+  padding: 8px; // (44 − 28) / 2 leaves a 28px painted circle
+  border: none;
+  border-radius: 50%;
+  background-clip: content-box;
+  cursor: pointer;
+
+  &.selected {
+    border: 2px solid var(--kh-text-primary);
+    padding: 6px; // keep the painted circle at 28px despite the ring
+  }
+
+  mat-icon {
+    color: var(--kh-text-on-accent);
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
   }
 }
 
@@ -79,7 +131,7 @@
   align-items: center;
   gap: 0.75rem;
   padding: 0.5rem 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  border-bottom: 1px solid var(--kh-border-subtle);
 }
 
 .up-item-label {
@@ -99,13 +151,13 @@
 }
 
 .up-pill-on {
-  background: #e8f5e9;
-  color: #1b5e20;
+  background: var(--kh-success-subtle);
+  color: var(--kh-success);
 }
 
 .up-pill-off {
-  background: #eceff1;
-  color: #546e7a;
+  background: var(--kh-glass);
+  color: var(--kh-text-tertiary);
 }
 
 .up-empty {

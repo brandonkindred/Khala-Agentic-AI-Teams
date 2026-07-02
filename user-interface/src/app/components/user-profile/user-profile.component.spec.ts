@@ -253,4 +253,73 @@ describe('UserProfileComponent', () => {
     expect(component.totalAssociations).toBe(0);
     expect(component.groups).toEqual([]);
   });
+
+  it('should load a stored avatar color into the form', async () => {
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark', avatar_color: 'blue' } } }),
+    );
+    await setup();
+    expect(component.form.value.avatar_color).toBe('blue');
+  });
+
+  it('should default the avatar color when preferences are missing or garbage', async () => {
+    for (const preferences of [null, 'nonsense', ['x'], { avatar_color: 42 }, { avatar_color: 'magenta' }]) {
+      apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, profile: { ...PROFILE, preferences } }));
+      await setup();
+      expect(component.form.value.avatar_color).toBe('amber');
+      fixture.destroy();
+      TestBed.resetTestingModule();
+    }
+  });
+
+  it('should mark the form dirty and check the matching swatch when a color is selected', async () => {
+    await setup();
+    expect(component.form.dirty).toBe(false);
+    component.selectAvatarColor('green');
+    fixture.detectChanges();
+    expect(component.form.value.avatar_color).toBe('green');
+    expect(component.form.dirty).toBe(true);
+    const checked = (fixture.nativeElement as HTMLElement).querySelector(
+      '.up-swatch[aria-checked="true"]',
+    ) as HTMLButtonElement;
+    expect(checked).toBeTruthy();
+    expect(checked.getAttribute('aria-label')).toBe('Green');
+  });
+
+  it('should merge the avatar color into existing preferences on save (no clobbering)', async () => {
+    // Regression guard: the backend PUT replaces preferences wholesale, so a
+    // save must carry the previously loaded keys alongside avatar_color.
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark' } } }),
+    );
+    await setup();
+    component.selectAvatarColor('green');
+    component.save();
+    expect(apiSpy.updateProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ preferences: { theme: 'dark', avatar_color: 'green' } }),
+    );
+  });
+
+  it('should keep merging against saved preferences on back-to-back saves', async () => {
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark' } } }),
+    );
+    await setup();
+    component.selectAvatarColor('green');
+    component.save();
+    // A second save without a reload must still carry the unrelated key.
+    component.selectAvatarColor('red');
+    component.save();
+    expect(apiSpy.updateProfile).toHaveBeenLastCalledWith(
+      expect.objectContaining({ preferences: { theme: 'dark', avatar_color: 'red' } }),
+    );
+  });
+
+  it('should live-update the avatar initials from the display name control', async () => {
+    await setup();
+    component.form.patchValue({ display_name: 'Grace Hopper' });
+    fixture.detectChanges();
+    const circle = (fixture.nativeElement as HTMLElement).querySelector('.ia-circle');
+    expect(circle?.textContent?.trim()).toBe('GH');
+  });
 });

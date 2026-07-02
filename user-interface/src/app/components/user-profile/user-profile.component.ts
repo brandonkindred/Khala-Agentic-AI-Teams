@@ -9,6 +9,12 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { RouterLink } from '@angular/router';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
+import { InitialsAvatarComponent } from '../../shared/avatar/initials-avatar.component';
+import {
+  AVATAR_COLOR_OPTIONS,
+  DEFAULT_AVATAR_COLOR,
+  resolveAvatarColor,
+} from '../../shared/avatar/avatar-colors';
 import { UserProfileApiService } from '../../services/user-profile-api.service';
 import type { Association, ProfileIntegration } from '../../models/user-profile.model';
 
@@ -29,9 +35,10 @@ const ARTIFACT_GROUPS: { type: string; label: string; icon: string }[] = [
 ];
 
 /**
- * User Profile page: review/update the single profile and view the artifacts
- * (brands, blog posts, projects, agentic teams) and integrations linked to it.
- * Reached via the "User Profile" icon in the Settings nav group.
+ * User Profile page: review/update the single profile (including the initials
+ * avatar color) and view the artifacts (brands, blog posts, projects, agentic
+ * teams) and integrations linked to it. Reached via the profile icon in the
+ * sidenav footer or the "User Profile" entry in the Settings nav group.
  */
 @Component({
   selector: 'app-user-profile',
@@ -46,6 +53,7 @@ const ARTIFACT_GROUPS: { type: string; label: string; icon: string }[] = [
     MatIconModule,
     MatProgressSpinnerModule,
     DashboardShellComponent,
+    InitialsAvatarComponent,
   ],
   templateUrl: './user-profile.component.html',
   styleUrl: './user-profile.component.scss',
@@ -65,10 +73,22 @@ export class UserProfileComponent implements OnInit {
   /** Total linked artifacts, computed once per load (not per change-detection tick). */
   totalAssociations = 0;
 
+  /** Palette rendered as the avatar color swatch radiogroup. */
+  readonly avatarColors = AVATAR_COLOR_OPTIONS;
+
+  /**
+   * Preferences as last loaded (or last saved) from the backend. The PUT
+   * endpoint replaces `preferences` wholesale, so every save must spread this
+   * snapshot before overriding `avatar_color` — otherwise unrelated keys
+   * written by other features would be silently dropped.
+   */
+  private loadedPreferences: Record<string, unknown> = {};
+
   readonly form = this.fb.group({
     display_name: [''],
     email: ['', [Validators.email]],
     bio: [''],
+    avatar_color: [DEFAULT_AVATAR_COLOR],
   });
 
   ngOnInit(): void {
@@ -118,12 +138,19 @@ export class UserProfileComponent implements OnInit {
           return;
         }
         const { profile, associations, integrations } = overview;
+        // `preferences` is free-form JSONB — only trust a plain object, and
+        // keep the snapshot so saves can merge instead of clobbering it.
+        this.loadedPreferences =
+          profile.preferences && typeof profile.preferences === 'object' && !Array.isArray(profile.preferences)
+            ? (profile.preferences as Record<string, unknown>)
+            : {};
         this.form.patchValue({
           // `?? ''` defends against a null slipping through a technically-valid
           // body; the backend columns are NOT NULL DEFAULT so this is belt-and-braces.
           display_name: profile.display_name ?? '',
           email: profile.email ?? '',
           bio: profile.bio ?? '',
+          avatar_color: resolveAvatarColor(this.loadedPreferences['avatar_color']).key,
         });
         this.groups = this.groupAssociations(associations);
         this.totalAssociations = this.groups.reduce((sum, g) => sum + g.items.length, 0);
@@ -156,17 +183,28 @@ export class UserProfileComponent implements OnInit {
     this.error = null;
     this.success = null;
     const value = this.form.getRawValue();
+    // Merge invariant: the backend PUT replaces `preferences` wholesale, so the
+    // payload must carry every previously loaded key, with only `avatar_color`
+    // overridden — unrelated keys (e.g. flags other features stored) survive.
+    const preferences: Record<string, unknown> = {
+      ...this.loadedPreferences,
+      avatar_color: value.avatar_color ?? DEFAULT_AVATAR_COLOR,
+    };
     this.api
       .updateProfile({
         display_name: value.display_name ?? '',
         email: value.email ?? '',
         bio: value.bio ?? '',
+        preferences,
       })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: () => {
           this.saving = false;
           this.success = 'Profile saved.';
+          // What we sent is now the persisted state — refresh the snapshot so a
+          // second save without a reload still merges against current data.
+          this.loadedPreferences = preferences;
           // The form now matches the persisted state — clear the dirty flag so an
           // unsaved-changes guard doesn't prompt after a successful save.
           this.form.markAsPristine();
@@ -176,6 +214,20 @@ export class UserProfileComponent implements OnInit {
           this.error = 'Failed to save your profile. Please try again.';
         },
       });
+  }
+
+  /**
+   * Select an avatar color swatch.
+   *
+   * Preconditions: `key` should be a palette key; unknown keys are tolerated
+   * (they render — and persist — as the default color via `resolveAvatarColor`).
+   * Postconditions: the `avatar_color` control holds `key` and is marked dirty,
+   * so unsaved-changes semantics match typing in a field (a bare button click
+   * does not dirty a reactive control by itself).
+   */
+  selectAvatarColor(key: string): void {
+    this.form.controls.avatar_color.setValue(key);
+    this.form.controls.avatar_color.markAsDirty();
   }
 
   /** Group flat associations into the fixed display order, dropping empties. */
