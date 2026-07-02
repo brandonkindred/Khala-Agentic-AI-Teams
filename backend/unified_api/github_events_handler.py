@@ -192,17 +192,20 @@ def _add_eyes_reaction(owner: str, repo: str, comment_id: int, token: str | None
         logger.warning("GitHub webhook: could not add reaction to comment %s", comment_id, exc_info=True)
 
 
-def _start_review(pr_number: int, token: str | None) -> bool:
+def _start_review(owner: str, repo: str, pr_number: int, token: str | None) -> bool:
     """Start the existing PR-review flow for ``pr_number`` (runs the async helper).
 
-    Preconditions: ``pr_number`` is a positive PR number; ``token`` is a pre-resolved
-        GitHub PAT reused so the review path does not re-read the credential store, or
-        ``None`` to let that path resolve it.
+    Preconditions: ``owner``/``repo`` are the repository ``dispatch_github_event`` already
+        validated against the configured integration; ``pr_number`` is a positive PR
+        number; ``token`` is a pre-resolved GitHub PAT reused so the review path does not
+        re-read the credential store, or ``None`` to let that path resolve it.
     Postconditions: forwards to the same ``_start_pr_review`` path used by
-        ``POST /api/integrations/github/review-pr``. Returns ``True`` iff a review job was
-        actually started, ``False`` on any failure (so the caller can avoid posting a
-        misleading acknowledgement). Errors are logged, not raised — the webhook has
-        already returned 200 and there is no client to surface them to.
+        ``POST /api/integrations/github/review-pr``, passing ``owner``/``repo`` as the
+        expected target so the review is refused (not run against a different repo) if the
+        configured owner/repo changed since dispatch validated them. Returns ``True`` iff a
+        review job was actually started, ``False`` on any failure (so the caller can avoid
+        posting a misleading acknowledgement). Errors are logged, not raised — the webhook
+        has already returned 200 and there is no client to surface them to.
         Runs on a bounded executor worker thread (see :func:`_get_dispatch_executor`),
         which has no event loop of its own, so a fresh ``asyncio.run()`` per call is the
         standard way to run this one coroutine to completion — the same shape as
@@ -219,7 +222,7 @@ def _start_review(pr_number: int, token: str | None) -> bool:
 
         from unified_api.routes.integrations import _start_pr_review
 
-        result = asyncio.run(_start_pr_review(pr_number, None, token=token))
+        result = asyncio.run(_start_pr_review(pr_number, None, token=token, expected_owner=owner, expected_repo=repo))
         logger.info("GitHub webhook: started review job %s for PR #%s", getattr(result, "job_id", "?"), pr_number)
         return True
     except Exception:
@@ -242,7 +245,7 @@ def process_review_request(owner: str, repo: str, pr_number: int, comment_id: in
         returned 200).
     """
     token = _resolve_github_token()
-    if _start_review(pr_number, token):
+    if _start_review(owner, repo, pr_number, token):
         _add_eyes_reaction(owner, repo, comment_id, token)
 
 

@@ -264,7 +264,7 @@ def test_process_review_request_resolves_token_once_starts_then_reacts_on_succes
     ):
         gh.process_review_request("acme", "widget", 42, 999)
     tok.assert_called_once_with()
-    start.assert_called_once_with(42, "ghp_tok")
+    start.assert_called_once_with("acme", "widget", 42, "ghp_tok")
     react.assert_called_once_with("acme", "widget", 999, "ghp_tok")
 
 
@@ -333,22 +333,24 @@ def test_configured_owner_repo_empty_on_error():
 def test_start_review_invokes_shared_helper_with_token_and_returns_true():
     seen = {}
 
-    async def _fake_start(pr_number, base_branch, *, token=None):
-        seen["args"] = (pr_number, base_branch, token)
+    async def _fake_start(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
+        seen["args"] = (pr_number, base_branch, token, expected_owner, expected_repo)
         return MagicMock(job_id="job-1")
 
     with patch("unified_api.routes.integrations._start_pr_review", _fake_start):
-        assert gh._start_review(42, "ghp_tok") is True
-    # The pre-resolved token is threaded through so the review path does not re-read it.
-    assert seen["args"] == (42, None, "ghp_tok")
+        assert gh._start_review("acme", "widget", 42, "ghp_tok") is True
+    # The pre-resolved token is threaded through so the review path does not re-read it,
+    # and the validated owner/repo are passed as the expected target so a config change
+    # mid-flight cannot redirect the review to a different repo.
+    assert seen["args"] == (42, None, "ghp_tok", "acme", "widget")
 
 
 def test_start_review_swallows_errors_and_returns_false():
-    async def _boom(pr_number, base_branch, *, token=None):
+    async def _boom(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
         raise RuntimeError("downstream down")
 
     with patch("unified_api.routes.integrations._start_pr_review", _boom):
-        assert gh._start_review(42, "ghp_tok") is False  # logged, not raised
+        assert gh._start_review("acme", "widget", 42, "ghp_tok") is False  # logged, not raised
 
 
 def test_configured_owner_repo_reads_meta():

@@ -1120,3 +1120,44 @@ def test_start_pr_review_with_token_400_when_owner_repo_missing():
         asyncio.run(_start_pr_review(7, None, token="ghp_pre"))
     assert exc.value.status_code == 400
     assert "owner/repo" in exc.value.detail
+
+
+def test_start_pr_review_proceeds_when_expected_owner_repo_match(monkeypatch):
+    """When the caller passes the repo it validated and the configured owner/repo still
+    match (case-insensitively), the review starts normally."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {"job_id": "rev-9", "pr_number": 7, "pr_url": "u", "status": "pending", "message": ""},
+        )
+    )
+    with (
+        patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG)),
+        patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_pre", True)),
+        patch(f"{_M}.httpx.AsyncClient", return_value=fake),
+    ):
+        # Different case on purpose — GitHub treats owner/repo case-insensitively.
+        result = asyncio.run(
+            _start_pr_review(7, None, token="ghp_pre", expected_owner="ACME", expected_repo="Widget")
+        )
+    assert result.job_id == "rev-9"
+
+
+def test_start_pr_review_409_when_configured_repo_changed():
+    """If the operator repointed the integration between webhook validation and this
+    worker running, the resolved owner/repo no longer match the repo the caller
+    validated — the review must be refused with 409, never run against the new repo."""
+    from fastapi import HTTPException as _HTTPExc
+
+    with (
+        # Config now points at a DIFFERENT repo than the webhook validated.
+        patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "acme", "repo": "other-repo"}),
+        patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_pre", True)),
+        pytest.raises(_HTTPExc) as exc,
+    ):
+        asyncio.run(
+            _start_pr_review(7, None, token="ghp_pre", expected_owner="acme", expected_repo="widget")
+        )
+    assert exc.value.status_code == 409
+    assert "changed" in exc.value.detail.lower()

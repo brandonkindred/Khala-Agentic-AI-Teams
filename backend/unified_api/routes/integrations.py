@@ -1974,7 +1974,14 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         ) from e
 
 
-async def _start_pr_review(pr_number: int, base_branch: str | None, *, token: str | None = None) -> RunPrReviewResponse:
+async def _start_pr_review(
+    pr_number: int,
+    base_branch: str | None,
+    *,
+    token: str | None = None,
+    expected_owner: str | None = None,
+    expected_repo: str | None = None,
+) -> RunPrReviewResponse:
     """Resolve the GitHub target and start a PR review on the coding-team service.
 
     Shared by ``POST /github/review-pr`` (manual UI trigger) and the GitHub webhook
@@ -1993,16 +2000,44 @@ async def _start_pr_review(pr_number: int, base_branch: str | None, *, token: st
         - ``token``, when supplied, is a GitHub PAT the caller already resolved (the
           webhook path passes this so a single credential-store read serves the whole
           request); when ``None`` the PAT is read via ``_resolve_github_target``.
+        - ``expected_owner``/``expected_repo``, when supplied, are the repository the
+          caller already validated (the webhook path validated the comment's repo
+          against the configured owner/repo at dispatch time).
     Postconditions:
         - On success returns a ``RunPrReviewResponse`` describing the started review
           job. Every failure path raises ``HTTPException`` with an explanatory detail;
           no ``httpx`` error escapes as an unhandled exception.
+        - When ``expected_owner``/``expected_repo`` are supplied and the currently
+          configured owner/repo no longer match them (the operator repointed the
+          integration between webhook validation and this worker running), raises
+          ``HTTPException(409)`` and starts no review — so an ``@khala review`` on one
+          repo can never launch a review of the same PR number against a *different*,
+          newly configured repo (comparison is case-insensitive, as GitHub treats
+          owner/repo).
     """
     # Single validation path (shared with every other GitHub route via
     # _resolve_github_target) — token, when pre-resolved by the caller (webhook path),
     # is forwarded as an override so the credential store is never re-touched; otherwise
     # it's read here, with the same 503-vs-400 reachability handling as the UI route.
     cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, token)
+
+    # Revalidate against the repository the caller matched. A webhook delivery is queued
+    # and processed on a worker thread; if the configured owner/repo changed in between,
+    # the resolved owner/repo above would point at the *new* repo while ``pr_number`` came
+    # from a comment on the *old* one. Refuse rather than review the wrong repository.
+    if (
+        expected_owner is not None
+        and expected_repo is not None
+        and (owner.casefold() != expected_owner.casefold() or repo.casefold() != expected_repo.casefold())
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Configured repository changed since the review was requested "
+                f"(expected {expected_owner}/{expected_repo}, now {owner}/{repo}); "
+                "skipping this stale review request."
+            ),
+        )
 
     coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
     if not coding_team_url:
