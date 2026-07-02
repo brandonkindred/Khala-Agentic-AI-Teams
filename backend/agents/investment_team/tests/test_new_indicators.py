@@ -1467,3 +1467,95 @@ def test_conformance_rejects_bare_donchian_call() -> None:
     results = CodeConformanceGate().check(_CC_BARE_DONCHIAN_CALL, _donchian_spec())
     # The bare, non-exported ``donchian(...)`` name must not credit the indicator.
     assert any("donchian" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def _bollinger_percent_b_spec() -> StrategySpec:
+    return StrategySpec(
+        strategy_id="cc-bb-pb",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ Bollinger %B mean reversion.",
+        signal_definition="percent_b < 0.05",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20}),
+                    op="<",
+                    rhs=0.05,
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+        requires_custom_code=True,
+    )
+
+
+_CC_BOLLINGER_CTX_PB = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            pb = ctx.indicator("bollinger", period=20, num_std=2.0, band="percent_b")
+            if pb is None:
+                return
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and pb < 0.05:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+# Reads the base bands via a plain ``bollinger_bands(...)`` call (which returns
+# only upper/middle/lower) but never computes %B — this satisfies the name-level
+# presence check yet does NOT produce the required derived band.
+_CC_BOLLINGER_BARE_BANDS = textwrap.dedent("""
+    from contract import Strategy
+    from indicators import bollinger_bands
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            upper, middle, lower = bollinger_bands(bars, 20, 2.0)
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and bar.close < lower:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_credits_bollinger_percent_b_via_ctx_indicator() -> None:
+    results = CodeConformanceGate().check(_CC_BOLLINGER_CTX_PB, _bollinger_percent_b_spec())
+    assert not any("percent_b" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def test_conformance_rejects_bare_bollinger_bands_for_derived_band() -> None:
+    # bollinger_bands(...) returns only upper/middle/lower, so it must not credit
+    # a required percent_b band even though it credits the bollinger *name*.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_BARE_BANDS, _bollinger_percent_b_spec())
+    crits = _crit(results)
+    assert any("percent_b" in d.lower() for d in crits), crits
+
+
+def test_conformance_compiled_bollinger_percent_b_passes() -> None:
+    # The deterministic compiler emits ``bollinger_bands(..., select='percent_b')``,
+    # which DOES produce the derived band — the band-aware check must credit it.
+    ref = IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20})
+    code = compile_strategy(_compile_spec(ref))
+    results = CodeConformanceGate().check(code, _compile_spec(ref))
+    assert not any("percent_b" in d.lower() for d in _crit(results)), _crit(results)

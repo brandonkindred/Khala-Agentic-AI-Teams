@@ -158,6 +158,43 @@ def _collect_required_indicators(spec: Any) -> set[str]:
     return refs
 
 
+# Bollinger bands that the ``bollinger_bands`` helper does NOT return: they are
+# derived from the base bands and only materialise when explicitly selected, so
+# a plain helper call that yields upper/middle/lower must not credit them.
+_BOLLINGER_DERIVED_BANDS: frozenset[str] = frozenset({"percent_b", "bandwidth"})
+
+
+def _required_bollinger_derived_bands(spec: Any) -> set[str]:
+    """Derived Bollinger bands (``percent_b``/``bandwidth``) the code must produce.
+
+    Pre: ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: returns the subset of ``{percent_b, bandwidth}`` any required Bollinger
+    ref selects. Entry rules count on both paths; ``SignalExitRule`` indicators
+    count only for the compiled path (custom-code exits are engine-owned), matching
+    :func:`_collect_required_indicators`. Base bands (upper/middle/lower) are not
+    tracked here — the ``bollinger_bands`` helper returns them directly, so a plain
+    call is a sufficient read; the derived bands need the ``select=``/``band=``
+    selector, so they are credited only by a band-matched read.
+    """
+    if spec is None:
+        return set()
+    bands: set[str] = set()
+
+    def _scan(when: Any) -> None:
+        for ref in iter_tree_indicator_refs(when):
+            if ref.name == "bollinger" and ref.param("band") in _BOLLINGER_DERIVED_BANDS:
+                bands.add(ref.param("band"))
+
+    for rule in getattr(spec, "entry_rules", []) or []:
+        if isinstance(rule, EntryRule):
+            _scan(rule.when)
+    if not getattr(spec, "requires_custom_code", False):
+        for rule in getattr(spec, "exit_rules", []) or []:
+            if isinstance(rule, SignalExitRule):
+                _scan(rule.when)
+    return bands
+
+
 def _collect_called_names_in_methods(cls: ast.ClassDef, method_names: frozenset[str]) -> set[str]:
     """Return the set of function-call names found inside the listed
     methods of ``cls`` (descent stops at nested defs/classes/lambdas).
@@ -345,6 +382,42 @@ def _collect_ctx_indicator_names(cls: ast.ClassDef, method_names: frozenset[str]
         if name:
             out.add(name)
     return out
+
+
+def _string_kwarg(node: ast.Call, key: str) -> Optional[str]:
+    """Return the string-literal value of ``node``'s ``key=`` keyword, else ``None``."""
+    for kw in node.keywords:
+        if kw.arg == key and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return kw.value.value
+    return None
+
+
+def _collect_produced_bollinger_bands(cls: ast.ClassDef, method_names: frozenset[str]) -> set[str]:
+    """Return the Bollinger selectors the on_bar-reachable code actually requests.
+
+    ``percent_b``/``bandwidth`` only materialise when explicitly selected — via
+    ``ctx.indicator('bollinger', ..., band='<b>')`` (the engine accessor the
+    custom-code path uses) or a ``bollinger_bands(..., select='<b>')`` call (the
+    form the deterministic compiler emits). A plain ``bollinger_bands(...)`` with
+    no ``select=`` yields only the base bands, so it does not credit a derived
+    band. Scans the same reachable methods as :func:`_collect_ctx_indicator_names`.
+    """
+    produced: set[str] = set()
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if not isinstance(node, ast.Call):
+                continue
+            if _is_ctx_indicator_call(node) and _ctx_indicator_arg_name(node) == "bollinger":
+                band = _string_kwarg(node, "band")
+                if band:
+                    produced.add(band)
+            elif _get_call_name(node) == "bollinger_bands":
+                select = _string_kwarg(node, "select")
+                if select:
+                    produced.add(select)
+    return produced
 
 
 def _invalid_ctx_indicator_reads(
@@ -940,6 +1013,25 @@ class CodeConformanceGate(GateResultsMixin):
                         "and calls in unreachable helpers are not recognised."
                     )
                 )
+
+            # A derived Bollinger band (percent_b/bandwidth) needs the selector:
+            # the ``bollinger_bands`` helper returns only upper/middle/lower, so a
+            # plain call satisfies the name-level check above yet never computes
+            # the requested series. Credit these bands only when a reachable read
+            # actually selects them.
+            required_derived = _required_bollinger_derived_bands(cctx.spec)
+            if required_derived:
+                produced = _collect_produced_bollinger_bands(cctx.cls, cctx.reachable)
+                for band in sorted(required_derived - produced):
+                    results.append(
+                        self._critical(
+                            f"Spec requires the Bollinger '{band}' band but no method "
+                            "reachable from on_bar produces it. Read it via "
+                            f"``ctx.indicator('bollinger', ..., band='{band}')`` (preferred) "
+                            f"or ``bollinger_bands(..., select='{band}')``; a plain "
+                            "bollinger_bands(...) call returns only upper/middle/lower."
+                        )
+                    )
         return results
 
     # ------------------------------------------------------------------
