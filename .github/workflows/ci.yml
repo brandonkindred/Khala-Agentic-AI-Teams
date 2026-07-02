@@ -77,6 +77,11 @@ jobs:
               - 'backend/agents/shared_agent_invoke/**'
               - 'backend/agents/shared_graph/**'
               - 'backend/agents/shared_observability/**'
+              - 'backend/agents/shared_command_runner/**'
+              - 'backend/agents/shared_repo_context/**'
+              - 'backend/agents/shared_llm_recovery/**'
+              - 'backend/agents/shared_dev_models/**'
+              - 'backend/agents/shared_git/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/event_bus/**'
               - 'backend/agents/artifact_registry/**'
@@ -142,10 +147,17 @@ jobs:
             software_engineering:
               - 'backend/agents/software_engineering_team/**'
               - 'backend/agents/coding_team/**'
+              - 'backend/agents/coding_team_service/**'
               - 'backend/agents/planning_v3_team/**'
               - 'backend/agents/agent_repair_team/**'
               # SE/coding_team's Senior SWE imports the shared repo-inspection tools.
               - 'backend/agents/agent_repo_tools/**'
+            # coding_team runs as its own job (its suite is substantial and, unlike
+            # SE, it must stay import-free of software_engineering_team — the
+            # test_no_se_imports guard rides along here).
+            coding_team:
+              - 'backend/agents/coding_team/**'
+              - 'backend/agents/coding_team_service/**'
             # Read-only repo-inspection tools shared by repo-backed agents.
             agent_repo_tools:
               - 'backend/agents/agent_repo_tools/**'
@@ -278,6 +290,7 @@ jobs:
           F_BACKEND_ANY: ${{ steps.filter.outputs.backend_any }}
           F_BACKEND_UNCLASSIFIED: ${{ steps.filter_unclassified.outputs.backend_unclassified }}
           F_SOFTWARE_ENGINEERING: ${{ steps.filter.outputs.software_engineering }}
+          F_CODING_TEAM: ${{ steps.filter.outputs.coding_team }}
           F_BLOGGING: ${{ steps.filter.outputs.blogging }}
           F_MARKET_RESEARCH: ${{ steps.filter.outputs.market_research }}
           F_SOC2: ${{ steps.filter.outputs.soc2 }}
@@ -303,6 +316,11 @@ jobs:
                   "extra_requirements": "software_engineering_team/requirements.txt",
                   "editable_install": "software_engineering_team",
                   "needs_node": True,
+              },
+              "coding_team": {
+                  "name": "Coding Team",
+                  "tests": "coding_team/tests/",
+                  "source": "coding_team",
               },
               "blogging": {
                   "name": "Blogging",
