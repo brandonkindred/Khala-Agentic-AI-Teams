@@ -176,7 +176,7 @@ def _dispatch(payload, event_type="issue_comment", delivery_id=""):
 
 def test_dispatch_triggers_review_on_valid_comment():
     proc = _dispatch(_comment_payload())
-    proc.assert_called_once_with("acme", "widget", 42, 999, "alice", "")
+    proc.assert_called_once_with("acme", "widget", 42, 999, "")
 
 
 def test_dispatch_ignores_non_issue_comment_event():
@@ -222,7 +222,7 @@ def test_dispatch_forwards_payload_repo_for_worker_side_config_match():
     # repo-match tests below); dispatch just forwards the payload's coordinates.
     payload = _comment_payload(repository={"name": "Widget", "owner": {"login": "ACME"}})
     proc = _dispatch(payload)
-    proc.assert_called_once_with("ACME", "Widget", 42, 999, "alice", "")
+    proc.assert_called_once_with("ACME", "Widget", 42, 999, "")
 
 
 @pytest.mark.parametrize("bad_number", ["not-an-int", None, True, False, 0, -7])
@@ -238,7 +238,7 @@ def test_dispatch_defaults_missing_comment_id_to_zero():
     payload = _comment_payload()
     del payload["comment"]["id"]
     proc = _dispatch(payload)
-    proc.assert_called_once_with("acme", "widget", 42, 0, "alice", "")
+    proc.assert_called_once_with("acme", "widget", 42, 0, "")
 
 
 def test_dispatch_forgets_delivery_when_submit_dropped():
@@ -259,19 +259,18 @@ def test_dispatch_forgets_delivery_when_submit_dropped():
 # ---------------------------------------------------------------------------
 
 
-def _process(owner="acme", repo="widget", cfg=("acme", "widget"), start="started", own_login=""):
+def _process(owner="acme", repo="widget", cfg=("acme", "widget"), start="started"):
     """Run process_review_request with its collaborators patched; return the mock bundle."""
     mocks = {
         "tok": patch(f"{_H}._resolve_github_token", return_value="ghp_tok"),
         "cfg": patch(f"{_H}._configured_owner_repo", return_value=cfg),
-        "own": patch(f"{_H}._own_github_login", return_value=own_login),
         "start": patch(f"{_H}._start_review", return_value=start),
         "react": patch(f"{_H}._add_comment_reaction"),
         "forget": patch(f"{_H}._forget_delivery"),
     }
     started = {k: m.start() for k, m in mocks.items()}
     try:
-        gh.process_review_request(owner, repo, 42, 999, "alice", "d-1")
+        gh.process_review_request(owner, repo, 42, 999, "d-1")
     finally:
         for m in mocks.values():
             m.stop()
@@ -325,24 +324,29 @@ def test_process_review_request_ignores_when_no_configured_repo():
     m["forget"].assert_called_once_with("d-1")
 
 
-def test_process_review_request_skips_own_comment():
-    """A comment posted by the PAT's own account (type "User", OWNER-associated) passes
-    the Bot check — the own-login match must stop it from re-triggering a review loop."""
-    m = _process(own_login="alice")  # comment author is "alice" (payload default)
-    m["start"].assert_not_called()
-    m["react"].assert_not_called()
-    m["forget"].assert_not_called()  # nothing to redeliver — the skip is final
+def test_dispatch_skips_khala_generated_comment_even_with_command():
+    """A Khala-posted comment (marker present) must never re-trigger a review, even when
+    it quotes '@khala review' — e.g. a review finding echoing a diff that contains the
+    command. This is the loop guard: Khala posts with the operator's PAT, so only the
+    marker, never the author, can distinguish its output."""
+    payload = _comment_payload()
+    payload["comment"]["body"] = f"Finding quotes: @khala review\n\n{gh._KHALA_COMMENT_MARKER}"
+    assert _dispatch(payload).called is False
 
 
-def test_process_review_request_own_login_match_is_case_insensitive():
-    m = _process(own_login="ALICE")
-    m["start"].assert_not_called()
+def test_dispatch_allows_pat_owner_to_request_reviews():
+    """The operator whose PAT is configured is often exactly the person triggering
+    reviews — their genuine (marker-less) command must go through."""
+    payload = _comment_payload()  # author "alice" could be the PAT owner; no marker
+    assert _dispatch(payload).called is True
 
 
-def test_process_review_request_proceeds_when_own_login_unknown():
-    # "" means the lookup failed — fail open (an API blip must not block real requests).
-    m = _process(own_login="")
-    m["start"].assert_called_once()
+def test_khala_comment_marker_matches_client_constant():
+    """The handler keeps its own copy of the marker literal (it must not import the
+    coding-team client at module scope); the two must never drift."""
+    from coding_team.github_source.client import KHALA_COMMENT_MARKER
+
+    assert gh._KHALA_COMMENT_MARKER == KHALA_COMMENT_MARKER
 
 
 def test_add_comment_reaction_noop_without_comment_id():
@@ -382,26 +386,6 @@ def test_add_comment_reaction_swallows_errors():
     with patch("coding_team.github_source.client.GitHubClient", side_effect=RuntimeError("boom")):
         # Best-effort: an exception here must not propagate.
         gh._add_comment_reaction("acme", "widget", 999, "ghp_tok")
-
-
-def test_own_github_login_resolves_and_caches():
-    gh._OWN_LOGIN_CACHE.clear()
-    fake_client = MagicMock()
-    fake_client.__enter__ = MagicMock(return_value=fake_client)
-    fake_client.__exit__ = MagicMock(return_value=False)
-    fake_client.get_authenticated_login.return_value = "khala-bot"
-    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client) as cls:
-        assert gh._own_github_login("ghp_tok") == "khala-bot"
-        assert gh._own_github_login("ghp_tok") == "khala-bot"  # served from cache
-    assert cls.call_count == 1
-
-
-def test_own_github_login_empty_without_token_and_on_error():
-    gh._OWN_LOGIN_CACHE.clear()
-    assert gh._own_github_login(None) == ""
-    assert gh._own_github_login("") == ""
-    with patch("coding_team.github_source.client.GitHubClient", side_effect=RuntimeError("api down")):
-        assert gh._own_github_login("ghp_tok") == ""  # fail-open, logged, not raised
 
 
 def test_resolve_github_token_reads_credential():
@@ -529,7 +513,7 @@ def test_dispatch_submits_to_bounded_executor_not_raw_thread():
         patch(f"{_H}.process_review_request") as proc,
     ):
         gh.dispatch_github_event("issue_comment", _comment_payload())
-    fake_executor.submit.assert_called_once_with(proc, "acme", "widget", 42, 999, "alice", "")
+    fake_executor.submit.assert_called_once_with(proc, "acme", "widget", 42, 999, "")
 
 
 def test_dispatch_never_raises_when_executor_is_shut_down():
@@ -595,7 +579,7 @@ def test_is_duplicate_delivery_caps_table_size():
 def test_dispatch_ignores_redelivered_delivery_id():
     """The same delivery_id twice must only submit review work once."""
     proc = _dispatch(_comment_payload(), delivery_id="delivery-1")
-    proc.assert_called_once_with("acme", "widget", 42, 999, "alice", "delivery-1")
+    proc.assert_called_once_with("acme", "widget", 42, 999, "delivery-1")
     assert _dispatch(_comment_payload(), delivery_id="delivery-1").called is False
 
 

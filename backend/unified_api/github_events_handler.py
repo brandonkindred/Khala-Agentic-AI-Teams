@@ -70,6 +70,18 @@ _AUTHORIZED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 # whitespace between the mention and the command.
 _REVIEW_COMMAND = re.compile(r"@khala\s+review\b", re.IGNORECASE)
 
+# Marker `GitHubClient.add_issue_comment` appends to every comment Khala posts (an HTML
+# comment — invisible in GitHub's rendered view). Comments carrying it are Khala's own
+# output and must never re-trigger a review, even when they quote "@khala review" (e.g. a
+# review finding echoing a diff that contains the command). Khala posts with the
+# operator's PAT, so author identity CANNOT be the loop guard: the PAT owner is often
+# exactly the maintainer expected to trigger reviews from PR comments, and filtering by
+# author would silently break their commands. Duplicated from
+# ``coding_team.github_source.client.KHALA_COMMENT_MARKER`` (this module must stay
+# importable without the coding-team package at module scope); a cross-module test
+# asserts the two literals stay equal.
+_KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
+
 
 # ---------------------------------------------------------------------------
 # Signature verification
@@ -194,43 +206,6 @@ def _add_comment_reaction(owner: str, repo: str, comment_id: int, token: str | N
         logger.warning("GitHub webhook: could not add reaction to comment %s", comment_id, exc_info=True)
 
 
-# Cached login of the PAT's own account, so the webhook can skip comments Khala itself
-# posted (they are type "User", not "Bot", and OWNER-associated — without this check a
-# Khala-posted comment quoting "@khala review" could re-trigger a review). Keyed by token
-# so a rotated PAT re-resolves; entries expire so a renamed account is picked up.
-_OWN_LOGIN_CACHE: dict[str, tuple[str, float]] = {}
-_OWN_LOGIN_TTL_S = 900.0
-
-
-def _own_github_login(token: str | None) -> str:
-    """Return the login of the account the PAT authenticates as ("" if unknown).
-
-    Preconditions: ``token`` is the GitHub PAT, or ``None``/empty when unavailable.
-    Postconditions: returns the cached ``GET /user`` login for ``token`` (cache TTL
-        ``_OWN_LOGIN_TTL_S``, keyed by token so rotation re-resolves). Returns ``""``
-        when ``token`` is falsy or the lookup fails — callers treat "" as "unknown"
-        and skip the self-comment check (fail-open: an API blip must not block real
-        review requests). Never raises.
-    """
-    if not token:
-        return ""
-    now = time.monotonic()
-    cached = _OWN_LOGIN_CACHE.get(token)
-    if cached is not None and cached[1] >= now:
-        return cached[0]
-    try:
-        from coding_team.github_source.client import GitHubClient
-
-        with GitHubClient(token) as client:
-            login = str(client.get_authenticated_login() or "")
-    except Exception:
-        logger.warning("GitHub webhook: could not resolve own login for self-comment check", exc_info=True)
-        return ""
-    _OWN_LOGIN_CACHE.clear()  # one PAT per deployment; drop stale/rotated tokens
-    _OWN_LOGIN_CACHE[token] = (login, now + _OWN_LOGIN_TTL_S)
-    return login
-
-
 def _start_review(owner: str, repo: str, pr_number: int, token: str | None) -> str:
     """Start the existing PR-review flow for ``pr_number`` (runs the async helper).
 
@@ -298,7 +273,6 @@ def process_review_request(
     repo: str,
     pr_number: int,
     comment_id: int,
-    author_login: str = "",
     delivery_id: str = "",
 ) -> None:
     """Validate config, start the code review, and signal the outcome. Runs in a worker thread.
@@ -307,18 +281,14 @@ def process_review_request(
         payload* (validated against the configured integration here, on the worker, so
         the config read never blocks the event loop); ``pr_number`` is a positive PR
         number; ``comment_id`` is the triggering comment's id (0 when unknown);
-        ``author_login`` is the commenting user's login ("" when unknown);
         ``delivery_id`` is the ``X-GitHub-Delivery`` header value ("" when absent).
     Postconditions:
         - Returns without starting a review when the integration is unconfigured/disabled
           or the payload repo does not match the configured owner/repo; in both cases the
           delivery is forgotten (see :func:`_forget_delivery`) so a redelivery after the
           operator fixes the configuration is not swallowed by the dedup table.
-        - Skips comments authored by the PAT's own account (Khala's own posted comments
-          are type "User" and OWNER-associated, so the Bot check alone cannot stop a
-          Khala-posted comment quoting the command from re-triggering a review loop).
-        - Resolves the GitHub PAT once and reuses it for the self-comment check, the
-          review start, and the reaction — a single credential-store read per webhook.
+        - Resolves the GitHub PAT once and reuses it for the review start and the
+          reaction — a single credential-store read per webhook.
         - Signals the outcome on the triggering comment: 👀 when a review started or one
           is already running (either way, a review is in flight for this PR), 😕
           (``confused``) when the request was seen but could not run. On a failed start
@@ -342,13 +312,6 @@ def process_review_request(
         return
 
     token = _resolve_github_token()
-    own_login = _own_github_login(token)
-    if own_login and author_login and author_login.casefold() == own_login.casefold():
-        # Khala's own comment (posted with this PAT) quoted the command — never
-        # self-trigger. Keep the delivery marked seen: there is nothing to redeliver.
-        logger.info("GitHub webhook: ignoring @khala review in a comment posted by our own account (%s)", own_login)
-        return
-
     outcome = _start_review(cfg_owner, cfg_repo, pr_number, token)
     if outcome in ("started", "already_running"):
         # Either way a review is in flight for this PR — acknowledge the request.
@@ -476,7 +439,10 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
     Submits work only when ALL hold (pure payload checks — no I/O on this thread):
     - ``event_type == "issue_comment"`` and ``payload["action"] == "created"``
     - the comment is on a pull request (``issue.pull_request`` present)
-    - the comment is not from a bot
+    - the comment is not from a bot, and is not Khala's own output (marked with
+      ``_KHALA_COMMENT_MARKER`` — Khala posts with the operator's PAT, so only the
+      marker, never the author, distinguishes its comments from the operator's
+      genuine commands)
     - the body contains ``@khala review``
     - the commenter's ``author_association`` is OWNER/MEMBER/COLLABORATOR
     - ``issue.number`` is a positive non-bool int (the PR number)
@@ -523,7 +489,13 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
     comment = payload.get("comment") or {}
     if _comment_is_from_bot(comment):
         return
-    if not parse_review_command(str(comment.get("body", ""))):
+    body = str(comment.get("body", ""))
+    if _KHALA_COMMENT_MARKER in body:
+        # Khala's own posted comment (see the marker's comment above) — never
+        # self-trigger, even when it quotes the command.
+        logger.info("GitHub webhook: ignoring @khala review inside a Khala-generated comment")
+        return
+    if not parse_review_command(body):
         return
     if not is_authorized(str(comment.get("author_association", ""))):
         logger.info(
@@ -543,7 +515,6 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
     repository = payload.get("repository") or {}
     repo_owner = str((repository.get("owner") or {}).get("login", "")).strip()
     repo_name = str(repository.get("name", "")).strip()
-    author_login = str((comment.get("user") or {}).get("login", "")).strip()
 
     if _is_duplicate_delivery(delivery_id):
         logger.info("GitHub webhook: ignoring redelivered delivery %s", delivery_id)
@@ -556,7 +527,6 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
         repo_name,
         pr_number,
         comment_id,
-        author_login,
         delivery_id,
         logger=logger,
         log_prefix="GitHub webhook dispatch",

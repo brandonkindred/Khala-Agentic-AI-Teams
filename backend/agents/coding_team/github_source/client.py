@@ -26,6 +26,15 @@ DEFAULT_MAX_RETRIES = 3
 RATE_LIMIT_CAP_S = 60
 MAX_ISSUES_TRAVERSED = 1000
 
+# Appended (as an HTML comment — invisible in GitHub's rendered view) to every issue/PR
+# conversation comment Khala posts, so the "@khala review" webhook can recognize and skip
+# Khala's own output. Comments are posted with the operator's PAT, so author identity
+# cannot distinguish Khala's comments from the operator's genuine commands — and the PAT
+# owner is often exactly the person expected to trigger reviews, so filtering by author
+# would break them. The webhook handler keeps its own copy of this literal (it must not
+# import this module at module scope); a cross-module test asserts the two stay equal.
+KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
+
 
 # ---------------------------------------------------------------------------
 # Public dataclasses
@@ -410,6 +419,19 @@ class GitHubClient:
         return out
 
     def add_issue_comment(self, owner: str, repo: str, number: int, body: str) -> None:
+        """Post an issue/PR conversation comment, tagged as Khala-generated.
+
+        Preconditions: ``number`` names an existing issue or pull request.
+        Postconditions: posts ``body`` with :data:`KHALA_COMMENT_MARKER` (an HTML
+            comment, invisible in GitHub's rendered view) appended when not already
+            present. The marker lets the ``@khala review`` webhook recognize and skip
+            Khala's own comments — they are posted with the operator's PAT, so author
+            identity cannot distinguish them from the operator's genuine commands (and
+            must not: the PAT owner is often exactly the person triggering reviews).
+            Raises ``GitHubAPIError`` on any non-2xx.
+        """
+        if KHALA_COMMENT_MARKER not in body:
+            body = f"{body}\n\n{KHALA_COMMENT_MARKER}"
         self._check(
             self._request(
                 "POST",
