@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import shared_job_store
 from job_service_client import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
@@ -152,7 +153,7 @@ def get_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> Optional[Dict[str, Any]]:
     """Get job data, or None if not found."""
-    return _client(cache_dir).get_job(job_id)
+    return shared_job_store.get_job(_client(cache_dir), job_id)
 
 
 def delete_job(
@@ -284,11 +285,7 @@ def add_pending_questions(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Add pending questions and set waiting_for_answers=True to pause job."""
-    _client(cache_dir).atomic_update(
-        job_id,
-        merge_fields={"waiting_for_answers": True},
-        append_to={"pending_questions": questions},
-    )
+    shared_job_store.add_pending_questions(_client(cache_dir), job_id, questions)
 
 
 def submit_answers(
@@ -297,11 +294,7 @@ def submit_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Store submitted answers, clear pending questions, and resume job."""
-    _client(cache_dir).atomic_update(
-        job_id,
-        merge_fields={"pending_questions": [], "waiting_for_answers": False},
-        append_to={"submitted_answers": answers},
-    )
+    shared_job_store.submit_answers(_client(cache_dir), job_id, answers)
 
 
 def is_waiting_for_answers(
@@ -309,8 +302,7 @@ def is_waiting_for_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Check if job is waiting for user answers."""
-    data = _client(cache_dir).get_job(job_id)
-    return bool(data.get("waiting_for_answers", False)) if data else False
+    return shared_job_store.is_waiting_for_answers(_client(cache_dir), job_id)
 
 
 def get_submitted_answers(
@@ -318,8 +310,7 @@ def get_submitted_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> List[Dict[str, Any]]:
     """Get submitted answers for a job."""
-    data = _client(cache_dir).get_job(job_id)
-    return list(data.get("submitted_answers", [])) if data else []
+    return shared_job_store.get_submitted_answers(_client(cache_dir), job_id)
 
 
 def request_cancel(

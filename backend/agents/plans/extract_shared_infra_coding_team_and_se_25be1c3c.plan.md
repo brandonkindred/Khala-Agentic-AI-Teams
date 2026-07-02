@@ -40,11 +40,12 @@ isProject: false
 
 > ## Implementation status
 >
-> The shared-infrastructure extraction **and** the engine-dependency inversion are
-> **implemented, verified, and landed**: the `coding_team` package now imports
-> nothing from `software_engineering_team` and an AST guard keeps it that way — the
-> circular dependency is broken. Each step was verified green (SE suite 2396 passed
-> at ~94% line coverage; coding_team 754 passed under `pytest -n 4`; `ruff` clean).
+> The plan is **fully implemented, verified, and landed**: all the shared
+> infrastructure is in neutral packages, the engine dependency is inverted, and the
+> `coding_team` package imports nothing from `software_engineering_team` — an AST
+> guard keeps it that way, so the circular dependency is broken. Each step was
+> verified green (SE suite passing at ~94% line coverage; coding_team 762 passed
+> under `pytest -n 4` at ~97%; `ruff` clean; coding_team now runs in CI).
 >
 > | Item | Status | Notes |
 > |---|---|---|
@@ -54,7 +55,7 @@ isProject: false
 > | A5 `shared_dev_models` + `shared_git` + `strands_model`→`llm_service` | ✅ done | moved to neutral homes; SE keeps `sys.modules` alias shims (identity + `@patch` preserved); coding_team's model/git/strands edges removed. |
 > | B invert-engines | ✅ done | `CodeEngineProvider` interface in coding_team; `SECodeEngineProvider` supplies the code-v2 team leads, quality gates, and PR reviewer; SE injects it per call, and the new out-of-package `coding_team_service` composition root installs it for the standalone container (its `TEAM_MODULE`, docker updated). |
 > | C2 acyclic guard | ✅ done | AST test fails if any coding_team module imports `software_engineering_team`. |
-> | A1 `shared_job_store` | ⏳ follow-up | pure de-duplication — `job_store` was never part of the cycle — and entangled with the `patched_job_store` fixture; deferred to keep this change focused. |
+> | A1 `shared_job_store` | ✅ done | extracted the byte-identical read + HITL helpers (`get_job` + pause/answer) into `shared_job_store`, which takes the `client` as a parameter so each team's `_client()` — and the `patched_job_store` fixture — still intercepts; reconciled the `get_submitted_answers` `None`→`[]` drift; team-specific `create_job`/`update_job`/`list_jobs` stay per team. |
 > | C1 CI/coverage | ✅ done (core) | coding_team now runs as its own CI job at the 90% gate (suite ~97%, includes the acyclic guard); the new `shared_*` packages join the `shared_backend` fan-out. Their code is exercised by the SE job; splitting each into its own per-package coverage job is an optional test-reorg refinement. |
 
 # Spec

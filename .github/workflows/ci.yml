@@ -82,6 +82,7 @@ jobs:
               - 'backend/agents/shared_llm_recovery/**'
               - 'backend/agents/shared_dev_models/**'
               - 'backend/agents/shared_git/**'
+              - 'backend/agents/shared_job_store/**'
               - 'backend/agents/llm_service/**'
               - 'backend/agents/event_bus/**'
               - 'backend/agents/artifact_registry/**'
