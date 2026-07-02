@@ -16,7 +16,11 @@ import { Subject, catchError, debounceTime, of, switchMap } from 'rxjs';
 import { AgentCatalogApiService } from '../../services/agent-catalog-api.service';
 import type { AgentSummary } from '../../models/agent-catalog.model';
 
-/** Debounce (ms) between the last keystroke and the catalog search request. */
+/**
+ * Debounce (ms) between the last keystroke and the catalog search request.
+ * 300ms balances responsiveness against request volume — long enough to collapse
+ * a burst of typing into a single query, short enough to feel near-instant on a pause.
+ */
 export const SEARCH_DEBOUNCE_MS = 300;
 
 export interface AddAgentFromRegistryDialogData {
@@ -122,10 +126,20 @@ export class AddAgentFromRegistryDialogComponent implements OnInit {
     this.searchInput.next();
   }
 
+  /**
+   * Whether `agentId` (a catalog manifest id) is already on the team's roster —
+   * such results render as "Added" and are non-selectable, so the same agent
+   * can't be added twice from a search.
+   */
   isAlreadyOnRoster(agentId: string): boolean {
     return this.data.existingManifestIds.includes(agentId);
   }
 
+  /**
+   * Pick a search result: close the dialog with the chosen manifest id so the
+   * caller can add it to the roster. No-ops for an agent already on the roster
+   * (those rows aren't clickable in the template; this also guards a direct call).
+   */
   choose(agent: AgentSummary): void {
     if (this.isAlreadyOnRoster(agent.id)) {
       return;
@@ -133,6 +147,7 @@ export class AddAgentFromRegistryDialogComponent implements OnInit {
     this.ref.close(agent.id);
   }
 
+  /** Dismiss the dialog without choosing an agent (`afterClosed` emits `undefined`). */
   cancel(): void {
     this.ref.close();
   }
