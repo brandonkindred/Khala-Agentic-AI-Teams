@@ -614,14 +614,18 @@ async def github_events(request: Request) -> Any:
     Postconditions:
         - When a webhook secret is configured (stored credential or ``GITHUB_WEBHOOK_SECRET``),
           the ``X-Hub-Signature-256`` HMAC is verified against the raw body and a mismatch
-          raises ``HTTPException(401)``; with no secret configured, verification is skipped
-          (logged) to ease first-time setup — mirroring the Slack events handler.
+          raises ``HTTPException(401)``.
         - Fails closed on a credential-store outage: if the secret is stored only in
           Postgres and that store is unreachable, this raises ``HTTPException(503)``
           rather than silently skipping verification — an unreachable store must never
           be treated the same as "no secret configured", or a forged payload could pass
           unverified for the duration of the outage.
-        - ``ping`` deliveries return ``{"ok": true}`` after verification.
+        - Fails closed when no secret is configured: ``ping`` still returns ``{"ok": true}``
+          (so an operator can verify delivery during setup), but every other event —
+          each of which can start a paid review from payload-supplied identity — is
+          refused with ``HTTPException(403)`` until a signing secret is set. An unsigned
+          request must never be able to trigger a review.
+        - ``ping`` deliveries return ``{"ok": true}`` after signature handling.
         - A non-JSON body raises ``HTTPException(400)``; otherwise the event (with the
           ``X-GitHub-Delivery`` header, used by :func:`dispatch_github_event` to skip a
           redelivery of the same delivery ID) is dispatched to
@@ -654,11 +658,31 @@ async def github_events(request: Request) -> Any:
             ),
         )
     else:
-        logger.warning("GitHub webhook secret not configured — skipping signature verification")
+        logger.warning(
+            "GitHub webhook secret not configured — only ping is served; review-triggering "
+            "events are refused until a signing secret is set"
+        )
 
     # Respond to the setup probe before attempting to parse an event payload.
     if event_type == "ping":
         return {"ok": True}
+
+    # Beyond ``ping``, every event this endpoint dispatches can start a paid PR review,
+    # and ``dispatch_github_event`` trusts payload fields (``author_association``,
+    # ``repository``) to authorize and scope it. Without a configured signing secret we
+    # cannot authenticate the sender, so an unsigned request could forge a collaborator
+    # ``issue_comment`` for the configured repo and spend review budget. Refuse review-
+    # triggering events when no secret is configured — ``ping`` is allowed above so an
+    # operator can still verify webhook delivery before setting the secret.
+    if not secret:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "GitHub webhook signing secret not configured; refusing to process "
+                "review-triggering events. Configure a secret (stored credential or "
+                "GITHUB_WEBHOOK_SECRET) and retry."
+            ),
+        )
 
     try:
         payload = json.loads(body)

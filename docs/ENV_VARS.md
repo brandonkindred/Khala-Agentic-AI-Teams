@@ -647,9 +647,11 @@ Signing secret for the GitHub webhook receiver `POST /api/integrations/github/ev
 collaborator trigger a PR review by commenting `@khala review` on a pull request. The receiver
 verifies each delivery's `X-Hub-Signature-256` HMAC against this secret and rejects mismatches with
 `401`. A secret stored via `PUT /api/integrations/github` (encrypted in Postgres) takes precedence
-over this env var. When neither is set, signature verification is skipped (logged) to ease first-time
-setup — set a secret in any real deployment. Only `issue_comment` events from OWNER/MEMBER/COLLABORATOR
-authors on the configured `owner/repo` trigger a review.
+over this env var. When neither is set, the receiver fails closed: a `ping` still succeeds (so you can
+verify webhook delivery during setup), but every review-triggering event is refused with `403` until a
+secret is configured — an unsigned request must never be able to start a paid review. Only
+`issue_comment` events from OWNER/MEMBER/COLLABORATOR authors on the configured `owner/repo` trigger a
+review.
 
 ### GITHUB_WEBHOOK_DEDUP_TTL_S / GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES
 Tune the webhook receiver's in-process, per-worker de-duplication of GitHub redeliveries (same

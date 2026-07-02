@@ -877,18 +877,34 @@ def test_github_events_rejects_bad_signature():
     assert "signature" in resp.json()["detail"].lower()
 
 
-def test_github_events_skips_verification_without_secret():
-    """With no secret configured (store reachable, genuinely unset), an unsigned valid
-    payload is dispatched (eased first-time setup)."""
+def test_github_events_refuses_review_events_without_secret():
+    """With no secret configured (store reachable, genuinely unset), a review-triggering
+    event is refused with 403 and never dispatched — an unsigned request must not be able
+    to forge a collaborator comment and spend review budget."""
     body = b'{"action":"created"}'
     with (
         patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=(None, True)),
         patch("unified_api.github_events_handler.dispatch_github_event") as disp,
     ):
         resp = client.post(_EVENTS, content=body, headers={"X-GitHub-Event": "issue_comment"})
+    assert resp.status_code == 403
+    assert "secret" in resp.json()["detail"].lower()
+    disp.assert_not_called()
+
+
+def test_github_events_ping_allowed_without_secret():
+    """``ping`` is exempt from the no-secret refusal so an operator can verify webhook
+    delivery during setup, before a signing secret is configured. It never dispatches
+    review work, so allowing it is safe."""
+    body = b'{"zen": "Keep it simple."}'
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=(None, True)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(_EVENTS, content=body, headers={"X-GitHub-Event": "ping"})
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
-    disp.assert_called_once()
+    disp.assert_not_called()
 
 
 def test_github_events_fails_closed_when_secret_store_unreachable():
