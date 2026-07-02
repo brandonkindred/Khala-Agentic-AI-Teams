@@ -124,4 +124,18 @@ describe('AgentStudioStateService', () => {
     expect(service.rosterFullyStaffed()).toBe(false);
     expect(service.composeProcessStatus()).toBeNull();
   });
+
+  it('tracks consumed handoff keys and does not conflate distinct keys', () => {
+    expect(service.hasConsumedHandoff('t-1::a')).toBe(false);
+    service.markHandoffConsumed('t-1::a');
+    expect(service.hasConsumedHandoff('t-1::a')).toBe(true);
+    // A different (team, agent) key is unaffected.
+    expect(service.hasConsumedHandoff('t-2::a')).toBe(false);
+  });
+
+  it('reset clears consumed handoff keys', () => {
+    service.markHandoffConsumed('t-1::a');
+    service.reset();
+    expect(service.hasConsumedHandoff('t-1::a')).toBe(false);
+  });
 });

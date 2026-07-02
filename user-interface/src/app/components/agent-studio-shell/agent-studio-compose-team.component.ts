@@ -66,15 +66,6 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   /** The embedded chat/roster panel — used to refresh its roster after an auto-add. */
   @ViewChild(ProcessDesignerChatComponent) private chat?: ProcessDesignerChatComponent;
 
-  /**
-   * `${teamId}::${manifestId}` keys the Stage-2 handoff agent has already been
-   * auto-added for. Tracked as a set (not a single "last team") so the "at most
-   * one attempt per team" guard survives switching teams: after adding the agent
-   * to team A and manually removing it, returning to A must NOT re-add it —
-   * which a single-value guard would, having been overwritten by the visit to B.
-   */
-  private readonly handoffAttempts = new Set<string>();
-
   readonly teams = signal<AgenticTeamSummary[]>([]);
   readonly teamsLoading = signal(false);
   readonly teamsError = signal<string | null>(null);
@@ -204,9 +195,11 @@ export class AgentStudioComposeTeamComponent implements OnInit {
    * When the user reached Stage 3 via Stage 2's "Add to team →", add the tested
    * agent (handoff `registryAgentId`) to this team's roster so they don't have to
    * search for it again (spec §2.4 handoff). Idempotent:
-   *   - at most one attempt per (team, handoff agent) — tracked in a set, so it
-   *     holds across team switches and a manual delete isn't undone by a later
-   *     background re-sync or a return visit to the team, and
+   *   - at most one attempt per (team, handoff agent) — tracked in shared studio
+   *     state (not this component), so it holds across team switches, a
+   *     background re-sync, a return visit to the team, AND the Stage-4 "iterate
+   *     roster" back-loop that destroys and recreates this component; a manual
+   *     delete is therefore never undone, and
    *   - skipped when the team already carries that manifest (no duplicate, and
    *     switching to a team that already has it is a no-op).
    * `registryAgentId` is left set so Stage 4's "fix an agent" back-loop still works.
@@ -217,10 +210,10 @@ export class AgentStudioComposeTeamComponent implements OnInit {
       return;
     }
     const key = `${team.team_id}::${manifestId}`;
-    if (this.handoffAttempts.has(key)) {
+    if (this.state.hasConsumedHandoff(key)) {
       return; // already attempted for this (team, agent) — don't re-add after a delete
     }
-    this.handoffAttempts.add(key);
+    this.state.markHandoffConsumed(key);
     if (team.agents.some((a) => a.manifest_id === manifestId)) {
       return; // already staffed with this agent
     }

@@ -344,6 +344,26 @@ describe('AgentStudioComposeTeamComponent', () => {
     expect(state.registryAgentId()).toBe('blogging.planner');
   });
 
+  it('does not re-add after a Stage-4 back-loop recreates the component (shared-state guard)', () => {
+    state.setRegistryAgentId('blogging.planner');
+    // Team returns without the agent (user manually removed it after the first add).
+    api.getTeam.mockImplementation((id: string) => of({ team: team({ team_id: id, agents: [] }) }));
+    fixture.detectChanges();
+    component.selectTeam('t-1'); // attempt #1 for A
+    expect(api.addAgentFromRegistry).toHaveBeenCalledTimes(1);
+    api.addAgentFromRegistry.mockClear();
+
+    // Stage 4 → "iterate roster" back-loop: the shell destroys and recreates the
+    // Compose component, but the shell-scoped state service (and its
+    // consumed-handoff set) survives. A fresh component sharing that state — whose
+    // ngOnInit re-loads the still-selected team — must NOT re-add the agent the
+    // user removed, since registryAgentId intentionally stays set for the back-loop.
+    fixture.destroy();
+    const fixture2 = TestBed.createComponent(AgentStudioComposeTeamComponent);
+    fixture2.detectChanges(); // ngOnInit → loadTeam('t-1') (state.teamId persists)
+    expect(api.addAgentFromRegistry).not.toHaveBeenCalled();
+  });
+
   // ── Create team ──────────────────────────────────────────────────────────
 
   it('toggleCreateForm shows/hides the form and resets it on close', () => {
