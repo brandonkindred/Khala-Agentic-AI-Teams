@@ -17,7 +17,7 @@ from coding_team.orchestrator import (
 )
 from coding_team.task_graph import TaskGraphService
 
-GIT_UTILS = "software_engineering_team.shared.git_utils"
+GIT_UTILS = "shared_git.git_utils"
 
 
 # --------------------------------------------------------------------------- helpers / stubs

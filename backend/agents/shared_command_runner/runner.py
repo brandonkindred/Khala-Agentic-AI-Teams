@@ -2149,7 +2149,7 @@ def ensure_backend_project_initialized(  # pragma: no cover  # integration-only:
 
     Returns a :class:`CommandResult` indicating success or the first failure.
     """
-    from software_engineering_team.shared.git_utils import (
+    from shared_git.git_utils import (
         ensure_files_committed_on_main,
         initialize_new_repo,
     )

@@ -73,7 +73,7 @@ from coding_team.review_history_store import (  # noqa: E402
 )
 from coding_team.token_crypto import decrypt_token, encrypt_token  # noqa: E402
 from shared_app import create_team_app  # noqa: E402
-from software_engineering_team.shared.git_utils import (  # noqa: E402
+from shared_git.git_utils import (  # noqa: E402
     DEVELOPMENT_BRANCH,
     commit_working_tree,
     git_identity_env,
@@ -1511,9 +1511,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             # comments.  anchor_to_first_file returns None only when valid_by_path
             # is empty — but we already exit early in that case, so the filter is
             # just a safety net.
-            anchored_leftovers = [
-                anchor_to_first_file(issue, valid_by_path) for issue in leftovers
-            ]
+            anchored_leftovers = [anchor_to_first_file(issue, valid_by_path) for issue in leftovers]
             comments = comments + [c for c in anchored_leftovers if c is not None]
 
             # Two GitHub endpoints, two shapes. Line-anchored comments ride the
@@ -1723,9 +1721,7 @@ def _submit_review(
     # each scrubbed comment with its original so the dropped set returned to the
     # caller keeps the original identity (with its ``line``).
     body = scrub_token_from_text(body)
-    pairs = [
-        ({**c, "body": scrub_token_from_text(c.get("body", ""))}, c) for c in comments
-    ]
+    pairs = [({**c, "body": scrub_token_from_text(c.get("body", ""))}, c) for c in comments]
 
     events = [event] if event == "COMMENT" else [event, "COMMENT"]
 

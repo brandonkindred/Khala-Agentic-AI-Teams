@@ -20,7 +20,7 @@ from coding_team.models import CodingTeamPlanInput, StackSpec, Task, TaskStatus
 from coding_team.orchestrator import CodingTeamSwarm, run_coding_team_orchestrator
 from coding_team.task_graph import TaskGraphService
 
-GIT_UTILS = "software_engineering_team.shared.git_utils"
+GIT_UTILS = "shared_git.git_utils"
 
 
 # --------------------------------------------------------------------------- stubs
@@ -478,7 +478,7 @@ def test_snapshot_restore_preserves_new_fields_and_failed_status():
 
 
 def test_branch_diff_returns_full_diff(tmp_path):
-    from software_engineering_team.shared.git_utils import (
+    from shared_git.git_utils import (
         branch_diff,
         create_feature_branch,
         initialize_new_repo,
@@ -498,14 +498,14 @@ def test_branch_diff_returns_full_diff(tmp_path):
 
 
 def test_branch_diff_no_repo(tmp_path):
-    from software_engineering_team.shared.git_utils import branch_diff
+    from shared_git.git_utils import branch_diff
 
     assert branch_diff(tmp_path / "does-not-exist", "development", "feature/x") == ""
 
 
 def test_branch_diff_bad_branch_returns_empty(tmp_path):
     """A failing git diff (e.g. unknown branch) yields "" rather than raising."""
-    from software_engineering_team.shared.git_utils import branch_diff, initialize_new_repo
+    from shared_git.git_utils import branch_diff, initialize_new_repo
 
     ok, _ = initialize_new_repo(tmp_path)
     assert ok
@@ -898,9 +898,7 @@ def test_team_key_warns_on_ambiguous_frontend_backend_label(caplog) -> None:
         ("back end", "backend_v2"),
     ],
 )
-def test_team_key_normalizes_separated_frontend_backend_labels(
-    label: str, expected: str
-) -> None:
+def test_team_key_normalizes_separated_frontend_backend_labels(label: str, expected: str) -> None:
     """Common separated frontend/backend labels route to canonical v2 teams."""
     assert orch_mod._team_key(label) == expected
 
@@ -1077,7 +1075,7 @@ def test_v2_text_mode_llm_resolves_underlying_client_on_clone_failure(monkeypatc
     model back would leak JSON mode. Re-resolving from the model's ``_client`` guarantees a
     fresh text-mode wrapper.
     """
-    import software_engineering_team.shared.strands_model as strands_model_mod
+    import llm_service.strands_model as strands_model_mod
 
     received: Dict[str, Any] = {}
     sentinel = object()
@@ -1110,7 +1108,7 @@ def test_v2_text_mode_llm_resolves_underlying_client_on_clone_failure(monkeypatc
 
 def test_v2_text_mode_llm_clone_failure_without_client_uses_default(monkeypatch):
     """A clone() failure on a handle with no ``_client`` falls back to a fresh text model."""
-    import software_engineering_team.shared.strands_model as strands_model_mod
+    import llm_service.strands_model as strands_model_mod
 
     received: Dict[str, Any] = {}
     sentinel = object()

@@ -646,7 +646,7 @@ def _v2_text_mode_llm(llm: Any) -> Any:
     # LLMClient off the orchestrator's import path, matching shared.strands_model's own
     # convention; resolved once here so all branches below share a single import.
     from llm_service import LLMClient
-    from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+    from llm_service.strands_model import resolve_text_mode_strands_model
 
     clone = getattr(llm, "clone", None)
     if callable(clone):
@@ -1546,7 +1546,7 @@ class CodingTeamSwarm:
             - Returns a hex digest; identical change states across rounds yield identical digests.
         """
         if diff is None:
-            from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH, branch_diff
+            from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
 
             branch = task.feature_branch or f"feature/{task.id}"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
@@ -1625,7 +1625,7 @@ class CodingTeamSwarm:
             # ``development`` and is silently dropped from the PR. Only a genuinely empty branch is a
             # no-op resolution (work already present elsewhere) that the job-level outcome should
             # report as "already complete".
-            from software_engineering_team.shared.git_utils import (
+            from shared_git.git_utils import (
                 DEVELOPMENT_BRANCH,
                 abort_merge,
                 branch_diff,
@@ -2046,7 +2046,7 @@ class CodingTeamSwarm:
 
     def _review_and_merge(self, update_fn: Callable) -> None:
         """Coordinator reviews completed tasks: merge approved ones, send rejected ones back."""
-        from software_engineering_team.shared.git_utils import (
+        from shared_git.git_utils import (
             DEVELOPMENT_BRANCH,
             branch_diff,
             merge_branch,
