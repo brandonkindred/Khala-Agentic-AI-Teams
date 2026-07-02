@@ -6,7 +6,13 @@ import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.com
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { ProcessDesignerChatComponent } from '../process-designer-chat/process-designer-chat.component';
-import type { AgenticTeam, AgenticTeamSummary, ProcessDefinition, RosterValidationResult } from '../../models';
+import type {
+  AgenticTeam,
+  AgenticTeamAgent,
+  AgenticTeamSummary,
+  ProcessDefinition,
+  RosterValidationResult,
+} from '../../models';
 
 /** Stub the heavy embedded chat/roster panel; tests exercise `onRosterChanged`
  *  directly rather than through the stub's (unused) output emissions. */
@@ -36,6 +42,18 @@ const process = (overrides: Partial<ProcessDefinition> = {}): ProcessDefinition 
   ...overrides,
 });
 
+const agent = (overrides: Partial<AgenticTeamAgent> = {}): AgenticTeamAgent => ({
+  agent_name: 'Planner',
+  role: 'Plans',
+  skills: [],
+  capabilities: [],
+  tools: [],
+  expertise: [],
+  source: 'registry',
+  manifest_id: 'blogging.planner',
+  ...overrides,
+});
+
 const team = (overrides: Partial<AgenticTeam> = {}): AgenticTeam => ({
   team_id: 't-1',
   name: 'Growth Pod',
@@ -55,6 +73,7 @@ describe('AgentStudioComposeTeamComponent', () => {
     listTeams: ReturnType<typeof vi.fn>;
     getTeam: ReturnType<typeof vi.fn>;
     createTeam: ReturnType<typeof vi.fn>;
+    addAgentFromRegistry: ReturnType<typeof vi.fn>;
   };
 
   function configure(): void {
@@ -80,6 +99,7 @@ describe('AgentStudioComposeTeamComponent', () => {
       listTeams: vi.fn().mockReturnValue(of([teamSummary('t-1'), teamSummary('t-2')])),
       getTeam: vi.fn().mockReturnValue(of({ team: team() })),
       createTeam: vi.fn().mockReturnValue(of({ team_id: 't-new', name: 'New', description: '', created_at: '' })),
+      addAgentFromRegistry: vi.fn().mockReturnValue(of(agent())),
     };
     configure();
   });
@@ -259,6 +279,55 @@ describe('AgentStudioComposeTeamComponent', () => {
     fixture.detectChanges();
     component.selectTeam('t-1');
     expect(component.teamLoadError()).toBe('Could not load this team.');
+  });
+
+  // ── Stage-2 → Stage-3 handoff: auto-add the tested agent (idempotent) ────────
+
+  it('auto-adds the handoff agent to the team when it is not already on the roster', () => {
+    state.setRegistryAgentId('blogging.planner'); // arrived via "Add to team →"
+    api.getTeam.mockReturnValue(of({ team: team({ agents: [] }) })); // roster lacks it
+    fixture.detectChanges();
+    component.selectTeam('t-1');
+    expect(api.addAgentFromRegistry).toHaveBeenCalledWith('t-1', 'blogging.planner');
+  });
+
+  it('does NOT auto-add when the team already carries that manifest (idempotent)', () => {
+    state.setRegistryAgentId('blogging.planner');
+    api.getTeam.mockReturnValue(
+      of({ team: team({ agents: [agent({ manifest_id: 'blogging.planner' })] }) }),
+    );
+    fixture.detectChanges();
+    component.selectTeam('t-1');
+    expect(api.addAgentFromRegistry).not.toHaveBeenCalled();
+  });
+
+  it('does NOT auto-add when there is no handoff agent', () => {
+    // registryAgentId stays null (reached Stage 3 without a Stage-2 selection).
+    api.getTeam.mockReturnValue(of({ team: team({ agents: [] }) }));
+    fixture.detectChanges();
+    component.selectTeam('t-1');
+    expect(api.addAgentFromRegistry).not.toHaveBeenCalled();
+  });
+
+  it('attempts the auto-add at most once per team (a later re-sync does not re-add)', () => {
+    state.setRegistryAgentId('blogging.planner');
+    api.getTeam.mockReturnValue(of({ team: team({ agents: [] }) }));
+    fixture.detectChanges();
+    component.selectTeam('t-1'); // first load → one add attempt
+    expect(api.addAgentFromRegistry).toHaveBeenCalledTimes(1);
+
+    // A background re-sync (another applyTeam for the same team) must not re-add —
+    // otherwise a subsequent manual delete would be silently undone.
+    component.onRosterChanged({ is_fully_staffed: false, agent_count: 0, process_count: 0, gaps: [], summary: '' });
+    expect(api.addAgentFromRegistry).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves registryAgentId after auto-add (Stage 4 back-loop still works)', () => {
+    state.setRegistryAgentId('blogging.planner');
+    api.getTeam.mockReturnValue(of({ team: team({ agents: [] }) }));
+    fixture.detectChanges();
+    component.selectTeam('t-1');
+    expect(state.registryAgentId()).toBe('blogging.planner');
   });
 
   // ── Create team ──────────────────────────────────────────────────────────

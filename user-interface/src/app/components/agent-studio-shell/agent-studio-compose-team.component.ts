@@ -3,6 +3,7 @@ import {
   Component,
   DestroyRef,
   OnInit,
+  ViewChild,
   computed,
   inject,
   signal,
@@ -61,6 +62,15 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   private readonly api = inject(AgenticTeamApiService);
   private readonly fb = inject(FormBuilder);
   private readonly destroyRef = inject(DestroyRef);
+
+  /** The embedded chat/roster panel — used to refresh its roster after an auto-add. */
+  @ViewChild(ProcessDesignerChatComponent) private chat?: ProcessDesignerChatComponent;
+
+  /**
+   * Team the Stage-2 handoff agent has already been consumed into (one auto-add
+   * attempt per team, so a manual delete isn't undone by a later re-sync).
+   */
+  private handoffConsumedForTeam: string | null = null;
 
   readonly teams = signal<AgenticTeamSummary[]>([]);
   readonly teamsLoading = signal(false);
@@ -172,6 +182,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
 
   private applyTeam(team: AgenticTeam): void {
     this.team.set(team);
+    this.consumeHandoffAgent(team);
     const current = this.selectedProcessId();
     const stillExists = !!current && team.processes.some((p) => p.process_id === current);
     if (stillExists) {
@@ -184,6 +195,38 @@ export class AgentStudioComposeTeamComponent implements OnInit {
     }
     // No valid selection: auto-select the sole process, or clear the gate.
     this.selectProcess(team.processes.length === 1 ? team.processes[0].process_id : null);
+  }
+
+  /**
+   * When the user reached Stage 3 via Stage 2's "Add to team →", add the tested
+   * agent (handoff `registryAgentId`) to this team's roster so they don't have to
+   * search for it again (spec §2.4 handoff). Idempotent:
+   *   - at most one attempt per team (so a manual delete isn't undone by a later
+   *     background re-sync), and
+   *   - skipped when the team already carries that manifest (no duplicate, and
+   *     switching to a team that already has it is a no-op).
+   * `registryAgentId` is left set so Stage 4's "fix an agent" back-loop still works.
+   */
+  private consumeHandoffAgent(team: AgenticTeam): void {
+    const manifestId = this.state.registryAgentId();
+    if (!manifestId || this.handoffConsumedForTeam === team.team_id) {
+      return;
+    }
+    this.handoffConsumedForTeam = team.team_id; // mark attempted (once per team)
+    if (team.agents.some((a) => a.manifest_id === manifestId)) {
+      return; // already staffed with this agent
+    }
+    this.api
+      .addAgentFromRegistry(team.team_id, manifestId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        // Reflect the new agent in the roster panel (and re-evaluate the gate).
+        // The child owns its roster view, so ask it to reload rather than mutating
+        // its state from here.
+        next: () => this.chat?.refreshRoster(),
+        // Best-effort: on failure the user can still add it manually via the panel.
+        error: () => undefined,
+      });
   }
 
   selectProcess(processId: string | null): void {
