@@ -195,6 +195,28 @@ class AgenticTeamStore:
             (team_id,),
         )
 
+    def _upsert_team_agent_row(
+        self, cur, team_id: str, agent: AgenticTeamAgent, now: datetime
+    ) -> None:
+        """Upsert one roster row on an open cursor (the single ``INSERT ... ON CONFLICT``
+        shared by every roster writer).
+
+        Preconditions: ``cur`` is an open cursor in a live transaction.
+        Postconditions: the ``agentic_team_agents`` row for ``(team_id,
+            agent.agent_name)`` holds ``agent`` with ``updated_at == now``; an existing
+            row keeps its original ``created_at`` (the ``ON CONFLICT`` SET omits it).
+            Does NOT touch ``agentic_teams.updated_at`` — callers bump that (once per
+            write) so the full-roster save can amortize a single team touch.
+        """
+        cur.execute(
+            "INSERT INTO agentic_team_agents "
+            "(team_id, agent_name, data_json, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
+            "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
+            (team_id, agent.agent_name, Json(agent.model_dump(mode="json")), now, now),
+        )
+
     def _write_team_agents(
         self, cur, team_id: str, agents: list[AgenticTeamAgent], now: datetime
     ) -> None:
@@ -225,14 +247,7 @@ class AgenticTeamStore:
         else:
             cur.execute("DELETE FROM agentic_team_agents WHERE team_id = %s", (team_id,))
         for a in agents:
-            cur.execute(
-                "INSERT INTO agentic_team_agents "
-                "(team_id, agent_name, data_json, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s) "
-                "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
-                "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
-                (team_id, a.agent_name, Json(a.model_dump(mode="json")), now, now),
-            )
+            self._upsert_team_agent_row(cur, team_id, a, now)
         cur.execute(
             "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
             (now, team_id),
@@ -348,14 +363,7 @@ class AgenticTeamStore:
             # Read the row we're about to replace under the lock, so a caller's
             # cleanup acts on the truly-replaced row (not a pre-lock snapshot).
             prior = self._get_team_agent(cur, team_id, agent.agent_name)
-            cur.execute(
-                "INSERT INTO agentic_team_agents "
-                "(team_id, agent_name, data_json, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s) "
-                "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
-                "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
-                (team_id, agent.agent_name, Json(agent.model_dump(mode="json")), now, now),
-            )
+            self._upsert_team_agent_row(cur, team_id, agent, now)
             cur.execute(
                 "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
                 (now, team_id),
@@ -399,14 +407,9 @@ class AgenticTeamStore:
             if current is None:
                 return None
             updated = apply_updates(current)
-            cur.execute(
-                "INSERT INTO agentic_team_agents "
-                "(team_id, agent_name, data_json, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s) "
-                "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
-                "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
-                (team_id, agent_name, Json(updated.model_dump(mode="json")), now, now),
-            )
+            # ``apply_updates`` must not change ``agent_name`` (see docstring), so the
+            # row is written under the same key it was read by.
+            self._upsert_team_agent_row(cur, team_id, updated, now)
             cur.execute(
                 "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
                 (now, team_id),

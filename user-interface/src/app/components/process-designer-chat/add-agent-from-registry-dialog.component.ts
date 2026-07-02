@@ -12,7 +12,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { Subject, catchError, debounceTime, of, switchMap, tap } from 'rxjs';
+import { Subject, catchError, debounceTime, of, switchMap } from 'rxjs';
 import { AgentCatalogApiService } from '../../services/agent-catalog-api.service';
 import type { AgentSummary } from '../../models/agent-catalog.model';
 
@@ -79,10 +79,6 @@ export class AddAgentFromRegistryDialogComponent implements OnInit {
     this.searchInput
       .pipe(
         debounceTime(SEARCH_DEBOUNCE_MS),
-        tap(() => {
-          this.loading.set(true);
-          this.error.set(null);
-        }),
         switchMap(() => {
           const q = this.query().trim();
           return this.api.listAgents(q ? { q } : {}).pipe(
@@ -113,8 +109,16 @@ export class AddAgentFromRegistryDialogComponent implements OnInit {
     this.search();
   }
 
-  /** Kick off a (debounced, cancellation-safe) catalog search for the current query. */
+  /**
+   * Kick off a (debounced, cancellation-safe) catalog search for the current query.
+   * The loading flag and error-clear are set here — synchronously, before the
+   * debounce — so the dialog shows the spinner immediately (and drops a stale
+   * error banner) rather than briefly rendering the "no matches" empty state
+   * during the debounce window before the first request even fires.
+   */
   search(): void {
+    this.loading.set(true);
+    this.error.set(null);
     this.searchInput.next();
   }
 

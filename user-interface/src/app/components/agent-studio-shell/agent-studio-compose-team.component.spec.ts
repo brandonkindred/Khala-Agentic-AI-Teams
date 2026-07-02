@@ -236,6 +236,31 @@ describe('AgentStudioComposeTeamComponent', () => {
     expect(api.getTeam).not.toHaveBeenCalled();
   });
 
+  it('a failed background re-sync does NOT surface a full-stage error or tear down the team', () => {
+    // Initial load succeeds; the background re-sync fetch then blips.
+    api.getTeam
+      .mockReturnValueOnce(of({ team: team() }))
+      .mockReturnValueOnce(throwError(() => new Error('transient')));
+    fixture.detectChanges();
+    component.selectTeam('t-1'); // user-initiated load succeeds
+    expect(component.team()).not.toBeNull();
+    expect(component.teamLoadError()).toBeNull();
+
+    component.onRosterChanged({ is_fully_staffed: true, agent_count: 1, process_count: 1, gaps: [], summary: '' });
+
+    // A background re-sync failure must NOT set teamLoadError (which would unmount
+    // the working chat/roster) — the current team stays on screen.
+    expect(component.teamLoadError()).toBeNull();
+    expect(component.team()).not.toBeNull();
+  });
+
+  it('a user-initiated load failure DOES surface a full-stage error', () => {
+    api.getTeam.mockReturnValueOnce(throwError(() => new Error('down')));
+    fixture.detectChanges();
+    component.selectTeam('t-1');
+    expect(component.teamLoadError()).toBe('Could not load this team.');
+  });
+
   // ── Create team ──────────────────────────────────────────────────────────
 
   it('toggleCreateForm shows/hides the form and resets it on close', () => {

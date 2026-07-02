@@ -86,27 +86,42 @@ export class AgentStudioComposeTeamComponent implements OnInit {
    * re-sync) through one `switchMap` cancels a prior in-flight fetch, so
    * switching teams rapidly can't let an earlier team's response land after a
    * later one and overwrite `team` with stale data.
+   *
+   * `surfaceError` distinguishes a user-initiated load (team select / initial)
+   * from a background re-sync (`onRosterChanged`): only the former surfaces a
+   * full-stage `teamLoadError` on failure. A background re-sync that blips must
+   * NOT set `teamLoadError` — the template hides the whole chat/roster when it's
+   * truthy, so doing so would tear down a working, mid-conversation stage over a
+   * transient failure (and, since the chat then can't re-emit `rosterChanged`,
+   * leave it stuck).
    */
-  private readonly teamFetch = new Subject<string>();
+  private readonly teamFetch = new Subject<{ teamId: string; surfaceError: boolean }>();
 
   constructor() {
     this.teamFetch
       .pipe(
-        switchMap((teamId) =>
+        switchMap(({ teamId, surfaceError }) =>
           this.api.getTeam(teamId).pipe(
-            map((resp) => ({ ok: true as const, team: resp?.team ?? null })),
-            catchError(() => of({ ok: false as const, team: null })),
+            // Cast to `AgenticTeam | null` so the defensive "no team in the body"
+            // branch below stays reachable — the response type declares `team`
+            // non-null, but an empty/HTTP-mapped-null body is still handled.
+            map((resp) => ({
+              ok: true as const,
+              team: (resp?.team ?? null) as AgenticTeam | null,
+              surfaceError,
+            })),
+            catchError(() => of({ ok: false as const, team: null, surfaceError })),
           ),
         ),
         takeUntilDestroyed(this.destroyRef),
       )
       .subscribe((res) => {
         if (!res.ok) {
-          this.teamLoadError.set('Could not load this team.');
+          if (res.surfaceError) this.teamLoadError.set('Could not load this team.');
           return;
         }
         if (!res.team) {
-          this.teamLoadError.set('Team not found.');
+          if (res.surfaceError) this.teamLoadError.set('Team not found.');
           return;
         }
         this.applyTeam(res.team);
@@ -150,8 +165,9 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   }
 
   private loadTeam(teamId: string): void {
+    // User-initiated load: clear any prior error and surface a new one on failure.
     this.teamLoadError.set(null);
-    this.teamFetch.next(teamId);
+    this.teamFetch.next({ teamId, surfaceError: true });
   }
 
   private applyTeam(team: AgenticTeam): void {
@@ -186,7 +202,9 @@ export class AgentStudioComposeTeamComponent implements OnInit {
     // status stay in sync without a manual reload.
     const teamId = this.selectedTeamId();
     if (!teamId) return;
-    this.teamFetch.next(teamId);
+    // Background re-sync: don't surface a full-stage error on a transient blip —
+    // it would tear down the working chat/roster (see `teamFetch` doc).
+    this.teamFetch.next({ teamId, surfaceError: false });
   }
 
   toggleCreateForm(): void {

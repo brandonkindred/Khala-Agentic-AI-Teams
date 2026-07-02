@@ -57,6 +57,31 @@ describe('AddAgentFromRegistryDialogComponent', () => {
     expect(fixture.componentInstance.results()).toHaveLength(1);
   });
 
+  it('shows loading immediately on open (not the empty state) before the debounce fires', () => {
+    const listAgents = vi.fn().mockReturnValue(of([summary('a.1')]));
+    const { fixture } = configure({ existingManifestIds: [] }, listAgents);
+    fixture.detectChanges(); // ngOnInit → search()
+    // loading is set synchronously in search(), before the debounced request fires,
+    // so the template shows the spinner rather than the "no matches" empty state.
+    expect(fixture.componentInstance.loading()).toBe(true);
+    expect(listAgents).not.toHaveBeenCalled();
+  });
+
+  it('clears a stale error synchronously when a new search starts', async () => {
+    const listAgents = vi
+      .fn()
+      .mockReturnValueOnce(throwError(() => new Error('boom')))
+      .mockReturnValueOnce(of([summary('a.1')]));
+    const { fixture } = configure({ existingManifestIds: [] }, listAgents);
+    const c = fixture.componentInstance;
+    fixture.detectChanges();
+    await flush(); // init search errors
+    expect(c.error()).toBe('Could not search the agent catalog.');
+
+    c.onQueryChange('x'); // a new search must drop the stale banner immediately
+    expect(c.error()).toBeNull();
+  });
+
   it('re-searches with the trimmed query on change', async () => {
     const listAgents = vi.fn().mockReturnValue(of([]));
     const { fixture } = configure({ existingManifestIds: [] }, listAgents);
