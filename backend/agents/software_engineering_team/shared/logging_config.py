@@ -40,7 +40,7 @@ AGENT_LOGGERS = [
     "shared.git_utils",
     "shared.repo_writer",
     "shared.job_store",
-    "shared.command_runner",
+    "shared_command_runner",
     # Agent loggers
     "architecture_expert.agent",
     "tech_lead_agent.agent",

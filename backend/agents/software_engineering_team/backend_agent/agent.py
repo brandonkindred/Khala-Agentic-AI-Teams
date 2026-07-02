@@ -12,11 +12,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import get_client, get_strands_model
+from shared_command_runner.error_parsing import normalize_error_signature
 from software_engineering_team.shared.context_sizing import (
     compute_existing_code_chars,
     compute_spec_content_chars,
 )
-from software_engineering_team.shared.error_parsing import normalize_error_signature
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
 from software_engineering_team.shared.prompt_utils import (
     build_problem_solving_header,
@@ -3780,7 +3780,7 @@ class BackendExpertAgent:
             if not data.get("needs_clarification", False) and total_chars == 0 and attempt < 3:
                 response_preview = ""
                 if data.get("content"):
-                    response_preview = (str(data["content"]) or "")
+                    response_preview = str(data["content"]) or ""
                 elif data:
                     response_preview = str(data)
                 logger.warning(

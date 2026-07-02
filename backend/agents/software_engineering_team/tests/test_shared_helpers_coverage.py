@@ -66,7 +66,7 @@ def test_extract_single_python_block_ignores_short_body():
 def test_parse_pytest_failure_empty_returns_unknown_failure():
     """Empty stdout/stderr still yields a single Unknown ParsedFailure
     so the caller surfaces *something* in the agent feedback."""
-    from software_engineering_team.shared import error_parsing as ep
+    from shared_command_runner import error_parsing as ep
 
     out = ep.parse_pytest_failure("", "")
     assert len(out) >= 1
@@ -74,7 +74,7 @@ def test_parse_pytest_failure_empty_returns_unknown_failure():
 
 
 def test_parse_ng_build_failure_empty_returns_unknown_failure():
-    from software_engineering_team.shared import error_parsing as ep
+    from shared_command_runner import error_parsing as ep
 
     out = ep.parse_ng_build_failure("", "")
     assert len(out) >= 1
@@ -82,7 +82,7 @@ def test_parse_ng_build_failure_empty_returns_unknown_failure():
 
 
 def test_parse_devops_failure_handles_generic_docker_error():
-    from software_engineering_team.shared import error_parsing as ep
+    from shared_command_runner import error_parsing as ep
 
     text = "docker: RUN apt-get install foo failed"
     out = ep.parse_devops_failure(text)
@@ -90,7 +90,7 @@ def test_parse_devops_failure_handles_generic_docker_error():
 
 
 def test_get_failure_class_tag_returns_string():
-    from software_engineering_team.shared.error_parsing import (
+    from shared_command_runner.error_parsing import (
         FailureClass,
         get_failure_class_tag,
     )
@@ -103,7 +103,7 @@ def test_get_failure_class_tag_returns_string():
 
 
 def test_build_agent_feedback_empty_returns_empty_or_string():
-    from software_engineering_team.shared.error_parsing import build_agent_feedback
+    from shared_command_runner.error_parsing import build_agent_feedback
 
     out = build_agent_feedback([])
     assert isinstance(out, str)

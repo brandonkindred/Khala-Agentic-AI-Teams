@@ -156,7 +156,7 @@ class CommandResult:
         if self.success:
             return []
         try:
-            from software_engineering_team.shared.error_parsing import parse_command_failure
+            from shared_command_runner.error_parsing import parse_command_failure
 
             return parse_command_failure(command_kind, self.stdout or "", self.stderr or "")
         except Exception as e:
