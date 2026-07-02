@@ -38,6 +38,24 @@ todos:
 isProject: false
 ---
 
+> ## Implementation status
+>
+> Part A's shared-infrastructure extraction is **implemented, verified, and
+> landed**; the `coding_team → software_engineering_team` dependency is reduced to
+> the four *engine* imports that Part B inverts. Each landed step was verified
+> green (SE suite 2392 passed at ~94% line coverage; coding_team 754 passed under
+> `pytest -n 4`; `ruff` clean).
+>
+> | Item | Status | Notes |
+> |---|---|---|
+> | A2 `shared_command_runner` | ✅ done | command runner + error parsing extracted; SE consumers repointed. |
+> | A3 `shared_repo_context` | ✅ done | repo scanner + constants extracted; the three `_read_repo_code` readers consolidated onto `read_repo_code_budgeted`; coding_team's `repo_utils` edge removed. |
+> | A4 `shared_llm_recovery` | ✅ done | salvage parsers extracted; coding_team's Tech Lead gained `extract_json_object` recovery. |
+> | A5 `shared_dev_models` + `shared_git` + `strands_model`→`llm_service` | ✅ done | moved to neutral homes; SE keeps `sys.modules` alias shims (identity + `@patch` preserved); coding_team's model/git/strands edges removed. |
+> | A1 `shared_job_store` | ⏳ follow-up | pure de-duplication — `job_store` was never part of the cycle — and entangled with the `patched_job_store` fixture; deferred to keep this change focused. |
+> | B invert-engines | ⏳ follow-up | the remaining cycle break; coding_team still imports SE's `frontend/backend_code_v2_team`, `quality_gate_tools`, `code_review_agent` (all deferred). Largest blast radius (new provider + SE-backed impl + out-of-package container entrypoint + docker `TEAM_MODULE` + ~9 test rewrites) — best as its own PR per the sequencing below. |
+> | C1 CI/coverage, C2 acyclic guard | ⏳ follow-up | land with/after B (the acyclic guard only goes green once B removes the last edges). |
+
 # Spec
 
 ## Problem
