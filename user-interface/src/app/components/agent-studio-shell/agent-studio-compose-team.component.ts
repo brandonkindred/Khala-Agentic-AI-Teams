@@ -67,10 +67,13 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   @ViewChild(ProcessDesignerChatComponent) private chat?: ProcessDesignerChatComponent;
 
   /**
-   * Team the Stage-2 handoff agent has already been consumed into (one auto-add
-   * attempt per team, so a manual delete isn't undone by a later re-sync).
+   * `${teamId}::${manifestId}` keys the Stage-2 handoff agent has already been
+   * auto-added for. Tracked as a set (not a single "last team") so the "at most
+   * one attempt per team" guard survives switching teams: after adding the agent
+   * to team A and manually removing it, returning to A must NOT re-add it —
+   * which a single-value guard would, having been overwritten by the visit to B.
    */
-  private handoffConsumedForTeam: string | null = null;
+  private readonly handoffAttempts = new Set<string>();
 
   readonly teams = signal<AgenticTeamSummary[]>([]);
   readonly teamsLoading = signal(false);
@@ -201,18 +204,23 @@ export class AgentStudioComposeTeamComponent implements OnInit {
    * When the user reached Stage 3 via Stage 2's "Add to team →", add the tested
    * agent (handoff `registryAgentId`) to this team's roster so they don't have to
    * search for it again (spec §2.4 handoff). Idempotent:
-   *   - at most one attempt per team (so a manual delete isn't undone by a later
-   *     background re-sync), and
+   *   - at most one attempt per (team, handoff agent) — tracked in a set, so it
+   *     holds across team switches and a manual delete isn't undone by a later
+   *     background re-sync or a return visit to the team, and
    *   - skipped when the team already carries that manifest (no duplicate, and
    *     switching to a team that already has it is a no-op).
    * `registryAgentId` is left set so Stage 4's "fix an agent" back-loop still works.
    */
   private consumeHandoffAgent(team: AgenticTeam): void {
     const manifestId = this.state.registryAgentId();
-    if (!manifestId || this.handoffConsumedForTeam === team.team_id) {
+    if (!manifestId) {
       return;
     }
-    this.handoffConsumedForTeam = team.team_id; // mark attempted (once per team)
+    const key = `${team.team_id}::${manifestId}`;
+    if (this.handoffAttempts.has(key)) {
+      return; // already attempted for this (team, agent) — don't re-add after a delete
+    }
+    this.handoffAttempts.add(key);
     if (team.agents.some((a) => a.manifest_id === manifestId)) {
       return; // already staffed with this agent
     }

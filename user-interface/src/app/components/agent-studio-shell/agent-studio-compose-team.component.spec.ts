@@ -322,6 +322,20 @@ describe('AgentStudioComposeTeamComponent', () => {
     expect(api.addAgentFromRegistry).toHaveBeenCalledTimes(1);
   });
 
+  it('does not re-add to a team on return after visiting another team (per-team attempt set)', () => {
+    state.setRegistryAgentId('blogging.planner');
+    // A returns without the agent (user manually removed it after the first add).
+    api.getTeam.mockImplementation((id: string) => of({ team: team({ team_id: id, agents: [] }) }));
+    fixture.detectChanges();
+
+    component.selectTeam('t-1'); // attempt #1 for A
+    component.selectTeam('t-2'); // attempt #1 for B (different team)
+    api.addAgentFromRegistry.mockClear();
+
+    component.selectTeam('t-1'); // return to A — must NOT re-add (already attempted for A)
+    expect(api.addAgentFromRegistry).not.toHaveBeenCalled();
+  });
+
   it('preserves registryAgentId after auto-add (Stage 4 back-loop still works)', () => {
     state.setRegistryAgentId('blogging.planner');
     api.getTeam.mockReturnValue(of({ team: team({ agents: [] }) }));
