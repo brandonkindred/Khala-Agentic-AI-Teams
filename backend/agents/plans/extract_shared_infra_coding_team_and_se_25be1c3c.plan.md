@@ -55,7 +55,7 @@ isProject: false
 > | B invert-engines | ✅ done | `CodeEngineProvider` interface in coding_team; `SECodeEngineProvider` supplies the code-v2 team leads, quality gates, and PR reviewer; SE injects it per call, and the new out-of-package `coding_team_service` composition root installs it for the standalone container (its `TEAM_MODULE`, docker updated). |
 > | C2 acyclic guard | ✅ done | AST test fails if any coding_team module imports `software_engineering_team`. |
 > | A1 `shared_job_store` | ⏳ follow-up | pure de-duplication — `job_store` was never part of the cycle — and entangled with the `patched_job_store` fixture; deferred to keep this change focused. |
-> | C1 CI/coverage | ⏳ follow-up | add a coding_team CI test job (its suite never runs today) + dedicated jobs for the new `shared_*` packages under the 90% gate. |
+> | C1 CI/coverage | ✅ done (core) | coding_team now runs as its own CI job at the 90% gate (suite ~97%, includes the acyclic guard); the new `shared_*` packages join the `shared_backend` fan-out. Their code is exercised by the SE job; splitting each into its own per-package coverage job is an optional test-reorg refinement. |
 
 # Spec
 
