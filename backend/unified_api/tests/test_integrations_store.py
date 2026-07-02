@@ -244,7 +244,7 @@ def test_set_github_config_persists_webhook_secret(tmp_path: Path, monkeypatch: 
     store.set_github_config(enabled=True, owner="acme", repo="widget", webhook_secret="whsec_abc")
 
     assert creds[("github", "webhook_secret")] == "whsec_abc"
-    assert store.get_github_webhook_secret() == "whsec_abc"
+    assert store.get_github_webhook_secret_status()[0] == "whsec_abc"
     cfg = store.get_github_config()
     assert cfg["webhook_secret_configured"] is True
 
@@ -268,11 +268,11 @@ def test_get_github_webhook_secret_env_fallback(tmp_path: Path, monkeypatch: pyt
     _install_inmemory_github_credentials(store, monkeypatch)
 
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "env_secret")
-    assert store.get_github_webhook_secret() == "env_secret"
+    assert store.get_github_webhook_secret_status()[0] == "env_secret"
     assert store.get_github_config()["webhook_secret_configured"] is True
 
     monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
-    assert store.get_github_webhook_secret() is None
+    assert store.get_github_webhook_secret_status()[0] is None
     assert store.get_github_config()["webhook_secret_configured"] is False
 
 

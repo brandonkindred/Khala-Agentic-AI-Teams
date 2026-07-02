@@ -65,6 +65,19 @@ def test_verify_signature_rejects_malformed_header_no_equals():
     assert gh.verify_github_signature("topsecret", b"x", "sha256") is False
 
 
+def test_verify_signature_rejects_non_ascii_header_without_raising():
+    # Starlette decodes header bytes as latin-1, so a byte >= 0x80 becomes a non-ASCII
+    # str char. Comparing digests as str would make hmac.compare_digest raise TypeError
+    # (→ unauthenticated 500); comparing as bytes must return False and never raise.
+    body = b"x"
+    assert gh.verify_github_signature("topsecret", body, "sha256=deadbeef\xff") is False
+
+
+def test_verify_signature_valid_still_matches_after_bytes_fix():
+    body = b'{"a":1}'
+    assert gh.verify_github_signature("topsecret", body, _sign("topsecret", body)) is True
+
+
 # ---------------------------------------------------------------------------
 # Command parsing + authorization
 # ---------------------------------------------------------------------------
@@ -131,10 +144,18 @@ def _comment_payload(**over):
 
 
 class _SyncExecutor:
-    """Executor stand-in that runs submitted work synchronously (no thread pool)."""
+    """Executor stand-in that runs submitted work synchronously (no thread pool).
+
+    Returns a resolved ``Future`` so ``submit_safely``'s ``add_done_callback`` works.
+    """
 
     def submit(self, fn, *args):
-        fn(*args)
+        fut: futures.Future = futures.Future()
+        try:
+            fut.set_result(fn(*args))
+        except BaseException as e:  # noqa: BLE001 - mirror to the future like a real pool
+            fut.set_exception(e)
+        return fut
 
 
 def _dispatch(payload, event_type="issue_comment", cfg=("acme", "widget")):
@@ -160,6 +181,20 @@ def test_dispatch_ignores_non_issue_comment_event():
 
 def test_dispatch_ignores_non_created_action():
     assert _dispatch(_comment_payload(action="edited")).called is False
+
+
+@pytest.mark.parametrize("bad_payload", [[], 5, "x", None, True])
+def test_dispatch_ignores_non_dict_payload_without_raising(bad_payload):
+    # A non-object JSON body must be a silent no-op (dispatch's "never raises" contract),
+    # not an AttributeError from payload.get(...).
+    proc = MagicMock()
+    with (
+        patch(f"{_H}.process_review_request", proc),
+        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
+        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
+    ):
+        gh.dispatch_github_event("issue_comment", bad_payload, "d-1")  # must not raise
+    proc.assert_not_called()
 
 
 def test_dispatch_ignores_comment_on_plain_issue():
@@ -218,18 +253,31 @@ def test_dispatch_defaults_missing_comment_id_to_zero():
 # ---------------------------------------------------------------------------
 
 
-def test_process_review_request_resolves_token_once_then_reacts_and_starts():
-    # The token is resolved a SINGLE time and reused by both the reaction and the
-    # review start (no duplicate credential-store read per webhook).
+def test_process_review_request_resolves_token_once_starts_then_reacts_on_success():
+    # The token is resolved a SINGLE time and reused by both the review start and the
+    # reaction (no duplicate credential-store read per webhook); the 👀 reaction is posted
+    # only AFTER the review actually started.
     with (
         patch(f"{_H}._resolve_github_token", return_value="ghp_tok") as tok,
+        patch(f"{_H}._start_review", return_value=True) as start,
         patch(f"{_H}._add_eyes_reaction") as react,
-        patch(f"{_H}._start_review") as start,
     ):
         gh.process_review_request("acme", "widget", 42, 999)
     tok.assert_called_once_with()
-    react.assert_called_once_with("acme", "widget", 999, "ghp_tok")
     start.assert_called_once_with(42, "ghp_tok")
+    react.assert_called_once_with("acme", "widget", 999, "ghp_tok")
+
+
+def test_process_review_request_skips_reaction_when_review_did_not_start():
+    # If the review fails to start, no 👀 reaction is posted — the acknowledgement must
+    # never appear for a review that did not actually run.
+    with (
+        patch(f"{_H}._resolve_github_token", return_value="ghp_tok"),
+        patch(f"{_H}._start_review", return_value=False),
+        patch(f"{_H}._add_eyes_reaction") as react,
+    ):
+        gh.process_review_request("acme", "widget", 42, 999)
+    react.assert_not_called()
 
 
 def test_add_eyes_reaction_noop_without_comment_id():
@@ -282,7 +330,7 @@ def test_configured_owner_repo_empty_on_error():
         assert gh._configured_owner_repo() == ("", "")
 
 
-def test_start_review_invokes_shared_helper_with_token():
+def test_start_review_invokes_shared_helper_with_token_and_returns_true():
     seen = {}
 
     async def _fake_start(pr_number, base_branch, *, token=None):
@@ -290,17 +338,17 @@ def test_start_review_invokes_shared_helper_with_token():
         return MagicMock(job_id="job-1")
 
     with patch("unified_api.routes.integrations._start_pr_review", _fake_start):
-        gh._start_review(42, "ghp_tok")  # must not raise
+        assert gh._start_review(42, "ghp_tok") is True
     # The pre-resolved token is threaded through so the review path does not re-read it.
     assert seen["args"] == (42, None, "ghp_tok")
 
 
-def test_start_review_swallows_errors():
+def test_start_review_swallows_errors_and_returns_false():
     async def _boom(pr_number, base_branch, *, token=None):
         raise RuntimeError("downstream down")
 
     with patch("unified_api.routes.integrations._start_pr_review", _boom):
-        gh._start_review(42, "ghp_tok")  # logged, not raised
+        assert gh._start_review(42, "ghp_tok") is False  # logged, not raised
 
 
 def test_configured_owner_repo_reads_meta():

@@ -21,8 +21,10 @@ import logging
 import re
 import time
 from concurrent import futures
+from itertools import islice
 from typing import Any
 
+from shared_env_config import env_float, env_int
 from unified_api.bounded_executor import get_or_recreate_executor, submit_safely
 
 logger = logging.getLogger(__name__)
@@ -87,7 +89,13 @@ def verify_github_signature(secret: str, body: bytes, signature_header: str) -> 
     Postconditions: returns ``True`` only when the header is a well-formed
         ``sha256=...`` digest that matches an HMAC-SHA256 of ``body`` under ``secret``,
         compared with :func:`hmac.compare_digest` (constant-time). Any malformed header,
-        wrong scheme, or mismatch returns ``False``. Never raises.
+        wrong scheme, or mismatch returns ``False``. Never raises — the digests are
+        compared as ``bytes`` (both ``.encode("utf-8")``d), NOT as ``str``, because
+        ``hmac.compare_digest`` raises ``TypeError`` on a ``str`` with non-ASCII
+        characters and Starlette decodes header bytes as latin-1, so an attacker-supplied
+        ``X-Hub-Signature-256`` with a byte >= 0x80 would otherwise crash verification
+        (turning a would-be 401 into an unauthenticated 500). A non-ASCII ``provided``
+        simply encodes to bytes that cannot match the ASCII-hex expected → ``False``.
     """
     if not secret or not signature_header:
         return False
@@ -95,7 +103,7 @@ def verify_github_signature(secret: str, body: bytes, signature_header: str) -> 
     if scheme != "sha256" or not provided:
         return False
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, provided)
+    return hmac.compare_digest(expected.encode("utf-8"), provided.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -184,15 +192,17 @@ def _add_eyes_reaction(owner: str, repo: str, comment_id: int, token: str | None
         logger.warning("GitHub webhook: could not add reaction to comment %s", comment_id, exc_info=True)
 
 
-def _start_review(pr_number: int, token: str | None) -> None:
+def _start_review(pr_number: int, token: str | None) -> bool:
     """Start the existing PR-review flow for ``pr_number`` (runs the async helper).
 
     Preconditions: ``pr_number`` is a positive PR number; ``token`` is a pre-resolved
         GitHub PAT reused so the review path does not re-read the credential store, or
         ``None`` to let that path resolve it.
     Postconditions: forwards to the same ``_start_pr_review`` path used by
-        ``POST /api/integrations/github/review-pr``. Errors are logged, not raised — the
-        webhook has already returned 200 and there is no client to surface them to.
+        ``POST /api/integrations/github/review-pr``. Returns ``True`` iff a review job was
+        actually started, ``False`` on any failure (so the caller can avoid posting a
+        misleading acknowledgement). Errors are logged, not raised — the webhook has
+        already returned 200 and there is no client to surface them to.
         Runs on a bounded executor worker thread (see :func:`_get_dispatch_executor`),
         which has no event loop of its own, so a fresh ``asyncio.run()`` per call is the
         standard way to run this one coroutine to completion — the same shape as
@@ -211,24 +221,29 @@ def _start_review(pr_number: int, token: str | None) -> None:
 
         result = asyncio.run(_start_pr_review(pr_number, None, token=token))
         logger.info("GitHub webhook: started review job %s for PR #%s", getattr(result, "job_id", "?"), pr_number)
+        return True
     except Exception:
         logger.exception("GitHub webhook: failed to start review for PR #%s", pr_number)
+        return False
 
 
 def process_review_request(owner: str, repo: str, pr_number: int, comment_id: int) -> None:
-    """Acknowledge with a 👀 reaction, then start the code review. Runs in a worker thread.
+    """Start the code review, then acknowledge with a 👀 reaction. Runs in a worker thread.
 
     Preconditions: ``owner``/``repo`` are the (config-matched) repository coordinates;
         ``pr_number`` is a positive PR number; ``comment_id`` is the triggering comment's
         id (0 when unknown).
-    Postconditions: resolves the GitHub PAT once and reuses it for both the reaction and
-        the review start, so a single credential-store read serves the whole webhook.
-        Best-effort throughout — neither a failed reaction nor a failed review start
-        raises (the webhook has already returned 200).
+    Postconditions: resolves the GitHub PAT once and reuses it for both the review start
+        and the reaction, so a single credential-store read serves the whole webhook. The
+        👀 reaction is posted ONLY when the review actually started — so the "on it" signal
+        is never shown for a review that silently failed to start (integration disabled in
+        the interim, coding-team service unreachable, etc.). Best-effort throughout —
+        neither a failed review start nor a failed reaction raises (the webhook has already
+        returned 200).
     """
     token = _resolve_github_token()
-    _add_eyes_reaction(owner, repo, comment_id, token)
-    _start_review(pr_number, token)
+    if _start_review(pr_number, token):
+        _add_eyes_reaction(owner, repo, comment_id, token)
 
 
 # ---------------------------------------------------------------------------
@@ -262,14 +277,21 @@ def _configured_owner_repo() -> tuple[str, str]:
 
 
 # Best-effort de-dup of GitHub webhook redeliveries by the `X-GitHub-Delivery` header.
-# GitHub retries a delivery (same ID) on a non-2xx response or a timeout; without this,
-# a retried "@khala review" comment would start a second review job for the same PR.
-# In-memory only — bounded (TTL + max-entries) so it can't grow unbounded, but it does
-# NOT catch a redelivery landing on a different worker process in a multi-worker
-# deployment (each process has its own table). Reduces, does not eliminate, duplicates.
+# GitHub retries a delivery (same ID) on a non-2xx response or a timeout; this suppresses
+# re-dispatch of an identical redelivery that lands on the SAME worker process.
+#
+# This is only a fast-path optimization, NOT the authoritative duplicate-review guard: it
+# is in-memory and per-process, so a redelivery landing on a different worker in a
+# multi-worker deployment (the documented `make deploy` prod config) slips past it. The
+# real, cross-worker guard lives one layer deeper — the coding-team `POST /review-pr`
+# endpoint rejects a second review for a PR that already has a running job (see
+# `_running_review_for_pr` there), which also covers the manual UI trigger. This table
+# just avoids the wasted HTTP round-trip for the common same-worker retry.
+#
+# Tunable via env; see docs/ENV_VARS.md.
 _SEEN_DELIVERY_IDS: dict[str, float] = {}
-_SEEN_DELIVERY_TTL_S = 600.0
-_SEEN_DELIVERY_MAX_ENTRIES = 1000
+_SEEN_DELIVERY_TTL_S = env_float("GITHUB_WEBHOOK_DEDUP_TTL_S", 600.0, floor=1.0)
+_SEEN_DELIVERY_MAX_ENTRIES = env_int("GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES", 1000, floor=2)
 
 
 def _is_duplicate_delivery(delivery_id: str) -> bool:
@@ -280,24 +302,33 @@ def _is_duplicate_delivery(delivery_id: str) -> bool:
     Postconditions: an empty ``delivery_id`` is never treated as a duplicate (returns
         ``False``, recording nothing) — GitHub always sends this header on a real
         delivery, so an empty value signals an unusual/test request, not a redelivery.
-        Otherwise, prunes expired entries, then returns ``True`` (recording nothing
-        further) if ``delivery_id`` is already tracked; else records it — expiring after
-        ``_SEEN_DELIVERY_TTL_S`` — and returns ``False``. Caps memory by dropping the
-        oldest half of entries once the table exceeds ``_SEEN_DELIVERY_MAX_ENTRIES``.
-        Never raises.
+        Returns ``True`` iff ``delivery_id`` is tracked AND not yet expired; otherwise
+        records it (with a fresh ``now + TTL`` expiry, refreshing an expired entry's
+        position) and returns ``False``. Expiry is checked lazily per-key (no full-table
+        scan per call); bulk reclamation is the size cap, which drops the oldest-inserted
+        half once the table exceeds ``_SEEN_DELIVERY_MAX_ENTRIES``. Because every insert
+        uses a non-decreasing ``now`` and dict order is insertion order, insertion order
+        equals expiry order, so "oldest half" is just the first ``MAX//2`` keys — no sort
+        needed. Never raises.
+
+    Invariants: ``len(_SEEN_DELIVERY_IDS) <= _SEEN_DELIVERY_MAX_ENTRIES`` after every call;
+        each value is the monotonic-clock expiry of its key. Single-writer: only ever
+        called from :func:`dispatch_github_event`, which runs synchronously on the async
+        route's event-loop thread (never from a pool worker), so the unsynchronized dict
+        mutation is race-free — see :func:`_get_dispatch_executor` for the same rationale.
     """
     if not delivery_id:
         return False
     now = time.monotonic()
-    for seen_id, expires_at in list(_SEEN_DELIVERY_IDS.items()):
-        if expires_at < now:
-            _SEEN_DELIVERY_IDS.pop(seen_id, None)
-    if delivery_id in _SEEN_DELIVERY_IDS:
+    expires_at = _SEEN_DELIVERY_IDS.get(delivery_id)
+    if expires_at is not None and expires_at >= now:
         return True
+    # New, or seen-but-expired: (re)record it. Pop first so a refreshed key moves to the
+    # end (newest) and insertion order keeps matching expiry order.
+    _SEEN_DELIVERY_IDS.pop(delivery_id, None)
     _SEEN_DELIVERY_IDS[delivery_id] = now + _SEEN_DELIVERY_TTL_S
     if len(_SEEN_DELIVERY_IDS) > _SEEN_DELIVERY_MAX_ENTRIES:
-        oldest = sorted(_SEEN_DELIVERY_IDS.items(), key=lambda kv: kv[1])[: _SEEN_DELIVERY_MAX_ENTRIES // 2]
-        for seen_id, _ in oldest:
+        for seen_id in list(islice(_SEEN_DELIVERY_IDS, _SEEN_DELIVERY_MAX_ENTRIES // 2)):
             _SEEN_DELIVERY_IDS.pop(seen_id, None)
     return False
 
@@ -320,13 +351,18 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
         ``delivery_id`` is the ``X-GitHub-Delivery`` header value, or ``""`` if absent.
     Postconditions: submits :func:`process_review_request` to the bounded dispatch
         executor (see :func:`_get_dispatch_executor`) exactly once when every condition
-        above holds; any unmet condition is a silent no-op. Never raises (it returns
-        before the submitted work does any I/O) — the submit itself goes through
-        :func:`unified_api.bounded_executor.submit_safely`, which swallows the
-        ``RuntimeError`` a shut-down executor (or interpreter-shutdown race) would
-        otherwise raise, so this contract holds even during process teardown.
+        above holds; any unmet condition (including a non-``dict`` ``payload``) is a
+        silent no-op. Never raises (it returns before the submitted work does any I/O) —
+        the submit itself goes through :func:`unified_api.bounded_executor.submit_safely`,
+        which swallows the ``RuntimeError`` a shut-down executor (or interpreter-shutdown
+        race) would otherwise raise, so this contract holds even during process teardown.
     """
     if event_type != "issue_comment":
+        return
+    # Defensive: the route already rejects a non-object body with 400, but honor the
+    # "never raises" contract for any other caller — a non-dict payload can't be an
+    # issue_comment event, so no-op rather than letting ``.get`` raise AttributeError.
+    if not isinstance(payload, dict):
         return
     if str(payload.get("action", "")).strip() != "created":
         return

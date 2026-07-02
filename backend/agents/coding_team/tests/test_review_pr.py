@@ -245,8 +245,13 @@ class TestCreateReviewComment:
 
         client = _client_with(handler)
         client.create_review_comment(
-            owner="o", repo="r", number=7, commit_id="abc", path="a.py",
-            body="fix", subject_type="file",
+            owner="o",
+            repo="r",
+            number=7,
+            commit_id="abc",
+            path="a.py",
+            body="fix",
+            subject_type="file",
         )
         assert captured["body"]["subject_type"] == "file"
         assert "line" not in captured["body"]
@@ -257,8 +262,13 @@ class TestCreateReviewComment:
         client = _client_with(lambda _req: httpx.Response(422, text="bad file comment"))
         with pytest.raises(GitHubAPIError):
             client.create_review_comment(
-                owner="o", repo="r", number=7, commit_id="s", path="a.py",
-                body="b", subject_type="file",
+                owner="o",
+                repo="r",
+                number=7,
+                commit_id="s",
+                path="a.py",
+                body="b",
+                subject_type="file",
             )
 
     def test_requires_exactly_one_anchor(self) -> None:
@@ -267,8 +277,14 @@ class TestCreateReviewComment:
         client = _client_with(lambda _req: httpx.Response(500, text="should not be hit"))
         with pytest.raises(ValueError):  # both supplied
             client.create_review_comment(
-                owner="o", repo="r", number=7, commit_id="s", path="a.py",
-                body="b", line=3, subject_type="file",
+                owner="o",
+                repo="r",
+                number=7,
+                commit_id="s",
+                path="a.py",
+                body="b",
+                line=3,
+                subject_type="file",
             )
         with pytest.raises(ValueError):  # neither supplied
             client.create_review_comment(
@@ -284,13 +300,24 @@ class TestCreateReviewComment:
             )
         with pytest.raises(ValueError):  # invalid side for a line comment
             client.create_review_comment(
-                owner="o", repo="r", number=7, commit_id="s", path="a.py",
-                body="b", line=3, side="MIDDLE",
+                owner="o",
+                repo="r",
+                number=7,
+                commit_id="s",
+                path="a.py",
+                body="b",
+                line=3,
+                side="MIDDLE",
             )
         with pytest.raises(ValueError):  # non-"file" subject_type
             client.create_review_comment(
-                owner="o", repo="r", number=7, commit_id="s", path="a.py",
-                body="b", subject_type="line",
+                owner="o",
+                repo="r",
+                number=7,
+                commit_id="s",
+                path="a.py",
+                body="b",
+                subject_type="line",
             )
         with pytest.raises(ValueError):  # empty path
             client.create_review_comment(
@@ -634,6 +661,38 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 502
 
+    def test_duplicate_review_for_same_pr_returns_409(self, review_app, monkeypatch) -> None:
+        """A second review while one is already running for the same PR is rejected 409 —
+        the cross-worker duplicate-review guard (also covers the manual UI trigger)."""
+        api = review_app["api"]
+        active = {
+            "job_id": "existing-job",
+            "status": "running",
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [active])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 409
+        assert "already running" in resp.json()["detail"]
+        assert "existing-job" in resp.json()["detail"]
+
+    def test_running_job_for_different_pr_does_not_block(self, review_app, monkeypatch) -> None:
+        """An active review for a DIFFERENT PR (or an issue run) must not block this PR."""
+        api = review_app["api"]
+        other = {
+            "job_id": "other-job",
+            "status": "running",
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 999},
+        }
+        issue_run = {
+            "job_id": "issue-job",
+            "status": "running",
+            "github_context": {"owner": "o", "repo": "r", "issue_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [other, issue_run])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+
     def test_agent_failure_marks_job_failed(self, review_app) -> None:
         review_app["github"]["agent_output"] = RuntimeError("llm down")
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -831,7 +890,9 @@ class TestReviewEndpoint:
         gh = review_app["github"]["client"]
         gh.review_comment_fail_paths = {"a.py"}  # every file-level post 422s
         review_app["github"]["agent_output"] = _FakeOutput(
-            issues=[_FakeReviewIssue("low", line=999, file_path="a.py", description="dropped finding")]
+            issues=[
+                _FakeReviewIssue("low", line=999, file_path="a.py", description="dropped finding")
+            ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -871,7 +932,9 @@ class TestReviewEndpoint:
         gh = review_app["github"]["client"]
         gh.review_fail_times = 1  # the lone summary-only review attempt 422s
         review_app["github"]["agent_output"] = _FakeOutput(
-            issues=[_FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff only")]
+            issues=[
+                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff only")
+            ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -940,7 +1003,9 @@ class TestReviewEndpoint:
         gh.review_comment_fail_paths = {"a.py"}
         gh.review_comment_fail_status = 403
         review_app["github"]["agent_output"] = _FakeOutput(
-            issues=[_FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff find")]
+            issues=[
+                _FakeReviewIssue("low", line=999, file_path="a.py", description="off-diff find")
+            ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
@@ -1279,8 +1344,7 @@ class TestBugConditionExploration:
 
         # EXPECTED: no standalone comments for the findings.
         assert gh.comments == [], (
-            f"BUG CONFIRMED — findings reposted as standalone comments: "
-            f"gh.comments = {gh.comments}"
+            f"BUG CONFIRMED — findings reposted as standalone comments: gh.comments = {gh.comments}"
         )
 
         # The in-diff line survives as a line-anchored comment in a posted review.
@@ -1380,21 +1444,21 @@ class TestPreservationProperties:
     # Diff hunk lines for a.py: {1, 2, 3}
     _PBT_A_CASES = [
         # (severity, line, description)
-        ("high",     1, "context line 1 high severity"),
-        ("high",     2, "added line 2 high severity"),
-        ("high",     3, "context line 3 high severity"),
-        ("low",      1, "context line 1 low severity"),
-        ("low",      2, "added line 2 low severity"),
-        ("low",      3, "context line 3 low severity"),
+        ("high", 1, "context line 1 high severity"),
+        ("high", 2, "added line 2 high severity"),
+        ("high", 3, "context line 3 high severity"),
+        ("low", 1, "context line 1 low severity"),
+        ("low", 2, "added line 2 low severity"),
+        ("low", 3, "context line 3 low severity"),
         ("critical", 1, "critical line 1"),
         ("critical", 2, "critical line 2"),
         ("critical", 3, "critical line 3"),
-        ("medium",   1, "medium line 1"),
-        ("medium",   2, "medium line 2"),
-        ("medium",   3, "medium line 3"),
-        ("info",     1, "info line 1"),
-        ("info",     2, "info line 2"),
-        ("info",     3, "info line 3"),
+        ("medium", 1, "medium line 1"),
+        ("medium", 2, "medium line 2"),
+        ("medium", 3, "medium line 3"),
+        ("info", 1, "info line 1"),
+        ("info", 2, "info line 2"),
+        ("info", 3, "info line 3"),
     ]
 
     @pytest.mark.parametrize("severity,line,description", _PBT_A_CASES)
@@ -1424,7 +1488,8 @@ class TestPreservationProperties:
             all_comments.extend(rev.get("comments", []))
 
         line_anchored = [
-            c for c in all_comments
+            c
+            for c in all_comments
             if c.get("side") == "RIGHT" and c.get("path") == "a.py" and c.get("line") == line
         ]
         assert len(line_anchored) == 1, (
@@ -1450,21 +1515,21 @@ class TestPreservationProperties:
     # Diff hunk lines for a.py: {1, 2, 3}; off-diff means anything else
     _PBT_B_CASES = [
         # (severity, line, description)
-        ("high",     None, "no line high severity"),
-        ("high",     4,    "line 4 off-diff high"),
-        ("high",     10,   "line 10 off-diff high"),
-        ("high",     100,  "line 100 off-diff high"),
-        ("high",     999,  "line 999 off-diff high"),
-        ("low",      None, "no line low severity"),
-        ("low",      4,    "line 4 off-diff low"),
-        ("low",      50,   "line 50 off-diff low"),
-        ("low",      500,  "line 500 off-diff low"),
+        ("high", None, "no line high severity"),
+        ("high", 4, "line 4 off-diff high"),
+        ("high", 10, "line 10 off-diff high"),
+        ("high", 100, "line 100 off-diff high"),
+        ("high", 999, "line 999 off-diff high"),
+        ("low", None, "no line low severity"),
+        ("low", 4, "line 4 off-diff low"),
+        ("low", 50, "line 50 off-diff low"),
+        ("low", 500, "line 500 off-diff low"),
         ("critical", None, "no line critical severity"),
-        ("critical", 7,    "line 7 off-diff critical"),
-        ("medium",   None, "no line medium severity"),
-        ("medium",   20,   "line 20 off-diff medium"),
-        ("info",     None, "no line info severity"),
-        ("info",     999,  "line 999 off-diff info"),
+        ("critical", 7, "line 7 off-diff critical"),
+        ("medium", None, "no line medium severity"),
+        ("medium", 20, "line 20 off-diff medium"),
+        ("info", None, "no line info severity"),
+        ("info", 999, "line 999 off-diff info"),
     ]
 
     @pytest.mark.parametrize("severity,line,description", _PBT_B_CASES)
@@ -1491,7 +1556,8 @@ class TestPreservationProperties:
         # File-level comments are posted on the dedicated endpoint, not in the
         # review's comments array.
         file_level = [
-            c for c in gh.review_comments
+            c
+            for c in gh.review_comments
             if c.get("subject_type") == "file" and c.get("path") == "a.py"
         ]
         assert len(file_level) == 1, (
@@ -1518,24 +1584,24 @@ class TestPreservationProperties:
     # (reviewer_is_author, severities, expected_event, description)
     _PBT_C_CASES = [
         # reviewer == author → always COMMENT regardless of severity
-        (True,  ["critical"],              "COMMENT",         "self-review critical"),
-        (True,  ["high"],                  "COMMENT",         "self-review high"),
-        (True,  ["critical", "high"],      "COMMENT",         "self-review critical+high"),
-        (True,  ["low"],                   "COMMENT",         "self-review low only"),
-        (True,  ["medium"],                "COMMENT",         "self-review medium only"),
-        (True,  ["info"],                  "COMMENT",         "self-review info only"),
+        (True, ["critical"], "COMMENT", "self-review critical"),
+        (True, ["high"], "COMMENT", "self-review high"),
+        (True, ["critical", "high"], "COMMENT", "self-review critical+high"),
+        (True, ["low"], "COMMENT", "self-review low only"),
+        (True, ["medium"], "COMMENT", "self-review medium only"),
+        (True, ["info"], "COMMENT", "self-review info only"),
         # reviewer ≠ author, blocking severity → REQUEST_CHANGES
-        (False, ["critical"],              "REQUEST_CHANGES", "critical → REQUEST_CHANGES"),
-        (False, ["high"],                  "REQUEST_CHANGES", "high → REQUEST_CHANGES"),
-        (False, ["critical", "low"],       "REQUEST_CHANGES", "critical+low → REQUEST_CHANGES"),
-        (False, ["high", "medium"],        "REQUEST_CHANGES", "high+medium → REQUEST_CHANGES"),
-        (False, ["critical", "high"],      "REQUEST_CHANGES", "critical+high → REQUEST_CHANGES"),
+        (False, ["critical"], "REQUEST_CHANGES", "critical → REQUEST_CHANGES"),
+        (False, ["high"], "REQUEST_CHANGES", "high → REQUEST_CHANGES"),
+        (False, ["critical", "low"], "REQUEST_CHANGES", "critical+low → REQUEST_CHANGES"),
+        (False, ["high", "medium"], "REQUEST_CHANGES", "high+medium → REQUEST_CHANGES"),
+        (False, ["critical", "high"], "REQUEST_CHANGES", "critical+high → REQUEST_CHANGES"),
         # reviewer ≠ author, no blocking severity → COMMENT
-        (False, ["low"],                   "COMMENT",         "low only → COMMENT"),
-        (False, ["medium"],                "COMMENT",         "medium only → COMMENT"),
-        (False, ["info"],                  "COMMENT",         "info only → COMMENT"),
-        (False, ["low", "medium"],         "COMMENT",         "low+medium → COMMENT"),
-        (False, ["low", "info"],           "COMMENT",         "low+info → COMMENT"),
+        (False, ["low"], "COMMENT", "low only → COMMENT"),
+        (False, ["medium"], "COMMENT", "medium only → COMMENT"),
+        (False, ["info"], "COMMENT", "info only → COMMENT"),
+        (False, ["low", "medium"], "COMMENT", "low+medium → COMMENT"),
+        (False, ["low", "info"], "COMMENT", "low+info → COMMENT"),
     ]
 
     @pytest.mark.parametrize(
@@ -1562,7 +1628,7 @@ class TestPreservationProperties:
         # author="alice" and login="khala-bot" (different).  Set login to "alice"
         # to simulate a self-review.
         if reviewer_is_author:
-            gh.login = "alice"   # reviewer == author
+            gh.login = "alice"  # reviewer == author
         else:
             gh.login = "khala-bot"  # reviewer != author (default)
 
@@ -1594,72 +1660,70 @@ class TestPreservationProperties:
         # description, in_diff_spec, out_of_diff_specs
         (
             "one in-diff line-anchored + one out-of-diff",
-            ("high",   2,    "a.py", "in-diff line-anchored"),
-            [("low",   4,    "gone.py",     "out-of-diff")],
+            ("high", 2, "a.py", "in-diff line-anchored"),
+            [("low", 4, "gone.py", "out-of-diff")],
         ),
         (
             "one in-diff file-level + one out-of-diff",
-            ("low",    999,  "a.py", "in-diff file-level"),
-            [("high",  1,    "absent.py",   "out-of-diff")],
+            ("low", 999, "a.py", "in-diff file-level"),
+            [("high", 1, "absent.py", "out-of-diff")],
         ),
         (
             "in-diff line-anchored + two out-of-diff",
-            ("medium", 3,    "a.py", "in-diff line 3"),
+            ("medium", 3, "a.py", "in-diff line 3"),
             [
-                ("low",    2, "missing1.py",  "out-of-diff 1"),
-                ("high",   1, "missing2.py",  "out-of-diff 2"),
+                ("low", 2, "missing1.py", "out-of-diff 1"),
+                ("high", 1, "missing2.py", "out-of-diff 2"),
             ],
         ),
         (
             "in-diff file-level + empty-path finding",
-            ("low",    50,   "a.py", "in-diff file-level"),
-            [("info",  None, "",             "empty file_path")],
+            ("low", 50, "a.py", "in-diff file-level"),
+            [("info", None, "", "empty file_path")],
         ),
         (
             "in-diff file-level + none-path finding",
-            ("low",    100,  "a.py", "in-diff file-level 100"),
-            [("info",  None, None,           "None file_path")],
+            ("low", 100, "a.py", "in-diff file-level 100"),
+            [("info", None, None, "None file_path")],
         ),
         (
             "critical in-diff line 1 + out-of-diff",
-            ("critical", 1,  "a.py", "critical line 1"),
-            [("low",    9, "other.py",      "out-of-diff low")],
+            ("critical", 1, "a.py", "critical line 1"),
+            [("low", 9, "other.py", "out-of-diff low")],
         ),
         (
             "high in-diff line 2 + two out-of-diff",
-            ("high",   2,    "a.py", "high line 2"),
+            ("high", 2, "a.py", "high line 2"),
             [
-                ("medium", 5, "x.py",        "out x"),
-                ("low",    3, "y.py",         "out y"),
+                ("medium", 5, "x.py", "out x"),
+                ("low", 3, "y.py", "out y"),
             ],
         ),
         (
             "low in-diff file-level + three out-of-diff",
-            ("low",    200,  "a.py", "low 200"),
+            ("low", 200, "a.py", "low 200"),
             [
-                ("high",   1, "f1.py",        "f1 high"),
-                ("high",   2, "f2.py",        "f2 high"),
-                ("low",    3, "f3.py",         "f3 low"),
+                ("high", 1, "f1.py", "f1 high"),
+                ("high", 2, "f2.py", "f2 high"),
+                ("low", 3, "f3.py", "f3 low"),
             ],
         ),
         (
             "info in-diff line 3 + out-of-diff",
-            ("info",   3,    "a.py", "info line 3"),
-            [("critical", 5, "crit.py",     "crit out-of-diff")],
+            ("info", 3, "a.py", "info line 3"),
+            [("critical", 5, "crit.py", "crit out-of-diff")],
         ),
         (
             "medium in-diff file-level + empty and absent",
-            ("medium", 77,   "a.py", "medium 77"),
+            ("medium", 77, "a.py", "medium 77"),
             [
-                ("low",  None, "",             "empty path"),
-                ("high", 1,    "not_there.py", "absent path"),
+                ("low", None, "", "empty path"),
+                ("high", 1, "not_there.py", "absent path"),
             ],
         ),
     ]
 
-    @pytest.mark.parametrize(
-        "description,in_diff_spec,out_of_diff_specs", _PBT_D_CASES
-    )
+    @pytest.mark.parametrize("description,in_diff_spec,out_of_diff_specs", _PBT_D_CASES)
     def test_pbt_d_mixed_path_in_diff_routing_unchanged(
         self,
         review_app,
@@ -1686,7 +1750,9 @@ class TestPreservationProperties:
         in_sev, in_line, in_path, in_desc = in_diff_spec
 
         # --- Step 1: route the in-diff finding alone ---
-        solo_issues = [_FakeReviewIssue(in_sev, line=in_line, file_path=in_path, description=in_desc)]
+        solo_issues = [
+            _FakeReviewIssue(in_sev, line=in_line, file_path=in_path, description=in_desc)
+        ]
         _r1, gh1, _j1 = self._post_review(review_app, solo_issues)
 
         # A finding is routed to either the review (line-anchored) or the dedicated
@@ -1699,9 +1765,7 @@ class TestPreservationProperties:
         all_comments_solo.extend(gh1.review_comments)
 
         # Find the in-diff finding's comment in the solo run.
-        in_diff_solo = [
-            c for c in all_comments_solo if c.get("path") == in_path
-        ]
+        in_diff_solo = [c for c in all_comments_solo if c.get("path") == in_path]
         assert len(in_diff_solo) == 1, (
             f"[{description}] Solo run: expected exactly 1 comment for in-diff finding "
             f"(path={in_path!r}), got {len(in_diff_solo)}. comments={all_comments_solo}"
@@ -1737,7 +1801,9 @@ class TestPreservationProperties:
 
         # Find the in-diff finding's comment in the mixed run.
         in_diff_mixed = [
-            c for c in all_comments_mixed if c.get("path") == in_path
+            c
+            for c in all_comments_mixed
+            if c.get("path") == in_path
             and (
                 # line-anchored: same line
                 (in_line is not None and c.get("line") == in_line)
@@ -1831,7 +1897,7 @@ class TestAnchorToFirstFileUnit:
         valid_by_path = {"src/api.py": {1, 2, 3}, "src/utils.py": {5, 6}}
         result = anchor_to_first_file(finding, valid_by_path)
         assert result is not None
-        assert result["path"] == "src/api.py"   # must be the FIRST key
+        assert result["path"] == "src/api.py"  # must be the FIRST key
         assert result["subject_type"] == "file"
 
     def test_anchor_to_first_file_empty_valid_by_path_returns_none(self) -> None:
@@ -1936,9 +2002,16 @@ class TestFixedRunPrReview:
         """
         review_app["github"]["agent_output"] = _FakeOutput(
             issues=[
-                _FakeReviewIssue("high",   line=2,   file_path="a.py",           description="on-diff finding"),
-                _FakeReviewIssue("low",    line=999, file_path="a.py",           description="off-diff-line finding"),
-                _FakeReviewIssue("medium", line=1,   file_path="not_in_diff.py", description="off-diff-file finding"),
+                _FakeReviewIssue("high", line=2, file_path="a.py", description="on-diff finding"),
+                _FakeReviewIssue(
+                    "low", line=999, file_path="a.py", description="off-diff-line finding"
+                ),
+                _FakeReviewIssue(
+                    "medium",
+                    line=1,
+                    file_path="not_in_diff.py",
+                    description="off-diff-file finding",
+                ),
             ]
         )
         resp = review_app["client"].post("/review-pr", json=_review_body())
@@ -1948,8 +2021,7 @@ class TestFixedRunPrReview:
 
         # Core assertion: no standalone comments for any finding.
         assert gh.comments == [], (
-            f"Expected gh.comments == [] (no standalone comments), "
-            f"but got {gh.comments}"
+            f"Expected gh.comments == [] (no standalone comments), but got {gh.comments}"
         )
 
         # All three findings must be present: one inline on the review, two on the

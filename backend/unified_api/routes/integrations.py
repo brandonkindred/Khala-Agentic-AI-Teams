@@ -665,6 +665,12 @@ async def github_events(request: Request) -> Any:
     except (json.JSONDecodeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
 
+    # A real GitHub webhook body is always a JSON object; a non-object (list/number/
+    # string/null) is malformed. Reject it here rather than letting dispatch (which does
+    # ``payload.get(...)``) raise AttributeError → an unhandled 500.
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Webhook payload must be a JSON object.")
+
     delivery_id = request.headers.get("X-GitHub-Delivery", "").strip()
     dispatch_github_event(event_type, payload, delivery_id)
     return {"ok": True}
@@ -1383,6 +1389,9 @@ def _resolve_github_target(token_override: str | None = None) -> tuple[dict[str,
     cfg = get_github_config_meta()
     if not cfg["enabled"]:
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
+    # A pre-resolved PAT is always a non-empty string; both ``None`` and ``""`` mean "no
+    # override, read from the store" — an empty string is never a valid token to forward,
+    # so falling through to the store read is the safe (and intended) behavior here.
     if token_override:
         token = token_override
     else:

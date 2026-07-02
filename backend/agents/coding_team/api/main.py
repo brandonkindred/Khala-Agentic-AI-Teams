@@ -1110,6 +1110,32 @@ def _running_job_for_issue(owner: str, repo: str, issue_number: int) -> Optional
     return None
 
 
+def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[str]:
+    """Return the job_id of any non-terminal code-review job already reviewing this PR.
+
+    Cross-worker by construction: the scan reads the shared central job service (the same
+    store ``_running_job_for_issue`` uses), so a review already running under a *different*
+    uvicorn worker is still seen — this is the authoritative duplicate-review guard that
+    the webhook's per-process ``X-GitHub-Delivery`` dedup cannot provide, and it also
+    protects the manual UI trigger. Owner/repo compare case-insensitively (GitHub treats
+    them that way). Only review jobs carry a ``pr_number`` in ``github_context`` (issue
+    runs carry ``issue_number``), so matching on it never collides with an issue run.
+
+    Performance: O(active-jobs) linear scan over the small non-terminal set (mirrors
+    ``_running_job_for_issue``); add an owner/repo/pr filter to ``list_jobs`` if that set
+    ever grows materially.
+    """
+    for j in list_jobs(active_only=True):
+        ctx = (j or {}).get("github_context") or {}
+        if (
+            str(ctx.get("owner") or "").casefold() == owner.casefold()
+            and str(ctx.get("repo") or "").casefold() == repo.casefold()
+            and ctx.get("pr_number") == pr_number
+        ):
+            return j.get("job_id")
+    return None
+
+
 def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Dict[str, Any]]:
     """Return another non-terminal job using this checkout, if any.
 
@@ -1350,6 +1376,18 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     if not token:
         raise HTTPException(status_code=400, detail="GITHUB_TOKEN not configured")
 
+    # Cross-worker idempotency: refuse a second review while one is already running for
+    # this PR. This is the authoritative duplicate guard (the webhook's per-process
+    # delivery-id dedup can't see other workers), and it also covers the manual UI trigger.
+    running = _running_review_for_pr(request.owner, request.repo, request.pr_number)
+    if running:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"review job {running} already running for {request.owner}/{request.repo}#{request.pr_number}"
+            ),
+        )
+
     with GitHubClient(token=token) as client:
         try:
             pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
@@ -1511,9 +1549,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             # comments.  anchor_to_first_file returns None only when valid_by_path
             # is empty — but we already exit early in that case, so the filter is
             # just a safety net.
-            anchored_leftovers = [
-                anchor_to_first_file(issue, valid_by_path) for issue in leftovers
-            ]
+            anchored_leftovers = [anchor_to_first_file(issue, valid_by_path) for issue in leftovers]
             comments = comments + [c for c in anchored_leftovers if c is not None]
 
             # Two GitHub endpoints, two shapes. Line-anchored comments ride the
@@ -1723,9 +1759,7 @@ def _submit_review(
     # each scrubbed comment with its original so the dropped set returned to the
     # caller keeps the original identity (with its ``line``).
     body = scrub_token_from_text(body)
-    pairs = [
-        ({**c, "body": scrub_token_from_text(c.get("body", ""))}, c) for c in comments
-    ]
+    pairs = [({**c, "body": scrub_token_from_text(c.get("body", ""))}, c) for c in comments]
 
     events = [event] if event == "COMMENT" else [event, "COMMENT"]
 

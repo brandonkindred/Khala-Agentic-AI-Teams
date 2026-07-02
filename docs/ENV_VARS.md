@@ -651,6 +651,15 @@ over this env var. When neither is set, signature verification is skipped (logge
 setup — set a secret in any real deployment. Only `issue_comment` events from OWNER/MEMBER/COLLABORATOR
 authors on the configured `owner/repo` trigger a review.
 
+### GITHUB_WEBHOOK_DEDUP_TTL_S / GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES
+Tune the webhook receiver's in-process, per-worker de-duplication of GitHub redeliveries (same
+`X-GitHub-Delivery` id). `GITHUB_WEBHOOK_DEDUP_TTL_S` (default `600`, floor `1`) is how long a delivery
+id is remembered; `GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES` (default `1000`, floor `2`) bounds the table size
+(the oldest half is dropped when exceeded). This is only a fast-path that suppresses re-dispatch of a
+redelivery landing on the *same* worker; the authoritative, cross-worker duplicate-review guard is the
+coding-team `POST /review-pr` endpoint, which rejects a second review while one is already running for
+the PR (and also covers the manual UI trigger).
+
 ### GITHUB_DEPENDENCY_CONCURRENCY
 Bounds the concurrent per-issue `blocked_by` dependency fetches that enrich
 `GET /api/integrations/github/issues` (the coding-team issue picker). Each open issue is annotated

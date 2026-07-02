@@ -948,6 +948,41 @@ def test_github_events_returns_400_on_invalid_json():
     disp.assert_not_called()
 
 
+def test_github_events_returns_400_on_non_object_body():
+    """Valid JSON that is not an object (e.g. `[]`) is rejected with 400 rather than
+    letting dispatch's payload.get(...) raise AttributeError → an unhandled 500."""
+    body = b"[]"
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={
+                "X-GitHub-Event": "issue_comment",
+                "X-Hub-Signature-256": _sign("whsec", body),
+            },
+        )
+    assert resp.status_code == 400
+    assert "JSON object" in resp.json()["detail"]
+    disp.assert_not_called()
+
+
+def test_github_events_non_ascii_signature_returns_401_not_500():
+    """A crafted non-ASCII X-Hub-Signature-256 must be a clean 401, not a 500 from a
+    TypeError inside hmac.compare_digest. The header is sent as raw bytes with a byte
+    >= 0x80 (Starlette decodes it latin-1 server-side, reproducing the attack)."""
+    body = b'{"action":"created"}'
+    with patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={"X-GitHub-Event": "issue_comment", "X-Hub-Signature-256": b"sha256=deadbeef\xff"},
+        )
+    assert resp.status_code == 401
+
+
 # ---------------------------------------------------------------------------
 # GET /github config status: webhook_secret_configured flag
 # ---------------------------------------------------------------------------

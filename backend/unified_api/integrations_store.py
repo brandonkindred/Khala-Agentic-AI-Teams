@@ -566,12 +566,15 @@ def get_github_config() -> dict[str, Any]:
 
     Preconditions: none.
     Postconditions: returns :func:`get_github_config_meta`'s keys PLUS ``token_configured``
-        (bool) and ``store_reachable`` (bool), derived from a SINGLE
+        (bool), ``store_reachable`` (bool), and ``webhook_secret_configured`` (bool).
+        ``token_configured``/``store_reachable`` derive from a SINGLE
         ``get_credential_status`` read — so the config panel and the run/review routes
         share one source of reachability (they can't disagree) and pay one DB round-trip,
-        not a read plus a separate probe. The raw token is deliberately NEVER included
-        (only ``token_configured``); routes that need the token value read it explicitly
-        via ``get_credential_status`` so the secret stays out of this widely passed dict.
+        not a read plus a separate probe. ``webhook_secret_configured`` reports whether a
+        webhook signing secret exists (stored credential OR ``GITHUB_WEBHOOK_SECRET`` env
+        var) and comes from its own read. The raw token/secret are deliberately NEVER
+        included (only the ``*_configured`` booleans); routes that need the token value
+        read it explicitly so the secret stays out of this widely passed dict.
         ``store_reachable`` is True when the credential store answered (or Postgres is
         disabled — "absent", not an outage) and False only on a connection/query error.
         Never raises (the credential read swallows its own errors).
@@ -585,20 +588,6 @@ def get_github_config() -> dict[str, Any]:
         "store_reachable": store_reachable,
         "webhook_secret_configured": bool(webhook_secret),
     }
-
-
-def get_github_webhook_secret() -> str | None:
-    """Return the GitHub webhook signing secret, or ``None`` if not configured.
-
-    Preconditions: none.
-    Postconditions: returns the stored secret from the credential store, falling back to
-        the ``GITHUB_WEBHOOK_SECRET`` environment variable. Returns ``None`` when neither
-        is set (so the caller can decide whether to skip signature verification). Never
-        raises. Does NOT distinguish "not configured" from "store unreachable" —
-        callers that must fail closed on an outage (e.g. the webhook route) should use
-        :func:`get_github_webhook_secret_status` instead.
-    """
-    return get_github_webhook_secret_status()[0]
 
 
 def get_github_webhook_secret_status() -> tuple[str | None, bool]:
