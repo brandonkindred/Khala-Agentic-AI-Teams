@@ -5,6 +5,7 @@ FastAPI app for coding_team: GET /health, POST /run, GET /status/{job_id}, GET /
 from __future__ import annotations
 
 import base64
+import contextlib
 import fcntl
 import logging
 import os
@@ -58,6 +59,7 @@ from coding_team.job_store import (  # noqa: E402
     claim_resume,
     create_job,
     get_job,
+    heartbeat_job,
     list_jobs,
     release_resume_claim,
     update_job,
@@ -1110,16 +1112,60 @@ def _running_job_for_issue(owner: str, repo: str, issue_number: int) -> Optional
     return None
 
 
+# A live review thread heartbeats every _REVIEW_HEARTBEAT_INTERVAL_S; a review job whose
+# last_heartbeat_at is older than this cutoff has no live worker anywhere (its process
+# died before the except-path could terminalize it) and must not block new reviews.
+# 10 missed beats plus the shared clock-skew tolerance keeps false stales implausible.
+_REVIEW_GUARD_HEARTBEAT_STALE_S = 300.0
+_REVIEW_HEARTBEAT_INTERVAL_S = 30.0
+
+
+def _review_job_heartbeat_live(job: Dict[str, Any]) -> bool:
+    """True when the job's ``last_heartbeat_at`` says a worker is (plausibly) still alive.
+
+    Preconditions: ``job`` is a job record dict (possibly empty).
+    Postconditions: returns True iff ``last_heartbeat_at`` parses as an ISO timestamp
+        whose age is under ``_REVIEW_GUARD_HEARTBEAT_STALE_S`` (a stamp up to
+        ``_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S`` in the future also counts as live — NTP
+        drift, mirroring ``_answer_wait_heartbeat_fresh``). A MISSING or unparseable
+        stamp returns True (treated as live): the job service stamps
+        ``last_heartbeat_at`` on every create/update, so an absent stamp means an
+        unfamiliar store, and the guard must fail toward blocking duplicates, not toward
+        starting them. Never raises.
+    """
+    raw = (job or {}).get("last_heartbeat_at")
+    if not raw:
+        return True
+    try:
+        beat = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return True
+    if beat.tzinfo is None:
+        beat = beat.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - beat).total_seconds()
+    return age < _REVIEW_GUARD_HEARTBEAT_STALE_S or age <= _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S
+
+
 def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[str]:
-    """Return the job_id of any non-terminal code-review job already reviewing this PR.
+    """Return the job_id of a live non-terminal code-review job already reviewing this PR.
+
+    Preconditions: ``owner``/``repo`` are non-empty repository coordinates; ``pr_number``
+        is a positive PR number.
+    Postconditions: returns the job_id of a non-terminal review job whose
+        ``github_context`` matches (owner, repo, pr_number) — owner/repo
+        case-insensitively, as GitHub treats them — and whose heartbeat is live per
+        :func:`_review_job_heartbeat_live`; ``None`` when no such job exists. A matching
+        job whose heartbeat went stale (its worker crashed before terminalizing it) is
+        NOT returned — it must not block new reviews of the PR forever — and is
+        best-effort marked ``failed`` so it stops surfacing as a zombie running review;
+        a failure to mark it never propagates. Only review jobs carry ``pr_number`` in
+        ``github_context`` (issue runs carry ``issue_number``), so matching on it never
+        collides with an issue run. Raises only if the job-service scan itself fails.
 
     Cross-worker by construction: the scan reads the shared central job service (the same
     store ``_running_job_for_issue`` uses), so a review already running under a *different*
-    uvicorn worker is still seen — this is the authoritative duplicate-review guard that
-    the webhook's per-process ``X-GitHub-Delivery`` dedup cannot provide, and it also
-    protects the manual UI trigger. Owner/repo compare case-insensitively (GitHub treats
-    them that way). Only review jobs carry a ``pr_number`` in ``github_context`` (issue
-    runs carry ``issue_number``), so matching on it never collides with an issue run.
+    uvicorn worker is still seen. Callers needing atomicity against concurrent admission
+    must hold :func:`_pr_review_admission` around scan + job creation.
 
     Performance: O(active-jobs) linear scan over the small non-terminal set (mirrors
     ``_running_job_for_issue``); add an owner/repo/pr filter to ``list_jobs`` if that set
@@ -1132,7 +1178,36 @@ def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[st
             and str(ctx.get("repo") or "").casefold() == repo.casefold()
             and ctx.get("pr_number") == pr_number
         ):
-            return j.get("job_id")
+            job_id = j.get("job_id")
+            if _review_job_heartbeat_live(j):
+                return job_id
+            # Crash-orphaned: no worker has heartbeated it within the cutoff. Unblock
+            # new reviews and terminalize the zombie (best-effort — the unblock matters,
+            # the cleanup is cosmetic).
+            logger.warning(
+                "review job %s for %s/%s#%s has a stale heartbeat; treating as dead and marking failed",
+                job_id,
+                owner,
+                repo,
+                pr_number,
+            )
+            if job_id:
+                try:
+                    update_job(
+                        job_id,
+                        status="failed",
+                        error="review worker heartbeat went stale (process died mid-review)",
+                    )
+                    update_review(
+                        job_id,
+                        status="failed",
+                        error="review worker heartbeat went stale (process died mid-review)",
+                        completed=True,
+                    )
+                except Exception:  # noqa: BLE001 - unblocking admission must not depend on cleanup
+                    logger.warning(
+                        "could not mark stale review job %s failed", job_id, exc_info=True
+                    )
     return None
 
 
@@ -1344,6 +1419,57 @@ def _review_author() -> str:
         return "anonymous"
 
 
+# Serializes review admission (duplicate-scan + job creation) within this process; the
+# Postgres advisory lock in _pr_review_admission extends the same mutual exclusion across
+# worker processes when Postgres is configured.
+_REVIEW_ADMISSION_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _pr_review_admission(owner: str, repo: str, pr_number: int):
+    """Mutual exclusion for PR-review admission (duplicate scan + job creation).
+
+    Preconditions: ``owner``/``repo``/``pr_number`` identify the PR being admitted.
+    Postconditions: while the ``with`` body runs, no other admission for the same PR can
+        run — in this process via ``_REVIEW_ADMISSION_LOCK``, and across worker processes
+        via a Postgres transaction-scoped advisory lock (``pg_advisory_xact_lock`` keyed
+        on the casefolded ``owner/repo#pr``) when Postgres is configured. The advisory
+        lock auto-releases when its transaction ends (body exit, exception, or connection
+        death — crash-safe). When Postgres is unconfigured or the lock cannot be taken,
+        degrades to the process-local lock alone (logged): single-worker admission stays
+        fully serialized, and the residual cross-worker window is the pre-lock behavior,
+        never worse. Exceptions from the body (e.g. the 409) propagate unchanged; lock
+        acquisition itself never raises.
+
+    Invariants: the process lock is always taken before (and released after) the advisory
+        lock's transaction, so lock ordering is fixed and deadlock-free.
+    """
+    with _REVIEW_ADMISSION_LOCK, contextlib.ExitStack() as stack:
+        try:
+            from shared_postgres import (  # noqa: PLC0415 - optional dep path
+                get_conn,
+                is_postgres_enabled,
+            )
+
+            if is_postgres_enabled():
+                conn = stack.enter_context(get_conn())
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                    ("coding_team_review_pr", f"{owner}/{repo}#{pr_number}".casefold()),
+                )
+        except Exception:  # noqa: BLE001 - degrade to process-local admission, never block reviews
+            stack.pop_all().close()
+            logger.warning(
+                "could not take cross-worker review admission lock for %s/%s#%s; "
+                "falling back to process-local admission only",
+                owner,
+                repo,
+                pr_number,
+                exc_info=True,
+            )
+        yield
+
+
 def _start_pr_review_thread(job_id: str, request: ReviewPrRequest, token: str) -> None:
     """Spawn the PR-review hook in a background thread.
 
@@ -1376,35 +1502,42 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     if not token:
         raise HTTPException(status_code=400, detail="GITHUB_TOKEN not configured")
 
-    # Cross-worker idempotency: refuse a second review while one is already running for
-    # this PR. This is the authoritative duplicate guard (the webhook's per-process
-    # delivery-id dedup can't see other workers), and it also covers the manual UI trigger.
-    running = _running_review_for_pr(request.owner, request.repo, request.pr_number)
-    if running:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"review job {running} already running for {request.owner}/{request.repo}#{request.pr_number}"
-            ),
-        )
-
+    # Validate the PR exists BEFORE taking the admission lock: the GitHub round-trip is
+    # the slowest step, and keeping it outside the critical section keeps admission
+    # serialization to two fast job-service writes.
     with GitHubClient(token=token) as client:
         try:
             pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
         except GitHubAPIError as e:
             raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
 
-    job_id = str(uuid.uuid4())
-    create_job(job_id=job_id, repo_path=request.repo_path)
-    update_job(
-        job_id,
-        github_context={
-            "owner": request.owner,
-            "repo": request.repo,
-            "pr_number": request.pr_number,
-            "pr_url": pr.html_url,
-        },
-    )
+    # Cross-worker idempotency: refuse a second review while one is already running for
+    # this PR (the webhook's per-process delivery-id dedup can't see other workers; this
+    # also covers the manual UI trigger). The admission lock makes scan + job creation
+    # atomic — without it, two concurrent requests both pass the scan before either has
+    # written the github_context that makes its job visible to the other.
+    with _pr_review_admission(request.owner, request.repo, request.pr_number):
+        running = _running_review_for_pr(request.owner, request.repo, request.pr_number)
+        if running:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"review job {running} already running for {request.owner}/{request.repo}#{request.pr_number}"
+                ),
+            )
+
+        job_id = str(uuid.uuid4())
+        create_job(job_id=job_id, repo_path=request.repo_path)
+        update_job(
+            job_id,
+            github_context={
+                "owner": request.owner,
+                "repo": request.repo,
+                "pr_number": request.pr_number,
+                "pr_url": pr.html_url,
+            },
+        )
+
     # Persist a row so the Code Review page can show this review's history (best-effort).
     record_review_start(
         job_id, request.owner, request.repo, request.pr_number, pr.html_url, _review_author()
@@ -1457,6 +1590,34 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
     update_review(job_id, status="running", status_text="Reviewing pull request")
+    # Continuous liveness beat for the admission guard: job updates only land at phase
+    # transitions, and a single review LLM call can run for minutes — without this, a
+    # perfectly healthy review would look heartbeat-stale to _running_review_for_pr.
+    # The context manager guarantees the beat stops on every exit path; on_error keeps
+    # a job-service blip from killing the beat thread (or the review).
+    from shared_concurrency import BackgroundHeartbeat  # noqa: PLC0415 - keep module import light
+
+    review_hb = BackgroundHeartbeat(
+        lambda: heartbeat_job(job_id),
+        _REVIEW_HEARTBEAT_INTERVAL_S,
+        name=f"review-heartbeat-{job_id}",
+        beat_first=True,
+        on_error=lambda exc: logger.warning("review heartbeat error for job %s: %s", job_id, exc),
+    )
+    with review_hb:
+        _run_pr_review_body(job_id, request, token, owner, repo, pr_number)
+
+
+def _run_pr_review_body(
+    job_id: str, request: ReviewPrRequest, token: str, owner: str, repo: str, pr_number: int
+) -> None:
+    """The review hook's body, extracted so the heartbeat wrapper stays trivially correct.
+
+    Preconditions: caller has marked the job/review ``running`` and holds a live
+        heartbeat for ``job_id``.
+    Postconditions: identical to :func:`_run_pr_review` (this IS that contract's
+        implementation; see its docstring). Never raises.
+    """
     try:
         with GitHubClient(token=token) as client:
             pr = client.get_pull_request(owner, repo, pr_number)

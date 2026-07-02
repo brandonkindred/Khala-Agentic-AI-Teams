@@ -57,23 +57,26 @@ def test_get_or_recreate_executor_degrades_gracefully_without_shutdown_attr():
     assert result is fake  # treated as "still live", not recreated; never raises
 
 
-def test_submit_safely_calls_submit_with_args():
+def test_submit_safely_calls_submit_with_args_and_returns_true():
     fake_executor = MagicMock()
     fn = MagicMock()
-    submit_safely(fake_executor, fn, "a", "b", logger=logging.getLogger("test"), log_prefix="test")
+    accepted = submit_safely(fake_executor, fn, "a", "b", logger=logging.getLogger("test"), log_prefix="test")
     fake_executor.submit.assert_called_once_with(fn, "a", "b")
+    assert accepted is True
 
 
-def test_submit_safely_swallows_runtime_error_from_shutdown_executor():
+def test_submit_safely_swallows_runtime_error_from_shutdown_executor_and_returns_false():
     """A shut-down executor's submit() raises RuntimeError; submit_safely must not
-    propagate it (callers with a 'never raises' contract must keep that guarantee)."""
+    propagate it (callers with a 'never raises' contract must keep that guarantee) and
+    must return False so callers can roll back bookkeeping for work that never ran."""
     real_executor = futures.ThreadPoolExecutor(max_workers=1)
     real_executor.shutdown(wait=True)
     fn = MagicMock()
 
-    submit_safely(real_executor, fn, logger=logging.getLogger("test"), log_prefix="test")  # must not raise
+    accepted = submit_safely(real_executor, fn, logger=logging.getLogger("test"), log_prefix="test")
 
     fn.assert_not_called()
+    assert accepted is False
 
 
 def test_submit_safely_logs_on_runtime_error():

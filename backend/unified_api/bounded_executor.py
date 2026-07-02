@@ -64,26 +64,28 @@ def submit_safely(
     *args: Any,
     logger: logging.Logger,
     log_prefix: str,
-) -> None:
+) -> bool:
     """Submit ``fn(*args)`` to ``executor``, never letting a shutdown race raise.
 
     Preconditions: ``executor`` is a (possibly already shut-down) ``ThreadPoolExecutor``.
-    Postconditions: calls ``executor.submit(fn, *args)``. If the executor — or the
-        interpreter itself, via ``concurrent.futures``' own ``atexit`` teardown — has
-        been shut down (or is broken), ``submit()`` raises ``RuntimeError``; that is
-        caught and logged rather than propagated, so a caller whose contract is "never
-        raises" (e.g. a webhook dispatcher that has already returned its HTTP response)
-        keeps that guarantee even during a process-shutdown race, where a raw
-        ``threading.Thread`` would not have raised. A ``done`` callback logs any exception
-        that escapes ``fn`` — ``ThreadPoolExecutor`` otherwise stores it on the discarded
-        ``Future`` and never surfaces it, so a failure in submitted work would vanish
-        without diagnostics. Never raises.
+    Postconditions: calls ``executor.submit(fn, *args)`` and returns ``True`` when the
+        work was accepted. If the executor — or the interpreter itself, via
+        ``concurrent.futures``' own ``atexit`` teardown — has been shut down (or is
+        broken), ``submit()`` raises ``RuntimeError``; that is caught and logged rather
+        than propagated, and ``False`` is returned so callers can roll back any
+        bookkeeping (e.g. a dedup-table entry) that assumed the work would run. A caller
+        whose contract is "never raises" (e.g. a webhook dispatcher that has already
+        returned its HTTP response) keeps that guarantee even during a process-shutdown
+        race, where a raw ``threading.Thread`` would not have raised. A ``done`` callback
+        logs any exception that escapes ``fn`` — ``ThreadPoolExecutor`` otherwise stores
+        it on the discarded ``Future`` and never surfaces it, so a failure in submitted
+        work would vanish without diagnostics. Never raises.
     """
     try:
         future = executor.submit(fn, *args)
     except RuntimeError:
         logger.warning("%s: executor unavailable (process shutting down?); dropping submitted work", log_prefix)
-        return
+        return False
 
     def _log_if_failed(fut: futures.Future[Any]) -> None:
         if fut.cancelled():
@@ -93,3 +95,4 @@ def submit_safely(
             logger.error("%s: submitted work raised an exception", log_prefix, exc_info=exc)
 
     future.add_done_callback(_log_if_failed)
+    return True

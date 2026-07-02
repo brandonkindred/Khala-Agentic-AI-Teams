@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import logging
 import re
+import threading
 import time
 from concurrent import futures
 from itertools import islice
@@ -170,14 +171,15 @@ def _resolve_github_token() -> str | None:
         return None
 
 
-def _add_eyes_reaction(owner: str, repo: str, comment_id: int, token: str | None) -> None:
-    """Best-effort 👀 reaction on the triggering comment.
+def _add_comment_reaction(owner: str, repo: str, comment_id: int, token: str | None, content: str = "eyes") -> None:
+    """Best-effort reaction on the triggering comment (👀 acknowledgement, 😕 failure).
 
     Preconditions: ``token`` is the GitHub PAT to authenticate with, or ``None`` when no
-        credential is available.
-    Postconditions: adds an ``eyes`` reaction to comment ``comment_id`` only when both a
-        token and a non-zero comment id are present; otherwise a no-op. Never raises — the
-        reaction is a courtesy acknowledgement and must not block the review.
+        credential is available; ``content`` is a GitHub reaction name (``eyes`` for "a
+        review is on it", ``confused`` for "your request was seen but could not run").
+    Postconditions: adds the reaction to comment ``comment_id`` only when both a token
+        and a non-zero comment id are present; otherwise a no-op. Never raises — the
+        reaction is a courtesy signal and must not block (or fail) the review flow.
     """
     if not comment_id or not token:
         return
@@ -185,27 +187,69 @@ def _add_eyes_reaction(owner: str, repo: str, comment_id: int, token: str | None
         from coding_team.github_source.client import GitHubClient
 
         with GitHubClient(token) as client:
-            client.create_comment_reaction(owner, repo, comment_id, content="eyes")
+            client.create_comment_reaction(owner, repo, comment_id, content=content)
     except Exception:
-        # The reaction is a courtesy acknowledgement; a failure here must not prevent
-        # the review from starting.
+        # The reaction is a courtesy signal; a failure here must not prevent the review
+        # from starting (or mask why it didn't).
         logger.warning("GitHub webhook: could not add reaction to comment %s", comment_id, exc_info=True)
 
 
-def _start_review(owner: str, repo: str, pr_number: int, token: str | None) -> bool:
+# Cached login of the PAT's own account, so the webhook can skip comments Khala itself
+# posted (they are type "User", not "Bot", and OWNER-associated — without this check a
+# Khala-posted comment quoting "@khala review" could re-trigger a review). Keyed by token
+# so a rotated PAT re-resolves; entries expire so a renamed account is picked up.
+_OWN_LOGIN_CACHE: dict[str, tuple[str, float]] = {}
+_OWN_LOGIN_TTL_S = 900.0
+
+
+def _own_github_login(token: str | None) -> str:
+    """Return the login of the account the PAT authenticates as ("" if unknown).
+
+    Preconditions: ``token`` is the GitHub PAT, or ``None``/empty when unavailable.
+    Postconditions: returns the cached ``GET /user`` login for ``token`` (cache TTL
+        ``_OWN_LOGIN_TTL_S``, keyed by token so rotation re-resolves). Returns ``""``
+        when ``token`` is falsy or the lookup fails — callers treat "" as "unknown"
+        and skip the self-comment check (fail-open: an API blip must not block real
+        review requests). Never raises.
+    """
+    if not token:
+        return ""
+    now = time.monotonic()
+    cached = _OWN_LOGIN_CACHE.get(token)
+    if cached is not None and cached[1] >= now:
+        return cached[0]
+    try:
+        from coding_team.github_source.client import GitHubClient
+
+        with GitHubClient(token) as client:
+            login = str(client.get_authenticated_login() or "")
+    except Exception:
+        logger.warning("GitHub webhook: could not resolve own login for self-comment check", exc_info=True)
+        return ""
+    _OWN_LOGIN_CACHE.clear()  # one PAT per deployment; drop stale/rotated tokens
+    _OWN_LOGIN_CACHE[token] = (login, now + _OWN_LOGIN_TTL_S)
+    return login
+
+
+def _start_review(owner: str, repo: str, pr_number: int, token: str | None) -> str:
     """Start the existing PR-review flow for ``pr_number`` (runs the async helper).
 
-    Preconditions: ``owner``/``repo`` are the repository ``dispatch_github_event`` already
-        validated against the configured integration; ``pr_number`` is a positive PR
-        number; ``token`` is a pre-resolved GitHub PAT reused so the review path does not
+    Preconditions: ``owner``/``repo`` are the repository the caller already validated
+        against the configured integration; ``pr_number`` is a positive PR number;
+        ``token`` is a pre-resolved GitHub PAT reused so the review path does not
         re-read the credential store, or ``None`` to let that path resolve it.
     Postconditions: forwards to the same ``_start_pr_review`` path used by
         ``POST /api/integrations/github/review-pr``, passing ``owner``/``repo`` as the
         expected target so the review is refused (not run against a different repo) if the
-        configured owner/repo changed since dispatch validated them. Returns ``True`` iff a
-        review job was actually started, ``False`` on any failure (so the caller can avoid
-        posting a misleading acknowledgement). Errors are logged, not raised — the webhook
-        has already returned 200 and there is no client to surface them to.
+        configured owner/repo changed since dispatch validated them. Returns one of:
+        - ``"started"`` — a review job was created;
+        - ``"already_running"`` — the coding team answered 409 because a review is
+          already in flight for this PR (the *intended* duplicate outcome: logged at
+          info, never as an error);
+        - ``"failed"`` — any other failure (stale-config 409, service unreachable,
+          unexpected error), logged at warning/error.
+        Errors are logged, not raised — the webhook has already returned 200 and there
+        is no client to surface them to.
         Runs on a bounded executor worker thread (see :func:`_get_dispatch_executor`),
         which has no event loop of its own, so a fresh ``asyncio.run()`` per call is the
         standard way to run this one coroutine to completion — the same shape as
@@ -220,33 +264,100 @@ def _start_review(owner: str, repo: str, pr_number: int, token: str | None) -> b
     try:
         import asyncio
 
+        from fastapi import HTTPException
+
         from unified_api.routes.integrations import _start_pr_review
 
-        result = asyncio.run(_start_pr_review(pr_number, None, token=token, expected_owner=owner, expected_repo=repo))
+        try:
+            result = asyncio.run(
+                _start_pr_review(pr_number, None, token=token, expected_owner=owner, expected_repo=repo)
+            )
+        except HTTPException as exc:
+            # 409 "already running" is the duplicate guard doing its job — an expected
+            # outcome, not an error. Match on the coding team's detail text (forwarded
+            # verbatim by _start_pr_review) to distinguish it from the stale-config 409.
+            if exc.status_code == 409 and "already running" in str(exc.detail):
+                logger.info("GitHub webhook: review already running for PR #%s: %s", pr_number, exc.detail)
+                return "already_running"
+            logger.warning(
+                "GitHub webhook: review for PR #%s was not started (HTTP %s): %s",
+                pr_number,
+                exc.status_code,
+                exc.detail,
+            )
+            return "failed"
         logger.info("GitHub webhook: started review job %s for PR #%s", getattr(result, "job_id", "?"), pr_number)
-        return True
+        return "started"
     except Exception:
         logger.exception("GitHub webhook: failed to start review for PR #%s", pr_number)
-        return False
+        return "failed"
 
 
-def process_review_request(owner: str, repo: str, pr_number: int, comment_id: int) -> None:
-    """Start the code review, then acknowledge with a 👀 reaction. Runs in a worker thread.
+def process_review_request(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    comment_id: int,
+    author_login: str = "",
+    delivery_id: str = "",
+) -> None:
+    """Validate config, start the code review, and signal the outcome. Runs in a worker thread.
 
-    Preconditions: ``owner``/``repo`` are the (config-matched) repository coordinates;
-        ``pr_number`` is a positive PR number; ``comment_id`` is the triggering comment's
-        id (0 when unknown).
-    Postconditions: resolves the GitHub PAT once and reuses it for both the review start
-        and the reaction, so a single credential-store read serves the whole webhook. The
-        👀 reaction is posted ONLY when the review actually started — so the "on it" signal
-        is never shown for a review that silently failed to start (integration disabled in
-        the interim, coding-team service unreachable, etc.). Best-effort throughout —
-        neither a failed review start nor a failed reaction raises (the webhook has already
-        returned 200).
+    Preconditions: ``owner``/``repo`` are the repository coordinates from the *webhook
+        payload* (validated against the configured integration here, on the worker, so
+        the config read never blocks the event loop); ``pr_number`` is a positive PR
+        number; ``comment_id`` is the triggering comment's id (0 when unknown);
+        ``author_login`` is the commenting user's login ("" when unknown);
+        ``delivery_id`` is the ``X-GitHub-Delivery`` header value ("" when absent).
+    Postconditions:
+        - Returns without starting a review when the integration is unconfigured/disabled
+          or the payload repo does not match the configured owner/repo; in both cases the
+          delivery is forgotten (see :func:`_forget_delivery`) so a redelivery after the
+          operator fixes the configuration is not swallowed by the dedup table.
+        - Skips comments authored by the PAT's own account (Khala's own posted comments
+          are type "User" and OWNER-associated, so the Bot check alone cannot stop a
+          Khala-posted comment quoting the command from re-triggering a review loop).
+        - Resolves the GitHub PAT once and reuses it for the self-comment check, the
+          review start, and the reaction — a single credential-store read per webhook.
+        - Signals the outcome on the triggering comment: 👀 when a review started or one
+          is already running (either way, a review is in flight for this PR), 😕
+          (``confused``) when the request was seen but could not run. On a failed start
+          the delivery is forgotten so GitHub's "Redeliver" can retry it.
+        - Best-effort throughout — never raises (the webhook has already returned 200).
     """
+    cfg_owner, cfg_repo = _configured_owner_repo()
+    if not cfg_owner or not cfg_repo:
+        logger.warning("GitHub webhook: no configured owner/repo; ignoring review request")
+        _forget_delivery(delivery_id)
+        return
+    if (owner.casefold(), repo.casefold()) != (cfg_owner.casefold(), cfg_repo.casefold()):
+        logger.warning(
+            "GitHub webhook: repo %s/%s does not match configured %s/%s; ignoring",
+            owner,
+            repo,
+            cfg_owner,
+            cfg_repo,
+        )
+        _forget_delivery(delivery_id)
+        return
+
     token = _resolve_github_token()
-    if _start_review(owner, repo, pr_number, token):
-        _add_eyes_reaction(owner, repo, comment_id, token)
+    own_login = _own_github_login(token)
+    if own_login and author_login and author_login.casefold() == own_login.casefold():
+        # Khala's own comment (posted with this PAT) quoted the command — never
+        # self-trigger. Keep the delivery marked seen: there is nothing to redeliver.
+        logger.info("GitHub webhook: ignoring @khala review in a comment posted by our own account (%s)", own_login)
+        return
+
+    outcome = _start_review(cfg_owner, cfg_repo, pr_number, token)
+    if outcome in ("started", "already_running"):
+        # Either way a review is in flight for this PR — acknowledge the request.
+        _add_comment_reaction(cfg_owner, cfg_repo, comment_id, token, content="eyes")
+    else:
+        # Seen-but-could-not-run: give the commenter a visible signal (😕) instead of
+        # silence, and forget the delivery so GitHub's "Redeliver" button can retry it.
+        _add_comment_reaction(cfg_owner, cfg_repo, comment_id, token, content="confused")
+        _forget_delivery(delivery_id)
 
 
 # ---------------------------------------------------------------------------
@@ -291,8 +402,14 @@ def _configured_owner_repo() -> tuple[str, str]:
 # `_running_review_for_pr` there), which also covers the manual UI trigger. This table
 # just avoids the wasted HTTP round-trip for the common same-worker retry.
 #
+# A delivery stays marked seen only while its work is (or ended up) in flight: when the
+# review fails to start — or the submitted work is dropped/misconfigured — the worker
+# calls :func:`_forget_delivery`, so GitHub's "Redeliver" button (which reuses the same
+# delivery GUID) can retry a delivery whose review never actually ran.
+#
 # Tunable via env; see docs/ENV_VARS.md.
 _SEEN_DELIVERY_IDS: dict[str, float] = {}
+_SEEN_DELIVERY_LOCK = threading.Lock()
 _SEEN_DELIVERY_TTL_S = env_float("GITHUB_WEBHOOK_DEDUP_TTL_S", 600.0, floor=1.0)
 _SEEN_DELIVERY_MAX_ENTRIES = env_int("GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES", 1000, floor=2)
 
@@ -315,39 +432,66 @@ def _is_duplicate_delivery(delivery_id: str) -> bool:
         needed. Never raises.
 
     Invariants: ``len(_SEEN_DELIVERY_IDS) <= _SEEN_DELIVERY_MAX_ENTRIES`` after every call;
-        each value is the monotonic-clock expiry of its key. Single-writer: only ever
-        called from :func:`dispatch_github_event`, which runs synchronously on the async
-        route's event-loop thread (never from a pool worker), so the unsynchronized dict
-        mutation is race-free — see :func:`_get_dispatch_executor` for the same rationale.
+        each value is the monotonic-clock expiry of its key. All table mutation happens
+        under ``_SEEN_DELIVERY_LOCK`` (held for dict operations only — microseconds):
+        dispatch records on the event-loop thread while pool workers may concurrently
+        :func:`_forget_delivery` a failed delivery.
     """
     if not delivery_id:
         return False
     now = time.monotonic()
-    expires_at = _SEEN_DELIVERY_IDS.get(delivery_id)
-    if expires_at is not None and expires_at >= now:
-        return True
-    # New, or seen-but-expired: (re)record it. Pop first so a refreshed key moves to the
-    # end (newest) and insertion order keeps matching expiry order.
-    _SEEN_DELIVERY_IDS.pop(delivery_id, None)
-    _SEEN_DELIVERY_IDS[delivery_id] = now + _SEEN_DELIVERY_TTL_S
-    if len(_SEEN_DELIVERY_IDS) > _SEEN_DELIVERY_MAX_ENTRIES:
-        for seen_id in list(islice(_SEEN_DELIVERY_IDS, _SEEN_DELIVERY_MAX_ENTRIES // 2)):
-            _SEEN_DELIVERY_IDS.pop(seen_id, None)
-    return False
+    with _SEEN_DELIVERY_LOCK:
+        expires_at = _SEEN_DELIVERY_IDS.get(delivery_id)
+        if expires_at is not None and expires_at >= now:
+            return True
+        # New, or seen-but-expired: (re)record it. Pop first so a refreshed key moves to
+        # the end (newest) and insertion order keeps matching expiry order.
+        _SEEN_DELIVERY_IDS.pop(delivery_id, None)
+        _SEEN_DELIVERY_IDS[delivery_id] = now + _SEEN_DELIVERY_TTL_S
+        if len(_SEEN_DELIVERY_IDS) > _SEEN_DELIVERY_MAX_ENTRIES:
+            for seen_id in list(islice(_SEEN_DELIVERY_IDS, _SEEN_DELIVERY_MAX_ENTRIES // 2)):
+                _SEEN_DELIVERY_IDS.pop(seen_id, None)
+        return False
+
+
+def _forget_delivery(delivery_id: str) -> None:
+    """Remove ``delivery_id`` from the dedup table so a redelivery can retry it.
+
+    Preconditions: ``delivery_id`` is the delivery's ``X-GitHub-Delivery`` value, or ``""``.
+    Postconditions: the delivery is no longer marked seen (no-op for ``""`` or an unknown
+        id). Called by the worker when the dispatched work did not result in a review —
+        failed start, config mismatch, or a dropped submission — because GitHub's
+        "Redeliver" reuses the same delivery GUID and must not be swallowed for a delivery
+        whose review never ran. Never raises.
+    """
+    if not delivery_id:
+        return
+    with _SEEN_DELIVERY_LOCK:
+        _SEEN_DELIVERY_IDS.pop(delivery_id, None)
 
 
 def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id: str = "") -> None:
     """Validate an ``issue_comment`` webhook and trigger a review when warranted.
 
-    Acts only when ALL hold:
+    Submits work only when ALL hold (pure payload checks — no I/O on this thread):
     - ``event_type == "issue_comment"`` and ``payload["action"] == "created"``
     - the comment is on a pull request (``issue.pull_request`` present)
     - the comment is not from a bot
     - the body contains ``@khala review``
     - the commenter's ``author_association`` is OWNER/MEMBER/COLLABORATOR
-    - the repository matches the configured owner/repo (never review an arbitrary repo)
+    - ``issue.number`` is a positive non-bool int (the PR number)
     - ``delivery_id`` (the ``X-GitHub-Delivery`` header) has not already been processed
       within the dedup TTL — see :func:`_is_duplicate_delivery`
+
+    The configured-repo match (a settings read — file I/O under a lock shared with
+    config writers) deliberately happens on the pool worker inside
+    :func:`process_review_request`, NOT here: this function runs synchronously on the
+    async route's event-loop thread, and blocking that thread on disk I/O (or behind a
+    concurrent config write) would stall every request on the loop. The dedup check runs
+    before submission, so a duplicate delivery costs one dict lookup and zero I/O; a
+    consequence is that deliveries for non-matching repos are also recorded (and then
+    forgotten by the worker) — benign, since the worker forgets any delivery that did
+    not start a review.
 
     Preconditions: ``event_type`` is the value of the ``X-GitHub-Event`` header;
         ``payload`` is the parsed webhook body (already signature-verified by the route);
@@ -355,10 +499,11 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
     Postconditions: submits :func:`process_review_request` to the bounded dispatch
         executor (see :func:`_get_dispatch_executor`) exactly once when every condition
         above holds; any unmet condition (including a non-``dict`` ``payload``) is a
-        silent no-op. Never raises (it returns before the submitted work does any I/O) —
-        the submit itself goes through :func:`unified_api.bounded_executor.submit_safely`,
-        which swallows the ``RuntimeError`` a shut-down executor (or interpreter-shutdown
-        race) would otherwise raise, so this contract holds even during process teardown.
+        no-op. If the executor rejects the work (process teardown), the delivery is
+        forgotten again so a redelivery is not swallowed. Never raises — the submit goes
+        through :func:`unified_api.bounded_executor.submit_safely`, which swallows the
+        ``RuntimeError`` a shut-down executor would otherwise raise, so this contract
+        holds even during process teardown.
     """
     if event_type != "issue_comment":
         return
@@ -387,40 +532,35 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
         )
         return
 
-    repository = payload.get("repository") or {}
-    repo_owner = str((repository.get("owner") or {}).get("login", "")).strip()
-    repo_name = str(repository.get("name", "")).strip()
-    cfg_owner, cfg_repo = _configured_owner_repo()
-    if not cfg_owner or not cfg_repo:
-        logger.warning("GitHub webhook: no configured owner/repo; ignoring review request")
-        return
-    if (repo_owner.lower(), repo_name.lower()) != (cfg_owner.lower(), cfg_repo.lower()):
-        logger.warning(
-            "GitHub webhook: repo %s/%s does not match configured %s/%s; ignoring",
-            repo_owner,
-            repo_name,
-            cfg_owner,
-            cfg_repo,
-        )
-        return
-
     pr_number = issue.get("number")
-    if not isinstance(pr_number, int):
+    # bool is an int subclass and GitHub PR numbers are strictly positive; reject both
+    # here so process_review_request's "positive PR number" precondition always holds.
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool) or pr_number <= 0:
         return
     comment_id = comment.get("id")
     comment_id = comment_id if isinstance(comment_id, int) else 0
+
+    repository = payload.get("repository") or {}
+    repo_owner = str((repository.get("owner") or {}).get("login", "")).strip()
+    repo_name = str(repository.get("name", "")).strip()
+    author_login = str((comment.get("user") or {}).get("login", "")).strip()
 
     if _is_duplicate_delivery(delivery_id):
         logger.info("GitHub webhook: ignoring redelivered delivery %s", delivery_id)
         return
 
-    submit_safely(
+    submitted = submit_safely(
         _get_dispatch_executor(),
         process_review_request,
         repo_owner,
         repo_name,
         pr_number,
         comment_id,
+        author_login,
+        delivery_id,
         logger=logger,
         log_prefix="GitHub webhook dispatch",
     )
+    if not submitted:
+        # The work never ran; don't let the dedup table swallow a redelivery of it.
+        _forget_delivery(delivery_id)

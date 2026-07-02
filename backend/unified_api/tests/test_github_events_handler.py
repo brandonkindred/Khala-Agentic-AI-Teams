@@ -135,7 +135,7 @@ def _comment_payload(**over):
             "id": 999,
             "body": "@khala review",
             "author_association": "COLLABORATOR",
-            "user": {"type": "User"},
+            "user": {"type": "User", "login": "alice"},
         },
         "repository": {"name": "widget", "owner": {"login": "acme"}},
     }
@@ -158,21 +158,25 @@ class _SyncExecutor:
         return fut
 
 
-def _dispatch(payload, event_type="issue_comment", cfg=("acme", "widget")):
-    """Run dispatch with process_review_request + the dispatch executor patched; return the mock."""
+def _dispatch(payload, event_type="issue_comment", delivery_id=""):
+    """Run dispatch with process_review_request + the dispatch executor patched; return the mock.
+
+    dispatch_github_event performs only pure payload checks — the configured-repo match
+    happens later, on the worker, inside process_review_request (so the config file read
+    never blocks the event loop).
+    """
     proc = MagicMock()
     with (
         patch(f"{_H}.process_review_request", proc),
         patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
-        patch(f"{_H}._configured_owner_repo", return_value=cfg),
     ):
-        gh.dispatch_github_event(event_type, payload)
+        gh.dispatch_github_event(event_type, payload, delivery_id)
     return proc
 
 
 def test_dispatch_triggers_review_on_valid_comment():
     proc = _dispatch(_comment_payload())
-    proc.assert_called_once_with("acme", "widget", 42, 999)
+    proc.assert_called_once_with("acme", "widget", 42, 999, "alice", "")
 
 
 def test_dispatch_ignores_non_issue_comment_event():
@@ -187,14 +191,7 @@ def test_dispatch_ignores_non_created_action():
 def test_dispatch_ignores_non_dict_payload_without_raising(bad_payload):
     # A non-object JSON body must be a silent no-op (dispatch's "never raises" contract),
     # not an AttributeError from payload.get(...).
-    proc = MagicMock()
-    with (
-        patch(f"{_H}.process_review_request", proc),
-        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
-        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
-    ):
-        gh.dispatch_github_event("issue_comment", bad_payload, "d-1")  # must not raise
-    proc.assert_not_called()
+    assert _dispatch(bad_payload, delivery_id="d-1").called is False
 
 
 def test_dispatch_ignores_comment_on_plain_issue():
@@ -220,24 +217,20 @@ def test_dispatch_ignores_unauthorized_association():
     assert _dispatch(payload).called is False
 
 
-def test_dispatch_ignores_repo_mismatch():
-    # Comment on acme/widget but configured repo is acme/other → ignored.
-    assert _dispatch(_comment_payload(), cfg=("acme", "other")).called is False
-
-
-def test_dispatch_repo_match_is_case_insensitive():
+def test_dispatch_forwards_payload_repo_for_worker_side_config_match():
+    # The configured-repo comparison happens on the worker (see the worker-level
+    # repo-match tests below); dispatch just forwards the payload's coordinates.
     payload = _comment_payload(repository={"name": "Widget", "owner": {"login": "ACME"}})
-    proc = _dispatch(payload, cfg=("acme", "widget"))
-    proc.assert_called_once()
+    proc = _dispatch(payload)
+    proc.assert_called_once_with("ACME", "Widget", 42, 999, "alice", "")
 
 
-def test_dispatch_ignores_when_no_configured_repo():
-    assert _dispatch(_comment_payload(), cfg=("", "")).called is False
-
-
-def test_dispatch_ignores_non_integer_pr_number():
+@pytest.mark.parametrize("bad_number", ["not-an-int", None, True, False, 0, -7])
+def test_dispatch_rejects_invalid_pr_numbers(bad_number):
+    # bool is an int subclass and PR numbers are strictly positive; both must be
+    # rejected here so process_review_request's "positive PR number" precondition holds.
     payload = _comment_payload()
-    payload["issue"]["number"] = "not-an-int"
+    payload["issue"]["number"] = bad_number
     assert _dispatch(payload).called is False
 
 
@@ -245,7 +238,20 @@ def test_dispatch_defaults_missing_comment_id_to_zero():
     payload = _comment_payload()
     del payload["comment"]["id"]
     proc = _dispatch(payload)
-    proc.assert_called_once_with("acme", "widget", 42, 0)
+    proc.assert_called_once_with("acme", "widget", 42, 0, "alice", "")
+
+
+def test_dispatch_forgets_delivery_when_submit_dropped():
+    """If the executor rejects the work (process teardown), the delivery must be forgotten
+    again — otherwise a redelivery of never-run work is swallowed for the whole TTL."""
+    gh._SEEN_DELIVERY_IDS.clear()
+    with (
+        patch(f"{_H}.process_review_request", MagicMock()),
+        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
+        patch(f"{_H}.submit_safely", return_value=False),
+    ):
+        gh.dispatch_github_event("issue_comment", _comment_payload(), "d-dropped")
+    assert "d-dropped" not in gh._SEEN_DELIVERY_IDS
 
 
 # ---------------------------------------------------------------------------
@@ -253,61 +259,149 @@ def test_dispatch_defaults_missing_comment_id_to_zero():
 # ---------------------------------------------------------------------------
 
 
+def _process(owner="acme", repo="widget", cfg=("acme", "widget"), start="started", own_login=""):
+    """Run process_review_request with its collaborators patched; return the mock bundle."""
+    mocks = {
+        "tok": patch(f"{_H}._resolve_github_token", return_value="ghp_tok"),
+        "cfg": patch(f"{_H}._configured_owner_repo", return_value=cfg),
+        "own": patch(f"{_H}._own_github_login", return_value=own_login),
+        "start": patch(f"{_H}._start_review", return_value=start),
+        "react": patch(f"{_H}._add_comment_reaction"),
+        "forget": patch(f"{_H}._forget_delivery"),
+    }
+    started = {k: m.start() for k, m in mocks.items()}
+    try:
+        gh.process_review_request(owner, repo, 42, 999, "alice", "d-1")
+    finally:
+        for m in mocks.values():
+            m.stop()
+    return started
+
+
 def test_process_review_request_resolves_token_once_starts_then_reacts_on_success():
-    # The token is resolved a SINGLE time and reused by both the review start and the
-    # reaction (no duplicate credential-store read per webhook); the 👀 reaction is posted
-    # only AFTER the review actually started.
-    with (
-        patch(f"{_H}._resolve_github_token", return_value="ghp_tok") as tok,
-        patch(f"{_H}._start_review", return_value=True) as start,
-        patch(f"{_H}._add_eyes_reaction") as react,
-    ):
-        gh.process_review_request("acme", "widget", 42, 999)
-    tok.assert_called_once_with()
-    start.assert_called_once_with("acme", "widget", 42, "ghp_tok")
-    react.assert_called_once_with("acme", "widget", 999, "ghp_tok")
+    # The token is resolved a SINGLE time and reused for the self-comment check, the
+    # review start, and the reaction; 👀 is posted only once the review is in flight.
+    m = _process()
+    m["tok"].assert_called_once_with()
+    m["start"].assert_called_once_with("acme", "widget", 42, "ghp_tok")
+    m["react"].assert_called_once_with("acme", "widget", 999, "ghp_tok", content="eyes")
+    m["forget"].assert_not_called()
 
 
-def test_process_review_request_skips_reaction_when_review_did_not_start():
-    # If the review fails to start, no 👀 reaction is posted — the acknowledgement must
-    # never appear for a review that did not actually run.
-    with (
-        patch(f"{_H}._resolve_github_token", return_value="ghp_tok"),
-        patch(f"{_H}._start_review", return_value=False),
-        patch(f"{_H}._add_eyes_reaction") as react,
-    ):
-        gh.process_review_request("acme", "widget", 42, 999)
-    react.assert_not_called()
+def test_process_review_request_acknowledges_already_running_review():
+    # A duplicate request while a review is in flight is the intended outcome: the
+    # commenter still gets the 👀 acknowledgement (a review IS running for this PR),
+    # and the delivery stays marked seen (nothing to redo on redelivery).
+    m = _process(start="already_running")
+    m["react"].assert_called_once_with("acme", "widget", 999, "ghp_tok", content="eyes")
+    m["forget"].assert_not_called()
 
 
-def test_add_eyes_reaction_noop_without_comment_id():
+def test_process_review_request_signals_failure_and_forgets_delivery():
+    # Seen-but-could-not-run: the commenter gets a visible 😕 signal instead of silence,
+    # and the delivery is forgotten so GitHub's "Redeliver" can retry it.
+    m = _process(start="failed")
+    m["react"].assert_called_once_with("acme", "widget", 999, "ghp_tok", content="confused")
+    m["forget"].assert_called_once_with("d-1")
+
+
+def test_process_review_request_ignores_repo_mismatch_and_forgets_delivery():
+    # Comment on acme/widget but configured repo is acme/other → no review, and the
+    # delivery is forgotten so a redelivery after a config fix is not swallowed.
+    m = _process(cfg=("acme", "other"))
+    m["start"].assert_not_called()
+    m["react"].assert_not_called()
+    m["forget"].assert_called_once_with("d-1")
+
+
+def test_process_review_request_repo_match_is_case_insensitive():
+    m = _process(owner="ACME", repo="Widget", cfg=("acme", "widget"))
+    m["start"].assert_called_once_with("acme", "widget", 42, "ghp_tok")
+
+
+def test_process_review_request_ignores_when_no_configured_repo():
+    m = _process(cfg=("", ""))
+    m["start"].assert_not_called()
+    m["forget"].assert_called_once_with("d-1")
+
+
+def test_process_review_request_skips_own_comment():
+    """A comment posted by the PAT's own account (type "User", OWNER-associated) passes
+    the Bot check — the own-login match must stop it from re-triggering a review loop."""
+    m = _process(own_login="alice")  # comment author is "alice" (payload default)
+    m["start"].assert_not_called()
+    m["react"].assert_not_called()
+    m["forget"].assert_not_called()  # nothing to redeliver — the skip is final
+
+
+def test_process_review_request_own_login_match_is_case_insensitive():
+    m = _process(own_login="ALICE")
+    m["start"].assert_not_called()
+
+
+def test_process_review_request_proceeds_when_own_login_unknown():
+    # "" means the lookup failed — fail open (an API blip must not block real requests).
+    m = _process(own_login="")
+    m["start"].assert_called_once()
+
+
+def test_add_comment_reaction_noop_without_comment_id():
     fake_client = MagicMock()
     with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
-        gh._add_eyes_reaction("acme", "widget", 0, "ghp_tok")
+        gh._add_comment_reaction("acme", "widget", 0, "ghp_tok")
     fake_client.create_comment_reaction.assert_not_called()
 
 
-def test_add_eyes_reaction_noop_without_token():
+def test_add_comment_reaction_noop_without_token():
     fake_client = MagicMock()
     with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
         # No token → no client built, must not raise.
-        gh._add_eyes_reaction("acme", "widget", 999, None)
+        gh._add_comment_reaction("acme", "widget", 999, None)
     fake_client.create_comment_reaction.assert_not_called()
 
 
-def test_add_eyes_reaction_calls_client():
+def test_add_comment_reaction_calls_client_with_default_eyes():
     fake_client = MagicMock()
     fake_client.__enter__ = MagicMock(return_value=fake_client)
     fake_client.__exit__ = MagicMock(return_value=False)
     with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
-        gh._add_eyes_reaction("acme", "widget", 999, "ghp_tok")
+        gh._add_comment_reaction("acme", "widget", 999, "ghp_tok")
     fake_client.create_comment_reaction.assert_called_once_with("acme", "widget", 999, content="eyes")
 
 
-def test_add_eyes_reaction_swallows_errors():
+def test_add_comment_reaction_passes_custom_content():
+    fake_client = MagicMock()
+    fake_client.__enter__ = MagicMock(return_value=fake_client)
+    fake_client.__exit__ = MagicMock(return_value=False)
+    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client):
+        gh._add_comment_reaction("acme", "widget", 999, "ghp_tok", content="confused")
+    fake_client.create_comment_reaction.assert_called_once_with("acme", "widget", 999, content="confused")
+
+
+def test_add_comment_reaction_swallows_errors():
     with patch("coding_team.github_source.client.GitHubClient", side_effect=RuntimeError("boom")):
         # Best-effort: an exception here must not propagate.
-        gh._add_eyes_reaction("acme", "widget", 999, "ghp_tok")
+        gh._add_comment_reaction("acme", "widget", 999, "ghp_tok")
+
+
+def test_own_github_login_resolves_and_caches():
+    gh._OWN_LOGIN_CACHE.clear()
+    fake_client = MagicMock()
+    fake_client.__enter__ = MagicMock(return_value=fake_client)
+    fake_client.__exit__ = MagicMock(return_value=False)
+    fake_client.get_authenticated_login.return_value = "khala-bot"
+    with patch("coding_team.github_source.client.GitHubClient", return_value=fake_client) as cls:
+        assert gh._own_github_login("ghp_tok") == "khala-bot"
+        assert gh._own_github_login("ghp_tok") == "khala-bot"  # served from cache
+    assert cls.call_count == 1
+
+
+def test_own_github_login_empty_without_token_and_on_error():
+    gh._OWN_LOGIN_CACHE.clear()
+    assert gh._own_github_login(None) == ""
+    assert gh._own_github_login("") == ""
+    with patch("coding_team.github_source.client.GitHubClient", side_effect=RuntimeError("api down")):
+        assert gh._own_github_login("ghp_tok") == ""  # fail-open, logged, not raised
 
 
 def test_resolve_github_token_reads_credential():
@@ -330,7 +424,7 @@ def test_configured_owner_repo_empty_on_error():
         assert gh._configured_owner_repo() == ("", "")
 
 
-def test_start_review_invokes_shared_helper_with_token_and_returns_true():
+def test_start_review_invokes_shared_helper_with_token_and_returns_started():
     seen = {}
 
     async def _fake_start(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
@@ -338,19 +432,46 @@ def test_start_review_invokes_shared_helper_with_token_and_returns_true():
         return MagicMock(job_id="job-1")
 
     with patch("unified_api.routes.integrations._start_pr_review", _fake_start):
-        assert gh._start_review("acme", "widget", 42, "ghp_tok") is True
+        assert gh._start_review("acme", "widget", 42, "ghp_tok") == "started"
     # The pre-resolved token is threaded through so the review path does not re-read it,
     # and the validated owner/repo are passed as the expected target so a config change
     # mid-flight cannot redirect the review to a different repo.
     assert seen["args"] == (42, None, "ghp_tok", "acme", "widget")
 
 
-def test_start_review_swallows_errors_and_returns_false():
+def test_start_review_swallows_errors_and_returns_failed():
     async def _boom(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
         raise RuntimeError("downstream down")
 
     with patch("unified_api.routes.integrations._start_pr_review", _boom):
-        assert gh._start_review("acme", "widget", 42, "ghp_tok") is False  # logged, not raised
+        assert gh._start_review("acme", "widget", 42, "ghp_tok") == "failed"  # logged, not raised
+
+
+def test_start_review_recognizes_already_running_409(caplog):
+    """The duplicate-guard 409 is the intended outcome, not an error: it must map to
+    'already_running' and log at info — never an error-level stack trace that reads as
+    a broken webhook to operators."""
+    from fastapi import HTTPException
+
+    async def _dup(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
+        raise HTTPException(status_code=409, detail="review job abc already running for acme/widget#42")
+
+    with patch("unified_api.routes.integrations._start_pr_review", _dup), caplog.at_level("INFO"):
+        assert gh._start_review("acme", "widget", 42, "ghp_tok") == "already_running"
+    assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_start_review_treats_stale_config_409_as_failed():
+    """The stale-config 409 (configured repo changed mid-flight) is NOT 'already
+    running' — it must map to 'failed' so the commenter gets the 😕 signal and the
+    delivery is forgotten for redelivery."""
+    from fastapi import HTTPException
+
+    async def _stale(pr_number, base_branch, *, token=None, expected_owner=None, expected_repo=None):
+        raise HTTPException(status_code=409, detail="Configured repository changed since the review was requested")
+
+    with patch("unified_api.routes.integrations._start_pr_review", _stale):
+        assert gh._start_review("acme", "widget", 42, "ghp_tok") == "failed"
 
 
 def test_configured_owner_repo_reads_meta():
@@ -405,11 +526,10 @@ def test_dispatch_submits_to_bounded_executor_not_raw_thread():
     fake_executor = MagicMock()
     with (
         patch(f"{_H}._get_dispatch_executor", return_value=fake_executor),
-        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
         patch(f"{_H}.process_review_request") as proc,
     ):
         gh.dispatch_github_event("issue_comment", _comment_payload())
-    fake_executor.submit.assert_called_once_with(proc, "acme", "widget", 42, 999)
+    fake_executor.submit.assert_called_once_with(proc, "acme", "widget", 42, 999, "alice", "")
 
 
 def test_dispatch_never_raises_when_executor_is_shut_down():
@@ -474,38 +594,33 @@ def test_is_duplicate_delivery_caps_table_size():
 
 def test_dispatch_ignores_redelivered_delivery_id():
     """The same delivery_id twice must only submit review work once."""
-    proc = MagicMock()
-    with (
-        patch(f"{_H}.process_review_request", proc),
-        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
-        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
-    ):
-        gh.dispatch_github_event("issue_comment", _comment_payload(), "delivery-1")
-        gh.dispatch_github_event("issue_comment", _comment_payload(), "delivery-1")
-    proc.assert_called_once_with("acme", "widget", 42, 999)
+    proc = _dispatch(_comment_payload(), delivery_id="delivery-1")
+    proc.assert_called_once_with("acme", "widget", 42, 999, "alice", "delivery-1")
+    assert _dispatch(_comment_payload(), delivery_id="delivery-1").called is False
 
 
 def test_dispatch_distinct_delivery_ids_both_processed():
-    proc = MagicMock()
-    with (
-        patch(f"{_H}.process_review_request", proc),
-        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
-        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
-    ):
-        gh.dispatch_github_event("issue_comment", _comment_payload(), "delivery-1")
-        gh.dispatch_github_event("issue_comment", _comment_payload(), "delivery-2")
-    assert proc.call_count == 2
+    assert _dispatch(_comment_payload(), delivery_id="delivery-a").called is True
+    assert _dispatch(_comment_payload(), delivery_id="delivery-b").called is True
 
 
 def test_dispatch_without_delivery_id_never_deduped():
     """No X-GitHub-Delivery header (delivery_id="") must not suppress repeated triggers —
     only a real, matching delivery ID counts as a redelivery."""
-    proc = MagicMock()
-    with (
-        patch(f"{_H}.process_review_request", proc),
-        patch(f"{_H}._get_dispatch_executor", return_value=_SyncExecutor()),
-        patch(f"{_H}._configured_owner_repo", return_value=("acme", "widget")),
-    ):
-        gh.dispatch_github_event("issue_comment", _comment_payload())
-        gh.dispatch_github_event("issue_comment", _comment_payload())
-    assert proc.call_count == 2
+    assert _dispatch(_comment_payload()).called is True
+    assert _dispatch(_comment_payload()).called is True
+
+
+def test_forget_delivery_allows_redelivery_to_retry():
+    """A forgotten delivery (failed review start) must be dispatchable again — this is
+    what makes GitHub's 'Redeliver' button work for a review that never actually ran."""
+    gh._SEEN_DELIVERY_IDS.clear()
+    assert _dispatch(_comment_payload(), delivery_id="d-retry").called is True
+    assert _dispatch(_comment_payload(), delivery_id="d-retry").called is False  # deduped
+    gh._forget_delivery("d-retry")
+    assert _dispatch(_comment_payload(), delivery_id="d-retry").called is True  # retried
+
+
+def test_forget_delivery_noop_for_empty_and_unknown_ids():
+    gh._forget_delivery("")  # must not raise
+    gh._forget_delivery("never-seen")  # must not raise
