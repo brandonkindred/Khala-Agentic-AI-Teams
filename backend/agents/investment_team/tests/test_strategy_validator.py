@@ -218,6 +218,48 @@ def test_new_indicator_vocabulary_is_recognised_in_consistency_check() -> None:
     assert "money flow" in lowered
 
 
+def test_prose_alias_matches_dsl_token_no_spurious_warning() -> None:
+    """A prose alias in the hypothesis and the DSL token a rule renders are the
+    same concept — no consistency warning.
+
+    ``format_rules_for_prompt`` renders an OBV rule as ``obv(...)`` while the
+    hypothesis says "on-balance volume"; resolving both to ``{obv}`` before
+    comparing avoids a spurious "each side is orphaned" mismatch. Same idea
+    fixes the pre-existing "moving average" vs ``sma`` case.
+    """
+    obv_spec = _spec(
+        hypothesis="On-Balance Volume confirms accumulation before entry",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=IndicatorRef(name="obv"), op=">", rhs=0),
+            ),
+        ],
+        exit_=[
+            SignalExitRule(when=Predicate(lhs=IndicatorRef(name="obv"), op="<", rhs=0)),
+        ],
+    )
+    warnings = _warnings(StrategySpecValidator().validate(obv_spec))
+    assert not any("Hypothesis/rules consistency" in w for w in warnings), warnings
+
+    ma_spec = _spec(
+        hypothesis="A moving average crossover drives the entry",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="sma", params={"period": 20}),
+                    op=">",
+                    rhs=IndicatorRef(name="sma", params={"period": 50}),
+                ),
+            ),
+        ],
+        exit_=[StopLossRule(pct=0.03)],
+    )
+    warnings = _warnings(StrategySpecValidator().validate(ma_spec))
+    assert not any("Hypothesis/rules consistency" in w for w in warnings), warnings
+
+
 def test_aligned_hypothesis_and_rules_emit_no_consistency_warning() -> None:
     """When hypothesis and rules share concept vocabulary, no warning fires."""
     spec = _spec(

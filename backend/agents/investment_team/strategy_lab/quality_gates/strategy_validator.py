@@ -43,6 +43,28 @@ _CONCEPT_TERMS = re.compile(
 )
 
 
+def _concept_mentions(text: str) -> list[tuple[str, frozenset[str]]]:
+    """Resolve each recognised term in ``text`` to the indicator(s) it denotes.
+
+    Preconditions: ``text`` is a string (empty allowed).
+    Postconditions: returns ``(surface_term, candidate_indicator_names)`` pairs,
+    one per regex match, whitespace-normalised. A prose alias resolves via the
+    shared ``_CONCEPT_TO_INDICATOR_NAMES`` map (so "on-balance volume" and the
+    DSL token "obv" both yield ``{"obv"}``); a term with no indicator mapping
+    (strategy concepts like "breakout"/"momentum") resolves to a singleton of
+    itself so it still compares by surface form. The map is imported lazily to
+    keep this validator's module-load surface light and to reuse the one copy
+    shared with the narrative-fidelity gate rather than duplicating it here.
+    """
+    from .spec_readiness import _CONCEPT_TO_INDICATOR_NAMES
+
+    mentions: list[tuple[str, frozenset[str]]] = []
+    for m in _CONCEPT_TERMS.finditer(text or ""):
+        term = re.sub(r"\s+", " ", m.group(0).lower())
+        mentions.append((term, _CONCEPT_TO_INDICATOR_NAMES.get(term, frozenset({term}))))
+    return mentions
+
+
 class StrategySpecValidator(GateResultsMixin):
     """Run deterministic checks on a StrategySpec before code execution."""
 
@@ -141,12 +163,19 @@ class StrategySpecValidator(GateResultsMixin):
                     " ".join(spec.unparsed_rules),
                 ]
             )
-            terms_in_hypothesis = {
-                m.group(0).lower() for m in _CONCEPT_TERMS.finditer(spec.hypothesis or "")
-            }
-            terms_in_rules = {m.group(0).lower() for m in _CONCEPT_TERMS.finditer(rules_text)}
-            orphan_in_hypothesis = terms_in_hypothesis - terms_in_rules
-            orphan_in_rules = terms_in_rules - terms_in_hypothesis
+            # Resolve each matched term to the indicator(s) it denotes before
+            # comparing, so a prose alias in the hypothesis ("on-balance volume")
+            # and the DSL token a rule renders ("obv") count as the same concept.
+            # A mention is orphaned only when NONE of its candidate indicators
+            # appears on the other side; strategy concepts with no indicator
+            # mapping (breakout/momentum/…) resolve to themselves and still
+            # compare by surface form.
+            hyp_mentions = _concept_mentions(spec.hypothesis or "")
+            rule_mentions = _concept_mentions(rules_text)
+            hyp_concepts = frozenset().union(*(c for _, c in hyp_mentions))
+            rule_concepts = frozenset().union(*(c for _, c in rule_mentions))
+            orphan_in_hypothesis = {t for t, c in hyp_mentions if not (c & rule_concepts)}
+            orphan_in_rules = {t for t, c in rule_mentions if not (c & hyp_concepts)}
             if orphan_in_hypothesis or orphan_in_rules:
                 results.append(
                     self._warning(
