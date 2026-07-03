@@ -573,6 +573,11 @@ export class IntegrationsDashboardComponent implements OnInit {
   githubPat = '';
   githubDefaultLabel = '';
   githubTokenConfigured = false;
+  // Webhook signing secret for the "@khala review" PR-comment trigger. The value is
+  // write-only (never returned by the API); `githubWebhookSecretConfigured` reflects
+  // whether one is stored so the input can show "Saved" without exposing the secret.
+  githubWebhookSecret = '';
+  githubWebhookSecretConfigured = false;
   // True when the PAT store (Postgres) is configured but unreachable, so the panel
   // can warn that the integration is down rather than implying it was never set up.
   githubStoreUnreachable = false;
@@ -588,7 +593,9 @@ export class IntegrationsDashboardComponent implements OnInit {
         this.githubDefaultLabel = res.default_label;
         this.githubTokenConfigured = res.token_configured;
         this.githubStoreUnreachable = res.credential_store_unreachable ?? false;
+        this.githubWebhookSecretConfigured = res.webhook_secret_configured ?? false;
         this.githubPat = '';
+        this.githubWebhookSecret = '';
         this.githubLoading = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
@@ -612,6 +619,8 @@ export class IntegrationsDashboardComponent implements OnInit {
       token: this.githubPat,
       default_label: this.githubDefaultLabel.trim(),
       repo_path: '',
+      // Empty preserves the existing stored secret (mirrors the token field).
+      webhook_secret: this.githubWebhookSecret,
     };
     this.api.updateGitHubConfig(body).subscribe({
       next: (res: GitHubConfigResponse) => {
@@ -620,7 +629,9 @@ export class IntegrationsDashboardComponent implements OnInit {
         this.githubRepo = res.repo;
         this.githubDefaultLabel = res.default_label;
         this.githubTokenConfigured = res.token_configured;
+        this.githubWebhookSecretConfigured = res.webhook_secret_configured ?? false;
         this.githubPat = '';
+        this.githubWebhookSecret = '';
         this.githubSuccess = 'GitHub integration saved.';
         this.githubSaving = false;
       },
@@ -642,7 +653,9 @@ export class IntegrationsDashboardComponent implements OnInit {
         this.githubRepo = res.repo;
         this.githubDefaultLabel = res.default_label;
         this.githubTokenConfigured = res.token_configured;
+        this.githubWebhookSecretConfigured = res.webhook_secret_configured ?? false;
         this.githubPat = '';
+        this.githubWebhookSecret = '';
         this.githubSuccess = 'GitHub disconnected.';
         this.githubDisconnecting = false;
       },

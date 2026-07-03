@@ -44,6 +44,7 @@ from llm_service import (
     LLMRateLimitError,
     LLMSchemaValidationError,
     LLMSemanticExhaustionError,
+    LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
 from shared_concurrency import parallel_map
@@ -190,11 +191,18 @@ def _is_infra_failure(exc: BaseException) -> bool:
 # unexpected defect and fails closed. ``json.JSONDecodeError`` is included
 # because the chunk reviewer parses the model's reply with a bare
 # ``json.loads`` — malformed model JSON surfaces as that raw error, not an
-# ``LLMJsonParseError``, and is just as recoverable.
+# ``LLMJsonParseError``, and is just as recoverable. ``LLMTruncatedError``
+# (finish_reason=length) is recoverable for the same reason bisection exists:
+# a smaller chunk yields a smaller review, so a half that no longer exhausts the
+# output-token budget parses cleanly; a chunk that still truncates at the
+# bisection floor degrades to a blocking "not reviewed" finding instead of
+# aborting the entire review job (the whole PR would otherwise fail on one
+# oversized chunk).
 _CONTENT_FAILURE_TYPES = (
     LLMJsonParseError,
     LLMSchemaValidationError,
     LLMSemanticExhaustionError,
+    LLMTruncatedError,
     json.JSONDecodeError,
 )
 
@@ -205,9 +213,11 @@ def _is_content_failure(exc: BaseException) -> bool:
     Postconditions:
         - Returns True only when the chain contains a known model-content
           failure (``LLMJsonParseError``, ``LLMSchemaValidationError``,
-          ``LLMSemanticExhaustionError``, or a raw ``json.JSONDecodeError`` from
-          parsing the model's reply) — the failures a smaller or repeated input
-          might fix, or that a human can be asked to review manually.
+          ``LLMSemanticExhaustionError``, ``LLMTruncatedError`` — a
+          finish_reason=length token-limit truncation — or a raw
+          ``json.JSONDecodeError`` from parsing the model's reply) — the failures
+          a smaller or repeated input might fix, or that a human can be asked to
+          review manually.
         - Returns False for everything else (e.g. ``KeyError``/``TypeError`` from
           a bug in the reviewer code), so unexpected defects fail closed instead
           of being masked as a not-reviewed finding.

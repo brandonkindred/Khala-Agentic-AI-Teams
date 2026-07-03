@@ -49,14 +49,17 @@ import logging
 import os
 import secrets
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from shared_env_config import env_float
 from unified_api.integration_credentials import (
     delete_credential,
     get_credential,
     get_credential_status,
+    resolve_credential_with_env_fallback,
     set_credential,
 )
 
@@ -565,19 +568,84 @@ def get_github_config() -> dict[str, Any]:
 
     Preconditions: none.
     Postconditions: returns :func:`get_github_config_meta`'s keys PLUS ``token_configured``
-        (bool) and ``store_reachable`` (bool), derived from a SINGLE
-        ``get_credential_status`` read — so the config panel and the run/review routes
-        share one source of reachability (they can't disagree) and pay one DB round-trip,
-        not a read plus a separate probe. The raw token is deliberately NEVER included
-        (only ``token_configured``); routes that need the token value read it explicitly
-        via ``get_credential_status`` so the secret stays out of this widely passed dict.
-        ``store_reachable`` is True when the credential store answered (or Postgres is
-        disabled — "absent", not an outage) and False only on a connection/query error.
-        Never raises (the credential read swallows its own errors).
+        (bool), ``store_reachable`` (bool), and ``webhook_secret_configured`` (bool).
+        ``token_configured`` derives from a ``get_credential_status`` read;
+        ``webhook_secret_configured`` reports whether a webhook signing secret exists
+        (stored credential OR ``GITHUB_WEBHOOK_SECRET`` env var) via
+        :func:`get_github_webhook_secret_status` — the same accessor the webhook route
+        verifies against, so the panel flag and the route can't diverge on where the
+        secret comes from. ``store_reachable`` is the AND of BOTH reads' reachability:
+        if either credential read hit a store outage, the response says so, rather than
+        reporting a stored-but-unreadable secret as "not configured" next to a healthy
+        ``store_reachable`` (which would invite a needless secret rotation). It is True
+        when both reads answered (or Postgres is disabled — "absent", not an outage) and
+        False on any connection/query error. The raw token/secret are deliberately NEVER
+        included (only the ``*_configured`` booleans); routes that need the token value
+        read it explicitly so the secret stays out of this widely passed dict.
+        Never raises (the credential reads swallow their own errors).
     """
     meta = get_github_config_meta()
-    token, store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")
-    return {**meta, "token_configured": bool(token), "store_reachable": store_reachable}
+    token, token_store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")
+    webhook_secret, secret_store_reachable = get_github_webhook_secret_status()
+    return {
+        **meta,
+        "token_configured": bool(token),
+        "store_reachable": token_store_reachable and secret_store_reachable,
+        "webhook_secret_configured": bool(webhook_secret),
+    }
+
+
+# Short-TTL cache for the webhook signing secret. The webhook endpoint verifies EVERY
+# delivery — including pings and event types the handler ignores — and the credential
+# store opens a fresh Postgres connection per read under a process-global lock, a cost
+# model built for infrequent config-page reads, not per-delivery traffic. The cache is
+# invalidated by set_github_config/clear_github_config, so a rotated secret takes effect
+# immediately on the worker that rotated it and within the TTL everywhere else (same
+# propagation story as a multi-worker deployment already has for its other workers).
+# Failure results (store unreachable) are cached too, deliberately: during an outage the
+# route fails closed with 503 either way, and caching prevents a delivery storm from
+# hammering a database that is already down. TTL is env-tunable; 0 disables caching.
+_WEBHOOK_SECRET_CACHE_TTL_S = env_float("GITHUB_WEBHOOK_SECRET_CACHE_TTL_S", 30.0, floor=0.0)
+_WEBHOOK_SECRET_CACHE: tuple[float, tuple[str | None, bool]] | None = None
+
+
+def _invalidate_webhook_secret_cache() -> None:
+    """Drop the cached webhook-secret read (next call re-reads the store).
+
+    Preconditions: none.
+    Postconditions: the next :func:`get_github_webhook_secret_status` call performs a
+        fresh credential read. Never raises.
+    """
+    global _WEBHOOK_SECRET_CACHE
+    _WEBHOOK_SECRET_CACHE = None
+
+
+def get_github_webhook_secret_status() -> tuple[str | None, bool]:
+    """Return ``(secret_or_None, store_reachable)`` for the webhook signature check.
+
+    Preconditions: none.
+    Postconditions: returns the stored secret (or the ``GITHUB_WEBHOOK_SECRET`` env
+        fallback) paired with whether the credential store was reachable — see
+        :func:`unified_api.integration_credentials.resolve_credential_with_env_fallback`
+        for the exact "no secret configured" vs "store unreachable" distinction this
+        implements (shared with the GitHub PAT's own fail-closed reachability check in
+        ``_resolve_github_target``, so the two credentials can't silently diverge).
+        Results are served from a ``GITHUB_WEBHOOK_SECRET_CACHE_TTL_S``-second cache
+        (default 30s, 0 disables) so per-delivery webhook traffic doesn't open a fresh
+        Postgres connection per event; :func:`set_github_config` and
+        :func:`clear_github_config` invalidate it. Reads and writes of the single cache
+        slot are atomic tuple assignments, so unsynchronized concurrent callers at worst
+        duplicate one fresh read. Never raises.
+    """
+    global _WEBHOOK_SECRET_CACHE
+    now = time.monotonic()
+    cached = _WEBHOOK_SECRET_CACHE
+    if cached is not None and cached[0] >= now:
+        return cached[1]
+    result = resolve_credential_with_env_fallback(_GITHUB_SERVICE, "webhook_secret", "GITHUB_WEBHOOK_SECRET")
+    if _WEBHOOK_SECRET_CACHE_TTL_S > 0:
+        _WEBHOOK_SECRET_CACHE = (now + _WEBHOOK_SECRET_CACHE_TTL_S, result)
+    return result
 
 
 def set_github_config(
@@ -588,13 +656,23 @@ def set_github_config(
     personal_access_token: str = "",
     default_label: str = "",
     repo_path: str = "",
+    webhook_secret: str = "",
 ) -> None:
-    """Persist GitHub config. PAT goes encrypted to Postgres; rest to JSON.
+    """Persist GitHub config. PAT and webhook secret go encrypted to Postgres; rest to JSON.
 
-    Preserves existing values when empty strings are passed for owner/repo/repo_path.
+    Preconditions: all arguments are strings (``enabled`` a bool). Blank ``owner``/``repo``/
+        ``repo_path`` mean "preserve existing"; blank ``personal_access_token``/
+        ``webhook_secret`` mean "leave the stored credential untouched".
+    Postconditions: the non-blank PAT and webhook secret are written encrypted via
+        ``set_credential``; the JSON settings (enabled/owner/repo/default_label/repo_path)
+        are rewritten atomically under ``_LOCK``. Returns ``None``. Raises only if the
+        underlying credential or JSON write fails.
     """
     if personal_access_token.strip():
         set_credential(_GITHUB_SERVICE, "personal_access_token", personal_access_token.strip())
+    if webhook_secret.strip():
+        set_credential(_GITHUB_SERVICE, "webhook_secret", webhook_secret.strip())
+        _invalidate_webhook_secret_cache()
 
     with _LOCK:
         data = _read_raw()
@@ -610,8 +688,17 @@ def set_github_config(
 
 
 def clear_github_config() -> None:
-    """Remove GitHub PAT and reset config to disabled defaults."""
+    """Remove GitHub PAT + webhook secret and reset config to disabled defaults.
+
+    Preconditions: none.
+    Postconditions: deletes the stored ``personal_access_token`` and ``webhook_secret``
+        credentials and rewrites the JSON settings to the disabled-defaults shape
+        (enabled=False, empty owner/repo/default_label/repo_path) atomically under
+        ``_LOCK``. Idempotent — safe to call when nothing is configured. Returns ``None``.
+    """
     delete_credential(_GITHUB_SERVICE, "personal_access_token")
+    delete_credential(_GITHUB_SERVICE, "webhook_secret")
+    _invalidate_webhook_secret_cache()
     with _LOCK:
         data = _read_raw()
         data["github"] = {

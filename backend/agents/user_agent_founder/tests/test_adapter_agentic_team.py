@@ -27,6 +27,7 @@ import pytest
 @dataclass
 class _FakeRun:
     """Fake StoredRun record for adapter tests."""
+
     run_id: str
     status: str = "running"
     se_job_id: str | None = None
@@ -44,6 +45,7 @@ class _FakeRun:
 
 class _FakeStore:
     """Minimal in-memory founder-store double that records calls."""
+
     def __init__(self, run: _FakeRun) -> None:
         self._run = run
         self.update_calls: list[dict[str, Any]] = []
@@ -725,6 +727,76 @@ def test_persona_run_cancelled_with_american_spelling_fails_promptly(
     assert "cancelled" in run.error.lower()
     assert "timed out" not in run.error.lower()
     assert len(fake.gets) == 1
+
+
+def test_persona_run_failed_pipeline_fails_promptly_with_pipeline_error(
+    stub_orchestrator_io, monkeypatch
+):
+    """A pipeline that reports 'failed' must be recognized as terminal by the
+    orchestrator's _run_phase exact-string match and fail promptly, carrying
+    the pipeline's own error — not poll for MAX_POLL_ATTEMPTS and time out.
+    Locks the adapter↔orchestrator agreement on the 'failed' terminal string,
+    which the drift tripwire pins adapter-side only."""
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    orchestrator = stub_orchestrator_io
+    run = _FakeRun(run_id="run-fail", spec_content=None)
+    store = _FakeStore(run)
+    agent = MagicMock()
+    agent.generate_spec.return_value = "# Generated spec"
+
+    fake = _FakeHttpxClient(
+        post_responses={"/test-pipeline/runs": _FakeResponse(201, {"run_id": "run-pipe"})},
+        get_responses={
+            "/test-pipeline/runs/run-pipe": [
+                _FakeResponse(200, {"status": "failed", "error": "agent step exploded"})
+            ],
+        },
+    )
+    monkeypatch.setattr(orchestrator.httpx, "Client", lambda *a, **kw: fake)
+
+    orchestrator.run_workflow(
+        "run-fail", store, agent, AgenticTeamAdapter("t1", process_id="proc1")
+    )
+
+    assert run.status == "failed"
+    # Fails on the first poll, carrying the pipeline's own error — not a
+    # generic timeout after exhausting MAX_POLL_ATTEMPTS.
+    assert "agent step exploded" in run.error
+    assert "timed out" not in run.error.lower()
+    assert len(fake.gets) == 1
+
+
+def test_persona_run_retries_transient_poll_error_then_completes(stub_orchestrator_io, monkeypatch):
+    """A transient poll HTTP error becomes '_poll_error' and the orchestrator
+    keeps polling instead of failing the run — locks the retry-key agreement
+    between the adapter and _run_phase, which the drift tripwire pins
+    adapter-side only."""
+    from user_agent_founder.targets import AgenticTeamAdapter
+
+    orchestrator = stub_orchestrator_io
+    run = _FakeRun(run_id="run-poll-blip", spec_content=None)
+    store = _FakeStore(run)
+    agent = MagicMock()
+    agent.generate_spec.return_value = "# Generated spec"
+
+    fake = _FakeHttpxClient(
+        post_responses={"/test-pipeline/runs": _FakeResponse(201, {"run_id": "run-pipe"})},
+        get_responses={
+            "/test-pipeline/runs/run-pipe": [
+                _FakeResponse(502, text="proxy hiccup"),
+                _FakeResponse(200, {"status": "completed"}),
+            ],
+        },
+    )
+    monkeypatch.setattr(orchestrator.httpx, "Client", lambda *a, **kw: fake)
+
+    orchestrator.run_workflow(
+        "run-poll-blip", store, agent, AgenticTeamAdapter("t1", process_id="proc1")
+    )
+
+    assert run.status == "completed"
+    assert len(fake.gets) == 2
 
 
 if __name__ == "__main__":
