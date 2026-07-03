@@ -11,7 +11,12 @@ export interface UserProfile {
   updated_at: string;
 }
 
-/** Partial update payload — omitted fields are left unchanged. */
+/**
+ * Partial update payload — omitted fields are left unchanged. Present scalar
+ * fields are written verbatim; a present `preferences` dict is MERGED
+ * key-by-key server-side (absent keys survive; no key-deletion path), so
+ * send only the preference keys you own.
+ */
 export interface UserProfileUpdate {
   display_name?: string;
   email?: string;

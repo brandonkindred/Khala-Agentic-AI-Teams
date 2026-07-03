@@ -263,9 +263,10 @@ describe('UserProfileComponent', () => {
   });
 
   it('should default the avatar color when preferences are missing or garbage', async () => {
-    // Two component-level cases cover the two load paths (non-object guard,
-    // unknown-key resolve); the full garbage matrix is unit-tested on
-    // resolveAvatarColor in the avatar spec — no need for a TestBed cycle each.
+    // Two component-level cases cover the two load paths: a null container
+    // (the optional chain yields undefined) and an unknown stored key
+    // (resolveAvatarColor falls back). Value-level garbage shapes are
+    // unit-tested on resolveAvatarColor in the avatar spec.
     for (const preferences of [null, { avatar_color: 'magenta' }]) {
       apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, profile: { ...PROFILE, preferences } }));
       await setup();
@@ -392,6 +393,44 @@ describe('UserProfileComponent', () => {
     radio.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(false);
     expect(component.form.value.avatar_color).toBe('amber');
+  });
+
+  it('should omit preferences entirely on a save when no color was chosen or stored', async () => {
+    // A bio-only save must not stamp the default color onto a profile that
+    // never picked one — omitting the field leaves server preferences alone.
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark' } } }),
+    );
+    await setup();
+    component.form.patchValue({ bio: 'updated' });
+    component.save();
+    expect(apiSpy.updateProfile).toHaveBeenCalledWith(
+      expect.not.objectContaining({ preferences: expect.anything() }),
+    );
+  });
+
+  it('should keep sending a stored avatar color on unrelated saves', async () => {
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { avatar_color: 'blue' } } }),
+    );
+    await setup();
+    component.form.patchValue({ bio: 'updated' });
+    component.save();
+    expect(apiSpy.updateProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ preferences: { avatar_color: 'blue' } }),
+    );
+  });
+
+  it('should keep sending the color on later saves once one has been saved', async () => {
+    // First save persists the picked color; a later bio-only save must not
+    // silently stop sending it (the flag flips after a successful save).
+    await setup(); // PROFILE.preferences is {} — nothing stored initially
+    component.selectAvatarColor('green');
+    component.save();
+    component.save(); // pristine again after success; no swatch touched
+    expect(apiSpy.updateProfile).toHaveBeenLastCalledWith(
+      expect.objectContaining({ preferences: { avatar_color: 'green' } }),
+    );
   });
 
   it('should live-update the avatar initials from the display name control', async () => {

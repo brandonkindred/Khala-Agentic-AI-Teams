@@ -174,8 +174,10 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
         - Only fields set (non-``None``) on ``update`` are written.
         - ``preferences`` is merged key-by-key into the stored object (top-level
           keys overwrite; keys absent from the update survive), so concurrent
-          writers of unrelated preference keys cannot clobber each other. There
-          is no key-deletion path; set a key to ``None`` to tombstone it.
+          writers of unrelated preference keys cannot clobber each other.
+          There is no key-deletion path: sending ``None`` stores the key with
+          a JSON ``null`` value (it is never removed or swept), so readers
+          must treat ``null`` the same as absent.
         - ``updated_at`` is advanced.
     """
     assert user_id, "user_id must be non-empty"

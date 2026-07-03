@@ -75,6 +75,15 @@ export class UserProfileComponent implements OnInit {
    */
   profileLoaded = false;
 
+  /**
+   * True when the server already has an `avatar_color` preference (or one was
+   * saved this session). Saves include the key only when this is true or the
+   * user picked a swatch — so a profile that never chose a color isn't
+   * silently pinned to the current default by an unrelated (e.g. bio-only)
+   * save, and keeps following the app default if it ever changes.
+   */
+  private hadStoredAvatarColor = false;
+
   groups: AssociationGroup[] = [];
   integrations: ProfileIntegration[] = [];
   /** Total linked artifacts, computed once per load (not per change-detection tick). */
@@ -137,18 +146,17 @@ export class UserProfileComponent implements OnInit {
           return;
         }
         const { profile, associations, integrations } = overview;
-        // `preferences` is free-form JSONB — only trust a plain object.
-        const preferences =
-          profile.preferences && typeof profile.preferences === 'object' && !Array.isArray(profile.preferences)
-            ? (profile.preferences as Record<string, unknown>)
-            : {};
+        // `preferences` is free-form JSONB; the optional chain yields undefined
+        // for null/garbage containers and resolveAvatarColor defends the rest.
+        const storedAvatarColor = profile.preferences?.['avatar_color'];
+        this.hadStoredAvatarColor = storedAvatarColor !== undefined;
         this.form.patchValue({
           // `?? ''` defends against a null slipping through a technically-valid
           // body; the backend columns are NOT NULL DEFAULT so this is belt-and-braces.
           display_name: profile.display_name ?? '',
           email: profile.email ?? '',
           bio: profile.bio ?? '',
-          avatar_color: resolveAvatarColor(preferences['avatar_color']).key,
+          avatar_color: resolveAvatarColor(storedAvatarColor).key,
         });
         this.groups = this.groupAssociations(associations);
         this.totalAssociations = this.groups.reduce((sum, g) => sum + g.items.length, 0);
@@ -186,20 +194,29 @@ export class UserProfileComponent implements OnInit {
     this.error = null;
     this.success = null;
     const value = this.form.getRawValue();
+    // Only the key this page owns, and only when the user picked a color (or
+    // one is already stored): the backend merges preferences key-by-key, and
+    // omitting the field entirely leaves server-side preferences untouched —
+    // so a bio-only save can't stamp the default color onto a profile that
+    // never chose one.
+    const includeAvatarColor = this.form.controls.avatar_color.dirty || this.hadStoredAvatarColor;
     this.api
       .updateProfile({
         display_name: value.display_name ?? '',
         email: value.email ?? '',
         bio: value.bio ?? '',
-        // Only the key this page owns: the backend merges preferences
-        // key-by-key, so keys written by other features/tabs survive.
-        preferences: { avatar_color: value.avatar_color ?? DEFAULT_AVATAR_COLOR },
+        ...(includeAvatarColor
+          ? { preferences: { avatar_color: value.avatar_color ?? DEFAULT_AVATAR_COLOR } }
+          : {}),
       })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: () => {
           this.saving = false;
           this.success = 'Profile saved.';
+          // A saved color is now server-side state — later saves keep sending it.
+          // (includeAvatarColor already subsumes the previous flag value.)
+          this.hadStoredAvatarColor = includeAvatarColor;
           // The form now matches the persisted state — clear the dirty flag so an
           // unsaved-changes guard doesn't prompt after a successful save.
           this.form.markAsPristine();

@@ -61,8 +61,10 @@ describe('AVATAR_COLOR_OPTIONS', () => {
     }
   });
 
-  it('uses the first palette entry as the default color', () => {
-    expect(DEFAULT_AVATAR_COLOR).toBe(AVATAR_COLOR_OPTIONS[0].key);
+  it('keeps amber as the intended default color', () => {
+    // The default is derived from the first palette entry, so this literal
+    // pin is what catches an accidental palette reordering.
+    expect(DEFAULT_AVATAR_COLOR).toBe('amber');
   });
 });
 

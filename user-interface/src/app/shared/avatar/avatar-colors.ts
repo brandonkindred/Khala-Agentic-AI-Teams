@@ -17,7 +17,7 @@ export interface AvatarColorOption {
   label: string;
   /** CSS custom property name (including leading `--`) supplying the fill. */
   cssVar: string;
-  /** Ready-to-bind CSS value (`var(<cssVar>)`) so templates never rebuild it. */
+  /** Ready-to-bind CSS value (`var(<cssVar>)`) used by the picker swatches. */
   fill: string;
 }
 
