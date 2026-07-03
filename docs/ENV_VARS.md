@@ -642,6 +642,40 @@ Optional override for the GitHub REST base URL used by the coding team's GitHub 
 (`backend/agents/coding_team/github_source/`). Defaults to `https://api.github.com`; set to a GitHub
 Enterprise URL when relevant.
 
+### GITHUB_WEBHOOK_SECRET
+Signing secret for the GitHub webhook receiver `POST /api/integrations/github/events`, which lets a
+collaborator trigger a PR review by commenting `@khala review` on a pull request. The receiver
+verifies each delivery's `X-Hub-Signature-256` HMAC against this secret and rejects mismatches with
+`401`. A secret stored via `PUT /api/integrations/github` (encrypted in Postgres) takes precedence
+over this env var. When neither is set, the receiver fails closed: a `ping` still succeeds (so you can
+verify webhook delivery during setup), but every review-triggering event is refused with `403` until a
+secret is configured — an unsigned request must never be able to start a paid review. Only
+`issue_comment` events from OWNER/MEMBER/COLLABORATOR authors on the configured `owner/repo` trigger a
+review.
+
+### GITHUB_WEBHOOK_DEDUP_TTL_S / GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES
+Tune the webhook receiver's in-process, per-worker de-duplication of GitHub redeliveries (same
+`X-GitHub-Delivery` id). `GITHUB_WEBHOOK_DEDUP_TTL_S` (default `600`, floor `1`) is how long a delivery
+id is remembered; `GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES` (default `1000`, floor `2`) bounds the table size
+(the oldest half is dropped when exceeded). A delivery stays remembered only while its review is (or
+ended up) in flight: a delivery whose review *failed to start* is forgotten again, so GitHub's
+"Redeliver" button (which reuses the same delivery id) can retry it. This is only a fast-path that
+suppresses re-dispatch of a redelivery landing on the *same* worker; the authoritative, cross-worker
+duplicate-review guard is the coding-team `POST /review-pr` endpoint, which serializes admission (a
+process lock plus, when Postgres is configured, a `pg_advisory_xact_lock` keyed on the PR) and rejects
+a second review while one is already running for the PR (and also covers the manual UI trigger). A
+review job whose worker died mid-review stops blocking new reviews once its liveness heartbeat is
+stale (~5 minutes).
+
+### GITHUB_WEBHOOK_SECRET_CACHE_TTL_S
+How long (seconds, default `30`, floor `0` = disable caching) the unified API caches the GitHub
+webhook signing secret between reads. The webhook endpoint verifies every delivery — including pings
+and event types it ignores — and each uncached read opens a fresh Postgres connection, a cost model
+meant for config-page traffic, not per-delivery volume. Saving or clearing the GitHub integration
+invalidates the cache immediately on the worker that handled it; other workers converge within the
+TTL. Store-outage results are cached too (the route fails closed with 503 either way, and caching
+keeps a delivery storm from hammering a database that is already down).
+
 ### GITHUB_DEPENDENCY_CONCURRENCY
 Bounds the concurrent per-issue `blocked_by` dependency fetches that enrich
 `GET /api/integrations/github/issues` (the coding-team issue picker). Each open issue is annotated

@@ -188,6 +188,28 @@ class AddAgentFromRegistryRequest(BaseModel):
     )
 
 
+class UpdateAgentRequest(BaseModel):
+    """Request body for ``PUT /teams/{team_id}/agents/{agent_name}`` (Agent Studio §3,
+    Stage 3 roster inline edit).
+
+    Every field is optional: only the fields present in the request overwrite the
+    existing roster row's corresponding fields, so a caller can edit e.g. just
+    ``skills`` without resending the rest. ``source`` and ``manifest_id`` are never
+    accepted here — they are fixed at add time (from-registry vs. LLM-generated)
+    and are not part of this "edit for this team" contract.
+    """
+
+    role: Optional[str] = Field(default=None, description="New role, if changed.")
+    skills: Optional[list[str]] = Field(default=None, description="New skills list, if changed.")
+    capabilities: Optional[list[str]] = Field(
+        default=None, description="New capabilities list, if changed."
+    )
+    tools: Optional[list[str]] = Field(default=None, description="New tools list, if changed.")
+    expertise: Optional[list[str]] = Field(
+        default=None, description="New expertise list, if changed."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Agentic Team
 # ---------------------------------------------------------------------------

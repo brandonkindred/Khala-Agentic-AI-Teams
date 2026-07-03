@@ -44,6 +44,9 @@
       @case ('test') {
         <app-agent-studio-test-agent />
       }
+      @case ('compose') {
+        <app-agent-studio-compose-team />
+      }
       @case ('personas') {
         <app-agent-studio-persona />
       }
@@ -68,15 +71,25 @@
       fully staffed + process complete) land with each real stage.
     -->
     @if (state.canAdvance()) {
-      <button
-        mat-flat-button
-        type="button"
-        class="studio__continue"
-        [disabled]="forwardDisabled()"
-        (click)="onContinue()"
+      <!-- Tooltip lives on the wrapping span, not the button: Material tooltips
+           don't fire on a disabled element (no pointer events), so the
+           "what's missing" hint would never show on the disabled button itself
+           (same pattern as the Stage-4 "fix an agent" back-loop button). -->
+      <span
+        class="studio__continue-wrap"
+        [matTooltip]="composeForwardDisabledReason() ?? ''"
+        [matTooltipDisabled]="!composeForwardDisabledReason()"
       >
-        {{ activeStageDef().forwardLabel ?? 'Continue' }}
-      </button>
+        <button
+          mat-flat-button
+          type="button"
+          class="studio__continue"
+          [disabled]="forwardDisabled()"
+          (click)="onContinue()"
+        >
+          {{ activeStageDef().forwardLabel ?? 'Continue' }}
+        </button>
+      </span>
     }
   </footer>
 </div>
