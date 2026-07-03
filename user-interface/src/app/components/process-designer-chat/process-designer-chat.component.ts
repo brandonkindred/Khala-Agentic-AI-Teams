@@ -1,8 +1,10 @@
 import {
   Component,
+  EventEmitter,
   Input,
   OnInit,
   OnChanges,
+  Output,
   SimpleChanges,
   ViewChild,
   ElementRef,
@@ -11,7 +13,7 @@ import {
   signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { FormBuilder, FormsModule, ReactiveFormsModule, Validators } from '@angular/forms';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -21,8 +23,18 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatMenuModule } from '@angular/material/menu';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { FlowStepEditorComponent } from '../flow-step-editor/flow-step-editor.component';
+import {
+  AddAgentFromRegistryDialogComponent,
+  type AddAgentFromRegistryDialogData,
+  type AddAgentFromRegistryDialogResult,
+} from './add-agent-from-registry-dialog.component';
+import {
+  ConfirmDialogComponent,
+  type ConfirmDialogData,
+} from '../../shared/confirm-dialog/confirm-dialog.component';
 import type {
   AgenticTeam,
   AgenticTeamAgent,
@@ -30,15 +42,26 @@ import type {
   ProcessDefinition,
   ProcessStep,
   RosterValidationResult,
+  UpdateAgentRequest,
 } from '../../models';
 
 let _stepCounter = 0;
+
+/** A roster agent's fields, editable via the inline "Edit" affordance. */
+interface AgentEditDraft {
+  role: string;
+  skills: string;
+  capabilities: string;
+  tools: string;
+  expertise: string;
+}
 
 @Component({
   selector: 'app-process-designer-chat',
   standalone: true,
   imports: [
     CommonModule,
+    FormsModule,
     ReactiveFormsModule,
     MatCardModule,
     MatFormFieldModule,
@@ -48,6 +71,7 @@ let _stepCounter = 0;
     MatChipsModule,
     MatTooltipModule,
     MatMenuModule,
+    MatDialogModule,
     FlowStepEditorComponent,
   ],
   templateUrl: './process-designer-chat.component.html',
@@ -56,12 +80,20 @@ let _stepCounter = 0;
 export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterViewChecked {
   @Input() team!: AgenticTeam;
 
+  /**
+   * Emitted every time the roster validation is (re)loaded — including `null` on
+   * a load failure. Lets an embedding stage (Agent Studio Stage 3) track "is the
+   * roster fully staffed" without re-fetching it independently.
+   */
+  @Output() readonly rosterChanged = new EventEmitter<RosterValidationResult | null>();
+
   @ViewChild('messagesContainer') messagesContainer!: ElementRef<HTMLDivElement>;
   @ViewChild('flowchartContainer') flowchartContainer!: ElementRef<HTMLDivElement>;
 
   private readonly api = inject(AgenticTeamApiService);
   private readonly fb = inject(FormBuilder);
   private readonly sanitizer = inject(DomSanitizer);
+  private readonly dialog = inject(MatDialog);
 
   messages = signal<AgenticConversationMessage[]>([]);
   currentProcess = signal<ProcessDefinition | null>(null);
@@ -81,7 +113,19 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   rosterAgents = signal<AgenticTeamAgent[]>([]);
   rosterValidation = signal<RosterValidationResult | null>(null);
   rosterLoading = signal(false);
+  rosterActionError = signal<string | null>(null);
   expandedAgent = signal<string | null>(null);
+  /** Name of the roster agent currently in inline-edit mode (`null` if none). */
+  editingAgent = signal<string | null>(null);
+  editDraft = signal<AgentEditDraft>({ role: '', skills: '', capabilities: '', tools: '', expertise: '' });
+  /**
+   * Snapshot of the row's fields as the edit form opened, used to send only the
+   * fields the user actually changed on save (see `saveAgentEdits`). `null` when
+   * no edit is in progress.
+   */
+  private readonly editOriginal = signal<AgentEditDraft | null>(null);
+  /** Monotonic stamp for `refreshRoster`; guards against out-of-order refresh results. */
+  private rosterRefreshSeq = 0;
 
   private conversationId: string | null = null;
 
@@ -94,7 +138,18 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   ngOnChanges(changes: SimpleChanges): void {
-    if (changes['team'] && !changes['team'].firstChange) {
+    const teamChange = changes['team'];
+    // Restart the conversation only when the team *identity* changes, not on
+    // every new object reference. An embedding stage (Agent Studio Stage 3)
+    // re-fetches the team after roster edits and hands us a freshly-parsed
+    // object with the same team_id; restarting on reference-equality alone would
+    // reset the chat — and, because that restart re-emits `rosterChanged`, drive
+    // the parent into an unbounded getTeam→re-render→restart loop.
+    if (
+      teamChange &&
+      !teamChange.firstChange &&
+      teamChange.previousValue?.team_id !== teamChange.currentValue?.team_id
+    ) {
       this.startConversation();
     }
   }
@@ -168,17 +223,52 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   refreshRoster(): void {
+    // Sequence token: a roster mutation (add/delete/edit) can trigger a new
+    // refresh while an older one is still in flight. Stamp each refresh and drop
+    // any callback whose stamp is no longer the latest, so a slow older
+    // validateRoster can't complete last and emit a stale is_fully_staffed —
+    // which the embedding stage (Agent Studio Stage 3) would use to (wrongly)
+    // enable "Test this team →" for a roster that has since changed.
+    const seq = ++this.rosterRefreshSeq;
     this.rosterLoading.set(true);
+    this.rosterActionError.set(null);
     this.api.listTeamAgents(this.team.team_id).subscribe({
       next: (agents) => {
+        if (seq !== this.rosterRefreshSeq) return; // superseded by a newer refresh
         this.rosterAgents.set(agents);
-        this.rosterLoading.set(false);
+        // Keep the loading indicator up until validation also resolves — the
+        // roster isn't "fully loaded" until its staffing gaps are known.
         this.api.validateRoster(this.team.team_id).subscribe({
-          next: (result) => this.rosterValidation.set(result),
-          error: () => this.rosterValidation.set(null),
+          next: (result) => {
+            if (seq !== this.rosterRefreshSeq) return;
+            this.rosterValidation.set(result);
+            this.rosterLoading.set(false);
+            this.rosterChanged.emit(result);
+          },
+          error: (err) => {
+            if (seq !== this.rosterRefreshSeq) return;
+            this.rosterValidation.set(null);
+            this.rosterLoading.set(false);
+            this.rosterChanged.emit(null);
+            // Surface the failure too: clearing the gate silently disables the
+            // embedding stage's "Test this team →" with no explanation otherwise.
+            this.rosterActionError.set(err?.error?.detail ?? 'Failed to validate the roster');
+          },
         });
       },
-      error: () => this.rosterLoading.set(false),
+      error: (err) => {
+        if (seq !== this.rosterRefreshSeq) return;
+        // Surface the failure instead of silently leaving a stale roster: the
+        // user needs to know their view may be out of date. Also clear the
+        // validation and emit null so an embedding stage (Agent Studio Stage 3)
+        // drops its "fully staffed" gate — otherwise a failed refresh after a
+        // previously-staffed load would keep "Test this team →" enabled on stale
+        // staffing (rosterFullyStaffed is only updated from rosterChanged).
+        this.rosterLoading.set(false);
+        this.rosterValidation.set(null);
+        this.rosterChanged.emit(null);
+        this.rosterActionError.set(err?.error?.detail ?? 'Failed to load roster');
+      },
     });
   }
 
@@ -190,6 +280,150 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     const v = this.rosterValidation();
     if (!v) return 0;
     return v.gaps.filter((g) => g.agent_name === agentName).length;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Roster mutation: add from registry / suggest via chat / delete / inline edit
+  // (spec §3, Stage 3 "Roster panel")
+  // ---------------------------------------------------------------------------
+
+  /** Open the "search registry agents" dialog and add the chosen manifest. */
+  openAddFromRegistry(): void {
+    this.rosterActionError.set(null);
+    const data: AddAgentFromRegistryDialogData = {
+      existingManifestIds: this.rosterAgents()
+        .map((a) => a.manifest_id)
+        .filter((id): id is string => !!id),
+    };
+    const ref = this.dialog.open<
+      AddAgentFromRegistryDialogComponent,
+      AddAgentFromRegistryDialogData,
+      AddAgentFromRegistryDialogResult
+    >(AddAgentFromRegistryDialogComponent, { data, width: '480px' });
+    ref.afterClosed().subscribe((manifestId) => this.onAddFromRegistryDialogClosed(manifestId));
+  }
+
+  /** Public for unit tests; invoked by `openAddFromRegistry` after the dialog closes. */
+  onAddFromRegistryDialogClosed(manifestId: AddAgentFromRegistryDialogResult | undefined): void {
+    if (!manifestId) return;
+    this.api.addAgentFromRegistry(this.team.team_id, manifestId).subscribe({
+      next: () => this.refreshRoster(),
+      error: (err) => {
+        this.rosterActionError.set(err?.error?.detail ?? 'Failed to add agent from registry');
+      },
+    });
+  }
+
+  /** "Suggest via chat": seed the chat input with a prompt asking for a new agent. */
+  suggestAgentViaChat(): void {
+    this.form.patchValue({ message: 'Suggest an additional agent for this team.' });
+  }
+
+  deleteAgent(agent: AgenticTeamAgent, event: Event): void {
+    event.stopPropagation();
+    // Use the shared Material confirm dialog (danger variant) rather than the
+    // native window.confirm, so a destructive roster removal matches the rest of
+    // the app's theming and Cancel-focused destructive-prompt convention.
+    const ref = this.dialog.open<
+      ConfirmDialogComponent,
+      ConfirmDialogData,
+      boolean
+    >(ConfirmDialogComponent, {
+      data: {
+        title: 'Remove agent',
+        message: `Remove "${agent.agent_name}" from the roster?`,
+        confirmLabel: 'Remove',
+        cancelLabel: 'Cancel',
+        variant: 'danger',
+      },
+      width: '420px',
+    });
+    ref.afterClosed().subscribe((confirmed) => this.onDeleteAgentConfirmed(agent, confirmed));
+  }
+
+  /** Public for unit tests; invoked by `deleteAgent` after the confirm dialog closes. */
+  onDeleteAgentConfirmed(agent: AgenticTeamAgent, confirmed: boolean | undefined): void {
+    if (!confirmed) return;
+    this.rosterActionError.set(null);
+    this.api.removeTeamAgent(this.team.team_id, agent.agent_name).subscribe({
+      next: () => {
+        if (this.editingAgent() === agent.agent_name) this.editingAgent.set(null);
+        this.refreshRoster();
+      },
+      error: (err) => {
+        this.rosterActionError.set(err?.error?.detail ?? 'Failed to remove agent');
+      },
+    });
+  }
+
+  startEditAgent(agent: AgenticTeamAgent, event: Event): void {
+    event.stopPropagation();
+    this.rosterActionError.set(null);
+    const snapshot: AgentEditDraft = {
+      role: agent.role,
+      skills: agent.skills.join(', '),
+      capabilities: agent.capabilities.join(', '),
+      tools: agent.tools.join(', '),
+      expertise: agent.expertise.join(', '),
+    };
+    this.editDraft.set({ ...snapshot });
+    this.editOriginal.set(snapshot);
+    this.editingAgent.set(agent.agent_name);
+  }
+
+  cancelEditAgent(event: Event): void {
+    event.stopPropagation();
+    this.editingAgent.set(null);
+    this.editOriginal.set(null);
+  }
+
+  /** Update a single field of the in-progress edit draft (template can't spread). */
+  updateEditDraftField(field: keyof AgentEditDraft, value: string): void {
+    this.editDraft.update((draft) => ({ ...draft, [field]: value }));
+  }
+
+  saveAgentEdits(agent: AgenticTeamAgent, event: Event): void {
+    event.stopPropagation();
+    const draft = this.editDraft();
+    const original = this.editOriginal();
+    const toList = (s: string) =>
+      s.split(',').map((v) => v.trim()).filter((v) => v.length > 0);
+
+    // Send ONLY the fields the user actually changed vs. what the form opened
+    // with. The backend PUT is a partial update (exclude_unset), so omitting an
+    // untouched field preserves whatever newer value the chat or another roster
+    // mutation wrote for it while this form was open — a full-object save would
+    // clobber those with the stale draft. Raw-string compare suffices: an
+    // untouched field is byte-identical to its `startEditAgent` snapshot. With no
+    // baseline (a save racing the form close) fall back to sending the field so a
+    // real edit isn't silently dropped.
+    const changed = (field: keyof AgentEditDraft) => !original || draft[field] !== original[field];
+    const updates: UpdateAgentRequest = {};
+    if (changed('role')) updates.role = draft.role.trim();
+    if (changed('skills')) updates.skills = toList(draft.skills);
+    if (changed('capabilities')) updates.capabilities = toList(draft.capabilities);
+    if (changed('tools')) updates.tools = toList(draft.tools);
+    if (changed('expertise')) updates.expertise = toList(draft.expertise);
+
+    // Nothing changed → close the form without a redundant write.
+    if (Object.keys(updates).length === 0) {
+      this.editingAgent.set(null);
+      this.editOriginal.set(null);
+      return;
+    }
+    this.rosterActionError.set(null);
+    this.api
+      .updateTeamAgent(this.team.team_id, agent.agent_name, updates)
+      .subscribe({
+        next: () => {
+          this.editingAgent.set(null);
+          this.editOriginal.set(null);
+          this.refreshRoster();
+        },
+        error: (err) => {
+          this.rosterActionError.set(err?.error?.detail ?? 'Failed to update agent');
+        },
+      });
   }
 
   onSubmit(): void {

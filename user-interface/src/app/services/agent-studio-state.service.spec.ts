@@ -104,4 +104,38 @@ describe('AgentStudioStateService', () => {
       draftAgentId: null,
     });
   });
+
+  it('starts with the Stage-3 gate signals unstaffed/unset', () => {
+    expect(service.rosterFullyStaffed()).toBe(false);
+    expect(service.composeProcessStatus()).toBeNull();
+  });
+
+  it('setRosterFullyStaffed / setComposeProcessStatus update the Stage-3 gate signals', () => {
+    service.setRosterFullyStaffed(true);
+    service.setComposeProcessStatus('complete');
+    expect(service.rosterFullyStaffed()).toBe(true);
+    expect(service.composeProcessStatus()).toBe('complete');
+  });
+
+  it('reset clears the Stage-3 gate signals', () => {
+    service.setRosterFullyStaffed(true);
+    service.setComposeProcessStatus('complete');
+    service.reset();
+    expect(service.rosterFullyStaffed()).toBe(false);
+    expect(service.composeProcessStatus()).toBeNull();
+  });
+
+  it('tracks consumed handoff keys and does not conflate distinct keys', () => {
+    expect(service.hasConsumedHandoff('t-1::a')).toBe(false);
+    service.markHandoffConsumed('t-1::a');
+    expect(service.hasConsumedHandoff('t-1::a')).toBe(true);
+    // A different (team, agent) key is unaffected.
+    expect(service.hasConsumedHandoff('t-2::a')).toBe(false);
+  });
+
+  it('reset clears consumed handoff keys', () => {
+    service.markHandoffConsumed('t-1::a');
+    service.reset();
+    expect(service.hasConsumedHandoff('t-1::a')).toBe(false);
+  });
 });

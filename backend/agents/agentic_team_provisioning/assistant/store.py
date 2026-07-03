@@ -195,6 +195,28 @@ class AgenticTeamStore:
             (team_id,),
         )
 
+    def _upsert_team_agent_row(
+        self, cur, team_id: str, agent: AgenticTeamAgent, now: datetime
+    ) -> None:
+        """Upsert one roster row on an open cursor (the single ``INSERT ... ON CONFLICT``
+        shared by every roster writer).
+
+        Preconditions: ``cur`` is an open cursor in a live transaction.
+        Postconditions: the ``agentic_team_agents`` row for ``(team_id,
+            agent.agent_name)`` holds ``agent`` with ``updated_at == now``; an existing
+            row keeps its original ``created_at`` (the ``ON CONFLICT`` SET omits it).
+            Does NOT touch ``agentic_teams.updated_at`` — callers bump that (once per
+            write) so the full-roster save can amortize a single team touch.
+        """
+        cur.execute(
+            "INSERT INTO agentic_team_agents "
+            "(team_id, agent_name, data_json, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
+            "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
+            (team_id, agent.agent_name, Json(agent.model_dump(mode="json")), now, now),
+        )
+
     def _write_team_agents(
         self, cur, team_id: str, agents: list[AgenticTeamAgent], now: datetime
     ) -> None:
@@ -225,14 +247,7 @@ class AgenticTeamStore:
         else:
             cur.execute("DELETE FROM agentic_team_agents WHERE team_id = %s", (team_id,))
         for a in agents:
-            cur.execute(
-                "INSERT INTO agentic_team_agents "
-                "(team_id, agent_name, data_json, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s) "
-                "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
-                "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
-                (team_id, a.agent_name, Json(a.model_dump(mode="json")), now, now),
-            )
+            self._upsert_team_agent_row(cur, team_id, a, now)
         cur.execute(
             "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
             (now, team_id),
@@ -348,20 +363,60 @@ class AgenticTeamStore:
             # Read the row we're about to replace under the lock, so a caller's
             # cleanup acts on the truly-replaced row (not a pre-lock snapshot).
             prior = self._get_team_agent(cur, team_id, agent.agent_name)
-            cur.execute(
-                "INSERT INTO agentic_team_agents "
-                "(team_id, agent_name, data_json, created_at, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s) "
-                "ON CONFLICT (team_id, agent_name) DO UPDATE SET "
-                "data_json = EXCLUDED.data_json, updated_at = EXCLUDED.updated_at",
-                (team_id, agent.agent_name, Json(agent.model_dump(mode="json")), now, now),
-            )
+            self._upsert_team_agent_row(cur, team_id, agent, now)
             cur.execute(
                 "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
                 (now, team_id),
             )
             if on_replaced is not None:
                 on_replaced(prior)
+
+    @timed_query(store=_STORE, op="update_team_agent")
+    def update_team_agent(
+        self,
+        team_id: str,
+        agent_name: str,
+        apply_updates: Callable[[AgenticTeamAgent], AgenticTeamAgent],
+        on_updated: Optional[Callable[[AgenticTeamAgent], None]] = None,
+    ) -> Optional[AgenticTeamAgent]:
+        """Atomically read-modify-write a single roster agent under the team lock.
+
+        ``apply_updates`` receives the agent row read **under the lock** and returns
+        the row to persist (the caller merges its patch onto that fresh row and
+        re-validates). Because the read, the merge, and the write all happen inside
+        one locked transaction, a concurrent roster write for the same agent (e.g. a
+        chat-save filling ``skills`` while the user saves a ``role`` edit) cannot be
+        clobbered by a merge over a pre-lock snapshot.
+
+        Preconditions: ``team_id`` and ``agent_name`` are non-empty strings;
+            ``apply_updates`` must not change ``agent_name`` (the row is written under
+            the same key it was read by).
+        Postconditions: returns the persisted (updated) agent when a row named
+            ``agent_name`` existed; returns ``None`` and leaves the roster unchanged
+            when the team or the agent is unknown. If ``apply_updates`` raises (e.g. a
+            validation error), the transaction rolls back and the exception propagates
+            (the roster is unchanged). ``on_updated`` (if given) runs **under the lock**
+            with the persisted row before commit, so a caller's dependent registry
+            reconciliation is serialized with the chat-save register — it must be
+            non-raising (a raising callback would roll back the write).
+        """
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self._lock_team(cur, team_id)  # parent-first lock — uniform lock order
+            current = self._get_team_agent(cur, team_id, agent_name)
+            if current is None:
+                return None
+            updated = apply_updates(current)
+            # ``apply_updates`` must not change ``agent_name`` (see docstring), so the
+            # row is written under the same key it was read by.
+            self._upsert_team_agent_row(cur, team_id, updated, now)
+            cur.execute(
+                "UPDATE agentic_teams SET updated_at = %s WHERE team_id = %s",
+                (now, team_id),
+            )
+            if on_updated is not None:
+                on_updated(updated)
+            return updated
 
     @timed_query(store=_STORE, op="delete_team_agent")
     def delete_team_agent(

@@ -5,6 +5,12 @@ adapter wraps a target team's start/poll/answer endpoints behind the
 same shape, so the orchestrator can drive any registered team without
 hardcoding URLs. Defined verbatim in
 ``system_design/FEATURE_SPEC_testing_personas.md`` §4.
+
+Shape changes here ripple into every adapter. The agentic-team collapse
+decision is recorded in the repo-root
+``system_design/adr/ADR-007-founder-agentic-team-adapter-collapse.md``, and
+``tests/test_adapter_agentic_team_contract_drift.py`` guards this Protocol's
+signatures (``runtime_checkable`` isinstance checks attribute presence only).
 """
 
 from __future__ import annotations

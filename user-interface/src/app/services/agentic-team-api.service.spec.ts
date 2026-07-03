@@ -54,6 +54,29 @@ describe('AgenticTeamApiService', () => {
     httpMock.expectOne(`${base}/teams/t1/roster/validation`).flush({});
   });
 
+  it('addAgentFromRegistry', () => {
+    service.addAgentFromRegistry('t1', 'blogging.planner').subscribe();
+    const req = httpMock.expectOne(`${base}/teams/t1/agents/from-registry`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ manifest_id: 'blogging.planner' });
+    req.flush({});
+  });
+
+  it('removeTeamAgent', () => {
+    service.removeTeamAgent('t1', 'agent/x').subscribe();
+    const req = httpMock.expectOne(`${base}/teams/t1/agents/${encodeURIComponent('agent/x')}`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush(null);
+  });
+
+  it('updateTeamAgent', () => {
+    service.updateTeamAgent('t1', 'Writer', { role: 'New role' }).subscribe();
+    const req = httpMock.expectOne(`${base}/teams/t1/agents/Writer`);
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body).toEqual({ role: 'New role' });
+    req.flush({});
+  });
+
   it('listProcesses', () => {
     service.listProcesses('t1').subscribe();
     httpMock.expectOne(`${base}/teams/t1/processes`).flush([]);
