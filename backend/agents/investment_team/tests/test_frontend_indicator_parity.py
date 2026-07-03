@@ -67,17 +67,68 @@ def _match_balanced(text: str, open_idx: int, open_ch: str, close_ch: str) -> in
 def _ts_object_to_json(literal: str) -> Any:
     """Parse a JSON-like TS object/array literal into Python.
 
-    Handles the subset used by ``investment.model.ts``: ``//`` line comments,
-    unquoted identifier keys, single-quoted strings, and trailing commas.
+    Preconditions: ``literal`` is a balanced TS object/array using the subset in
+    ``investment.model.ts`` — ``//`` line comments, unquoted identifier keys,
+    single-quoted strings, and trailing commas. String contents may contain any
+    character (including ``//``, ``'``, ``"``).
+    Postconditions: returns the parsed Python value. String literals are converted to
+    JSON with a single left-to-right scan that tracks string state, so comment
+    stripping and key quoting never touch characters inside a string (a value
+    containing ``//`` or an apostrophe is preserved verbatim). Raises
+    ``json.JSONDecodeError`` if the (transformed) literal is not valid JSON.
     """
-    text = re.sub(r"//[^\n]*", "", literal)  # strip line comments
-    text = re.sub(r"([{\[,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', text)  # quote keys
-    text = text.replace("'", '"')  # single -> double quotes
+    out: list[str] = []
+    i, n = 0, len(literal)
+    quote = ""  # "" outside a string, else the opening delimiter (' or ")
+    while i < n:
+        ch = literal[i]
+        if quote:
+            if ch == "\\" and i + 1 < n:  # normalise escapes for JSON
+                nxt = literal[i + 1]
+                if nxt == "'":  # apostrophes need no escape in JSON
+                    out.append("'")
+                elif nxt == '"':
+                    out.append('\\"')
+                else:  # keep \n \t \\ \uXXXX etc. verbatim
+                    out.append(literal[i : i + 2])
+                i += 2
+                continue
+            if ch == quote:  # closing delimiter -> JSON double quote
+                out.append('"')
+                quote = ""
+            elif ch == '"':  # a literal " inside a '...' string must be escaped
+                out.append('\\"')
+            else:
+                out.append(ch)
+            i += 1
+            continue
+        if ch in ("'", '"'):  # opening delimiter (either style)
+            out.append('"')
+            quote = ch
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and literal[i + 1] == "/":  # line comment (outside strings)
+            while i < n and literal[i] != "\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    # Keys are now the only bare identifiers followed by ``:``; string values are
+    # already double-quoted, so quoting keys can't touch string contents.
+    text = re.sub(r"([{\[,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', "".join(out))
     text = re.sub(r",(\s*[}\]])", r"\1", text)  # drop trailing commas
     return json.loads(text)
 
 
 def _extract_literal(source: str, anchor: str, open_ch: str, close_ch: str) -> Any:
+    """Parse the ``open_ch``…``close_ch`` literal that follows ``anchor`` in ``source``.
+
+    Preconditions: ``anchor`` occurs in ``source`` (its first occurrence is used), and
+    the next ``open_ch`` after it opens a balanced, JSON-like TS literal.
+    Postconditions: returns the parsed Python value of that literal (via
+    :func:`_ts_object_to_json`). Raises ``ValueError`` if ``anchor``/``open_ch`` is
+    absent and ``AssertionError`` if the brackets never balance.
+    """
     start = source.index(anchor) + len(anchor)
     open_idx = source.index(open_ch, start)
     close_idx = _match_balanced(source, open_idx, open_ch, close_ch)
@@ -85,8 +136,16 @@ def _extract_literal(source: str, anchor: str, open_ch: str, close_ch: str) -> A
 
 
 def _frontend_name_union(source: str) -> set[str]:
+    """Indicator names declared in the ``export type IndicatorName = 'a' | 'b' | …`` union.
+
+    Preconditions: ``source`` contains the ``IndicatorName`` type-union declaration.
+    Postconditions: the set of quoted member names. The name pattern allows digits so a
+    numeric-suffixed indicator (e.g. ``ema200``) is captured whole rather than truncated
+    — keeping this parser consistent with the digit-tolerant JSON parse of
+    ``INDICATOR_NAME_OPTIONS``.
+    """
     block = re.search(r"export type IndicatorName\s*=(.*?);", source, re.S).group(1)
-    return set(re.findall(r"'([a-z_]+)'", block))
+    return set(re.findall(r"'([a-z0-9_]+)'", block))
 
 
 def _validator_kind_and_bounds(validator: Any) -> tuple[str, dict[str, Any]]:
@@ -108,6 +167,14 @@ def _validator_kind_and_bounds(validator: Any) -> tuple[str, dict[str, Any]]:
 
 
 def _backend_params(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Normalise one ``_INDICATOR_PARAM_SPECS`` entry into a per-key comparison dict.
+
+    Preconditions: ``spec`` is a registry entry with ``required``/``optional`` maps of
+    param-name → validator (``optional`` values are ``(default, validator)`` tuples).
+    Postconditions: ``{key: {"required": bool, "kind": str, ...bounds, ["default"]}}``
+    with bounds recovered via :func:`_validator_kind_and_bounds`, ready to compare
+    field-by-field against the frontend param spec.
+    """
     out: dict[str, dict[str, Any]] = {}
     for key, validator in spec["required"].items():
         kind, meta = _validator_kind_and_bounds(validator)
@@ -119,7 +186,36 @@ def _backend_params(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _frontend_specs(source: str) -> dict[str, dict[str, Any]]:
+    """Parse the frontend ``INDICATOR_SPECS`` record into a Python dict.
+
+    Preconditions: ``source`` is the ``investment.model.ts`` text and contains the
+    ``export const INDICATOR_SPECS`` declaration.
+    Postconditions: ``{indicator_name: {"name", "allowSource", "params": [...]}}`` as
+    declared in the TypeScript, keyed by indicator name.
+    """
     return _extract_literal(source, "export const INDICATOR_SPECS", "{", "}")
+
+
+def test_ts_object_parser_is_string_aware() -> None:
+    # The literal parser must not corrupt string VALUES: ``//`` inside a string is not
+    # a comment, an apostrophe (raw, or escaped in a single-quoted string, or inside a
+    # double-quoted string) is not a delimiter, and trailing commas are dropped. These
+    # guard the parity check against a future benign edit to investment.model.ts.
+    assert _ts_object_to_json("{ foo: 'a//b', bar: ['x', 'y'], }") == {
+        "foo": "a//b",
+        "bar": ["x", "y"],
+    }
+    assert _ts_object_to_json("{ label: 'd\\'oh', n: 2 }") == {"label": "d'oh", "n": 2}
+    assert _ts_object_to_json('{ label: "don\'t" }') == {"label": "don't"}
+    assert _ts_object_to_json("{ a: 1 } // trailing comment") == {"a": 1}
+
+
+def test_frontend_name_union_allows_digits() -> None:
+    # The union regex must capture digit-bearing names whole (consistent with the
+    # digit-tolerant JSON parse of INDICATOR_NAME_OPTIONS), or it would report phantom
+    # drift for an indicator like ``ema200``.
+    block = "export type IndicatorName =\n  | 'ema200'\n  | 'sma';\n"
+    assert _frontend_name_union(block) == {"ema200", "sma"}
 
 
 def test_indicator_name_sets_match_across_layers() -> None:

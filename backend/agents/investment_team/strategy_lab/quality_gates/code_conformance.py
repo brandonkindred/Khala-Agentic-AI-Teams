@@ -114,12 +114,15 @@ if set(_INDICATOR_ALLOWED_CALL_NAMES) != set(IndicatorName.__args__):
         f"{set(IndicatorName.__args__) ^ set(_INDICATOR_ALLOWED_CALL_NAMES)}"
     )
 
-# The real exported indicator-helper names (``sma``, ``bollinger_bands``,
-# ``donchian_channels``, …). These are the names the deterministic compiler emits
-# as inline ``self.<helper>`` methods; a custom (non-compiled) strategy that calls
-# ``self.<helper>(...)`` without defining the method raises ``AttributeError``
-# (the base ``Strategy`` provides none of them).
-_KNOWN_INDICATOR_HELPER_NAMES: frozenset[str] = frozenset().union(
+# Every name a strategy might plausibly call as ``self.<name>(...)`` intending an
+# indicator: BOTH the exported helper names (``bollinger_bands``,
+# ``donchian_channels``, … — what the deterministic compiler emits as inline
+# ``self.<helper>`` methods) AND the bare DSL names (``bollinger``, ``donchian``,
+# ``keltner`` — what a hand/LLM author sees in the spec and may copy verbatim).
+# For 13 of the 16 indicators the two coincide; the union covers the three where
+# they differ. The base ``Strategy`` defines none of these, so an undefined
+# ``self.<name>(...)`` to any of them raises ``AttributeError`` at runtime.
+_KNOWN_INDICATOR_HELPER_NAMES: frozenset[str] = frozenset(_INDICATOR_ALLOWED_CALL_NAMES).union(
     *_INDICATOR_ALLOWED_CALL_NAMES.values()
 )
 

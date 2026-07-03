@@ -424,18 +424,22 @@ def test_indicators_registry_uses_windowed_cumulative_helpers() -> None:
 
 
 def test_cumulative_specs_use_windowed_wrappers() -> None:
-    # Generic invariant behind the two assertions above: EVERY spec flagged
-    # ``cumulative`` must route through a window-bounded ``_windowed_*`` wrapper
-    # (never the unbounded full-history helper), and the set of cumulative
-    # indicators is exactly {obv, vwap}. A future cumulative indicator added
-    # without a windowed wrapper trips this guard.
-    cumulative = {name for name, spec in ind.INDICATORS.items() if spec.cumulative}
-    assert cumulative == {"obv", "vwap"}, cumulative
-    for name in cumulative:
+    # The ``cumulative`` flag must track the STRUCTURAL property that motivates it:
+    # a period-less indicator (no scalar kwargs -> a running total over all history)
+    # is exactly the one whose unbounded value diverges from the runtime's bounded
+    # StreamingHistoryView. Derive the expected set from that structure (empty
+    # ``kwarg_names``) rather than hardcoding {obv, vwap}, so a future period-less
+    # indicator added without ``cumulative=True`` (or without a windowed wrapper)
+    # trips this guard instead of silently escaping it.
+    period_less = {name for name, spec in ind.INDICATORS.items() if not spec.kwarg_names}
+    flagged = {name for name, spec in ind.INDICATORS.items() if spec.cumulative}
+    assert flagged == period_less, (flagged, period_less)
+    # Every flagged spec routes through a window-bounded ``_windowed_*`` wrapper...
+    for name in flagged:
         helper = ind.INDICATORS[name].helper
         assert helper.__name__.startswith("_windowed_"), (name, helper.__name__)
-    # And the non-cumulative specs are NOT windowed wrappers (the flag is the
-    # single source of truth for "needs bounding", not an ad-hoc helper-name check).
+    # ...and no non-cumulative spec does (the flag is the single source of truth for
+    # "needs bounding", not an ad-hoc helper-name check).
     for name, spec in ind.INDICATORS.items():
         if not spec.cumulative:
             assert not spec.helper.__name__.startswith("_windowed_"), name

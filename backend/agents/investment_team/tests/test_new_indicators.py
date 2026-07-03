@@ -1716,6 +1716,39 @@ def test_conformance_rejects_undefined_self_macd_call() -> None:
     assert any("macd" in d.lower() and "attributeerror" in d.lower() for d in crits), crits
 
 
+_CC_DONCHIAN_SELF_UNDEFINED = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            upper = self.donchian(bars, 20)
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and bar.close > upper:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_rejects_undefined_self_dsl_name_call() -> None:
+    # The check must cover the bare DSL name too, not just the exported helper name.
+    # A hand/LLM author sees ``donchian`` in the spec and may write ``self.donchian``
+    # (the internal helper is ``donchian_channels``); either undefined form
+    # AttributeErrors at runtime and must be flagged. Guards the three indicators
+    # whose DSL name differs from its helper (bollinger/donchian/keltner).
+    results = CodeConformanceGate().check(_CC_DONCHIAN_SELF_UNDEFINED, _bollinger_base_band_spec())
+    crits = _crit(results)
+    assert any("donchian" in d.lower() and "attributeerror" in d.lower() for d in crits), crits
+
+
 def test_conformance_abstains_on_dynamic_bollinger_band() -> None:
     # A dynamic (non-literal) band value is runtime-valid but unresolvable
     # statically; the derived-band check must abstain rather than reject.
