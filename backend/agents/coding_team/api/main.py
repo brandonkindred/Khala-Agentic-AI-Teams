@@ -83,6 +83,26 @@ from shared_git.git_utils import (  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+
+def _warn_if_no_engine_provider() -> None:
+    """Startup probe: make a mis-wired deployment visible at boot, not per-job.
+
+    The standalone container must run via ``coding_team_service.main`` (its
+    ``TEAM_MODULE``), which installs the SE-backed engine provider before this
+    app is imported. A process serving this module directly still boots (tests
+    and embedded uses rely on that), but every /run and /review-pr job will fail
+    without a provider — so say it loudly once at startup.
+
+    Postconditions: logs an ERROR when no provider is installed; never raises.
+    """
+    if get_engine_provider() is None:
+        logger.error(
+            "No CodeEngineProvider installed at startup: /run and /review-pr jobs will fail. "
+            "Serve the coding team via coding_team_service.main (TEAM_MODULE) or call "
+            "coding_team.engine_provider.set_engine_provider() before serving traffic."
+        )
+
+
 app = create_team_app(
     service_name="coding-team",
     team_key="coding_team",
@@ -90,6 +110,7 @@ app = create_team_app(
     description="Tech Lead with frontend_v2/backend_v2 implementation teams and Task Graph. POST /run to start a job; poll GET /status/{job_id}.",
     version="0.1.0",
     postgres_schema=CODE_REVIEW_SCHEMA,
+    on_startup=_warn_if_no_engine_provider,
 )
 
 # Tracks the orchestrator thread per job so the answers endpoint can tell whether a blocked wait
@@ -1418,6 +1439,26 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           alone does not fail the job, since the findings still post.)
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
+    # Resolve the review engine BEFORE any GitHub call: a mis-wired process (no
+    # provider installed) must fail the job immediately instead of burning REST
+    # rate budget on PR metadata + diff assembly and then failing anyway.
+    provider = get_engine_provider()
+    if provider is None:
+        logger.error("PR review %s aborted: no engine provider configured", job_id)
+        update_job(
+            job_id,
+            status="failed",
+            phase="completed",
+            error=(
+                "code review failed: no engine provider configured — the standalone "
+                "coding-team service must run via coding_team_service.main (TEAM_MODULE), "
+                "which installs the engine provider at startup"
+            ),
+        )
+        update_review(
+            job_id, status="failed", status_text="No engine provider configured", completed=True
+        )
+        return
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
     update_review(job_id, status="running", status_text="Reviewing pull request")
     try:
@@ -1471,20 +1512,8 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
 
             # The PR reviewer is an injected engine (software_engineering_team owns
             # it); coding_team calls it through the CodeEngineProvider so this
-            # package imports nothing from SE. The standalone service installs the
-            # provider at startup; without one, fail the job cleanly.
-            provider = get_engine_provider()
-            if provider is None:
-                _record_failure(
-                    client,
-                    owner,
-                    repo,
-                    pr_number,
-                    job_id,
-                    "code review failed: no engine provider configured",
-                )
-                return
-
+            # package imports nothing from SE. The provider was resolved (and its
+            # absence handled) before the first GitHub call above.
             # Same bridge as the orchestrator's review sites: shared schema,
             # coalescing, swallow-on-failure, and clear-on-exit in one place.
             # last_activity_at is stamped centrally by the job service on every

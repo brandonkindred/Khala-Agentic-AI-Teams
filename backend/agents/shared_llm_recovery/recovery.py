@@ -10,88 +10,199 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+# Bound on how many candidate objects one salvage call will attempt to parse.
+# Typical responses contain a handful; the cap keeps adversarial output (e.g.
+# thousands of balanced "{}" pairs) from turning salvage into a CPU sink.
+_MAX_PARSE_ATTEMPTS = 64
+
+
+def _strip_wrappers(content: str) -> str:
+    """Drop think/reasoning blocks and unwrap ``<json>...</json>`` tags.
+
+    Preconditions: ``content`` is a str.
+    Postconditions: returns the stripped text (may be empty); never raises.
+    """
+    stripped = content.strip()
+    stripped = re.sub(r"<think>.*?</think>", "", stripped, flags=re.DOTALL)
+    stripped = re.sub(r"<thinking>.*?</thinking>", "", stripped, flags=re.DOTALL)
+    stripped = re.sub(r"<reasoning>.*?</reasoning>", "", stripped, flags=re.DOTALL)
+    stripped = stripped.strip()
+    json_tag_match = re.search(r"<json>\s*([\s\S]*?)\s*</json>", stripped)
+    if json_tag_match:
+        stripped = json_tag_match.group(1).strip()
+    return stripped
+
+
+def _balanced_object_spans(text: str) -> Tuple[List[Tuple[int, int]], int]:
+    """Locate top-level balanced ``{...}`` spans in one linear, string-aware pass.
+
+    Braces inside JSON string literals must not affect nesting depth — task
+    descriptions and review reasons routinely carry code snippets with unbalanced
+    ``{``/``}`` — and an escaped quote must not close its string. Quotes are only
+    treated as string delimiters while inside an open object, so prose quotation
+    marks before any ``{`` cannot derail the scan.
+
+    Preconditions: ``text`` is a str.
+    Postconditions: returns ``(spans, first_unclosed)`` where ``spans`` lists
+    ``(start, end_exclusive)`` for every balanced object not nested inside
+    another balanced object, in document order, and ``first_unclosed`` is the
+    index of the first ``{`` that never closed (-1 when all opens closed).
+    Single pass — O(len(text)); never raises.
+    """
+    spans: List[Tuple[int, int]] = []
+    stack: List[int] = []
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            if stack:
+                in_string = True
+        elif ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            start = stack.pop()
+            if not stack:
+                spans.append((start, i + 1))
+    first_unclosed = stack[0] if stack else -1
+    return spans, first_unclosed
+
+
+def _parse_candidate(fragment: str) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Parse one candidate fragment strictly, then via tolerant repair.
+
+    Repair (the ``json-repair`` library — the same dependency the LLM clients
+    use) fixes common model slips like trailing commas and max-tokens
+    truncation. A repaired result is only trusted when the fragment at least
+    resembles JSON (contains a quote and a colon) and the result is a non-empty
+    dict — repairing prose braces like ``{not json}`` must not fabricate a
+    payload.
+
+    Preconditions: ``fragment`` is a str.
+    Postconditions: returns ``(parsed, strict)`` where ``strict`` is True iff
+    plain ``json.loads`` accepted the fragment, or ``(None, False)`` when no
+    dict can be produced. Never raises — ``RecursionError`` from pathologically
+    deep nesting and any repair-library failure are contained here.
+    """
+    try:
+        parsed = json.loads(fragment)
+        if isinstance(parsed, dict):
+            return parsed, True
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        pass
+    if '"' in fragment and ":" in fragment:
+        try:
+            import json_repair
+
+            parsed = json_repair.loads(fragment)
+            if isinstance(parsed, dict) and parsed:
+                return parsed, False
+        except Exception:  # noqa: BLE001 - salvage must never raise
+            pass
+    return None, False
+
+
+def _salvage_object(
+    content: str, accept: Callable[[Dict[str, Any]], bool]
+) -> Optional[Dict[str, Any]]:
+    """Salvage the authoritative JSON object matching ``accept`` from raw output.
+
+    The single engine behind ``extract_json_object`` and
+    ``extract_task_assignment_from_content``: strip think-blocks/``<json>``
+    wrappers, scan for balanced objects (string-aware, linear time), parse each
+    candidate strictly-then-repaired, and select by rank.
+
+    Selection rule: strict-parsed outranks repaired, non-empty outranks empty,
+    and ties break toward the LAST candidate in document order — models
+    routinely echo a format example ("I will answer in the form {...}") before
+    the final object, so the trailing object is the authoritative one.
+
+    Preconditions: ``content`` is a str (may be empty); ``accept`` is a pure
+    predicate over a parsed dict.
+    Postconditions: returns an accepted dict, or ``None`` when nothing
+    salvageable matches. Never raises on malformed input.
+    """
+    if not content or not content.strip():
+        return None
+    stripped = _strip_wrappers(content)
+    spans, first_unclosed = _balanced_object_spans(stripped)
+
+    best: Optional[Dict[str, Any]] = None
+    best_rank = (-1, -1)
+    attempts = 0
+    # Reverse order + strictly-greater rank replacement keeps the LAST candidate
+    # for equal ranks, per the selection rule above.
+    for start, end in reversed(spans):
+        if attempts >= _MAX_PARSE_ATTEMPTS:
+            break
+        attempts += 1
+        parsed, strict = _parse_candidate(stripped[start:end])
+        if parsed is None or not accept(parsed):
+            continue
+        rank = (1 if strict else 0, 1 if parsed else 0)
+        if rank == (1, 1):
+            return parsed
+        if rank > best_rank:
+            best, best_rank = parsed, rank
+    if best is not None:
+        return best
+
+    # Whole payload inside a markdown fence (may itself need repair).
+    fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", content, re.IGNORECASE)
+    if fence:
+        parsed, _strict = _parse_candidate(fence.group(1).strip())
+        if parsed is not None and accept(parsed):
+            return parsed
+
+    # Max-tokens truncation: the object never closed. Repair can complete it.
+    if first_unclosed != -1:
+        parsed, _strict = _parse_candidate(stripped[first_unclosed:])
+        if parsed is not None and accept(parsed):
+            return parsed
+
+    return None
+
+
+def _has_tasks(parsed: Dict[str, Any]) -> bool:
+    """Accept predicate: a task-assignment dict with a non-empty ``tasks`` list."""
+    tasks = parsed.get("tasks")
+    return isinstance(tasks, list) and len(tasks) > 0
 
 
 def extract_task_assignment_from_content(content: str) -> Optional[Dict[str, Any]]:
     """
     When LLM returns raw content wrapper {"content": "..."}, try to extract
     a task assignment dict (tasks, execution_order, etc.) from the text.
-    Returns None if nothing usable found.
+
+    Thin wrapper over the shared salvage engine with the task-assignment accept
+    predicate; candidates without a non-empty ``tasks`` list are skipped.
+
+    Preconditions: ``content`` is a str (may be empty).
+    Postconditions: returns the salvaged assignment dict, or ``None`` if nothing
+    usable is found. Never raises on malformed input.
     """
-    if not content or not content.strip():
-        return None
-    stripped = content.strip()
-
-    # Strip thinking/reasoning blocks that some models emit
-    stripped = re.sub(r"<think>.*?</think>", "", stripped, flags=re.DOTALL)
-    stripped = re.sub(r"<thinking>.*?</thinking>", "", stripped, flags=re.DOTALL)
-    stripped = re.sub(r"<reasoning>.*?</reasoning>", "", stripped, flags=re.DOTALL)
-    stripped = stripped.strip()
-
-    # Extract JSON from XML-style tags if present
-    json_tag_match = re.search(r"<json>\s*([\s\S]*?)\s*</json>", stripped)
-    if json_tag_match:
-        stripped = json_tag_match.group(1).strip()
-
-    # Find first { and match braces to get a complete JSON object
-    start = stripped.find("{")
-    if start == -1:
-        return None
-
-    # Try all top-level {...} objects (greedy match from each {)
-    i = start
-    while i < len(stripped):
-        if stripped[i] != "{":
-            i += 1
-            continue
-        depth = 0
-        end = -1
-        for j in range(i, len(stripped)):
-            if stripped[j] == "{":
-                depth += 1
-            elif stripped[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = j
-                    break
-        if end == -1:
-            i += 1
-            continue
-        try:
-            parsed = json.loads(stripped[i : end + 1])
-            if isinstance(parsed, dict):
-                tasks = parsed.get("tasks")
-                if isinstance(tasks, list) and len(tasks) > 0:
-                    return parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
-        i += 1
-
-    # Try JSON inside markdown code block
-    json_match = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", content, re.IGNORECASE)
-    if json_match:
-        try:
-            parsed = json.loads(json_match.group(1).strip())
-            if isinstance(parsed, dict):
-                tasks = parsed.get("tasks")
-                if isinstance(tasks, list) and len(tasks) > 0:
-                    return parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    return None
+    return _salvage_object(content, _has_tasks)
 
 
 def extract_json_object(content: str) -> Optional[Dict[str, Any]]:
-    """Recover the first balanced JSON *object* from raw LLM content.
+    """Recover the authoritative JSON *object* from raw LLM content.
 
-    Generalises the brace-scan used by ``extract_task_assignment_from_content``
-    without the ``tasks`` filter, so any agent that expects a single JSON object
-    can salvage one from prose-wrapped or think-block-polluted output. Strips
-    ``<think>``/``<thinking>``/``<reasoning>`` blocks, unwraps ``<json>...</json>``,
-    scans for the first top-level balanced ``{...}`` that parses to a ``dict``, and
-    finally falls back to JSON inside a ```` ```json ```` fence.
+    Thin wrapper over the shared salvage engine accepting any dict: strips
+    ``<think>``/``<thinking>``/``<reasoning>`` blocks, unwraps ``<json>``,
+    scans for balanced objects with a string-aware linear pass (braces inside
+    JSON string values do not corrupt the scan), parses each candidate strictly
+    then via ``json-repair`` (trailing commas, truncated output), and prefers
+    strict, non-empty, later candidates — so a format example echoed before the
+    real payload is not mistaken for it.
 
     Preconditions:
         - ``content`` is a ``str`` (may be empty).
@@ -99,54 +210,7 @@ def extract_json_object(content: str) -> Optional[Dict[str, Any]]:
         - Returns a ``dict`` on success, or ``None`` when nothing parses. Never
           raises on malformed input.
     """
-    if not content or not content.strip():
-        return None
-    stripped = content.strip()
-    stripped = re.sub(r"<think>.*?</think>", "", stripped, flags=re.DOTALL)
-    stripped = re.sub(r"<thinking>.*?</thinking>", "", stripped, flags=re.DOTALL)
-    stripped = re.sub(r"<reasoning>.*?</reasoning>", "", stripped, flags=re.DOTALL)
-    stripped = stripped.strip()
-
-    json_tag_match = re.search(r"<json>\s*([\s\S]*?)\s*</json>", stripped)
-    if json_tag_match:
-        stripped = json_tag_match.group(1).strip()
-
-    i = stripped.find("{")
-    while i != -1 and i < len(stripped):
-        if stripped[i] != "{":
-            i += 1
-            continue
-        depth = 0
-        end = -1
-        for j in range(i, len(stripped)):
-            if stripped[j] == "{":
-                depth += 1
-            elif stripped[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = j
-                    break
-        if end == -1:
-            i += 1
-            continue
-        try:
-            parsed = json.loads(stripped[i : end + 1])
-            if isinstance(parsed, dict):
-                return parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
-        i += 1
-
-    json_match = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", content, re.IGNORECASE)
-    if json_match:
-        try:
-            parsed = json.loads(json_match.group(1).strip())
-            if isinstance(parsed, dict):
-                return parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    return None
+    return _salvage_object(content, lambda parsed: True)
 
 
 # Extensions we treat as file paths (backend + frontend)

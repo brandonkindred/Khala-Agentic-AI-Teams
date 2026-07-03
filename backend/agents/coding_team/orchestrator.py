@@ -1084,8 +1084,12 @@ def run_coding_team_orchestrator(
     assert 0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100
     # The implementation engines (v2 team leads, quality gates, code review) are injected, not
     # imported: prefer the provider passed explicitly (the software-engineering team supplies one
-    # per call) and fall back to the process-wide default the standalone service installs at startup.
-    engine_provider = engine_provider or get_engine_provider()
+    # per call) and fall back to the process-wide default the standalone service installs at
+    # startup. Presence check, not truthiness: an injected provider is an arbitrary object whose
+    # __bool__/__len__ are not part of the contract, so a falsy-but-valid provider must not be
+    # silently swapped for the ambient default.
+    if engine_provider is None:
+        engine_provider = get_engine_provider()
     path = Path(repo_path).resolve()
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
@@ -1886,9 +1890,14 @@ class CodingTeamSwarm:
         try:
             provider = self.engine_provider
             if provider is None:
-                logger.debug(
+                # Skipping build/lint/review is never a silent event: production paths always
+                # inject a provider (worker construction fails without one), so reaching this
+                # branch means an embedder wired the swarm directly — surface it in the log AND
+                # the job record so unreviewed merges are visible, not discovered post-hoc.
+                logger.warning(
                     "No engine provider configured; skipping quality gates for %s", task.id
                 )
+                update_fn(status_text=f"Quality gates SKIPPED (no engine provider): {task.title}")
                 return True
             run_build_verification = provider.run_build_verification
             run_linting = provider.run_linting
@@ -1955,13 +1964,14 @@ class CodingTeamSwarm:
                     )
                     revision_feedback = review.issues
 
-        except ImportError:
-            logger.debug("Quality gate tools not available; skipping")
         except Exception:
             # Log the full traceback, not a one-line summary: a real bug in the
             # review path (e.g. an OOM-precursor or a malformed evidence payload)
-            # must be debuggable. The swarm still proceeds — a failed gate must
-            # never abort the whole run — but the stack is now in the logs.
+            # must be debuggable. With the engines injected, an ImportError here
+            # means the provider's engine stack is broken — that deserves the
+            # same full-stack ERROR, not a silent "tools not available" skip.
+            # The swarm still proceeds — a failed gate must never abort the
+            # whole run — but the stack is now in the logs.
             logger.exception("Quality gate tools error for task %s; proceeding", task.id)
 
         if revision_feedback is not None:

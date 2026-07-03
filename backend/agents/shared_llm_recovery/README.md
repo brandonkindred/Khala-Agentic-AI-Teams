@@ -27,9 +27,16 @@ except json.JSONDecodeError:
 
 ## Contracts & conventions
 
-- **Stdlib-only**, import-safe, and never raises on malformed input (returns
-  `None` / `{}` instead).
-- `extract_json_object` returns the first *balanced* `{...}` that parses to a
-  `dict`; `extract_task_assignment_from_content` additionally requires a non-empty
-  `tasks` list.
+- Import-safe and never raises on malformed input (returns `None` / `{}`
+  instead) — including `RecursionError` from pathologically deep nesting.
+- Both public object extractors share one salvage engine (`_salvage_object`):
+  a **string-aware, linear-time** balanced-object scan (braces inside JSON
+  string values don't corrupt the scan), strict `json.loads` first, then
+  tolerant repair via the `json-repair` dependency (trailing commas,
+  max-tokens-truncated output).
+- **Selection rule:** strict-parsed outranks repaired, non-empty outranks
+  empty, ties break toward the **last** candidate in document order — models
+  routinely echo a format example before the final object, so the trailing
+  object is authoritative. `extract_task_assignment_from_content` additionally
+  requires a non-empty `tasks` list.
 - Depends on `backend/agents` being on `sys.path` (the `shared_*` convention).

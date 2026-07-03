@@ -43,3 +43,51 @@ def test_nested_braces() -> None:
 
 def test_top_level_array_is_not_an_object() -> None:
     assert extract_json_object("[1, 2, 3]") is None
+
+
+def test_schema_echo_before_real_payload_is_not_selected() -> None:
+    """A format example echoed before the verdict must not shadow the verdict."""
+    text = (
+        'I will answer in the format {"approved": true, "reason": "..."}.\n'
+        'My verdict: {"approved": false, "issues": ["missing tests"]}'
+    )
+    assert extract_json_object(text) == {"approved": False, "issues": ["missing tests"]}
+
+
+def test_empty_dict_in_prose_does_not_shadow_payload() -> None:
+    text = 'Note: default schema is {} unless specified.\n{"approved": false}'
+    assert extract_json_object(text) == {"approved": False}
+
+
+def test_braces_inside_string_values_do_not_break_scan() -> None:
+    text = 'ok {"reason": "use } to close the block", "approved": false}'
+    assert extract_json_object(text) == {"reason": "use } to close the block", "approved": False}
+
+
+def test_trailing_comma_is_repaired() -> None:
+    assert extract_json_object('{"tasks": [{"id": "t1"}],}') == {"tasks": [{"id": "t1"}]}
+
+
+def test_truncated_object_is_repaired() -> None:
+    out = extract_json_object('Here is the plan: {"tasks": [{"id": "t1"}, {"id": "t2"')
+    assert isinstance(out, dict)
+    assert out.get("tasks"), "truncated task list should be completed by repair"
+
+
+def test_deep_nesting_does_not_raise() -> None:
+    text = '{"a":' * 2000 + "1" + "}" * 2000
+    # Postcondition is "never raises"; the value may be None or a dict.
+    extract_json_object(text)
+
+
+def test_prose_braces_do_not_fabricate_a_payload() -> None:
+    assert extract_json_object("{not json}") is None
+
+
+def test_large_unbalanced_input_completes_quickly() -> None:
+    import time
+
+    text = "x" + "{" * 20_000
+    start = time.monotonic()
+    extract_json_object(text)
+    assert time.monotonic() - start < 2.0, "salvage scan must stay linear-time"

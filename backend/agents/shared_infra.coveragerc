@@ -1,0 +1,17 @@
+# Coverage config for the shared-infra CI job (test-shared-infra in ci.yml): the
+# neutral shared_* packages extracted from software_engineering_team plus the
+# coding_team_service composition root, gated at the repo's 90% line-coverage
+# floor (see CLAUDE.md).
+[run]
+omit =
+    */tests/*
+    */__pycache__/*
+    # Integration-heavy git subprocess layer: excluded from the unit gate for the
+    # same reason software_engineering_team/pyproject.toml omitted
+    # shared/git_utils.py before the extraction — its branch/merge/recovery paths
+    # drive live git worktrees and are exercised by integration tests, not unit
+    # tests. branch_utils (pure helpers) remains gated.
+    shared_git/git_utils.py
+
+[report]
+show_missing = true

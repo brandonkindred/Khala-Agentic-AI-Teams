@@ -117,28 +117,40 @@ def read_repo_code_budgeted(
         - ``max_chars`` is a positive int.
     Postconditions:
         - Returns the concatenated briefing, or *empty* when no eligible file is
-          found. Files whose path contains any name in *exclude_dirs* as a path
-          component are skipped; unreadable files are skipped, not raised.
+          found. The briefing is best-effort by contract and this function never
+          raises past precondition checks: a file that cannot be read is skipped
+          (logged at WARNING), and a mid-walk filesystem error (e.g. a directory
+          deleted by a parallel build while scanning, or an untraversable dir)
+          degrades to the partial briefing gathered so far instead of failing
+          the caller's workflow.
     """
     assert max_chars > 0, "max_chars must be positive"
     ext_set = frozenset(extensions)
     excl_set = frozenset(exclude_dirs)
     parts: List[str] = []
     total = 0
-    for f in sorted(repo_path.rglob("*")):
-        if not f.is_file() or f.suffix not in ext_set:
-            continue
-        if excl_set & set(f.parts):
-            continue
-        try:
-            content = f.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        chunk = f"--- {f.relative_to(repo_path)} ---\n{content}\n"
-        if total + len(chunk) > max_chars:
-            break
-        parts.append(chunk)
-        total += len(chunk)
+    try:
+        for f in sorted(repo_path.rglob("*")):
+            try:
+                if not f.is_file() or f.suffix not in ext_set:
+                    continue
+                if excl_set & set(f.parts):
+                    continue
+                content = f.read_text(encoding="utf-8", errors="replace")
+            except Exception as exc:  # noqa: BLE001 - per-file best-effort, visibly skipped
+                logger.warning("Repo briefing skipped %s: %s", f, exc)
+                continue
+            chunk = f"--- {f.relative_to(repo_path)} ---\n{content}\n"
+            if total + len(chunk) > max_chars:
+                break
+            parts.append(chunk)
+            total += len(chunk)
+    except Exception:  # noqa: BLE001 - a scan failure must degrade, not fail the workflow
+        logger.warning(
+            "Repo briefing scan under %s aborted early; returning partial content",
+            repo_path,
+            exc_info=True,
+        )
     return "\n".join(parts) if parts else empty
 
 

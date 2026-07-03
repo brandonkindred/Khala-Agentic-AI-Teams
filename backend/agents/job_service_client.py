@@ -509,6 +509,12 @@ class BaseJobStore:
     Subclass and set ``team`` to get create/get/update/delete/list/reset
     for free.  Override or add team-specific methods as needed.
 
+    The human-in-the-loop pause/answer operations shared by the coding and
+    software-engineering teams live as module-level functions at the bottom of
+    this file (``add_pending_questions`` / ``submit_answers`` /
+    ``is_waiting_for_answers`` / ``get_submitted_answers``) — this module is the
+    single home for team-agnostic job-store behaviour.
+
     Usage::
 
         class BlogJobStore(BaseJobStore):
@@ -626,3 +632,65 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop pause / answer operations — shared by the coding and
+# software-engineering teams' job stores. Each function takes the client
+# explicitly so a team wrapper passes its own (monkeypatch-able) client; writes
+# are atomic so a concurrent answer submission and a status update cannot
+# clobber each other.
+# ---------------------------------------------------------------------------
+
+
+def add_pending_questions(
+    client: JobServiceClient, job_id: str, questions: List[Dict[str, Any]]
+) -> None:
+    """Append pending questions and set ``waiting_for_answers=True`` to pause the job.
+
+    Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` is
+        non-empty; ``questions`` is a list of structured question dicts.
+    Postconditions: the job's ``waiting_for_answers`` is True and ``questions``
+        are appended to ``pending_questions`` in one atomic write.
+    """
+    client.atomic_update(
+        job_id,
+        merge_fields={"waiting_for_answers": True},
+        append_to={"pending_questions": questions},
+    )
+
+
+def submit_answers(client: JobServiceClient, job_id: str, answers: List[Dict[str, Any]]) -> None:
+    """Store submitted answers, clear pending questions, and clear the waiting flag.
+
+    Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` is non-empty.
+    Postconditions: ``waiting_for_answers`` is False, ``pending_questions`` is
+        empty, and ``answers`` are appended to ``submitted_answers`` in one atomic
+        write (the orchestrator's wait loop resumes on the cleared flag).
+    """
+    client.atomic_update(
+        job_id,
+        merge_fields={"pending_questions": [], "waiting_for_answers": False},
+        append_to={"submitted_answers": answers},
+    )
+
+
+def is_waiting_for_answers(client: JobServiceClient, job_id: str) -> bool:
+    """True iff the job is currently paused waiting for user answers.
+
+    Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` is non-empty.
+    Postconditions: pure read; False when the job is missing.
+    """
+    data = client.get_job(job_id)
+    return bool(data.get("waiting_for_answers", False)) if data else False
+
+
+def get_submitted_answers(client: JobServiceClient, job_id: str) -> List[Dict[str, Any]]:
+    """Return the answers submitted for this job (empty when none/unknown).
+
+    Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` is non-empty.
+    Postconditions: pure read; a stored ``None`` is coerced to ``[]`` (``or []``)
+        so a partially-written record never yields ``None`` to callers.
+    """
+    data = client.get_job(job_id)
+    return list(data.get("submitted_answers") or []) if data else []

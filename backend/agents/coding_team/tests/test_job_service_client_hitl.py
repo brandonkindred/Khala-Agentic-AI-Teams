@@ -1,8 +1,8 @@
-"""Unit tests for shared_job_store (team-agnostic read + HITL operations)."""
+"""Unit tests for job_service_client's shared HITL pause/answer operations."""
 
 from __future__ import annotations
 
-import shared_job_store
+import job_service_client as shared_job_store
 
 
 class _FakeClient:
@@ -15,10 +15,6 @@ class _FakeClient:
 
     def atomic_update(self, job_id, *, merge_fields=None, append_to=None):
         self.updates.append({"merge": merge_fields, "append": append_to})
-
-
-def test_get_job_passes_through() -> None:
-    assert shared_job_store.get_job(_FakeClient(job={"id": "j"}), "j") == {"id": "j"}
 
 
 def test_add_pending_questions_sets_waiting_and_appends() -> None:

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import shared_job_store
+import job_service_client as _jsc
 from job_service_client import JobServiceClient, get_job_service_client
 from user_profile import ArtifactType, record_association_safe
 
@@ -69,7 +69,7 @@ def get_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> Optional[Dict[str, Any]]:
     """Get job data. Returns None if not found."""
-    return shared_job_store.get_job(_client(cache_dir), job_id)
+    return _client(cache_dir).get_job(job_id)
 
 
 def update_job(
@@ -135,7 +135,7 @@ def add_pending_questions(
         - The job's ``waiting_for_answers`` is True and ``questions`` are appended to
           ``pending_questions``.
     """
-    shared_job_store.add_pending_questions(_client(cache_dir), job_id, questions)
+    _jsc.add_pending_questions(_client(cache_dir), job_id, questions)
 
 
 def is_waiting_for_answers(
@@ -143,7 +143,7 @@ def is_waiting_for_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """True iff the job is currently paused waiting for user answers."""
-    return shared_job_store.is_waiting_for_answers(_client(cache_dir), job_id)
+    return _jsc.is_waiting_for_answers(_client(cache_dir), job_id)
 
 
 def submit_answers(
@@ -158,7 +158,7 @@ def submit_answers(
           appended to ``submitted_answers``. The orchestrator's wait loop resumes on the cleared
           flag and reads ``submitted_answers``.
     """
-    shared_job_store.submit_answers(_client(cache_dir), job_id, answers)
+    _jsc.submit_answers(_client(cache_dir), job_id, answers)
 
 
 def get_submitted_answers(
@@ -166,7 +166,7 @@ def get_submitted_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> List[Dict[str, Any]]:
     """Return the answers submitted for this job (empty when none/unknown)."""
-    return shared_job_store.get_submitted_answers(_client(cache_dir), job_id)
+    return _jsc.get_submitted_answers(_client(cache_dir), job_id)
 
 
 # ---------------------------------------------------------------------------

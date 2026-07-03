@@ -10,9 +10,28 @@ from temporalio import activity, workflow
 
 @activity.defn(name="coding_team_run_pipeline")
 def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Run the coding-team pipeline as a Temporal activity.
+
+    Preconditions:
+        - A ``CodeEngineProvider`` is installed in THIS worker process (the
+          Temporal worker does not run the ``coding_team_service`` composition
+          root, so its bootstrap must call ``set_engine_provider`` itself).
+    Postconditions:
+        - Returns the orchestrator result as a dict, or raises with an
+          actionable message when the worker is mis-wired — instead of failing
+          later, mid-run, with a generic worker-build error.
+    """
     from coding_team.api.main import RunRequest
+    from coding_team.engine_provider import get_engine_provider
     from coding_team.orchestrator import run_coding_team_orchestrator
 
+    if get_engine_provider() is None:
+        raise RuntimeError(
+            "coding_team Temporal worker has no CodeEngineProvider installed: this worker "
+            "process never ran the coding_team_service composition root. Call "
+            "coding_team.engine_provider.set_engine_provider(...) in the worker bootstrap "
+            "before executing CodingTeamWorkflow."
+        )
     req = RunRequest(**request)
     result = run_coding_team_orchestrator(req)
     if hasattr(result, "model_dump"):

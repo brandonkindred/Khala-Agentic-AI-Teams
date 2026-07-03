@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import shared_job_store
+import job_service_client as _jsc
 from job_service_client import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
@@ -153,7 +153,7 @@ def get_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> Optional[Dict[str, Any]]:
     """Get job data, or None if not found."""
-    return shared_job_store.get_job(_client(cache_dir), job_id)
+    return _client(cache_dir).get_job(job_id)
 
 
 def delete_job(
@@ -285,7 +285,7 @@ def add_pending_questions(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Add pending questions and set waiting_for_answers=True to pause job."""
-    shared_job_store.add_pending_questions(_client(cache_dir), job_id, questions)
+    _jsc.add_pending_questions(_client(cache_dir), job_id, questions)
 
 
 def submit_answers(
@@ -294,7 +294,7 @@ def submit_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Store submitted answers, clear pending questions, and resume job."""
-    shared_job_store.submit_answers(_client(cache_dir), job_id, answers)
+    _jsc.submit_answers(_client(cache_dir), job_id, answers)
 
 
 def is_waiting_for_answers(
@@ -302,7 +302,7 @@ def is_waiting_for_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Check if job is waiting for user answers."""
-    return shared_job_store.is_waiting_for_answers(_client(cache_dir), job_id)
+    return _jsc.is_waiting_for_answers(_client(cache_dir), job_id)
 
 
 def get_submitted_answers(
@@ -310,7 +310,7 @@ def get_submitted_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> List[Dict[str, Any]]:
     """Get submitted answers for a job."""
-    return shared_job_store.get_submitted_answers(_client(cache_dir), job_id)
+    return _jsc.get_submitted_answers(_client(cache_dir), job_id)
 
 
 def request_cancel(
