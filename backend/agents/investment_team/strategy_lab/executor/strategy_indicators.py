@@ -80,14 +80,17 @@ class _RegBar:
 def _project_bars(**fields) -> list:
     """Build registry bars from named OHLCV field sequences; omitted fields default to 0.0.
 
-    Each keyword is a ``_RegBar`` field name (``open``/``high``/``low``/``close``/
-    ``volume``) mapped to a sequence ``_coerce_series`` accepts. Provided series are
+    Single source of truth for the call shapes the scalar wrappers need: an indicator
+    that reads only a subset (Donchian: high/low; OBV: close/volume) passes just those
+    fields and gets no placeholder in the slots it never reads.
+
+    Preconditions: each keyword is a ``_RegBar`` field name (``open``/``high``/``low``/
+    ``close``/``volume``) mapped to a sequence ``_coerce_series`` accepts; a non-field
+    keyword raises ``TypeError`` from the ``_RegBar(**…)`` construction.
+    Postconditions: returns one ``_RegBar`` per position, with each provided series
     coerced to floats and zipped positionally (stopping at the shortest, matching the
-    prior per-shape builders); a field not passed is left at ``_RegBar``'s ``0.0``
-    default on every bar — so an indicator that reads only a subset (Donchian:
-    high/low; OBV: close/volume) gets exactly those slots and no placeholder in the
-    ones it never reads. Single source of truth for the four call shapes the scalar
-    wrappers need.
+    prior per-shape builders); an omitted field keeps ``_RegBar``'s ``0.0`` default on
+    every bar. Empty ``fields`` yields ``[]``.
     """
     names = list(fields)
     columns = [[float(v) for v in _impl._coerce_series(fields[name], name)] for name in names]

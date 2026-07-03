@@ -309,6 +309,67 @@ def test_sliding_window_matches_cold_compute(case) -> None:
         assert got == pytest.approx(cold, rel=0, abs=1e-9), f"{_id} offset={offset}"
 
 
+def _fractional_volume_series(n: int, seed: int) -> list[_Bar]:
+    """Like ``_series`` but with FRACTIONAL (crypto-style) volumes.
+
+    ``_series`` uses exactly-representable volumes (``1000 + k*250``), which makes the
+    incremental running sums bit-exact and hides any float drift. Fractional volumes
+    exercise the running-sum accumulation in obv/mfi.
+    """
+    rng = random.Random(seed)
+    bars: list[_Bar] = []
+    close = 100.0
+    for i in range(n):
+        close = max(5.0, close + rng.uniform(-3.0, 3.0) + i * 0.03)
+        spread = 1.0 + rng.uniform(0.0, 0.5)
+        bars.append(
+            _Bar(
+                timestamp=f"2024-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
+                open=close - 0.1,
+                high=close + spread,
+                low=max(0.5, close - spread),
+                close=close,
+                volume=rng.uniform(0.0001, 3.5),
+            )
+        )
+    return bars
+
+
+@pytest.mark.parametrize(
+    "reg_call, ref_call, warm",
+    [
+        (lambda r, b: r.obv(b), lambda b: _ref_obv(b), 2),
+        (lambda r, b: r.mfi(b, 14), lambda b: _ref_mfi(b, 14), 15),
+    ],
+    ids=["obv", "mfi"],
+)
+def test_obv_mfi_expand_then_slide_with_fractional_volume(reg_call, ref_call, warm) -> None:
+    # The incremental obv/mfi keep a deque + running sum. Drive ONE registry through an
+    # EXPAND phase (growing prefix), then a SLIDE phase (fixed window moving past the
+    # same bars), then a REPLAY/seek — the exact transitions the pure-expand and
+    # pure-slide tests never combine — with fractional volumes so the running sums
+    # actually accumulate float rounding. The value must track an independent reference
+    # within a bounded tolerance (running sums are not bit-exact to a fresh re-sum, by
+    # design — same tradeoff as bollinger_bands — but the drift stays far below any
+    # predicate threshold).
+    bars = _fractional_volume_series(160, seed=13)
+    reg = IndicatorRegistry()
+    window = 40
+    # Expand: growing prefix.
+    for n in range(warm, 80):
+        got = reg_call(reg, bars[:n])
+        assert got == pytest.approx(ref_call(bars[:n]), rel=0, abs=1e-6), f"expand n={n}"
+    # Slide: fixed window advancing past the just-seen bars (expand→slide boundary).
+    for offset in range(41, 120):
+        sliding = bars[offset : offset + window]
+        got = reg_call(reg, sliding)
+        assert got == pytest.approx(ref_call(sliding), rel=0, abs=1e-6), f"slide offset={offset}"
+    # Replay/seek: a shorter earlier window forces _advance_kind == "none" (cold rebuild),
+    # which must recover exactly rather than mis-reuse stale deque/running-sum state.
+    replay = bars[10:60]
+    assert reg_call(reg, replay) == pytest.approx(ref_call(replay), rel=0, abs=1e-6)
+
+
 def test_same_bar_repeat_returns_cached() -> None:
     """Re-querying the same trailing bar returns the cached value (same-bar fingerprint hit)."""
     bars = _series(60, seed=5)

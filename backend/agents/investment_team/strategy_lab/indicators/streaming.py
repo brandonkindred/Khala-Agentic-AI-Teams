@@ -73,6 +73,41 @@ def _source_value(bar: Any, source: str) -> float:
     return float(bar.close)
 
 
+def _obv_signed_volume(cur: Any, prev: Any) -> float:
+    """The single-bar OBV term: ``+volume`` on an up-close, ``−volume`` on a down-close.
+
+    Pre: ``cur``/``prev`` are adjacent bars. Post: ``float(cur.volume)`` when the close
+    rose vs. ``prev``, its negation when it fell, ``0.0`` on a flat close. Module-level
+    (like :func:`_source_value`) so the hot-path :meth:`IndicatorRegistry.obv` allocates
+    no per-call closure.
+    """
+    cur_c = float(cur.close)
+    prev_c = float(prev.close)
+    if cur_c > prev_c:
+        return float(cur.volume)
+    if cur_c < prev_c:
+        return -float(cur.volume)
+    return 0.0
+
+
+def _mfi_flow_term(cur: Any, prev: Any) -> Tuple[float, float]:
+    """The single-bar MFI ``(positive, negative)`` raw-money-flow term.
+
+    Pre: ``cur``/``prev`` are adjacent bars. Post: ``(tp·volume, 0)`` when the typical
+    price rose vs. ``prev``, ``(0, tp·volume)`` when it fell, ``(0, 0)`` on a flat move —
+    where ``tp = (high+low+close)/3``. Module-level so :meth:`IndicatorRegistry.mfi`
+    allocates no per-call closure.
+    """
+    tp = (float(cur.high) + float(cur.low) + float(cur.close)) / 3.0
+    tp_prev = (float(prev.high) + float(prev.low) + float(prev.close)) / 3.0
+    rmf = tp * float(cur.volume)
+    if tp > tp_prev:
+        return (rmf, 0.0)
+    if tp < tp_prev:
+        return (0.0, rmf)
+    return (0.0, 0.0)
+
+
 def windowed_ema(
     bars: Sequence[Any],
     period: int,
@@ -832,6 +867,16 @@ class IndicatorRegistry:
     # ----- VWAP ----------------------------------------------------------
 
     def vwap(self, bars: Sequence[Any]) -> Optional[float]:
+        """Volume-Weighted Average Price, cumulative over ``bars`` at ``bars[-1]``.
+
+        Pre: ``bars`` is non-empty. Post: ``Σ(typical·volume) / Σ volume`` over the
+        window (``typical = (high+low+close)/3``); falls back to the mean close when the
+        window's total volume is 0. Deliberately recomputed exactly over the window
+        (O(window)) rather than incrementally like its cumulative sibling
+        :meth:`obv`: VWAP is a ratio whose zero-volume fallback needs the window's
+        close mean, so an exact per-call sum keeps it bit-stable and simple; the
+        per-bar cost is dominated by the bounded window and a same-bar cache hit.
+        """
         if not bars:
             return None
         key = ("vwap",)
@@ -1165,18 +1210,15 @@ class IndicatorRegistry:
         window grows on expand instead of evicting — unlike the fixed-``period``
         indicators (:meth:`bollinger_bands`, :meth:`mfi`) whose deque is always
         full so both paths evict.
+
+        Numerical note: the running sum is add/subtract-maintained (like
+        :meth:`bollinger_bands`), so for non-integer volumes it can differ from an
+        exact per-window re-sum by accumulated floating-point rounding — bounded and
+        far below any predicate threshold, not a fresh exact sum. The unbounded twin
+        :meth:`vwap` is deliberately left as an exact O(window) recompute.
         """
         if not bars:
             return None
-
-        def _obv_term(cur: Any, prev: Any) -> float:
-            cur_c = float(cur.close)
-            prev_c = float(prev.close)
-            if cur_c > prev_c:
-                return float(cur.volume)
-            if cur_c < prev_c:
-                return -float(cur.volume)
-            return 0.0
 
         # If two symbols (or two unrelated bar streams) ever share a registry,
         # the cache must not conflate them — include ``bars[-1].symbol`` in the
@@ -1200,14 +1242,14 @@ class IndicatorRegistry:
                     # leaves the sum. ``expand`` keeps every bar, so it evicts
                     # nothing.
                     s -= deltas.popleft()
-                new_term = _obv_term(bars[-1], bars[-2])
+                new_term = _obv_signed_volume(bars[-1], bars[-2])
                 deltas.append(new_term)
                 s += new_term
         if deltas is None:
             deltas = deque()
             s = 0.0
             for i in range(1, len(bars)):
-                term = _obv_term(bars[i], bars[i - 1])
+                term = _obv_signed_volume(bars[i], bars[i - 1])
                 deltas.append(term)
                 s += term
         self._state[key] = {"fp": fp, "value": s, "deltas": deltas}
@@ -1228,6 +1270,11 @@ class IndicatorRegistry:
         bounded deque of the terms together with running ``pos``/``neg`` sums and
         updates both in O(1) on a single-bar advance (subtract the evicted term,
         add the new one), exactly like :meth:`bollinger_bands`.
+
+        Numerical note: the running ``pos``/``neg`` are add/subtract-maintained (like
+        :meth:`bollinger_bands`), so for non-integer volumes they can differ from an
+        exact per-window re-sum by accumulated floating-point rounding — bounded, and
+        the final MFI is a ratio in ``[0, 100]`` so the output drift is negligible.
         """
         if not bars or len(bars) < period + 1:
             return None
@@ -1240,18 +1287,6 @@ class IndicatorRegistry:
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
-
-        def _flow(cur: Any, prev: Any) -> Tuple[float, float]:
-            # (positive, negative) raw money flow: the term is signed by whether
-            # the typical price rose or fell vs. the prior bar; a flat move is zero.
-            tp = (float(cur.high) + float(cur.low) + float(cur.close)) / 3.0
-            tp_prev = (float(prev.high) + float(prev.low) + float(prev.close)) / 3.0
-            rmf = tp * float(cur.volume)
-            if tp > tp_prev:
-                return (rmf, 0.0)
-            if tp < tp_prev:
-                return (0.0, rmf)
-            return (0.0, 0.0)
 
         flows: Optional[Deque[Tuple[float, float]]] = None
         s_pos = 0.0
@@ -1268,7 +1303,7 @@ class IndicatorRegistry:
                 outgoing = flows[0]
                 s_pos -= outgoing[0]
                 s_neg -= outgoing[1]
-                new_term = _flow(bars[-1], bars[-2])
+                new_term = _mfi_flow_term(bars[-1], bars[-2])
                 flows.append(new_term)
                 s_pos += new_term[0]
                 s_neg += new_term[1]
@@ -1277,7 +1312,7 @@ class IndicatorRegistry:
             s_pos = 0.0
             s_neg = 0.0
             for i in range(len(bars) - period, len(bars)):
-                term = _flow(bars[i], bars[i - 1])
+                term = _mfi_flow_term(bars[i], bars[i - 1])
                 flows.append(term)
                 s_pos += term[0]
                 s_neg += term[1]
