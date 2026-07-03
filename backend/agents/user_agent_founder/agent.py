@@ -212,6 +212,50 @@ Respond with a JSON object (no markdown fencing):
 }}
 """
 
+# Used instead of QUESTION_ANSWERING_PROMPT when a question has **no** predefined
+# options — an open-ended WAIT step from an agentic-team pipeline, wrapped by
+# AgenticTeamAdapter as a single free-text ("other") answer. The multiple-choice
+# framing above ("choose the option") fits open prompts poorly, so this variant
+# tells the persona to *author* a decisive, self-contained answer and makes clear
+# the answer is consumed by an automated pipeline with no human in the loop.
+# ``selected_option_id`` is pinned to "other" to match the bounded schema
+# ``_build_answer_schema`` produces for empty options (``Literal["other"]``).
+FREE_TEXT_ANSWERING_PROMPT = """\
+The agentic team building TaskFlow has paused its automated pipeline to ask you \
+an open-ended question. There are no predefined options — you must write the \
+answer yourself, as the founder: budget-conscious, speed-first, UX-obsessed.
+
+## Question
+{question_text}
+
+## Context
+{context}
+
+## How your answer is used
+Your answer is fed DIRECTLY back into an automated pipeline. No human will read \
+it, clarify it, or ask a follow-up — the run resumes on exactly what you write. \
+So your answer must be:
+- **Decisive.** Make the call. Don't hedge, don't offer several options, don't \
+ask a question back. Pick one concrete direction and commit to it.
+- **Specific and self-contained.** State the actual decision and every concrete \
+detail the pipeline needs to act on it (names, numbers, scope, wording), assuming \
+the reader has only your answer and no prior conversation.
+- **Actionable.** Phrase it as a settled choice or an instruction the pipeline \
+can execute, not as musings or a trade-off analysis.
+- **In your voice and values.** Filter the choice through budget, then speed to \
+users, then UX. Cut scope ruthlessly; prefer the cheapest, fastest thing that \
+still ships a good experience.
+
+Keep it tight — a few sentences at most. Substance over length.
+
+Respond with a JSON object (no markdown fencing):
+{{
+  "selected_option_id": "other",
+  "other_text": "<your complete, decisive, self-contained answer>",
+  "rationale": "<1-2 sentences explaining the choice through your founder values>"
+}}
+"""
+
 
 class FounderAgent:
     """Simulates a budget-conscious, speed-first, UX-obsessed startup founder."""
@@ -356,6 +400,20 @@ class FounderAgent:
         before the caller sees a failure. The bespoke regex-stripping /
         ``json.loads`` fallback that lived here previously is no longer needed.
 
+        The prompt is chosen by whether the question carries options. A question
+        **with** options uses :data:`QUESTION_ANSWERING_PROMPT` (multiple-choice
+        selection). A question with **no** options — an open-ended agentic-team
+        WAIT step wrapped by ``AgenticTeamAdapter`` — uses
+        :data:`FREE_TEXT_ANSWERING_PROMPT`, tuned for authoring a decisive,
+        self-contained free-text answer (``selected_option_id == "other"``,
+        ``other_text`` load-bearing). Both feed the same bounded schema.
+
+        Preconditions: ``question`` is a dict; ``options`` (if present) is a list
+            of dicts each carrying at least ``id`` and ``label``.
+        Postconditions: returns ``{selected_option_id, other_text, rationale}``;
+            when ``options`` is empty, ``selected_option_id == "other"`` and
+            ``other_text`` is non-empty.
+
         Args:
             question: Dict with keys: id, question_text, context, recommendation, options.
                       Each option has: id, label, is_default, rationale, confidence.
@@ -371,26 +429,32 @@ class FounderAgent:
         from llm_service import generate_structured
 
         options = question.get("options") or []
-        options_lines = []
-        for opt in options:
-            default_marker = " [DEFAULT]" if opt.get("is_default") else ""
-            confidence = opt.get("confidence", "")
-            conf_str = f" (confidence: {confidence})" if confidence else ""
-            options_lines.append(f"- [{opt['id']}] {opt['label']}{default_marker}{conf_str}")
-            if opt.get("rationale"):
-                options_lines.append(f"  Rationale: {opt['rationale']}")
-        options_text = (
-            "\n".join(options_lines)
-            if options_lines
-            else "(No predefined options — provide a free-text answer)"
-        )
-
-        prompt = QUESTION_ANSWERING_PROMPT.format(
-            question_text=question.get("question_text", ""),
-            context=question.get("context", "No additional context provided."),
-            recommendation=question.get("recommendation", "No recommendation provided."),
-            options_text=options_text,
-        )
+        # No options ⇒ an open-ended (agentic-team WAIT) prompt. Use the
+        # free-text-tuned prompt rather than the multiple-choice one, whose
+        # "choose the option" framing produces weak open-ended answers. Both
+        # paths feed the same bounded schema below (``Literal["other"]`` when
+        # options is empty), so ``other_text`` stays the load-bearing field.
+        if options:
+            options_lines = []
+            for opt in options:
+                default_marker = " [DEFAULT]" if opt.get("is_default") else ""
+                confidence = opt.get("confidence", "")
+                conf_str = f" (confidence: {confidence})" if confidence else ""
+                options_lines.append(f"- [{opt['id']}] {opt['label']}{default_marker}{conf_str}")
+                if opt.get("rationale"):
+                    options_lines.append(f"  Rationale: {opt['rationale']}")
+            options_text = "\n".join(options_lines)
+            prompt = QUESTION_ANSWERING_PROMPT.format(
+                question_text=question.get("question_text", ""),
+                context=question.get("context", "No additional context provided."),
+                recommendation=question.get("recommendation", "No recommendation provided."),
+                options_text=options_text,
+            )
+        else:
+            prompt = FREE_TEXT_ANSWERING_PROMPT.format(
+                question_text=question.get("question_text", ""),
+                context=question.get("context", "No additional context provided."),
+            )
 
         bounded_schema = _build_answer_schema(options)
         answer = generate_structured(

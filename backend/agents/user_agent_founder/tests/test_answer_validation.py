@@ -328,6 +328,116 @@ def test_answer_question_handles_empty_options(monkeypatch):
     result = founder.answer_question(question)
     assert result["selected_option_id"] == "other"
     assert result["other_text"] == "free-text reply"
+    # Return shape is unchanged regardless of which prompt is used.
+    assert set(result) == {"selected_option_id", "other_text", "rationale"}
+
+
+# ---------------------------------------------------------------------------
+# Prompt selection — open-ended (WAIT) vs multiple-choice questions
+# ---------------------------------------------------------------------------
+
+
+def _capture_prompt(monkeypatch) -> dict[str, Any]:
+    """Patch generate_structured to capture the formatted prompt and return a
+    schema-valid answer, so tests can assert which prompt template was used."""
+    captured: dict[str, Any] = {}
+
+    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key, objective):
+        captured["prompt"] = prompt
+        captured["schema"] = schema
+        # Return a valid 'other' answer — works for both bounded schemas
+        # (empty options ⇒ Literal["other"]; with options 'other' is allowed too).
+        return schema.model_validate(
+            {
+                "selected_option_id": "other",
+                "other_text": "a decisive, self-contained answer",
+                "rationale": "budget first",
+            },
+        )
+
+    import llm_service
+
+    monkeypatch.setattr(llm_service, "generate_structured", fake_generate_structured)
+    return captured
+
+
+def test_answer_question_empty_options_uses_free_text_prompt(monkeypatch):
+    """A question with no options must use FREE_TEXT_ANSWERING_PROMPT, not the
+    multiple-choice template."""
+    captured = _capture_prompt(monkeypatch)
+    founder = _make_agent_without_init()
+
+    founder.answer_question(
+        {
+            "id": "q-wait",
+            "question_text": "Which tone for the launch post?",
+            "context": "This is an open-ended request from step 'write'.",
+            "options": [],
+        },
+    )
+
+    prompt = captured["prompt"]
+    # Free-text framing is present…
+    assert "open-ended question" in prompt
+    assert "fed DIRECTLY back into an automated pipeline" in prompt
+    assert "Which tone for the launch post?" in prompt
+    # …and the multiple-choice framing is absent.
+    assert "Available Options" not in prompt
+    assert "Choose the option" not in prompt
+    assert "Team's Recommendation" not in prompt
+    # Bounded schema still forces the free-text 'other' path.
+    assert _allowed_option_ids(captured["schema"]) == ("other",)
+
+
+def test_answer_question_with_options_uses_multiple_choice_prompt(monkeypatch):
+    """A question with options must keep using QUESTION_ANSWERING_PROMPT, and a
+    fully-populated option renders its default/confidence/rationale markers."""
+    captured = _capture_prompt(monkeypatch)
+    founder = _make_agent_without_init()
+
+    founder.answer_question(
+        {
+            "id": "q-mc",
+            "question_text": "Which database?",
+            "context": "ctx",
+            "recommendation": "rec",
+            "options": [
+                {
+                    "id": "opt-a",
+                    "label": "SQLite",
+                    "is_default": True,
+                    "confidence": "high",
+                    "rationale": "cheapest to run",
+                },
+                {"id": "opt-b", "label": "Postgres"},
+            ],
+        },
+    )
+
+    prompt = captured["prompt"]
+    # Multiple-choice framing is present…
+    assert "Available Options" in prompt
+    assert "Choose the option" in prompt
+    assert "[opt-a]" in prompt
+    # …including the option markers (default / confidence / rationale rendering).
+    assert "[DEFAULT]" in prompt
+    assert "confidence: high" in prompt
+    assert "Rationale: cheapest to run" in prompt
+    # …and the free-text task sentence is absent.
+    assert "fed DIRECTLY back into an automated pipeline" not in prompt
+
+
+def test_free_text_prompt_pins_other_and_formats_cleanly():
+    """FREE_TEXT_ANSWERING_PROMPT pins selected_option_id to 'other' and needs
+    only {question_text}/{context} — no stray {recommendation}/{options_text}."""
+    template = agent_module.FREE_TEXT_ANSWERING_PROMPT
+    assert isinstance(template, str) and template
+    assert '"selected_option_id": "other"' in template
+    # .format with only the two supported fields must not raise KeyError on a
+    # leftover placeholder (guards against a template/answer_question mismatch).
+    rendered = template.format(question_text="Q?", context="ctx")
+    assert "Q?" in rendered
+    assert "ctx" in rendered
 
 
 # ---------------------------------------------------------------------------
