@@ -121,6 +121,26 @@ describe('JobListingsPanelComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('Retry');
   });
 
+  it('discards a stale response that arrives after the filter changed', async () => {
+    await setup();
+    const slowFavorites = new Subject<ListingsResponse>();
+    const fastAll = new Subject<ListingsResponse>();
+    apiSpy.listListings.mockImplementation((filter: string) =>
+      filter === 'favorite' ? slowFavorites.asObservable() : fastAll.asObservable()
+    );
+
+    component.setFilter('favorite'); // slow request in flight
+    component.setFilter('all'); // user moves on
+
+    fastAll.next(makeResponse([makeListing(), makeListing({ fingerprint: 'fp2' })], { new: 2 }));
+    // The older favorites response lands last — it must be ignored.
+    slowFavorites.next(makeResponse([makeListing({ status: 'favorite' })], { favorite: 1 }));
+
+    expect(component.filter).toBe('all');
+    expect(component.listings.length).toBe(2);
+    expect(component.counts).toEqual({ new: 2 });
+  });
+
   it('reloads with the selected filter', async () => {
     await setup();
     component.setFilter('favorite');

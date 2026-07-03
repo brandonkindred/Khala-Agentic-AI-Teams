@@ -146,7 +146,9 @@ export class JobProfileFormComponent implements OnInit {
 
   readonly form = this.fb.nonNullable.group({
     remote_preference: ['any'],
-    salary_min: [0, [Validators.min(0)]],
+    // required: clearing a number input yields null, which Validators.min
+    // ignores — without required the form stays valid and the backend 422s.
+    salary_min: [0, [Validators.required, Validators.min(0)]],
     currency: ['USD'],
     work_authorization: [''],
     title_fit: [0.25, [Validators.min(0)]],
@@ -236,7 +238,7 @@ export class JobProfileFormComponent implements OnInit {
       seniority_levels: this.chips.seniority_levels,
       locations: this.chips.locations,
       remote_preference: raw.remote_preference as JobSeekerProfile['remote_preference'],
-      salary_min: raw.salary_min,
+      salary_min: raw.salary_min ?? 0,
       currency: raw.currency,
       company_stages: this.chips.company_stages,
       company_sizes: this.chips.company_sizes,
@@ -279,9 +281,27 @@ export class JobProfileFormComponent implements OnInit {
         },
         error: (err) => {
           this.saving = false;
-          const detail = err?.error?.detail ?? err?.message ?? 'Failed to save the profile.';
-          this.snackBar.open(detail, 'Dismiss', { duration: 6000 });
+          this.snackBar.open(formatSaveError(err), 'Dismiss', { duration: 6000 });
         },
       });
   }
+}
+
+/**
+ * Render a save failure as a readable sentence. FastAPI validation errors
+ * (422) carry `detail` as an array of `{msg}` objects — joined here so the
+ * snackbar never shows "[object Object]".
+ */
+function formatSaveError(err: unknown): string {
+  const detail = (err as { error?: { detail?: unknown } })?.error?.detail;
+  if (typeof detail === 'string') {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    const msgs = detail.map((d) => (d as { msg?: string })?.msg).filter(Boolean);
+    if (msgs.length) {
+      return msgs.join('; ');
+    }
+  }
+  return (err as { message?: string })?.message ?? 'Failed to save the profile.';
 }

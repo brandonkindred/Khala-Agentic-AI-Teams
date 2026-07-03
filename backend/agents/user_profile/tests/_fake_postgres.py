@@ -55,7 +55,15 @@ class _FakeCursor:
 
         if norm.startswith("insert into user_profiles") and "do update" in norm:
             # upsert_profile: INSERT ... ON CONFLICT DO UPDATE ... RETURNING.
-            cols = ["user_id", "display_name", "email", "bio", "profile_json", "created_at", "updated_at"]
+            cols = [
+                "user_id",
+                "display_name",
+                "email",
+                "bio",
+                "profile_json",
+                "created_at",
+                "updated_at",
+            ]
             incoming = dict(zip(cols, params))
             incoming["profile_json"] = _unwrap_json(incoming["profile_json"])
             user_id = incoming["user_id"]
@@ -97,6 +105,19 @@ class _FakeCursor:
                 self.rowcount = 1
             return
 
+        if norm.startswith("update user_profiles set profile_json = profile_json ||"):
+            # merge_preferences: atomic shallow JSONB merge ... RETURNING.
+            patch, user_id = params
+            row = self._db["profiles"].get(user_id)
+            if row is None:
+                self._one = None
+                self.rowcount = 0
+                return
+            row["profile_json"] = {**row["profile_json"], **_unwrap_json(patch)}
+            self._one = {"profile_json": dict(row["profile_json"])}
+            self.rowcount = 1
+            return
+
         # -- user_profile_associations ------------------------------------
         if norm.startswith("insert into user_profile_associations"):
             assoc_id, user_id, atype, team, artifact_id, label, role, created_at = params
@@ -122,7 +143,10 @@ class _FakeCursor:
             self.rowcount = 1
             return
 
-        if norm.startswith("select id, user_id, artifact_type") and "from user_profile_associations" in norm:
+        if (
+            norm.startswith("select id, user_id, artifact_type")
+            and "from user_profile_associations" in norm
+        ):
             user_id = params[0]
             atype = params[1] if len(params) > 1 else None
             rows = [
@@ -137,7 +161,11 @@ class _FakeCursor:
         if norm.startswith("delete from user_profile_associations"):
             assoc_id, user_id = params
             match = next(
-                (k for k, r in self._db["associations"].items() if r["id"] == assoc_id and r["user_id"] == user_id),
+                (
+                    k
+                    for k, r in self._db["associations"].items()
+                    if r["id"] == assoc_id and r["user_id"] == user_id
+                ),
                 None,
             )
             if match is not None:

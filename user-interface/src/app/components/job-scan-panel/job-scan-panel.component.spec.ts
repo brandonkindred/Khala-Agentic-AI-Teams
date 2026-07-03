@@ -40,7 +40,8 @@ describe('JobScanPanelComponent', () => {
   let fixture: ComponentFixture<JobScanPanelComponent>;
   let component: JobScanPanelComponent;
   let apiSpy: {
-    runScan: ReturnType<typeof vi.fn>;
+    startScan: ReturnType<typeof vi.fn>;
+    pollScan: ReturnType<typeof vi.fn>;
     listScanJobs: ReturnType<typeof vi.fn>;
     listRuns: ReturnType<typeof vi.fn>;
     getRun: ReturnType<typeof vi.fn>;
@@ -52,7 +53,8 @@ describe('JobScanPanelComponent', () => {
 
   async function setup(): Promise<void> {
     apiSpy = {
-      runScan: vi.fn(),
+      startScan: vi.fn().mockReturnValue(of({ job_id: 'j1', status: 'pending' })),
+      pollScan: vi.fn(),
       listScanJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
       listRuns: vi
         .fn()
@@ -114,7 +116,7 @@ describe('JobScanPanelComponent', () => {
     expect(request.exclude_seen).toBe(true);
   });
 
-  it('runs a scan, announces completion, and emits scanCompleted', async () => {
+  it('runs a scan, refreshes jobs after submission, announces completion, and emits scanCompleted', async () => {
     await setup();
     const result: JobMatchResponse = {
       run_id: 'r2',
@@ -124,13 +126,18 @@ describe('JobScanPanelComponent', () => {
       profile_snapshot: {} as never,
       generated_at: '',
     };
-    apiSpy.runScan.mockReturnValue(of(result));
+    apiSpy.pollScan.mockReturnValue(of(result));
     const completed = vi.fn();
     component.scanCompleted.subscribe(completed);
+    apiSpy.listScanJobs.mockClear();
 
     component.startScan();
 
-    expect(apiSpy.runScan).toHaveBeenCalled();
+    expect(apiSpy.startScan).toHaveBeenCalled();
+    // The jobs list refresh is sequenced after the POST response, so the
+    // pending row (and its Cancel button) is guaranteed to exist server-side.
+    expect(apiSpy.listScanJobs).toHaveBeenCalled();
+    expect(apiSpy.pollScan).toHaveBeenCalledWith('j1');
     expect(component.scanning).toBe(false);
     expect(completed).toHaveBeenCalled();
     expect(snackSpy.open).toHaveBeenCalledWith(
@@ -142,7 +149,7 @@ describe('JobScanPanelComponent', () => {
 
   it('surfaces a scan failure', async () => {
     await setup();
-    apiSpy.runScan.mockReturnValue(throwError(() => new Error('scan failed hard')));
+    apiSpy.pollScan.mockReturnValue(throwError(() => new Error('scan failed hard')));
     component.startScan();
     expect(component.scanning).toBe(false);
     expect(component.scanError).toBe('scan failed hard');
@@ -152,12 +159,12 @@ describe('JobScanPanelComponent', () => {
     await setup();
     component.form.patchValue({ max_queries: 99 });
     component.startScan();
-    expect(apiSpy.runScan).not.toHaveBeenCalled();
+    expect(apiSpy.startScan).not.toHaveBeenCalled();
 
     component.form.patchValue({ max_queries: 6 });
     component.scanning = true;
     component.startScan();
-    expect(apiSpy.runScan).not.toHaveBeenCalled();
+    expect(apiSpy.startScan).not.toHaveBeenCalled();
   });
 
   it('cancels an active scan job', async () => {

@@ -72,6 +72,11 @@
                   <mat-label>Minimum base salary</mat-label>
                   <input matInput type="number" min="0" step="5000" formControlName="salary_min" />
                   <mat-hint>0 = no floor</mat-hint>
+                  @if (form.controls.salary_min.hasError('required')) {
+                    <mat-error>Enter a salary floor — use 0 for no floor.</mat-error>
+                  } @else if (form.controls.salary_min.hasError('min')) {
+                    <mat-error>The salary floor can't be negative.</mat-error>
+                  }
                 </mat-form-field>
                 <mat-form-field appearance="outline">
                   <mat-label>Currency</mat-label>

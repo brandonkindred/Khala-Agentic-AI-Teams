@@ -1,8 +1,9 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable, EMPTY, of, throwError, timer } from 'rxjs';
-import { expand, first, switchMap } from 'rxjs/operators';
+import { Observable, of, throwError } from 'rxjs';
+import { first, switchMap } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
+import { pollWhile } from '../shared/poll-while';
 import type {
   HealthResponse,
   JobMatchRequest,
@@ -65,14 +66,18 @@ export class JobMatchingApiService {
     );
   }
 
-  private pollScan(jobId: string): Observable<JobMatchResponse> {
-    const poll$ = this.getScanStatus(jobId);
-    return poll$.pipe(
-      expand((job) =>
-        TERMINAL_STATUSES.has(job.status)
-          ? EMPTY
-          : timer(POLL_INTERVAL_MS).pipe(switchMap(() => poll$))
-      ),
+  /**
+   * Poll a scan to its terminal state and emit the final result. Built on the
+   * shared pollWhile operator, so a transient failed poll is swallowed and
+   * polling continues — one network blip must not report a running scan as
+   * failed. Errors only when the scan itself ends `failed`/`cancelled`.
+   */
+  pollScan(jobId: string): Observable<JobMatchResponse> {
+    return pollWhile(
+      () => this.getScanStatus(jobId),
+      (job) => TERMINAL_STATUSES.has(job.status),
+      { intervalMs: POLL_INTERVAL_MS }
+    ).pipe(
       first((job) => TERMINAL_STATUSES.has(job.status)),
       switchMap((job) =>
         job.status === 'completed' && job.result

@@ -76,13 +76,20 @@ export class JobListingsPanelComponent implements OnInit {
 
   /** Reload the current filter (also called by the dashboard after a scan). */
   load(): void {
+    // Stale-response guard: rapid filter switches (arrow-key roving fires one
+    // per keystroke) can make an older, slower response arrive last — it must
+    // not overwrite the newer filter's rows and counts.
+    const requested = this.filter;
     this.loading = true;
     this.error = null;
     this.api
-      .listListings(this.filter)
+      .listListings(requested)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
+          if (requested !== this.filter) {
+            return;
+          }
           this.listings = res.listings;
           this.counts = res.counts;
           this.loading = false;
@@ -90,6 +97,9 @@ export class JobListingsPanelComponent implements OnInit {
             res.listings.length === 1 ? '1 listing shown' : `${res.listings.length} listings shown`;
         },
         error: (err) => {
+          if (requested !== this.filter) {
+            return;
+          }
           this.error = err?.error?.detail ?? err?.message ?? 'Failed to load listings.';
           this.loading = false;
         },
@@ -222,11 +232,16 @@ export class JobListingsPanelComponent implements OnInit {
       );
     }
     // Refresh pill counts without refetching the whole page.
+    const requested = this.filter;
     this.api
-      .listListings(this.filter, 1)
+      .listListings(requested, 1)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: (res) => (this.counts = res.counts),
+        next: (res) => {
+          if (requested === this.filter) {
+            this.counts = res.counts;
+          }
+        },
         error: () => undefined, // counts are cosmetic; the next full load corrects them
       });
     return removed;

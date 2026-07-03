@@ -1,5 +1,6 @@
 import { Component, DestroyRef, EventEmitter, OnInit, Output, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { switchMap, tap } from 'rxjs/operators';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -124,8 +125,15 @@ export class JobScanPanelComponent implements OnInit {
     this.scanning = true;
     this.scanError = null;
     this.api
-      .runScan(this.toRequest())
-      .pipe(takeUntilDestroyed(this.destroyRef))
+      .startScan(this.toRequest())
+      .pipe(
+        // Refresh the jobs list only after the POST response — the backend
+        // creates the job row before responding, so the pending row (and its
+        // Cancel button) is guaranteed to be visible for the whole scan.
+        tap(() => this.refreshScanJobs()),
+        switchMap((submission) => this.api.pollScan(submission.job_id)),
+        takeUntilDestroyed(this.destroyRef)
+      )
       .subscribe({
         next: (result) => {
           this.scanning = false;
@@ -144,8 +152,6 @@ export class JobScanPanelComponent implements OnInit {
           this.refreshScanJobs();
         },
       });
-    // Show the pending job row right away rather than waiting for completion.
-    this.refreshScanJobs();
   }
 
   refreshScanJobs(): void {

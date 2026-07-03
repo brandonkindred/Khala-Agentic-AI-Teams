@@ -170,6 +170,35 @@ describe('JobProfileFormComponent', () => {
     expect(apiSpy.saveProfile).not.toHaveBeenCalled();
   });
 
+  it('blocks saving when the salary field is cleared to null', async () => {
+    await setup();
+    // Clearing a number input emits null; required must catch it (min() ignores null).
+    component.form.controls.salary_min.setValue(null as never);
+    expect(component.form.invalid).toBe(true);
+    component.save();
+    expect(apiSpy.saveProfile).not.toHaveBeenCalled();
+  });
+
+  it('renders FastAPI array-shaped 422 details as a readable message', async () => {
+    await setup();
+    apiSpy.saveProfile.mockReturnValue(
+      throwError(() => ({
+        error: {
+          detail: [
+            { msg: 'Input should be a valid integer', loc: ['body', 'salary_min'] },
+            { msg: 'Extra inputs are not permitted' },
+          ],
+        },
+      }))
+    );
+    component.save();
+    expect(snackSpy.open).toHaveBeenCalledWith(
+      'Input should be a valid integer; Extra inputs are not permitted',
+      'Dismiss',
+      expect.anything()
+    );
+  });
+
   it('computes each dimension\'s share of the final score from normalized weights', async () => {
     await setup();
     // Weights from makeProfile: 0.3/0.1/0.15/0.15/0.1/0.2 → total 1.0.

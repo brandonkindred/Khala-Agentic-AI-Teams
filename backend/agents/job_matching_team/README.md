@@ -34,14 +34,15 @@ The standing criteria are the **career section of the central user profile**
 and edited via `PUT /profile`). Saving records a `career` artifact association
 so the profile surfaces on the User Profile page. Resolution order:
 
-1. Career section of the user profile (Postgres; skipped when unavailable)
-2. `$JOB_SEEKER_PROFILE_PATH`
+1. `$JOB_SEEKER_PROFILE_PATH` — explicit operator pin, always honored first
+2. Career section of the user profile (Postgres; skipped when unavailable or
+   malformed — corruption is logged at ERROR and repaired by re-saving)
 3. `$AGENT_CACHE/job_seeker_profile.yaml`
 4. the bundled `profile/job_seeker_profile.example.yaml` (with a WARN log)
 
-Set `JOB_SEEKER_PROFILE_STRICT=true` to raise instead of falling back to the
-example. Each scan request may override any profile field via
-`profile_overrides`.
+Set `JOB_SEEKER_PROFILE_STRICT=true` to raise when the pinned env path is
+missing (and to disable the example fallback). Each scan request may override
+any profile field via `profile_overrides`.
 
 ## HTTP API
 

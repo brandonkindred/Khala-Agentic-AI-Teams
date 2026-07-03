@@ -28,6 +28,21 @@ def _clear_profile_cache():
     clear_cache()
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch):
+    """Keep loader tests independent of the developer's environment.
+
+    Without this, a developer running the suite with the documented local-dev
+    env (``POSTGRES_HOST`` exported, career profile saved) would have the
+    career section pre-empt the YAML chain these tests assert on — and
+    ``get_profile`` would lazily INSERT rows into the shared dev database as
+    a test side effect. Tests that need Postgres re-enable it explicitly.
+    """
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    monkeypatch.delenv("JOB_SEEKER_PROFILE_PATH", raising=False)
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
+
+
 def test_bundled_example_loads_and_validates():
     profile = load_job_seeker_profile()
     assert isinstance(profile, JobSeekerProfile)
@@ -188,7 +203,7 @@ def test_load_career_profile_none_on_operational_failure(monkeypatch):
     assert load_career_profile() is None
 
 
-def test_load_career_profile_raises_on_malformed_section(monkeypatch):
+def test_load_career_profile_falls_back_on_malformed_section(monkeypatch, caplog):
     _enable_postgres(monkeypatch)
     monkeypatch.setattr(
         career_store,
@@ -197,8 +212,11 @@ def test_load_career_profile_raises_on_malformed_section(monkeypatch):
             preferences={CAREER_SECTION_KEY: {"remote_preference": "bogus"}}
         ),
     )
-    with pytest.raises(Exception):
-        load_career_profile()
+    # A corrupt stored section must not hard-fail every scan/profile read: it
+    # is logged at ERROR and the loader falls back to the YAML chain.
+    with caplog.at_level("ERROR"):
+        assert load_career_profile() is None
+    assert any("invalid" in r.message for r in caplog.records)
 
 
 def test_save_career_profile_raises_when_postgres_disabled(monkeypatch):
@@ -207,21 +225,24 @@ def test_save_career_profile_raises_when_postgres_disabled(monkeypatch):
         save_career_profile(JobSeekerProfile())
 
 
-def test_save_career_profile_merges_and_records_association(monkeypatch):
+def test_save_career_profile_merges_atomically_and_records_association(monkeypatch):
     _enable_postgres(monkeypatch)
-    existing = {"other_section": {"keep": True}}
-    saved_updates = []
+    ensured = []
+    merges = []
     associations = []
 
     monkeypatch.setattr(
-        career_store, "get_profile", lambda user_id: SimpleNamespace(preferences=dict(existing))
+        career_store,
+        "get_profile",
+        lambda user_id: ensured.append(user_id) or SimpleNamespace(preferences={}),
     )
 
-    def fake_upsert(update, user_id):
-        saved_updates.append((update, user_id))
-        return SimpleNamespace(preferences=update.preferences)
+    def fake_merge(patch, user_id):
+        merges.append((patch, user_id))
+        # Server-side `profile_json || patch`: other sections survive untouched.
+        return {"other_section": {"keep": True}, **patch}
 
-    monkeypatch.setattr(career_store, "upsert_profile", fake_upsert)
+    monkeypatch.setattr(career_store, "merge_preferences", fake_merge)
     monkeypatch.setattr(
         career_store,
         "record_association_safe",
@@ -231,10 +252,12 @@ def test_save_career_profile_merges_and_records_association(monkeypatch):
     result = save_career_profile(JobSeekerProfile(target_titles=["Staff Eng"]))
 
     assert result.target_titles == ["Staff Eng"]
-    update, user_id = saved_updates[0]
-    # Other profile_json sections are preserved, career section written.
-    assert update.preferences["other_section"] == {"keep": True}
-    assert update.preferences[CAREER_SECTION_KEY]["target_titles"] == ["Staff Eng"]
+    # The row is ensured first (merge_preferences requires it to exist)...
+    assert ensured == ["default"]
+    # ...and the write is a section-scoped patch, never the whole document.
+    patch, user_id = merges[0]
+    assert list(patch.keys()) == [CAREER_SECTION_KEY]
+    assert patch[CAREER_SECTION_KEY]["target_titles"] == ["Staff Eng"]
     assert user_id == "default"
     # The Career card association is recorded best-effort.
     (artifact_type, team, artifact_id), kwargs = associations[0]
@@ -255,14 +278,29 @@ def test_save_career_profile_wraps_operational_failure(monkeypatch):
         save_career_profile(JobSeekerProfile())
 
 
-def test_loader_prefers_career_section(monkeypatch):
+def test_loader_prefers_career_section_over_passive_defaults(monkeypatch, tmp_path):
     monkeypatch.setattr(
         career_store,
         "load_career_profile",
         lambda: JobSeekerProfile(target_titles=["From User Profile"]),
     )
+    # Even with an AGENT_CACHE profile present, the career section wins.
+    (tmp_path / "job_seeker_profile.yaml").write_text("target_titles: [From Cache]\n")
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     profile = load_job_seeker_profile()
     assert profile.target_titles == ["From User Profile"]
+
+
+def test_env_path_beats_career_section(monkeypatch, tmp_path):
+    def boom():
+        raise AssertionError("career store must not be consulted when the env path resolves")
+
+    monkeypatch.setattr(career_store, "load_career_profile", boom)
+    p = tmp_path / "pinned.yaml"
+    p.write_text("target_titles: [Pinned]\n")
+    monkeypatch.setenv("JOB_SEEKER_PROFILE_PATH", str(p))
+    # The explicit operator pin outranks the stored career section.
+    assert load_job_seeker_profile().target_titles == ["Pinned"]
 
 
 def test_loader_falls_back_to_yaml_when_career_absent(monkeypatch, tmp_path):

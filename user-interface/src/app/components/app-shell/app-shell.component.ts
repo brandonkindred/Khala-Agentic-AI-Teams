@@ -6,12 +6,13 @@ import {
   inject,
   QueryList,
   signal,
+  ViewChild,
   ViewChildren,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { filter } from 'rxjs/operators';
-import { MatSidenavModule } from '@angular/material/sidenav';
+import { MatSidenavContent, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -58,6 +59,9 @@ export class AppShellComponent {
   /** All focusable elements in the nav for arrow-key navigation. */
   @ViewChildren('navFocusable') navFocusableElements!: QueryList<ElementRef<HTMLElement>>;
 
+  /** The app's real scroll container (the window never overflows in this layout). */
+  @ViewChild(MatSidenavContent) sidenavContent?: MatSidenavContent;
+
   /** Which nav group is currently revealed in the flyout overlay, if any. */
   readonly activeGroup = signal<NavGroup | null>(null);
   /** Trigger element the flyout should anchor to. */
@@ -72,23 +76,35 @@ export class AppShellComponent {
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
   private lastOrigin: HTMLElement | null = null;
 
+  private previousPath: string | null = null;
+
   constructor() {
-    // Keep keyboard/screen-reader context in step with SPA navigation: after
-    // every route change (except the initial load, where default focus is
-    // correct), move focus to the main content region.
-    let firstNavigation = true;
     this.router.events
       .pipe(
         filter((e): e is NavigationEnd => e instanceof NavigationEnd),
         takeUntilDestroyed(this.destroyRef)
       )
-      .subscribe(() => {
-        if (firstNavigation) {
-          firstNavigation = false;
-          return;
-        }
-        document.getElementById('main-content')?.focus({ preventScroll: true });
-      });
+      .subscribe((event) => this.onNavigationEnd(event));
+  }
+
+  /**
+   * Keep keyboard/screen-reader context in step with SPA navigation: when the
+   * route PATH changes (not on query-param-only navigations, which dashboards
+   * use to mirror in-page state like the active tab — stealing focus there
+   * would break the very control being operated), move focus to the main
+   * content region and start the new view at the top. The window never
+   * scrolls in this layout, so scroll-to-top targets the sidenav content —
+   * the app's actual scroll container.
+   */
+  onNavigationEnd(event: NavigationEnd): void {
+    const path = event.urlAfterRedirects.split(/[?#]/)[0];
+    const pathChanged = this.previousPath !== null && this.previousPath !== path;
+    this.previousPath = path;
+    if (!pathChanged) {
+      return; // initial load, or an in-page query-param/fragment update
+    }
+    document.getElementById('main-content')?.focus({ preventScroll: true });
+    this.sidenavContent?.getElementRef().nativeElement.scrollTo({ top: 0 });
   }
 
   /** Returns true if the given path is the current route (for aria-current).

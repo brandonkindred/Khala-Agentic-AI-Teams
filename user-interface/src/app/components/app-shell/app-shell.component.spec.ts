@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { provideRouter } from '@angular/router';
+import { NavigationEnd, provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
@@ -72,6 +72,34 @@ describe('AppShellComponent', () => {
     vi.advanceTimersByTime(500);
     expect(component.activeGroup()).toBe(firstGroup);
     vi.useRealTimers();
+  });
+
+  describe('route-change focus and scroll', () => {
+    const nav = (url: string) => new NavigationEnd(1, url, url);
+
+    it('focuses main content and scrolls to top only when the path changes', () => {
+      // The shell's own template renders #main-content; assert against it.
+      const main = document.getElementById('main-content') as HTMLElement;
+      expect(main).toBeTruthy();
+      const scrollTo = vi.fn();
+      component.sidenavContent = {
+        getElementRef: () => ({ nativeElement: { scrollTo } }),
+      } as never;
+
+      component.onNavigationEnd(nav('/dashboard')); // initial load — no focus move
+      expect(document.activeElement).not.toBe(main);
+
+      component.onNavigationEnd(nav('/job-matching')); // path change
+      expect(document.activeElement).toBe(main);
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0 });
+
+      (document.activeElement as HTMLElement).blur();
+      scrollTo.mockClear();
+      // Query-param-only navigation (tab mirroring) must not steal focus.
+      component.onNavigationEnd(nav('/job-matching?tab=profile'));
+      expect(document.activeElement).not.toBe(main);
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
   });
 
   describe('flyout keyboard access', () => {

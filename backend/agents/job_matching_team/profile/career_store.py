@@ -23,10 +23,9 @@ from typing import Optional
 from user_profile import (
     DEFAULT_USER_ID,
     ArtifactType,
-    UserProfileUpdate,
     get_profile,
+    merge_preferences,
     record_association_safe,
-    upsert_profile,
 )
 
 from .model import JobSeekerProfile
@@ -50,12 +49,14 @@ def load_career_profile(user_id: str = DEFAULT_USER_ID) -> Optional[JobSeekerPro
     Preconditions:
         * ``user_id`` is a non-empty string.
     Postconditions:
-        * Returns a validated :class:`JobSeekerProfile` when the section exists.
-        * Returns ``None`` when the section is absent OR the store is
-          operationally unavailable (unconfigured/unreachable Postgres) — the
-          caller falls back to the YAML resolution chain.
-        * A *malformed* stored section raises (pydantic ``ValidationError``):
-          that is a broken postcondition of a prior save, never hidden.
+        * Returns a validated :class:`JobSeekerProfile` when the section exists
+          and validates.
+        * Returns ``None`` when the section is absent, the store is
+          operationally unavailable (unconfigured/unreachable Postgres), or the
+          stored section is malformed — the caller falls back to the YAML
+          resolution chain. A malformed section is a broken postcondition of a
+          prior save: it is logged at ERROR (never silently), but must not
+          hard-fail every scan and profile read; re-saving repairs it.
     """
     assert user_id, "user_id must be non-empty"
     from shared_postgres import is_postgres_enabled
@@ -69,7 +70,15 @@ def load_career_profile(user_id: str = DEFAULT_USER_ID) -> Optional[JobSeekerPro
         return None
     if section is None:
         return None
-    return JobSeekerProfile.model_validate(section)
+    try:
+        return JobSeekerProfile.model_validate(section)
+    except Exception:  # noqa: BLE001 - a corrupt stored section must not hard-fail every scan
+        logger.error(
+            "career_store: stored career section is invalid; falling back to the YAML "
+            "chain — re-save the profile via PUT /profile to repair it",
+            exc_info=True,
+        )
+        return None
 
 
 def save_career_profile(
@@ -81,7 +90,9 @@ def save_career_profile(
         * ``user_id`` is a non-empty string; ``profile`` is a validated model.
     Postconditions:
         * ``user_profiles.profile_json[CAREER_SECTION_KEY]`` equals the profile
-          dump; every other ``profile_json`` section is preserved.
+          dump; every other ``profile_json`` section is preserved even under
+          concurrent section writers (the merge is a single atomic server-side
+          ``profile_json || patch`` statement, not a read-modify-write).
         * A ``career`` artifact association exists for the profile (best-effort;
           an association failure is logged, never raised).
         * Returns the saved profile (round-tripped from the persisted mapping).
@@ -98,9 +109,10 @@ def save_career_profile(
             "Career profile storage requires Postgres (set POSTGRES_HOST)."
         )
     try:
-        current = get_profile(user_id).preferences
-        merged = {**current, CAREER_SECTION_KEY: profile.model_dump(mode="json")}
-        saved = upsert_profile(UserProfileUpdate(preferences=merged), user_id)
+        # Ensure the row exists (get_profile lazily creates it), then merge the
+        # career section atomically so other sections can never be clobbered.
+        get_profile(user_id)
+        merged = merge_preferences({CAREER_SECTION_KEY: profile.model_dump(mode="json")}, user_id)
     except Exception as exc:  # noqa: BLE001 - operational write failure -> typed error for the API
         raise CareerProfileUnavailableError(f"Could not persist career profile: {exc}") from exc
     record_association_safe(
@@ -110,4 +122,4 @@ def save_career_profile(
         user_id=user_id,
         label="Career profile",
     )
-    return JobSeekerProfile.model_validate(saved.preferences[CAREER_SECTION_KEY])
+    return JobSeekerProfile.model_validate(merged[CAREER_SECTION_KEY])

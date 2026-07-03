@@ -225,3 +225,25 @@ def test_record_association_safe_skips_empty_inputs(monkeypatch, db):
     up_store.record_association_safe("brand", "", "brand_1")
     up_store.record_association_safe("brand", "branding", "")
     assert called is False
+
+
+def test_merge_preferences_preserves_other_sections(db):
+    up_store.get_profile("default")  # ensure the row exists
+    up_store.merge_preferences({"career": {"target_titles": ["Eng"]}}, "default")
+    merged = up_store.merge_preferences({"other": {"keep": True}}, "default")
+    # Each writer's top-level key lands without touching the other's section.
+    assert merged["career"] == {"target_titles": ["Eng"]}
+    assert merged["other"] == {"keep": True}
+    assert up_store.get_profile("default").preferences == merged
+
+
+def test_merge_preferences_requires_existing_row(db):
+    with pytest.raises(LookupError):
+        up_store.merge_preferences({"career": {}}, "nobody")
+
+
+def test_merge_preferences_rejects_empty_inputs(db):
+    with pytest.raises(AssertionError):
+        up_store.merge_preferences({}, "default")
+    with pytest.raises(AssertionError):
+        up_store.merge_preferences({"career": {}}, "")
