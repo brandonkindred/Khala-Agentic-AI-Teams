@@ -41,4 +41,18 @@ describe('ApiStatusWidgetComponent', () => {
     expect(component.statuses.length).toBeGreaterThan(0);
     expect(component.loading).toBe(false);
   });
+
+  it('summarizes health as an accessible name for keyboard focus', () => {
+    expect(component.summary).toBe('API status: 6 of 6 services healthy');
+    const widget = (fixture.nativeElement as HTMLElement).querySelector('.widget');
+    // Focusable so a keyboard user can reach the tooltip/label.
+    expect(widget?.getAttribute('tabindex')).toBe('0');
+    expect(widget?.getAttribute('aria-label')).toBe(component.summary);
+  });
+
+  it('reports a checking summary before statuses resolve', () => {
+    const fresh = TestBed.createComponent(ApiStatusWidgetComponent);
+    fresh.componentInstance.loading = true;
+    expect(fresh.componentInstance.summary).toBe('API status: checking…');
+  });
 });

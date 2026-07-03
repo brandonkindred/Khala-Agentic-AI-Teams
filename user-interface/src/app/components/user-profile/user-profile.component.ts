@@ -1,4 +1,4 @@
-import { Component, DestroyRef, ElementRef, OnInit, ViewChild, inject } from '@angular/core';
+import { Component, DestroyRef, ElementRef, HostListener, OnInit, ViewChild, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
@@ -7,15 +7,20 @@ import { MatInputModule } from '@angular/material/input';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { RouterLink } from '@angular/router';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import { InitialsAvatarComponent } from '../../shared/avatar/initials-avatar.component';
+import { EmptyStateComponent } from '../../shared/empty-state/empty-state.component';
 import {
   AVATAR_COLOR_OPTIONS,
   DEFAULT_AVATAR_COLOR,
   resolveAvatarColor,
 } from '../../shared/avatar/avatar-colors';
 import { UserProfileApiService } from '../../services/user-profile-api.service';
+import { UserProfileStore } from '../../services/user-profile-store.service';
+import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import type { Association, ProfileIntegration } from '../../models/user-profile.model';
 
 /** A display group of associations sharing one artifact type. */
@@ -52,21 +57,24 @@ const ARTIFACT_GROUPS: { type: string; label: string; icon: string }[] = [
     MatButtonModule,
     MatIconModule,
     MatProgressSpinnerModule,
+    MatTooltipModule,
     DashboardShellComponent,
     InitialsAvatarComponent,
+    EmptyStateComponent,
   ],
   templateUrl: './user-profile.component.html',
   styleUrl: './user-profile.component.scss',
 })
-export class UserProfileComponent implements OnInit {
+export class UserProfileComponent implements OnInit, HasUnsavedChanges {
   private readonly api = inject(UserProfileApiService);
   private readonly fb = inject(FormBuilder);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly snackBar = inject(MatSnackBar);
+  private readonly profileStore = inject(UserProfileStore);
 
   loading = false;
   saving = false;
   error: string | null = null;
-  success: string | null = null;
   /**
    * True once at least one load has succeeded. Saving is blocked until then:
    * submitting the constructor-default form after a failed load would blank
@@ -105,11 +113,31 @@ export class UserProfileComponent implements OnInit {
   }
 
   /**
+   * Whether leaving the page would discard edits (drives the CanDeactivate
+   * guard and the beforeunload prompt).
+   *
+   * Preconditions: none.
+   * Postconditions: true iff the form has unsaved edits and no save is in
+   * flight; false otherwise.
+   */
+  hasUnsavedChanges(): boolean {
+    return this.form.dirty && !this.saving;
+  }
+
+  /** Native browser prompt when the tab/window closes with unsaved edits. */
+  @HostListener('window:beforeunload', ['$event'])
+  onBeforeUnload(event: BeforeUnloadEvent): void {
+    if (this.hasUnsavedChanges()) {
+      event.preventDefault();
+      event.returnValue = ''; // required by some browsers to trigger the prompt
+    }
+  }
+
+  /**
    * Load the profile, its associations, and integration status in one request.
    *
    * Preconditions: none — a no-op while a previous load is still in flight, so
-   * overlapping requests can't race to set the view. Clears any prior `success`
-   * banner so a stale "Profile saved." message can't linger across a reload.
+   * overlapping requests can't race to set the view.
    * Postconditions: on success `groups`/`totalAssociations`/`integrations`
    * reflect the response, and `form` is patched ONLY while pristine — a dirty
    * form keeps the user's unsaved edits (e.g. a "Refresh linked work" click
@@ -124,7 +152,6 @@ export class UserProfileComponent implements OnInit {
     if (this.loading) return; // guard against overlapping loads (e.g. a refresh re-trigger)
     this.loading = true;
     this.error = null;
-    this.success = null; // drop any stale "Profile saved." banner from a prior save
     this.api
       .getOverview()
       .pipe(takeUntilDestroyed(this.destroyRef))
@@ -161,6 +188,8 @@ export class UserProfileComponent implements OnInit {
             avatar_color: resolveAvatarColor(profile.preferences?.['avatar_color']).key,
           });
         }
+        // Keep the shared identity (footer avatar) in sync with the server.
+        this.profileStore.set(profile.display_name ?? '', profile.preferences?.['avatar_color']);
         this.groups = this.groupAssociations(associations);
         this.totalAssociations = this.groups.reduce((sum, g) => sum + g.items.length, 0);
         this.integrations = integrations;
@@ -202,9 +231,9 @@ export class UserProfileComponent implements OnInit {
    * a no-op (marking the form touched) when `form.invalid` (e.g. a malformed
    * email), and a no-op while a previous save is still in flight, so a
    * double-submit can't send duplicate updates.
-   * Postconditions: when the form is valid and loaded, exactly one of `success`
-   * ('Profile saved.') or `error` is set after the request settles, and
-   * `saving` is false.
+   * Postconditions: when the form is valid and loaded, on success a transient
+   * "Profile saved." snackbar is shown and the form is marked pristine; on
+   * failure the persistent `error` banner is set. `saving` is false either way.
    */
   save(): void {
     if (!this.profileLoaded) return; // never overwrite the server with unloaded defaults
@@ -215,7 +244,6 @@ export class UserProfileComponent implements OnInit {
     if (this.saving) return; // guard against a double-submit before the button disables
     this.saving = true;
     this.error = null;
-    this.success = null;
     const value = this.form.getRawValue();
     // Send avatar_color only when the user picked a swatch this session: the
     // backend merges preferences key-by-key, so omitting the field leaves the
@@ -236,8 +264,12 @@ export class UserProfileComponent implements OnInit {
       .subscribe({
         next: () => {
           this.saving = false;
-          this.success = 'Profile saved.';
-          // The form now matches the persisted state — clear the dirty flag so an
+          // Transient confirmation (matches the app's snackbar convention for
+          // successful actions); errors stay as persistent banners.
+          this.snackBar.open('Profile saved.', 'Dismiss', { duration: 3000 });
+          // Reflect the saved identity in the shared store (footer avatar).
+          this.profileStore.set(value.display_name ?? '', value.avatar_color);
+          // The form now matches the persisted state — clear the dirty flag so the
           // unsaved-changes guard doesn't prompt after a successful save.
           this.form.markAsPristine();
         },

@@ -5,8 +5,8 @@
     class="sidenav"
     fixedInViewport
     [attr.aria-label]="'Main navigation'"
-    [mode]="'side'"
-    [opened]="true"
+    [mode]="isHandset() ? 'over' : 'side'"
+    [opened]="!isHandset()"
   >
     <div class="sidenav-header">
       <div class="brand-logo">
@@ -32,15 +32,26 @@
           <h2 class="visually-hidden">Favorites</h2>
           <div class="nav-group-label">Favorites</div>
           @for (item of navState.favoriteItems(); track item.id) {
-            <a #navFocusable
-               [routerLink]="item.route"
-               routerLinkActive="active"
-               [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
-               class="nav-link nav-link-favorite"
-               [attr.aria-current]="isActive(item.route) ? 'page' : null">
-              <mat-icon>star</mat-icon>
-              <span>{{ item.label }}</span>
-            </a>
+            <div class="nav-link-row">
+              <a #navFocusable
+                 [routerLink]="item.route"
+                 routerLinkActive="active"
+                 [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
+                 class="nav-link nav-link-favorite"
+                 [attr.aria-current]="isActive(item.route) ? 'page' : null">
+                <mat-icon>star</mat-icon>
+                <span>{{ item.label }}</span>
+              </a>
+              <button type="button"
+                      mat-icon-button
+                      class="nav-link-star"
+                      [attr.aria-label]="favoriteLabel(item)"
+                      [attr.aria-pressed]="navState.isFavorite(item.id)"
+                      [matTooltip]="favoriteLabel(item)"
+                      (click)="navState.toggleFavorite(item.id)">
+                <mat-icon>{{ navState.isFavorite(item.id) ? 'star' : 'star_border' }}</mat-icon>
+              </button>
+            </div>
           }
         </div>
       }
@@ -53,7 +64,6 @@
                 class="nav-group-trigger"
                 [class.active]="isGroupActive(group)"
                 [attr.aria-expanded]="activeGroup()?.key === group.key"
-                aria-haspopup="menu"
                 [attr.aria-controls]="'nav-flyout-' + group.key"
                 (mouseenter)="openFlyout(group, trigger)"
                 (focus)="openFlyout(group, trigger)"
@@ -77,9 +87,11 @@
         [cdkConnectedOverlayHasBackdrop]="false"
         (overlayOutsideClick)="closeFlyout()">
         @if (activeGroup(); as group) {
+          <!-- Disclosure pattern: a labelled region of links revealed by the
+               group trigger's aria-expanded — not an ARIA menu (these are
+               navigation links, and focus is not trapped/roved inside). -->
           <div class="nav-flyout"
                [id]="'nav-flyout-' + group.key"
-               role="menu"
                tabindex="-1"
                [attr.aria-label]="group.label"
                (mouseenter)="cancelClose()"
@@ -87,17 +99,27 @@
                (keydown.escape)="closeFlyout(true)">
             <div class="nav-flyout-title">{{ group.label }}</div>
             @for (item of group.items; track trackByItemId($index, item)) {
-              <a [routerLink]="item.route"
-                 routerLinkActive="active"
-                 [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
-                 class="nav-flyout-link"
-                 [class.nav-flyout-link-nested]="item.nested"
-                 role="menuitem"
-                 [attr.aria-current]="isActive(item.route) ? 'page' : null"
-                 (click)="closeFlyout()">
-                <mat-icon>{{ item.icon }}</mat-icon>
-                <span>{{ item.label }}</span>
-              </a>
+              <div class="nav-link-row nav-flyout-row">
+                <a [routerLink]="item.route"
+                   routerLinkActive="active"
+                   [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
+                   class="nav-flyout-link"
+                   [class.nav-flyout-link-nested]="item.nested"
+                   [attr.aria-current]="isActive(item.route) ? 'page' : null"
+                   (click)="closeFlyout()">
+                  <mat-icon>{{ item.icon }}</mat-icon>
+                  <span>{{ item.label }}</span>
+                </a>
+                <button type="button"
+                        mat-icon-button
+                        class="nav-link-star"
+                        [attr.aria-label]="favoriteLabel(item)"
+                        [attr.aria-pressed]="navState.isFavorite(item.id)"
+                        [matTooltip]="favoriteLabel(item)"
+                        (click)="navState.toggleFavorite(item.id)">
+                  <mat-icon>{{ navState.isFavorite(item.id) ? 'star' : 'star_border' }}</mat-icon>
+                </button>
+              </div>
             }
           </div>
         }
@@ -115,7 +137,15 @@
           [matTooltip]="profileNavItem.label"
           [attr.aria-current]="isActive(profileNavItem.route) ? 'page' : null"
         >
-          <mat-icon aria-hidden="true">{{ profileNavItem.icon }}</mat-icon>
+          @if (profileStore.hasIdentity()) {
+            <app-initials-avatar
+              [name]="profileStore.displayName()"
+              [colorKey]="profileStore.avatarColorKey()"
+              [size]="28"
+            />
+          } @else {
+            <mat-icon aria-hidden="true">{{ profileNavItem.icon }}</mat-icon>
+          }
         </a>
         <app-api-status-widget />
       </div>
@@ -123,7 +153,7 @@
   </mat-sidenav>
 
   <mat-sidenav-content>
-    <mat-toolbar class="main-toolbar">
+    <mat-toolbar class="main-toolbar" role="banner">
       <button mat-icon-button (click)="drawer.toggle()" [attr.aria-label]="'Toggle navigation menu'" class="menu-button">
         <mat-icon>menu</mat-icon>
       </button>

@@ -37,6 +37,17 @@ export class ApiStatusWidgetComponent implements OnInit {
   statuses: ApiStatus[] = [];
   loading = true;
 
+  /**
+   * One-line status summary used as the widget's accessible name and tooltip,
+   * so a keyboard user who focuses it hears the health at a glance (the
+   * per-icon tooltips are mouse-only).
+   */
+  get summary(): string {
+    if (this.loading) return 'API status: checking…';
+    const healthy = this.statuses.filter((s) => s.ok).length;
+    return `API status: ${healthy} of ${this.statuses.length} services healthy`;
+  }
+
   ngOnInit(): void {
     forkJoin({
       blogging: this.blogging.health().pipe(

@@ -1,22 +1,41 @@
-import { Component, ElementRef, HostListener, inject, QueryList, signal, ViewChildren } from '@angular/core';
-import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
-import { MatSidenavModule } from '@angular/material/sidenav';
+import {
+  Component,
+  ElementRef,
+  HostListener,
+  OnInit,
+  QueryList,
+  ViewChild,
+  ViewChildren,
+  inject,
+  signal,
+} from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
+import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { MatSidenav, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { BreakpointObserver } from '@angular/cdk/layout';
 import { OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
+import { filter, map } from 'rxjs/operators';
 import { ApiStatusWidgetComponent } from '../api-status-widget/api-status-widget.component';
 import { BreadcrumbComponent } from '../../shared/breadcrumb/breadcrumb.component';
+import { InitialsAvatarComponent } from '../../shared/avatar/initials-avatar.component';
 import { NavStateService } from '../../services/nav-state.service';
+import { UserProfileStore } from '../../services/user-profile-store.service';
 import { ALL_NAV_ITEMS, NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from '../../models/navigation.model';
+
+/** Viewport below which the sidebar collapses into an overlay drawer. */
+const HANDSET_QUERY = '(max-width: 959.98px)';
 
 /**
  * Application shell with sidebar navigation and main content area.
  * Navigation is data-driven from NAV_GROUPS with flyout panels on hover/focus
- * and favorites. The sidenav footer pins a profile icon linking to
- * /user-profile; it carries the #navFocusable ref, so it participates in the
- * arrow-key nav as the last focusable element (DOM order).
+ * and favorites. On handset-width viewports the rail becomes an overlay drawer
+ * that closes on navigation. The sidenav footer shows the user's initials
+ * avatar (linking to /user-profile); it carries the #navFocusable ref, so it
+ * participates in the arrow-key nav as the last focusable element (DOM order).
  */
 @Component({
   selector: 'app-app-shell',
@@ -33,14 +52,45 @@ import { ALL_NAV_ITEMS, NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from 
     OverlayModule,
     ApiStatusWidgetComponent,
     BreadcrumbComponent,
+    InitialsAvatarComponent,
   ],
   templateUrl: './app-shell.component.html',
   styleUrl: './app-shell.component.scss',
 })
-export class AppShellComponent {
+export class AppShellComponent implements OnInit {
   private readonly router = inject(Router);
+  private readonly breakpoints = inject(BreakpointObserver);
   readonly navState = inject(NavStateService);
+  readonly profileStore = inject(UserProfileStore);
   readonly navGroups = NAV_GROUPS;
+
+  /** True on handset-width viewports (sidebar becomes an overlay drawer). */
+  readonly isHandset = toSignal(
+    this.breakpoints.observe(HANDSET_QUERY).pipe(map((state) => state.matches)),
+    { initialValue: false },
+  );
+
+  /** The sidebar drawer, closed on navigation while in handset overlay mode. */
+  @ViewChild('drawer') private drawer?: MatSidenav;
+
+  ngOnInit(): void {
+    // Populate the footer avatar's identity once the shell mounts.
+    this.profileStore.refresh();
+    // In overlay mode, close the drawer after navigating so it doesn't cover
+    // the page the user just chose.
+    this.router.events
+      .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
+      .subscribe(() => {
+        if (this.isHandset()) this.drawer?.close();
+      });
+  }
+
+  /** aria-label for a favorite toggle, phrased by current pinned state. */
+  favoriteLabel(item: NavItem): string {
+    return this.navState.isFavorite(item.id)
+      ? `Remove ${item.label} from favorites`
+      : `Add ${item.label} to favorites`;
+  }
 
   /**
    * The footer profile link's route/icon/label come from the nav model so the

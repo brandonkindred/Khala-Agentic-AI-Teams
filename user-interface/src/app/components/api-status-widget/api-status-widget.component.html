@@ -1,5 +1,5 @@
-<div class="widget" role="status" [attr.aria-label]="'API status'">
-  <span class="label">APIs:</span>
+<div class="widget" role="status" tabindex="0" [attr.aria-label]="summary" [matTooltip]="summary">
+  <span class="label" aria-hidden="true">APIs:</span>
   @for (s of statuses; track s.name) {
     <span
       class="status"

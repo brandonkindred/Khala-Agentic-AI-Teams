@@ -109,4 +109,31 @@ describe('AppShellComponent', () => {
     expect(component.activeGroup()).toBe(firstGroup);
     vi.useRealTimers();
   });
+
+  it('phrases the favorite toggle label by pinned state', () => {
+    const item = component.navGroups[0].items[0];
+    expect(component.favoriteLabel(item)).toBe(`Add ${item.label} to favorites`);
+    component.navState.toggleFavorite(item.id);
+    expect(component.favoriteLabel(item)).toBe(`Remove ${item.label} from favorites`);
+    component.navState.toggleFavorite(item.id); // reset shared localStorage state
+  });
+
+  it('renders the footer as a generic icon until an identity is known', () => {
+    // Store starts with no name (getProfile request is not flushed here).
+    expect(component.profileStore.hasIdentity()).toBe(false);
+    const link = (fixture.nativeElement as HTMLElement).querySelector('.footer-profile-link');
+    expect(link?.querySelector('app-initials-avatar')).toBeNull();
+    expect(link?.querySelector('mat-icon')).toBeTruthy();
+  });
+
+  it('shows the initials avatar in the footer once an identity is known', () => {
+    component.profileStore.set('Grace Hopper', 'blue');
+    fixture.detectChanges();
+    const link = (fixture.nativeElement as HTMLElement).querySelector('.footer-profile-link');
+    expect(link?.querySelector('app-initials-avatar')).toBeTruthy();
+  });
+
+  it('defaults to desktop (non-handset) layout', () => {
+    expect(component.isHandset()).toBe(false);
+  });
 });

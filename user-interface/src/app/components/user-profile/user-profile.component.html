@@ -24,14 +24,10 @@
         }
       </div>
     }
-    @if (success) {
-      <div class="up-banner up-success" role="status">{{ success }}</div>
-    }
-
     <!-- Editable profile -->
     <mat-card class="up-card">
       <mat-card-header>
-        <mat-card-title>Profile details</mat-card-title>
+        <h2 mat-card-title class="up-card-title">Profile details</h2>
       </mat-card-header>
       <mat-card-content>
         <form [formGroup]="form" (ngSubmit)="save()" class="up-form">
@@ -53,6 +49,7 @@
                     [attr.aria-checked]="checked"
                     [class.selected]="checked"
                     [attr.aria-label]="option.label"
+                    [matTooltip]="option.label"
                     [tabindex]="checked ? 0 : -1"
                     [style.backgroundColor]="option.fill"
                     (click)="selectAvatarColor(option.key)"
@@ -70,11 +67,13 @@
           <mat-form-field appearance="outline">
             <mat-label>Display name</mat-label>
             <input #displayNameInput matInput formControlName="display_name" autocomplete="name" />
+            <mat-hint>Shown on your avatar and wherever your profile appears.</mat-hint>
           </mat-form-field>
 
           <mat-form-field appearance="outline">
             <mat-label>Email</mat-label>
             <input matInput formControlName="email" type="email" autocomplete="email" />
+            <mat-hint>Optional.</mat-hint>
             @if (form.controls.email.touched && form.controls.email.errors?.['email']) {
               <mat-error>Enter a valid email address.</mat-error>
             }
@@ -92,8 +91,13 @@
               type="submit"
               [disabled]="saving || !profileLoaded"
             >
-              <mat-icon>save</mat-icon>
-              {{ saving ? 'Saving…' : 'Save profile' }}
+              @if (saving) {
+                <mat-spinner class="up-save-spinner" diameter="18" aria-hidden="true" />
+                <span>Saving…</span>
+              } @else {
+                <mat-icon>save</mat-icon>
+                <span>Save profile</span>
+              }
             </button>
           </div>
         </form>
@@ -103,7 +107,7 @@
     <!-- Linked artifacts -->
     <mat-card class="up-card">
       <mat-card-header class="up-card-header">
-        <mat-card-title>Linked work ({{ totalAssociations }})</mat-card-title>
+        <h2 mat-card-title class="up-card-title">Linked work ({{ totalAssociations }})</h2>
         <button
           mat-icon-button
           type="button"
@@ -111,16 +115,18 @@
           (click)="load()"
           [disabled]="loading"
           aria-label="Refresh linked work"
+          matTooltip="Refresh linked work"
         >
           <mat-icon>refresh</mat-icon>
         </button>
       </mat-card-header>
       <mat-card-content>
         @if (totalAssociations === 0) {
-          <p class="up-empty">
-            Nothing linked yet. Create a brand, blog post, project, or agentic team and it will
-            appear here.
-          </p>
+          <app-empty-state
+            icon="hub"
+            title="Nothing linked yet"
+            description="Create a brand, blog post, project, or agentic team and it will appear here."
+          />
         } @else {
           @for (group of groups; track group.type) {
             <section class="up-group">
@@ -145,11 +151,15 @@
     <!-- Integrations -->
     <mat-card class="up-card">
       <mat-card-header>
-        <mat-card-title>Integrations</mat-card-title>
+        <h2 mat-card-title class="up-card-title">Integrations</h2>
       </mat-card-header>
       <mat-card-content>
         @if (integrations.length === 0) {
-          <p class="up-empty">No integrations reported.</p>
+          <app-empty-state
+            icon="extension"
+            title="No integrations connected"
+            description="Connect Slack, GitHub, and more to see their status here."
+          />
         } @else {
           <ul class="up-list">
             @for (integration of integrations; track integration.id) {
@@ -169,7 +179,10 @@
             }
           </ul>
         }
-        <a routerLink="/integrations" class="up-link">Manage integrations</a>
+        <a mat-stroked-button routerLink="/integrations" class="up-link">
+          <mat-icon>tune</mat-icon>
+          Manage integrations
+        </a>
       </mat-card-content>
     </mat-card>
   }

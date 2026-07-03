@@ -491,6 +491,16 @@
   border-radius: 0 var(--kh-radius-md) var(--kh-radius-md) 0;
 }
 
+// Flyout item row: link fills the width, favorite star sits at the end.
+.nav-flyout-row {
+  gap: 2px;
+
+  .nav-flyout-link {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
 // ============================================================================
 // Scrollbar
 // ============================================================================

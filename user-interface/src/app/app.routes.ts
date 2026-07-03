@@ -1,6 +1,7 @@
 import { Routes } from '@angular/router';
 import { AppShellComponent } from './components/app-shell/app-shell.component';
 import { llmConfiguredGuard } from './core/llm-configured.guard';
+import { unsavedChangesGuard } from './core/unsaved-changes.guard';
 
 // All feature routes are lazily loaded so the initial bundle ships only the app
 // shell; each dashboard (and its Angular Material deps) is fetched on first
@@ -181,6 +182,7 @@ export const routes: Routes = [
         path: 'user-profile',
         loadComponent: () =>
           import('./components/user-profile/user-profile.component').then((m) => m.UserProfileComponent),
+        canDeactivate: [unsavedChangesGuard],
         data: { breadcrumb: 'User Profile', title: 'User Profile' },
       },
       {

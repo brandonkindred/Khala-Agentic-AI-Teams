@@ -13,7 +13,7 @@
   border-radius: 6px;
   padding: 0.75rem 1rem;
   margin-bottom: 1rem;
-  font-size: 0.9rem;
+  font-size: var(--kh-text-base);
 }
 
 .up-retry {
@@ -29,13 +29,19 @@
   color: var(--kh-error);
 }
 
-.up-success {
-  background: var(--kh-success-subtle);
-  color: var(--kh-success);
-}
-
 .up-card {
   margin-bottom: 1.25rem;
+}
+
+// mat-card-title styling on a real <h2> heading — reset UA heading margins so
+// the card header lays out as before while keeping the element in the outline.
+.up-card-title {
+  margin: 0;
+}
+
+// Center the button spinner with its label.
+.up-save-spinner {
+  display: inline-block;
 }
 
 // Lay out the card title and its refresh action on one row.
@@ -72,7 +78,7 @@
 
 .up-identity-hint {
   color: var(--kh-text-muted);
-  font-size: 0.85rem;
+  font-size: var(--kh-text-sm);
 }
 
 .up-swatches {
@@ -128,7 +134,7 @@
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  font-size: 1rem;
+  font-size: var(--kh-text-md);
   margin: 0 0 0.5rem;
 }
 
@@ -152,13 +158,13 @@
 
 .up-item-meta {
   color: var(--kh-text-secondary);
-  font-size: 0.85rem;
+  font-size: var(--kh-text-sm);
 }
 
 .up-pill {
   border-radius: 999px;
   padding: 0.1rem 0.6rem;
-  font-size: 0.75rem;
+  font-size: var(--kh-text-xs);
   font-weight: 600;
 }
 
@@ -172,11 +178,6 @@
   color: var(--kh-text-tertiary);
 }
 
-.up-empty {
-  color: var(--kh-text-muted);
-}
-
 .up-link {
-  display: inline-block;
   margin-top: 0.75rem;
 }

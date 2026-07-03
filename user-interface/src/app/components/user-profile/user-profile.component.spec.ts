@@ -3,6 +3,7 @@ import { of, throwError } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { vi } from 'vitest';
 import { UserProfileApiService } from '../../services/user-profile-api.service';
 import { UserProfileComponent } from './user-profile.component';
@@ -32,7 +33,9 @@ describe('UserProfileComponent', () => {
   let apiSpy: {
     getOverview: ReturnType<typeof vi.fn>;
     updateProfile: ReturnType<typeof vi.fn>;
+    getProfile: ReturnType<typeof vi.fn>;
   };
+  let snackBar: { open: ReturnType<typeof vi.fn> };
 
   async function setup(): Promise<void> {
     await TestBed.configureTestingModule({
@@ -41,6 +44,7 @@ describe('UserProfileComponent', () => {
         provideHttpClient(),
         provideRouter([]),
         { provide: UserProfileApiService, useValue: apiSpy },
+        { provide: MatSnackBar, useValue: snackBar },
       ],
     }).compileComponents();
 
@@ -53,7 +57,9 @@ describe('UserProfileComponent', () => {
     apiSpy = {
       getOverview: vi.fn().mockReturnValue(of(OVERVIEW)),
       updateProfile: vi.fn().mockReturnValue(of(PROFILE)),
+      getProfile: vi.fn().mockReturnValue(of(PROFILE)),
     };
+    snackBar = { open: vi.fn() };
   });
 
   afterEach(() => {
@@ -109,12 +115,14 @@ describe('UserProfileComponent', () => {
     expect(component.loading).toBe(false);
   });
 
-  it('should render the empty integrations message when none are reported', async () => {
+  it('should render the empty integrations state when none are reported', async () => {
     apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, integrations: [] }));
     await setup();
     expect(component.integrations).toEqual([]);
     const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
-    expect(text).toContain('No integrations reported.');
+    expect(text).toContain('No integrations connected');
+    // Uses the shared empty-state component, not an inline paragraph.
+    expect((fixture.nativeElement as HTMLElement).querySelector('app-empty-state')).toBeTruthy();
   });
 
   it('should fall back to artifact_id when an association has no label', async () => {
@@ -149,14 +157,7 @@ describe('UserProfileComponent', () => {
     expect(component.loading).toBe(false);
   });
 
-  it('should clear a stale success banner on reload', async () => {
-    await setup();
-    component.success = 'Profile saved.';
-    component.load();
-    expect(component.success).toBeNull();
-  });
-
-  it('should save valid profile edits', async () => {
+  it('should save valid profile edits and confirm via a snackbar', async () => {
     await setup();
     component.form.patchValue({ display_name: 'New Name' });
     component.form.markAsDirty(); // simulate a user edit dirtying the form
@@ -165,9 +166,34 @@ describe('UserProfileComponent', () => {
     expect(apiSpy.updateProfile).toHaveBeenCalledWith(
       expect.objectContaining({ display_name: 'New Name' }),
     );
-    expect(component.success).toBe('Profile saved.');
+    // Transient confirmation, not a persistent banner.
+    expect(snackBar.open).toHaveBeenCalledWith('Profile saved.', 'Dismiss', { duration: 3000 });
     // The form matches the persisted state after a successful save.
     expect(component.form.pristine).toBe(true);
+  });
+
+  it('should report unsaved changes only while the form is dirty and not saving', async () => {
+    await setup();
+    expect(component.hasUnsavedChanges()).toBe(false);
+    component.form.patchValue({ bio: 'edit' });
+    component.form.markAsDirty();
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.save(); // success path marks pristine
+    expect(component.hasUnsavedChanges()).toBe(false);
+  });
+
+  it('should prompt the browser on unload while there are unsaved changes', async () => {
+    await setup();
+    component.form.patchValue({ bio: 'edit' });
+    component.form.markAsDirty();
+    const event = { preventDefault: vi.fn(), returnValue: undefined } as unknown as BeforeUnloadEvent;
+    component.onBeforeUnload(event);
+    expect(event.preventDefault).toHaveBeenCalled();
+    // A pristine form leaves the event untouched.
+    component.form.markAsPristine();
+    const clean = { preventDefault: vi.fn(), returnValue: undefined } as unknown as BeforeUnloadEvent;
+    component.onBeforeUnload(clean);
+    expect(clean.preventDefault).not.toHaveBeenCalled();
   });
 
   it('should not save when the email is invalid', async () => {
