@@ -131,9 +131,13 @@ def test_upsert_profile_preferences_roundtrip(db):
 
 
 def test_upsert_profile_preferences_merge_preserves_other_sections(db):
-    """A profile-page PUT must never clobber a team-owned section (e.g. career)."""
-    up_store.get_profile("default")
-    up_store.merge_preferences({"career": {"target_titles": ["Eng"]}}, "default")
+    """A profile-page PUT must never clobber a team-owned section (e.g. career).
+
+    upsert_profile applies ``preferences`` as an atomic shallow merge, so a
+    section written by one caller (here ``career``) survives another caller's
+    update to a different key.
+    """
+    up_store.upsert_profile(UserProfileUpdate(preferences={"career": {"target_titles": ["Eng"]}}))
 
     updated = up_store.upsert_profile(UserProfileUpdate(preferences={"theme": "dark"}))
     assert updated.preferences["theme"] == "dark"
@@ -240,35 +244,3 @@ def test_record_association_safe_skips_empty_inputs(monkeypatch, db):
     up_store.record_association_safe("brand", "", "brand_1")
     up_store.record_association_safe("brand", "branding", "")
     assert called is False
-
-
-def test_merge_preferences_preserves_other_sections(db):
-    up_store.get_profile("default")  # ensure the row exists
-    up_store.merge_preferences({"career": {"target_titles": ["Eng"]}}, "default")
-    merged = up_store.merge_preferences({"other": {"keep": True}}, "default")
-    # Each writer's top-level key lands without touching the other's section.
-    assert merged["career"] == {"target_titles": ["Eng"]}
-    assert merged["other"] == {"keep": True}
-    assert up_store.get_profile("default").preferences == merged
-
-
-def test_merge_preferences_advances_updated_at(db):
-    up_store.get_profile("default")
-    before = db["profiles"]["default"]["updated_at"]
-    up_store.merge_preferences({"career": {"target_titles": ["Eng"]}}, "default")
-    after = db["profiles"]["default"]["updated_at"]
-    # A section save is a profile update — "last updated" must move.
-    assert after != before
-    assert after >= before  # ISO-8601 strings compare chronologically
-
-
-def test_merge_preferences_requires_existing_row(db):
-    with pytest.raises(LookupError):
-        up_store.merge_preferences({"career": {}}, "nobody")
-
-
-def test_merge_preferences_rejects_empty_inputs(db):
-    with pytest.raises(AssertionError):
-        up_store.merge_preferences({}, "default")
-    with pytest.raises(AssertionError):
-        up_store.merge_preferences({"career": {}}, "")

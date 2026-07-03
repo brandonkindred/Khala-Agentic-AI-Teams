@@ -69,6 +69,23 @@ export interface SubScores {
   skills_fit: number;
 }
 
+/** The six ranking dimensions in display order, keyed to {@link SubScores} /
+ *  {@link RankingWeights}, with a short label (fit-breakdown meter) and a long
+ *  label (weight-slider row). Single source of truth so the card and the
+ *  profile form can't drift on wording or order. */
+export const SCORE_DIMENSIONS: readonly {
+  key: keyof SubScores;
+  short: string;
+  long: string;
+}[] = [
+  { key: 'title_fit', short: 'Title', long: 'Title fit' },
+  { key: 'seniority_fit', short: 'Seniority', long: 'Seniority fit' },
+  { key: 'location_fit', short: 'Location', long: 'Location fit' },
+  { key: 'comp_fit', short: 'Compensation', long: 'Comp fit' },
+  { key: 'company_fit', short: 'Company', long: 'Company fit' },
+  { key: 'skills_fit', short: 'Skills', long: 'Skills fit' },
+];
+
 /** A posting plus its computed score, recommendation, and rationale. */
 export interface RankedJob {
   posting: JobPosting;
@@ -134,6 +151,17 @@ export interface JobMatchRunDetail extends JobMatchRunSummary {
 
 /** Exclusive user disposition of a listing; 'new' is the untriaged default. */
 export type ListingStatus = 'new' | 'favorite' | 'not_interested' | 'poor_fit' | 'archived';
+
+/**
+ * Statuses that remove a listing from the Active inbox — a single source of
+ * truth shared by the card's "triaged away" grouping and the panel's active
+ * filter/count, so the two can't drift.
+ */
+export const TRIAGED_AWAY_STATUSES: readonly ListingStatus[] = [
+  'not_interested',
+  'poor_fit',
+  'archived',
+];
 
 /**
  * GET /listings filter: every ListingStatus plus 'active' (everything except

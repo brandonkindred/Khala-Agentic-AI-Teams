@@ -112,21 +112,6 @@ class _FakeCursor:
                 self.rowcount = 1
             return
 
-        if norm.startswith("update user_profiles set profile_json = profile_json ||"):
-            # merge_preferences: atomic shallow JSONB merge + updated_at touch
-            # ... RETURNING.
-            patch, updated_at, user_id = params
-            row = self._db["profiles"].get(user_id)
-            if row is None:
-                self._one = None
-                self.rowcount = 0
-                return
-            row["profile_json"] = {**row["profile_json"], **_unwrap_json(patch)}
-            row["updated_at"] = updated_at
-            self._one = {"profile_json": dict(row["profile_json"])}
-            self.rowcount = 1
-            return
-
         # -- user_profile_associations ------------------------------------
         if norm.startswith("insert into user_profile_associations"):
             assoc_id, user_id, atype, team, artifact_id, label, role, created_at = params

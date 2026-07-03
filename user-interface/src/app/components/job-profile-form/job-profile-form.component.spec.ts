@@ -210,10 +210,12 @@ describe('JobProfileFormComponent', () => {
 
   it('computes each dimension\'s share of the final score from normalized weights', async () => {
     await setup();
-    // Weights from makeProfile: 0.3/0.1/0.15/0.15/0.1/0.2 → total 1.0.
+    // Shares are memoized (computed once on load / slider commit). Weights from
+    // makeProfile: 0.3/0.1/0.15/0.15/0.1/0.2 → total 1.0.
     expect(component.weightShare('title_fit')).toBe(30);
     expect(component.weightShare('skills_fit')).toBe(20);
-    // All-zero weights fall back to a uniform split (mirrors the ranker).
+    // All-zero weights fall back to a uniform split (mirrors the ranker). A
+    // slider commit is what recomputes — announceWeights() models that event.
     component.form.patchValue({
       title_fit: 0,
       seniority_fit: 0,
@@ -222,6 +224,7 @@ describe('JobProfileFormComponent', () => {
       company_fit: 0,
       skills_fit: 0,
     });
+    component.announceWeights();
     expect(component.weightShare('comp_fit')).toBe(17);
   });
 

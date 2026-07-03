@@ -28,6 +28,9 @@ import {
   type ConfirmDialogData,
 } from '../../shared/confirm-dialog/confirm-dialog.component';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
+import { deferFocus } from '../../shared/defer-focus';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
+import { LatestOnly } from '../../shared/latest-only';
 import type {
   JobMatchRequest,
   JobMatchRunDetail,
@@ -92,11 +95,11 @@ export class JobScanPanelComponent implements OnInit {
   expandedRuns = new Map<string, JobMatchRunDetail | 'loading'>();
 
   /**
-   * Monotonic token per jobs-list refresh. Refreshes fire from several sites
-   * (submit, completion, cancel, delete); without ordering, a slow early GET
-   * arriving after a later one would revert a terminal job to "running".
+   * "Latest refresh wins" guard for the jobs list. Refreshes fire from several
+   * sites (submit, completion, cancel, delete); without ordering, a slow early
+   * GET arriving after a later one would revert a terminal job to "running".
    */
-  private scanJobsSeq = 0;
+  private readonly scanJobsGuard = new LatestOnly();
 
   readonly form = this.fb.nonNullable.group({
     max_queries: [6, [Validators.required, Validators.min(1), Validators.max(25)]],
@@ -171,7 +174,7 @@ export class JobScanPanelComponent implements OnInit {
         error: (err) => {
           this.scanning = false;
           this.scanStatus = 'The scan failed.';
-          this.scanError = err?.error?.detail ?? err?.message ?? 'The scan failed.';
+          this.scanError = extractErrorDetail(err, 'The scan failed.');
           this.refreshScanJobs();
         },
       });
@@ -194,13 +197,13 @@ export class JobScanPanelComponent implements OnInit {
   }
 
   refreshScanJobs(): void {
-    const seq = ++this.scanJobsSeq;
+    const token = this.scanJobsGuard.next();
     this.api
       .listScanJobs()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
-          if (seq === this.scanJobsSeq) {
+          if (this.scanJobsGuard.isCurrent(token)) {
             this.scanJobs = res.jobs;
           }
         },
@@ -249,15 +252,12 @@ export class JobScanPanelComponent implements OnInit {
    * named row's action button, or the "Scan jobs" heading when it's gone.
    */
   private restoreJobFocus(jobId: string): void {
-    setTimeout(() => {
-      const root = this.host.nativeElement;
-      const row = root.querySelector<HTMLElement>(`[data-job-id="${jobId}"] button`);
-      if (row) {
-        row.focus();
-        return;
-      }
-      root.querySelector<HTMLElement>('#jm-scanjobs-heading')?.focus();
-    });
+    deferFocus(
+      this.host.nativeElement,
+      (root) =>
+        root.querySelector<HTMLElement>(`[data-job-id="${jobId}"] button`) ??
+        root.querySelector<HTMLElement>('#jm-scanjobs-heading')
+    );
   }
 
   deleteJob(job: ScanJobListItem): void {

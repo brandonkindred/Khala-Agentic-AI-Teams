@@ -16,6 +16,8 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { COMMA, ENTER } from '@angular/cdk/keycodes';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
+import { SCORE_DIMENSIONS } from '../../models';
 import type { JobSeekerProfile, RankingWeights } from '../../models';
 
 /** The profile's string-list fields, grouped into form sections. */
@@ -79,14 +81,12 @@ const CHIP_SECTIONS: ChipSection[] = [
   },
 ];
 
-const WEIGHT_FIELDS: { key: keyof RankingWeights; label: string }[] = [
-  { key: 'title_fit', label: 'Title fit' },
-  { key: 'seniority_fit', label: 'Seniority fit' },
-  { key: 'location_fit', label: 'Location fit' },
-  { key: 'comp_fit', label: 'Comp fit' },
-  { key: 'company_fit', label: 'Company fit' },
-  { key: 'skills_fit', label: 'Skills fit' },
-];
+// Weight-slider rows: the shared dimension set with its long label. Keys are
+// keyof RankingWeights (identical to keyof SubScores) — one source of order/wording.
+const WEIGHT_FIELDS: { key: keyof RankingWeights; label: string }[] = SCORE_DIMENSIONS.map((d) => ({
+  key: d.key as keyof RankingWeights,
+  label: d.long,
+}));
 
 /**
  * Career profile editor. Loads the resolved profile from the Job Matching API
@@ -132,6 +132,9 @@ export class JobProfileFormComponent implements OnInit {
   chipsDirty = false;
   /** Polite announcement of the recomputed weight split after a slider commit. */
   weightAnnouncement = '';
+  /** Normalized share-of-score per dimension, recomputed only when a weight
+   *  changes (not per slider per change-detection tick). */
+  shares: Record<string, number> = {};
 
   /** Chip-list values, keyed by profile field. */
   chips: Record<ChipFieldKey, string[]> = {
@@ -182,7 +185,7 @@ export class JobProfileFormComponent implements OnInit {
           this.loading = false;
         },
         error: (err) => {
-          this.error = err?.error?.detail ?? err?.message ?? 'Failed to load the profile.';
+          this.error = extractErrorDetail(err, 'Failed to load the profile.');
           this.loading = false;
         },
       });
@@ -201,6 +204,7 @@ export class JobProfileFormComponent implements OnInit {
     });
     this.form.markAsPristine();
     this.chipsDirty = false;
+    this.recomputeShares();
   }
 
   /** True when there are edits not yet saved to the user profile. */
@@ -223,18 +227,26 @@ export class JobProfileFormComponent implements OnInit {
   }
 
   /**
-   * Share of the final score a dimension gets after the ranker normalizes the
-   * six weights (uniform split when all are zero — mirrors the backend).
+   * Recompute every dimension's normalized share of the final score once (a
+   * slider move shifts all six). Uniform split when all weights are zero —
+   * mirrors the backend. Called on a slider commit and after populate(), so the
+   * template reads {@link shares} instead of recomputing per slider per tick.
    */
-  weightShare(key: keyof RankingWeights): number {
+  private recomputeShares(): void {
     const raw = this.form.getRawValue();
     const values = WEIGHT_FIELDS.map((w) => Math.max(0, raw[w.key] ?? 0));
     const total = values.reduce((sum, v) => sum + v, 0);
-    if (total <= 0) {
-      return Math.round(100 / WEIGHT_FIELDS.length);
-    }
-    const idx = WEIGHT_FIELDS.findIndex((w) => w.key === key);
-    return Math.round((values[idx] / total) * 100);
+    const uniform = Math.round(100 / WEIGHT_FIELDS.length);
+    const next: Record<string, number> = {};
+    WEIGHT_FIELDS.forEach((w, i) => {
+      next[w.key] = total <= 0 ? uniform : Math.round((values[i] / total) * 100);
+    });
+    this.shares = next;
+  }
+
+  /** Precomputed share for a dimension (see {@link recomputeShares}). */
+  weightShare(key: keyof RankingWeights): number {
+    return this.shares[key] ?? 0;
   }
 
   /** One-line summary of the weight split for the collapsed panel header. */
@@ -242,8 +254,9 @@ export class JobProfileFormComponent implements OnInit {
     return WEIGHT_FIELDS.map((w) => `${w.label} ${this.weightShare(w.key)}%`).join(' · ');
   }
 
-  /** Announce the recomputed split after a slider commit (all six shares move). */
+  /** Recompute + announce the split after a slider commit (all six shares move). */
   announceWeights(): void {
+    this.recomputeShares();
     this.weightAnnouncement = `Weights updated. ${this.weightSummary}.`;
   }
 

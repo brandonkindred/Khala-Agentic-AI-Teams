@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, List, Mapping, Optional
+from typing import List, Optional
 from uuid import uuid4
 
 from psycopg.rows import dict_row
@@ -175,8 +175,9 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
         - ``preferences`` is a shallow *merge*, not a replacement: exactly its
           top-level keys are replaced in ``profile_json``; every other section
           (e.g. a team-owned section like job matching's ``career``) is
-          preserved — the same contract as :func:`merge_preferences`. Removing
-          a section is not expressible through this call.
+          preserved via a single atomic server-side ``profile_json ||
+          EXCLUDED.profile_json``, so concurrent section writers never clobber
+          each other. Removing a section is not expressible through this call.
         - ``updated_at`` is advanced.
     """
     assert user_id, "user_id must be non-empty"
@@ -223,47 +224,6 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
     # Postcondition: INSERT ... ON CONFLICT DO UPDATE always yields the row.
     assert row is not None, f"user_profiles upsert returned no row for {user_id!r}"
     return _profile_from_row(row)
-
-
-@timed_query(store=_STORE, op="merge_preferences")
-def merge_preferences(patch: Mapping[str, Any], user_id: str = DEFAULT_USER_ID) -> dict:
-    """Atomically shallow-merge ``patch`` into ``user_id``'s ``profile_json``.
-
-    Unlike :func:`upsert_profile` (which replaces the whole ``profile_json``
-    document and therefore races concurrent section writers), this issues a
-    single server-side ``profile_json = profile_json || patch`` statement, so
-    each writer's top-level keys land atomically — teams updating their own
-    section (e.g. job matching's ``career``) can never clobber another's.
-
-    Preconditions:
-        * ``user_id`` is non-empty and its ``user_profiles`` row exists
-          (call :func:`get_profile` first — it lazily creates the row).
-        * ``patch`` is a non-empty mapping of JSON-serialisable values.
-    Postconditions:
-        * Exactly the top-level keys in ``patch`` are replaced; all other
-          sections of ``profile_json`` are preserved even under concurrency.
-        * ``updated_at`` is advanced in the same atomic statement.
-        * Returns the full merged ``profile_json`` document.
-
-    Raises:
-        LookupError: If no row exists for ``user_id`` (broken precondition).
-    """
-    assert user_id, "user_id must be non-empty"
-    assert patch, "patch must be non-empty"
-    from shared_postgres.aggregate import merge_jsonb_via_cursor
-
-    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        merged = merge_jsonb_via_cursor(
-            cur,
-            "user_profiles",
-            key={"user_id": user_id},
-            patch=patch,
-            data_column="profile_json",
-            touch={"updated_at": _now_iso()},
-        )
-    if merged is None:
-        raise LookupError(f"user_profiles row missing for {user_id!r}; call get_profile first")
-    return merged
 
 
 @timed_query(store=_STORE, op="record_association")

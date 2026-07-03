@@ -4,19 +4,15 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { SCORE_DIMENSIONS, TRIAGED_AWAY_STATUSES } from '../../models';
 import type { Listing, ListingStatus, SubScores } from '../../models';
 
-/** Display metadata for the six fit dimensions, in render order. Labels are
- *  spelled out so a screen reader (and a non-expert) reads them plainly rather
- *  than abbreviations like "Comp". */
-const SUB_SCORE_LABELS: { key: keyof SubScores; label: string }[] = [
-  { key: 'title_fit', label: 'Title' },
-  { key: 'seniority_fit', label: 'Seniority' },
-  { key: 'location_fit', label: 'Location' },
-  { key: 'comp_fit', label: 'Compensation' },
-  { key: 'company_fit', label: 'Company' },
-  { key: 'skills_fit', label: 'Skills' },
-];
+/** Fit-breakdown rows: the shared dimension set with its short label (spelled
+ *  out — "Compensation" not "Comp" — so a screen reader reads it plainly). */
+const SUB_SCORE_LABELS: { key: keyof SubScores; label: string }[] = SCORE_DIMENSIONS.map((d) => ({
+  key: d.key,
+  label: d.short,
+}));
 
 const STATUS_LABELS: Record<ListingStatus, string> = {
   new: 'New',
@@ -89,7 +85,7 @@ export class JobListingCardComponent {
 
   /** True for statuses whose only action is restoring to the inbox. */
   get isTriagedAway(): boolean {
-    return ['not_interested', 'poor_fit', 'archived'].includes(this.listing.status);
+    return TRIAGED_AWAY_STATUSES.includes(this.listing.status);
   }
 
   get salaryLabel(): string {

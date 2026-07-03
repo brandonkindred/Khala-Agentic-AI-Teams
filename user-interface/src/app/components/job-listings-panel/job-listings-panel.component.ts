@@ -16,6 +16,10 @@ import { JobMatchingApiService } from '../../services/job-matching-api.service';
 import { EmptyStateComponent } from '../../shared/empty-state/empty-state.component';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { JobListingCardComponent } from '../job-listing-card/job-listing-card.component';
+import { deferFocus } from '../../shared/defer-focus';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
+import { LatestOnly } from '../../shared/latest-only';
+import { TRIAGED_AWAY_STATUSES } from '../../models';
 import type { Listing, ListingFilter, ListingStatus } from '../../models';
 
 /** Filter pills in display order. `active` is the inbox view. */
@@ -74,6 +78,9 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
   filter: ListingFilter = 'active';
   listings: Listing[] = [];
   counts: Record<string, number> = {};
+  /** Per-pill totals derived from {@link counts}; recomputed only on change,
+   *  not per pill per change-detection tick. */
+  pillCounts: Record<ListingFilter, number> = {} as Record<ListingFilter, number>;
   loading = false;
   error: string | null = null;
   /** Fingerprint of the listing whose PATCH is in flight, if any. */
@@ -82,14 +89,11 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
   resultAnnouncement = '';
 
   /**
-   * Monotonic token per full load; a response applies only if it is still the
-   * newest load. Comparing the *filter value* instead would readmit a stale
-   * response after an A→B→A round trip (both A requests "match" the filter,
-   * so the older one arriving last would win).
+   * "Latest load wins" guard. Comparing the *filter value* instead would
+   * readmit a stale response after an A→B→A round trip (both A requests match
+   * the filter, so the older one arriving last would win).
    */
-  private loadSeq = 0;
-  /** Monotonic token per counts-only refresh (see {@link applyUpdate}). */
-  private countsSeq = 0;
+  private readonly loadGuard = new LatestOnly();
 
   /** Pending debounced load from rapid pill switching (see {@link setFilter}). */
   private filterDebounce?: ReturnType<typeof setTimeout>;
@@ -112,9 +116,47 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
     this.resultAnnouncement = n === 1 ? '1 listing shown' : `${n} listings shown`;
   }
 
+  /** Assign the server counts and derive the per-pill totals once. */
+  private setCounts(counts: Record<string, number>): void {
+    this.counts = counts;
+    this.recomputePillCounts();
+  }
+
+  /**
+   * Move one listing between status buckets locally (no network) — the status
+   * transition is fully known, so the pill counts can be adjusted in place
+   * instead of refetching. The next full {@link load} self-corrects any drift.
+   */
+  private adjustCounts(from: ListingStatus, to: ListingStatus): void {
+    if (from === to) {
+      return;
+    }
+    this.counts = {
+      ...this.counts,
+      [from]: Math.max((this.counts[from] ?? 0) - 1, 0),
+      [to]: (this.counts[to] ?? 0) + 1,
+    };
+    this.recomputePillCounts();
+  }
+
+  /** Derive the number shown on each filter pill from the status counts. */
+  private recomputePillCounts(): void {
+    const total = Object.values(this.counts).reduce((sum, n) => sum + n, 0);
+    const triagedAway = TRIAGED_AWAY_STATUSES.reduce((sum, s) => sum + (this.counts[s] ?? 0), 0);
+    this.pillCounts = {
+      all: total,
+      active: total - triagedAway,
+      new: this.counts['new'] ?? 0,
+      favorite: this.counts['favorite'] ?? 0,
+      not_interested: this.counts['not_interested'] ?? 0,
+      poor_fit: this.counts['poor_fit'] ?? 0,
+      archived: this.counts['archived'] ?? 0,
+    };
+  }
+
   /** Reload the current filter (also called by the dashboard after a scan). */
   load(): void {
-    const seq = ++this.loadSeq;
+    const token = this.loadGuard.next();
     this.loading = true;
     this.error = null;
     this.api
@@ -122,19 +164,19 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
-          if (seq !== this.loadSeq) {
+          if (!this.loadGuard.isCurrent(token)) {
             return; // a newer load superseded this response
           }
           this.listings = res.listings;
-          this.counts = res.counts;
+          this.setCounts(res.counts);
           this.loading = false;
           this.announceCount(res.listings.length);
         },
         error: (err) => {
-          if (seq !== this.loadSeq) {
+          if (!this.loadGuard.isCurrent(token)) {
             return;
           }
-          this.error = err?.error?.detail ?? err?.message ?? 'Failed to load listings.';
+          this.error = extractErrorDetail(err, 'Failed to load listings.');
           this.loading = false;
         },
       });
@@ -191,21 +233,9 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
     pills?.[nextIdx]?.focus();
   }
 
-  /** Count shown on a filter pill; `active` and `all` are derived. */
+  /** Count shown on a filter pill — precomputed in {@link recomputePillCounts}. */
   countFor(filter: ListingFilter): number {
-    const total = Object.values(this.counts).reduce((sum, n) => sum + n, 0);
-    if (filter === 'all') {
-      return total;
-    }
-    if (filter === 'active') {
-      return (
-        total -
-        (this.counts['archived'] ?? 0) -
-        (this.counts['not_interested'] ?? 0) -
-        (this.counts['poor_fit'] ?? 0)
-      );
-    }
-    return this.counts[filter] ?? 0;
+    return this.pillCounts[filter] ?? 0;
   }
 
   onStatusChange(listing: Listing, status: ListingStatus): void {
@@ -218,6 +248,7 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
       .subscribe({
         next: (updated) => {
           this.pendingFingerprint = null;
+          this.adjustCounts(previousStatus, updated.status);
           const removed = this.applyUpdate(updated);
           if (removed) {
             this.restoreFocus(removalIndex);
@@ -240,8 +271,11 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
         },
         error: (err) => {
           this.pendingFingerprint = null;
-          const detail = err?.error?.detail ?? err?.message ?? 'Failed to update the listing.';
-          this.snackBar.open(detail, 'Dismiss', { duration: 5000 });
+          this.snackBar.open(
+            extractErrorDetail(err, 'Failed to update the listing.'),
+            'Dismiss',
+            { duration: 5000 }
+          );
         },
       });
   }
@@ -253,12 +287,14 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (reverted) => {
+          this.adjustCounts(listing.status, reverted.status);
           const present = this.listings.some((l) => l.fingerprint === reverted.fingerprint);
           if (present) {
             this.applyUpdate(reverted);
           } else if (this.matchesFilter(reverted.status)) {
             // The row was removed from this filter by the original change;
-            // reload so it reappears in its ranked position.
+            // reload so it reappears in its ranked position (load() also
+            // re-syncs the counts from the server).
             this.load();
           }
           this.snackBar.open('Change undone.', 'Dismiss', { duration: 3000 });
@@ -285,23 +321,8 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
     }
     // Keep the polite live region in step with the visible count after an
     // in-place triage (load() announces on its own; this covers the no-reload path).
+    // Pill counts were already adjusted locally by the caller — no counts refetch.
     this.announceCount(this.listings.length);
-    // Refresh pill counts without refetching the whole page. Apply only while
-    // this is both the newest counts refresh AND no newer full load has fired
-    // (a full load carries fresher counts of its own).
-    const countsSeq = ++this.countsSeq;
-    const loadSeq = this.loadSeq;
-    this.api
-      .listListings(this.filter, 1)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: (res) => {
-          if (countsSeq === this.countsSeq && loadSeq === this.loadSeq) {
-            this.counts = res.counts;
-          }
-        },
-        error: () => undefined, // counts are cosmetic; the next full load corrects them
-      });
     return removed;
   }
 
@@ -311,15 +332,12 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
    * selected filter pill when the list emptied.
    */
   private restoreFocus(removedIndex: number): void {
-    setTimeout(() => {
-      const root: HTMLElement = this.host.nativeElement;
+    deferFocus(this.host.nativeElement, (root) => {
       const toggles = root.querySelectorAll<HTMLElement>('.review-toggle');
       if (toggles.length) {
-        const idx = Math.min(Math.max(removedIndex, 0), toggles.length - 1);
-        toggles[idx].focus();
-        return;
+        return toggles[Math.min(Math.max(removedIndex, 0), toggles.length - 1)];
       }
-      root.querySelector<HTMLElement>('.filter-pill.selected')?.focus();
+      return root.querySelector<HTMLElement>('.filter-pill.selected');
     });
   }
 
@@ -332,9 +350,9 @@ export class JobListingsPanelComponent implements OnInit, OnDestroy {
       return true;
     }
     if (this.filter === 'active') {
-      // Active is the inbox: everything triaged away (archived / not-interested
-      // / poor-fit) leaves it, matching the card's isTriagedAway grouping.
-      return status !== 'archived' && status !== 'not_interested' && status !== 'poor_fit';
+      // Active is the inbox: everything triaged away leaves it (shared with the
+      // card's isTriagedAway grouping via TRIAGED_AWAY_STATUSES).
+      return !TRIAGED_AWAY_STATUSES.includes(status);
     }
     return status === this.filter;
   }

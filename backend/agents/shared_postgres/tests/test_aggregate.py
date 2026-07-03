@@ -59,14 +59,6 @@ def test_build_merge_statement_shape() -> None:
     )
 
 
-def test_build_merge_statement_with_touch_columns() -> None:
-    stmt = build_merge_statement("user_profiles", "profile_json", ["user_id"], ["updated_at"])
-    assert stmt == (
-        "UPDATE user_profiles SET profile_json = profile_json || %s::jsonb, updated_at = %s "
-        "WHERE user_id = %s RETURNING profile_json"
-    )
-
-
 def test_build_merge_statement_rejects_bad_identifiers() -> None:
     with pytest.raises(ValueError, match="table"):
         build_merge_statement("brands; DROP TABLE x", "data", ["id"])
@@ -76,10 +68,6 @@ def test_build_merge_statement_rejects_bad_identifiers() -> None:
         build_merge_statement("brands", "data", ["id = 1 OR 1=1"])
     with pytest.raises(ValueError, match="non-empty"):
         build_merge_statement("brands", "data", [])
-    with pytest.raises(ValueError, match="touch column"):
-        build_merge_statement("brands", "data", ["id"], ["updated_at = now()"])
-    with pytest.raises(ValueError, match="conflicts with data_column"):
-        build_merge_statement("brands", "data", ["id"], ["data"])
 
 
 def test_merge_via_cursor_returns_merged_dict_and_wraps_patch() -> None:
@@ -102,22 +90,6 @@ def test_merge_via_cursor_coerces_model_and_handles_miss() -> None:
 
     miss = merge_jsonb_via_cursor(_StubCursor(None), "t", key={"id": "x"}, patch={"a": 1})
     assert miss is None
-
-
-def test_merge_via_cursor_orders_touch_params_between_patch_and_key() -> None:
-    cur = _StubCursor({"profile_json": {"a": 1}})
-    merge_jsonb_via_cursor(
-        cur,
-        "user_profiles",
-        key={"user_id": "default"},
-        patch={"a": 1},
-        data_column="profile_json",
-        touch={"updated_at": "2026-07-03T00:00:00+00:00"},
-    )
-    sql, params = cur.executed[0]
-    assert ", updated_at = %s WHERE" in sql
-    assert params[0].obj == {"a": 1}
-    assert params[1:] == ["2026-07-03T00:00:00+00:00", "default"]
 
 
 def test_merge_via_cursor_rejects_empty_key() -> None:
@@ -157,9 +129,7 @@ def test_merge_jsonb_returning_against_live_postgres() -> None:
     table = f"_agg_merge_test_{uuid4().hex[:8]}"
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"CREATE TABLE {table} (id TEXT PRIMARY KEY, data JSONB NOT NULL, touched TEXT)"
-            )
+            cur.execute(f"CREATE TABLE {table} (id TEXT PRIMARY KEY, data JSONB NOT NULL)")
             cur.execute(
                 f"INSERT INTO {table} (id, data) VALUES (%s, %s::jsonb)",
                 ("r1", '{"keep": 1, "name": "old"}'),
@@ -171,11 +141,6 @@ def test_merge_jsonb_returning_against_live_postgres() -> None:
         assert merged == {"keep": 1, "name": "new", "extra": True}
         # A non-existent key returns None and changes nothing.
         assert merge_jsonb_returning(table, key={"id": "missing"}, patch={"x": 1}) is None
-        # A touch column is written in the same statement as the merge.
-        merge_jsonb_returning(table, key={"id": "r1"}, patch={"n": 2}, touch={"touched": "t1"})
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(f"SELECT touched FROM {table} WHERE id = %s", ("r1",))
-            assert cur.fetchone()[0] == "t1"
     finally:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS {table}")

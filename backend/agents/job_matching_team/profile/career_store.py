@@ -23,9 +23,10 @@ from typing import Optional
 from user_profile import (
     DEFAULT_USER_ID,
     ArtifactType,
+    UserProfileUpdate,
     get_profile,
-    merge_preferences,
     record_association_safe,
+    upsert_profile,
 )
 
 from .model import JobSeekerProfile
@@ -109,10 +110,14 @@ def save_career_profile(
             "Career profile storage requires Postgres (set POSTGRES_HOST)."
         )
     try:
-        # Ensure the row exists (get_profile lazily creates it), then merge the
-        # career section atomically so other sections can never be clobbered.
-        get_profile(user_id)
-        merged = merge_preferences({CAREER_SECTION_KEY: profile.model_dump(mode="json")}, user_id)
+        # upsert_profile applies `preferences` as a single atomic server-side
+        # shallow merge (profile_json || EXCLUDED.profile_json), so the career
+        # section lands (and updated_at advances) without a read-modify-write and
+        # without clobbering other sections — no separate ensure-row step needed.
+        saved = upsert_profile(
+            UserProfileUpdate(preferences={CAREER_SECTION_KEY: profile.model_dump(mode="json")}),
+            user_id=user_id,
+        )
     except Exception as exc:  # noqa: BLE001 - operational write failure -> typed error for the API
         raise CareerProfileUnavailableError(f"Could not persist career profile: {exc}") from exc
     record_association_safe(
@@ -122,4 +127,4 @@ def save_career_profile(
         user_id=user_id,
         label="Career profile",
     )
-    return JobSeekerProfile.model_validate(merged[CAREER_SECTION_KEY])
+    return JobSeekerProfile.model_validate(saved.preferences[CAREER_SECTION_KEY])

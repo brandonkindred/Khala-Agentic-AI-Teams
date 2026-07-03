@@ -197,22 +197,16 @@ def test_save_career_profile_raises_when_postgres_disabled(monkeypatch):
 
 def test_save_career_profile_merges_atomically_and_records_association(monkeypatch):
     _enable_postgres(monkeypatch)
-    ensured = []
-    merges = []
+    upserts = []
     associations = []
 
-    monkeypatch.setattr(
-        career_store,
-        "get_profile",
-        lambda user_id: ensured.append(user_id) or SimpleNamespace(preferences={}),
-    )
+    def fake_upsert(update, user_id):
+        upserts.append((update, user_id))
+        # upsert_profile shallow-merges `preferences` server-side: other
+        # sections survive untouched.
+        return SimpleNamespace(preferences={"other_section": {"keep": True}, **update.preferences})
 
-    def fake_merge(patch, user_id):
-        merges.append((patch, user_id))
-        # Server-side `profile_json || patch`: other sections survive untouched.
-        return {"other_section": {"keep": True}, **patch}
-
-    monkeypatch.setattr(career_store, "merge_preferences", fake_merge)
+    monkeypatch.setattr(career_store, "upsert_profile", fake_upsert)
     monkeypatch.setattr(
         career_store,
         "record_association_safe",
@@ -222,12 +216,11 @@ def test_save_career_profile_merges_atomically_and_records_association(monkeypat
     result = save_career_profile(JobSeekerProfile(target_titles=["Staff Eng"]))
 
     assert result.target_titles == ["Staff Eng"]
-    # The row is ensured first (merge_preferences requires it to exist)...
-    assert ensured == ["default"]
-    # ...and the write is a section-scoped patch, never the whole document.
-    patch, user_id = merges[0]
-    assert list(patch.keys()) == [CAREER_SECTION_KEY]
-    assert patch[CAREER_SECTION_KEY]["target_titles"] == ["Staff Eng"]
+    # A single atomic upsert of the career section — no separate ensure-row read,
+    # and the write is a section-scoped patch, never the whole document.
+    update, user_id = upserts[0]
+    assert list(update.preferences.keys()) == [CAREER_SECTION_KEY]
+    assert update.preferences[CAREER_SECTION_KEY]["target_titles"] == ["Staff Eng"]
     assert user_id == "default"
     # The Career card association is recorded best-effort.
     (artifact_type, team, artifact_id), kwargs = associations[0]
@@ -240,10 +233,10 @@ def test_save_career_profile_merges_atomically_and_records_association(monkeypat
 def test_save_career_profile_wraps_operational_failure(monkeypatch):
     _enable_postgres(monkeypatch)
 
-    def boom(user_id):
+    def boom(update, user_id):
         raise RuntimeError("connection refused")
 
-    monkeypatch.setattr(career_store, "get_profile", boom)
+    monkeypatch.setattr(career_store, "upsert_profile", boom)
     with pytest.raises(CareerProfileUnavailableError):
         save_career_profile(JobSeekerProfile())
 
