@@ -81,6 +81,7 @@ from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
+from .market_regime import RegimeSummary, compute_regime_summary
 from .mechanical_repair import RepairAction, repair_spec, select_code_path
 from .phases import (
     PHASE_TRANSITION_EVENT_NAME,
@@ -341,6 +342,21 @@ def _design_max_llm_calls() -> int:
         return 120
 
 
+def _env_flag(name: str, *, default: bool = True) -> bool:
+    """Resolve a boolean on/off env toggle.
+
+    Pre: ``name`` is a non-empty env-var name.
+    Post: returns ``default`` when the var is unset; otherwise ``True`` only
+    for the recognised truthy values ``true``/``1``/``yes`` (case-insensitive),
+    ``False`` for anything else. Centralises the truthy-env idiom that the
+    strategy-lab toggles share.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("true", "1", "yes")
+
+
 def _mechanical_repair_enabled() -> bool:
     """Resolve the deterministic mechanical-repair pre-flight toggle.
 
@@ -350,8 +366,7 @@ def _mechanical_repair_enabled() -> bool:
     ``true``/``1``/``yes`` (case-insensitive); anything else disables the
     pre-flight and restores the pure LLM-revise behaviour. Default ``true``.
     """
-    raw = os.environ.get("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", "true")
-    return raw.strip().lower() in ("true", "1", "yes")
+    return _env_flag("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED")
 
 
 MAX_CODE_REFINEMENT_ROUNDS = 50
@@ -782,6 +797,34 @@ class StrategyLabOrchestrator:
             )
         return float("nan")
 
+    def _compute_regime_summary(self) -> Optional[RegimeSummary]:
+        """Derive the current market-regime summary for the designer prompt.
+
+        Gated by ``STRATEGY_LAB_REGIME_SUMMARY_ENABLED`` (default ``true``;
+        truthy ``"true"``/``"1"``/``"yes"``, case-insensitive). Fetches through
+        the orchestrator's live :class:`MarketDataService` — the same service
+        the readiness / realism gates use — so the regime read is consistent
+        with the data the gates size against. The content-hashed market-data
+        cache makes the small fixed set of benchmark fetches cheap across a
+        batch of cycles.
+
+        Pre: ``self.market_data_service`` is constructed.
+        Post: returns a :class:`RegimeSummary` (possibly degraded) or ``None``
+        when the feature is disabled. Never raises — ``compute_regime_summary``
+        is itself fail-open, and any unexpected error here degrades to ``None``
+        rather than crashing the cycle.
+        """
+        if not _env_flag("STRATEGY_LAB_REGIME_SUMMARY_ENABLED"):
+            return None
+        try:
+            return compute_regime_summary(
+                self.market_data_service.fetch_ohlcv,
+                computed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as exc:  # noqa: BLE001 — regime input is best-effort
+            logger.debug("regime summary computation failed: %s", exc)
+            return None
+
     def record_gates(
         self,
         results: List[QualityGateResult],
@@ -979,6 +1022,12 @@ class StrategyLabOrchestrator:
         # agents charge it through ``charge_active_budget`` at each LLM call;
         # no ``budget`` argument is threaded through the call chain.
         llm_budget = LLMCallBudget(_design_max_llm_calls())
+        # Current market-regime read, computed once per cycle and shared across
+        # every design re-entry so the designer conditions its setup archetype
+        # on trend / volatility state (see the "Setup playbook" system prompt).
+        # Fail-open: ``None`` when disabled or on data failure — the designer
+        # simply omits the regime section then.
+        regime_summary = self._compute_regime_summary()
         with use_budget(llm_budget):
             for design_attempt in range(MAX_DESIGN_REENTRIES + 1):
                 # Copy-on-entry: hand this attempt a clean child collector so
@@ -996,6 +1045,7 @@ class StrategyLabOrchestrator:
                         phase_back_count=phase_back_count,
                         drift_collector=attempt_drift,
                         cumulative_gate_results=cumulative_gate_results,
+                        regime_summary=regime_summary,
                     )
                 except SpecImplementabilityError as exc:
                     last_evidence = exc.evidence
@@ -1069,6 +1119,7 @@ class StrategyLabOrchestrator:
         emit: PhaseCallback,
         design_attempt: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
+        regime_summary: Optional[RegimeSummary] = None,
     ) -> _DesignLoopOutcome:
         """Drive the bounded design ↔ design-review loop.
 
@@ -1125,6 +1176,7 @@ class StrategyLabOrchestrator:
                 signal_brief=signal_brief,
                 convergence_directives=directives or None,
                 exclude_asset_classes=exclude_asset_classes,
+                regime_summary=regime_summary,
             )
             spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
 
@@ -3882,6 +3934,7 @@ class StrategyLabOrchestrator:
         phase_back_count: int = 0,
         drift_collector: Optional[_DriftCollector] = None,
         cumulative_gate_results: Optional[List[QualityGateResult]] = None,
+        regime_summary: Optional[RegimeSummary] = None,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -3926,6 +3979,7 @@ class StrategyLabOrchestrator:
             design_attempt=design_attempt,
             phase_back_count=phase_back_count,
             drift_collector=drift_collector,
+            regime_summary=regime_summary,
         )
         if design_phase.record is not None:
             return design_phase.record
@@ -4064,6 +4118,7 @@ class StrategyLabOrchestrator:
         design_attempt: int,
         phase_back_count: int,
         drift_collector: _DriftCollector,
+        regime_summary: Optional[RegimeSummary] = None,
     ) -> _DesignPhaseResult:
         """Run the bounded design + review loop and gate entry to synthesis.
 
@@ -4085,6 +4140,7 @@ class StrategyLabOrchestrator:
             emit=emit,
             design_attempt=design_attempt,
             drift_collector=drift_collector,
+            regime_summary=regime_summary,
         )
         spec = design_outcome.spec
         rationale = design_outcome.rationale
