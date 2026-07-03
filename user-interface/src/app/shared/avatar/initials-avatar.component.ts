@@ -2,23 +2,32 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { AvatarColorOption, resolveAvatarColor } from './avatar-colors';
 
+// Grapheme-cluster segmentation keeps combining marks (NFD 'é' = 'e' + U+0301)
+// and ZWJ emoji sequences attached to their base — Array.from would split them.
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+function firstGrapheme(word: string): string {
+  // Callers pass non-empty words, so the segment at index 0 always exists.
+  return GRAPHEMES.segment(word).containing(0).segment;
+}
+
 /**
  * Compute display initials from a person's name.
  *
  * Preconditions: none — any string is accepted.
  * Postconditions: returns '' for an empty/whitespace-only name (callers render
- * a fallback); for one word, the first code point uppercased; for two or more
- * words, the first code points of the first and last words uppercased.
- * Code points (not UTF-16 units) are taken so surrogate pairs aren't split,
- * and `toLocaleUpperCase` keeps accented letters intact (é → É).
+ * a fallback); for one word, the first grapheme cluster uppercased; for two or
+ * more words, the first grapheme clusters of the first and last words
+ * uppercased. Whole graphemes (not code points or UTF-16 units) are taken, so
+ * surrogate pairs, combining marks, and ZWJ emoji stay intact; the result is
+ * NFC-normalized so decomposed and precomposed input yield identical output.
  */
 export function computeInitials(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);
   if (words.length === 0) return '';
-  const first = Array.from(words[0])[0];
-  if (words.length === 1) return first.toLocaleUpperCase();
-  const last = Array.from(words[words.length - 1])[0];
-  return (first + last).toLocaleUpperCase();
+  const first = firstGrapheme(words[0]);
+  const initials = words.length === 1 ? first : first + firstGrapheme(words[words.length - 1]);
+  return initials.toLocaleUpperCase().normalize('NFC');
 }
 
 /**

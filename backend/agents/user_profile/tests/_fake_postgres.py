@@ -55,7 +55,15 @@ class _FakeCursor:
 
         if norm.startswith("insert into user_profiles") and "do update" in norm:
             # upsert_profile: INSERT ... ON CONFLICT DO UPDATE ... RETURNING.
-            cols = ["user_id", "display_name", "email", "bio", "profile_json", "created_at", "updated_at"]
+            cols = [
+                "user_id",
+                "display_name",
+                "email",
+                "bio",
+                "profile_json",
+                "created_at",
+                "updated_at",
+            ]
             incoming = dict(zip(cols, params))
             incoming["profile_json"] = _unwrap_json(incoming["profile_json"])
             user_id = incoming["user_id"]
@@ -70,7 +78,12 @@ class _FakeCursor:
                 set_clause = norm.split("do update set", 1)[1].split("returning", 1)[0]
                 for assignment in set_clause.split(","):
                     col = assignment.split("=", 1)[0].strip()
-                    if col in incoming:
+                    if col not in incoming:
+                        continue
+                    if "||" in assignment:
+                        # JSONB concatenation: merge top-level keys like Postgres.
+                        existing[col] = {**existing[col], **incoming[col]}
+                    else:
                         existing[col] = incoming[col]
             self.rowcount = 1
             self._one = dict(self._db["profiles"][user_id])
@@ -122,7 +135,10 @@ class _FakeCursor:
             self.rowcount = 1
             return
 
-        if norm.startswith("select id, user_id, artifact_type") and "from user_profile_associations" in norm:
+        if (
+            norm.startswith("select id, user_id, artifact_type")
+            and "from user_profile_associations" in norm
+        ):
             user_id = params[0]
             atype = params[1] if len(params) > 1 else None
             rows = [
@@ -137,7 +153,11 @@ class _FakeCursor:
         if norm.startswith("delete from user_profile_associations"):
             assoc_id, user_id = params
             match = next(
-                (k for k, r in self._db["associations"].items() if r["id"] == assoc_id and r["user_id"] == user_id),
+                (
+                    k
+                    for k, r in self._db["associations"].items()
+                    if r["id"] == assoc_id and r["user_id"] == user_id
+                ),
                 None,
             )
             if match is not None:

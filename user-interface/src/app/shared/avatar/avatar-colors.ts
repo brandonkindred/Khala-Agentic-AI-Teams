@@ -21,22 +21,24 @@ export interface AvatarColorOption {
   fill: string;
 }
 
-/** The selectable palette, mapped onto bright semantic theme tokens. */
+/**
+ * The selectable palette, mapped onto bright semantic theme tokens. `fill` is
+ * derived from `cssVar` here so the two can never drift apart (the avatar
+ * circle renders from `cssVar`, the picker swatches from `fill`).
+ */
 export const AVATAR_COLOR_OPTIONS: readonly AvatarColorOption[] = [
-  { key: 'amber', label: 'Amber', cssVar: '--kh-accent', fill: 'var(--kh-accent)' },
-  { key: 'green', label: 'Green', cssVar: '--kh-success', fill: 'var(--kh-success)' },
-  { key: 'blue', label: 'Blue', cssVar: '--kh-info', fill: 'var(--kh-info)' },
-  { key: 'red', label: 'Red', cssVar: '--kh-error', fill: 'var(--kh-error)' },
-];
+  { key: 'amber', label: 'Amber', cssVar: '--kh-accent' },
+  { key: 'green', label: 'Green', cssVar: '--kh-success' },
+  { key: 'blue', label: 'Blue', cssVar: '--kh-info' },
+  { key: 'red', label: 'Red', cssVar: '--kh-error' },
+].map((option) => ({ ...option, fill: `var(${option.cssVar})` }));
+
+// The first palette entry is the default — derived, so a mismatch between the
+// default key and the palette is impossible by construction.
+const DEFAULT_OPTION: AvatarColorOption = AVATAR_COLOR_OPTIONS[0];
 
 /** Fallback color key used when a stored value is missing or unrecognized. */
-export const DEFAULT_AVATAR_COLOR = 'amber';
-
-// Resolved once at module init so the palette invariant (the default key
-// exists) fails fast here rather than at first fallback deep in a render.
-const DEFAULT_OPTION: AvatarColorOption = AVATAR_COLOR_OPTIONS.find(
-  (option) => option.key === DEFAULT_AVATAR_COLOR,
-)!;
+export const DEFAULT_AVATAR_COLOR = DEFAULT_OPTION.key;
 
 /**
  * Resolve a stored color key to its palette option.

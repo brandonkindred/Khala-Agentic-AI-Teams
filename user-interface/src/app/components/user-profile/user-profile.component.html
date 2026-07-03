@@ -10,7 +10,17 @@
     </div>
   } @else {
     @if (error) {
-      <div class="up-banner up-error" role="alert">{{ error }}</div>
+      <div class="up-banner up-error" role="alert">
+        <span>{{ error }}</span>
+        <!-- Retry only before the first successful load (the dead-end case);
+             after a failed SAVE, reloading here would discard unsaved edits. -->
+        @if (!profileLoaded) {
+          <button mat-stroked-button type="button" class="up-retry" (click)="load()">
+            <mat-icon aria-hidden="true">refresh</mat-icon>
+            Retry
+          </button>
+        }
+      </div>
     }
     @if (success) {
       <div class="up-banner up-success" role="status">{{ success }}</div>

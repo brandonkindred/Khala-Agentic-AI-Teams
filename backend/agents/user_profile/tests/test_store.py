@@ -130,6 +130,19 @@ def test_upsert_profile_preferences_roundtrip(db):
     assert updated.preferences == {"theme": "dark"}
 
 
+def test_upsert_profile_preferences_merge_preserves_unrelated_keys(db):
+    # The JSONB || merge is the lost-update guard: a writer touching one key
+    # must not clobber keys written by other features/tabs.
+    up_store.get_profile()
+    up_store.upsert_profile(UserProfileUpdate(preferences={"theme": "dark"}))
+    merged = up_store.upsert_profile(UserProfileUpdate(preferences={"avatar_color": "green"}))
+    assert merged.preferences == {"theme": "dark", "avatar_color": "green"}
+
+    # Overwriting an existing key still takes the incoming value.
+    merged2 = up_store.upsert_profile(UserProfileUpdate(preferences={"avatar_color": "red"}))
+    assert merged2.preferences == {"theme": "dark", "avatar_color": "red"}
+
+
 def test_record_association_is_idempotent(db):
     a = up_store.record_association("brand", "branding", "brand_1", label="Acme")
     assert a is not None

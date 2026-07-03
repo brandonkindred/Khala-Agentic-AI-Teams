@@ -31,10 +31,14 @@ export class UserProfileApiService {
   /**
    * PUT /api/user-profile — update profile fields.
    *
-   * Preconditions: `body` conforms to `UserProfileUpdate` (omitted fields are left
-   * unchanged server-side).
+   * Preconditions: `body` conforms to `UserProfileUpdate`. Omitted fields are left
+   * unchanged server-side. A present scalar field (display_name/email/bio) is
+   * written verbatim, so send the full desired value, not a fragment.
    * Postconditions: the observable emits the updated `UserProfile`, or errors with
-   * the `HttpErrorResponse`.
+   * the `HttpErrorResponse`. A present `preferences` dict is MERGED key-by-key
+   * into the stored object server-side (top-level keys overwrite; keys absent
+   * from the update survive) — send only the keys you own; there is no
+   * key-deletion path.
    */
   updateProfile(body: UserProfileUpdate): Observable<UserProfile> {
     return this.http.put<UserProfile>(this.baseUrl, body);

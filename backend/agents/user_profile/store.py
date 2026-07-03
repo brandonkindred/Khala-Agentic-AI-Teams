@@ -172,6 +172,10 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
         - ``user_id`` is a non-empty string.
     Postconditions:
         - Only fields set (non-``None``) on ``update`` are written.
+        - ``preferences`` is merged key-by-key into the stored object (top-level
+          keys overwrite; keys absent from the update survive), so concurrent
+          writers of unrelated preference keys cannot clobber each other. There
+          is no key-deletion path; set a key to ``None`` to tombstone it.
         - ``updated_at`` is advanced.
     """
     assert user_id, "user_id must be non-empty"
@@ -190,7 +194,9 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
     if update.bio is not None:
         set_clauses.append("bio = EXCLUDED.bio")
     if update.preferences is not None:
-        set_clauses.append("profile_json = EXCLUDED.profile_json")
+        # JSONB || merges top-level keys server-side, so a client updating one
+        # preference key can never wipe keys written by other features/tabs.
+        set_clauses.append("profile_json = user_profiles.profile_json || EXCLUDED.profile_json")
 
     # `x or default` here only supplies INSERT defaults for a brand-new row; a
     # field is written on conflict *only* if it's non-None (see set_clauses above),

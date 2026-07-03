@@ -69,9 +69,9 @@ export class UserProfileComponent implements OnInit {
   success: string | null = null;
   /**
    * True once at least one load has succeeded. Saving is blocked until then:
-   * the backend PUT replaces `preferences` (and profile fields) wholesale, so
-   * submitting the constructor-default form after a failed load would wipe
-   * the real server-side profile.
+   * submitting the constructor-default form after a failed load would blank
+   * the real display name/email/bio on the server (present scalar fields are
+   * written verbatim) and reset the avatar color.
    */
   profileLoaded = false;
 
@@ -82,14 +82,6 @@ export class UserProfileComponent implements OnInit {
 
   /** Palette rendered as the avatar color swatch radiogroup. */
   readonly avatarColors = AVATAR_COLOR_OPTIONS;
-
-  /**
-   * Preferences as last loaded (or last saved) from the backend. The PUT
-   * endpoint replaces `preferences` wholesale, so every save must spread this
-   * snapshot before overriding `avatar_color` — otherwise unrelated keys
-   * written by other features would be silently dropped.
-   */
-  private loadedPreferences: Record<string, unknown> = {};
 
   readonly form = this.fb.group({
     display_name: [''],
@@ -145,9 +137,8 @@ export class UserProfileComponent implements OnInit {
           return;
         }
         const { profile, associations, integrations } = overview;
-        // `preferences` is free-form JSONB — only trust a plain object, and
-        // keep the snapshot so saves can merge instead of clobbering it.
-        this.loadedPreferences =
+        // `preferences` is free-form JSONB — only trust a plain object.
+        const preferences =
           profile.preferences && typeof profile.preferences === 'object' && !Array.isArray(profile.preferences)
             ? (profile.preferences as Record<string, unknown>)
             : {};
@@ -157,7 +148,7 @@ export class UserProfileComponent implements OnInit {
           display_name: profile.display_name ?? '',
           email: profile.email ?? '',
           bio: profile.bio ?? '',
-          avatar_color: resolveAvatarColor(this.loadedPreferences['avatar_color']).key,
+          avatar_color: resolveAvatarColor(preferences['avatar_color']).key,
         });
         this.groups = this.groupAssociations(associations);
         this.totalAssociations = this.groups.reduce((sum, g) => sum + g.items.length, 0);
@@ -195,28 +186,20 @@ export class UserProfileComponent implements OnInit {
     this.error = null;
     this.success = null;
     const value = this.form.getRawValue();
-    // Merge invariant: the backend PUT replaces `preferences` wholesale, so the
-    // payload must carry every previously loaded key, with only `avatar_color`
-    // overridden — unrelated keys (e.g. flags other features stored) survive.
-    const preferences: Record<string, unknown> = {
-      ...this.loadedPreferences,
-      avatar_color: value.avatar_color ?? DEFAULT_AVATAR_COLOR,
-    };
     this.api
       .updateProfile({
         display_name: value.display_name ?? '',
         email: value.email ?? '',
         bio: value.bio ?? '',
-        preferences,
+        // Only the key this page owns: the backend merges preferences
+        // key-by-key, so keys written by other features/tabs survive.
+        preferences: { avatar_color: value.avatar_color ?? DEFAULT_AVATAR_COLOR },
       })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: () => {
           this.saving = false;
           this.success = 'Profile saved.';
-          // What we sent is now the persisted state — refresh the snapshot so a
-          // second save without a reload still merges against current data.
-          this.loadedPreferences = preferences;
           // The form now matches the persisted state — clear the dirty flag so an
           // unsaved-changes guard doesn't prompt after a successful save.
           this.form.markAsPristine();

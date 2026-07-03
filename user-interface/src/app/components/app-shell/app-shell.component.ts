@@ -47,10 +47,26 @@ export class AppShellComponent {
    * Settings-flyout entry and the footer can never drift apart.
    *
    * Invariants: the 'user-profile' NavItem exists in NAV_GROUPS (settings
-   * group) — the non-null assertion fails fast at construction if it is ever
-   * removed, rather than rendering a dead footer link.
+   * group) — `requireNavItem` throws at construction if it is ever removed,
+   * so the breakage is an explicit error instead of a broken footer link.
    */
-  readonly profileNavItem: NavItem = ALL_NAV_ITEMS.find((item) => item.id === 'user-profile')!;
+  readonly profileNavItem: NavItem = AppShellComponent.requireNavItem('user-profile');
+
+  /**
+   * Look up a NavItem the shell template depends on.
+   *
+   * Preconditions: `id` names an item present in `ALL_NAV_ITEMS`.
+   * Postconditions: returns that item; throws (real runtime check, not a
+   * type-level assertion) when the item is missing, failing fast at shell
+   * construction instead of during template rendering.
+   */
+  private static requireNavItem(id: string): NavItem {
+    const item = ALL_NAV_ITEMS.find((navItem) => navItem.id === id);
+    if (!item) {
+      throw new Error(`NavItem '${id}' is missing from NAV_GROUPS but the app shell requires it`);
+    }
+    return item;
+  }
 
   /** All focusable elements in the nav for arrow-key navigation. */
   @ViewChildren('navFocusable') navFocusableElements!: QueryList<ElementRef<HTMLElement>>;

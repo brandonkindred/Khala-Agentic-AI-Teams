@@ -27,13 +27,42 @@ describe('computeInitials', () => {
     expect(computeInitials('édouard ångström')).toBe('ÉÅ');
   });
 
+  it('treats decomposed (NFD) and precomposed (NFC) input identically', () => {
+    // Built via normalize('NFD') so the input is unambiguously 'e' + U+0301
+    // combining acute etc. Grapheme segmentation + NFC normalization must
+    // keep the accents ('\u00c9', '\u00c5'), not strip them to bare 'E'/'A'.
+    const precomposed = '\u00e9douard \u00e5ngstr\u00f6m';
+    const decomposed = precomposed.normalize('NFD');
+    expect(decomposed).not.toBe(precomposed); // really decomposed
+    expect(computeInitials(decomposed)).toBe('\u00c9\u00c5');
+    expect(computeInitials(decomposed)).toBe(computeInitials(precomposed));
+  });
+
   it('does not split surrogate pairs', () => {
     // '𝔘' is outside the BMP; charAt(0) would return half a code point.
     expect(computeInitials('𝔘nicode')).toBe('𝔘');
   });
 
+  it('keeps ZWJ emoji sequences intact as a single grapheme', () => {
+    // Family emoji = 5 code points joined by ZWJs; code-point slicing would
+    // strand the first person and drop the joiners.
+    expect(computeInitials('👨‍👩‍👧 family')).toBe('👨‍👩‍👧F');
+  });
+
   it('tolerates leading/trailing/repeated whitespace', () => {
     expect(computeInitials('  jane   doe  ')).toBe('JD');
+  });
+});
+
+describe('AVATAR_COLOR_OPTIONS', () => {
+  it('derives every fill from its cssVar so the two cannot drift', () => {
+    for (const option of AVATAR_COLOR_OPTIONS) {
+      expect(option.fill).toBe(`var(${option.cssVar})`);
+    }
+  });
+
+  it('uses the first palette entry as the default color', () => {
+    expect(DEFAULT_AVATAR_COLOR).toBe(AVATAR_COLOR_OPTIONS[0].key);
   });
 });
 

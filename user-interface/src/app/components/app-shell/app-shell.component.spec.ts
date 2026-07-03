@@ -68,6 +68,14 @@ describe('AppShellComponent', () => {
     expect(link.getAttribute('aria-current')).toBeNull();
   });
 
+  it('requireNavItem throws when the nav model is missing a required item', () => {
+    // Real fail-fast: a removed 'user-profile' NavItem must be an explicit
+    // construction error, not an undefined that crashes template rendering.
+    expect(() => (AppShellComponent as any).requireNavItem('does-not-exist')).toThrowError(
+      /does-not-exist/,
+    );
+  });
+
   it('marks the footer profile link as current when on /user-profile', () => {
     (component as any).router = { url: '/user-profile' };
     fixture.detectChanges();

@@ -263,7 +263,10 @@ describe('UserProfileComponent', () => {
   });
 
   it('should default the avatar color when preferences are missing or garbage', async () => {
-    for (const preferences of [null, 'nonsense', ['x'], { avatar_color: 42 }, { avatar_color: 'magenta' }]) {
+    // Two component-level cases cover the two load paths (non-object guard,
+    // unknown-key resolve); the full garbage matrix is unit-tested on
+    // resolveAvatarColor in the avatar spec — no need for a TestBed cycle each.
+    for (const preferences of [null, { avatar_color: 'magenta' }]) {
       apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, profile: { ...PROFILE, preferences } }));
       await setup();
       expect(component.form.value.avatar_color).toBe('amber');
@@ -286,32 +289,18 @@ describe('UserProfileComponent', () => {
     expect(checked.getAttribute('aria-label')).toBe('Green');
   });
 
-  it('should merge the avatar color into existing preferences on save (no clobbering)', async () => {
-    // Regression guard: the backend PUT replaces preferences wholesale, so a
-    // save must carry the previously loaded keys alongside avatar_color.
+  it('should send only the avatar_color preference key on save (server merges)', async () => {
+    // Clobber-prevention regression: unrelated preference keys survive because
+    // the backend merges key-by-key — the client must NOT send a snapshot of
+    // other features' keys (a stale snapshot is what caused lost updates).
     apiSpy.getOverview.mockReturnValue(
-      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark' } } }),
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark', avatar_color: 'blue' } } }),
     );
     await setup();
     component.selectAvatarColor('green');
     component.save();
     expect(apiSpy.updateProfile).toHaveBeenCalledWith(
-      expect.objectContaining({ preferences: { theme: 'dark', avatar_color: 'green' } }),
-    );
-  });
-
-  it('should keep merging against saved preferences on back-to-back saves', async () => {
-    apiSpy.getOverview.mockReturnValue(
-      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark' } } }),
-    );
-    await setup();
-    component.selectAvatarColor('green');
-    component.save();
-    // A second save without a reload must still carry the unrelated key.
-    component.selectAvatarColor('red');
-    component.save();
-    expect(apiSpy.updateProfile).toHaveBeenLastCalledWith(
-      expect.objectContaining({ preferences: { theme: 'dark', avatar_color: 'red' } }),
+      expect.objectContaining({ preferences: { avatar_color: 'green' } }),
     );
   });
 
@@ -337,6 +326,27 @@ describe('UserProfileComponent', () => {
     expect(component.profileLoaded).toBe(true);
     component.save();
     expect(apiSpy.updateProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it('should offer a Retry button in the error banner before the first successful load', async () => {
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    const retry = (fixture.nativeElement as HTMLElement).querySelector('.up-retry') as HTMLButtonElement;
+    expect(retry).toBeTruthy();
+    apiSpy.getOverview.mockReturnValue(of(OVERVIEW));
+    retry.click();
+    fixture.detectChanges();
+    expect(component.profileLoaded).toBe(true);
+    expect((fixture.nativeElement as HTMLElement).querySelector('.up-retry')).toBeNull();
+  });
+
+  it('should not offer Retry on a save error (reloading would discard unsaved edits)', async () => {
+    apiSpy.updateProfile.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    component.save();
+    fixture.detectChanges();
+    expect(component.error).toBeTruthy();
+    expect((fixture.nativeElement as HTMLElement).querySelector('.up-retry')).toBeNull();
   });
 
   it('should rove tabindex so only the checked swatch is a tab stop', async () => {
