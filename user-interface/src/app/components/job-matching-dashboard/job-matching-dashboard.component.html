@@ -4,10 +4,14 @@
   icon="work"
   [healthCheck]="healthCheck"
 >
-  <mat-tab-group animationDuration="0ms">
+  <mat-tab-group
+    animationDuration="0ms"
+    [selectedIndex]="selectedTabIndex"
+    (selectedIndexChange)="onTabIndexChange($event)"
+  >
     <mat-tab label="Listings">
       <div class="tab-body">
-        <app-job-listings-panel />
+        <app-job-listings-panel (startScanRequested)="onStartScanRequested()" />
       </div>
     </mat-tab>
     <mat-tab label="Scan & Runs">

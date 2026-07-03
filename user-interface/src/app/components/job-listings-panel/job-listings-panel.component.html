@@ -5,8 +5,10 @@
         class="filter-pill"
         role="radio"
         [attr.aria-checked]="filter === f.key"
+        [attr.tabindex]="filter === f.key ? 0 : -1"
         [class.selected]="filter === f.key"
         (click)="setFilter(f.key)"
+        (keydown)="onPillKeydown($event, f.key)"
       >
         {{ f.label }} <b>{{ countFor(f.key) }}</b>
       </button>
@@ -16,6 +18,8 @@
     <mat-icon>refresh</mat-icon>
   </button>
 </div>
+
+<div class="visually-hidden" aria-live="polite">{{ resultAnnouncement }}</div>
 
 @if (loading) {
   <app-loading-spinner message="Loading listings…" />
@@ -31,10 +35,16 @@
     [title]="filter === 'active' ? 'No listings yet' : 'Nothing here'"
     [description]="
       filter === 'active'
-        ? 'Run a scan from the Scan & Runs tab and the roles it finds will show up here, ranked best-first.'
+        ? 'Run a scan and the roles it finds will show up here, ranked best-first.'
         : 'No listings match this filter.'
     "
-  />
+  >
+    @if (filter === 'active') {
+      <button class="kh-btn-primary" type="button" (click)="startScanRequested.emit()">
+        Start a scan
+      </button>
+    }
+  </app-empty-state>
 } @else {
   @for (listing of listings; track listing.fingerprint) {
     <app-job-listing-card

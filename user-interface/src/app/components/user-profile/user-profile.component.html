@@ -83,9 +83,12 @@
                 @for (item of group.items; track item.id) {
                   <li class="up-list-item">
                     @if (group.route) {
-                      <a class="up-item-label" [routerLink]="group.route">{{
-                        item.label || item.artifact_id
-                      }}</a>
+                      <a
+                        class="up-item-label"
+                        [routerLink]="group.route"
+                        [queryParams]="group.queryParams ?? null"
+                        >{{ item.label || item.artifact_id }}</a
+                      >
                     } @else {
                       <span class="up-item-label">{{ item.label || item.artifact_id }}</span>
                     }

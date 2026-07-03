@@ -169,4 +169,37 @@ describe('JobProfileFormComponent', () => {
     component.save();
     expect(apiSpy.saveProfile).not.toHaveBeenCalled();
   });
+
+  it('computes each dimension\'s share of the final score from normalized weights', async () => {
+    await setup();
+    // Weights from makeProfile: 0.3/0.1/0.15/0.15/0.1/0.2 → total 1.0.
+    expect(component.weightShare('title_fit')).toBe(30);
+    expect(component.weightShare('skills_fit')).toBe(20);
+    // All-zero weights fall back to a uniform split (mirrors the ranker).
+    component.form.patchValue({
+      title_fit: 0,
+      seniority_fit: 0,
+      location_fit: 0,
+      comp_fit: 0,
+      company_fit: 0,
+      skills_fit: 0,
+    });
+    expect(component.weightShare('comp_fit')).toBe(17);
+  });
+
+  it('tracks dirty state across edits and save', async () => {
+    await setup();
+    expect(component.dirty).toBe(false);
+
+    const clear = vi.fn();
+    component.addChip('keywords', { value: 'infra', chipInput: { clear } } as never);
+    expect(component.dirty).toBe(true);
+
+    apiSpy.saveProfile.mockReturnValue(of(makeProfile()));
+    component.save();
+    expect(component.dirty).toBe(false);
+
+    component.form.controls.salary_min.markAsDirty();
+    expect(component.dirty).toBe(true);
+  });
 });

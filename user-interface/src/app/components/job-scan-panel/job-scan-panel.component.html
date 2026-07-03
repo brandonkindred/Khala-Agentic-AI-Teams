@@ -118,7 +118,7 @@
               <th scope="col">Found</th>
               <th scope="col">Ranked</th>
               <th scope="col">Completed</th>
-              <th scope="col"><span class="cdk-visually-hidden">Expand</span></th>
+              <th scope="col"><span class="visually-hidden">Expand</span></th>
             </tr>
           </thead>
           <tbody>
@@ -138,6 +138,7 @@
                     mat-icon-button
                     [attr.aria-label]="'Toggle roles for run ' + run.run_id"
                     [attr.aria-expanded]="expandedRuns.has(run.run_id)"
+                    [attr.aria-controls]="'run-detail-' + run.run_id"
                     (click)="toggleRun(run)"
                   >
                     <mat-icon>{{
@@ -148,7 +149,7 @@
               </tr>
               @if (expandedRuns.has(run.run_id)) {
                 <tr>
-                  <td colspan="6" class="run-detail-cell">
+                  <td colspan="6" class="run-detail-cell" [id]="'run-detail-' + run.run_id">
                     @if (isRunLoading(run.run_id)) {
                       <mat-progress-bar mode="indeterminate" aria-label="Loading run detail" />
                     } @else {

@@ -1,7 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
-import { of, throwError } from 'rxjs';
+import { EMPTY, Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
 import { JobListingsPanelComponent } from './job-listings-panel.component';
@@ -53,6 +53,10 @@ describe('JobListingsPanelComponent', () => {
   };
   let snackSpy: { open: ReturnType<typeof vi.fn> };
 
+  function mockSnackRef(onAction = EMPTY as ReturnType<typeof of>) {
+    return { onAction: () => onAction };
+  }
+
   async function setup(
     response: ListingsResponse = makeResponse([makeListing()], { new: 1 })
   ): Promise<void> {
@@ -60,7 +64,7 @@ describe('JobListingsPanelComponent', () => {
       listListings: vi.fn().mockReturnValue(of(response)),
       updateListing: vi.fn(),
     };
-    snackSpy = { open: vi.fn() };
+    snackSpy = { open: vi.fn().mockReturnValue(mockSnackRef()) };
     await TestBed.configureTestingModule({
       imports: [JobListingsPanelComponent],
       providers: [
@@ -74,16 +78,25 @@ describe('JobListingsPanelComponent', () => {
     fixture.detectChanges();
   }
 
-  it('loads active listings on init', async () => {
+  it('loads active listings on init and announces the count', async () => {
     await setup();
     expect(apiSpy.listListings).toHaveBeenCalledWith('active');
     expect(component.listings.length).toBe(1);
+    expect(component.resultAnnouncement).toBe('1 listing shown');
     expect(fixture.nativeElement.textContent).toContain('Staff Engineer');
   });
 
-  it('shows the empty state when there are no listings', async () => {
+  it('shows the empty state with a Start a scan CTA on the active filter', async () => {
     await setup(makeResponse([], {}));
     expect(fixture.nativeElement.textContent).toContain('No listings yet');
+    const emitted = vi.fn();
+    component.startScanRequested.subscribe(emitted);
+    const cta = Array.from(
+      fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>
+    ).find((b) => b.textContent?.includes('Start a scan'));
+    expect(cta).toBeDefined();
+    cta!.click();
+    expect(emitted).toHaveBeenCalled();
   });
 
   it('surfaces a load error with retry', async () => {
@@ -91,7 +104,7 @@ describe('JobListingsPanelComponent', () => {
       listListings: vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'boom' } }))),
       updateListing: vi.fn(),
     };
-    snackSpy = { open: vi.fn() };
+    snackSpy = { open: vi.fn().mockReturnValue(mockSnackRef()) };
     await TestBed.configureTestingModule({
       imports: [JobListingsPanelComponent],
       providers: [
@@ -119,6 +132,30 @@ describe('JobListingsPanelComponent', () => {
     expect(apiSpy.listListings.mock.calls.length).toBe(calls);
   });
 
+  it('moves selection and focus with arrow keys on the pills', async () => {
+    await setup();
+    const pills = fixture.nativeElement.querySelectorAll('.filter-pill');
+    // Only the selected pill participates in the tab order.
+    expect(pills[0].getAttribute('tabindex')).toBe('0');
+    expect(pills[1].getAttribute('tabindex')).toBe('-1');
+
+    component.onPillKeydown(
+      new KeyboardEvent('keydown', { key: 'ArrowRight' }),
+      'active'
+    );
+    expect(component.filter).toBe('favorite');
+
+    component.onPillKeydown(new KeyboardEvent('keydown', { key: 'End' }), 'favorite');
+    expect(component.filter).toBe('all');
+
+    component.onPillKeydown(new KeyboardEvent('keydown', { key: 'Home' }), 'all');
+    expect(component.filter).toBe('active');
+
+    // Wrap-around from the first pill going left.
+    component.onPillKeydown(new KeyboardEvent('keydown', { key: 'ArrowLeft' }), 'active');
+    expect(component.filter).toBe('all');
+  });
+
   it('derives pill counts from the counts map', async () => {
     await setup(
       makeResponse([makeListing()], {
@@ -134,7 +171,7 @@ describe('JobListingsPanelComponent', () => {
     expect(component.countFor('poor_fit')).toBe(0);
   });
 
-  it('patches the listing pessimistically and replaces the row', async () => {
+  it('patches the listing pessimistically, replaces the row, and offers Undo', async () => {
     await setup();
     const updated = makeListing({ status: 'favorite' });
     apiSpy.updateListing.mockReturnValue(of(updated));
@@ -146,9 +183,42 @@ describe('JobListingsPanelComponent', () => {
     expect(component.listings[0].status).toBe('favorite');
     expect(snackSpy.open).toHaveBeenCalledWith(
       expect.stringContaining('Added to favorites'),
-      'Dismiss',
+      'Undo',
       expect.anything()
     );
+  });
+
+  it('undoes a status change by PATCHing the previous status back', async () => {
+    await setup();
+    const undoClicks = new Subject<void>();
+    snackSpy.open.mockReturnValue({ onAction: () => undoClicks.asObservable() });
+    apiSpy.updateListing
+      .mockReturnValueOnce(of(makeListing({ status: 'favorite' })))
+      .mockReturnValueOnce(of(makeListing({ status: 'new' })));
+
+    component.onStatusChange(component.listings[0], 'favorite');
+    undoClicks.next();
+
+    expect(apiSpy.updateListing).toHaveBeenNthCalledWith(2, 'fp1', { status: 'new' });
+    expect(component.listings[0].status).toBe('new');
+    expect(snackSpy.open).toHaveBeenCalledWith('Change undone.', 'Dismiss', expect.anything());
+  });
+
+  it('reloads on undo when the row had left the current filter', async () => {
+    await setup();
+    const undoClicks = new Subject<void>();
+    snackSpy.open.mockReturnValue({ onAction: () => undoClicks.asObservable() });
+    apiSpy.updateListing
+      .mockReturnValueOnce(of(makeListing({ status: 'archived' })))
+      .mockReturnValueOnce(of(makeListing({ status: 'new' })));
+
+    component.onStatusChange(component.listings[0], 'archived');
+    expect(component.listings.length).toBe(0); // left the active filter
+
+    const loadsBefore = apiSpy.listListings.mock.calls.length;
+    undoClicks.next();
+    expect(apiSpy.updateListing).toHaveBeenNthCalledWith(2, 'fp1', { status: 'new' });
+    expect(apiSpy.listListings.mock.calls.length).toBeGreaterThan(loadsBefore);
   });
 
   it('removes the row when its new status leaves the active filter', async () => {
@@ -174,7 +244,7 @@ describe('JobListingsPanelComponent', () => {
     component.onStatusChange(component.listings[0], 'new');
     expect(snackSpy.open).toHaveBeenCalledWith(
       expect.stringContaining('Removed from favorites'),
-      'Dismiss',
+      'Undo',
       expect.anything()
     );
   });

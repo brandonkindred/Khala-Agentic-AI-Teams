@@ -10,6 +10,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
+import { MatSliderModule } from '@angular/material/slider';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { COMMA, ENTER } from '@angular/cdk/keycodes';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
@@ -104,6 +105,7 @@ const WEIGHT_FIELDS: { key: keyof RankingWeights; label: string }[] = [
     MatIconModule,
     MatInputModule,
     MatSelectModule,
+    MatSliderModule,
     LoadingSpinnerComponent,
   ],
   templateUrl: './job-profile-form.component.html',
@@ -123,6 +125,8 @@ export class JobProfileFormComponent implements OnInit {
   saving = false;
   error: string | null = null;
   savedAt: string | null = null;
+  /** True once a chip has been added/removed since the last load/save. */
+  chipsDirty = false;
 
   /** Chip-list values, keyed by profile field. */
   chips: Record<ChipFieldKey, string[]> = {
@@ -186,18 +190,42 @@ export class JobProfileFormComponent implements OnInit {
       work_authorization: profile.work_authorization ?? '',
       ...(profile.weights ?? {}),
     });
+    this.form.markAsPristine();
+    this.chipsDirty = false;
+  }
+
+  /** True when there are edits not yet saved to the user profile. */
+  get dirty(): boolean {
+    return this.form.dirty || this.chipsDirty;
   }
 
   addChip(key: ChipFieldKey, event: MatChipInputEvent): void {
     const value = event.value.trim();
     if (value && !this.chips[key].includes(value)) {
       this.chips[key] = [...this.chips[key], value];
+      this.chipsDirty = true;
     }
     event.chipInput.clear();
   }
 
   removeChip(key: ChipFieldKey, value: string): void {
     this.chips[key] = this.chips[key].filter((v) => v !== value);
+    this.chipsDirty = true;
+  }
+
+  /**
+   * Share of the final score a dimension gets after the ranker normalizes the
+   * six weights (uniform split when all are zero — mirrors the backend).
+   */
+  weightShare(key: keyof RankingWeights): number {
+    const raw = this.form.getRawValue();
+    const values = WEIGHT_FIELDS.map((w) => Math.max(0, raw[w.key] ?? 0));
+    const total = values.reduce((sum, v) => sum + v, 0);
+    if (total <= 0) {
+      return Math.round(100 / WEIGHT_FIELDS.length);
+    }
+    const idx = WEIGHT_FIELDS.findIndex((w) => w.key === key);
+    return Math.round((values[idx] / total) * 100);
   }
 
   /** Assemble the snake_case payload the backend expects. */
@@ -243,6 +271,8 @@ export class JobProfileFormComponent implements OnInit {
         next: () => {
           this.saving = false;
           this.savedAt = new Date().toLocaleTimeString();
+          this.form.markAsPristine();
+          this.chipsDirty = false;
           this.snackBar.open('Career profile saved to your user profile.', 'Dismiss', {
             duration: 3500,
           });

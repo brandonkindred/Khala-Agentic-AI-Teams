@@ -1,7 +1,10 @@
 <article class="listing-card" [class.pending]="pending">
   <div class="listing-main">
     <div class="listing-score">
-      <span class="score-value">{{ scorePercent }}%</span>
+      <span class="score-value">
+        <span class="visually-hidden">Match score</span>
+        {{ scorePercent }}%
+      </span>
       <span class="rec-badge" [class]="'rec-badge ' + listing.recommendation">{{
         listing.recommendation
       }}</span>
@@ -22,7 +25,7 @@
           <span>{{ listing.posting.remote_mode }}</span>
         }
         <span>{{ salaryLabel }}</span>
-        <span>Seen {{ listing.times_seen }}×</span>
+        <span>Seen {{ listing.times_seen }} {{ listing.times_seen === 1 ? 'time' : 'times' }}</span>
       </div>
     </div>
 
@@ -54,28 +57,31 @@
           <button
             mat-stroked-button
             [disabled]="pending"
-            (click)="setStatus('poor_fit')"
-            matTooltip="The match is off — keep it visible but flagged"
-          >
-            Poor fit
-          </button>
-          <button
-            mat-stroked-button
-            [disabled]="pending"
             (click)="setStatus('not_interested')"
             matTooltip="Hide from the active list"
           >
             Not interested
           </button>
           <button
-            mat-stroked-button
+            mat-icon-button
             [disabled]="pending"
-            (click)="setStatus('archived')"
-            matTooltip="Archive this listing"
+            [matMenuTriggerFor]="moreActions"
+            [attr.aria-label]="'More actions for ' + (listing.posting.title || 'this listing')"
+            matTooltip="More actions"
+            (click)="$event.stopPropagation()"
           >
-            <mat-icon>archive</mat-icon>
-            Archive
+            <mat-icon>more_vert</mat-icon>
           </button>
+          <mat-menu #moreActions="matMenu" xPosition="before">
+            <button mat-menu-item (click)="setStatus('poor_fit')">
+              <mat-icon>thumb_down_off_alt</mat-icon>
+              <span>Mark as poor fit</span>
+            </button>
+            <button mat-menu-item (click)="setStatus('archived')">
+              <mat-icon>archive</mat-icon>
+              <span>Archive</span>
+            </button>
+          </mat-menu>
         }
       }
       <button
@@ -83,6 +89,7 @@
         class="review-toggle"
         (click)="toggleExpanded()"
         [attr.aria-expanded]="expanded"
+        [attr.aria-controls]="detailId"
       >
         {{ expanded ? 'Hide' : 'Review' }}
       </button>
@@ -90,7 +97,7 @@
   </div>
 
   @if (expanded) {
-    <div class="listing-detail">
+    <div class="listing-detail" [id]="detailId">
       <div class="detail-grid">
         <div class="detail-text">
           <h4 class="detail-label">Why this score</h4>
@@ -120,7 +127,8 @@
             @if (listing.posting.url) {
               <a [href]="listing.posting.url" target="_blank" rel="noopener">
                 Open original posting
-                <mat-icon inline>open_in_new</mat-icon>
+                <span class="visually-hidden">(opens in new tab)</span>
+                <mat-icon inline aria-hidden="true">open_in_new</mat-icon>
               </a>
             }
           </p>
@@ -133,12 +141,17 @@
               <span class="sub-score-name">{{ dim.label }}</span>
               <div
                 class="sub-score-bar"
-                role="img"
-                [attr.aria-label]="dim.label + ' fit ' + (subScore(dim.key) | number: '1.2-2')"
+                role="meter"
+                aria-valuemin="0"
+                aria-valuemax="1"
+                [attr.aria-valuenow]="subScore(dim.key)"
+                [attr.aria-label]="dim.label + ' fit'"
               >
                 <span [style.width.%]="subScore(dim.key) * 100"></span>
               </div>
-              <span class="sub-score-value">{{ subScore(dim.key) | number: '1.2-2' }}</span>
+              <span class="sub-score-value" aria-hidden="true">{{
+                subScore(dim.key) | number: '1.2-2'
+              }}</span>
             </div>
           }
         </div>

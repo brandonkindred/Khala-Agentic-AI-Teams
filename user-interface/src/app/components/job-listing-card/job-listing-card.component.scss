@@ -1,8 +1,8 @@
 .listing-card {
-  background: #fff;
-  border: 1px solid #e0e5ec;
-  border-radius: 10px;
-  margin-bottom: 12px;
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-lg);
+  margin-bottom: var(--kh-space-3);
 
   &.pending {
     opacity: 0.55;
@@ -12,7 +12,7 @@
 
 .listing-main {
   display: flex;
-  gap: 16px;
+  gap: var(--kh-space-4);
   align-items: flex-start;
   padding: 14px 16px;
 }
@@ -27,54 +27,52 @@
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
+    color: var(--kh-text-primary);
   }
 }
 
 .rec-badge,
 .status-badge {
   display: inline-block;
-  border-radius: 999px;
+  border-radius: var(--kh-radius-full);
   padding: 2px 10px;
-  font-size: 12px;
+  font-size: var(--kh-text-xs);
   font-weight: 600;
   letter-spacing: 0.02em;
 }
 
 .rec-badge {
   &.apply {
-    background: #e5f3ea;
-    color: #15803d;
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
   }
   &.maybe {
-    background: #fdf3e4;
-    color: #b45309;
+    background: var(--kh-warning-subtle);
+    color: var(--kh-warning);
   }
   &.skip {
-    background: #eef1f5;
-    color: #64748b;
+    background: var(--kh-glass);
+    color: var(--kh-text-tertiary);
   }
 }
 
 .status-badge {
   &.status-new {
-    background: #edf1fd;
-    color: #3b5bdb;
+    background: var(--kh-info-subtle);
+    color: var(--kh-info);
   }
   &.status-favorite {
-    background: #fdf0da;
-    color: #92610a;
+    background: var(--kh-accent-subtle);
+    color: var(--kh-accent-text);
   }
   &.status-poor_fit {
-    background: #fbede6;
-    color: #c2410c;
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
   }
-  &.status-not_interested {
-    background: #eef1f5;
-    color: #64748b;
-  }
+  &.status-not_interested,
   &.status-archived {
-    background: #e9edf2;
-    color: #47566a;
+    background: var(--kh-glass);
+    color: var(--kh-text-tertiary);
   }
 }
 
@@ -85,17 +83,18 @@
 
 .listing-title-row {
   display: flex;
-  gap: 10px;
+  gap: var(--kh-space-3);
   align-items: baseline;
   flex-wrap: wrap;
 
   .listing-title {
     font-weight: 600;
-    font-size: 16px;
+    font-size: 1rem;
+    color: var(--kh-text-primary);
   }
 
   .listing-company {
-    color: #5b6b7c;
+    color: var(--kh-text-secondary);
   }
 }
 
@@ -104,25 +103,25 @@
   gap: 14px;
   flex-wrap: wrap;
   margin-top: 2px;
-  color: #5b6b7c;
-  font-size: 13.5px;
+  color: var(--kh-text-muted);
+  font-size: var(--kh-text-sm);
 }
 
 .listing-actions {
   display: flex;
-  gap: 6px;
+  gap: var(--kh-space-2);
   align-items: center;
   flex-wrap: wrap;
   justify-content: flex-end;
 
   .favorite-on {
-    color: #e6a817;
+    color: var(--kh-accent);
   }
 }
 
 .listing-detail {
-  border-top: 1px solid #e0e5ec;
-  padding: 16px;
+  border-top: 1px solid var(--kh-border-subtle);
+  padding: var(--kh-space-4);
 }
 
 .detail-grid {
@@ -136,30 +135,31 @@
 }
 
 .detail-label {
-  margin: 0 0 6px;
+  margin: 0 0 var(--kh-space-2);
   font-size: 11.5px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.07em;
-  color: #5b6b7c;
+  color: var(--kh-text-muted);
 }
 
 .rationale {
   margin: 0 0 14px;
   max-width: 65ch;
+  color: var(--kh-text-secondary);
 }
 
 .concerns {
   margin: 0 0 14px;
   padding-left: 18px;
-  color: #c2410c;
-  font-size: 13.5px;
+  color: var(--kh-error);
+  font-size: var(--kh-text-sm);
 }
 
 .detail-muted {
   margin: 0 0 14px;
-  color: #5b6b7c;
-  font-size: 13.5px;
+  color: var(--kh-text-muted);
+  font-size: var(--kh-text-sm);
 
   &.description {
     max-width: 65ch;
@@ -171,41 +171,43 @@
   gap: 14px;
   flex-wrap: wrap;
   margin: 0;
-  color: #5b6b7c;
-  font-size: 13.5px;
+  color: var(--kh-text-muted);
+  font-size: var(--kh-text-sm);
 
   a {
     display: inline-flex;
     align-items: center;
     gap: 3px;
+    color: var(--kh-accent-text);
   }
 }
 
 .sub-score-row {
   display: grid;
   grid-template-columns: 84px 1fr 42px;
-  gap: 8px;
+  gap: var(--kh-space-2);
   align-items: center;
-  margin-bottom: 6px;
-  font-size: 13px;
+  margin-bottom: var(--kh-space-2);
+  font-size: var(--kh-text-sm);
+  color: var(--kh-text-secondary);
 }
 
 .sub-score-bar {
   height: 6px;
   border-radius: 3px;
-  background: #e7ecf3;
+  background: var(--kh-surface-4);
   overflow: hidden;
 
   span {
     display: block;
     height: 100%;
-    background: #3b5bdb;
+    background: var(--kh-accent);
     border-radius: 3px;
   }
 }
 
 .sub-score-value {
   text-align: right;
-  color: #5b6b7c;
+  color: var(--kh-text-muted);
   font-variant-numeric: tabular-nums;
 }

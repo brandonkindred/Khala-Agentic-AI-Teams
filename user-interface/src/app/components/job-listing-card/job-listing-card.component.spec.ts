@@ -55,22 +55,37 @@ describe('JobListingCardComponent', () => {
     fixture.detectChanges();
   }
 
-  function buttonByText(text: string): HTMLButtonElement | undefined {
-    const buttons = Array.from(
-      fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>
-    );
+  afterEach(() => {
+    // Menus render into an overlay attached to the document body; clear it so
+    // one test's open menu can't leak into the next test's queries.
+    document.querySelectorAll('.cdk-overlay-container').forEach((el) => el.remove());
+  });
+
+  function buttonByText(text: string, root: ParentNode = fixture.nativeElement): HTMLButtonElement | undefined {
+    const buttons = Array.from(root.querySelectorAll('button') as NodeListOf<HTMLButtonElement>);
     return buttons.find((b) => b.textContent?.includes(text));
+  }
+
+  function openMoreActions(): void {
+    const trigger = Array.from(
+      fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>
+    ).find((b) => b.getAttribute('aria-label')?.startsWith('More actions'));
+    expect(trigger).toBeDefined();
+    trigger!.click();
+    fixture.detectChanges();
   }
 
   it('renders score, recommendation, and status badges', async () => {
     await setup(makeListing());
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('.score-value')?.textContent).toContain('87%');
+    expect(el.querySelector('.score-value')?.textContent).toContain('Match score');
     expect(el.querySelector('.rec-badge')?.textContent).toContain('apply');
     expect(el.querySelector('.status-badge')?.textContent).toContain('New');
     expect(el.textContent).toContain('Staff Engineer');
     expect(el.textContent).toContain('Acme');
     expect(el.textContent).toContain('USD 200k–260k');
+    expect(el.textContent).toContain('Seen 2 times');
   });
 
   it('emits favorite on the star and toggles back to new when already favorite', async () => {
@@ -86,15 +101,29 @@ describe('JobListingCardComponent', () => {
     expect(emitted).toEqual(['favorite', 'new']);
   });
 
-  it('emits the matching status for each triage button', async () => {
+  it('keeps Not interested inline and emits its status', async () => {
+    await setup(makeListing());
+    const emitted: ListingStatus[] = [];
+    component.statusChange.subscribe((s) => emitted.push(s));
+    buttonByText('Not interested')!.click();
+    expect(emitted).toEqual(['not_interested']);
+  });
+
+  it('emits poor_fit and archived from the more-actions menu', async () => {
     await setup(makeListing());
     const emitted: ListingStatus[] = [];
     component.statusChange.subscribe((s) => emitted.push(s));
 
-    buttonByText('Poor fit')!.click();
-    buttonByText('Not interested')!.click();
-    buttonByText('Archive')!.click();
-    expect(emitted).toEqual(['poor_fit', 'not_interested', 'archived']);
+    // Archive and Poor fit are not inline anymore.
+    expect(buttonByText('Archive')).toBeUndefined();
+    expect(buttonByText('Poor fit')).toBeUndefined();
+
+    openMoreActions();
+    buttonByText('Mark as poor fit', document)!.click();
+    fixture.detectChanges();
+    openMoreActions();
+    buttonByText('Archive', document)!.click();
+    expect(emitted).toEqual(['poor_fit', 'archived']);
   });
 
   it('shows a single Restore action for triaged-away listings', async () => {
@@ -102,7 +131,7 @@ describe('JobListingCardComponent', () => {
     const emitted: ListingStatus[] = [];
     component.statusChange.subscribe((s) => emitted.push(s));
 
-    expect(buttonByText('Archive')).toBeUndefined();
+    expect(buttonByText('Not interested')).toBeUndefined();
     const restore = buttonByText('Restore');
     expect(restore).toBeDefined();
     restore!.click();
@@ -111,7 +140,7 @@ describe('JobListingCardComponent', () => {
 
   it('hides all triage actions in readonly mode', async () => {
     await setup(makeListing(), { readonly: true });
-    expect(buttonByText('Archive')).toBeUndefined();
+    expect(buttonByText('Not interested')).toBeUndefined();
     expect(buttonByText('Restore')).toBeUndefined();
     // The review toggle stays available.
     expect(buttonByText('Review')).toBeDefined();
@@ -119,24 +148,32 @@ describe('JobListingCardComponent', () => {
 
   it('disables actions while pending', async () => {
     await setup(makeListing(), { pending: true });
-    expect(buttonByText('Archive')!.disabled).toBe(true);
+    expect(buttonByText('Not interested')!.disabled).toBe(true);
   });
 
-  it('expands to the review detail with rationale, concerns, and sub-scores', async () => {
+  it('expands to the review detail with rationale, concerns, and meters', async () => {
     await setup(makeListing());
     expect(fixture.nativeElement.querySelector('.listing-detail')).toBeNull();
 
-    buttonByText('Review')!.click();
+    const toggle = buttonByText('Review')!;
+    expect(toggle.getAttribute('aria-controls')).toBe('listing-detail-fp1');
+    toggle.click();
     fixture.detectChanges();
 
     const el: HTMLElement = fixture.nativeElement;
-    expect(el.querySelector('.listing-detail')).not.toBeNull();
+    const detail = el.querySelector('.listing-detail');
+    expect(detail).not.toBeNull();
+    expect(detail!.id).toBe('listing-detail-fp1');
     expect(el.textContent).toContain('Great fit.');
     expect(el.textContent).toContain('Hybrid only');
-    expect(el.querySelectorAll('.sub-score-row').length).toBe(6);
+    const meters = el.querySelectorAll('.sub-score-bar[role="meter"]');
+    expect(meters.length).toBe(6);
+    expect(meters[0].getAttribute('aria-valuenow')).toBe('0.9');
+    expect(meters[0].getAttribute('aria-valuemax')).toBe('1');
     const link = el.querySelector('.detail-facts a') as HTMLAnchorElement;
     expect(link.href).toContain('https://example.com/job');
     expect(link.rel).toContain('noopener');
+    expect(link.textContent).toContain('(opens in new tab)');
     expect(buttonByText('Hide')).toBeDefined();
   });
 

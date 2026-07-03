@@ -1,4 +1,4 @@
-import { Component, DestroyRef, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, ElementRef, EventEmitter, OnInit, Output, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
@@ -29,10 +29,12 @@ const STATUS_VERBS: Record<ListingStatus, string> = {
 
 /**
  * Listings management panel: aggregated listings across runs with status
- * filter pills and per-card triage actions (favorite / poor fit /
- * not interested / archive). Updates are pessimistic — the card's actions
- * disable while the PATCH is in flight and the row is replaced (or removed
- * from the current filter) from the server's response.
+ * filter pills (roving arrow-key navigation) and per-card triage actions.
+ * Updates are pessimistic — the card's actions disable while the PATCH is
+ * in flight and the row is replaced (or removed from the current filter)
+ * from the server's response. Every status snackbar carries an Undo action
+ * that PATCHes the previous status back, and keyboard focus is restored to
+ * the next card (or the filter pills) when a card leaves the list.
  */
 @Component({
   selector: 'app-job-listings-panel',
@@ -48,9 +50,13 @@ const STATUS_VERBS: Record<ListingStatus, string> = {
   styleUrl: './job-listings-panel.component.scss',
 })
 export class JobListingsPanelComponent implements OnInit {
+  /** Emitted by the empty state's "Start a scan" CTA; the dashboard switches tabs. */
+  @Output() startScanRequested = new EventEmitter<void>();
+
   private readonly api = inject(JobMatchingApiService);
   private readonly snackBar = inject(MatSnackBar);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   readonly filters = FILTERS;
 
@@ -61,6 +67,8 @@ export class JobListingsPanelComponent implements OnInit {
   error: string | null = null;
   /** Fingerprint of the listing whose PATCH is in flight, if any. */
   pendingFingerprint: string | null = null;
+  /** aria-live message announcing the result of the latest load. */
+  resultAnnouncement = '';
 
   ngOnInit(): void {
     this.load();
@@ -78,6 +86,8 @@ export class JobListingsPanelComponent implements OnInit {
           this.listings = res.listings;
           this.counts = res.counts;
           this.loading = false;
+          this.resultAnnouncement =
+            res.listings.length === 1 ? '1 listing shown' : `${res.listings.length} listings shown`;
         },
         error: (err) => {
           this.error = err?.error?.detail ?? err?.message ?? 'Failed to load listings.';
@@ -94,6 +104,40 @@ export class JobListingsPanelComponent implements OnInit {
     this.load();
   }
 
+  /**
+   * Roving arrow-key navigation across the filter pills (role="radiogroup").
+   * Selecting follows focus; Enter/Space are handled natively by the buttons.
+   */
+  onPillKeydown(event: KeyboardEvent, filter: ListingFilter): void {
+    const idx = FILTERS.findIndex((f) => f.key === filter);
+    if (idx < 0) {
+      return;
+    }
+    let nextIdx = idx;
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        nextIdx = (idx + 1) % FILTERS.length;
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        nextIdx = (idx - 1 + FILTERS.length) % FILTERS.length;
+        break;
+      case 'Home':
+        nextIdx = 0;
+        break;
+      case 'End':
+        nextIdx = FILTERS.length - 1;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    this.setFilter(FILTERS[nextIdx].key);
+    const pills = this.pillElements();
+    pills?.[nextIdx]?.focus();
+  }
+
   /** Count shown on a filter pill; `active` and `all` are derived. */
   countFor(filter: ListingFilter): number {
     const total = Object.values(this.counts).reduce((sum, n) => sum + n, 0);
@@ -107,6 +151,8 @@ export class JobListingsPanelComponent implements OnInit {
   }
 
   onStatusChange(listing: Listing, status: ListingStatus): void {
+    const previousStatus = listing.status;
+    const removalIndex = this.listings.findIndex((l) => l.fingerprint === listing.fingerprint);
     this.pendingFingerprint = listing.fingerprint;
     this.api
       .updateListing(listing.fingerprint, { status })
@@ -114,14 +160,21 @@ export class JobListingsPanelComponent implements OnInit {
       .subscribe({
         next: (updated) => {
           this.pendingFingerprint = null;
-          this.applyUpdate(updated);
+          const removed = this.applyUpdate(updated);
+          if (removed) {
+            this.restoreFocus(removalIndex);
+          }
           const title = updated.posting.title || 'listing';
           const company = updated.posting.company ? ` at ${updated.posting.company}` : '';
           const verb =
-            status === 'new' && listing.status === 'favorite'
+            status === 'new' && previousStatus === 'favorite'
               ? 'Removed from favorites'
               : STATUS_VERBS[status];
-          this.snackBar.open(`${verb}: ${title}${company}`, 'Dismiss', { duration: 3500 });
+          this.snackBar
+            .open(`${verb}: ${title}${company}`, 'Undo', { duration: 6000 })
+            .onAction()
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe(() => this.undoStatusChange(updated, previousStatus));
         },
         error: (err) => {
           this.pendingFingerprint = null;
@@ -131,10 +184,38 @@ export class JobListingsPanelComponent implements OnInit {
       });
   }
 
-  /** Replace the row with the server's version, dropping it if it left the filter. */
-  private applyUpdate(updated: Listing): void {
+  /** PATCH the previous status back and fold the listing into the view. */
+  private undoStatusChange(listing: Listing, previousStatus: ListingStatus): void {
+    this.api
+      .updateListing(listing.fingerprint, { status: previousStatus })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (reverted) => {
+          const present = this.listings.some((l) => l.fingerprint === reverted.fingerprint);
+          if (present) {
+            this.applyUpdate(reverted);
+          } else if (this.matchesFilter(reverted.status)) {
+            // The row was removed from this filter by the original change;
+            // reload so it reappears in its ranked position.
+            this.load();
+          }
+          this.snackBar.open('Change undone.', 'Dismiss', { duration: 3000 });
+        },
+        error: () => {
+          this.snackBar.open('Could not undo the change.', 'Dismiss', { duration: 5000 });
+        },
+      });
+  }
+
+  /**
+   * Replace the row with the server's version, dropping it if it left the
+   * filter. Returns true when the row was removed from the visible list.
+   */
+  private applyUpdate(updated: Listing): boolean {
+    let removed = false;
     if (!this.matchesFilter(updated.status)) {
       this.listings = this.listings.filter((l) => l.fingerprint !== updated.fingerprint);
+      removed = true;
     } else {
       this.listings = this.listings.map((l) =>
         l.fingerprint === updated.fingerprint ? updated : l
@@ -148,6 +229,29 @@ export class JobListingsPanelComponent implements OnInit {
         next: (res) => (this.counts = res.counts),
         error: () => undefined, // counts are cosmetic; the next full load corrects them
       });
+    return removed;
+  }
+
+  /**
+   * After a card is removed, keep keyboard users anchored: focus the card now
+   * occupying the removed card's slot (or the last card), falling back to the
+   * selected filter pill when the list emptied.
+   */
+  private restoreFocus(removedIndex: number): void {
+    setTimeout(() => {
+      const root: HTMLElement = this.host.nativeElement;
+      const toggles = root.querySelectorAll<HTMLElement>('.review-toggle');
+      if (toggles.length) {
+        const idx = Math.min(Math.max(removedIndex, 0), toggles.length - 1);
+        toggles[idx].focus();
+        return;
+      }
+      root.querySelector<HTMLElement>('.filter-pill.selected')?.focus();
+    });
+  }
+
+  private pillElements(): NodeListOf<HTMLElement> | null {
+    return this.host.nativeElement.querySelectorAll<HTMLElement>('.filter-pill');
   }
 
   private matchesFilter(status: ListingStatus): boolean {

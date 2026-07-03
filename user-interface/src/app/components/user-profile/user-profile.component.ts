@@ -19,16 +19,19 @@ interface AssociationGroup {
   icon: string;
   /** Route the group's items link to, when the owning team has an editor screen. */
   route?: string;
+  /** Query params for the route link (e.g. deep-linking a dashboard tab). */
+  queryParams?: Record<string, string>;
   items: Association[];
 }
 
 /** Supported artifact types in display order, each with its label and Material icon. */
-const ARTIFACT_GROUPS: { type: string; label: string; icon: string; route?: string }[] = [
+const ARTIFACT_GROUPS: Omit<AssociationGroup, 'items'>[] = [
   { type: 'brand', label: 'Brands', icon: 'palette' },
   { type: 'blog_post', label: 'Blog Posts', icon: 'article' },
   { type: 'project', label: 'Projects', icon: 'terminal' },
   { type: 'agentic_team', label: 'Agentic Teams', icon: 'groups' },
-  { type: 'career', label: 'Career', icon: 'work', route: '/job-matching' },
+  // Deep-link straight to the career profile editor tab.
+  { type: 'career', label: 'Career', icon: 'work', route: '/job-matching', queryParams: { tab: 'profile' } },
 ];
 
 /**

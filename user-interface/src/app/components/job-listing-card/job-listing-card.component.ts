@@ -2,6 +2,7 @@ import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { DecimalPipe } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
+import { MatMenuModule } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import type { Listing, ListingStatus, SubScores } from '../../models';
 
@@ -31,7 +32,7 @@ const STATUS_LABELS: Record<ListingStatus, string> = {
 @Component({
   selector: 'app-job-listing-card',
   standalone: true,
-  imports: [DecimalPipe, MatButtonModule, MatIconModule, MatTooltipModule],
+  imports: [DecimalPipe, MatButtonModule, MatIconModule, MatMenuModule, MatTooltipModule],
   templateUrl: './job-listing-card.component.html',
   styleUrl: './job-listing-card.component.scss',
 })
@@ -49,6 +50,11 @@ export class JobListingCardComponent {
 
   get scorePercent(): number {
     return Math.round(this.listing.score * 100);
+  }
+
+  /** Stable id for the expandable detail region (aria-controls target). */
+  get detailId(): string {
+    return `listing-detail-${this.listing.fingerprint}`;
   }
 
   get statusLabel(): string {

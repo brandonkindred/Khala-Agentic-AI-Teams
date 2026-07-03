@@ -45,11 +45,15 @@
                   <input
                     [id]="'chips-' + field.key"
                     placeholder="Add…"
+                    [attr.aria-describedby]="'chips-help-' + field.key"
                     [matChipInputFor]="chipGrid"
                     [matChipInputSeparatorKeyCodes]="separatorKeyCodes"
                     (matChipInputTokenEnd)="addChip(field.key, $event)"
                   />
                 </mat-chip-grid>
+                <p class="chip-help" [id]="'chips-help-' + field.key">
+                  Type and press Enter to add
+                </p>
               </div>
             }
 
@@ -96,12 +100,22 @@
         </mat-card-subtitle>
       </mat-card-header>
       <mat-card-content>
-        <div class="inline-fields">
+        <div class="weight-rows">
           @for (weight of weightFields; track weight.key) {
-            <mat-form-field appearance="outline">
-              <mat-label>{{ weight.label }}</mat-label>
-              <input matInput type="number" min="0" step="0.05" [formControlName]="weight.key" />
-            </mat-form-field>
+            <div class="weight-row">
+              <label class="weight-name" [attr.for]="'weight-' + weight.key">{{
+                weight.label
+              }}</label>
+              <mat-slider min="0" max="1" step="0.05" discrete>
+                <input
+                  matSliderThumb
+                  [id]="'weight-' + weight.key"
+                  [formControlName]="weight.key"
+                  [attr.aria-label]="weight.label + ' weight'"
+                />
+              </mat-slider>
+              <span class="weight-share">{{ weightShare(weight.key) }}% of score</span>
+            </div>
           }
         </div>
       </mat-card-content>
@@ -109,10 +123,12 @@
 
     <div class="save-row">
       <button mat-flat-button color="primary" type="submit" [disabled]="form.invalid || saving">
-        {{ saving ? 'Saving…' : 'Save career profile' }}
+        {{ saving ? 'Saving…' : dirty ? 'Save changes' : 'Save career profile' }}
       </button>
-      @if (savedAt) {
+      @if (savedAt && !dirty) {
         <span class="saved-note">Saved to your user profile at {{ savedAt }}.</span>
+      } @else if (dirty) {
+        <span class="saved-note">Unsaved changes</span>
       }
     </div>
   </form>
