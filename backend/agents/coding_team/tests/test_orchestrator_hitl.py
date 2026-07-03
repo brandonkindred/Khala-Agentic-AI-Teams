@@ -540,7 +540,7 @@ def test_plan_to_task_graph_parses_open_questions(monkeypatch):
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda a, p: {
+        lambda a, p, required_keys=None: {
             "tasks": [],
             "stacks": [{"name": "backend", "tools_services": []}],
             "open_questions": [{"question_text": "Allergen default?"}],
@@ -557,7 +557,7 @@ def test_plan_to_task_graph_failure_includes_open_questions_key(monkeypatch):
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
 
-    def boom(a, p):
+    def boom(a, p, required_keys=None):
         raise RuntimeError("x")
 
     monkeypatch.setattr(tl_mod, "_agent_call_json", boom)

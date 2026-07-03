@@ -1619,19 +1619,30 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
     provider = get_engine_provider()
     if provider is None:
         logger.error("PR review %s aborted: no engine provider configured", job_id)
-        update_job(
-            job_id,
-            status="failed",
-            phase="completed",
-            error=(
-                "code review failed: no engine provider configured — the standalone "
-                "coding-team service must run via coding_team_service.main (TEAM_MODULE), "
-                "which installs the engine provider at startup"
-            ),
+        error = (
+            "code review failed: no engine provider configured — the standalone "
+            "coding-team service must run via coding_team_service.main (TEAM_MODULE), "
+            "which installs the engine provider at startup"
         )
+        update_job(job_id, status="failed", phase="completed", error=error)
         update_review(
             job_id, status="failed", status_text="No engine provider configured", completed=True
         )
+        # Tell the PR, not just the job store: the reviewer who invoked @khala-review
+        # is watching the pull request and would otherwise wait forever on a job that
+        # silently failed. The token is already in hand, so post a scrubbed one-liner
+        # (best-effort — a GitHub outage must not turn this into an unhandled raise).
+        try:
+            with GitHubClient(token=token) as client:
+                _safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    f"Code review could not run: {scrub_token_from_text(error)}",
+                )
+        except Exception as exc:  # noqa: BLE001 - notification is best-effort
+            logger.warning("PR review %s: failed to post abort notice: %s", job_id, exc)
         return
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
     update_review(job_id, status="running", status_text="Reviewing pull request")

@@ -589,6 +589,15 @@ jobs:
             backend/agents/software_engineering_team/requirements.txt
       - run: pip install -r requirements.txt -r software_engineering_team/requirements.txt
       # Coverage gate is enforced at 90% line coverage; see CLAUDE.md.
+      #
+      # This is an EXPLICIT file list, not a directory glob, on purpose: the job
+      # installs only the shared/SE requirement set, so collecting the full
+      # software_engineering_team/tests and coding_team/tests trees would import
+      # team-specific test modules whose heavier deps are absent and fail at
+      # collection. The tradeoff is drift — a NEW test that exercises a shared_*
+      # package must be added to this list (and, if it lifts a package's line
+      # count, it is needed to keep --cov-fail-under=90 satisfied). Keep this list
+      # in sync when adding shared-infra tests.
       - run: >-
           pytest
           software_engineering_team/tests/test_command_runner.py

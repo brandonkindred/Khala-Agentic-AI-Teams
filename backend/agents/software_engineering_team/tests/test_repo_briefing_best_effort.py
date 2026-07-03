@@ -26,10 +26,11 @@ def test_unreadable_file_is_skipped_not_raised(tmp_path: Path, monkeypatch) -> N
     assert "secret" not in out
 
 
-def test_mid_walk_error_degrades_instead_of_raising(tmp_path: Path, monkeypatch) -> None:
+def test_mid_walk_error_degrades_to_partial_briefing(tmp_path: Path, monkeypatch) -> None:
     """A filesystem race mid-scan (e.g. a dir deleted by a parallel build) must not
-    escape the scanner and fail the calling workflow; it degrades to whatever was
-    gathered (here: nothing, since the walk is materialized up front)."""
+    escape the scanner and fail the calling workflow; it degrades to a briefing
+    built from the entries enumerated *before* the error — real partial content,
+    not the empty sentinel."""
     (tmp_path / "a.py").write_text("A = 1")
 
     def _boom(self: Path, pattern: str):
@@ -40,4 +41,21 @@ def test_mid_walk_error_degrades_instead_of_raising(tmp_path: Path, monkeypatch)
     out = read_repo_code_budgeted(
         tmp_path, extensions={".py"}, exclude_dirs={".git"}, max_chars=10_000
     )
-    assert out == "# No code files found"  # degraded, no exception escaped
+    # The entry yielded before the walk error is still read: partial, not empty.
+    assert "a.py" in out
+    assert "A = 1" in out
+
+
+def test_walk_error_before_any_entry_returns_empty(tmp_path: Path, monkeypatch) -> None:
+    """When the walk raises before yielding anything, there is nothing to salvage,
+    so the briefing degrades to the empty sentinel — still no exception escapes."""
+
+    def _boom(self: Path, pattern: str):
+        raise FileNotFoundError("directory vanished before scan")
+        yield  # pragma: no cover - unreachable, makes _boom a generator
+
+    monkeypatch.setattr(Path, "rglob", _boom)
+    out = read_repo_code_budgeted(
+        tmp_path, extensions={".py"}, exclude_dirs={".git"}, max_chars=10_000
+    )
+    assert out == "# No code files found"

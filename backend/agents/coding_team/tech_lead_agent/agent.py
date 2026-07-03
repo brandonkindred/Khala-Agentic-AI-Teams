@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Collection, Dict, List, Optional
 
 from strands import Agent
 
@@ -129,17 +129,24 @@ def _plan_text(plan: CodingTeamPlanInput) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def _agent_call_json(agent: Agent, prompt: str) -> Dict[str, Any]:
+def _agent_call_json(
+    agent: Agent, prompt: str, required_keys: Optional[Collection[str]] = None
+) -> Dict[str, Any]:
     """Call a Strands Agent and parse the result as JSON.
 
     Preconditions:
         - ``agent`` is a callable Strands ``Agent``; ``prompt`` is a non-empty str.
+        - ``required_keys`` is ``None`` or the anchor keys this call site expects
+          in the payload (e.g. ``{"approved"}`` for a review verdict). When set,
+          salvage only accepts a recovered object carrying at least one of them,
+          so a usage/format echo that lacks the anchor cannot be mistaken for the
+          answer.
     Postconditions:
         - Returns the parsed object. Strict ``json.loads`` is tried first (after
           stripping a single leading/trailing ```` ``` ```` fence); on failure the
-          shared brace-scan recovery salvages a JSON object from prose- or
-          think-block-wrapped output. Raises ``json.JSONDecodeError`` only when no
-          object can be recovered.
+          shared salvage recovery extracts a JSON object from prose- or
+          think-block-wrapped output, anchored on ``required_keys``. Raises
+          ``json.JSONDecodeError`` only when no object can be recovered.
     """
     result = agent(prompt)
     raw = str(result).strip()
@@ -148,7 +155,7 @@ def _agent_call_json(agent: Agent, prompt: str) -> Dict[str, Any]:
     try:
         return json.loads(fenced)
     except json.JSONDecodeError:
-        recovered = extract_json_object(raw)
+        recovered = extract_json_object(raw, required_keys=required_keys)
         if recovered is not None:
             return recovered
         raise
@@ -187,7 +194,11 @@ class TechLeadAgent:
         user = prompts.PLAN_TO_TASK_GRAPH_USER.format(plan_text=plan_text)
         user += "\n\nRespond with valid JSON only, no markdown fences."
         try:
-            data = _agent_call_json(self._plan_agent, user)
+            data = _agent_call_json(
+                self._plan_agent,
+                user,
+                required_keys=("tasks", "stacks", "open_questions", "already_complete"),
+            )
         except Exception as e:
             logger.warning("Tech Lead plan_to_task_graph LLM failed: %s", e)
             return {
@@ -275,7 +286,9 @@ class TechLeadAgent:
         user += "\n\nRespond with valid JSON only, no markdown fences."
         try:
             data = call_llm_with_retries(
-                lambda: _agent_call_json(self._adjudication_agent, user),
+                lambda: _agent_call_json(
+                    self._adjudication_agent, user, required_keys=("verdict",)
+                ),
                 max_attempts=_review_retry_attempts(),
             )
         except Exception as e:  # noqa: BLE001 — a failed adjudication must not re-enter the loop
@@ -313,7 +326,16 @@ class TechLeadAgent:
         )
         user += "\n\nRespond with valid JSON only, no markdown fences."
         try:
-            data = _agent_call_json(self._groom_agent, user)
+            data = _agent_call_json(
+                self._groom_agent,
+                user,
+                required_keys=(
+                    "acceptance_criteria",
+                    "description_enriched",
+                    "subtasks",
+                    "out_of_scope",
+                ),
+            )
         except Exception as e:
             logger.warning("Tech Lead groom_task LLM failed: %s", e)
             return {
@@ -347,7 +369,7 @@ class TechLeadAgent:
         )
         user += "\n\nRespond with valid JSON only, no markdown fences."
         try:
-            data = _agent_call_json(self._assignment_agent, user)
+            data = _agent_call_json(self._assignment_agent, user, required_keys=("assignments",))
         except Exception as e:
             logger.warning("Tech Lead assignments LLM failed: %s", e)
             return {"assignments": []}
@@ -427,13 +449,15 @@ class TechLeadAgent:
                 f"attempt {attempt_no}/{attempts}",
                 min(0.1 + 0.8 * (attempt_no - 1) / attempts, 0.9),
             )
-            data = _agent_call_json(self._review_agent, user)
-            # A response that parses as JSON but carries no verdict (missing/null "approved") is not
-            # a substantive rejection — it's an unusable review. Raise so the shared retry envelope
-            # retries it and it ultimately surfaces error=True (fail once), rather than silently
-            # becoming approved=False and burning the revision loop.
-            if data.get("approved") is None:
-                raise ValueError(f"review response missing 'approved' verdict: {data!r}")
+            data = _agent_call_json(self._review_agent, user, required_keys=("approved",))
+            # A response that parses as JSON but carries no usable verdict is not a substantive
+            # rejection — it's an unusable review. ``approved`` must be a real boolean: a missing or
+            # null verdict, or a fabricated non-bool that tolerant repair completed from a truncated
+            # ``{"approved": `` (which yields ``""``), must NOT slip through as ``approved=False`` and
+            # burn the revision loop. Raise so the shared retry envelope retries and ultimately
+            # surfaces error=True (fail once).
+            if not isinstance(data.get("approved"), bool):
+                raise ValueError(f"review response missing a boolean 'approved' verdict: {data!r}")
             return data
 
         # Reuse the platform's jittered-exponential-backoff retry envelope rather than a bespoke

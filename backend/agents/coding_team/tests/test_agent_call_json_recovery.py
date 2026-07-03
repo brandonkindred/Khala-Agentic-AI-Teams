@@ -41,3 +41,13 @@ def test_recovers_from_think_block() -> None:
 def test_raises_when_unrecoverable() -> None:
     with pytest.raises(json.JSONDecodeError):
         _agent_call_json(_FakeAgent("there is absolutely no json here"), "p")
+
+
+def test_required_keys_anchor_skips_usage_echo() -> None:
+    """When the call site knows its schema, a trailing usage echo that lacks the
+    anchor key must not be returned in place of the real (recoverable) payload."""
+    agent = _FakeAgent('Verdict: {"approved": false, "issues": ["x"],}\nUsage: {"tokens": 9}')
+    assert _agent_call_json(agent, "p", required_keys=("approved",)) == {
+        "approved": False,
+        "issues": ["x"],
+    }

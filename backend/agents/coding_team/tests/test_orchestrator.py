@@ -251,7 +251,7 @@ def test_review_retries_transient_error_then_succeeds(monkeypatch):
     monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
     calls = {"n": 0}
 
-    def flaky(agent, prompt):
+    def flaky(agent, prompt, required_keys=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("rate limited")
@@ -275,7 +275,7 @@ def test_review_returns_error_after_exhausting_retries(monkeypatch):
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
 
-    def boom(agent, prompt):
+    def boom(agent, prompt, required_keys=None):
         raise RuntimeError("context overflow")
 
     monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
@@ -297,7 +297,7 @@ def test_review_missing_approved_is_infra_error_not_rejection(monkeypatch):
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
     # Valid JSON, but no verdict — e.g. a weak/over-context model that omits 'approved'.
-    monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt: {"reason": "hmm"})
+    monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt, required_keys=None: {"reason": "hmm"})
     tl = tl_mod.TechLeadAgent(model=object())
 
     out = tl.run_code_review("t", "d", [], "evidence")
@@ -314,7 +314,7 @@ def test_review_explicit_false_is_substantive_rejection(monkeypatch):
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: {"approved": False, "reason": "needs tests"},
+        lambda agent, prompt, required_keys=None: {"approved": False, "reason": "needs tests"},
     )
     tl = tl_mod.TechLeadAgent(model=object())
 
@@ -323,6 +323,28 @@ def test_review_explicit_false_is_substantive_rejection(monkeypatch):
     assert out["error"] is False
     assert out["approved"] is False
     assert out["reason"] == "needs tests"
+
+
+def test_review_non_bool_approved_is_infra_failure_not_rejection(monkeypatch):
+    """A fabricated non-boolean ``approved`` (e.g. ``""`` that tolerant repair completes
+    from a truncated ``{"approved": ``) must NOT slip through as a substantive rejection.
+    The guard raises so it surfaces as an infra failure (error=True), never a silent
+    approved=False that would burn a revision round on a verdict the model never gave."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "0")  # single attempt, no backoff waits
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt, required_keys=None: {"approved": "", "reason": ""},
+    )
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    out = tl.run_code_review("t", "d", [], "evidence")
+
+    assert out["error"] is True
+    assert out["approved"] is False  # fail-closed default, not the fabricated verdict
 
 
 def test_review_retry_attempts_env_parsing(monkeypatch):
@@ -2161,7 +2183,7 @@ def test_tech_lead_review_progress_reports_attempts_and_retry_waits(monkeypatch)
     monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
     calls = {"n": 0}
 
-    def flaky(agent, prompt):
+    def flaky(agent, prompt, required_keys=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("rate limited")
@@ -2195,7 +2217,7 @@ def test_tech_lead_review_progress_terminal_done_on_exhausted_retries(monkeypatc
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: (_ for _ in ()).throw(RuntimeError("down")),
+        lambda agent, prompt, required_keys=None: (_ for _ in ()).throw(RuntimeError("down")),
     )
     tl = tl_mod.TechLeadAgent(model=object())
 
@@ -2222,7 +2244,7 @@ def test_tech_lead_review_fail_fast_reports_actual_attempt_count(monkeypatch):
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: (_ for _ in ()).throw(LLMRateLimitError("429")),
+        lambda agent, prompt, required_keys=None: (_ for _ in ()).throw(LLMRateLimitError("429")),
     )
     tl = tl_mod.TechLeadAgent(model=object())
 
@@ -2244,7 +2266,7 @@ def test_tech_lead_review_raising_callback_never_burns_attempts(monkeypatch):
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     calls = {"n": 0}
 
-    def ok(agent, prompt):
+    def ok(agent, prompt, required_keys=None):
         calls["n"] += 1
         return {"approved": True, "reason": "ok", "requested_changes": []}
 
@@ -2267,7 +2289,7 @@ def test_tech_lead_review_no_callback_unchanged(monkeypatch):
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: {"approved": True, "reason": "ok", "requested_changes": []},
+        lambda agent, prompt, required_keys=None: {"approved": True, "reason": "ok", "requested_changes": []},
     )
     tl = tl_mod.TechLeadAgent(model=object())
     out = tl.run_code_review("t", "d", [], "evidence")
@@ -2408,7 +2430,7 @@ def _capture_review_prompt(monkeypatch):
 
     captured: Dict[str, str] = {}
 
-    def _record(agent, prompt):
+    def _record(agent, prompt, required_keys=None):
         captured["prompt"] = prompt
         return {"approved": True, "reason": "ok", "requested_changes": []}
 

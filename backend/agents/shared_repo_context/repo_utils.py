@@ -121,36 +121,49 @@ def read_repo_code_budgeted(
           raises past precondition checks: a file that cannot be read is skipped
           (logged at WARNING), and a mid-walk filesystem error (e.g. a directory
           deleted by a parallel build while scanning, or an untraversable dir)
-          degrades to the partial briefing gathered so far instead of failing
-          the caller's workflow.
+          degrades to a briefing built from the entries enumerated *before* the
+          error, instead of failing the caller's workflow. The tree is
+          enumerated first, then sorted, then read — so a walk that aborts
+          partway still yields real content, not the empty string.
     """
     assert max_chars > 0, "max_chars must be positive"
     ext_set = frozenset(extensions)
     excl_set = frozenset(exclude_dirs)
     parts: List[str] = []
     total = 0
+    # Enumerate the walk into a list under its own guard: ``rglob`` can raise
+    # mid-iteration (a dir deleted by a parallel build, an untraversable dir),
+    # and materializing here — rather than inside ``sorted(...)`` in the read
+    # loop — keeps the entries gathered so far so the read below still produces a
+    # partial briefing. ``OSError`` is the only family a filesystem walk raises;
+    # a broader catch would bury real programming errors as empty briefings.
+    walked: List[Path] = []
     try:
-        for f in sorted(repo_path.rglob("*")):
-            try:
-                if not f.is_file() or f.suffix not in ext_set:
-                    continue
-                if excl_set & set(f.parts):
-                    continue
-                content = f.read_text(encoding="utf-8", errors="replace")
-            except Exception as exc:  # noqa: BLE001 - per-file best-effort, visibly skipped
-                logger.warning("Repo briefing skipped %s: %s", f, exc)
-                continue
-            chunk = f"--- {f.relative_to(repo_path)} ---\n{content}\n"
-            if total + len(chunk) > max_chars:
-                break
-            parts.append(chunk)
-            total += len(chunk)
-    except Exception:  # noqa: BLE001 - a scan failure must degrade, not fail the workflow
+        for f in repo_path.rglob("*"):
+            walked.append(f)
+    except OSError as exc:
         logger.warning(
-            "Repo briefing scan under %s aborted early; returning partial content",
+            "Repo briefing walk under %s aborted early (%s); using the %d entries found so far",
             repo_path,
+            exc,
+            len(walked),
             exc_info=True,
         )
+    for f in sorted(walked):
+        try:
+            if not f.is_file() or f.suffix not in ext_set:
+                continue
+            if excl_set & set(f.parts):
+                continue
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            logger.warning("Repo briefing skipped %s: %s", f, exc)
+            continue
+        chunk = f"--- {f.relative_to(repo_path)} ---\n{content}\n"
+        if total + len(chunk) > max_chars:
+            break
+        parts.append(chunk)
+        total += len(chunk)
     return "\n".join(parts) if parts else empty
 
 

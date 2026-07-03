@@ -16,13 +16,21 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
         - A ``CodeEngineProvider`` is installed in THIS worker process (the
           Temporal worker does not run the ``coding_team_service`` composition
           root, so its bootstrap must call ``set_engine_provider`` itself).
+        - ``request`` is a serialized ``RunRequest`` carrying a non-null
+          ``plan_input`` (the workflow executes a plan; a job-only request with
+          no plan has nothing to run).
     Postconditions:
-        - Returns the orchestrator result as a dict, or raises with an
-          actionable message when the worker is mis-wired — instead of failing
-          later, mid-run, with a generic worker-build error.
+        - Creates a job, runs the orchestrator against it wired to the job
+          store, and returns the final job snapshot as a dict. Raises with an
+          actionable message when the worker is mis-wired (no provider) or the
+          request carries no plan — instead of failing later, mid-run, with a
+          generic error.
     """
-    from coding_team.api.main import RunRequest
+    import uuid
+
+    from coding_team.api.main import DEFAULT_CACHE_DIR, RunRequest, create_job, get_job, update_job
     from coding_team.engine_provider import get_engine_provider
+    from coding_team.models import CodingTeamPlanInput
     from coding_team.orchestrator import run_coding_team_orchestrator
 
     if get_engine_provider() is None:
@@ -33,10 +41,25 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
             "before executing CodingTeamWorkflow."
         )
     req = RunRequest(**request)
-    result = run_coding_team_orchestrator(req)
-    if hasattr(result, "model_dump"):
-        return result.model_dump()
-    return result if isinstance(result, dict) else {"result": result}
+    if not req.plan_input:
+        raise ValueError(
+            "CodingTeamWorkflow requires a plan_input to execute; received a job-only request "
+            "with no plan."
+        )
+    # Mirror the POST /run background path: mint a job, wire the orchestrator to the
+    # job store, and run it against the real (job_id, repo_path, plan) signature.
+    job_id = str(uuid.uuid4())
+    create_job(job_id=job_id, repo_path=req.repo_path, plan_input=req.plan_input)
+    plan = CodingTeamPlanInput.model_validate({**req.plan_input, "repo_path": req.repo_path})
+    run_coding_team_orchestrator(
+        job_id,
+        req.repo_path,
+        plan,
+        update_job_fn=lambda **kw: update_job(job_id, **kw),
+        get_job_fn=get_job,
+        cache_dir=DEFAULT_CACHE_DIR,
+    )
+    return get_job(job_id) or {"job_id": job_id, "status": "unknown"}
 
 
 @workflow.defn(name="CodingTeamWorkflow")

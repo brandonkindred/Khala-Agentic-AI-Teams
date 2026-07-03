@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Collection, Dict, Iterator, List, Optional, Tuple
 
-# Bound on how many candidate objects one salvage call will attempt to parse.
-# Typical responses contain a handful; the cap keeps adversarial output (e.g.
-# thousands of balanced "{}" pairs) from turning salvage into a CPU sink.
-_MAX_PARSE_ATTEMPTS = 64
+# Bounds on salvage work. Strict ``raw_decode`` probes are O(1) each (they fail
+# or succeed at the current brace without rescanning), so their bound is
+# generous; tolerant repair can be superlinear on large fragments, so it gets a
+# tighter cap. Both keep adversarial output (e.g. thousands of "{" or "{}"
+# pairs) from turning salvage into a CPU sink.
+_MAX_STRICT_PROBES = 256
+_MAX_REPAIR_ATTEMPTS = 32
 
 
 def _strip_wrappers(content: str) -> str:
@@ -77,38 +80,148 @@ def _balanced_object_spans(text: str) -> Tuple[List[Tuple[int, int]], int]:
     return spans, first_unclosed
 
 
-def _parse_candidate(fragment: str) -> Tuple[Optional[Dict[str, Any]], bool]:
-    """Parse one candidate fragment strictly, then via tolerant repair.
+def _looks_like_json_object(fragment: str) -> bool:
+    """True when *fragment* is shaped like a JSON object literal.
 
-    Repair (the ``json-repair`` library — the same dependency the LLM clients
-    use) fixes common model slips like trailing commas and max-tokens
-    truncation. A repaired result is only trusted when the fragment at least
-    resembles JSON (contains a quote and a colon) and the result is a non-empty
-    dict — repairing prose braces like ``{not json}`` must not fabricate a
-    payload.
+    The first non-space character after the opening ``{`` must be a quote (a
+    quoted key) or a closing ``}`` (an empty object). This gates tolerant repair
+    so prose braces such as ``{see the "spec" above}`` are never fabricated into
+    a dict, while genuine model slips still pass: ``{"a": 1,}`` (trailing comma)
+    and ``{"a": `` (max-tokens truncation) both start with a quoted key.
 
     Preconditions: ``fragment`` is a str.
-    Postconditions: returns ``(parsed, strict)`` where ``strict`` is True iff
-    plain ``json.loads`` accepted the fragment, or ``(None, False)`` when no
-    dict can be produced. Never raises — ``RecursionError`` from pathologically
-    deep nesting and any repair-library failure are contained here.
+    Postconditions: bool; never raises.
+    """
+    inner = fragment.lstrip()
+    if not inner.startswith("{"):
+        return False
+    rest = inner[1:].lstrip()
+    return rest.startswith('"') or rest.startswith("}")
+
+
+def _repair_object(fragment: str) -> Optional[Dict[str, Any]]:
+    """Repair *fragment* into a non-empty dict via ``json-repair``, or ``None``.
+
+    The caller must have already confirmed the fragment is object-shaped (see
+    ``_looks_like_json_object``) — repair fabricates a value for a dangling key,
+    so it is only ever run on fragments whose shape already commits them to
+    being an object literal.
+
+    Preconditions: ``fragment`` is an object-shaped str.
+    Postconditions: a non-empty ``dict`` or ``None``; never raises. A missing
+    ``json-repair`` wheel or any library failure yields ``None`` (repair
+    silently disabled — salvage degrades rather than crashing).
+    """
+    try:
+        import json_repair
+
+        parsed = json_repair.loads(fragment)
+    except Exception:  # noqa: BLE001 - salvage must never raise
+        return None
+    return parsed if isinstance(parsed, dict) and parsed else None
+
+
+def _parse_or_repair(fragment: str) -> Optional[Dict[str, Any]]:
+    """Strict-parse *fragment*, then object-shaped repair. For fence/tail paths.
+
+    Preconditions: ``fragment`` is a str.
+    Postconditions: a ``dict`` (possibly empty, when strict JSON) or ``None``;
+    never raises.
     """
     try:
         parsed = json.loads(fragment)
         if isinstance(parsed, dict):
-            return parsed, True
+            return parsed
     except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
         pass
-    if '"' in fragment and ":" in fragment:
-        try:
-            import json_repair
+    if _looks_like_json_object(fragment):
+        return _repair_object(fragment)
+    return None
 
-            parsed = json_repair.loads(fragment)
-            if isinstance(parsed, dict) and parsed:
-                return parsed, False
-        except Exception:  # noqa: BLE001 - salvage must never raise
-            pass
-    return None, False
+
+def _iter_strict_objects(text: str) -> Iterator[Tuple[int, Dict[str, Any]]]:
+    """Yield ``(start, obj)`` for each strict-JSON object embedded in *text*.
+
+    Uses ``json.JSONDecoder.raw_decode`` from each ``{`` so prose braces and
+    prose quotation marks cannot corrupt the scan the way a hand-rolled
+    brace-matcher can — ``raw_decode`` simply fails on ``{ not json }`` and the
+    probe advances to the next ``{``. This is the recall fallback: it finds a
+    real object buried under an unclosed prose brace (``the set {1,2 ...
+    {"tasks": [...]}``) that the top-level span scan, which sees the whole thing
+    as one never-closed object, misses.
+
+    Preconditions: ``text`` is a str.
+    Postconditions: yields dicts in document order using at most
+    ``_MAX_STRICT_PROBES`` probes; never raises.
+    """
+    decoder = json.JSONDecoder()
+    i = 0
+    probes = 0
+    while probes < _MAX_STRICT_PROBES:
+        j = text.find("{", i)
+        if j == -1:
+            return
+        probes += 1
+        try:
+            obj, end = decoder.raw_decode(text, j)
+        except (ValueError, RecursionError):
+            # ValueError: not JSON at this brace. RecursionError: pathologically
+            # deep nesting — skip this probe rather than let salvage raise.
+            i = j + 1
+            continue
+        if isinstance(obj, dict):
+            yield j, obj
+            i = max(end, j + 1)
+        else:
+            i = j + 1
+
+
+def _select_object(
+    candidates: List[Tuple[int, Dict[str, Any]]],
+    accept: Callable[[Dict[str, Any]], bool],
+) -> Optional[Dict[str, Any]]:
+    """Pick the authoritative object: the last non-empty *accepted* candidate.
+
+    Ranking key ``(non_empty, start)``: a non-empty object always outranks an
+    empty ``{}``, and among equally-non-empty accepted candidates the LAST in
+    document order wins — models echo a format example ("I will answer as
+    {...}") before the real payload, so the trailing object is authoritative.
+    Strict-vs-repaired is deliberately NOT in the rank: a repaired real payload
+    that appears after a strict format echo must still win, so position is the
+    only authority signal once a candidate is accepted.
+
+    Preconditions: ``candidates`` is a list of ``(start, dict)``; ``accept`` is
+    a pure predicate. Postconditions: an accepted dict or ``None``; never raises.
+    """
+    best: Optional[Dict[str, Any]] = None
+    best_key: Tuple[int, int] = (-1, -1)
+    for start, obj in candidates:
+        if not accept(obj):
+            continue
+        key = (1 if obj else 0, start)
+        if key > best_key:
+            best, best_key = obj, key
+    return best
+
+
+def _descend_envelope(
+    candidates: List[Tuple[int, Dict[str, Any]]],
+    accept: Callable[[Dict[str, Any]], bool],
+) -> Optional[Dict[str, Any]]:
+    """Recover a payload wrapped one level deep in a rejected envelope object.
+
+    e.g. ``{"result": {"tasks": [...]}}`` when the predicate wants a top-level
+    ``tasks``. Only fires when no top-level candidate was accepted, so it never
+    overrides a direct match; later parents are tried first.
+
+    Preconditions/Postconditions: as ``_select_object``.
+    """
+    for _start, obj in reversed(candidates):
+        nested = [(0, v) for v in obj.values() if isinstance(v, dict)]
+        pick = _select_object(nested, accept)
+        if pick is not None:
+            return pick
+    return None
 
 
 def _salvage_object(
@@ -117,14 +230,23 @@ def _salvage_object(
     """Salvage the authoritative JSON object matching ``accept`` from raw output.
 
     The single engine behind ``extract_json_object`` and
-    ``extract_task_assignment_from_content``: strip think-blocks/``<json>``
-    wrappers, scan for balanced objects (string-aware, linear time), parse each
-    candidate strictly-then-repaired, and select by rank.
+    ``extract_task_assignment_from_content``. After stripping think-blocks and
+    ``<json>`` wrappers, five ordered strategies run — the first accepted object
+    wins, so cheaper/higher-confidence strategies pre-empt the fallbacks:
 
-    Selection rule: strict-parsed outranks repaired, non-empty outranks empty,
-    and ties break toward the LAST candidate in document order — models
-    routinely echo a format example ("I will answer in the form {...}") before
-    the final object, so the trailing object is the authoritative one.
+    1. Top-level balanced spans (string-aware), each strict-parsed then, if it
+       is object-shaped, tolerant-repaired; selected by ``_select_object``. This
+       resolves clean output, prose-wrapped objects, trailing-comma repair, the
+       format-echo-before-payload case, and empty-``{}`` shadowing.
+    2. Envelope descent one level into a rejected top-level object.
+    3. A whole payload inside a markdown fence — searched on the WRAPPER-STRIPPED
+       text so a fenced draft inside a removed ``<think>`` block is not
+       resurrected as the answer.
+    4. Max-tokens truncation: the first never-closed object, repaired — but only
+       when it is object-shaped, so an unclosed prose brace cannot fabricate one.
+    5. Recall fallback: ``raw_decode`` from every ``{`` (strict only), which
+       finds a real object buried under prose braces/quotes that derail the span
+       scan. Last so it never hijacks a case strategies 1-4 already resolved.
 
     Preconditions: ``content`` is a str (may be empty); ``accept`` is a pure
     predicate over a parsed dict.
@@ -136,46 +258,80 @@ def _salvage_object(
     stripped = _strip_wrappers(content)
     spans, first_unclosed = _balanced_object_spans(stripped)
 
-    best: Optional[Dict[str, Any]] = None
-    best_rank = (-1, -1)
-    attempts = 0
-    # Reverse order + strictly-greater rank replacement keeps the LAST candidate
-    # for equal ranks, per the selection rule above.
-    for start, end in reversed(spans):
-        if attempts >= _MAX_PARSE_ATTEMPTS:
-            break
-        attempts += 1
-        parsed, strict = _parse_candidate(stripped[start:end])
-        if parsed is None or not accept(parsed):
-            continue
-        rank = (1 if strict else 0, 1 if parsed else 0)
-        if rank == (1, 1):
-            return parsed
-        if rank > best_rank:
-            best, best_rank = parsed, rank
-    if best is not None:
-        return best
+    # Strategy 1: top-level spans, strict-then-object-shaped-repair.
+    pool: List[Tuple[int, Dict[str, Any]]] = []
+    repairs = 0
+    for start, end in spans:
+        fragment = stripped[start:end]
+        try:
+            parsed = json.loads(fragment)
+            if isinstance(parsed, dict):
+                pool.append((start, parsed))
+                continue
+        except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
+            pass
+        if repairs < _MAX_REPAIR_ATTEMPTS and _looks_like_json_object(fragment):
+            repairs += 1
+            repaired = _repair_object(fragment)
+            if repaired is not None:
+                pool.append((start, repaired))
+    pick = _select_object(pool, accept)
+    if pick is not None:
+        return pick
 
-    # Whole payload inside a markdown fence (may itself need repair).
-    fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", content, re.IGNORECASE)
+    # Strategy 2: envelope descent into rejected top-level objects.
+    pick = _descend_envelope(pool, accept)
+    if pick is not None:
+        return pick
+
+    # Strategy 3: whole payload inside a markdown fence (on STRIPPED text).
+    fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", stripped, re.IGNORECASE)
     if fence:
-        parsed, _strict = _parse_candidate(fence.group(1).strip())
+        parsed = _parse_or_repair(fence.group(1).strip())
         if parsed is not None and accept(parsed):
             return parsed
 
-    # Max-tokens truncation: the object never closed. Repair can complete it.
+    # Strategy 4: max-tokens truncation — the first object never closed.
     if first_unclosed != -1:
-        parsed, _strict = _parse_candidate(stripped[first_unclosed:])
-        if parsed is not None and accept(parsed):
-            return parsed
+        fragment = stripped[first_unclosed:]
+        if _looks_like_json_object(fragment):
+            repaired = _repair_object(fragment)
+            if repaired is not None and accept(repaired):
+                return repaired
 
-    return None
+    # Strategy 5: recall fallback — strict objects buried under prose.
+    recall = list(_iter_strict_objects(stripped))
+    pick = _select_object(recall, accept)
+    if pick is not None:
+        return pick
+    return _descend_envelope(recall, accept)
 
 
 def _has_tasks(parsed: Dict[str, Any]) -> bool:
     """Accept predicate: a task-assignment dict with a non-empty ``tasks`` list."""
     tasks = parsed.get("tasks")
     return isinstance(tasks, list) and len(tasks) > 0
+
+
+def _accept_with_keys(
+    required_keys: Optional[Collection[str]],
+) -> Callable[[Dict[str, Any]], bool]:
+    """Build an accept predicate that anchors on known payload keys.
+
+    With ``required_keys`` set, a candidate is accepted only when it carries at
+    least one of them — so a usage echo (``{"tokens": 123}``) or a format recap
+    that lacks the anchor is filtered out before selection, and only genuine
+    same-schema candidates remain for the positional tiebreak. With no keys
+    (``None`` / empty), any dict is accepted (the caller has no schema to anchor
+    on).
+
+    Preconditions: ``required_keys`` is ``None`` or a collection of str.
+    Postconditions: returns a pure predicate; never raises.
+    """
+    if not required_keys:
+        return lambda parsed: True
+    keys = tuple(required_keys)
+    return lambda parsed: any(k in parsed for k in keys)
 
 
 def extract_task_assignment_from_content(content: str) -> Optional[Dict[str, Any]]:
@@ -193,24 +349,30 @@ def extract_task_assignment_from_content(content: str) -> Optional[Dict[str, Any
     return _salvage_object(content, _has_tasks)
 
 
-def extract_json_object(content: str) -> Optional[Dict[str, Any]]:
+def extract_json_object(
+    content: str, required_keys: Optional[Collection[str]] = None
+) -> Optional[Dict[str, Any]]:
     """Recover the authoritative JSON *object* from raw LLM content.
 
-    Thin wrapper over the shared salvage engine accepting any dict: strips
-    ``<think>``/``<thinking>``/``<reasoning>`` blocks, unwraps ``<json>``,
-    scans for balanced objects with a string-aware linear pass (braces inside
-    JSON string values do not corrupt the scan), parses each candidate strictly
-    then via ``json-repair`` (trailing commas, truncated output), and prefers
-    strict, non-empty, later candidates — so a format example echoed before the
-    real payload is not mistaken for it.
+    Thin wrapper over the shared salvage engine: strips
+    ``<think>``/``<thinking>``/``<reasoning>`` blocks, unwraps ``<json>``, and
+    runs the five ordered salvage strategies (see ``_salvage_object``), so
+    braces inside JSON string values, a format example echoed before the real
+    payload, trailing commas, truncation, and prose braces are all handled.
+
+    When the caller knows the payload's schema, pass ``required_keys``: a
+    candidate is accepted only if it carries at least one of them, which filters
+    out usage echoes and envelope wrappers that would otherwise win the
+    positional tiebreak. Without it, any dict is accepted.
 
     Preconditions:
         - ``content`` is a ``str`` (may be empty).
+        - ``required_keys`` is ``None`` or a collection of str anchor keys.
     Postconditions:
-        - Returns a ``dict`` on success, or ``None`` when nothing parses. Never
-          raises on malformed input.
+        - Returns a ``dict`` on success, or ``None`` when nothing parses (or no
+          candidate carries an anchor key). Never raises on malformed input.
     """
-    return _salvage_object(content, lambda parsed: True)
+    return _salvage_object(content, _accept_with_keys(required_keys))
 
 
 # Extensions we treat as file paths (backend + frontend)

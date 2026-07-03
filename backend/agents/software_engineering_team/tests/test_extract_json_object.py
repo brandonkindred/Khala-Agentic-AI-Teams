@@ -91,3 +91,86 @@ def test_large_unbalanced_input_completes_quickly() -> None:
     start = time.monotonic()
     extract_json_object(text)
     assert time.monotonic() - start < 2.0, "salvage scan must stay linear-time"
+
+
+def test_schema_echo_before_repair_needing_verdict_selects_verdict() -> None:
+    """A strict format echo must not win over a later, repair-needing real payload:
+    position, not strictness, is the authority signal once a candidate is accepted."""
+    text = (
+        'Format: {"approved": true, "issues": []}\n'
+        'Verdict: {"approved": false, "issues": ["missing tests"],}'  # trailing comma → repair
+    )
+    assert extract_json_object(text, required_keys=("approved",)) == {
+        "approved": False,
+        "issues": ["missing tests"],
+    }
+
+
+def test_required_keys_filters_trailing_usage_echo() -> None:
+    """A payload followed by a usage/telemetry echo that lacks the anchor key must
+    not be shadowed by the trailing object."""
+    text = 'verdict: {"approved": false, "issues": ["x"]}\nUsage: {"tokens": 123}'
+    assert extract_json_object(text, required_keys=("approved",)) == {
+        "approved": False,
+        "issues": ["x"],
+    }
+    # Without the anchor, the trailing object wins (no schema to discriminate) —
+    # documents why callers with a known schema must pass required_keys.
+    assert extract_json_object(text) == {"tokens": 123}
+
+
+def test_empty_dict_does_not_beat_repaired_payload() -> None:
+    """A trailing strict ``{}`` must not outrank an earlier repaired non-empty
+    object — non-empty is the primary rank key."""
+    assert extract_json_object('{"a": 1,} and then {}') == {"a": 1}
+
+
+def test_envelope_wrapped_payload_is_recovered() -> None:
+    """A payload nested one level inside a rejected envelope is recovered via descent."""
+    text = '{"result": {"tasks": [{"id": "t1"}], "note": "wrapped"}}'
+    assert extract_json_object(text, required_keys=("tasks",)) == {
+        "tasks": [{"id": "t1"}],
+        "note": "wrapped",
+    }
+
+
+def test_fenced_draft_inside_think_block_is_not_resurrected() -> None:
+    """The fence fallback searches the wrapper-stripped text, so a fenced draft
+    inside a removed <think> block is not mistaken for the answer."""
+    text = (
+        '<think>draft:\n```json\n{"approved": true}\n```\n</think>\nI cannot complete this review.'
+    )
+    assert extract_json_object(text, required_keys=("approved",)) is None
+
+
+def test_real_object_under_unclosed_prose_brace_is_recovered() -> None:
+    """A never-closed prose brace before the payload used to swallow it; the strict
+    recall scan now finds the real object regardless."""
+    text = 'the set {1, 2 and more items ... verdict: {"approved": true}'
+    assert extract_json_object(text, required_keys=("approved",)) == {"approved": True}
+
+
+def test_prose_quote_containing_brace_does_not_corrupt_scan() -> None:
+    """A prose quotation mark that contains a '{' must not derail recovery of a
+    later real object."""
+    text = 'He said "an open { brace" and then: {"a": 1}'
+    assert extract_json_object(text) == {"a": 1}
+
+
+def test_truncated_dangling_key_is_not_fabricated_into_prose_payload() -> None:
+    """A balanced prose fragment must never be repaired into a fabricated dict."""
+    assert extract_json_object('{see the "spec": section above}') is None
+
+
+def test_leading_payload_survives_many_trailing_junk_objects() -> None:
+    """A long tail of anchor-less junk objects must not starve the real payload."""
+    text = '{"approved": true} ' + " ".join('{"evt": %d}' % i for i in range(80))
+    assert extract_json_object(text, required_keys=("approved",)) == {"approved": True}
+
+
+def test_fenced_payload_under_unclosed_prose_brace_is_repaired() -> None:
+    """The fence fallback recovers a fenced object that the span scan can't reach
+    because an earlier unclosed prose brace nests it — and repairs it (trailing
+    comma) via the fence path, not the span path."""
+    text = 'note: config { started but never closed\n```json\n{"approved": true,}\n```\n'
+    assert extract_json_object(text, required_keys=("approved",)) == {"approved": True}
