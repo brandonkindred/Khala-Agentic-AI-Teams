@@ -9,6 +9,7 @@ Design documents for this team. The platform convention for this folder is:
 | `use_cases.md` | Actors and numbered use cases with triggers, preconditions, and main flows. |
 | `flow_charts.md` | Sequence and flow diagrams for every runtime path. |
 | `FEATURE_SPEC_<slug>.md` | Pre-implementation proposals for new user-facing features. |
+| `DECISION_<slug>.md` | A recorded design decision: the risk/context, the decision taken, and how to reproduce any supporting evidence. |
 | `README.md` | This file — team-specific index of the documents above. |
 
 All diagrams use Mermaid. See `accessibility_audit_team`, `branding_team`,
@@ -20,3 +21,7 @@ Existing documents in this folder:
 - [`FEATURE_SPEC_testing_personas.md`](./FEATURE_SPEC_testing_personas.md) —
   rename "Persona Testing" to "Testing Personas", add persona CRUD, make
   target team selectable.
+- [`DECISION_free_text_wait_answers.md`](./DECISION_free_text_wait_answers.md) —
+  tune the persona's answering path (dedicated free-text prompt + richer adapter
+  context) so open-ended agentic-team `WAIT` steps get decisive, self-contained
+  answers; includes the manual empirical-read procedure.
