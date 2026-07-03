@@ -1672,15 +1672,48 @@ _CC_BOLLINGER_SELF_UNDEFINED = textwrap.dedent("""
 
 
 def test_conformance_rejects_undefined_self_bollinger_bands_select() -> None:
-    # ``self.bollinger_bands(..., select=...)`` is only valid as the compiler's
-    # inline helper; a custom strategy that calls it WITHOUT defining the method
-    # AttributeErrors at runtime, so it must not be credited or exempted — it is
-    # flagged and the derived band is not produced.
+    # ``self.bollinger_bands(...)`` is only valid as the compiler's inline helper;
+    # a custom strategy that calls it WITHOUT defining the method AttributeErrors at
+    # runtime. The generic undefined-self-helper check flags it (not the select-only
+    # check), so it is neither credited nor exempted.
     results = CodeConformanceGate().check(_CC_BOLLINGER_SELF_UNDEFINED, _bollinger_percent_b_spec())
     crits = _crit(results)
-    assert any("invalid" in d.lower() and "select" in d.lower() for d in crits), crits
+    assert any("bollinger_bands" in d.lower() and "attributeerror" in d.lower() for d in crits), (
+        crits
+    )
     # And the derived band is not credited from the undefined self-call.
     assert any("percent_b" in d.lower() for d in crits), crits
+
+
+_CC_MACD_SELF_UNDEFINED = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 40)
+            if len(bars) < 40:
+                return
+            line = self.macd(bars, 12, 26, 9)
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and line > 0:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and line < 0:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_rejects_undefined_self_macd_call() -> None:
+    # The generic undefined-self-helper check is not Bollinger-specific: any
+    # ``self.<indicator-helper>(...)`` the class never defines (here ``self.macd``)
+    # is an AttributeError at runtime and must be flagged.
+    results = CodeConformanceGate().check(_CC_MACD_SELF_UNDEFINED, _bollinger_base_band_spec())
+    crits = _crit(results)
+    assert any("macd" in d.lower() and "attributeerror" in d.lower() for d in crits), crits
 
 
 def test_conformance_abstains_on_dynamic_bollinger_band() -> None:

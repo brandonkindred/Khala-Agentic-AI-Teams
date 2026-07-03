@@ -250,6 +250,39 @@ def stochastic(
     return pct_k, pct_d
 
 
+def _vwap_cumulatives(
+    high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series
+) -> tuple[pd.Series, pd.Series]:
+    """Cumulative typical-price·volume and cumulative volume — the VWAP building blocks.
+
+    Preconditions: ``high``/``low``/``close``/``volume`` are coercible series of
+    equal length.
+    Postconditions: ``(cum_tp_vol, cum_vol)`` — the running sums of typical price
+    (``(h+l+c)/3``) weighted by volume, and of volume. Shared by :func:`vwap` (full
+    cumulative) and :func:`_windowed_vwap` (which re-bases both to a trailing window)
+    so the typical-price definition lives in exactly one place.
+    """
+    high = _coerce_series(high, "high")
+    low = _coerce_series(low, "low")
+    close = _coerce_series(close, "close")
+    volume = _coerce_series(volume, "volume")
+    typical_price = (high + low + close) / 3
+    return (typical_price * volume).cumsum(), volume.cumsum()
+
+
+def _rebase_cumulative(cumulative: pd.Series, lag: int) -> pd.Series:
+    """Re-base a cumulative series to a trailing window by subtracting its lagged self.
+
+    Preconditions: ``cumulative`` is a running sum (monotone in the accumulated
+    sign); ``lag >= 1``.
+    Postconditions: ``cumulative[t] - cumulative[t - lag]`` (the pre-window prefix
+    treated as 0 during warm-up), i.e. the sum accrued over the trailing ``lag``
+    steps. Shared by the windowed cumulative wrappers (:func:`_windowed_obv`,
+    :func:`_windowed_vwap`).
+    """
+    return cumulative - cumulative.shift(lag).fillna(0.0)
+
+
 def vwap(
     high: pd.Series,
     low: pd.Series,
@@ -261,14 +294,8 @@ def vwap(
     Note: this is a cumulative VWAP with no intraday reset, appropriate
     for daily OHLCV bars.
     """
-    high = _coerce_series(high, "high")
-    low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    volume = _coerce_series(volume, "volume")
-    typical_price = (high + low + close) / 3
-    cum_tp_vol = (typical_price * volume).cumsum()
-    cum_vol = volume.cumsum().replace(0, np.nan)
-    return cum_tp_vol / cum_vol
+    cum_tp_vol, cum_vol = _vwap_cumulatives(high, low, close, volume)
+    return cum_tp_vol / cum_vol.replace(0, np.nan)
 
 
 def donchian_channels(
@@ -376,8 +403,9 @@ def _windowed_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     # copied without its parent package.
     from ..runtime_window import STREAMING_WINDOW_BARS
 
-    full = obv(close, volume)
-    return full - full.shift(STREAMING_WINDOW_BARS - 1).fillna(0.0)
+    # Lag is ``window - 1`` (not ``window``): the oldest in-window bar has no
+    # in-window predecessor, so its direction is undefined and it contributes 0.
+    return _rebase_cumulative(obv(close, volume), STREAMING_WINDOW_BARS - 1)
 
 
 def _windowed_vwap(
@@ -397,24 +425,15 @@ def _windowed_vwap(
     # Lazy import — probe-only path; see :func:`_windowed_obv`.
     from ..runtime_window import STREAMING_WINDOW_BARS
 
-    high = _coerce_series(high, "high")
-    low = _coerce_series(low, "low")
-    close = _coerce_series(close, "close")
-    volume = _coerce_series(volume, "volume")
-    typical_price = (high + low + close) / 3
-    cum_tp_vol = (typical_price * volume).cumsum()
-    cum_vol = volume.cumsum()
     w = STREAMING_WINDOW_BARS
-    num = cum_tp_vol - cum_tp_vol.shift(w).fillna(0.0)
-    den = cum_vol - cum_vol.shift(w).fillna(0.0)
+    cum_tp_vol, cum_vol = _vwap_cumulatives(high, low, close, volume)
+    num = _rebase_cumulative(cum_tp_vol, w)
+    den = _rebase_cumulative(cum_vol, w)
     # Zero-volume-window fallback = trailing-window average close, matching the
-    # runtime. Window bar count is min(t + 1, w): the trailing sum of a series of
-    # ones re-based the same way as the other cumulatives.
-    ones = pd.Series(1.0, index=close.index)
-    cum_count = ones.cumsum()
-    window_count = cum_count - cum_count.shift(w).fillna(0.0)
-    cum_close = close.cumsum()
-    avg_close = (cum_close - cum_close.shift(w).fillna(0.0)) / window_count
+    # runtime. ``rolling(w, min_periods=1).mean()`` is the trailing mean over the
+    # min(t + 1, w) in-window closes — identical to re-basing cumulative close by
+    # cumulative bar-count, but expressed directly.
+    avg_close = _coerce_series(close, "close").rolling(w, min_periods=1).mean()
     return (num / den.replace(0, np.nan)).where(den != 0, avg_close)
 
 
@@ -586,6 +605,11 @@ class IndicatorSpec:
     # Every other scalar must resolve to a positive integer or the
     # dispatcher declines the indicator.
     float_kwargs: frozenset = frozenset()
+    # True for period-less running-total indicators (``vwap``, ``obv``) whose
+    # unbounded full-history value diverges from what the runtime's bounded
+    # ``StreamingHistoryView`` trades on. Their ``helper`` MUST therefore be a
+    # window-bounded wrapper (``_windowed_*``), enforced by a registry guard test.
+    cumulative: bool = False
 
 
 INDICATORS: Mapping[str, IndicatorSpec] = MappingProxyType(
@@ -619,6 +643,7 @@ INDICATORS: Mapping[str, IndicatorSpec] = MappingProxyType(
             data_inputs=("high", "low", "close", "volume"),
             kwarg_names=(),
             tuple_arity=None,
+            cumulative=True,
         ),
         "macd": IndicatorSpec(
             helper=macd,
@@ -660,6 +685,7 @@ INDICATORS: Mapping[str, IndicatorSpec] = MappingProxyType(
             data_inputs=("close", "volume"),
             kwarg_names=(),
             tuple_arity=None,
+            cumulative=True,
         ),
         "mfi": IndicatorSpec(
             helper=mfi,

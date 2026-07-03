@@ -114,6 +114,15 @@ if set(_INDICATOR_ALLOWED_CALL_NAMES) != set(IndicatorName.__args__):
         f"{set(IndicatorName.__args__) ^ set(_INDICATOR_ALLOWED_CALL_NAMES)}"
     )
 
+# The real exported indicator-helper names (``sma``, ``bollinger_bands``,
+# ``donchian_channels``, …). These are the names the deterministic compiler emits
+# as inline ``self.<helper>`` methods; a custom (non-compiled) strategy that calls
+# ``self.<helper>(...)`` without defining the method raises ``AttributeError``
+# (the base ``Strategy`` provides none of them).
+_KNOWN_INDICATOR_HELPER_NAMES: frozenset[str] = frozenset().union(
+    *_INDICATOR_ALLOWED_CALL_NAMES.values()
+)
+
 # Names recognised as the position-snapshot receiver in exit branches.
 _POSITION_RECEIVER_NAMES: frozenset[str] = frozenset({"position", "pos"})
 
@@ -408,18 +417,15 @@ def _is_self_call(node: ast.Call, attr: str) -> bool:
 
 
 def _class_defines_method(cls: ast.ClassDef, name: str) -> bool:
-    """True iff ``cls`` defines a method named ``name`` in its body.
+    """True iff ``cls`` directly defines a method named ``name``.
 
-    Pre: ``cls`` is a Strategy ClassDef. Post: True only when the class body
-    contains a (possibly async) ``def name`` — used to confirm that a
-    ``self.<name>(...)`` call actually resolves to a real method rather than an
-    ``AttributeError`` (the base ``Strategy`` provides no ``bollinger_bands``; only
-    the compiler's emitted module defines it as an inline helper).
+    Pre: ``cls`` is a Strategy ClassDef. Post: True only when :func:`_iter_strategy_methods`
+    (the module's single definition of "method directly defined on ``cls``") yields
+    a ``def name`` — used to confirm that a ``self.<name>(...)`` call resolves to a
+    real method rather than an ``AttributeError`` (the base ``Strategy`` provides
+    no indicator helpers; only the compiler's emitted module defines them inline).
     """
-    return any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
-        for node in cls.body
-    )
+    return any(m.name == name for m in _iter_strategy_methods(cls))
 
 
 def _collect_produced_bollinger_bands(
@@ -471,29 +477,68 @@ def _collect_produced_bollinger_bands(
     return produced, dynamic
 
 
+def _undefined_self_indicator_helper_calls(
+    cls: ast.ClassDef, method_names: frozenset[str]
+) -> list[str]:
+    """Reachable ``self.<helper>(...)`` calls to an indicator helper the class never defines.
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable.
+    Post: one message per distinct indicator-helper name (``sma``, ``macd``,
+    ``bollinger_bands``, ``donchian_channels``, …) that is called as ``self.<name>``
+    but not defined on the class. The compiler emits these helpers as inline
+    ``self.<name>`` methods and DOES define them, so compiled strategies are clean;
+    a custom (hand/LLM-authored) strategy that copies the ``self.<helper>`` calling
+    convention without emitting the helper body raises ``AttributeError`` on the
+    first bar. Flag it (like invalid ctx reads) so the refinement loop fixes the
+    call — read indicators via ``ctx.indicator('<name>', ...)`` or the imported
+    named helper (e.g. ``sma(bars, 50)``) instead.
+    """
+    defined = {m.name for m in _iter_strategy_methods(cls)}
+    flagged: set[str] = set()
+    out: list[str] = []
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            recv = node.func.value
+            helper = node.func.attr
+            if (
+                isinstance(recv, ast.Name)
+                and recv.id == "self"
+                and helper in _KNOWN_INDICATOR_HELPER_NAMES
+                and helper not in defined
+                and helper not in flagged
+            ):
+                flagged.add(helper)
+                out.append(
+                    f"self.{helper}(...) is called but the strategy defines no '{helper}' "
+                    "method; the base Strategy provides no indicator helpers, so this raises "
+                    "AttributeError at runtime. Read indicators via "
+                    "``ctx.indicator('<name>', ...)`` (preferred) or the imported named helper "
+                    f"(e.g. ``sma(bars, 50)``), not ``self.{helper}(...)``."
+                )
+    return out
+
+
 def _invalid_bollinger_select_calls(
     cls: ast.ClassDef, method_names: frozenset[str], import_aliases: Optional[dict[str, str]] = None
 ) -> list[str]:
-    """Reachable ``bollinger_bands(..., select=...)`` calls that will fail at runtime.
+    """Reachable NON-self ``bollinger_bands(..., select=...)`` calls (a runtime TypeError).
 
     Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable;
     ``import_aliases`` maps ``from indicators import bollinger_bands as bb`` bindings.
-    Post: one message per reachable ``bollinger_bands(..., select=...)`` call that is
-    NOT the compiler's inline helper. A ``select=`` call is valid ONLY when it is
-    ``self.bollinger_bands`` AND the class actually defines a ``bollinger_bands``
-    method (the emitted compiled module). Every other form fails at runtime:
-
-      * the sandbox scalar helper ``bollinger_bands(data, period=20, num_std=2.0)``
-        (bare, ``indicators.``-qualified, or aliased) has no ``select`` param →
-        ``TypeError``;
-      * ``self.bollinger_bands(...)`` on a class that never defines it (the base
-        ``Strategy`` does not) → ``AttributeError``.
-
-    Flag it here (like invalid ctx reads) so the refinement loop fixes the call
-    shape instead of the strategy crashing in the sandbox.
+    Post: one message per bare / ``indicators.``-qualified / aliased
+    ``bollinger_bands(..., select=...)`` call. The sandbox scalar helper
+    ``bollinger_bands(data, period=20, num_std=2.0)`` has no ``select`` param, so
+    such a call raises ``TypeError``. ``self.bollinger_bands`` is excluded here: the
+    compiler's inline helper accepts ``select`` (valid), and an UNDEFINED
+    ``self.bollinger_bands`` is caught generically by
+    :func:`_undefined_self_indicator_helper_calls` (an ``AttributeError``, not this
+    ``TypeError``).
     """
     aliases = import_aliases or {}
-    defines_helper = _class_defines_method(cls, "bollinger_bands")
     out: list[str] = []
     for method in _iter_strategy_methods(cls):
         if method.name not in method_names:
@@ -501,19 +546,16 @@ def _invalid_bollinger_select_calls(
         for node in _iter_method_body_nodes(method):
             if not isinstance(node, ast.Call) or _keyword_node(node, "select") is None:
                 continue
-            if aliases.get(_get_call_name(node), _get_call_name(node)) != "bollinger_bands":
+            call_name = _get_call_name(node)
+            if aliases.get(call_name, call_name) != "bollinger_bands":
                 continue
-            # Valid only as the compiler's inline helper: self.bollinger_bands on a
-            # class that actually defines the method.
-            if _is_self_call(node, "bollinger_bands") and defines_helper:
-                continue
+            if _is_self_call(node, "bollinger_bands"):
+                continue  # compiler inline helper (valid) or undefined-self (caught elsewhere)
             out.append(
-                "bollinger_bands(..., select=...) is invalid here: only the compiler's "
-                "inline ``self.bollinger_bands`` helper accepts ``select``. The sandbox "
+                "bollinger_bands(..., select=...) is invalid: the sandbox "
                 "``indicators.bollinger_bands(data, period, num_std)`` helper has no "
-                "``select`` param (TypeError), and ``self.bollinger_bands`` is undefined "
-                "on the base Strategy (AttributeError). Read a derived Bollinger band via "
-                "``ctx.indicator('bollinger', ..., band='percent_b')``."
+                "``select`` param and raises TypeError at runtime. Read a derived "
+                "Bollinger band via ``ctx.indicator('bollinger', ..., band='percent_b')``."
             )
     return out
 
@@ -1106,6 +1148,12 @@ class CodeConformanceGate(GateResultsMixin):
         # the sandbox (the scalar helper takes no ``select``), regardless of spec —
         # including alias-called forms, resolved via ``import_aliases``.
         for detail in _invalid_bollinger_select_calls(cctx.cls, cctx.reachable, import_aliases):
+            results.append(self._critical(detail))
+        # A ``self.<helper>(...)`` call to any indicator helper the class never
+        # defines raises ``AttributeError`` on the first bar — the base Strategy
+        # provides no such helpers; only the compiler emits them inline. Flag it
+        # generically (covers ``self.bollinger_bands``, ``self.macd``, ``self.sma``…).
+        for detail in _undefined_self_indicator_helper_calls(cctx.cls, cctx.reachable):
             results.append(self._critical(detail))
 
         required = _collect_required_indicators(cctx.spec)

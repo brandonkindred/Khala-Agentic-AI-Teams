@@ -423,6 +423,24 @@ def test_indicators_registry_uses_windowed_cumulative_helpers() -> None:
     assert ind.INDICATORS["vwap"].helper is ind._windowed_vwap
 
 
+def test_cumulative_specs_use_windowed_wrappers() -> None:
+    # Generic invariant behind the two assertions above: EVERY spec flagged
+    # ``cumulative`` must route through a window-bounded ``_windowed_*`` wrapper
+    # (never the unbounded full-history helper), and the set of cumulative
+    # indicators is exactly {obv, vwap}. A future cumulative indicator added
+    # without a windowed wrapper trips this guard.
+    cumulative = {name for name, spec in ind.INDICATORS.items() if spec.cumulative}
+    assert cumulative == {"obv", "vwap"}, cumulative
+    for name in cumulative:
+        helper = ind.INDICATORS[name].helper
+        assert helper.__name__.startswith("_windowed_"), (name, helper.__name__)
+    # And the non-cumulative specs are NOT windowed wrappers (the flag is the
+    # single source of truth for "needs bounding", not an ad-hoc helper-name check).
+    for name, spec in ind.INDICATORS.items():
+        if not spec.cumulative:
+            assert not spec.helper.__name__.startswith("_windowed_"), name
+
+
 def test_windowed_obv_bounds_to_trailing_window() -> None:
     from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
 
