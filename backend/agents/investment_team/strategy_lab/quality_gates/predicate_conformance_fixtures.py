@@ -307,9 +307,60 @@ def _oscillate_indicator_vs_number(
         return _oscillate_ma_vs_number(lhs, threshold, total, op)
     if lhs.name == "rsi":
         return _oscillate_rsi_vs_number(threshold, total, op, lhs)
-    if lhs.name in ("macd", "bollinger", "atr", "adx", "stochastic", "vwap"):
+    if lhs.name in (
+        "macd",
+        "bollinger",
+        "atr",
+        "adx",
+        "stochastic",
+        "vwap",
+        "donchian",
+        "keltner",
+        "obv",
+        "mfi",
+        "cci",
+        "williams_r",
+    ):
         return _oscillate_generic_indicator(lhs, threshold, total, op)
+    if lhs.name == "roc":
+        return _oscillate_roc_vs_number(lhs, threshold, total, op)
     return None
+
+
+def _oscillate_roc_vs_number(
+    ref: IndicatorRef,
+    threshold: float,
+    total: int,
+    op: str,
+) -> List[OHLCVBar]:
+    """Build bars whose ROC (percent change over ``period``) crosses ``threshold``.
+
+    Preconditions: ``ref`` is a ``roc`` IndicatorRef; ``threshold`` is a percent.
+    Postconditions: returns ``total`` bars whose ``period``-over-``period`` percent
+    change alternates between a regime clearly above and one clearly below the
+    threshold, so both predicate states occur.
+
+    Unlike the MA path, the threshold is a PERCENT, not a price level: ROC is
+    ``100 * (close[t] - close[t-period]) / close[t-period]``. Each bar's close is
+    set directly from ``close[t-period] * (1 + roc_target/100)``, which pins the
+    interior of each regime block to that exact ROC (the block is longer than
+    ``period``, so a full trailing window falls inside one regime). ``roc_low`` is
+    floored above -100 so prices stay strictly positive.
+    """
+    period = int(ref.param("period"))
+    margin = max(abs(threshold) * 0.5, 5.0)
+    roc_high = threshold + margin
+    roc_low = max(-90.0, threshold - margin)
+    seg = max(period + 5, total // 6, 10)
+
+    # Seed the first window flat (ROC undefined until bar ``period``), then set
+    # each later close from its lagged peer at the block's target ROC.
+    closes: List[float] = [_BASE_CLOSE] * period
+    while len(closes) < total:
+        block = len(closes) // seg
+        roc_target = roc_high if block % 2 == 0 else roc_low
+        closes.append(max(0.01, closes[-period] * (1.0 + roc_target / 100.0)))
+    return [_make_bar(c) for c in closes[:total]]
 
 
 def _oscillate_ma_vs_number(
@@ -581,4 +632,18 @@ def _warmup_for_indicator(ref: IndicatorRef) -> int:
         k = int(ref.param("k_period")) if "k_period" in ref.params else 14
         d = int(ref.param("d_period")) if "d_period" in ref.params else 3
         return k + d + 5
+    if ref.name in ("donchian", "cci", "williams_r", "mfi", "roc"):
+        # ``ref.param`` resolves the registry's per-indicator default when the
+        # param is absent (donchian=20, roc=12, mfi/williams_r=14, cci=20), so no
+        # hardcoded fallback — which would otherwise mis-size a missing-period ref.
+        return int(ref.param("period")) + 5
+    if ref.name == "keltner":
+        period = int(ref.param("period"))
+        atr_period = int(ref.param("atr_period"))
+        return max(period, atr_period + 1) + 5
+    if ref.name in ("obv", "vwap"):
+        # Cumulative indicators have no rolling warm-up, but they need enough
+        # history to swing through a threshold; give the fixture a longer margin
+        # (the compiler requests _VWAP_HISTORY at runtime for the same reason).
+        return 50
     return 20

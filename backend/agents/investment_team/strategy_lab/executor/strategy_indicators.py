@@ -77,30 +77,40 @@ class _RegBar:
         self.volume = volume
 
 
+def _project_bars(**fields) -> list:
+    """Build registry bars from named OHLCV field sequences; omitted fields default to 0.0.
+
+    Single source of truth for the call shapes the scalar wrappers need: an indicator
+    that reads only a subset (Donchian: high/low; OBV: close/volume) passes just those
+    fields and gets no placeholder in the slots it never reads.
+
+    Preconditions: each keyword is a ``_RegBar`` field name (``open``/``high``/``low``/
+    ``close``/``volume``) mapped to a sequence ``_coerce_series`` accepts; a non-field
+    keyword raises ``TypeError`` from the ``_RegBar(**…)`` construction.
+    Postconditions: returns one ``_RegBar`` per position, with each provided series
+    coerced to floats and zipped positionally (stopping at the shortest, matching the
+    prior per-shape builders); an omitted field keeps ``_RegBar``'s ``0.0`` default on
+    every bar. Empty ``fields`` yields ``[]``.
+    """
+    names = list(fields)
+    columns = [[float(v) for v in _impl._coerce_series(fields[name], name)] for name in names]
+    return [_RegBar(**dict(zip(names, row))) for row in zip(*columns)]
+
+
 def _value_bars(values) -> list:
     """Project a single source series onto close-only registry bars.
 
-    ``values`` is any shape ``_coerce_series`` accepts (``pd.Series``,
-    ``list[float]``, ``list[Bar]``, …); the projected scalar lands in ``close``
-    so a registry call with ``source="close"`` reads exactly that series.
+    ``values`` is any shape ``_coerce_series`` accepts; the projected scalar lands in
+    ``close`` so a registry call with ``source="close"`` reads exactly that series.
     """
-    return [_RegBar(close=float(v)) for v in _impl._coerce_series(values)]
+    return _project_bars(close=values)
 
 
 def _ohlc_bars(high, low, close, volume=None) -> list:
-    """Zip separate OHLC(V) sequences into registry bars (atr/adx/stochastic/vwap)."""
-    highs = [float(v) for v in _impl._coerce_series(high, "high")]
-    lows = [float(v) for v in _impl._coerce_series(low, "low")]
-    closes = [float(v) for v in _impl._coerce_series(close, "close")]
-    vols = (
-        [float(v) for v in _impl._coerce_series(volume, "volume")]
-        if volume is not None
-        else [0.0] * len(closes)
-    )
-    return [
-        _RegBar(high=h, low=lo, close=c, volume=vol)
-        for h, lo, c, vol in zip(highs, lows, closes, vols)
-    ]
+    """Zip separate OHLC(V) sequences into registry bars (atr/adx/stochastic/vwap/…)."""
+    if volume is None:
+        return _project_bars(high=high, low=low, close=close)
+    return _project_bars(high=high, low=low, close=close, volume=volume)
 
 
 def _ohlc_bars_from_history(history) -> list:
@@ -199,6 +209,67 @@ def vwap(high, low, close, volume) -> float:
     return _scalar(IndicatorRegistry().vwap(_ohlc_bars(high, low, close, volume)))
 
 
+def donchian_channels(high, low, period=20) -> tuple[float, float, float]:
+    """Latest (upper, middle, lower) Donchian channel values. See module contract."""
+    bars = _project_bars(high=high, low=low)
+    reg = IndicatorRegistry()
+    p = int(period)
+    return (
+        _scalar(reg.donchian(bars, period=p, select="upper")),
+        _scalar(reg.donchian(bars, period=p, select="middle")),
+        _scalar(reg.donchian(bars, period=p, select="lower")),
+    )
+
+
+def keltner_channels(
+    high, low, close, period=20, atr_period=10, multiplier=2.0
+) -> tuple[float, float, float]:
+    """Latest (upper, middle, lower) Keltner channel values. See module contract."""
+    bars = _ohlc_bars(high, low, close)
+    reg = IndicatorRegistry()
+    p, ap, m = int(period), int(atr_period), float(multiplier)
+    return (
+        _scalar(reg.keltner(bars, period=p, atr_period=ap, multiplier=m, select="upper")),
+        _scalar(reg.keltner(bars, period=p, atr_period=ap, multiplier=m, select="middle")),
+        _scalar(reg.keltner(bars, period=p, atr_period=ap, multiplier=m, select="lower")),
+    )
+
+
+def obv(close, volume) -> float:
+    """Latest On-Balance Volume value. See module contract."""
+    return _scalar(IndicatorRegistry().obv(_project_bars(close=close, volume=volume)))
+
+
+def mfi(high, low, close, volume, period=14) -> float:
+    """Latest Money Flow Index value. See module contract."""
+    return _scalar(
+        IndicatorRegistry().mfi(_ohlc_bars(high, low, close, volume), period=int(period))
+    )
+
+
+def roc(data, period=12) -> float:
+    """Latest Rate of Change (percent) value. See module contract.
+
+    ``roc`` is source-aware, but — like the other source-aware scalar wrappers
+    (:func:`sma`, :func:`ema`, :func:`rsi`) — this helper takes ``data`` already
+    projected onto a single series and reads it via the registry's ``close``
+    slot. Source selection is the accessor's job: use
+    ``indicator_value("roc", history, source=...)`` / ``ctx.indicator(...)`` to
+    compute ROC over a non-close source.
+    """
+    return _scalar(IndicatorRegistry().roc(_value_bars(data), int(period), source="close"))
+
+
+def cci(high, low, close, period=20) -> float:
+    """Latest Commodity Channel Index value. See module contract."""
+    return _scalar(IndicatorRegistry().cci(_ohlc_bars(high, low, close), period=int(period)))
+
+
+def williams_r(high, low, close, period=14) -> float:
+    """Latest Williams %R value. See module contract."""
+    return _scalar(IndicatorRegistry().williams_r(_ohlc_bars(high, low, close), period=int(period)))
+
+
 # ---------------------------------------------------------------------------
 # Unified accessor — backs ``ctx.indicator(...)`` (issue #703).
 #
@@ -214,7 +285,24 @@ def vwap(high, low, close, volume) -> float:
 # DSL indicator names this accessor understands (mirrors spec_dsl.IndicatorName);
 # kept as a literal set so the flat sandbox copy needs no spec_dsl import.
 _VALID_INDICATORS: frozenset[str] = frozenset(
-    {"sma", "ema", "rsi", "macd", "bollinger", "atr", "adx", "stochastic", "vwap"}
+    {
+        "sma",
+        "ema",
+        "rsi",
+        "macd",
+        "bollinger",
+        "atr",
+        "adx",
+        "stochastic",
+        "vwap",
+        "donchian",
+        "keltner",
+        "obv",
+        "mfi",
+        "roc",
+        "cci",
+        "williams_r",
+    }
 )
 _VALID_SOURCES: frozenset[str] = frozenset(
     {"close", "open", "high", "low", "volume", "hl2", "ohlc4"}
@@ -275,7 +363,7 @@ _INDICATOR_PARAM_VALIDATORS: dict[str, dict[str, "object"]] = {
     "bollinger": {
         "period": _int_in(5, 200),
         "num_std": _float_gt(0),
-        "band": _one_of("upper", "middle", "lower"),
+        "band": _one_of("upper", "middle", "lower", "percent_b", "bandwidth"),
     },
     "atr": {"period": _int_in(2, 200)},
     "adx": {"period": _int_in(2, 200)},
@@ -285,6 +373,21 @@ _INDICATOR_PARAM_VALIDATORS: dict[str, dict[str, "object"]] = {
         "output": _one_of("k", "d"),
     },
     "vwap": {},
+    "donchian": {
+        "period": _int_in(2, 400),
+        "band": _one_of("upper", "middle", "lower"),
+    },
+    "keltner": {
+        "period": _int_in(2, 400),
+        "atr_period": _int_in(2, 200),
+        "multiplier": _float_gt(0),
+        "band": _one_of("upper", "middle", "lower"),
+    },
+    "obv": {},
+    "mfi": {"period": _int_in(2, 200)},
+    "roc": {"period": _int_in(2, 400)},
+    "cci": {"period": _int_in(2, 400)},
+    "williams_r": {"period": _int_in(2, 200)},
 }
 
 
@@ -404,6 +507,15 @@ def indicator_value(
             select=str(params.get("band", "middle")),
         )
 
+    if name == "roc":
+        # ``_source_values`` already projects the requested ``source`` into a flat
+        # series, and ``_value_bars`` lands it in each bar's ``close`` slot — so the
+        # registry must read ``source="close"`` here to consume exactly that
+        # projected series. This mirrors the sma/ema/rsi/macd/bollinger branches
+        # above; the bars carry only a ``close`` field, not the original OHLC.
+        bars = _value_bars(_source_values(history, source))
+        return reg.roc(bars, period=int(params.get("period", 12)), source="close")
+
     # OHLC-sourced indicators read their fields directly and forbid a `source`
     # override (mirrors spec_dsl's allow_source=False for these names). Reject a
     # non-default source rather than silently computing a different indicator
@@ -423,6 +535,36 @@ def indicator_value(
             d_period=int(params.get("d_period", 3)),
             select=str(params.get("output", "k")),
         )
+    if name == "donchian":
+        return reg.donchian(
+            ohlc,
+            period=int(params.get("period", 20)),
+            select=str(params.get("band", "middle")),
+        )
+    if name == "keltner":
+        return reg.keltner(
+            ohlc,
+            period=int(params.get("period", 20)),
+            atr_period=int(params.get("atr_period", 10)),
+            multiplier=float(params.get("multiplier", 2.0)),
+            select=str(params.get("band", "middle")),
+        )
+    if name == "obv":
+        return reg.obv(ohlc)
+    if name == "mfi":
+        return reg.mfi(ohlc, period=int(params.get("period", 14)))
+    if name == "cci":
+        return reg.cci(ohlc, period=int(params.get("period", 20)))
+    if name == "williams_r":
+        return reg.williams_r(ohlc, period=int(params.get("period", 14)))
+    if name == "vwap":
+        return reg.vwap(ohlc)
 
-    # name == "vwap" (only remaining valid name)
-    return reg.vwap(ohlc)
+    # ``name`` passed the ``_VALID_INDICATORS`` precondition above, so reaching
+    # here means a name was added to that table without a dispatch branch. Fail
+    # loudly rather than silently returning VWAP's value (a consistent-but-wrong
+    # result the conformance shadow and live sandbox would both accept).
+    raise ValueError(
+        f"indicator_value: no dispatch branch for {name!r} (in _VALID_INDICATORS "
+        "but unhandled — add a branch above)."
+    )

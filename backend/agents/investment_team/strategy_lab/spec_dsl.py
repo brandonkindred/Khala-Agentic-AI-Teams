@@ -41,6 +41,13 @@ IndicatorName = Literal[
     "adx",
     "stochastic",
     "vwap",
+    "donchian",
+    "keltner",
+    "obv",
+    "mfi",
+    "roc",
+    "cci",
+    "williams_r",
 ]
 
 _PRICE_REF_LITERALS: frozenset[str] = frozenset({"bar.close", "bar.high", "bar.low", "bar.volume"})
@@ -95,12 +102,16 @@ def _float_gt(threshold: float):
 
 
 def _one_of(*allowed: str):
-    allowed_set = set(allowed)
+    allowed_set = frozenset(allowed)
 
     def check(value: Any) -> None:
         if value not in allowed_set:
             raise ValueError(f"must be one of {sorted(allowed_set)} (got {value!r})")
 
+    # Expose the accepted set so downstream code can derive from the DSL rather
+    # than hardcoding a second copy (e.g. the conformance gate's Bollinger
+    # derived-band set); keep this the single source of truth.
+    check.allowed = allowed_set
     return check
 
 
@@ -139,7 +150,13 @@ _INDICATOR_PARAM_SPECS: dict[str, dict[str, Any]] = {
         "optional": {
             "period": (20, _int_in(5, 200)),
             "num_std": (2.0, _float_gt(0)),
-            "band": ("middle", _one_of("upper", "middle", "lower")),
+            # ``percent_b`` and ``bandwidth`` are derived series surfaced as their
+            # own band outputs so the common case needs no indicator-of-indicator:
+            # %B = (price − lower) / (upper − lower); bandwidth = (upper − lower) / middle.
+            "band": (
+                "middle",
+                _one_of("upper", "middle", "lower", "percent_b", "bandwidth"),
+            ),
         },
         "allow_source": True,
     },
@@ -169,6 +186,60 @@ _INDICATOR_PARAM_SPECS: dict[str, dict[str, Any]] = {
         "optional": {},
         "allow_source": False,
     },
+    # Donchian channels: highest-high / lowest-low breakout bands over ``period``;
+    # ``middle`` is their midpoint. Reads OHLC directly (no source override).
+    "donchian": {
+        "required": {},
+        "optional": {
+            "period": (20, _int_in(2, 400)),
+            "band": ("middle", _one_of("upper", "middle", "lower")),
+        },
+        "allow_source": False,
+    },
+    # Keltner channels: EMA(close, period) basis ± ``multiplier`` × ATR(atr_period).
+    # OHLC-only (the ATR leg reads high/low/close); the basis is close-EMA.
+    "keltner": {
+        "required": {},
+        "optional": {
+            "period": (20, _int_in(2, 400)),
+            "atr_period": (10, _int_in(2, 200)),
+            "multiplier": (2.0, _float_gt(0)),
+            "band": ("middle", _one_of("upper", "middle", "lower")),
+        },
+        "allow_source": False,
+    },
+    # On-Balance Volume: cumulative signed volume (close-direction weighted).
+    "obv": {
+        "required": {},
+        "optional": {},
+        "allow_source": False,
+    },
+    # Money Flow Index: volume-weighted RSI on typical price, bounded 0–100.
+    "mfi": {
+        "required": {},
+        "optional": {"period": (14, _int_in(2, 200))},
+        "allow_source": False,
+        "output_range": (0.0, 100.0),
+    },
+    # Rate of Change: percent change of ``source`` over ``period`` bars (unbounded).
+    "roc": {
+        "required": {},
+        "optional": {"period": (12, _int_in(2, 400))},
+        "allow_source": True,
+    },
+    # Commodity Channel Index: typical-price deviation oscillator (unbounded).
+    "cci": {
+        "required": {},
+        "optional": {"period": (20, _int_in(2, 400))},
+        "allow_source": False,
+    },
+    # Williams %R: position of close within the trailing high/low range, −100–0.
+    "williams_r": {
+        "required": {},
+        "optional": {"period": (14, _int_in(2, 200))},
+        "allow_source": False,
+        "output_range": (-100.0, 0.0),
+    },
 }
 
 
@@ -186,6 +257,41 @@ INDICATOR_OUTPUT_RANGES: dict[str, tuple[float, float]] = {
     for name, spec in _INDICATOR_PARAM_SPECS.items()
     if "output_range" in spec
 }
+
+
+# DSL indicator name → the exported/emitted helper function name. Single source of
+# truth for the name↔helper mapping: the synthesis compiler derives its emitted
+# ``self.<helper>(...)`` method name from this, and the conformance gate derives the
+# call names it credits. Most indicators share the DSL name; only the multi-output
+# channel indicators carry a distinct helper (bollinger→bollinger_bands, etc.). A
+# load-time guard here keeps it covering every ``IndicatorName``, so the two derived
+# tables no longer need their own guards.
+INDICATOR_HELPER_NAME: dict[str, str] = {
+    "sma": "sma",
+    "ema": "ema",
+    "rsi": "rsi",
+    "macd": "macd",
+    "bollinger": "bollinger_bands",
+    "atr": "atr",
+    "adx": "adx",
+    "stochastic": "stochastic",
+    "vwap": "vwap",
+    "donchian": "donchian_channels",
+    "keltner": "keltner_channels",
+    "obv": "obv",
+    "mfi": "mfi",
+    "roc": "roc",
+    "cci": "cci",
+    "williams_r": "williams_r",
+}
+
+# Explicit raise (survives ``python -O``): a DSL indicator missing from this map would
+# make the compiler ``KeyError`` at emit time and the conformance gate miss the call.
+if set(INDICATOR_HELPER_NAME) != set(IndicatorName.__args__):
+    raise RuntimeError(
+        "indicator helper map (INDICATOR_HELPER_NAME) must cover every DSL "
+        f"IndicatorName literal; mismatch: {set(IndicatorName.__args__) ^ set(INDICATOR_HELPER_NAME)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +1063,27 @@ def _format_indicator_ref(ref: IndicatorRef) -> str:
         return f"stochastic_{output}({ref.param('k_period')},{ref.param('d_period')})"
     if name == "vwap":
         return "vwap()"
+    if name == "donchian":
+        band = ref.param("band")
+        return f"donchian_{band}({ref.param('period')})"
+    if name == "keltner":
+        band = ref.param("band")
+        multiplier = float(ref.param("multiplier"))
+        return (
+            f"keltner_{band}({ref.param('period')},{ref.param('atr_period')},"
+            f"{_format_number(multiplier)})"
+        )
+    if name == "obv":
+        return "obv()"
+    if name == "mfi":
+        return f"mfi({ref.param('period')})"
+    if name == "roc":
+        base = f"roc({ref.param('period')})"
+        return _with_source(base, ref.source)
+    if name == "cci":
+        return f"cci({ref.param('period')})"
+    if name == "williams_r":
+        return f"williams_r({ref.param('period')})"
     raise TypeError(f"unknown IndicatorRef name: {name!r}")
 
 
@@ -999,7 +1126,9 @@ def format_predicate_tree(node: "PredicateTree", *, leaf_formatter=_format_predi
     joiner = " and " if isinstance(node, AllOf) else " or "
     return (
         "("
-        + joiner.join(format_predicate_tree(child, leaf_formatter=leaf_formatter) for child in node.of)
+        + joiner.join(
+            format_predicate_tree(child, leaf_formatter=leaf_formatter) for child in node.of
+        )
         + ")"
     )
 

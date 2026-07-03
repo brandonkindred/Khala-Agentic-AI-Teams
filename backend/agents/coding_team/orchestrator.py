@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 from coding_team import hitl
 from coding_team.activity import ActivityBridge
 from coding_team.agent_status import derive_stack_roster
+from coding_team.engine_provider import get_engine_provider
 from coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     get_job,
@@ -287,7 +288,7 @@ def _build_review_evidence(summary: str, diff: str) -> str:
 
 
 # Repo-context file selection. The shared full-stack code extensions / exclude dirs live in
-# software_engineering_team.shared.repo_utils; this summariser additionally surfaces the doc and
+# shared_repo_context.repo_utils; this summariser additionally surfaces the doc and
 # config formats below (so a docs/spec task is not blind to specs, plans, and READMEs). The
 # directories it skips come from repo_utils.REPO_INSPECT_EXCLUDE_DIRS (imported in
 # `_context_file_filters`), shared with the active inspection tools so the two views of the repo
@@ -646,7 +647,7 @@ def _v2_text_mode_llm(llm: Any) -> Any:
     # LLMClient off the orchestrator's import path, matching shared.strands_model's own
     # convention; resolved once here so all branches below share a single import.
     from llm_service import LLMClient
-    from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
+    from llm_service.strands_model import resolve_text_mode_strands_model
 
     clone = getattr(llm, "clone", None)
     if callable(clone):
@@ -683,24 +684,37 @@ def _build_implementation_worker(
     agent_id: str,
     spec: StackSpec,
     llm_getter: Callable[[str], Any],
+    engine_provider: Any,
 ) -> Any:
-    """Build a v2 specialist worker for a stack."""
+    """Build a v2 specialist worker for a stack.
+
+    The concrete implementation team-lead engine comes from the injected
+    ``engine_provider`` (the software-engineering team owns those engines);
+    coding_team only resolves the text-mode LLM and wraps the result in a
+    ``V2TeamWorker``.
+
+    Preconditions: ``engine_provider`` is a live ``CodeEngineProvider``.
+    Postconditions: returns a ``V2TeamWorker`` whose ``team_lead`` came from the
+    provider. Raises ``ValueError`` for an unsupported stack and ``RuntimeError``
+    when no provider was injected.
+    """
     kind = _v2_team_kind_for_stack(spec)
     if not kind:
         raise ValueError(
             f"Unsupported coding-team stack {spec.name!r}. "
             "Only frontend_v2 and backend_v2 implementation teams are available."
         )
+    if engine_provider is None:
+        raise RuntimeError(
+            "No CodeEngineProvider is configured: coding_team needs an implementation-engine "
+            "provider (injected by the software-engineering team, or installed by the standalone "
+            "coding-team service via set_engine_provider) to build an implementation worker."
+        )
     from coding_team.v2_team_worker import V2TeamWorker
 
-    if kind == "frontend":
-        from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
-
-        team_lead = FrontendCodeV2TeamLead(_v2_text_mode_llm(llm_getter("frontend")))
-    else:
-        from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
-
-        team_lead = BackendCodeV2TeamLead(_v2_text_mode_llm(llm_getter("backend")))
+    team_lead = engine_provider.build_implementation_team_lead(
+        kind, _v2_text_mode_llm(llm_getter(kind))
+    )
     return V2TeamWorker(
         agent_id=agent_id,
         stack_spec=spec,
@@ -717,7 +731,7 @@ def _context_file_filters() -> tuple[frozenset[str], frozenset[str]]:
     """
     global _CONTEXT_EXTENSIONS, _CONTEXT_EXCLUDE_DIRS
     if _CONTEXT_EXTENSIONS is None or _CONTEXT_EXCLUDE_DIRS is None:
-        from software_engineering_team.shared.repo_utils import (
+        from shared_repo_context.repo_utils import (
             FULL_STACK_EXTENSIONS,
             REPO_INSPECT_EXCLUDE_DIRS,
         )
@@ -1053,6 +1067,7 @@ def run_coding_team_orchestrator(
     on_pause: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     progress_base: int = _DEFAULT_PROGRESS_BASE,
     progress_span: int = _DEFAULT_PROGRESS_SPAN,
+    engine_provider: Optional[Any] = None,
 ) -> None:
     """
     Run the coding_team pipeline: plan → Task Graph → groom/assign → implement → review → merge.
@@ -1067,6 +1082,14 @@ def run_coding_team_orchestrator(
     writes count as activity while the 120s liveness heartbeat does not.
     """
     assert 0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100
+    # The implementation engines (v2 team leads, quality gates, code review) are injected, not
+    # imported: prefer the provider passed explicitly (the software-engineering team supplies one
+    # per call) and fall back to the process-wide default the standalone service installs at
+    # startup. Presence check, not truthiness: an injected provider is an arbitrary object whose
+    # __bool__/__len__ are not part of the contract, so a falsy-but-valid provider must not be
+    # silently swapped for the ambient default.
+    if engine_provider is None:
+        engine_provider = get_engine_provider()
     path = Path(repo_path).resolve()
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
@@ -1235,7 +1258,9 @@ def run_coding_team_orchestrator(
     implementation_workers: List[Any] = []
     try:
         for aid, spec in zip(agent_ids, stack_specs):
-            implementation_workers.append(_build_implementation_worker(aid, spec, llm_getter))
+            implementation_workers.append(
+                _build_implementation_worker(aid, spec, llm_getter, engine_provider)
+            )
     except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
         logger.error("Failed to build coding-team implementation workers: %s", exc)
         _update(
@@ -1262,6 +1287,7 @@ def run_coding_team_orchestrator(
         agent_ids=agent_ids,
         llm_getter=llm_getter,
         resolved_questions=plan_input.resolved_questions,
+        engine_provider=engine_provider,
     )
     # Flush captured "thinking" to the job record on an interval for the UI poll.
     # beat_first surfaces any planning-phase reasoning immediately; the final flush
@@ -1351,6 +1377,7 @@ class CodingTeamSwarm:
         agent_ids: List[str],
         llm_getter: Callable[[str], Any],
         resolved_questions: Optional[List[Dict[str, Any]]] = None,
+        engine_provider: Any = None,
     ) -> None:
         self.tech_lead = tech_lead
         self.workers = workers
@@ -1359,6 +1386,8 @@ class CodingTeamSwarm:
         self.agent_ids = agent_ids
         self.agent_team_keys = {w.agent_id: _worker_team_key(w) for w in workers}
         self.llm_getter = llm_getter
+        # Injected implementation engines (build/lint/review); None → quality gates are skipped.
+        self.engine_provider = engine_provider
         # Plan-level decisions the user already answered (entry gate + Tech Lead planning), folded
         # into plan_input.resolved_questions before the swarm is built. Surfaced to both review
         # gates so a reviewer never re-raises a question the user has settled.
@@ -1546,7 +1575,7 @@ class CodingTeamSwarm:
             - Returns a hex digest; identical change states across rounds yield identical digests.
         """
         if diff is None:
-            from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH, branch_diff
+            from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
 
             branch = task.feature_branch or f"feature/{task.id}"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
@@ -1625,7 +1654,7 @@ class CodingTeamSwarm:
             # ``development`` and is silently dropped from the PR. Only a genuinely empty branch is a
             # no-op resolution (work already present elsewhere) that the job-level outcome should
             # report as "already complete".
-            from software_engineering_team.shared.git_utils import (
+            from shared_git.git_utils import (
                 DEVELOPMENT_BRANCH,
                 abort_merge,
                 branch_diff,
@@ -1859,11 +1888,20 @@ class CodingTeamSwarm:
         # record the verdict here and act on it after the try/except.
         revision_feedback: Optional[List[Dict[str, Any]]] = None
         try:
-            from software_engineering_team.quality_gate_tools import (
-                run_build_verification,
-                run_code_review,
-                run_linting,
-            )
+            provider = self.engine_provider
+            if provider is None:
+                # Skipping build/lint/review is never a silent event: production paths always
+                # inject a provider (worker construction fails without one), so reaching this
+                # branch means an embedder wired the swarm directly — surface it in the log AND
+                # the job record so unreviewed merges are visible, not discovered post-hoc.
+                logger.warning(
+                    "No engine provider configured; skipping quality gates for %s", task.id
+                )
+                update_fn(status_text=f"Quality gates SKIPPED (no engine provider): {task.title}")
+                return True
+            run_build_verification = provider.run_build_verification
+            run_linting = provider.run_linting
+            run_code_review = provider.run_code_review
 
             agent_type = _quality_gate_agent_type(swe.stack_spec.name)
 
@@ -1926,13 +1964,14 @@ class CodingTeamSwarm:
                     )
                     revision_feedback = review.issues
 
-        except ImportError:
-            logger.debug("Quality gate tools not available; skipping")
         except Exception:
             # Log the full traceback, not a one-line summary: a real bug in the
             # review path (e.g. an OOM-precursor or a malformed evidence payload)
-            # must be debuggable. The swarm still proceeds — a failed gate must
-            # never abort the whole run — but the stack is now in the logs.
+            # must be debuggable. With the engines injected, an ImportError here
+            # means the provider's engine stack is broken — that deserves the
+            # same full-stack ERROR, not a silent "tools not available" skip.
+            # The swarm still proceeds — a failed gate must never abort the
+            # whole run — but the stack is now in the logs.
             logger.exception("Quality gate tools error for task %s; proceeding", task.id)
 
         if revision_feedback is not None:
@@ -2046,7 +2085,7 @@ class CodingTeamSwarm:
 
     def _review_and_merge(self, update_fn: Callable) -> None:
         """Coordinator reviews completed tasks: merge approved ones, send rejected ones back."""
-        from software_engineering_team.shared.git_utils import (
+        from shared_git.git_utils import (
             DEVELOPMENT_BRANCH,
             branch_diff,
             merge_branch,

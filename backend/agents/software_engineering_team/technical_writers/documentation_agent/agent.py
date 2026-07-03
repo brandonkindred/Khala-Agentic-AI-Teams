@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from llm_service import get_strands_model
+from shared_repo_context.repo_utils import DOCUMENTATION_EXTENSIONS, read_repo_code
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
@@ -19,7 +20,6 @@ from software_engineering_team.shared.git_utils import (
     merge_branch,
     write_files_and_commit,
 )
-from software_engineering_team.shared.repo_utils import DOCUMENTATION_EXTENSIONS, read_repo_code
 
 from .models import DocumentationInput, DocumentationOutput, DocumentationStatus
 from .prompts import (

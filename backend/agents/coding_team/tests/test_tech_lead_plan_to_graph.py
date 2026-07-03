@@ -22,7 +22,7 @@ def test_tech_lead_plan_to_task_graph_output_structure(monkeypatch) -> None:
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: {
+        lambda agent, prompt, required_keys=None: {
             "tasks": [
                 {
                     "id": "t1",
@@ -66,7 +66,7 @@ def test_tech_lead_plan_to_task_graph_preserves_target_team(monkeypatch) -> None
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: {
+        lambda agent, prompt, required_keys=None: {
             "tasks": [
                 {
                     "id": "ui",
@@ -102,7 +102,7 @@ def test_tech_lead_plan_to_task_graph_falls_back_to_legacy_team_fields(monkeypat
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: {
+        lambda agent, prompt, required_keys=None: {
             "tasks": [
                 {"id": "ui", "title": "UI", "team": "frontend_v2"},
                 {"id": "api", "title": "API", "stack": "backend_v2"},
@@ -129,7 +129,7 @@ def test_tech_lead_run_groom_task(monkeypatch) -> None:
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: {
+        lambda agent, prompt, required_keys=None: {
             "acceptance_criteria": ["done when tests pass"],
             "out_of_scope": "no UI",
             "description_enriched": "more detail",
@@ -149,7 +149,7 @@ def test_tech_lead_run_groom_task_llm_failure_returns_defaults(monkeypatch) -> N
     """When grooming's LLM call fails, return safe defaults that preserve the input dependencies."""
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
 
-    def boom(agent, prompt):
+    def boom(agent, prompt, required_keys=None):
         raise RuntimeError("LLM error")
 
     monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
@@ -167,7 +167,7 @@ def test_tech_lead_plan_to_task_graph_llm_failure_returns_defaults(monkeypatch) 
         repo_path="/tmp",
     )
 
-    def boom(agent, prompt):
+    def boom(agent, prompt, required_keys=None):
         raise RuntimeError("LLM error")
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
@@ -235,7 +235,7 @@ def test_plan_to_task_graph_already_complete(monkeypatch) -> None:
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: {
+        lambda agent, prompt, required_keys=None: {
             "tasks": [],
             "stacks": [],
             "already_complete": True,
@@ -256,7 +256,7 @@ def test_plan_to_task_graph_already_complete_ignored_when_tasks_present(monkeypa
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: {
+        lambda agent, prompt, required_keys=None: {
             "tasks": [{"id": "t1", "title": "Real task", "description": "", "dependencies": []}],
             "stacks": [],
             "already_complete": True,
@@ -278,7 +278,7 @@ def test_plan_to_task_graph_already_complete_string_false_is_not_truthy(monkeypa
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt: {
+        lambda agent, prompt, required_keys=None: {
             "tasks": [],
             "stacks": [],
             "already_complete": "false",  # string, not bool
@@ -315,7 +315,7 @@ def test_run_revision_adjudication_verdicts(monkeypatch) -> None:
         monkeypatch.setattr(
             tl_mod,
             "_agent_call_json",
-            lambda agent, prompt, _v=verdict: {"verdict": _v.upper(), "reason": f"because {_v}"},
+            lambda agent, prompt, _v=verdict, required_keys=None: {"verdict": _v.upper(), "reason": f"because {_v}"},
         )
         out = TechLeadAgent(model=object()).run_revision_adjudication(
             "T1", "desc", ["ac"], "summary", [{"source": "tech_lead", "reason": "nope"}]
@@ -328,14 +328,14 @@ def test_run_revision_adjudication_fails_closed(monkeypatch) -> None:
     """An LLM error or an unusable verdict must fail closed to 'fail', never re-enter the loop."""
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
 
-    def boom(agent, prompt):
+    def boom(agent, prompt, required_keys=None):
         raise RuntimeError("LLM down")
 
     monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
     out = TechLeadAgent(model=object()).run_revision_adjudication("T", "d", [], "s", [])
     assert out["verdict"] == "fail"
 
-    monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt: {"verdict": "maybe"})
+    monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt, required_keys=None: {"verdict": "maybe"})
     out = TechLeadAgent(model=object()).run_revision_adjudication("T", "d", [], "s", [])
     assert out["verdict"] == "fail"
 
@@ -344,7 +344,7 @@ def test_run_groom_task_passes_full_inputs_to_llm(monkeypatch) -> None:
     """A large task description and plan context reach the groom prompt in full, never truncated."""
     captured: dict[str, str] = {}
 
-    def _capture(agent, prompt):
+    def _capture(agent, prompt, required_keys=None):
         captured["prompt"] = prompt
         return {}
 
