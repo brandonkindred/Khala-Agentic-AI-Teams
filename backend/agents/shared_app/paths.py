@@ -4,6 +4,10 @@ Every team's ``api`` package prepends a couple of directories to ``sys.path`` so
 that bare, team-local imports resolve when the app is launched by uvicorn from an
 arbitrary working directory. :func:`bootstrap_syspath` centralizes that
 otherwise-copy-pasted idempotent insert.
+
+Invariants:
+    - Importing this module has no side effects; all path mutation happens only
+      when :func:`bootstrap_syspath` is called, and that call is idempotent.
 """
 
 from __future__ import annotations
