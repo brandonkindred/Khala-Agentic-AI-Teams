@@ -130,7 +130,11 @@ def test_is_authorized_rejects_outside_contributor():
 def _comment_payload(**over):
     payload = {
         "action": "created",
-        "issue": {"number": 42, "pull_request": {"url": "https://api.github.com/.../pulls/42"}},
+        "issue": {
+            "number": 42,
+            "state": "open",
+            "pull_request": {"url": "https://api.github.com/.../pulls/42"},
+        },
         "comment": {
             "id": 999,
             "body": "@khala review",
@@ -196,6 +200,15 @@ def test_dispatch_ignores_non_dict_payload_without_raising(bad_payload):
 
 def test_dispatch_ignores_comment_on_plain_issue():
     payload = _comment_payload(issue={"number": 42})  # no pull_request key
+    assert _dispatch(payload).called is False
+
+
+@pytest.mark.parametrize("state", ["closed", "CLOSED", "", None])
+def test_dispatch_ignores_comment_on_non_open_pr(state):
+    """GitHub fires issue_comment (with issue.pull_request set) for closed/merged PRs
+    too — those must not spend review budget on findings nobody can act on."""
+    payload = _comment_payload()
+    payload["issue"]["state"] = state
     assert _dispatch(payload).called is False
 
 

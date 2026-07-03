@@ -739,6 +739,47 @@ class TestReviewEndpoint:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 409
 
+    def test_far_future_heartbeat_treated_as_stale_not_live(self, review_app, monkeypatch) -> None:
+        """A stamp beyond the clock-skew tolerance in the future is implausible (bad
+        clock or corrupt data) — it must NOT count as live, or a dead job would block
+        reviews until that future time passes. Mirrors _answer_wait_heartbeat_fresh."""
+        from datetime import datetime, timedelta, timezone
+
+        api = review_app["api"]
+        far_future = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=api._HEARTBEAT_CLOCK_SKEW_TOLERANCE_S + 3600)
+        ).isoformat()
+        bad = {
+            "job_id": "future-job",
+            "status": "running",
+            "last_heartbeat_at": far_future,
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [bad])
+        monkeypatch.setattr(api, "update_review", lambda *a, **kw: None)
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200  # unblocked
+
+    def test_slightly_future_heartbeat_within_skew_is_live(self, review_app, monkeypatch) -> None:
+        """NTP drift up to the tolerance must still count as live (keeps blocking)."""
+        from datetime import datetime, timedelta, timezone
+
+        api = review_app["api"]
+        slight_future = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=api._HEARTBEAT_CLOCK_SKEW_TOLERANCE_S - 2)
+        ).isoformat()
+        live = {
+            "job_id": "skewed-live-job",
+            "status": "running",
+            "last_heartbeat_at": slight_future,
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [live])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 409
+
     def test_missing_heartbeat_stamp_treated_as_live(self, review_app, monkeypatch) -> None:
         """No last_heartbeat_at → treated as live (fail toward blocking duplicates, not
         starting them) — the job service stamps it on every create/update, so a missing

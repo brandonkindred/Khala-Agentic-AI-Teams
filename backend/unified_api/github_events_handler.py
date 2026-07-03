@@ -438,7 +438,9 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
 
     Submits work only when ALL hold (pure payload checks — no I/O on this thread):
     - ``event_type == "issue_comment"`` and ``payload["action"] == "created"``
-    - the comment is on a pull request (``issue.pull_request`` present)
+    - the comment is on an OPEN pull request (``issue.pull_request`` present and
+      ``issue.state == "open"`` — GitHub fires issue_comment for closed/merged PRs too,
+      and reviewing those would spend budget on findings nobody can act on)
     - the comment is not from a bot, and is not Khala's own output (marked with
       ``_KHALA_COMMENT_MARKER`` — Khala posts with the operator's PAT, so only the
       marker, never the author, distinguishes its comments from the operator's
@@ -484,6 +486,12 @@ def dispatch_github_event(event_type: str, payload: dict[str, Any], delivery_id:
     issue = payload.get("issue") or {}
     if not issue.get("pull_request"):
         # A comment on a regular issue, not a PR — nothing to review.
+        return
+    if str(issue.get("state", "")).strip().lower() != "open":
+        # GitHub delivers issue_comment (with issue.pull_request set) for comments on
+        # closed/merged PRs too. The feature is open-PRs-only — a review of a closed PR
+        # would spend LLM budget on findings nobody can act on.
+        logger.info("GitHub webhook: ignoring @khala review on non-open PR #%s", issue.get("number"))
         return
 
     comment = payload.get("comment") or {}
