@@ -275,6 +275,42 @@ The docker stack sets `2`.
 
 ---
 
+## Agentic Team Provisioning
+
+WAIT-state reliability for Agent Studio pipeline test runs
+(`agentic_team_provisioning/runtime/pipeline_runner.py`). All three parse
+defensively (garbage → default) and are read once when the `PipelineRunner`
+singleton is constructed.
+
+### AGENTIC_TEAM_PIPELINE_WAIT_TIMEOUT_S
+Maximum time a pipeline test run blocks at a WAIT step for human input before it
+fails cleanly (default `259200` = 72h; clamped to `[60, 604800]` — floor 60s,
+ceiling 7 days). On expiry the run is transitioned to `failed` via a DB
+compare-and-swap with `error` prefixed `wait_timeout:`, `finished_at` set, and the
+WAIT step marked `timed_out`, so the persona-test audit panel can distinguish a
+timeout from a genuine agent failure. The ceiling exists so a fat-fingered value
+can't recreate the original unbounded wait.
+
+### AGENTIC_TEAM_PIPELINE_WAIT_POLL_S
+How often (seconds) a waiting run re-checks the durable run status and refreshes
+its liveness heartbeat (default `5`; clamped to `[1, 60]`). This bounds how quickly
+a run observes a resume that landed on a *different* uvicorn worker (or a
+cancellation), since the in-memory wakeup event is only reachable on the worker
+that owns the run's thread.
+
+### AGENTIC_TEAM_PIPELINE_STALE_S
+Heartbeat-staleness threshold (seconds) used by the orphaned-run reaper (default
+`30`; floored to `2 × AGENTIC_TEAM_PIPELINE_WAIT_POLL_S`). A run whose
+`heartbeat_at` is older than this (or NULL) while still `running`/`waiting_for_input`
+is considered orphaned — its worker thread died on a restart or crash — and is
+reaped to `failed` (`error` prefix `orphaned:`). Because staleness is measured on
+the heartbeat rather than row age, a live sibling worker's run (which heartbeats
+every poll interval) is never reaped. The reaper runs once at startup and then on
+a periodic background sweep, guarded by a Postgres advisory lock so only one worker
+reaps at a time.
+
+---
+
 ## Blogging and Medium
 
 ### BLOGGING_RUN_ARTIFACTS_ROOT

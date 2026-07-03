@@ -11,7 +11,7 @@ registered from the team's FastAPI lifespan.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from psycopg.rows import dict_row
@@ -316,6 +316,140 @@ class AgenticTestStore:
             }
             for r in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Pipeline run resume/timeout (compare-and-swap) + liveness
+    # ------------------------------------------------------------------
+    #
+    # The terminal transition out of ``waiting_for_input`` (resume, timeout, or
+    # cancel) is a single-row conditional UPDATE. Postgres serializes concurrent
+    # UPDATEs to the same row, so exactly one caller observes ``rowcount == 1`` and
+    # wins the transition — this is what closes the timeout-vs-submit race without an
+    # in-process lock, and what makes resume correct regardless of which uvicorn
+    # worker serves the ``/input`` request.
+
+    @timed_query(store=_STORE, op="try_resume_pipeline_run")
+    def try_resume_pipeline_run(self, run_id: str, human_input: str) -> bool:
+        """Atomically move a waiting run back to ``running`` with the human answer.
+
+        Preconditions:
+            ``run_id`` is a non-empty str; ``human_input`` is a str (may be empty).
+        Postconditions:
+            Returns True iff the row was in ``waiting_for_input`` and is now
+            ``running`` with ``human_input`` persisted, ``human_prompt`` cleared, and
+            ``heartbeat_at`` refreshed. Returns False (no-op) if the row already left
+            ``waiting_for_input`` (timed out, cancelled, completed, or reaped).
+        """
+        assert run_id, "run_id must be non-empty"
+        now = _now()
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE agentic_test_pipeline_runs "
+                "SET status = 'running', human_prompt = NULL, human_input = %s, heartbeat_at = %s "
+                "WHERE run_id = %s AND status = 'waiting_for_input'",
+                (human_input, now, run_id),
+            )
+            return cur.rowcount > 0
+
+    @timed_query(store=_STORE, op="try_expire_pipeline_run")
+    def try_expire_pipeline_run(self, run_id: str, error: str) -> bool:
+        """Atomically fail a still-waiting run whose human-input timeout elapsed.
+
+        Preconditions:
+            ``run_id`` is a non-empty str; ``error`` is a str.
+        Postconditions:
+            Returns True iff the row was in ``waiting_for_input`` and is now
+            ``failed`` with ``error`` and ``finished_at`` set. Returns False if the
+            row already left ``waiting_for_input`` (i.e. a concurrent resume/cancel
+            won the race).
+        """
+        assert run_id, "run_id must be non-empty"
+        now = _now()
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE agentic_test_pipeline_runs "
+                "SET status = 'failed', error = %s, finished_at = %s "
+                "WHERE run_id = %s AND status = 'waiting_for_input'",
+                (error, now, run_id),
+            )
+            return cur.rowcount > 0
+
+    @timed_query(store=_STORE, op="consume_pipeline_human_input")
+    def consume_pipeline_human_input(self, run_id: str) -> str:
+        """Read the persisted human input for a run (empty string if none).
+
+        Kept separate from ``get_pipeline_run`` so the DTO-shaped SELECT — and the
+        ``TestPipelineRun`` response model — need not carry the internal column.
+
+        Preconditions: ``run_id`` is a non-empty str.
+        Postconditions: returns the stored ``human_input`` or ``""`` when NULL/absent.
+        """
+        assert run_id, "run_id must be non-empty"
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT human_input FROM agentic_test_pipeline_runs WHERE run_id = %s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return ""
+        return row["human_input"] or ""
+
+    @timed_query(store=_STORE, op="heartbeat_pipeline_run")
+    def heartbeat_pipeline_run(self, run_id: str) -> None:
+        """Refresh the liveness timestamp for an in-flight run.
+
+        Preconditions: ``run_id`` is a non-empty str.
+        Postconditions: sets ``heartbeat_at = now`` iff the run is still
+        ``running``/``waiting_for_input``; a no-op once the run is terminal.
+        """
+        assert run_id, "run_id must be non-empty"
+        now = _now()
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE agentic_test_pipeline_runs SET heartbeat_at = %s "
+                "WHERE run_id = %s AND status IN ('running', 'waiting_for_input')",
+                (now, run_id),
+            )
+
+    @timed_query(store=_STORE, op="reap_orphaned_pipeline_runs")
+    def reap_orphaned_pipeline_runs(self, error: str, stale_seconds: int) -> int:
+        """Fail active runs whose heartbeat has gone stale (orphaned by a dead worker).
+
+        Guarded by a Postgres advisory lock so that, with multiple uvicorn workers,
+        only one worker reaps per sweep. Staleness is measured on ``heartbeat_at``
+        (not row age): a live sibling-worker run heartbeats within its poll interval,
+        so it is never reaped; an orphaned run stops heartbeating and is reaped once
+        it exceeds ``stale_seconds``. Rows with a NULL heartbeat (created before this
+        feature, or never heartbeated) are treated as stale.
+
+        Preconditions:
+            ``error`` is a str; ``stale_seconds`` is a positive int.
+        Postconditions:
+            Returns the number of rows transitioned to ``failed`` (0 if the advisory
+            lock was not acquired, i.e. another worker is reaping concurrently). Never
+            touches non-active or freshly-heartbeated rows.
+        """
+        assert stale_seconds > 0, "stale_seconds must be positive"
+        now = _now()
+        # Stable, arbitrary advisory-lock key for the pipeline-run reaper.
+        lock_key = 0x41544D50  # "ATMP"
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_key,))
+            got = cur.fetchone()
+            if not got or not got[0]:
+                return 0
+            try:
+                cur.execute(
+                    "UPDATE agentic_test_pipeline_runs "
+                    "SET status = 'failed', error = %s, finished_at = %s "
+                    "WHERE status IN ('running', 'waiting_for_input') "
+                    "AND (heartbeat_at IS NULL OR heartbeat_at < %s)",
+                    (error, now, now - timedelta(seconds=stale_seconds)),
+                )
+                return cur.rowcount
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
 
 
 # ---------------------------------------------------------------------------

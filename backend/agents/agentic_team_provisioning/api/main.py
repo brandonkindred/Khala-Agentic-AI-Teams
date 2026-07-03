@@ -123,6 +123,18 @@ for _team_row in _existing_teams:
     except Exception as _e:
         logger.warning("Could not register generated manifests for team %s: %s", _tid, _e)
 
+# Restart cleanup: a pipeline test run whose worker thread died (restart or crash)
+# leaves its DB row stuck in an active state with no live waiter. Reap orphans whose
+# heartbeat has gone stale so they fail cleanly instead of stranding forever. Safe with
+# multiple workers (advisory-locked, heartbeat-based) — a live sibling worker's run is
+# never touched. Best-effort so a reaper hiccup can't break module import.
+try:
+    _reaped = _pipeline_runner.reap_orphaned_runs()
+    if _reaped:
+        logger.warning("Reaped %d orphaned pipeline run(s) on startup", _reaped)
+except Exception as _e:
+    logger.warning("Could not reap orphaned pipeline runs on startup: %s", _e)
+
 GREETING = (
     "Hello! I'm your Process Designer assistant. I'll help you design an agentic "
     "team — its agents and processes. Tell me what the team should do at a high "
@@ -1265,7 +1277,16 @@ def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputReq
         raise HTTPException(status_code=404, detail="Pipeline run not found")
     if row["status"] != "waiting_for_input":
         raise HTTPException(status_code=400, detail="Pipeline is not waiting for input")
-    _pipeline_runner.submit_human_input(run_id, req.input)
+    # The terminal transition is decided by a DB compare-and-swap, so this is race-free
+    # even if the run timed out or was reaped between the read above and here — and it
+    # works regardless of which worker owns the run's thread. A False return means the
+    # run left waiting_for_input first (lost the race): report a conflict.
+    if not _pipeline_runner.submit_human_input(run_id, req.input):
+        raise HTTPException(
+            status_code=409,
+            detail="Pipeline run is no longer resumable (it timed out, was cancelled, "
+            "or was reaped). Start a new run.",
+        )
     updated = _test_store.get_pipeline_run(run_id)
     return TestPipelineRun(**(updated or row))
 
