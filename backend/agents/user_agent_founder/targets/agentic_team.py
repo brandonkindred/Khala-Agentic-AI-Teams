@@ -261,7 +261,20 @@ class AgenticTeamAdapter:
                         # a free-text ("other") answer from the persona.
                         "id": f"{job_id}:{step_id}",
                         "question_text": prompt,
-                        "context": f"Pipeline run {job_id}, step {step_id}.",
+                        # Richer context than a bare "run X, step Y" so the
+                        # persona is grounded when it answers open-ended: it flows
+                        # verbatim into FREE_TEXT_ANSWERING_PROMPT's {context}
+                        # (agent.answer_question takes the free-text branch on the
+                        # empty options below). Names the open-ended nature and the
+                        # no-human-in-the-loop resume so the answer is authored to
+                        # be decisive and self-contained.
+                        "context": (
+                            f"This is an open-ended request from step '{step_id}' of "
+                            f"automated pipeline run {job_id}. There are no predefined "
+                            f"choices — write the answer yourself. Your reply is "
+                            f"submitted as-is to resume the run; no one will ask a "
+                            f"follow-up."
+                        ),
                         "options": [],
                     }
                 ],
