@@ -48,7 +48,7 @@ def run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     project — returns ``[]`` instead.
     """
     try:
-        from software_engineering_team.shared.command_runner import (
+        from shared_command_runner.runner import (
             run_command,
             run_pytest,
             run_python_syntax_check,
@@ -139,7 +139,7 @@ def run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     project is present or the build passes). Never raises for a missing project.
     """
     try:
-        from software_engineering_team.shared.command_runner import (
+        from shared_command_runner.runner import (
             detect_frontend_framework,
             run_frontend_build,
         )

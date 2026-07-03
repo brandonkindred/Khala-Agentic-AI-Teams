@@ -37,10 +37,13 @@ JOB_LOG_FILENAME = "job.log"
 AGENT_LOGGERS = [
     # Orchestrator and infrastructure
     "orchestrator",
-    "shared.git_utils",
+    # git ops moved to the neutral shared_git package; its modules log as
+    # shared_git.git_utils / shared_git.branch_utils under EVERY import path
+    # (the compatibility shims alias to the same module objects).
+    "shared_git",
     "shared.repo_writer",
     "shared.job_store",
-    "shared.command_runner",
+    "shared_command_runner",
     # Agent loggers
     "architecture_expert.agent",
     "tech_lead_agent.agent",

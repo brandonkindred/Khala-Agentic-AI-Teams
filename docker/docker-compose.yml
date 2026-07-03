@@ -620,7 +620,10 @@ services:
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
-      TEAM_MODULE: coding_team.api.main
+      # Composition root outside the coding_team package: installs the SE-backed
+      # CodeEngineProvider, then serves coding_team.api.main:app. Keeps the
+      # coding_team package free of software_engineering_team imports.
+      TEAM_MODULE: coding_team_service.main
       TEAM_NAME: coding_team
       TEAM_PORT: "8103"
       TEAM_TEMPORAL_WORKER_MODULE: ""

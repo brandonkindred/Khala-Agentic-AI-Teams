@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from software_engineering_team.shared.command_runner import (
+from shared_command_runner.runner import (
     CommandResult,
     _ensure_angular_common_in_package_json,
     _ensure_angular_material_in_package_json,
@@ -148,7 +148,7 @@ def test_is_ng_build_environment_failure_code_error_returns_false() -> None:
     assert is_ng_build_environment_failure(r) is False
 
 
-@patch("software_engineering_team.shared.command_runner.subprocess.run")
+@patch("shared_command_runner.runner.subprocess.run")
 def test_run_command_success(mock_run: object, tmp_path: Path) -> None:
     """run_command returns success when subprocess succeeds."""
     mock_run.return_value = subprocess.CompletedProcess(
@@ -159,7 +159,7 @@ def test_run_command_success(mock_run: object, tmp_path: Path) -> None:
     assert r.stdout == "ok"
 
 
-@patch("software_engineering_team.shared.command_runner.subprocess.run")
+@patch("shared_command_runner.runner.subprocess.run")
 def test_run_command_failure(mock_run: object, tmp_path: Path) -> None:
     """run_command returns failure when subprocess fails."""
     mock_run.return_value = subprocess.CompletedProcess(
@@ -170,7 +170,7 @@ def test_run_command_failure(mock_run: object, tmp_path: Path) -> None:
     assert r.exit_code == 1
 
 
-@patch("software_engineering_team.shared.command_runner.subprocess.run")
+@patch("shared_command_runner.runner.subprocess.run")
 def test_run_command_file_not_found(mock_run: object, tmp_path: Path) -> None:
     """run_command returns failure when command not found."""
     mock_run.side_effect = FileNotFoundError()
@@ -179,7 +179,7 @@ def test_run_command_file_not_found(mock_run: object, tmp_path: Path) -> None:
     assert "not found" in r.stderr.lower()
 
 
-@patch("software_engineering_team.shared.command_runner.subprocess.run")
+@patch("shared_command_runner.runner.subprocess.run")
 def test_run_command_timeout(mock_run: object, tmp_path: Path) -> None:
     """run_command returns timed_out when subprocess times out."""
     mock_run.side_effect = subprocess.TimeoutExpired("sleep", 1)
@@ -188,7 +188,7 @@ def test_run_command_timeout(mock_run: object, tmp_path: Path) -> None:
     assert r.timed_out
 
 
-@patch("software_engineering_team.shared.command_runner.subprocess.run")
+@patch("shared_command_runner.runner.subprocess.run")
 def test_run_command_generic_exception(mock_run: object, tmp_path: Path) -> None:
     """run_command returns failure on unexpected exception."""
     mock_run.side_effect = RuntimeError("unexpected")
@@ -197,7 +197,7 @@ def test_run_command_generic_exception(mock_run: object, tmp_path: Path) -> None
     assert "unexpected" in r.stderr
 
 
-@patch("software_engineering_team.shared.command_runner.subprocess.run")
+@patch("shared_command_runner.runner.subprocess.run")
 def test_run_command_env_override(mock_run: object, tmp_path: Path) -> None:
     """run_command passes env_override to subprocess."""
     mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
@@ -207,7 +207,7 @@ def test_run_command_env_override(mock_run: object, tmp_path: Path) -> None:
     assert call_kwargs["env"].get("CUSTOM") == "value"
 
 
-@patch("software_engineering_team.shared.command_runner.subprocess.Popen")
+@patch("shared_command_runner.runner.subprocess.Popen")
 def test_run_ng_serve_smoke_test_success_when_timeout(mock_popen: object, tmp_path: Path) -> None:
     """run_ng_serve_smoke_test returns success when process runs past timeout (server started)."""
     import subprocess
@@ -224,7 +224,7 @@ def test_run_ng_serve_smoke_test_success_when_timeout(mock_popen: object, tmp_pa
     assert r.success
 
 
-@patch("software_engineering_team.shared.command_runner.subprocess.Popen")
+@patch("shared_command_runner.runner.subprocess.Popen")
 def test_run_ng_serve_smoke_test_fail_when_exits_early(mock_popen: object, tmp_path: Path) -> None:
     """run_ng_serve_smoke_test returns failure when process exits within timeout."""
     mock_proc = MagicMock()
@@ -458,10 +458,10 @@ def test_ensure_frontend_dependencies_installed_noop_when_no_package_json(tmp_pa
 
 
 @patch(
-    "software_engineering_team.shared.command_runner.run_command",
+    "shared_command_runner.runner.run_command",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
-@patch("software_engineering_team.shared.command_runner._get_nvm_script_prefix", return_value=None)
+@patch("shared_command_runner.runner._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_dependencies_uses_run_command_when_no_nvm(
     _mock_nvm: object, mock_run: object, tmp_path: Path
 ) -> None:
@@ -481,11 +481,11 @@ def test_ensure_frontend_dependencies_uses_run_command_when_no_nvm(
 
 
 @patch(
-    "software_engineering_team.shared.command_runner.run_command_with_nvm",
+    "shared_command_runner.runner.run_command_with_nvm",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
 @patch(
-    "software_engineering_team.shared.command_runner._get_nvm_script_prefix",
+    "shared_command_runner.runner._get_nvm_script_prefix",
     return_value="source ~/.nvm/nvm.sh",
 )
 def test_ensure_frontend_dependencies_calls_repairs(
@@ -537,10 +537,10 @@ def test_ensure_frontend_project_initialized_noop_when_package_json_exists(tmp_p
 
 
 @patch(
-    "software_engineering_team.shared.command_runner.run_command",
+    "shared_command_runner.runner.run_command",
     return_value=CommandResult(success=False, exit_code=1, stdout="", stderr="npm init failed"),
 )
-@patch("software_engineering_team.shared.command_runner._get_nvm_script_prefix", return_value=None)
+@patch("shared_command_runner.runner._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_project_initialized_returns_on_npm_init_failure(
     _mock_nvm: object, _mock_run: object, tmp_path: Path
 ) -> None:
@@ -551,14 +551,14 @@ def test_ensure_frontend_project_initialized_returns_on_npm_init_failure(
 
 
 @patch(
-    "software_engineering_team.shared.command_runner.run_command",
+    "shared_command_runner.runner.run_command",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
 @patch(
-    "software_engineering_team.shared.command_runner.run_command_with_nvm",
+    "shared_command_runner.runner.run_command_with_nvm",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
-@patch("software_engineering_team.shared.command_runner._get_nvm_script_prefix", return_value=None)
+@patch("shared_command_runner.runner._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_project_initialized_creates_environment_files(
     _mock_nvm: object, _mock_nvm_run: object, mock_run: object, tmp_path: Path
 ) -> None:
@@ -576,14 +576,14 @@ def test_ensure_frontend_project_initialized_creates_environment_files(
 
 
 @patch(
-    "software_engineering_team.shared.command_runner.run_command",
+    "shared_command_runner.runner.run_command",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
 @patch(
-    "software_engineering_team.shared.command_runner.run_command_with_nvm",
+    "shared_command_runner.runner.run_command_with_nvm",
     return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
 )
-@patch("software_engineering_team.shared.command_runner._get_nvm_script_prefix", return_value=None)
+@patch("shared_command_runner.runner._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_project_initialized_produces_material_theme_fonts_provide_animations(
     _mock_nvm: object, _mock_nvm_run: object, mock_run: object, tmp_path: Path
 ) -> None:
