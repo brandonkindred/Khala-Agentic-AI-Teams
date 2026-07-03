@@ -40,17 +40,24 @@
     "
   >
     @if (filter === 'active') {
-      <button class="kh-btn-primary" type="button" (click)="startScanRequested.emit()">
-        Start a scan
-      </button>
+      <div class="empty-actions">
+        <button class="kh-btn-primary" type="button" (click)="startScanRequested.emit()">
+          Start a scan
+        </button>
+        <button mat-stroked-button type="button" (click)="setupProfileRequested.emit()">
+          Set up your profile first
+        </button>
+      </div>
     }
   </app-empty-state>
 } @else {
-  @for (listing of listings; track listing.fingerprint) {
-    <app-job-listing-card
-      [listing]="listing"
-      [pending]="pendingFingerprint === listing.fingerprint"
-      (statusChange)="onStatusChange(listing, $event)"
-    />
-  }
+  <div role="list" class="listing-list">
+    @for (listing of listings; track listing.fingerprint) {
+      <app-job-listing-card
+        [listing]="listing"
+        [pending]="pendingFingerprint === listing.fingerprint"
+        (statusChange)="onStatusChange(listing, $event)"
+      />
+    }
+  </div>
 }

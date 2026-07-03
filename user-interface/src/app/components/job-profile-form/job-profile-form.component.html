@@ -1,7 +1,7 @@
 @if (loading) {
   <app-loading-spinner message="Loading your career profile…" />
 } @else {
-  <div class="career-note">
+  <div class="career-note" id="jm-profile-heading" tabindex="-1">
     <mat-icon>link</mat-icon>
     <span>
       This is the <b>career section of your user profile</b> — saving here updates it.
@@ -21,7 +21,7 @@
     @for (section of chipSections; track section.title) {
       <mat-card appearance="outlined" class="profile-card">
         <mat-card-header>
-          <mat-card-title>{{ section.title }}</mat-card-title>
+          <h2 mat-card-title>{{ section.title }}</h2>
         </mat-card-header>
         <mat-card-content>
           <div class="chip-fields">
@@ -70,11 +70,16 @@
                 </mat-form-field>
                 <mat-form-field appearance="outline">
                   <mat-label>Minimum base salary</mat-label>
-                  <input matInput type="number" min="0" step="5000" formControlName="salary_min" />
+                  <input
+                    matInput
+                    type="number"
+                    min="0"
+                    step="5000"
+                    formControlName="salary_min"
+                    (blur)="coerceSalary()"
+                  />
                   <mat-hint>0 = no floor</mat-hint>
-                  @if (form.controls.salary_min.hasError('required')) {
-                    <mat-error>Enter a salary floor — use 0 for no floor.</mat-error>
-                  } @else if (form.controls.salary_min.hasError('min')) {
+                  @if (form.controls.salary_min.hasError('min')) {
                     <mat-error>The salary floor can't be negative.</mat-error>
                   }
                 </mat-form-field>
@@ -96,35 +101,41 @@
       </mat-card>
     }
 
-    <mat-card appearance="outlined" class="profile-card">
-      <mat-card-header>
-        <mat-card-title>Ranking weights</mat-card-title>
-        <mat-card-subtitle>
-          Relative importance of each scoring dimension — they don't need to sum to 1; the ranker
-          normalizes them.
-        </mat-card-subtitle>
-      </mat-card-header>
-      <mat-card-content>
-        <div class="weight-rows">
-          @for (weight of weightFields; track weight.key) {
-            <div class="weight-row">
-              <label class="weight-name" [attr.for]="'weight-' + weight.key">{{
-                weight.label
-              }}</label>
-              <mat-slider min="0" max="1" step="0.05" discrete>
-                <input
-                  matSliderThumb
-                  [id]="'weight-' + weight.key"
-                  [formControlName]="weight.key"
-                  [attr.aria-label]="weight.label + ' weight'"
-                />
-              </mat-slider>
-              <span class="weight-share">{{ weightShare(weight.key) }}% of score</span>
-            </div>
-          }
-        </div>
-      </mat-card-content>
-    </mat-card>
+    <mat-expansion-panel class="weights-panel">
+      <mat-expansion-panel-header>
+        <mat-panel-title><h2 class="weights-heading">Ranking weights</h2></mat-panel-title>
+        <mat-panel-description>{{ weightSummary }}</mat-panel-description>
+      </mat-expansion-panel-header>
+      <p class="weights-note">
+        Relative importance of each scoring dimension — they don't need to sum to 1; the ranker
+        normalizes them.
+      </p>
+      <div class="weight-rows">
+        @for (weight of weightFields; track weight.key) {
+          <div class="weight-row">
+            <label class="weight-name" [attr.for]="'weight-' + weight.key">{{
+              weight.label
+            }}</label>
+            <mat-slider min="0" max="1" step="0.05" discrete>
+              <input
+                matSliderThumb
+                [id]="'weight-' + weight.key"
+                [formControlName]="weight.key"
+                [attr.aria-label]="weight.label + ' weight'"
+                [attr.aria-describedby]="'weight-share-' + weight.key"
+                (change)="announceWeights()"
+              />
+            </mat-slider>
+            <span class="weight-share" [id]="'weight-share-' + weight.key"
+              >{{ weightShare(weight.key) }}% of score</span
+            >
+          </div>
+        }
+      </div>
+    </mat-expansion-panel>
+    <!-- One polite region announces the redistributed split after a slider
+         commit — per-slider live regions would be chatty and inconsistent. -->
+    <p class="visually-hidden" role="status" aria-live="polite">{{ weightAnnouncement }}</p>
 
     <div class="save-row">
       <button mat-flat-button color="primary" type="submit" [disabled]="form.invalid || saving">

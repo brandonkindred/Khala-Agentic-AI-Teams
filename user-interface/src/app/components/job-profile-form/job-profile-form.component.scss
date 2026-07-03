@@ -82,6 +82,25 @@
   grid-column: 1 / -1;
 }
 
+.weights-panel {
+  margin-bottom: var(--kh-space-4);
+  box-shadow: none;
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-lg);
+}
+
+.weights-heading {
+  margin: 0;
+  font: inherit;
+  font-weight: 600;
+}
+
+.weights-note {
+  margin: 0 0 var(--kh-space-3);
+  color: var(--kh-text-muted);
+  font-size: var(--kh-text-sm);
+}
+
 .weight-rows {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -108,6 +127,17 @@
     font-size: var(--kh-text-sm);
     color: var(--kh-text-muted);
     font-variant-numeric: tabular-nums;
+  }
+
+  // On narrow phones the fixed label/share columns starve the slider (~5px per
+  // step); stack to a single column so the slider spans the full width.
+  @media (max-width: 480px) {
+    grid-template-columns: 1fr;
+    gap: var(--kh-space-1);
+
+    .weight-share {
+      text-align: left;
+    }
   }
 }
 

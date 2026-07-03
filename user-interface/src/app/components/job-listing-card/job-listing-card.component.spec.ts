@@ -80,12 +80,45 @@ describe('JobListingCardComponent', () => {
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('.score-value')?.textContent).toContain('87%');
     expect(el.querySelector('.score-value')?.textContent).toContain('Match score');
-    expect(el.querySelector('.rec-badge')?.textContent).toContain('apply');
+    // Recommendation renders the human label with a screen-reader qualifier.
+    expect(el.querySelector('.rec-badge')?.textContent).toContain('Apply');
+    expect(el.querySelector('.rec-badge')?.textContent).toContain('Recommendation:');
     expect(el.querySelector('.status-badge')?.textContent).toContain('New');
+    expect(el.querySelector('.status-badge')?.textContent).toContain('Status:');
     expect(el.textContent).toContain('Staff Engineer');
     expect(el.textContent).toContain('Acme');
     expect(el.textContent).toContain('USD 200k–260k');
     expect(el.textContent).toContain('Seen 2 times');
+  });
+
+  it('exposes the job title as a heading and the card as a list item', async () => {
+    await setup(makeListing());
+    const el: HTMLElement = fixture.nativeElement;
+    const heading = el.querySelector('h3.listing-title');
+    expect(heading?.textContent).toContain('Staff Engineer');
+    expect(fixture.nativeElement.getAttribute('role')).toBe('listitem');
+  });
+
+  it('names each per-card control with the listing title', async () => {
+    await setup(makeListing());
+    const label = (sel: string) =>
+      fixture.nativeElement.querySelector(sel)?.getAttribute('aria-label') ?? '';
+    expect(buttonByText('Not interested')!.getAttribute('aria-label')).toContain('Staff Engineer');
+    expect(buttonByText('Review')!.getAttribute('aria-label')).toContain('Staff Engineer');
+    // The star's accessible name keeps its visible intent AND names the listing.
+    const star = fixture.nativeElement.querySelector('button[aria-pressed]');
+    expect(star.getAttribute('aria-label')).toContain('Add to favorites');
+    expect(star.getAttribute('aria-label')).toContain('Staff Engineer');
+    expect(label).toBeDefined();
+  });
+
+  it('maps the recommendation enum to a human label', async () => {
+    await setup(makeListing({ recommendation: 'maybe' }));
+    expect(component.recommendationLabel).toBe('Worth a look');
+    component.listing = makeListing({ recommendation: 'skip' });
+    expect(component.recommendationLabel).toBe('Skip');
+    component.listing = makeListing({ recommendation: 'apply' });
+    expect(component.recommendationLabel).toBe('Apply');
   });
 
   it('emits favorite on the star and toggles back to new when already favorite', async () => {
@@ -170,6 +203,15 @@ describe('JobListingCardComponent', () => {
     expect(meters.length).toBe(6);
     expect(meters[0].getAttribute('aria-valuenow')).toBe('0.9');
     expect(meters[0].getAttribute('aria-valuemax')).toBe('1');
+    // The meter announces a readable percentage (role="meter" alone reads a bare
+    // decimal inconsistently across screen readers), and the visible value is
+    // on the same 0–100 scale as the headline — no longer aria-hidden.
+    expect(meters[0].getAttribute('aria-valuetext')).toBe('90%');
+    const values = el.querySelectorAll('.sub-score-value');
+    expect(values[0].textContent).toContain('90%');
+    expect(values[0].getAttribute('aria-hidden')).toBeNull();
+    // "Compensation" is spelled out rather than the cryptic "Comp".
+    expect(el.textContent).toContain('Compensation');
     const link = el.querySelector('.detail-facts a') as HTMLAnchorElement;
     expect(link.href).toContain('https://example.com/job');
     expect(link.rel).toContain('noopener');

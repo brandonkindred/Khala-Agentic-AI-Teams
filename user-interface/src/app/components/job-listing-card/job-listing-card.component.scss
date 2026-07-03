@@ -196,6 +196,10 @@
   height: 6px;
   border-radius: 3px;
   background: var(--kh-surface-4);
+  // Outline the full track so its extent (the 100% reference) clears the 3:1
+  // non-text-contrast bar even at low fit values, where the amber fill is tiny.
+  // Inset shadow doesn't affect layout/height like a border would.
+  box-shadow: inset 0 0 0 1px var(--kh-border-strong);
   overflow: hidden;
 
   span {

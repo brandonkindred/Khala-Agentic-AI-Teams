@@ -1,4 +1,4 @@
-import { Component, DestroyRef, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, ElementRef, OnInit, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { RouterLink } from '@angular/router';
@@ -6,6 +6,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import type { MatChipInputEvent } from '@angular/material/chips';
+import { MatExpansionModule } from '@angular/material/expansion';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
@@ -101,6 +102,7 @@ const WEIGHT_FIELDS: { key: keyof RankingWeights; label: string }[] = [
     MatButtonModule,
     MatCardModule,
     MatChipsModule,
+    MatExpansionModule,
     MatFormFieldModule,
     MatIconModule,
     MatInputModule,
@@ -116,6 +118,7 @@ export class JobProfileFormComponent implements OnInit {
   private readonly fb = inject(FormBuilder);
   private readonly snackBar = inject(MatSnackBar);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   readonly chipSections = CHIP_SECTIONS;
   readonly weightFields = WEIGHT_FIELDS;
@@ -127,6 +130,8 @@ export class JobProfileFormComponent implements OnInit {
   savedAt: string | null = null;
   /** True once a chip has been added/removed since the last load/save. */
   chipsDirty = false;
+  /** Polite announcement of the recomputed weight split after a slider commit. */
+  weightAnnouncement = '';
 
   /** Chip-list values, keyed by profile field. */
   chips: Record<ChipFieldKey, string[]> = {
@@ -146,9 +151,11 @@ export class JobProfileFormComponent implements OnInit {
 
   readonly form = this.fb.nonNullable.group({
     remote_preference: ['any'],
-    // required: clearing a number input yields null, which Validators.min
-    // ignores — without required the form stays valid and the backend 422s.
-    salary_min: [0, [Validators.required, Validators.min(0)]],
+    // No `required`: clearing the field is coerced back to 0 on blur (see
+    // coerceSalary), and toProfile() also coerces `?? 0`, so an empty value is
+    // never sent to the backend — dropping `required` removes a friction-only
+    // error state on a field that defaults to 0 ("0 = no floor").
+    salary_min: [0, [Validators.min(0)]],
     currency: ['USD'],
     work_authorization: [''],
     title_fit: [0.25, [Validators.min(0)]],
@@ -228,6 +235,29 @@ export class JobProfileFormComponent implements OnInit {
     }
     const idx = WEIGHT_FIELDS.findIndex((w) => w.key === key);
     return Math.round((values[idx] / total) * 100);
+  }
+
+  /** One-line summary of the weight split for the collapsed panel header. */
+  get weightSummary(): string {
+    return WEIGHT_FIELDS.map((w) => `${w.label} ${this.weightShare(w.key)}%`).join(' · ');
+  }
+
+  /** Announce the recomputed split after a slider commit (all six shares move). */
+  announceWeights(): void {
+    this.weightAnnouncement = `Weights updated. ${this.weightSummary}.`;
+  }
+
+  /** Empty number input emits null; normalize it back to 0 ("no floor"). */
+  coerceSalary(): void {
+    if (this.form.controls.salary_min.value == null) {
+      this.form.controls.salary_min.setValue(0);
+    }
+  }
+
+  /** Focus the top of the form — the dashboard's landing point when it
+   *  programmatically switches to the Profile tab. */
+  focus(): void {
+    this.host.nativeElement.querySelector<HTMLElement>('#jm-profile-heading')?.focus();
   }
 
   /** Assemble the snake_case payload the backend expects. */

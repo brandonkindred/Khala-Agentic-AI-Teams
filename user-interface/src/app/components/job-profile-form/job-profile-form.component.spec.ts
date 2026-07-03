@@ -169,13 +169,43 @@ describe('JobProfileFormComponent', () => {
     expect(apiSpy.saveProfile).not.toHaveBeenCalled();
   });
 
-  it('blocks saving when the salary field is cleared to null', async () => {
+  it('coerces a cleared salary field to 0 on blur instead of blocking save', async () => {
     await setup();
-    // Clearing a number input emits null; required must catch it (min() ignores null).
+    apiSpy.saveProfile.mockReturnValue(of(makeProfile()));
+    // Clearing a number input emits null. Salary is no longer required, so the
+    // form stays valid; blur normalizes the empty value back to 0 ("no floor").
     component.form.controls.salary_min.setValue(null as never);
-    expect(component.form.invalid).toBe(true);
+    expect(component.form.valid).toBe(true);
+    component.coerceSalary();
+    expect(component.form.controls.salary_min.value).toBe(0);
     component.save();
-    expect(apiSpy.saveProfile).not.toHaveBeenCalled();
+    expect(apiSpy.saveProfile).toHaveBeenCalled();
+  });
+
+  it('announces the recomputed weight split after a slider commit', async () => {
+    await setup();
+    component.announceWeights();
+    expect(component.weightAnnouncement).toContain('Weights updated');
+    expect(component.weightAnnouncement).toContain('Title fit 30%');
+    // The collapsed panel header shows the same summary.
+    expect(component.weightSummary).toContain('Skills fit 20%');
+  });
+
+  it('associates each weight slider with its live share via aria-describedby', async () => {
+    await setup();
+    const thumb = fixture.nativeElement.querySelector('#weight-title_fit') as HTMLElement;
+    expect(thumb.getAttribute('aria-describedby')).toBe('weight-share-title_fit');
+    const share = fixture.nativeElement.querySelector('#weight-share-title_fit');
+    expect(share?.textContent).toContain('% of score');
+  });
+
+  it('renders section titles as headings', async () => {
+    await setup();
+    const headings = Array.from(
+      fixture.nativeElement.querySelectorAll('h2') as NodeListOf<HTMLElement>
+    ).map((h) => h.textContent?.trim());
+    expect(headings).toContain('Targeting');
+    expect(headings).toContain('Ranking weights');
   });
 
   it('computes each dimension\'s share of the final score from normalized weights', async () => {

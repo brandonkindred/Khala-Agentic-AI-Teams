@@ -87,14 +87,37 @@ describe('JobMatchingDashboardComponent', () => {
     );
   });
 
-  it('switches to the Scan tab when the empty state asks to start a scan', async () => {
+  it('switches to the Scan tab and focuses it when the empty state asks to start a scan', async () => {
+    vi.useFakeTimers();
     await setup();
+    const focusStart = vi.fn();
+    component.scanPanel = { focusStart } as never;
     component.onStartScanRequested();
     expect(component.selectedTabIndex).toBe(1);
     expect(navigateSpy).toHaveBeenCalledWith(
       [],
       expect.objectContaining({ queryParams: { tab: 'scans' } })
     );
+    // Focus is handed off after the tab body renders (deferred).
+    vi.runAllTimers();
+    expect(focusStart).toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it('switches to the Profile tab and focuses it when asked to set up the profile', async () => {
+    vi.useFakeTimers();
+    await setup();
+    const focus = vi.fn();
+    component.profileForm = { focus } as never;
+    component.onSetupProfileRequested();
+    expect(component.selectedTabIndex).toBe(2);
+    expect(navigateSpy).toHaveBeenCalledWith(
+      [],
+      expect.objectContaining({ queryParams: { tab: 'profile' } })
+    );
+    vi.runAllTimers();
+    expect(focus).toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
   it('onScanCompleted reloads the listings panel when present', async () => {

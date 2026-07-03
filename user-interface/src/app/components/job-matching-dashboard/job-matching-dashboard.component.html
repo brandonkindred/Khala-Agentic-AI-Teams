@@ -11,7 +11,10 @@
   >
     <mat-tab label="Listings">
       <div class="tab-body">
-        <app-job-listings-panel (startScanRequested)="onStartScanRequested()" />
+        <app-job-listings-panel
+          (startScanRequested)="onStartScanRequested()"
+          (setupProfileRequested)="onSetupProfileRequested()"
+        />
       </div>
     </mat-tab>
     <mat-tab label="Scan & Runs">

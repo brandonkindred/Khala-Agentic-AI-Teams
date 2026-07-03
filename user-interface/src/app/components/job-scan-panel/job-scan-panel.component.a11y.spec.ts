@@ -1,5 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
+import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
 import { axe } from 'vitest-axe';
@@ -23,7 +24,11 @@ describe('JobScanPanelComponent a11y', () => {
     };
     await TestBed.configureTestingModule({
       imports: [JobScanPanelComponent],
-      providers: [provideNoopAnimations(), { provide: JobMatchingApiService, useValue: apiSpy }],
+      providers: [
+        provideNoopAnimations(),
+        provideRouter([]),
+        { provide: JobMatchingApiService, useValue: apiSpy },
+      ],
     }).compileComponents();
     const fixture = TestBed.createComponent(JobScanPanelComponent);
     fixture.detectChanges();

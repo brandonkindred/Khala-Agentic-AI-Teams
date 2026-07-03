@@ -5,18 +5,22 @@
         <span class="visually-hidden">Match score</span>
         {{ scorePercent }}%
       </span>
-      <span class="rec-badge" [class]="'rec-badge ' + listing.recommendation">{{
-        listing.recommendation
-      }}</span>
+      <span
+        class="rec-badge"
+        [class]="'rec-badge ' + listing.recommendation"
+        [matTooltip]="'Recommendation: ' + recommendationLabel"
+      >
+        <span class="visually-hidden">Recommendation: </span>{{ recommendationLabel }}
+      </span>
     </div>
 
     <div class="listing-body">
       <div class="listing-title-row">
-        <span class="listing-title">{{ listing.posting.title || 'Untitled role' }}</span>
+        <h3 class="listing-title">{{ listing.posting.title || 'Untitled role' }}</h3>
         <span class="listing-company">{{ listing.posting.company }}</span>
-        <span class="status-badge" [class]="'status-badge status-' + listing.status">{{
-          statusLabel
-        }}</span>
+        <span class="status-badge" [class]="'status-badge status-' + listing.status">
+          <span class="visually-hidden">Status: </span>{{ statusLabel }}
+        </span>
       </div>
       <div class="listing-meta">
         @if (listing.posting.location) {
@@ -35,6 +39,7 @@
           <button
             mat-stroked-button
             [disabled]="pending"
+            [attr.aria-label]="'Restore — ' + titleForLabel"
             (click)="setStatus('new')"
             matTooltip="Return this listing to the inbox"
           >
@@ -46,7 +51,9 @@
             mat-icon-button
             [disabled]="pending"
             [attr.aria-pressed]="isFavorite"
-            [attr.aria-label]="isFavorite ? 'Remove from favorites' : 'Add to favorites'"
+            [attr.aria-label]="
+              (isFavorite ? 'Remove from favorites' : 'Add to favorites') + ' — ' + titleForLabel
+            "
             [matTooltip]="isFavorite ? 'Remove from favorites' : 'Add to favorites'"
             (click)="toggleFavorite()"
           >
@@ -57,6 +64,7 @@
           <button
             mat-stroked-button
             [disabled]="pending"
+            [attr.aria-label]="'Not interested — ' + titleForLabel"
             (click)="setStatus('not_interested')"
             matTooltip="Hide from the active list"
           >
@@ -90,6 +98,7 @@
         (click)="toggleExpanded()"
         [attr.aria-expanded]="expanded"
         [attr.aria-controls]="detailId"
+        [attr.aria-label]="(expanded ? 'Hide' : 'Review') + ' — ' + titleForLabel"
       >
         {{ expanded ? 'Hide' : 'Review' }}
       </button>
@@ -145,13 +154,12 @@
                 aria-valuemin="0"
                 aria-valuemax="1"
                 [attr.aria-valuenow]="subScore(dim.key)"
+                [attr.aria-valuetext]="(subScore(dim.key) * 100 | number: '1.0-0') + '%'"
                 [attr.aria-label]="dim.label + ' fit'"
               >
                 <span [style.width.%]="subScore(dim.key) * 100"></span>
               </div>
-              <span class="sub-score-value" aria-hidden="true">{{
-                subScore(dim.key) | number: '1.2-2'
-              }}</span>
+              <span class="sub-score-value">{{ subScore(dim.key) * 100 | number: '1.0-0' }}%</span>
             </div>
           }
         </div>

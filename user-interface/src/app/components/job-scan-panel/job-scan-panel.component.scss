@@ -17,6 +17,11 @@
   padding-bottom: 18px;
 }
 
+.scan-primary {
+  margin-bottom: var(--kh-space-2);
+}
+
+.advanced-panel,
 .overrides-panel {
   margin: var(--kh-space-1) 0 var(--kh-space-4);
   box-shadow: none;
@@ -50,10 +55,9 @@
     border-bottom: none;
   }
 
-  .job-id {
-    color: var(--kh-text-muted);
+  .job-label {
+    color: var(--kh-text-secondary);
     font-size: var(--kh-text-sm);
-    font-variant-numeric: tabular-nums;
   }
 
   .spacer {
@@ -119,8 +123,15 @@
     color: var(--kh-text-secondary);
   }
 
-  .run-id {
+  .run-when {
     font-size: var(--kh-text-sm);
+    color: var(--kh-text-secondary);
+    white-space: nowrap;
+  }
+
+  .run-id-sub {
+    display: block;
+    font-size: var(--kh-text-xs);
     color: var(--kh-text-muted);
   }
 }
@@ -128,4 +139,39 @@
 .run-detail-cell {
   background: var(--kh-surface-1);
   padding: var(--kh-space-3);
+}
+
+// Compact read-only recap of a run's ranked roles (triage lives in Listings).
+.run-recap {
+  list-style: none;
+  margin: 0 0 var(--kh-space-2);
+  padding: 0;
+}
+
+.run-recap-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--kh-space-3);
+  padding: var(--kh-space-1) 0;
+
+  .run-recap-score {
+    min-width: 44px;
+    font-variant-numeric: tabular-nums;
+    color: var(--kh-accent-text);
+    font-weight: 600;
+  }
+
+  .run-recap-title {
+    color: var(--kh-text-primary);
+  }
+
+  .run-recap-company {
+    color: var(--kh-text-muted);
+    font-size: var(--kh-text-sm);
+  }
+}
+
+.run-recap-link {
+  display: inline-block;
+  font-size: var(--kh-text-sm);
 }

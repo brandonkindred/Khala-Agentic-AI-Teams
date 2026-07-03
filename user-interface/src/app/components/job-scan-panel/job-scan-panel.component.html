@@ -1,31 +1,59 @@
 <mat-card appearance="outlined" class="scan-card">
   <mat-card-header>
-    <mat-card-title>Start a scan</mat-card-title>
+    <h2 mat-card-title id="jm-scan-heading" tabindex="-1">Start a scan</h2>
     <mat-card-subtitle>
       Searches the web for open roles matching your career profile, then ranks them best-first.
     </mat-card-subtitle>
   </mat-card-header>
   <mat-card-content>
     <form [formGroup]="form" (ngSubmit)="startScan()">
-      <div class="scan-fields">
-        <mat-form-field appearance="outline">
-          <mat-label>Search queries</mat-label>
-          <input matInput type="number" min="1" max="25" formControlName="max_queries" />
-          <mat-hint>1–25 distinct queries</mat-hint>
-        </mat-form-field>
-        <mat-form-field appearance="outline">
-          <mat-label>Max roles to collect</mat-label>
-          <input matInput type="number" min="1" max="200" formControlName="max_roles" />
-          <mat-hint>before ranking</mat-hint>
-        </mat-form-field>
-        <mat-form-field appearance="outline">
-          <mat-label>Ranked roles to return</mat-label>
-          <input matInput type="number" min="1" max="200" formControlName="top_n" />
-        </mat-form-field>
+      <div class="scan-primary">
         <mat-checkbox formControlName="exclude_seen" class="exclude-seen">
           Skip roles seen in earlier runs
         </mat-checkbox>
       </div>
+
+      <mat-expansion-panel class="advanced-panel">
+        <mat-expansion-panel-header>
+          <mat-panel-title>Advanced scan settings</mat-panel-title>
+          <mat-panel-description>How wide and deep to search</mat-panel-description>
+        </mat-expansion-panel-header>
+        <div class="scan-fields">
+          <mat-form-field appearance="outline">
+            <mat-label>Search queries</mat-label>
+            <input matInput type="number" min="1" max="25" formControlName="max_queries" />
+            <mat-hint>1–25 distinct queries</mat-hint>
+            @if (form.controls.max_queries.hasError('required')) {
+              <mat-error>Enter how many queries to run (1–25).</mat-error>
+            } @else if (
+              form.controls.max_queries.hasError('min') || form.controls.max_queries.hasError('max')
+            ) {
+              <mat-error>Must be between 1 and 25.</mat-error>
+            }
+          </mat-form-field>
+          <mat-form-field appearance="outline">
+            <mat-label>Max roles to collect</mat-label>
+            <input matInput type="number" min="1" max="200" formControlName="max_roles" />
+            <mat-hint>before ranking</mat-hint>
+            @if (form.controls.max_roles.hasError('required')) {
+              <mat-error>Enter how many roles to collect (1–200).</mat-error>
+            } @else if (
+              form.controls.max_roles.hasError('min') || form.controls.max_roles.hasError('max')
+            ) {
+              <mat-error>Must be between 1 and 200.</mat-error>
+            }
+          </mat-form-field>
+          <mat-form-field appearance="outline">
+            <mat-label>Ranked roles to return</mat-label>
+            <input matInput type="number" min="1" max="200" formControlName="top_n" />
+            @if (form.controls.top_n.hasError('required')) {
+              <mat-error>Enter how many ranked roles to return (1–200).</mat-error>
+            } @else if (form.controls.top_n.hasError('min') || form.controls.top_n.hasError('max')) {
+              <mat-error>Must be between 1 and 200.</mat-error>
+            }
+          </mat-form-field>
+        </div>
+      </mat-expansion-panel>
 
       <mat-expansion-panel class="overrides-panel">
         <mat-expansion-panel-header>
@@ -61,6 +89,9 @@
           <mat-progress-bar mode="indeterminate" aria-label="Scan in progress" />
         }
       </div>
+      <!-- Persistent status region (kept in the DOM, text mutated) so a screen
+           reader hears scan start/finish; a gated element wouldn't announce. -->
+      <p class="visually-hidden" role="status" aria-live="polite">{{ scanStatus }}</p>
       @if (scanError) {
         <p class="scan-error" role="alert">{{ scanError }}</p>
       }
@@ -71,20 +102,26 @@
 @if (scanJobs.length) {
   <mat-card appearance="outlined" class="scan-card">
     <mat-card-header>
-      <mat-card-title>Scan jobs</mat-card-title>
+      <h2 mat-card-title id="jm-scanjobs-heading" tabindex="-1">Scan jobs</h2>
     </mat-card-header>
     <mat-card-content>
       @for (job of scanJobs; track job.job_id) {
-        <div class="scan-job-row">
+        <div class="scan-job-row" [attr.data-job-id]="job.job_id">
           <span class="status-chip" [class]="'status-chip ' + job.status">{{ job.status }}</span>
-          <span class="job-id">{{ job.job_id }}</span>
+          <span class="job-label">{{ jobLabel(job) }}</span>
           <span class="spacer"></span>
           @if (isActive(job)) {
-            <button mat-stroked-button (click)="cancelJob(job)">Cancel</button>
+            <button
+              mat-stroked-button
+              [attr.aria-label]="'Cancel ' + jobLabel(job)"
+              (click)="cancelJob(job)"
+            >
+              Cancel
+            </button>
           } @else {
             <button
               mat-icon-button
-              aria-label="Delete scan job"
+              [attr.aria-label]="'Delete ' + jobLabel(job)"
               (click)="deleteJob(job)"
             >
               <mat-icon>delete_outline</mat-icon>
@@ -98,7 +135,7 @@
 
 <mat-card appearance="outlined" class="scan-card">
   <mat-card-header>
-    <mat-card-title>Run history</mat-card-title>
+    <h2 mat-card-title>Run history</h2>
     <mat-card-subtitle>
       Click a run to see the roles it ranked. Manage them in the Listings tab.
     </mat-card-subtitle>
@@ -117,14 +154,16 @@
               <th scope="col">Status</th>
               <th scope="col">Found</th>
               <th scope="col">Ranked</th>
-              <th scope="col">Completed</th>
               <th scope="col"><span class="visually-hidden">Expand</span></th>
             </tr>
           </thead>
           <tbody>
             @for (run of runs; track run.run_id) {
               <tr class="run-row">
-                <td class="run-id">{{ run.run_id }}</td>
+                <td class="run-when">
+                  {{ run.completed_at ? (run.completed_at | date: 'd MMM, HH:mm') : 'In progress' }}
+                  <span class="run-id-sub">{{ shortRunId(run.run_id) }}</span>
+                </td>
                 <td>
                   <span class="status-chip" [class]="'status-chip ' + run.status">{{
                     run.status
@@ -132,11 +171,10 @@
                 </td>
                 <td>{{ run.total_found }}</td>
                 <td>{{ run.total_ranked }}</td>
-                <td>{{ run.completed_at ?? '—' }}</td>
                 <td>
                   <button
                     mat-icon-button
-                    [attr.aria-label]="'Toggle roles for run ' + run.run_id"
+                    [attr.aria-label]="'Toggle roles for run ' + shortRunId(run.run_id)"
                     [attr.aria-expanded]="expandedRuns.has(run.run_id)"
                     [attr.aria-controls]="'run-detail-' + run.run_id"
                     (click)="toggleRun(run)"
@@ -149,18 +187,30 @@
               </tr>
               @if (expandedRuns.has(run.run_id)) {
                 <tr>
-                  <td colspan="6" class="run-detail-cell" [id]="'run-detail-' + run.run_id">
+                  <td colspan="5" class="run-detail-cell" [id]="'run-detail-' + run.run_id">
                     @if (isRunLoading(run.run_id)) {
                       <mat-progress-bar mode="indeterminate" aria-label="Loading run detail" />
                     } @else {
                       @if (runDetail(run.run_id); as detail) {
                         @if (detail.ranked_jobs.length) {
-                          @for (job of detail.ranked_jobs; track job.posting.fingerprint) {
-                            <app-job-listing-card
-                              [listing]="asListing(job, run.run_id)"
-                              [readonly]="true"
-                            />
-                          }
+                          <!-- Compact recap: the Listings tab is the place to
+                               triage; here we only summarize what the run ranked. -->
+                          <ol class="run-recap">
+                            @for (job of detail.ranked_jobs; track job.posting.fingerprint) {
+                              <li class="run-recap-row">
+                                <span class="run-recap-score">{{
+                                  job.score * 100 | number: '1.0-0'
+                                }}%</span>
+                                <span class="run-recap-title">{{
+                                  job.posting.title || 'Untitled role'
+                                }}</span>
+                                <span class="run-recap-company">{{ job.posting.company }}</span>
+                              </li>
+                            }
+                          </ol>
+                          <a class="run-recap-link" routerLink="/job-matching" [queryParams]="{ tab: 'listings' }">
+                            Manage these in Listings
+                          </a>
                         } @else {
                           <p class="no-runs">This run ranked no roles.</p>
                         }

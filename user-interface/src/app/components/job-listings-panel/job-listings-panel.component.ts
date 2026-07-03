@@ -1,4 +1,13 @@
-import { Component, DestroyRef, ElementRef, EventEmitter, OnInit, Output, inject } from '@angular/core';
+import {
+  Component,
+  DestroyRef,
+  ElementRef,
+  EventEmitter,
+  OnDestroy,
+  OnInit,
+  Output,
+  inject,
+} from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
@@ -49,9 +58,11 @@ const STATUS_VERBS: Record<ListingStatus, string> = {
   templateUrl: './job-listings-panel.component.html',
   styleUrl: './job-listings-panel.component.scss',
 })
-export class JobListingsPanelComponent implements OnInit {
+export class JobListingsPanelComponent implements OnInit, OnDestroy {
   /** Emitted by the empty state's "Start a scan" CTA; the dashboard switches tabs. */
   @Output() startScanRequested = new EventEmitter<void>();
+  /** Emitted by the empty state's "Set up your profile first" CTA. */
+  @Output() setupProfileRequested = new EventEmitter<void>();
 
   private readonly api = inject(JobMatchingApiService);
   private readonly snackBar = inject(MatSnackBar);
@@ -80,8 +91,25 @@ export class JobListingsPanelComponent implements OnInit {
   /** Monotonic token per counts-only refresh (see {@link applyUpdate}). */
   private countsSeq = 0;
 
+  /** Pending debounced load from rapid pill switching (see {@link setFilter}). */
+  private filterDebounce?: ReturnType<typeof setTimeout>;
+  /** Debounce window for pill-driven loads — long enough to coalesce arrow-key
+   *  roving, short enough to feel instant on a deliberate click. */
+  private static readonly FILTER_DEBOUNCE_MS = 200;
+
   ngOnInit(): void {
     this.load();
+  }
+
+  ngOnDestroy(): void {
+    if (this.filterDebounce) {
+      clearTimeout(this.filterDebounce);
+    }
+  }
+
+  /** Build the polite live-region text for a result count (shared by load + triage). */
+  private announceCount(n: number): void {
+    this.resultAnnouncement = n === 1 ? '1 listing shown' : `${n} listings shown`;
   }
 
   /** Reload the current filter (also called by the dashboard after a scan). */
@@ -100,8 +128,7 @@ export class JobListingsPanelComponent implements OnInit {
           this.listings = res.listings;
           this.counts = res.counts;
           this.loading = false;
-          this.resultAnnouncement =
-            res.listings.length === 1 ? '1 listing shown' : `${res.listings.length} listings shown`;
+          this.announceCount(res.listings.length);
         },
         error: (err) => {
           if (seq !== this.loadSeq) {
@@ -117,8 +144,17 @@ export class JobListingsPanelComponent implements OnInit {
     if (filter === this.filter) {
       return;
     }
+    // Update the selected filter immediately (aria-checked, pill highlight and
+    // focus follow synchronously) but debounce the network load so arrow-key
+    // roving across the pills doesn't fire one request per keystroke.
     this.filter = filter;
-    this.load();
+    if (this.filterDebounce) {
+      clearTimeout(this.filterDebounce);
+    }
+    this.filterDebounce = setTimeout(
+      () => this.load(),
+      JobListingsPanelComponent.FILTER_DEBOUNCE_MS
+    );
   }
 
   /**
@@ -162,7 +198,12 @@ export class JobListingsPanelComponent implements OnInit {
       return total;
     }
     if (filter === 'active') {
-      return total - (this.counts['archived'] ?? 0) - (this.counts['not_interested'] ?? 0);
+      return (
+        total -
+        (this.counts['archived'] ?? 0) -
+        (this.counts['not_interested'] ?? 0) -
+        (this.counts['poor_fit'] ?? 0)
+      );
     }
     return this.counts[filter] ?? 0;
   }
@@ -187,8 +228,12 @@ export class JobListingsPanelComponent implements OnInit {
             status === 'new' && previousStatus === 'favorite'
               ? 'Removed from favorites'
               : STATUS_VERBS[status];
+          // A longer window (keyboard/AT users can't reach an auto-dismissing
+          // toast in time) plus a durable fallback: the moved card keeps a
+          // Restore action under its status filter even after the toast is gone.
+          const durableHint = removed ? ' — or reopen its filter and press Restore' : '';
           this.snackBar
-            .open(`${verb}: ${title}${company}`, 'Undo', { duration: 6000 })
+            .open(`${verb}: ${title}${company}${durableHint}`, 'Undo', { duration: 10000 })
             .onAction()
             .pipe(takeUntilDestroyed(this.destroyRef))
             .subscribe(() => this.undoStatusChange(updated, previousStatus));
@@ -238,6 +283,9 @@ export class JobListingsPanelComponent implements OnInit {
         l.fingerprint === updated.fingerprint ? updated : l
       );
     }
+    // Keep the polite live region in step with the visible count after an
+    // in-place triage (load() announces on its own; this covers the no-reload path).
+    this.announceCount(this.listings.length);
     // Refresh pill counts without refetching the whole page. Apply only while
     // this is both the newest counts refresh AND no newer full load has fired
     // (a full load carries fresher counts of its own).
@@ -284,7 +332,9 @@ export class JobListingsPanelComponent implements OnInit {
       return true;
     }
     if (this.filter === 'active') {
-      return status !== 'archived' && status !== 'not_interested';
+      // Active is the inbox: everything triaged away (archived / not-interested
+      // / poor-fit) leaves it, matching the card's isTriagedAway grouping.
+      return status !== 'archived' && status !== 'not_interested' && status !== 'poor_fit';
     }
     return status === this.filter;
   }

@@ -59,9 +59,12 @@ describe('JobListingsPanelComponent a11y', () => {
   }
 
   it('has no axe violations with rendered listings', async () => {
-    const fixture = await createFixture([LISTING]);
-    // Guards: cards + the radiogroup toolbar are actually in the DOM.
-    expect(fixture.nativeElement.querySelector('app-job-listing-card')).toBeTruthy();
+    const fixture = await createFixture([LISTING, { ...LISTING, fingerprint: 'fp2' }]);
+    // Guards: the results list wraps role="listitem" cards, and the radiogroup
+    // toolbar is present — so the list/listitem parent-child pair is exercised.
+    const list = fixture.nativeElement.querySelector('[role="list"]');
+    expect(list).toBeTruthy();
+    expect(list.querySelectorAll('[role="listitem"]').length).toBe(2);
     expect(fixture.nativeElement.querySelector('[role="radiogroup"]')).toBeTruthy();
     const results = await axe(fixture.nativeElement, axeOptions);
     expect(results).toHaveNoViolations();

@@ -34,6 +34,8 @@ type DashboardTab = (typeof TABS)[number];
 })
 export class JobMatchingDashboardComponent implements OnInit {
   @ViewChild(JobListingsPanelComponent) listingsPanel?: JobListingsPanelComponent;
+  @ViewChild(JobScanPanelComponent) scanPanel?: JobScanPanelComponent;
+  @ViewChild(JobProfileFormComponent) profileForm?: JobProfileFormComponent;
 
   private readonly api = inject(JobMatchingApiService);
   private readonly route = inject(ActivatedRoute);
@@ -64,9 +66,18 @@ export class JobMatchingDashboardComponent implements OnInit {
     });
   }
 
-  /** The Listings empty state asked to start a scan — switch to the Scan tab. */
+  /** The Listings empty state asked to start a scan — switch to the Scan tab and
+   *  move focus into it (a programmatic tab switch otherwise drops focus to body). */
   onStartScanRequested(): void {
     this.onTabIndexChange(TABS.indexOf('scans'));
+    // Defer until the tab body (and its ViewChild) has rendered.
+    setTimeout(() => this.scanPanel?.focusStart());
+  }
+
+  /** The Listings empty state asked to set up the profile first — switch tabs and focus it. */
+  onSetupProfileRequested(): void {
+    this.onTabIndexChange(TABS.indexOf('profile'));
+    setTimeout(() => this.profileForm?.focus());
   }
 
   /** A completed scan may have added listings; refresh the Listings tab. */

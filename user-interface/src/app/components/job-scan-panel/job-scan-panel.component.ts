@@ -1,7 +1,18 @@
-import { Component, DestroyRef, EventEmitter, OnInit, Output, inject } from '@angular/core';
+import {
+  Component,
+  DestroyRef,
+  ElementRef,
+  EventEmitter,
+  OnInit,
+  Output,
+  inject,
+} from '@angular/core';
+import { DecimalPipe } from '@angular/common';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { switchMap, tap } from 'rxjs/operators';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { RouterLink } from '@angular/router';
+import { DatePipe } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatCheckboxModule } from '@angular/material/checkbox';
@@ -17,14 +28,11 @@ import {
   type ConfirmDialogData,
 } from '../../shared/confirm-dialog/confirm-dialog.component';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
-import { JobListingCardComponent } from '../job-listing-card/job-listing-card.component';
 import type {
   JobMatchRequest,
   JobMatchRunDetail,
   JobMatchRunSummary,
   JobSeekerProfile,
-  Listing,
-  RankedJob,
   ScanJobListItem,
 } from '../../models';
 
@@ -47,6 +55,9 @@ function splitCsv(value: string): string[] {
   standalone: true,
   imports: [
     ReactiveFormsModule,
+    RouterLink,
+    DatePipe,
+    DecimalPipe,
     MatButtonModule,
     MatCardModule,
     MatCheckboxModule,
@@ -55,7 +66,6 @@ function splitCsv(value: string): string[] {
     MatIconModule,
     MatInputModule,
     MatProgressBarModule,
-    JobListingCardComponent,
   ],
   templateUrl: './job-scan-panel.component.html',
   styleUrl: './job-scan-panel.component.scss',
@@ -69,9 +79,12 @@ export class JobScanPanelComponent implements OnInit {
   private readonly snackBar = inject(MatSnackBar);
   private readonly dialog = inject(MatDialog);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
 
   scanning = false;
   scanError: string | null = null;
+  /** Polite status text for screen readers as a scan starts/finishes. */
+  scanStatus = '';
   scanJobs: ScanJobListItem[] = [];
   runs: JobMatchRunSummary[] = [];
   runsLoading = false;
@@ -131,6 +144,7 @@ export class JobScanPanelComponent implements OnInit {
     }
     this.scanning = true;
     this.scanError = null;
+    this.scanStatus = 'Scan started — searching for roles. This can take a few minutes.';
     this.api
       .startScan(this.toRequest())
       .pipe(
@@ -144,6 +158,7 @@ export class JobScanPanelComponent implements OnInit {
       .subscribe({
         next: (result) => {
           this.scanning = false;
+          this.scanStatus = `Scan complete — ${result.total_ranked} roles ranked from ${result.total_found} found.`;
           this.snackBar.open(
             `Scan complete — ${result.total_ranked} roles ranked from ${result.total_found} found.`,
             'Dismiss',
@@ -155,10 +170,27 @@ export class JobScanPanelComponent implements OnInit {
         },
         error: (err) => {
           this.scanning = false;
+          this.scanStatus = 'The scan failed.';
           this.scanError = err?.error?.detail ?? err?.message ?? 'The scan failed.';
           this.refreshScanJobs();
         },
       });
+  }
+
+  /** Focus the "Start a scan" heading — the dashboard's landing point when it
+   *  programmatically switches to this tab (so keyboard focus follows the view). */
+  focusStart(): void {
+    this.host.nativeElement.querySelector<HTMLElement>('#jm-scan-heading')?.focus();
+  }
+
+  /** Human label for a scan job — a short id, not the full opaque UUID. */
+  jobLabel(job: ScanJobListItem): string {
+    return `scan ${this.shortRunId(job.job_id)}`;
+  }
+
+  /** First segment of a UUID — enough to disambiguate rows without the full id. */
+  shortRunId(id: string): string {
+    return id ? id.split('-')[0] : id;
   }
 
   refreshScanJobs(): void {
@@ -204,15 +236,34 @@ export class JobScanPanelComponent implements OnInit {
         next: () => {
           this.snackBar.open('Scan cancelled.', 'Dismiss', { duration: 3000 });
           this.refreshScanJobs();
+          // Cancel replaces this row's button with a Delete button; keep the
+          // keyboard user anchored on the same row rather than dropping to body.
+          this.restoreJobFocus(job.job_id);
         },
         error: () => this.snackBar.open('Could not cancel the scan.', 'Dismiss', { duration: 4000 }),
       });
   }
 
+  /**
+   * After a scan-job row re-renders, keep keyboard focus anchored: focus the
+   * named row's action button, or the "Scan jobs" heading when it's gone.
+   */
+  private restoreJobFocus(jobId: string): void {
+    setTimeout(() => {
+      const root = this.host.nativeElement;
+      const row = root.querySelector<HTMLElement>(`[data-job-id="${jobId}"] button`);
+      if (row) {
+        row.focus();
+        return;
+      }
+      root.querySelector<HTMLElement>('#jm-scanjobs-heading')?.focus();
+    });
+  }
+
   deleteJob(job: ScanJobListItem): void {
     const data: ConfirmDialogData = {
       title: 'Delete scan job?',
-      message: `This removes the record of scan ${job.job_id}. Ranked listings are kept.`,
+      message: `This removes the record of ${this.jobLabel(job)}. Ranked listings are kept.`,
       confirmLabel: 'Delete',
       variant: 'danger',
     };
@@ -228,7 +279,12 @@ export class JobScanPanelComponent implements OnInit {
           .deleteScanJob(job.job_id)
           .pipe(takeUntilDestroyed(this.destroyRef))
           .subscribe({
-            next: () => this.refreshScanJobs(),
+            next: () => {
+              this.refreshScanJobs();
+              // The row is gone; anchor focus on the section heading (or the
+              // confirm dialog already returned focus to a now-removed button).
+              this.restoreJobFocus(job.job_id);
+            },
             error: () =>
               this.snackBar.open('Could not delete the scan job.', 'Dismiss', { duration: 4000 }),
           });
@@ -260,21 +316,5 @@ export class JobScanPanelComponent implements OnInit {
 
   isRunLoading(runId: string): boolean {
     return this.expandedRuns.get(runId) === 'loading';
-  }
-
-  /** Adapt a run's RankedJob to the Listing shape the card renders (read-only). */
-  asListing(job: RankedJob, runId: string): Listing {
-    return {
-      fingerprint: job.posting.fingerprint,
-      posting: job.posting,
-      score: job.score,
-      sub_scores: job.sub_scores,
-      recommendation: job.recommendation,
-      rationale: job.rationale,
-      concerns: job.concerns,
-      run_id: runId,
-      times_seen: 1,
-      status: 'new',
-    };
   }
 }

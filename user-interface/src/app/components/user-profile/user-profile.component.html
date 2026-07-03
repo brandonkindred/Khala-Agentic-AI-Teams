@@ -70,7 +70,11 @@
         @if (totalAssociations === 0) {
           <p class="up-empty">
             Nothing linked yet. Create a brand, blog post, project, or agentic team and it will
-            appear here.
+            appear here — or
+            <a routerLink="/job-matching" [queryParams]="{ tab: 'profile' }"
+              >set up your career profile</a
+            >
+            to start matching jobs.
           </p>
         } @else {
           @for (group of groups; track group.type) {
@@ -79,23 +83,33 @@
                 <mat-icon aria-hidden="true">{{ group.icon }}</mat-icon>
                 {{ group.label }} ({{ group.items.length }})
               </h3>
-              <ul class="up-list">
-                @for (item of group.items; track item.id) {
-                  <li class="up-list-item">
-                    @if (group.route) {
-                      <a
-                        class="up-item-label"
-                        [routerLink]="group.route"
-                        [queryParams]="group.queryParams ?? null"
-                        >{{ item.label || item.artifact_id }}</a
-                      >
-                    } @else {
-                      <span class="up-item-label">{{ item.label || item.artifact_id }}</span>
-                    }
-                    <span class="up-item-meta">{{ item.team }} · {{ item.role }}</span>
-                  </li>
-                }
-              </ul>
+              @if (group.items.length) {
+                <ul class="up-list">
+                  @for (item of group.items; track item.id) {
+                    <li class="up-list-item">
+                      @if (group.route) {
+                        <a
+                          class="up-item-label"
+                          [routerLink]="group.route"
+                          [queryParams]="group.queryParams ?? null"
+                          >{{ item.label || item.artifact_id }}</a
+                        >
+                      } @else {
+                        <span class="up-item-label">{{ item.label || item.artifact_id }}</span>
+                      }
+                      <span class="up-item-meta">{{ item.team }} · {{ item.role }}</span>
+                    </li>
+                  }
+                </ul>
+              } @else {
+                <!-- Only the always-present Career group reaches here when empty. -->
+                <p class="up-empty">
+                  <a [routerLink]="group.route" [queryParams]="group.queryParams ?? null"
+                    >Set up your career profile</a
+                  >
+                  so the job-matching team can find roles for you.
+                </p>
+              }
             </section>
           }
         }

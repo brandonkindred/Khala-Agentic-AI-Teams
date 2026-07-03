@@ -38,7 +38,15 @@ const LISTING: Listing = {
 
 // `color-contrast` is disabled because jsdom can't paint; contrast is
 // enforced by the --kh-* token system + the SCSS contrast guard spec.
-const axeOptions = { rules: { 'color-contrast': { enabled: false } } };
+// `aria-required-parent` is disabled because the card host is role="listitem":
+// its required role="list" parent is supplied by the listings panel (verified
+// in that panel's own a11y spec), not by this isolated fragment.
+const axeOptions = {
+  rules: {
+    'color-contrast': { enabled: false },
+    'aria-required-parent': { enabled: false },
+  },
+};
 
 describe('JobListingCardComponent a11y', () => {
   async function createFixture() {

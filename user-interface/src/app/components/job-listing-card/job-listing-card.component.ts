@@ -6,12 +6,14 @@ import { MatMenuModule } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import type { Listing, ListingStatus, SubScores } from '../../models';
 
-/** Display metadata for the six fit dimensions, in render order. */
+/** Display metadata for the six fit dimensions, in render order. Labels are
+ *  spelled out so a screen reader (and a non-expert) reads them plainly rather
+ *  than abbreviations like "Comp". */
 const SUB_SCORE_LABELS: { key: keyof SubScores; label: string }[] = [
   { key: 'title_fit', label: 'Title' },
   { key: 'seniority_fit', label: 'Seniority' },
   { key: 'location_fit', label: 'Location' },
-  { key: 'comp_fit', label: 'Comp' },
+  { key: 'comp_fit', label: 'Compensation' },
   { key: 'company_fit', label: 'Company' },
   { key: 'skills_fit', label: 'Skills' },
 ];
@@ -22,6 +24,13 @@ const STATUS_LABELS: Record<ListingStatus, string> = {
   not_interested: 'Not interested',
   poor_fit: 'Poor fit',
   archived: 'Archived',
+};
+
+/** Human labels for the ranker's recommendation enum (raw value drives styling). */
+const REC_LABELS: Record<string, string> = {
+  apply: 'Apply',
+  maybe: 'Worth a look',
+  skip: 'Skip',
 };
 
 /**
@@ -35,6 +44,9 @@ const STATUS_LABELS: Record<ListingStatus, string> = {
   imports: [DecimalPipe, MatButtonModule, MatIconModule, MatMenuModule, MatTooltipModule],
   templateUrl: './job-listing-card.component.html',
   styleUrl: './job-listing-card.component.scss',
+  // Each card is one item of the panel's role="list" so AT announces
+  // "list, N items" and the position of each ranked role.
+  host: { role: 'listitem' },
 })
 export class JobListingCardComponent {
   @Input({ required: true }) listing!: Listing;
@@ -59,6 +71,16 @@ export class JobListingCardComponent {
 
   get statusLabel(): string {
     return STATUS_LABELS[this.listing.status] ?? this.listing.status;
+  }
+
+  /** Human recommendation label (falls back to the raw enum if unmapped). */
+  get recommendationLabel(): string {
+    return REC_LABELS[this.listing.recommendation] ?? this.listing.recommendation;
+  }
+
+  /** The listing's title for parameterizing per-card control accessible names. */
+  get titleForLabel(): string {
+    return this.listing.posting.title || 'this listing';
   }
 
   get isFavorite(): boolean {

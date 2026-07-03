@@ -86,17 +86,26 @@ describe('JobListingsPanelComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('Staff Engineer');
   });
 
-  it('shows the empty state with a Start a scan CTA on the active filter', async () => {
+  it('shows both empty-state CTAs on the active filter and emits from each', async () => {
     await setup(makeResponse([], {}));
     expect(fixture.nativeElement.textContent).toContain('No listings yet');
-    const emitted = vi.fn();
-    component.startScanRequested.subscribe(emitted);
-    const cta = Array.from(
-      fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>
-    ).find((b) => b.textContent?.includes('Start a scan'));
-    expect(cta).toBeDefined();
-    cta!.click();
-    expect(emitted).toHaveBeenCalled();
+    const scan = vi.fn();
+    const setup2 = vi.fn();
+    component.startScanRequested.subscribe(scan);
+    component.setupProfileRequested.subscribe(setup2);
+    const button = (text: string) =>
+      Array.from(
+        fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>
+      ).find((b) => b.textContent?.includes(text));
+
+    const scanCta = button('Start a scan');
+    const profileCta = button('Set up your profile first');
+    expect(scanCta).toBeDefined();
+    expect(profileCta).toBeDefined();
+    scanCta!.click();
+    profileCta!.click();
+    expect(scan).toHaveBeenCalled();
+    expect(setup2).toHaveBeenCalled();
   });
 
   it('surfaces a load error with retry', async () => {
@@ -123,14 +132,18 @@ describe('JobListingsPanelComponent', () => {
 
   it('discards a stale response that arrives after the filter changed', async () => {
     await setup();
+    // Pill-driven loads are debounced; advance the timer to let each fire.
+    vi.useFakeTimers();
     const slowFavorites = new Subject<ListingsResponse>();
     const fastAll = new Subject<ListingsResponse>();
     apiSpy.listListings.mockImplementation((filter: string) =>
       filter === 'favorite' ? slowFavorites.asObservable() : fastAll.asObservable()
     );
 
-    component.setFilter('favorite'); // slow request in flight
-    component.setFilter('all'); // user moves on
+    component.setFilter('favorite');
+    vi.advanceTimersByTime(200); // slow favorites request in flight
+    component.setFilter('all');
+    vi.advanceTimersByTime(200); // user moved on — fast all request in flight
 
     fastAll.next(makeResponse([makeListing(), makeListing({ fingerprint: 'fp2' })], { new: 2 }));
     // The older favorites response lands last — it must be ignored.
@@ -139,10 +152,12 @@ describe('JobListingsPanelComponent', () => {
     expect(component.filter).toBe('all');
     expect(component.listings.length).toBe(2);
     expect(component.counts).toEqual({ new: 2 });
+    vi.useRealTimers();
   });
 
   it('discards a stale response even when the user returns to the same filter (A→B→A)', async () => {
     await setup();
+    vi.useFakeTimers();
     // Three in-flight requests: favorite (abandoned), active (stale), active
     // (fresh). A filter-value guard would accept the stale active response
     // because its filter matches again; the sequence token must reject it.
@@ -153,9 +168,11 @@ describe('JobListingsPanelComponent', () => {
       return s.asObservable();
     });
 
-    component.setFilter('favorite'); // request in flight, then abandoned
-    component.setFilter('active'); // stale active request in flight
-    component.load(); // fresh active request (e.g. post-scan refresh)
+    component.setFilter('favorite');
+    vi.advanceTimersByTime(200); // favorite request fires, then abandoned
+    component.setFilter('active');
+    vi.advanceTimersByTime(200); // stale active request fires
+    component.load(); // fresh active request (e.g. post-scan refresh), immediate
 
     responses[2].next(
       makeResponse([makeListing(), makeListing({ fingerprint: 'fp2' })], { new: 2 })
@@ -165,25 +182,37 @@ describe('JobListingsPanelComponent', () => {
 
     expect(component.listings.length).toBe(2);
     expect(component.counts).toEqual({ new: 2 });
+    vi.useRealTimers();
   });
 
-  it('reloads with the selected filter', async () => {
+  it('debounces the pill-driven load and reloads with the selected filter', async () => {
     await setup();
+    vi.useFakeTimers();
     component.setFilter('favorite');
+    // Selection is immediate; the network load is not fired until the debounce elapses.
     expect(component.filter).toBe('favorite');
+    const before = apiSpy.listListings.mock.calls.length;
+    vi.advanceTimersByTime(199);
+    expect(apiSpy.listListings.mock.calls.length).toBe(before);
+    vi.advanceTimersByTime(1);
     expect(apiSpy.listListings).toHaveBeenLastCalledWith('favorite');
+
     // Selecting the same filter again does not refetch.
     const calls = apiSpy.listListings.mock.calls.length;
     component.setFilter('favorite');
+    vi.advanceTimersByTime(200);
     expect(apiSpy.listListings.mock.calls.length).toBe(calls);
+    vi.useRealTimers();
   });
 
-  it('moves selection and focus with arrow keys on the pills', async () => {
+  it('coalesces rapid arrow-key roving into a single load', async () => {
     await setup();
+    vi.useFakeTimers();
     const pills = fixture.nativeElement.querySelectorAll('.filter-pill');
     // Only the selected pill participates in the tab order.
     expect(pills[0].getAttribute('tabindex')).toBe('0');
     expect(pills[1].getAttribute('tabindex')).toBe('-1');
+    const before = apiSpy.listListings.mock.calls.length;
 
     component.onPillKeydown(
       new KeyboardEvent('keydown', { key: 'ArrowRight' }),
@@ -197,24 +226,33 @@ describe('JobListingsPanelComponent', () => {
     component.onPillKeydown(new KeyboardEvent('keydown', { key: 'Home' }), 'all');
     expect(component.filter).toBe('active');
 
+    // Rapid roving fired no load yet; after the debounce, exactly one fires.
+    expect(apiSpy.listListings.mock.calls.length).toBe(before);
+    vi.advanceTimersByTime(200);
+    expect(apiSpy.listListings.mock.calls.length).toBe(before + 1);
+
     // Wrap-around from the first pill going left.
     component.onPillKeydown(new KeyboardEvent('keydown', { key: 'ArrowLeft' }), 'active');
     expect(component.filter).toBe('all');
+    vi.advanceTimersByTime(200); // flush the trailing debounce before restoring timers
+    vi.useRealTimers();
   });
 
-  it('derives pill counts from the counts map', async () => {
+  it('derives pill counts, excluding archived, not-interested and poor-fit from Active', async () => {
     await setup(
       makeResponse([makeListing()], {
         new: 3,
         favorite: 2,
         archived: 1,
         not_interested: 1,
+        poor_fit: 2,
       })
     );
-    expect(component.countFor('all')).toBe(7);
+    expect(component.countFor('all')).toBe(9);
+    // Active is the inbox: everything except archived/not-interested/poor-fit.
     expect(component.countFor('active')).toBe(5);
     expect(component.countFor('favorite')).toBe(2);
-    expect(component.countFor('poor_fit')).toBe(0);
+    expect(component.countFor('poor_fit')).toBe(2);
   });
 
   it('patches the listing pessimistically, replaces the row, and offers Undo', async () => {
@@ -272,6 +310,31 @@ describe('JobListingsPanelComponent', () => {
     apiSpy.updateListing.mockReturnValue(of(makeListing({ status: 'archived' })));
     component.onStatusChange(component.listings[0], 'archived');
     expect(component.listings.length).toBe(0);
+  });
+
+  it('drops a poor-fit listing from the Active inbox', async () => {
+    // Poor fit is a triaged-away status — it must leave Active like archived /
+    // not-interested (previously it lingered with only a Restore action).
+    await setup();
+    apiSpy.updateListing.mockReturnValue(of(makeListing({ status: 'poor_fit' })));
+    component.onStatusChange(component.listings[0], 'poor_fit');
+    expect(component.listings.length).toBe(0);
+  });
+
+  it('keeps the live-region count in step after an in-place triage', async () => {
+    // Two rows on the Favorites filter; un-favoriting one removes it, and the
+    // polite region must reflect the new count (not the stale load-time count).
+    await setup(
+      makeResponse(
+        [makeListing({ status: 'favorite' }), makeListing({ fingerprint: 'fp2', status: 'favorite' })],
+        { favorite: 2 }
+      )
+    );
+    component.filter = 'favorite'; // rows already loaded; pin the filter without a debounced reload
+    expect(component.resultAnnouncement).toBe('2 listings shown');
+    apiSpy.updateListing.mockReturnValue(of(makeListing({ status: 'new' })));
+    component.onStatusChange(component.listings[0], 'new');
+    expect(component.resultAnnouncement).toBe('1 listing shown');
   });
 
   it('keeps the row and shows an error snackbar when the PATCH fails', async () => {

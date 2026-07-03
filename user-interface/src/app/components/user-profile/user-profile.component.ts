@@ -184,11 +184,16 @@ export class UserProfileComponent implements OnInit {
       });
   }
 
-  /** Group flat associations into the fixed display order, dropping empties. */
+  /**
+   * Group flat associations into the fixed display order. Empty groups are
+   * dropped, EXCEPT the Career group: it always renders (as a "set it up"
+   * prompt when empty) so a user who hasn't built a career profile can still
+   * discover the editor from the profile page.
+   */
   private groupAssociations(items: Association[]): AssociationGroup[] {
     return ARTIFACT_GROUPS.map((g) => ({
       ...g,
       items: items.filter((a) => a.artifact_type === g.type),
-    })).filter((g) => g.items.length > 0);
+    })).filter((g) => g.items.length > 0 || g.type === 'career');
   }
 }

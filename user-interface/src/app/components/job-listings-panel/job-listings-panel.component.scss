@@ -5,6 +5,15 @@
   margin-bottom: var(--kh-space-4);
 }
 
+// Empty-state CTAs: primary "Start a scan" beside the secondary "Set up your
+// profile first" so a new user sees the recommended step-1 before scanning.
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kh-space-2);
+  justify-content: center;
+}
+
 .filter-pills {
   display: flex;
   gap: var(--kh-space-2);

@@ -2,6 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
+import { provideRouter } from '@angular/router';
 import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
@@ -76,6 +77,7 @@ describe('JobScanPanelComponent', () => {
       imports: [JobScanPanelComponent],
       providers: [
         provideNoopAnimations(),
+        provideRouter([]),
         { provide: JobMatchingApiService, useValue: apiSpy },
         { provide: MatSnackBar, useValue: snackSpy },
         { provide: MatDialog, useValue: dialogSpy },
@@ -230,11 +232,54 @@ describe('JobScanPanelComponent', () => {
     expect(component.runDetail('r1')).toBeNull();
   });
 
-  it('adapts a ranked job to a read-only listing', async () => {
+  it('renders a run as a compact recap (title · company · score), not full cards', async () => {
     await setup();
-    const listing = component.asListing(makeRankedJob(), 'r1');
-    expect(listing.fingerprint).toBe('fp1');
-    expect(listing.run_id).toBe('r1');
-    expect(listing.status).toBe('new');
+    const detail: JobMatchRunDetail = {
+      run_id: 'r1',
+      status: 'completed',
+      total_found: 5,
+      total_ranked: 1,
+      ranked_jobs: [makeRankedJob()],
+    };
+    apiSpy.getRun.mockReturnValue(of(detail));
+    component.toggleRun(component.runs[0]);
+    fixture.detectChanges();
+
+    const recap = fixture.nativeElement.querySelector('.run-recap');
+    expect(recap).toBeTruthy();
+    expect(recap.textContent).toContain('Engineer');
+    expect(recap.textContent).toContain('Acme');
+    expect(recap.textContent).toContain('80%');
+    // No editable triage surface in the run detail anymore.
+    expect(fixture.nativeElement.querySelector('.run-recap app-job-listing-card')).toBeNull();
+    // A deep link points at the Listings tab where roles are managed.
+    const link = fixture.nativeElement.querySelector('.run-recap-link');
+    expect(link).toBeTruthy();
+  });
+
+  it('labels scan jobs with a short id and formats run timestamps', async () => {
+    await setup();
+    expect(component.shortRunId('abcd1234-5678-90ab-cdef')).toBe('abcd1234');
+    expect(component.jobLabel({ job_id: 'abcd1234-5678', status: 'running' })).toBe('scan abcd1234');
+  });
+
+  it('announces scan start and completion for screen readers', async () => {
+    await setup();
+    const result: JobMatchResponse = {
+      run_id: 'r2',
+      ranked_jobs: [],
+      total_found: 4,
+      total_ranked: 2,
+      profile_snapshot: {} as never,
+      generated_at: '',
+    };
+    // Hold the poll open so we can observe the "started" status first.
+    const poll = new Subject<JobMatchResponse>();
+    apiSpy.pollScan.mockReturnValue(poll.asObservable());
+    component.startScan();
+    expect(component.scanStatus).toContain('Scan started');
+    poll.next(result);
+    poll.complete();
+    expect(component.scanStatus).toContain('Scan complete');
   });
 });
