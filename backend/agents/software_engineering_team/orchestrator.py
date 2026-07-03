@@ -41,6 +41,10 @@ from llm_service import (  # noqa: E402
     get_strands_model,
     llm_attribution,
 )
+from shared_repo_context.repo_utils import (  # noqa: E402
+    read_repo_code,
+    truncate_for_context,
+)
 from software_engineering_team.shared import (  # noqa: E402
     cost_tracker,
     se_events,
@@ -64,10 +68,6 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
 )
 from software_engineering_team.shared.models import TaskUpdate  # noqa: E402
 from software_engineering_team.shared.plan_dir import ensure_plan_dir  # noqa: E402
-from software_engineering_team.shared.repo_utils import (  # noqa: E402
-    read_repo_code,
-    truncate_for_context,
-)
 from software_engineering_team.shared.task_utils import task_requirements  # noqa: E402
 
 try:
@@ -798,7 +798,7 @@ def _run_build_verification(
     For frontend: runs ng build.
     For backend: runs python syntax check (pytest if tests exist).
     """
-    from software_engineering_team.shared.command_runner import (
+    from shared_command_runner.runner import (
         run_command,
         run_ng_build_with_nvm_fallback,
         run_pytest,
@@ -815,7 +815,7 @@ def _run_build_verification(
         if not (frontend_dir / "package.json").exists():
             logger.info("Build verification: no frontend project found, skipping frontend build")
             return True, ""
-        from software_engineering_team.shared.command_runner import is_ng_build_environment_failure
+        from shared_command_runner.runner import is_ng_build_environment_failure
 
         result = run_ng_build_with_nvm_fallback(frontend_dir)
         if not result.success:
@@ -831,7 +831,7 @@ def _run_build_verification(
                 return True, ""
             failures = result.parsed_failures("ng_build")
             if failures:
-                from software_engineering_team.shared.error_parsing import (
+                from shared_command_runner.error_parsing import (
                     build_agent_feedback,
                     get_failure_class_tag,
                 )
@@ -858,9 +858,7 @@ def _run_build_verification(
             return True, ""
         result = run_python_syntax_check(backend_dir)
         if not result.success:  # pragma: no cover  # integration-only: syntax-check + LLM fix loop
-            logger.warning(
-                "Syntax check failed for task %s: %s", task_id, result.error_summary
-            )
+            logger.warning("Syntax check failed for task %s: %s", task_id, result.error_summary)
             fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
             if fixed:
                 logger.info(
@@ -893,7 +891,7 @@ def _run_build_verification(
             if not test_result.success:
                 failures = test_result.parsed_failures("pytest")
                 if failures:
-                    from software_engineering_team.shared.error_parsing import (
+                    from shared_command_runner.error_parsing import (
                         build_agent_feedback,
                         get_failure_class_tag,
                     )
@@ -931,7 +929,7 @@ def _run_build_verification(
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
 
-        from software_engineering_team.shared.command_runner import run_command
+        from shared_command_runner.runner import run_command
 
         errors: list[str] = []
         # Validate .github/workflows/*.yml
@@ -998,7 +996,7 @@ def _try_build_fix_one_at_a_time(
     Use a tool-agent style flow to identify all build issues, then fix them one at a time.
     Returns (True, "") if build passes after fixes; otherwise (False, error_summary).
     """
-    from software_engineering_team.shared.command_runner import (
+    from shared_command_runner.runner import (
         run_command,
         run_ng_build_with_nvm_fallback,
         run_pytest,
@@ -1012,7 +1010,7 @@ def _try_build_fix_one_at_a_time(
         if not (project_dir / "package.json").exists():
             return False, "No frontend project found"
         try:
-            from software_engineering_team.shared.command_runner import (
+            from shared_command_runner.runner import (
                 is_ng_build_environment_failure,
             )
 
@@ -2248,6 +2246,7 @@ def run_orchestrator(
             adapter_result, str(path), existing_code_summary, resolved_questions_override
         )
         from coding_team.orchestrator import run_coding_team_orchestrator
+        from software_engineering_team.coding_engine_provider import SECodeEngineProvider
 
         base, span = PROGRESS_BAND_CODING
         # get_llm deliberately NOT passed: the coding team's default getter wraps
@@ -2269,6 +2268,7 @@ def run_orchestrator(
                 get_job_fn=lambda jid: get_job(jid),
                 progress_base=base,
                 progress_span=span,
+                engine_provider=SECodeEngineProvider(),
             )
         # Emit DORA lifecycle events (deployment/lead-time/change-failure) from
         # the coding-team task graph the run persisted, and flush final cost.

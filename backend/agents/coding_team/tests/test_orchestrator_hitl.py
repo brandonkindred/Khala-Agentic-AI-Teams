@@ -17,7 +17,7 @@ from coding_team.orchestrator import (
 )
 from coding_team.task_graph import TaskGraphService
 
-GIT_UTILS = "software_engineering_team.shared.git_utils"
+GIT_UTILS = "shared_git.git_utils"
 
 
 # --------------------------------------------------------------------------- helpers / stubs
@@ -540,7 +540,7 @@ def test_plan_to_task_graph_parses_open_questions(monkeypatch):
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda a, p: {
+        lambda a, p, required_keys=None: {
             "tasks": [],
             "stacks": [{"name": "backend", "tools_services": []}],
             "open_questions": [{"question_text": "Allergen default?"}],
@@ -557,7 +557,7 @@ def test_plan_to_task_graph_failure_includes_open_questions_key(monkeypatch):
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
 
-    def boom(a, p):
+    def boom(a, p, required_keys=None):
         raise RuntimeError("x")
 
     monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
@@ -579,7 +579,7 @@ def _stub_agents(monkeypatch, tech_lead_cls, swarm_cls):
     monkeypatch.setattr(
         orch_mod,
         "_build_implementation_worker",
-        lambda agent_id, spec, llm_getter: Worker(agent_id),
+        lambda agent_id, spec, llm_getter, engine_provider: Worker(agent_id),
     )
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", swarm_cls)
 

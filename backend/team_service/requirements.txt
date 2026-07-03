@@ -15,6 +15,12 @@ temporalio>=1.25,<2.0
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
 ollama>=0.6,<1.0
+# Tolerant JSON repair for LLM output. Its consumers import it lazily and
+# swallow ImportError by design (salvage must never crash), so a missing wheel
+# silently disables repair in production instead of failing loudly:
+# llm_service/clients/ollama.py and shared_llm_recovery/recovery.py.
+# Keep the pin in lockstep with backend/agents/requirements.txt.
+json-repair>=0.28,<1.0
 python-multipart>=0.0.26,<1.0
 slack-sdk>=3.41,<4
 APScheduler>=3.11,<4.0

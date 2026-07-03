@@ -1,6 +1,6 @@
 """Tests for shared.error_parsing."""
 
-from software_engineering_team.shared.error_parsing import (
+from shared_command_runner.error_parsing import (
     FailureClass,
     ParsedFailure,
     build_agent_feedback,
@@ -140,7 +140,7 @@ E         -401
 
 def test_build_agent_feedback_includes_interpretation_for_401():
     """build_agent_feedback includes Interpretation section when 401 playbook is present."""
-    from software_engineering_team.shared.error_parsing import PLAYBOOK_401_UNAUTHORIZED
+    from shared_command_runner.error_parsing import PLAYBOOK_401_UNAUTHORIZED
 
     failures = [
         ParsedFailure(

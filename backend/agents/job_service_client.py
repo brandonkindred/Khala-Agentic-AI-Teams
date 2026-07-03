@@ -17,7 +17,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -509,6 +509,12 @@ class BaseJobStore:
     Subclass and set ``team`` to get create/get/update/delete/list/reset
     for free.  Override or add team-specific methods as needed.
 
+    The human-in-the-loop pause/answer operations shared by the coding and
+    software-engineering teams live as module-level functions at the bottom of
+    this file (``add_pending_questions`` / ``submit_answers`` /
+    ``is_waiting_for_answers`` / ``get_submitted_answers``) — this module is the
+    single home for team-agnostic job-store behaviour.
+
     Usage::
 
         class BlogJobStore(BaseJobStore):
@@ -626,3 +632,128 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop pause / answer operations — shared by the coding and
+# software-engineering teams' job stores. Each function takes the client
+# explicitly so a team wrapper passes its own (monkeypatch-able) client; writes
+# are atomic so a concurrent answer submission and a status update cannot
+# clobber each other.
+# ---------------------------------------------------------------------------
+
+
+def add_pending_questions(
+    client: JobServiceClient, job_id: str, questions: List[Dict[str, Any]]
+) -> None:
+    """Append pending questions and set ``waiting_for_answers=True`` to pause the job.
+
+    Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` is
+        non-empty; ``questions`` is a list of structured question dicts.
+    Postconditions: the job's ``waiting_for_answers`` is True and ``questions``
+        are appended to ``pending_questions`` in one atomic write.
+    """
+    client.atomic_update(
+        job_id,
+        merge_fields={"waiting_for_answers": True},
+        append_to={"pending_questions": questions},
+    )
+
+
+def submit_answers(client: JobServiceClient, job_id: str, answers: List[Dict[str, Any]]) -> None:
+    """Store submitted answers, clear pending questions, and clear the waiting flag.
+
+    Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` is non-empty.
+    Postconditions: ``waiting_for_answers`` is False, ``pending_questions`` is
+        empty, and ``answers`` are appended to ``submitted_answers`` in one atomic
+        write (the orchestrator's wait loop resumes on the cleared flag).
+    """
+    client.atomic_update(
+        job_id,
+        merge_fields={"pending_questions": [], "waiting_for_answers": False},
+        append_to={"submitted_answers": answers},
+    )
+
+
+def is_waiting_for_answers(client: JobServiceClient, job_id: str) -> bool:
+    """True iff the job is currently paused waiting for user answers.
+
+    Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` is non-empty.
+    Postconditions: pure read; False when the job is missing.
+    """
+    data = client.get_job(job_id)
+    return bool(data.get("waiting_for_answers", False)) if data else False
+
+
+def get_submitted_answers(client: JobServiceClient, job_id: str) -> List[Dict[str, Any]]:
+    """Return the answers submitted for this job (empty when none/unknown).
+
+    Preconditions: ``client`` is a live ``JobServiceClient``; ``job_id`` is non-empty.
+    Postconditions: pure read; a stored ``None`` is coerced to ``[]`` (``or []``)
+        so a partially-written record never yields ``None`` to callers.
+    """
+    data = client.get_job(job_id)
+    return list(data.get("submitted_answers") or []) if data else []
+
+
+# Type of a team's ``cache_dir -> JobServiceClient`` factory.
+ClientGetter = Callable[[Any], JobServiceClient]
+
+
+def make_cachedir_hitl(
+    client_getter: ClientGetter,
+    default_cache_dir: Any,
+) -> Tuple[
+    Callable[..., None],
+    Callable[..., None],
+    Callable[..., bool],
+    Callable[..., List[Dict[str, Any]]],
+]:
+    """Build the four ``cache_dir``-keyed HITL wrappers over a team's client getter.
+
+    Both team job-stores (``coding_team.job_store`` and
+    ``software_engineering_team.shared.job_store``) expose the same
+    human-in-the-loop surface — pause a job with pending questions, submit answers
+    to resume, and query the wait flag / submitted answers — keyed by a
+    ``cache_dir`` rather than an explicit ``JobServiceClient``. Each wrapper is a
+    one-line delegation to the module-level client-based function above; this
+    factory single-sources them so the two teams cannot drift.
+
+    Preconditions:
+        - ``client_getter(cache_dir)`` returns a live ``JobServiceClient``.
+        - ``default_cache_dir`` is the team's default cache root (used as the
+          wrappers' ``cache_dir`` default).
+    Postconditions:
+        - Returns ``(add_pending_questions, submit_answers, is_waiting_for_answers,
+          get_submitted_answers)``. Each accepts ``(job_id, ..., cache_dir=default)``
+          and carries the contract of its client-based counterpart; the returned
+          callables' ``__name__`` match the public wrapper names for clean
+          tracebacks. Never raises here.
+    """
+
+    def add_pending_questions_cd(job_id, questions, cache_dir=default_cache_dir) -> None:
+        """Append pending questions and set waiting_for_answers=True (pauses the job)."""
+        add_pending_questions(client_getter(cache_dir), job_id, questions)
+
+    def submit_answers_cd(job_id, answers, cache_dir=default_cache_dir) -> None:
+        """Store answers, clear pending questions, and clear the wait flag (resumes the job)."""
+        submit_answers(client_getter(cache_dir), job_id, answers)
+
+    def is_waiting_for_answers_cd(job_id, cache_dir=default_cache_dir) -> bool:
+        """True iff the job is currently paused waiting for user answers."""
+        return is_waiting_for_answers(client_getter(cache_dir), job_id)
+
+    def get_submitted_answers_cd(job_id, cache_dir=default_cache_dir) -> List[Dict[str, Any]]:
+        """Return the answers submitted for this job (empty when none/unknown)."""
+        return get_submitted_answers(client_getter(cache_dir), job_id)
+
+    add_pending_questions_cd.__name__ = "add_pending_questions"
+    submit_answers_cd.__name__ = "submit_answers"
+    is_waiting_for_answers_cd.__name__ = "is_waiting_for_answers"
+    get_submitted_answers_cd.__name__ = "get_submitted_answers"
+    return (
+        add_pending_questions_cd,
+        submit_answers_cd,
+        is_waiting_for_answers_cd,
+        get_submitted_answers_cd,
+    )

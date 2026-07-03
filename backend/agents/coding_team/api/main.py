@@ -34,6 +34,7 @@ from coding_team.clone_workspace import (  # noqa: E402
     is_per_issue_dir,
     is_within_ephemeral_workspace,
 )
+from coding_team.engine_provider import get_engine_provider  # noqa: E402
 from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
     GitHubClient,
@@ -75,7 +76,7 @@ from coding_team.review_history_store import (  # noqa: E402
 )
 from coding_team.token_crypto import decrypt_token, encrypt_token  # noqa: E402
 from shared_app import create_team_app  # noqa: E402
-from software_engineering_team.shared.git_utils import (  # noqa: E402
+from shared_git.git_utils import (  # noqa: E402
     DEVELOPMENT_BRANCH,
     commit_working_tree,
     git_identity_env,
@@ -84,6 +85,26 @@ from software_engineering_team.shared.git_utils import (  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+
+def _warn_if_no_engine_provider() -> None:
+    """Startup probe: make a mis-wired deployment visible at boot, not per-job.
+
+    The standalone container must run via ``coding_team_service.main`` (its
+    ``TEAM_MODULE``), which installs the SE-backed engine provider before this
+    app is imported. A process serving this module directly still boots (tests
+    and embedded uses rely on that), but every /run and /review-pr job will fail
+    without a provider — so say it loudly once at startup.
+
+    Postconditions: logs an ERROR when no provider is installed; never raises.
+    """
+    if get_engine_provider() is None:
+        logger.error(
+            "No CodeEngineProvider installed at startup: /run and /review-pr jobs will fail. "
+            "Serve the coding team via coding_team_service.main (TEAM_MODULE) or call "
+            "coding_team.engine_provider.set_engine_provider() before serving traffic."
+        )
+
+
 app = create_team_app(
     service_name="coding-team",
     team_key="coding_team",
@@ -91,6 +112,7 @@ app = create_team_app(
     description="Tech Lead with frontend_v2/backend_v2 implementation teams and Task Graph. POST /run to start a job; poll GET /status/{job_id}.",
     version="0.1.0",
     postgres_schema=CODE_REVIEW_SCHEMA,
+    on_startup=_warn_if_no_engine_provider,
 )
 
 # Tracks the orchestrator thread per job so the answers endpoint can tell whether a blocked wait
@@ -365,27 +387,60 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "coding-team"}
 
 
+def plan_from_input(plan_input: Dict[str, Any], repo_path: str) -> CodingTeamPlanInput:
+    """Validate a raw plan dict into a ``CodingTeamPlanInput``, binding *repo_path*.
+
+    Single source of the "merge the request's repo_path into the plan" convention:
+    the ``repo_path`` from the request authoritatively overrides any ``repo_path``
+    embedded in the plan payload, so the orchestrator always runs against the
+    checkout the caller named.
+
+    Preconditions: ``plan_input`` is a mapping (a plan payload); ``repo_path`` is
+    the request's repository path.
+    Postconditions: returns a validated ``CodingTeamPlanInput`` whose ``repo_path``
+    is *repo_path*. Raises ``pydantic.ValidationError`` on an invalid payload.
+    """
+    return CodingTeamPlanInput.model_validate({**plan_input, "repo_path": repo_path})
+
+
+def run_orchestrator_wired(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
+    """Run the coding-team orchestrator for *job_id* with the standard job-store wiring.
+
+    Single source of the ``(update_job_fn, get_job_fn, cache_dir)`` wiring shared
+    by the POST /run background thread, the resume path, and the Temporal
+    activity, so it cannot drift between them. The github-source path wires a
+    custom ``update_job_fn`` (+ ``on_pause``) and deliberately does not use this.
+
+    Preconditions:
+        - ``job_id`` names an existing job in the process job store; ``plan`` is a
+          validated ``CodingTeamPlanInput`` whose ``repo_path`` equals *repo_path*.
+    Postconditions:
+        - The orchestrator has run to completion (or raised); job state is
+          persisted through ``update_job``. Propagates the orchestrator's
+          exceptions unchanged — callers own their own failure handling.
+    """
+    run_coding_team_orchestrator(
+        job_id,
+        repo_path,
+        plan,
+        update_job_fn=lambda **kw: update_job(job_id, **kw),
+        get_job_fn=get_job,
+        cache_dir=DEFAULT_CACHE_DIR,
+    )
+
+
 @app.post("/run", response_model=RunResponse)
 def post_run(request: RunRequest) -> RunResponse:
     """Start a coding_team job. If plan_input is provided, runs orchestrator in background."""
     job_id = str(uuid.uuid4())
     create_job(job_id=job_id, repo_path=request.repo_path, plan_input=request.plan_input)
     if request.plan_input:
-        plan = CodingTeamPlanInput.model_validate(
-            {**request.plan_input, "repo_path": request.repo_path}
-        )
+        plan = plan_from_input(request.plan_input, request.repo_path)
 
         def run() -> None:
             _register_run_thread(job_id)
             try:
-                run_coding_team_orchestrator(
-                    job_id,
-                    request.repo_path,
-                    plan,
-                    update_job_fn=lambda **kw: update_job(job_id, **kw),
-                    get_job_fn=lambda jid: get_job(jid),
-                    cache_dir=DEFAULT_CACHE_DIR,
-                )
+                run_orchestrator_wired(job_id, request.repo_path, plan)
             except Exception as e:
                 logger.exception("Coding team orchestrator failed: %s", e)
                 # current_activity=None: a crash skips the in-flow clears, and a
@@ -607,14 +662,7 @@ def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlan
             # Registration is inside the try so the finally always releases the claim — even if
             # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
             _register_run_thread(job_id)
-            run_coding_team_orchestrator(
-                job_id,
-                repo_path,
-                plan,
-                update_job_fn=lambda **kw: update_job(job_id, **kw),
-                get_job_fn=lambda jid: get_job(jid),
-                cache_dir=DEFAULT_CACHE_DIR,
-            )
+            run_orchestrator_wired(job_id, repo_path, plan)
         except Exception as e:
             logger.exception("Coding team orchestrator resume failed: %s", e)
             update_job(job_id, status="failed", error=str(e), current_activity=None)
@@ -799,7 +847,7 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     if not repo_path:
         return False
     try:
-        plan = CodingTeamPlanInput.model_validate({**plan_raw, "repo_path": repo_path})
+        plan = plan_from_input(plan_raw, repo_path)
     except Exception:
         logger.exception("Auto-resume for job %s skipped: invalid plan_input.", job_id)
         return False
@@ -982,7 +1030,7 @@ def resume_job(job_id: str) -> RunResponse:
     repo_path = data.get("repo_path") or plan_raw.get("repo_path")
     if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")
-    plan = CodingTeamPlanInput.model_validate({**plan_raw, "repo_path": repo_path})
+    plan = plan_from_input(plan_raw, repo_path)
 
     ctx = data.get("github_context") or {}
     is_github_job = bool(
@@ -1591,6 +1639,43 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           alone does not fail the job, since the findings still post.)
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
+    # Resolve the review engine BEFORE any GitHub call: a mis-wired process (no
+    # provider installed) must fail the job immediately instead of burning REST
+    # rate budget on PR metadata + diff assembly and then failing anyway.
+    provider = get_engine_provider()
+    if provider is None:
+        logger.error("PR review %s aborted: no engine provider configured", job_id)
+        error = (
+            "code review failed: no engine provider configured — the standalone "
+            "coding-team service must run via coding_team_service.main (TEAM_MODULE), "
+            "which installs the engine provider at startup"
+        )
+        update_job(job_id, status="failed", phase="completed", error=error)
+        # error=error (not just status_text) so the Code Review page's error column
+        # is populated on this path exactly as _record_failure does everywhere else.
+        update_review(
+            job_id,
+            status="failed",
+            status_text="No engine provider configured",
+            error=error,
+            completed=True,
+        )
+        # Tell the PR, not just the job store: the reviewer who invoked @khala-review
+        # is watching the pull request and would otherwise wait forever on a job that
+        # silently failed. The token is already in hand, so post a scrubbed one-liner
+        # (best-effort — a GitHub outage must not turn this into an unhandled raise).
+        try:
+            with GitHubClient(token=token) as client:
+                _safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    f"Code review could not run: {scrub_token_from_text(error)}",
+                )
+        except Exception as exc:  # noqa: BLE001 - notification is best-effort
+            logger.warning("PR review %s: failed to post abort notice: %s", job_id, exc)
+        return
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
     update_review(job_id, status="running", status_text="Reviewing pull request")
     # Continuous liveness beat for the admission guard: job updates only land at phase
@@ -1608,16 +1693,24 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
         on_error=lambda exc: logger.warning("review heartbeat error for job %s: %s", job_id, exc),
     )
     with review_hb:
-        _run_pr_review_body(job_id, request, token, owner, repo, pr_number)
+        _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
 
 
 def _run_pr_review_body(
-    job_id: str, request: ReviewPrRequest, token: str, owner: str, repo: str, pr_number: int
+    job_id: str,
+    request: ReviewPrRequest,
+    token: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    provider: Any,
 ) -> None:
     """The review hook's body, extracted so the heartbeat wrapper stays trivially correct.
 
-    Preconditions: caller has marked the job/review ``running`` and holds a live
-        heartbeat for ``job_id``.
+    Preconditions: caller has marked the job/review ``running``, holds a live
+        heartbeat for ``job_id``, and passes the already-resolved (non-None)
+        engine ``provider`` — the wrapper fails the job before any GitHub call
+        when no provider is installed.
     Postconditions: identical to :func:`_run_pr_review` (this IS that contract's
         implementation; see its docstring). Never raises.
     """
@@ -1670,21 +1763,10 @@ def _run_pr_review_body(
             except GitHubAPIError:
                 reviewer_login = ""
 
-            # Import the reviewer lazily: it pulls in strands/llm_service, and
-            # keeping it out of module import lets tests stub it cheaply.
-            from software_engineering_team.code_review_agent import CodeReviewAgent, CodeReviewInput
-
-            review_input = CodeReviewInput(
-                code=code,
-                # _build_review_code renders every line with its original
-                # line-number prefix; declaring it here (instead of letting the
-                # reviewer sniff the format) keeps issue lines verbatim.
-                pre_numbered=True,
-                task_description=f"Review pull request #{pr_number}: {pr.title}",
-                task_requirements=pr.body or "",
-                language=_infer_review_language(files),
-            )
-
+            # The PR reviewer is an injected engine (software_engineering_team owns
+            # it); coding_team calls it through the CodeEngineProvider so this
+            # package imports nothing from SE. The provider was resolved (and its
+            # absence handled) before the first GitHub call above.
             # Same bridge as the orchestrator's review sites: shared schema,
             # coalescing, swallow-on-failure, and clear-on-exit in one place.
             # last_activity_at is stamped centrally by the job service on every
@@ -1696,7 +1778,17 @@ def _run_pr_review_body(
             )
 
             try:
-                output = CodeReviewAgent().run(review_input, progress_callback=pr_bridge)
+                output = provider.run_pr_code_review(
+                    code=code,
+                    # _build_review_code renders every line with its original
+                    # line-number prefix; declaring it here (instead of letting the
+                    # reviewer sniff the format) keeps issue lines verbatim.
+                    pre_numbered=True,
+                    task_description=f"Review pull request #{pr_number}: {pr.title}",
+                    task_requirements=pr.body or "",
+                    language=_infer_review_language(files),
+                    progress_callback=pr_bridge,
+                )
             except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
                 logger.exception("PR review agent failed: %s", e)
                 _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
