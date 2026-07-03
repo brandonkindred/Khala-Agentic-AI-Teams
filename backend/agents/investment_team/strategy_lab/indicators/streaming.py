@@ -1050,10 +1050,12 @@ class IndicatorRegistry:
 
         Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
         Post: ``upper`` is the highest high and ``lower`` the lowest low over
-        the trailing ``period`` bars; ``middle`` is their midpoint. The bands
-        depend only on those ``period`` highs/lows, so the registry keeps a
-        bounded :class:`deque` of ``(high, low)`` pairs and recomputes the
-        extrema over it — O(period) per call, independent of history length.
+        the trailing ``period`` bars; ``middle`` is their midpoint. The extrema
+        are recomputed over the trailing ``period`` bars — O(period), independent
+        of history length (max/min are not invertible, so a running-sum trick
+        does not apply; a monotonic-deque O(1) form is not worth its complexity
+        for the small ``period`` here). A same-bar fingerprint cache collapses
+        repeated intra-bar reads to one compute.
         """
         if not bars or len(bars) < period:
             return None
@@ -1067,20 +1069,11 @@ class IndicatorRegistry:
         if state is not None and self._is_same_bar(state, fp):
             triple = state["value"]
         else:
-            hl: Optional[Deque[Tuple[float, float]]] = None
-            if state is not None and "hl" in state:
-                kind = self._advance_kind(state, bars, fp)
-                if kind in ("expand", "slide"):
-                    hl = state["hl"]
-                    hl.append((float(bars[-1].high), float(bars[-1].low)))
-            if hl is None:
-                hl = deque(maxlen=period)
-                for b in bars[-period:]:
-                    hl.append((float(b.high), float(b.low)))
-            upper = max(t[0] for t in hl)
-            lower = min(t[1] for t in hl)
+            window = bars[-period:]
+            upper = max(float(b.high) for b in window)
+            lower = min(float(b.low) for b in window)
             triple = (upper, (upper + lower) / 2.0, lower)
-            self._state[key] = {"fp": fp, "value": triple, "hl": hl}
+            self._state[key] = {"fp": fp, "value": triple}
         upper, middle, lower = triple
         if select == "upper":
             return upper
@@ -1160,40 +1153,65 @@ class IndicatorRegistry:
         Pre: ``bars`` is non-empty. Post: the running signed-volume total — add
         ``volume`` when the close rises vs. the prior bar, subtract it when the
         close falls, leave it unchanged on an equal close. Cumulative over the
-        whole supplied window (like :meth:`vwap`), so a bounded sliding window
-        re-bases OBV to the window start.
+        whole supplied window, so a bounded sliding window re-bases OBV to the
+        window start.
 
-        Cost: O(window) per non-same-bar call, matching :meth:`vwap`. An
-        incremental update is deliberately NOT used: under the engine's bounded
-        ``StreamingHistoryView`` (≤500 bars) every steady-state call is a
-        slide whose oldest bar drops, which re-bases the cumulative sum to the
-        new window start — so an incremental form would have to recompute anyway,
-        exactly as ``vwap`` does. Keeping the two cumulative indicators identical
-        outweighs a micro-optimisation that the slide path defeats.
+        Cost: O(1) per single-bar advance. Each bar contributes an *invertible*
+        signed-volume term (it depends only on that bar and its predecessor, not
+        on the window aggregate), so the registry keeps a deque of the terms plus
+        their running sum: an ``expand`` appends one term (the oldest bar stays),
+        a ``slide`` also drops the head term (the oldest bar left the window).
+        This is the one place the warm paths differ — a period-less cumulative
+        window grows on expand instead of evicting — unlike the fixed-``period``
+        indicators (:meth:`bollinger_bands`, :meth:`mfi`) whose deque is always
+        full so both paths evict.
         """
         if not bars:
             return None
+
+        def _obv_term(cur: Any, prev: Any) -> float:
+            cur_c = float(cur.close)
+            prev_c = float(prev.close)
+            if cur_c > prev_c:
+                return float(cur.volume)
+            if cur_c < prev_c:
+                return -float(cur.volume)
+            return 0.0
+
         # If two symbols (or two unrelated bar streams) ever share a registry,
         # the cache must not conflate them — include ``bars[-1].symbol`` in the
         # key so the slots are disjoint, mirroring :meth:`macd` and the sibling
-        # new indicators (donchian/mfi/cci/williams_r). ``vwap`` predates this
-        # convention and stays symbol-less; the new indicators are uniform.
+        # new indicators (donchian/mfi/cci/williams_r).
         symbol = _safe_getattr(bars[-1], "symbol")
         key = ("obv", symbol)
         fp = self._bar_fingerprint(bars)
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
-        value = 0.0
-        for i in range(1, len(bars)):
-            cur = float(bars[i].close)
-            prev = float(bars[i - 1].close)
-            if cur > prev:
-                value += float(bars[i].volume)
-            elif cur < prev:
-                value -= float(bars[i].volume)
-        self._state[key] = {"fp": fp, "value": value}
-        return value
+        deltas: Optional[Deque[float]] = None
+        s = 0.0
+        if state is not None and "deltas" in state:
+            kind = self._advance_kind(state, bars, fp)
+            if kind in ("expand", "slide"):
+                deltas = state["deltas"]
+                s = state["value"]
+                if kind == "slide":
+                    # Oldest bar left the window: its term (the deque head)
+                    # leaves the sum. ``expand`` keeps every bar, so it evicts
+                    # nothing.
+                    s -= deltas.popleft()
+                new_term = _obv_term(bars[-1], bars[-2])
+                deltas.append(new_term)
+                s += new_term
+        if deltas is None:
+            deltas = deque()
+            s = 0.0
+            for i in range(1, len(bars)):
+                term = _obv_term(bars[i], bars[i - 1])
+                deltas.append(term)
+                s += term
+        self._state[key] = {"fp": fp, "value": s, "deltas": deltas}
+        return s
 
     # ----- MFI -----------------------------------------------------------
 
@@ -1204,11 +1222,12 @@ class IndicatorRegistry:
         (each money-flow term compares typical price against the prior bar).
         Post: the volume-weighted RSI of typical price over the trailing
         ``period`` bars. Mirrors :meth:`rsi`'s zero-denominator convention:
-        all-positive flow → 100, no flow at all → 50. Keeps a bounded deque of
-        per-bar ``(positive, negative)`` money-flow contributions (like
-        :meth:`donchian`) so the warm ``expand``/``slide`` path appends one term
-        instead of rewalking the window each call; ``pos``/``neg`` are still summed
-        over the deque in oldest-to-newest order, so the value is identical.
+        all-positive flow → 100, no flow at all → 50. Each per-bar
+        ``(positive, negative)`` money-flow term depends only on its own bar and
+        the prior one — not on the window aggregate — so the registry keeps a
+        bounded deque of the terms together with running ``pos``/``neg`` sums and
+        updates both in O(1) on a single-bar advance (subtract the evicted term,
+        add the new one), exactly like :meth:`bollinger_bands`.
         """
         if not bars or len(bars) < period + 1:
             return None
@@ -1235,23 +1254,45 @@ class IndicatorRegistry:
             return (0.0, 0.0)
 
         flows: Optional[Deque[Tuple[float, float]]] = None
+        s_pos = 0.0
+        s_neg = 0.0
         if state is not None and "flows" in state:
             kind = self._advance_kind(state, bars, fp)
             if kind in ("expand", "slide"):
                 flows = state["flows"]
-                flows.append(_flow(bars[-1], bars[-2]))
+                s_pos = state["s_pos"]
+                s_neg = state["s_neg"]
+                # The deque is at full capacity (``period`` terms) once warm, so
+                # the append evicts ``flows[0]``; remove it from the running sums
+                # first, then add the new per-bar term — O(1) per advance.
+                outgoing = flows[0]
+                s_pos -= outgoing[0]
+                s_neg -= outgoing[1]
+                new_term = _flow(bars[-1], bars[-2])
+                flows.append(new_term)
+                s_pos += new_term[0]
+                s_neg += new_term[1]
         if flows is None:
             flows = deque(maxlen=period)
+            s_pos = 0.0
+            s_neg = 0.0
             for i in range(len(bars) - period, len(bars)):
-                flows.append(_flow(bars[i], bars[i - 1]))
-        pos = sum(f[0] for f in flows)
-        neg = sum(f[1] for f in flows)
-        if neg == 0:
-            value: float = 100.0 if pos > 0 else 50.0
+                term = _flow(bars[i], bars[i - 1])
+                flows.append(term)
+                s_pos += term[0]
+                s_neg += term[1]
+        if s_neg == 0:
+            value: float = 100.0 if s_pos > 0 else 50.0
         else:
-            ratio = pos / neg
+            ratio = s_pos / s_neg
             value = 100.0 - (100.0 / (1.0 + ratio))
-        self._state[key] = {"fp": fp, "value": value, "flows": flows}
+        self._state[key] = {
+            "fp": fp,
+            "value": value,
+            "flows": flows,
+            "s_pos": s_pos,
+            "s_neg": s_neg,
+        }
         return value
 
     # ----- ROC -----------------------------------------------------------
@@ -1295,12 +1336,10 @@ class IndicatorRegistry:
         Post: ``(tp − sma_tp) / (0.015 × mean_deviation)`` over the trailing
         ``period`` typical prices, where ``mean_deviation`` is the mean absolute
         deviation from ``sma_tp``; ``0.0`` when that deviation is 0 (a flat
-        window has no defined CCI). Keeps a bounded typical-price deque (like
-        :meth:`donchian`) so the warm ``expand``/``slide`` path appends one value
-        instead of rebuilding the window each call; the SMA and mean-deviation are
-        still summed over the deque in oldest-to-newest order, so the value is
-        identical (mean absolute deviation has no incremental form — it depends on
-        the SMA, which shifts as the window slides).
+        window has no defined CCI). Mean absolute deviation has no incremental
+        form (it depends on the SMA, which shifts as the window slides), so the
+        value is recomputed over the trailing ``period`` typical prices — O(period)
+        regardless. A same-bar fingerprint cache collapses repeated intra-bar reads.
         """
         if not bars or len(bars) < period:
             return None
@@ -1313,22 +1352,12 @@ class IndicatorRegistry:
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
-        tps: Optional[Deque[float]] = None
-        if state is not None and "tps" in state:
-            kind = self._advance_kind(state, bars, fp)
-            if kind in ("expand", "slide"):
-                tps = state["tps"]
-                last = bars[-1]
-                tps.append((float(last.high) + float(last.low) + float(last.close)) / 3.0)
-        if tps is None:
-            tps = deque(maxlen=period)
-            for b in bars[-period:]:
-                tps.append((float(b.high) + float(b.low) + float(b.close)) / 3.0)
+        tps = [(float(b.high) + float(b.low) + float(b.close)) / 3.0 for b in bars[-period:]]
         sma_tp = sum(tps) / period
         mean_dev = sum(abs(t - sma_tp) for t in tps) / period
         cur_tp = tps[-1]
         value = 0.0 if mean_dev == 0 else (cur_tp - sma_tp) / (0.015 * mean_dev)
-        self._state[key] = {"fp": fp, "value": value, "tps": tps}
+        self._state[key] = {"fp": fp, "value": value}
         return value
 
     # ----- Williams %R ---------------------------------------------------
@@ -1339,10 +1368,10 @@ class IndicatorRegistry:
         Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
         Post: ``−100 × (highest_high − close) / (highest_high − lowest_low)``
         over the trailing ``period`` bars; ``−50.0`` (neutral) when the range is
-        0, mirroring :meth:`stochastic`'s flat-window convention. Keeps a bounded
-        ``(high, low)`` deque (like :meth:`donchian`) so the warm ``expand``/``slide``
-        path appends one bar instead of re-slicing ``bars[-period:]`` each call; the
-        extrema are still recomputed over the deque, so the value is identical.
+        0, mirroring :meth:`stochastic`'s flat-window convention. The extrema are
+        recomputed over the trailing ``period`` bars — O(period), like
+        :meth:`donchian` (max/min are not invertible). A same-bar fingerprint
+        cache collapses repeated intra-bar reads.
         """
         if not bars or len(bars) < period:
             return None
@@ -1355,20 +1384,11 @@ class IndicatorRegistry:
         state = self._peek(key)
         if state is not None and self._is_same_bar(state, fp):
             return state["value"]
-        hl: Optional[Deque[Tuple[float, float]]] = None
-        if state is not None and "hl" in state:
-            kind = self._advance_kind(state, bars, fp)
-            if kind in ("expand", "slide"):
-                hl = state["hl"]
-                hl.append((float(bars[-1].high), float(bars[-1].low)))
-        if hl is None:
-            hl = deque(maxlen=period)
-            for b in bars[-period:]:
-                hl.append((float(b.high), float(b.low)))
-        highest = max(t[0] for t in hl)
-        lowest = min(t[1] for t in hl)
+        window = bars[-period:]
+        highest = max(float(b.high) for b in window)
+        lowest = min(float(b.low) for b in window)
         rng = highest - lowest
         close = float(bars[-1].close)
         value = -50.0 if rng == 0 else -100.0 * (highest - close) / rng
-        self._state[key] = {"fp": fp, "value": value, "hl": hl}
+        self._state[key] = {"fp": fp, "value": value}
         return value
