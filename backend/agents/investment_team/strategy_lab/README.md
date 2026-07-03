@@ -205,6 +205,20 @@ Each enabled round adds two charged LLM calls to the design-phase budget — the
 re-audit (more if the self-revision hits parse-retries) — so size `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`
 accordingly.
 
+### STRATEGY_LAB_REGIME_SUMMARY_ENABLED
+Toggle for injecting a current **market-regime summary** into `DesignAgent.run()` (default `true`;
+truthy `true`/`1`/`yes`, case-insensitive; anything else disables). When enabled, `run_cycle`
+computes a lightweight regime read once per cycle via `market_regime.compute_regime_summary` over the
+orchestrator's live `MarketDataService` — for a small fixed set of asset-class benchmarks (`SPY` for
+stocks, `BTC-USD` for crypto) it classifies **trend direction** (close vs SMA50/SMA200), **trend
+strength** (ADX(14) buckets), and **volatility regime** (latest ATR% ranked against its own trailing
+distribution). The summary is rendered into a `## Market Regime` prompt section so the designer can
+pick the setup archetype that fits the regime (see the "Setup playbook" in `design_system.md`).
+Fully **fail-open**: any data-fetch or compute error skips that benchmark and degrades the summary
+rather than raising; a degraded/empty summary renders no prompt section, so the design cycle never
+depends on market data being reachable. The regime read is shared across every design re-entry in a
+cycle. Disable to restore the pre-change context-free designer prompt.
+
 ### Ollama LLM transport (routed through `llm_service`)
 For the default **Ollama** provider, `get_strands_model` (`strategy_lab/agents/model_factory.py`)
 routes every Strategy Lab LLM call through the platform's hardened `llm_service` client (via
