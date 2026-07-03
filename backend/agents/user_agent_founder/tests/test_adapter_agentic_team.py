@@ -457,6 +457,13 @@ def test_poll_build_maps_waiting_for_input_to_free_text_question():
     assert q["id"] == "run-9:step-review"  # stable per (run, step)
     assert q["question_text"] == "Which tone for the post?"
     assert q["options"] == []  # empty ⇒ persona answers free-text via "other"
+    # Context is enriched (not a bare "run X, step Y") so the persona is grounded
+    # when it answers open-ended — it flows into FREE_TEXT_ANSWERING_PROMPT.
+    context = q["context"]
+    assert "run-9" in context
+    assert "step-review" in context
+    assert "open-ended" in context
+    assert "resume the run" in context
 
 
 def test_poll_build_waiting_without_step_id_falls_back_to_wait():
