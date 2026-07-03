@@ -7,11 +7,6 @@
     </p>
   </header>
 
-  @if (success) {
-    <div class="banner banner-success" role="status">
-      <mat-icon>check_circle_outline</mat-icon> <span>{{ success }}</span>
-    </div>
-  }
   @if (!storageAvailable) {
     <div class="banner banner-warn" role="alert">
       <mat-icon>warning_amber</mat-icon>
@@ -34,7 +29,9 @@
     </mat-card-header>
     <mat-card-content>
       @if (providersLoading) {
-        <div class="loading"><mat-spinner diameter="24"></mat-spinner> <span>Loading providers…</span></div>
+        <div class="loading" role="status" aria-live="polite">
+          <mat-spinner diameter="24"></mat-spinner> <span>Loading providers…</span>
+        </div>
       }
       @if (providersError) {
         <div class="banner banner-error" role="alert">
@@ -88,8 +85,12 @@
                     autocomplete="off"
                     name="editApiKey"
                     [(ngModel)]="editForm.api_key"
+                    [attr.aria-required]="requiresApiKey(editForm.provider) && !entry.api_key_configured"
                     [placeholder]="entry.api_key_configured ? '•••••••• (configured — leave blank to keep)' : 'Enter API key'"
                   />
+                  @if (requiresApiKey(editForm.provider) && !entry.api_key_configured) {
+                    <mat-hint>Required for Claude.</mat-hint>
+                  }
                 </mat-form-field>
                 @if (entry.api_key_configured && !editForm.api_key.trim()) {
                   <mat-checkbox name="editClearApiKey" [(ngModel)]="editForm.clear_api_key">
@@ -166,7 +167,11 @@
           }
           <mat-form-field appearance="outline">
             <mat-label>API key</mat-label>
-            <input matInput type="password" autocomplete="off" name="addApiKey" [(ngModel)]="addForm.api_key" placeholder="Enter API key" />
+            <input matInput type="password" autocomplete="off" name="addApiKey" [(ngModel)]="addForm.api_key"
+              [attr.aria-required]="requiresApiKey(addForm.provider)" placeholder="Enter API key" />
+            @if (requiresApiKey(addForm.provider)) {
+              <mat-hint>Required for Claude.</mat-hint>
+            }
           </mat-form-field>
           <div class="form-actions">
             <button mat-button type="button" (click)="cancelAdd()">Cancel</button>

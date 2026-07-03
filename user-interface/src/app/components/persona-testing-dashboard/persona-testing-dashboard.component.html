@@ -55,10 +55,10 @@
           <p>{{ persona.description }}</p>
         </mat-card-content>
         <mat-card-actions align="end">
-          <button mat-icon-button matTooltip="Edit" (click)="openEditDialog(persona)">
+          <button mat-icon-button matTooltip="Edit" aria-label="Edit" (click)="openEditDialog(persona)">
             <mat-icon>edit</mat-icon>
           </button>
-          <button mat-icon-button matTooltip="Delete" (click)="deletePersona(persona)">
+          <button mat-icon-button matTooltip="Delete" aria-label="Delete" (click)="deletePersona(persona)">
             <mat-icon>delete</mat-icon>
           </button>
         </mat-card-actions>
@@ -96,6 +96,7 @@
             <button
               mat-icon-button
               matTooltip="Stop"
+              aria-label="Stop"
               [disabled]="!canStop(run) || isActionPending(run, 'stop')"
               (click)="stopRun(run, $event)"
             >
@@ -104,6 +105,7 @@
             <button
               mat-icon-button
               matTooltip="Delete"
+              aria-label="Delete"
               [disabled]="isActionPending(run, 'delete')"
               (click)="deleteRun(run, $event)"
             >
@@ -145,6 +147,7 @@
               <button
                 mat-icon-button
                 matTooltip="Resume"
+                aria-label="Resume"
                 [disabled]="isActionPending(run, 'resume')"
                 (click)="resumeRun(run, $event)"
               >
@@ -154,6 +157,7 @@
             <button
               mat-icon-button
               matTooltip="Restart"
+              aria-label="Restart"
               [disabled]="!canRestart(run) || isActionPending(run, 'restart')"
               (click)="restartRun(run, $event)"
             >
@@ -162,6 +166,7 @@
             <button
               mat-icon-button
               matTooltip="Delete"
+              aria-label="Delete"
               [disabled]="isActionPending(run, 'delete')"
               (click)="deleteRun(run, $event)"
             >

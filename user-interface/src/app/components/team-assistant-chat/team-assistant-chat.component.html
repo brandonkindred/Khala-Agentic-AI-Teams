@@ -65,7 +65,7 @@
               @if (field.required) { <span class="required-marker">*</span> }
             </span>
             @if (editingField !== field.key) {
-              <button mat-icon-button class="edit-btn" (click)="startEdit(field.key)" matTooltip="Edit manually">
+              <button mat-icon-button class="edit-btn" (click)="startEdit(field.key)" matTooltip="Edit manually" aria-label="Edit manually">
                 <mat-icon>edit</mat-icon>
               </button>
             }

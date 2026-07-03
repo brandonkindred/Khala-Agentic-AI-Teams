@@ -8,7 +8,7 @@
           Process Designer
         </mat-card-title>
         <span class="spacer"></span>
-        <button mat-icon-button (click)="newConversation()" matTooltip="Start new conversation" [disabled]="loading()">
+        <button mat-icon-button (click)="newConversation()" matTooltip="Start new conversation" aria-label="Start new conversation" [disabled]="loading()">
           <mat-icon>refresh</mat-icon>
         </button>
       </mat-card-header>
@@ -99,7 +99,7 @@
             <span>Suggest via chat</span>
           </button>
         </mat-menu>
-        <button mat-icon-button (click)="refreshRoster()" matTooltip="Refresh roster" [disabled]="rosterLoading()">
+        <button mat-icon-button (click)="refreshRoster()" matTooltip="Refresh roster" aria-label="Refresh roster" [disabled]="rosterLoading()">
           <mat-icon>sync</mat-icon>
         </button>
       </mat-card-header>

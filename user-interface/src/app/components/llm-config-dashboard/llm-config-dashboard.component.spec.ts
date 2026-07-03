@@ -2,6 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { Subject, of, throwError } from 'rxjs';
 import { CdkDragDrop } from '@angular/cdk/drag-drop';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { vi } from 'vitest';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
 import { LlmConfigDashboardComponent } from './llm-config-dashboard.component';
@@ -44,6 +45,7 @@ describe('LlmConfigDashboardComponent', () => {
     deleteProvider: ReturnType<typeof vi.fn>;
     reorderProviders: ReturnType<typeof vi.fn>;
   };
+  let snackBar: { open: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
     apiSpy = {
@@ -54,10 +56,14 @@ describe('LlmConfigDashboardComponent', () => {
       reorderProviders: vi.fn(),
     };
     apiSpy.listProviders.mockReturnValue(of(listResponse([])));
+    snackBar = { open: vi.fn() };
 
     await TestBed.configureTestingModule({
       imports: [LlmConfigDashboardComponent, NoopAnimationsModule],
-      providers: [{ provide: LlmConfigApiService, useValue: apiSpy }],
+      providers: [
+        { provide: LlmConfigApiService, useValue: apiSpy },
+        { provide: MatSnackBar, useValue: snackBar },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(LlmConfigDashboardComponent);
@@ -121,7 +127,8 @@ describe('LlmConfigDashboardComponent', () => {
     );
     expect(component.addForm).toBeNull(); // closed on success
     expect(component.providers.map((p) => p.id)).toEqual([5]);
-    expect(component.success).toBeTruthy();
+    // Transient confirmation via snackbar (not a persistent banner).
+    expect(snackBar.open).toHaveBeenCalledWith('Provider added.', 'Dismiss', { duration: 3000 });
   });
 
   it('omits the ollama base_url for a claude add', () => {
@@ -129,9 +136,50 @@ describe('LlmConfigDashboardComponent', () => {
     component.startAdd();
     component.addForm!.label = 'C';
     component.addForm!.provider = 'claude';
+    component.addForm!.api_key = 'sk';
     component.addForm!.base_url = 'http://should-be-dropped';
     component.submitAdd();
     expect(apiSpy.createProvider.mock.calls[0][0].base_url).toBe('');
+  });
+
+  it('blocks a Claude add with no API key (required field)', () => {
+    component.startAdd();
+    component.addForm!.label = 'Anthropic';
+    component.addForm!.provider = 'claude';
+    component.addForm!.api_key = '   ';
+    component.submitAdd();
+    expect(apiSpy.createProvider).not.toHaveBeenCalled();
+    expect(component.providersError).toContain('API key is required');
+  });
+
+  it('allows an ollama add with no API key (key not required)', () => {
+    apiSpy.createProvider.mockReturnValue(of(listResponse([])));
+    component.startAdd();
+    component.addForm!.label = 'Local';
+    component.addForm!.provider = 'ollama';
+    component.submitAdd();
+    expect(apiSpy.createProvider).toHaveBeenCalled();
+  });
+
+  it('reports unsaved changes when an add form has typed content', () => {
+    expect(component.hasUnsavedChanges()).toBe(false);
+    component.startAdd();
+    expect(component.hasUnsavedChanges()).toBe(false); // pristine defaults
+    component.addForm!.api_key = 'sk-secret';
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.cancelAdd();
+    expect(component.hasUnsavedChanges()).toBe(false);
+  });
+
+  it('reports unsaved changes when an edit changes a field or types a key', () => {
+    apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 3, label: 'Orig' })])));
+    component.loadProviders();
+    component.startEdit(component.providers[0]);
+    expect(component.hasUnsavedChanges()).toBe(false); // matches the entry
+    component.editForm.label = 'Changed';
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.cancelEdit();
+    expect(component.hasUnsavedChanges()).toBe(false);
   });
 
   it('rejects an add with a blank label', () => {

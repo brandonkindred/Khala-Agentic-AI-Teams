@@ -12,7 +12,9 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatCheckboxModule } from '@angular/material/checkbox';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
+import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import type {
   LlmProvider,
   LlmProviderCreate,
@@ -65,16 +67,16 @@ function emptyProviderForm(): ProviderForm {
   templateUrl: './llm-config-dashboard.component.html',
   styleUrl: './llm-config-dashboard.component.scss',
 })
-export class LlmConfigDashboardComponent implements OnInit {
+export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
   private readonly api = inject(LlmConfigApiService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly snackBar = inject(MatSnackBar);
 
   /** Ordered providers (most→least preferred). */
   providers: LlmProviderEntry[] = [];
   providersLoading = false;
   providersError: string | null = null;
   providersSaving = false;
-  success: string | null = null;
   /** The add-provider form is shown when this is non-null. */
   addForm: ProviderForm | null = null;
   /** The id of the entry being edited inline, or null. */
@@ -89,6 +91,44 @@ export class LlmConfigDashboardComponent implements OnInit {
   /** Adding/editing is allowed only when the store is configured AND reachable. */
   get storageAvailable(): boolean {
     return this.storageStatus === 'available';
+  }
+
+  /** True for providers that authenticate with an API key (Claude), not a local URL. */
+  requiresApiKey(provider: LlmProvider): boolean {
+    return provider === 'claude';
+  }
+
+  /**
+   * Whether an open add/edit form holds unsaved input (drives the CanDeactivate
+   * guard). API keys here are write-only and hard to reproduce, so losing a
+   * half-typed provider form to a misclick is expensive.
+   *
+   * Preconditions: none.
+   * Postconditions: true while a save is in flight, or while an add/edit form
+   * is open with content that differs from its initial state; false otherwise.
+   */
+  hasUnsavedChanges(): boolean {
+    if (this.providersSaving) return true;
+    if (this.addForm) {
+      const f = this.addForm;
+      if (f.label.trim() || f.model.trim() || f.api_key.trim()) return true;
+      if (f.base_url.trim() && f.base_url.trim() !== OLLAMA_LOCAL_DEFAULT) return true;
+    }
+    if (this.editingId !== null) {
+      const f = this.editForm;
+      if (f.api_key.trim() || f.clear_api_key) return true;
+      const entry = this.providers.find((p) => p.id === this.editingId);
+      if (
+        entry &&
+        (f.label !== entry.label ||
+          f.provider !== entry.provider ||
+          f.model !== entry.model ||
+          f.base_url !== entry.base_url)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Clock tick for the reset-time badges (`resetInfo`); refreshed every 30s so a
@@ -186,6 +226,10 @@ export class LlmConfigDashboardComponent implements OnInit {
       this.providersError = 'Please enter a label for the provider.';
       return;
     }
+    if (this.requiresApiKey(form.provider) && !form.api_key.trim()) {
+      this.providersError = 'An API key is required for Claude.';
+      return;
+    }
     const body: LlmProviderCreate = {
       label: form.label.trim(),
       provider: form.provider,
@@ -276,12 +320,13 @@ export class LlmConfigDashboardComponent implements OnInit {
   ): void {
     this.providersError = null;
     this.providersSaving = true;
-    this.success = null;
     call.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (res) => {
         this.applyProviderList(res);
         this.providersSaving = false;
-        this.success = successMsg;
+        // Transient confirmation (matches the app's snackbar convention);
+        // errors remain a persistent banner below the form.
+        this.snackBar.open(successMsg, 'Dismiss', { duration: 3000 });
         opts?.onSuccess?.();
       },
       error: (err) => {

@@ -105,12 +105,6 @@
               </span>
             </div>
           }
-          @if (googleBrowserSuccess) {
-            <div class="status-banner status-banner--success">
-              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-              <span>{{ googleBrowserSuccess }}</span>
-            </div>
-          }
 
           <div class="form-grid form-grid--two">
             <mat-form-field appearance="outline">
@@ -238,12 +232,6 @@
             <div class="status-banner status-banner--error">
               <mat-icon aria-hidden="true">error_outline</mat-icon>
               <span>{{ error }}</span>
-            </div>
-          }
-          @if (success) {
-            <div class="status-banner status-banner--success">
-              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-              <span>{{ success }}</span>
             </div>
           }
 
@@ -485,12 +473,6 @@
               <span>{{ mediumError }}</span>
             </div>
           }
-          @if (mediumSuccess) {
-            <div class="status-banner status-banner--success">
-              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-              <span>{{ mediumSuccess }}</span>
-            </div>
-          }
 
           <div class="setting-row">
             <mat-slide-toggle [(ngModel)]="mediumEnabled" color="primary">
@@ -665,12 +647,6 @@
             <div class="status-banner status-banner--error">
               <mat-icon aria-hidden="true">error_outline</mat-icon>
               <span>{{ githubError }}</span>
-            </div>
-          }
-          @if (githubSuccess) {
-            <div class="status-banner status-banner--success">
-              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-              <span>{{ githubSuccess }}</span>
             </div>
           }
 

@@ -11,7 +11,9 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatRadioModule } from '@angular/material/radio';
 import { MatDividerModule } from '@angular/material/divider';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
+import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import type {
   GitHubConfigResponse,
   GitHubConfigUpdate,
@@ -47,16 +49,44 @@ type IntegrationKey = 'google' | 'slack' | 'medium' | 'github';
   templateUrl: './integrations-dashboard.component.html',
   styleUrl: './integrations-dashboard.component.scss',
 })
-export class IntegrationsDashboardComponent implements OnInit {
+export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges {
   private readonly api = inject(IntegrationsApiService);
   private readonly route = inject(ActivatedRoute);
+  private readonly snackBar = inject(MatSnackBar);
 
   loadingSlack = false;
   saving = false;
   connecting = false;
   disconnecting = false;
   error: string | null = null;
-  success: string | null = null;
+
+  /** Transient success confirmation (the app's convention for saved actions). */
+  private notify(message: string): void {
+    this.snackBar.open(message, 'Dismiss', { duration: 3000 });
+  }
+
+  /**
+   * Whether an unsaved secret has been typed into any credential field (drives
+   * the CanDeactivate guard). Client secrets, tokens, and passwords are never
+   * returned by the API, so a half-typed one lost to navigation must be
+   * re-fetched from the external provider — the highest-stakes input here.
+   *
+   * Preconditions: none.
+   * Postconditions: true while any save is in flight, or while any write-only
+   * secret field holds text; false otherwise.
+   */
+  hasUnsavedChanges(): boolean {
+    if (this.saving || this.mediumSaving || this.savingGoogleBrowserCredentials || this.githubSaving) {
+      return true;
+    }
+    return !!(
+      this.clientSecret.trim() ||
+      this.botToken.trim() ||
+      this.googleAccountPassword.length > 0 ||
+      this.githubPat.trim() ||
+      this.githubWebhookSecret.trim()
+    );
+  }
 
   /** Which integration card is currently expanded inline. Only one at a time. */
   expanded: IntegrationKey | null = null;
@@ -114,9 +144,9 @@ export class IntegrationsDashboardComponent implements OnInit {
     this.route.queryParams.subscribe((params) => {
       if (params['slack_connected']) {
         const team = params['team'] ? decodeURIComponent(params['team']) : null;
-        this.success = team
-          ? `Connected to "${team}" workspace successfully.`
-          : 'Slack connected successfully.';
+        this.notify(
+          team ? `Connected to "${team}" workspace successfully.` : 'Slack connected successfully.',
+        );
         this.expanded = 'slack';
         this.loadSlackConfig();
       } else if (params['slack_error']) {
@@ -125,7 +155,7 @@ export class IntegrationsDashboardComponent implements OnInit {
         this.expanded = 'slack';
       }
       if (params['medium_google_connected']) {
-        this.mediumSuccess = 'Google account linked for Medium workflow.';
+        this.notify('Google account linked for Medium workflow.');
         this.expanded = 'medium';
         this.loadMediumConfig();
       }
@@ -164,7 +194,6 @@ export class IntegrationsDashboardComponent implements OnInit {
 
   googleBrowserLoading = false;
   googleBrowserError: string | null = null;
-  googleBrowserSuccess: string | null = null;
   googleBrowserLoginConfigured = false;
   /** When false, API runs without Postgres — browser-login credentials are not supported. */
   googleBrowserStorageAvailable = true;
@@ -194,7 +223,6 @@ export class IntegrationsDashboardComponent implements OnInit {
   saveGoogleBrowserLoginCredentials(): void {
     this.savingGoogleBrowserCredentials = true;
     this.googleBrowserError = null;
-    this.googleBrowserSuccess = null;
     const body: GoogleBrowserLoginCredentialsBody = {
       email: this.googleAccountEmail.trim(),
       password: this.googleAccountPassword,
@@ -204,7 +232,7 @@ export class IntegrationsDashboardComponent implements OnInit {
         this.googleBrowserLoginConfigured = r.configured;
         this.googleBrowserStorageAvailable = r.storage_available !== false;
         this.googleAccountPassword = '';
-        this.googleBrowserSuccess = 'Gmail / Google credentials saved (encrypted on the server).';
+        this.notify('Gmail / Google credentials saved (encrypted on the server).');
         this.savingGoogleBrowserCredentials = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
@@ -218,14 +246,13 @@ export class IntegrationsDashboardComponent implements OnInit {
   clearGoogleBrowserLoginCredentials(): void {
     this.clearingGoogleBrowserCredentials = true;
     this.googleBrowserError = null;
-    this.googleBrowserSuccess = null;
     this.api.deleteGoogleBrowserLoginCredentials().subscribe({
       next: (r) => {
         this.googleBrowserLoginConfigured = r.configured;
         this.googleBrowserStorageAvailable = r.storage_available !== false;
         this.googleAccountEmail = '';
         this.googleAccountPassword = '';
-        this.googleBrowserSuccess = 'Shared Google credentials removed.';
+        this.notify('Shared Google credentials removed.');
         this.clearingGoogleBrowserCredentials = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
@@ -243,7 +270,6 @@ export class IntegrationsDashboardComponent implements OnInit {
   mediumLoading = false;
   mediumSaving = false;
   mediumError: string | null = null;
-  mediumSuccess: string | null = null;
 
   mediumEnabled = false;
   mediumProvider: MediumOAuthProvider = 'google';
@@ -300,7 +326,6 @@ export class IntegrationsDashboardComponent implements OnInit {
   saveMediumSettings(): void {
     this.mediumSaving = true;
     this.mediumError = null;
-    this.mediumSuccess = null;
     const body: MediumConfigUpdate = {
       enabled: this.mediumEnabled,
       oauth_provider: this.mediumProvider,
@@ -310,7 +335,7 @@ export class IntegrationsDashboardComponent implements OnInit {
     this.api.updateMediumConfig(body).subscribe({
       next: (res) => {
         this.applyMediumConfig(res);
-        this.mediumSuccess = 'Medium integration saved.';
+        this.notify('Medium integration saved.');
         this.mediumSaving = false;
       },
       error: (err) => {
@@ -323,12 +348,10 @@ export class IntegrationsDashboardComponent implements OnInit {
   runMediumBrowserLogin(): void {
     this.mediumBrowserLoginRunning = true;
     this.mediumError = null;
-    this.mediumSuccess = null;
     this.api.mediumBrowserLoginSession().subscribe({
       next: (res: MediumConfigResponse) => {
         this.applyMediumConfig(res);
-        this.mediumSuccess =
-          'Medium browser session saved using shared Google credentials from Integrations.';
+        this.notify('Medium browser session saved using shared Google credentials from Integrations.');
         this.mediumBrowserLoginRunning = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
@@ -380,7 +403,6 @@ export class IntegrationsDashboardComponent implements OnInit {
   connectWithSlack(): void {
     this.connecting = true;
     this.error = null;
-    this.success = null;
 
     const clientId = this.clientId.trim();
     const clientSecret = this.clientSecret.trim();
@@ -429,11 +451,10 @@ export class IntegrationsDashboardComponent implements OnInit {
   disconnectSlack(): void {
     this.disconnecting = true;
     this.error = null;
-    this.success = null;
     this.api.disconnectSlack().subscribe({
       next: (res) => {
         this.applyConfig(res);
-        this.success = 'Slack disconnected.';
+        this.notify('Slack disconnected.');
         this.disconnecting = false;
       },
       error: (err) => {
@@ -452,7 +473,6 @@ export class IntegrationsDashboardComponent implements OnInit {
 
     this.saving = true;
     this.error = null;
-    this.success = null;
 
     const body: SlackConfigUpdate = {
       enabled: this.slackEnabled,
@@ -470,7 +490,7 @@ export class IntegrationsDashboardComponent implements OnInit {
     this.api.updateSlackConfig(body).subscribe({
       next: (res) => {
         this.applyConfig(res);
-        this.success = 'Settings saved.';
+        this.notify('Settings saved.');
         this.saving = false;
       },
       error: (err) => {
@@ -529,7 +549,6 @@ export class IntegrationsDashboardComponent implements OnInit {
 
     this.saving = true;
     this.error = null;
-    this.success = null;
 
     const body: SlackConfigUpdate = {
       enabled: this.slackEnabled,
@@ -547,7 +566,7 @@ export class IntegrationsDashboardComponent implements OnInit {
     this.api.updateSlackConfig(body).subscribe({
       next: (res) => {
         this.applyConfig(res);
-        this.success = 'Slack integration saved.';
+        this.notify('Slack integration saved.');
         this.saving = false;
       },
       error: (err) => {
@@ -565,7 +584,6 @@ export class IntegrationsDashboardComponent implements OnInit {
   githubSaving = false;
   githubDisconnecting = false;
   githubError: string | null = null;
-  githubSuccess: string | null = null;
 
   githubEnabled = false;
   githubOwner = '';
@@ -611,7 +629,6 @@ export class IntegrationsDashboardComponent implements OnInit {
   saveGitHubConfig(): void {
     this.githubSaving = true;
     this.githubError = null;
-    this.githubSuccess = null;
     const body: GitHubConfigUpdate = {
       enabled: this.githubEnabled,
       owner: this.githubOwner.trim(),
@@ -632,7 +649,7 @@ export class IntegrationsDashboardComponent implements OnInit {
         this.githubWebhookSecretConfigured = res.webhook_secret_configured ?? false;
         this.githubPat = '';
         this.githubWebhookSecret = '';
-        this.githubSuccess = 'GitHub integration saved.';
+        this.notify('GitHub integration saved.');
         this.githubSaving = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
@@ -645,7 +662,6 @@ export class IntegrationsDashboardComponent implements OnInit {
   disconnectGitHub(): void {
     this.githubDisconnecting = true;
     this.githubError = null;
-    this.githubSuccess = null;
     this.api.deleteGitHubConfig().subscribe({
       next: (res: GitHubConfigResponse) => {
         this.githubEnabled = res.enabled;
@@ -656,7 +672,7 @@ export class IntegrationsDashboardComponent implements OnInit {
         this.githubWebhookSecretConfigured = res.webhook_secret_configured ?? false;
         this.githubPat = '';
         this.githubWebhookSecret = '';
-        this.githubSuccess = 'GitHub disconnected.';
+        this.notify('GitHub disconnected.');
         this.githubDisconnecting = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {

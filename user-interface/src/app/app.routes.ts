@@ -176,6 +176,7 @@ export const routes: Routes = [
           import('./components/integrations-dashboard/integrations-dashboard.component').then(
             (m) => m.IntegrationsDashboardComponent,
           ),
+        canDeactivate: [unsavedChangesGuard],
         data: { breadcrumb: 'Integrations', title: 'Integrations' },
       },
       {
@@ -191,6 +192,7 @@ export const routes: Routes = [
           import('./components/llm-config-dashboard/llm-config-dashboard.component').then(
             (m) => m.LlmConfigDashboardComponent,
           ),
+        canDeactivate: [unsavedChangesGuard],
         data: { breadcrumb: 'LLM Provider', title: 'LLM Provider' },
       },
       {
