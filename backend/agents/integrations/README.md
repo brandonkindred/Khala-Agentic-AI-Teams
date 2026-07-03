@@ -47,6 +47,7 @@ The example config now includes detailed capability/action metadata for:
 - n8n
 - GitHub
 - GitLab
+- TradingView (MCP market-data source for the Strategy Lab)
 
 Each provider can define:
 

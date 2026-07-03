@@ -154,4 +154,45 @@ describe('IntegrationsApiService', () => {
     expect(req.request.params.get('pr_number')).toBe('7');
     req.flush([]);
   });
+
+  it('getTradingViewConfig GET', () => {
+    const mockConfig = {
+      enabled: true,
+      mcp_server_url: 'https://tv/mcp',
+      tool_name: 'get_ohlcv',
+      auth_token_configured: true,
+    };
+    service.getTradingViewConfig().subscribe((res) => {
+      expect(res).toEqual(mockConfig);
+    });
+    const req = httpMock.expectOne(`${baseUrl}/tradingview`);
+    expect(req.request.method).toBe('GET');
+    req.flush(mockConfig);
+  });
+
+  it('updateTradingViewConfig PUT with body', () => {
+    const body = {
+      enabled: true,
+      mcp_server_url: 'https://tv/mcp',
+      tool_name: '',
+      auth_token: 'secret',
+    };
+    service.updateTradingViewConfig(body).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/tradingview`);
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body).toEqual(body);
+    req.flush({
+      enabled: true,
+      mcp_server_url: 'https://tv/mcp',
+      tool_name: 'get_ohlcv',
+      auth_token_configured: true,
+    });
+  });
+
+  it('deleteTradingViewConfig DELETE', () => {
+    service.deleteTradingViewConfig().subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/tradingview`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush({ enabled: false, mcp_server_url: '', tool_name: '', auth_token_configured: false });
+  });
 });

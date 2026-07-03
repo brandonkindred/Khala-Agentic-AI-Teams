@@ -294,3 +294,24 @@ providers:
       scopes: ["api", "read_repository", "write_repository"]
     settings:
       project_id: your-project-id
+
+  - name: tradingview
+    display_name: TradingView
+    category: market_data
+    description: Market data (OHLCV) for the Strategy Lab via a TradingView MCP server.
+    transport: mcp
+    capabilities: ["market_data.ohlcv.read"]
+    actions:
+      market_data.ohlcv.read: Fetch historical OHLCV bars for a symbol/date range
+    auth:
+      type: bearer_token
+    settings:
+      # Configured per-tenant via /api/integrations/tradingview (URL + encrypted token)
+      # or the TRADINGVIEW_MCP_* environment variables.
+      mcp_server_url: https://your-tradingview-mcp-server.example.com/mcp
+    mcp_tools:
+      - name: get_ohlcv
+        description: Return historical OHLCV bars for a symbol over a date range.
+        capabilities: ["market_data.ohlcv.read"]
+        config:
+          arguments: ["symbol", "asset_class", "start_date", "end_date", "interval"]

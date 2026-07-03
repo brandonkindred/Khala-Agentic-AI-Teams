@@ -756,5 +756,150 @@
       }
     </article>
 
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <!-- TradingView                                                    -->
+    <!-- ─────────────────────────────────────────────────────────────── -->
+    <article
+      class="integration-card"
+      [class.integration-card--expanded]="expanded === 'tradingview'"
+      [attr.aria-busy]="tradingViewLoading || null"
+    >
+      <header class="integration-card__head">
+        <div class="integration-card__brand">
+          <div class="integration-card__icon integration-card__icon--tradingview" aria-hidden="true">
+            <mat-icon>candlestick_chart</mat-icon>
+          </div>
+          <div class="integration-card__title-block">
+            <h2 class="integration-card__title">TradingView</h2>
+            <p class="integration-card__tag">Strategy Lab market data (MCP)</p>
+          </div>
+        </div>
+
+        <div class="integration-card__status">
+          @if (tradingViewLoading) {
+            <mat-spinner diameter="20" class="integration-card__spinner"></mat-spinner>
+          } @else if (tradingViewEnabled && tradingViewServerUrl) {
+            <span class="status-chip status-chip--success">
+              <mat-icon aria-hidden="true">check_circle</mat-icon>
+              Connected
+            </span>
+          } @else {
+            <span class="status-chip status-chip--neutral">Not configured</span>
+          }
+        </div>
+      </header>
+
+      <p class="integration-card__summary">
+        Connect a <strong>TradingView MCP</strong> server so the <strong>Strategy Lab</strong> pulls
+        OHLCV price data from TradingView before falling back to the free public providers.
+      </p>
+
+      <div class="integration-card__actions">
+        <button
+          type="button"
+          mat-flat-button
+          color="primary"
+          (click)="toggleExpanded('tradingview')"
+          [disabled]="tradingViewLoading"
+        >
+          <mat-icon>{{ expanded === 'tradingview' ? 'expand_less' : 'tune' }}</mat-icon>
+          {{ expanded === 'tradingview' ? 'Hide settings' : (tradingViewServerUrl ? 'Manage' : 'Configure') }}
+        </button>
+
+        @if (tradingViewServerUrl || tradingViewTokenConfigured) {
+          <button
+            type="button"
+            mat-stroked-button
+            color="warn"
+            (click)="disconnectTradingView()"
+            [disabled]="tradingViewDisconnecting || tradingViewSaving"
+          >
+            @if (tradingViewDisconnecting) { Disconnecting… } @else { Disconnect }
+          </button>
+        }
+      </div>
+
+      @if (expanded === 'tradingview') {
+        <div class="integration-card__body">
+          @if (tradingViewError) {
+            <div class="status-banner status-banner--error">
+              <mat-icon aria-hidden="true">error_outline</mat-icon>
+              <span>{{ tradingViewError }}</span>
+            </div>
+          }
+          @if (tradingViewSuccess) {
+            <div class="status-banner status-banner--success">
+              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
+              <span>{{ tradingViewSuccess }}</span>
+            </div>
+          }
+
+          <p class="form-hint">
+            Enter the URL of your <strong>TradingView MCP server</strong> and an optional bearer token.
+            The Strategy Lab calls the MCP <code>get_ohlcv</code> tool to fetch price bars.
+          </p>
+
+          <div class="form-grid">
+            <mat-form-field appearance="outline">
+              <mat-label>MCP server URL</mat-label>
+              <input
+                matInput
+                [(ngModel)]="tradingViewServerUrl"
+                placeholder="https://your-tradingview-mcp.example.com/mcp"
+                autocomplete="off"
+              />
+              @if (serverUrlInvalid()) {
+                <mat-hint align="end" class="hint-error">Must start with http:// or https://</mat-hint>
+              }
+              <mat-hint>Streamable-HTTP JSON-RPC endpoint of the TradingView MCP server.</mat-hint>
+            </mat-form-field>
+          </div>
+
+          <div class="form-grid">
+            <mat-form-field appearance="outline">
+              <mat-label>Auth token (optional)</mat-label>
+              <input
+                matInput
+                type="password"
+                [(ngModel)]="tradingViewToken"
+                placeholder="••••••••"
+                autocomplete="new-password"
+              />
+              @if (tradingViewTokenConfigured && !tradingViewToken) {
+                <mat-hint align="end">Saved</mat-hint>
+              }
+              <mat-hint>Sent as a Bearer token to the MCP server. Stored encrypted.</mat-hint>
+            </mat-form-field>
+          </div>
+
+          <div class="form-grid">
+            <mat-form-field appearance="outline">
+              <mat-label>OHLCV tool name (optional)</mat-label>
+              <input matInput [(ngModel)]="tradingViewToolName" placeholder="get_ohlcv" autocomplete="off" />
+              <mat-hint>MCP tool the Strategy Lab calls for price bars. Defaults to <code>get_ohlcv</code>.</mat-hint>
+            </mat-form-field>
+          </div>
+
+          <div class="setting-row">
+            <mat-slide-toggle [(ngModel)]="tradingViewEnabled" color="primary">
+              Enable TradingView data source
+            </mat-slide-toggle>
+          </div>
+
+          <div class="form-actions">
+            <button
+              mat-flat-button
+              color="primary"
+              type="button"
+              (click)="saveTradingViewConfig()"
+              [disabled]="tradingViewSaving || (tradingViewEnabled && !tradingViewServerUrl.trim())"
+            >
+              @if (tradingViewSaving) { Saving… } @else { Save TradingView settings }
+            </button>
+          </div>
+        </div>
+      }
+    </article>
+
   </div>
 </div>

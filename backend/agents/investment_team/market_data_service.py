@@ -43,6 +43,10 @@ _ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
 
 _DEFAULT_MAX_UNIVERSE_SYMBOLS = 20
 
+# Sentinel distinguishing "caller did not specify a TradingView client" (resolve one
+# from configuration) from an explicit ``None`` (no client — skip the integration).
+_UNSET = object()
+
 
 def _max_universe_symbols() -> int:
     """Env-var ceiling on the asset-class default universe.
@@ -71,6 +75,23 @@ def _max_universe_symbols() -> int:
         )
         return _DEFAULT_MAX_UNIVERSE_SYMBOLS
     return max(1, value)
+
+
+def _resolve_tradingview_client() -> Optional[object]:
+    """Best-effort build of the TradingView MCP client from configuration.
+
+    Postconditions: returns a ``TradingViewMcpClient`` when the integration is enabled
+        and has a server URL, else ``None``. Any import/resolution failure degrades to
+        ``None`` (the service runs on its public free-tier chain) — market-data fetching
+        must never break because the optional TradingView integration misbehaves.
+    """
+    try:
+        from .tradingview_mcp.provider import build_tradingview_client
+
+        return build_tradingview_client()
+    except Exception as exc:  # noqa: BLE001 - the integration is strictly optional
+        logger.warning("TradingView MCP client unavailable: %s", exc)
+        return None
 
 
 class OHLCVBar(BaseModel):
@@ -190,8 +211,19 @@ class MarketDataService:
         http_timeout: float = 30.0,
         *,
         cache: Optional["MarketDataCache"] = None,
+        tradingview_client: object = _UNSET,
     ) -> None:
         self._timeout = http_timeout
+        # TradingView MCP data source (Strategy Lab integration). When a user has
+        # configured and enabled it (via /api/integrations/tradingview or the
+        # TRADINGVIEW_MCP_* env vars), it becomes the FIRST provider tried for every
+        # asset class, ahead of the free public fallbacks. Unconfigured ⇒ ``None`` and
+        # the chain behaves exactly as before. Tests may inject a client, or pass an
+        # explicit ``None`` to force the integration off without a config lookup.
+        if tradingview_client is _UNSET:
+            self._tradingview_client = _resolve_tradingview_client()
+        else:
+            self._tradingview_client = tradingview_client
         # Phase 5 (partial): records which provider supplied bars for each
         # symbol on the most recent fetch.  Read by
         # ``execution.intraday_guard.check_intraday_data_source`` to
@@ -522,20 +554,73 @@ class MarketDataService:
         The slug is stable across monkey-patching in tests — it's what the
         intraday-safety guard inspects when deciding whether to hard-fail
         a run that fell back to an unreliable OHLCV source.
+
+        A configured TradingView MCP source is prepended for every asset class so the
+        Strategy Lab prefers the user's TradingView data before falling back to the
+        free public providers.
         """
         if asset_class == "crypto":
-            return [
+            chain: list[tuple[str, _FetchFn]] = [
                 ("yahoo", self._fetch_yahoo),
                 ("twelve_data", self._fetch_twelve_data),
                 ("coingecko", self._fetch_coingecko),
             ]
-        chain: list[tuple[str, _FetchFn]] = [
-            ("yahoo", self._fetch_yahoo),
-            ("twelve_data", self._fetch_twelve_data),
-        ]
-        if _ALPHA_VANTAGE_API_KEY:
-            chain.append(("alphavantage", self._fetch_alphavantage))
+        else:
+            chain = [
+                ("yahoo", self._fetch_yahoo),
+                ("twelve_data", self._fetch_twelve_data),
+            ]
+            if _ALPHA_VANTAGE_API_KEY:
+                chain.append(("alphavantage", self._fetch_alphavantage))
+        if self._tradingview_client is not None:
+            chain.insert(0, ("tradingview_mcp", self._fetch_tradingview_mcp))
         return chain
+
+    # ------------------------------------------------------------------
+    # Provider 0: TradingView MCP (user-configured Strategy Lab integration)
+    # ------------------------------------------------------------------
+
+    def _fetch_tradingview_mcp(
+        self, symbol: str, asset_class: str, start_date: str, end_date: str
+    ) -> List[OHLCVBar]:
+        """Fetch daily OHLCV from the configured TradingView MCP server.
+
+        Preconditions: ``self._tradingview_client`` is a configured client (guaranteed
+            by :meth:`_get_named_provider_chain`, which only adds this provider then).
+        Postconditions: returns normalized bars via the shared
+            :meth:`_bars_from_normalized` pipeline, or ``[]`` on any client error so the
+            provider chain falls back to the next source (matching every other provider).
+            Rows missing O/H/L fall back to the close, yielding a flat bar rather than a
+            dropped one.
+        """
+        client = self._tradingview_client
+        if client is None:  # defensive: chain only adds us when configured
+            return []
+        try:
+            rows = client.fetch_ohlcv(symbol, asset_class, start_date, end_date)
+        except Exception as exc:  # noqa: BLE001 - a TradingView failure must fall back
+            logger.warning("TradingView MCP fetch failed for %s (%s): %s", symbol, asset_class, exc)
+            return []
+
+        normalized: List[Tuple[str, Optional[OHLCVBar], bool]] = []
+        for row in rows:
+            bar_date = str(row.get("date", ""))[:10]
+            if not bar_date or bar_date < start_date or bar_date > end_date:
+                continue
+            close = row.get("close")
+            bar, repaired = self._normalize_ohlc_bar(
+                date=bar_date,
+                open=row.get("open") if row.get("open") is not None else close,
+                high=row.get("high") if row.get("high") is not None else close,
+                low=row.get("low") if row.get("low") is not None else close,
+                close=close,
+                volume=row.get("volume", 0),
+            )
+            normalized.append((bar_date, bar, repaired))
+        # TradingView MCP rows may arrive newest-first or oldest-first; sort by date so
+        # forward-fill carry-forward is always chronological regardless of server order.
+        normalized.sort(key=lambda entry: entry[0])
+        return self._bars_from_normalized(normalized, provider="TradingView MCP", symbol=symbol)
 
     # ------------------------------------------------------------------
     # Provider 1: Yahoo Finance

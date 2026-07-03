@@ -501,6 +501,20 @@ Issue #376. Worker count for `MarketDataService.fetch_multi_symbol_range` and
 `MarketDataCache.get_or_fetch_multi`. Default `min(len(symbols), 16)`; the previous hard cap of 5
 is gone.
 
+### TRADINGVIEW_MCP_ENABLED / TRADINGVIEW_MCP_URL / TRADINGVIEW_MCP_TOKEN / TRADINGVIEW_MCP_TOOL
+Environment overrides for the TradingView MCP data source the Strategy Lab pulls OHLCV bars from.
+Configuration normally comes from the Integrations UI (`PUT /api/integrations/tradingview`, token
+stored Fernet-encrypted); these env vars take precedence over the stored config so an operator can
+point a container at a server without the Unified API store on its path (isolated team containers,
+CI). `TRADINGVIEW_MCP_ENABLED` is truthy (`1/true/yes/on`, case-insensitive). The source is used
+only when **enabled** *and* a URL is present; when active it becomes the first provider tried for
+every asset class, ahead of the free public fallbacks (Yahoo → Twelve Data → CoinGecko/Alpha Vantage).
+`TRADINGVIEW_MCP_TOOL` overrides the MCP tool name the client calls (default `get_ohlcv`).
+
+### TRADINGVIEW_MCP_TIMEOUT_SEC
+Per-request wall-clock timeout (seconds) for the TradingView MCP client. Default `30.0`;
+non-numeric / non-positive values fall back to the default.
+
 ---
 
 ## Strategy Lab

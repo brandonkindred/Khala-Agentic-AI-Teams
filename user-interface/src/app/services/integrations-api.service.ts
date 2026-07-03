@@ -21,6 +21,8 @@ import type {
   SlackConfigResponse,
   SlackConfigUpdate,
   SlackOAuthConnectResponse,
+  TradingViewConfigResponse,
+  TradingViewConfigUpdate,
 } from '../models/integrations.model';
 
 /**
@@ -154,5 +156,20 @@ export class IntegrationsApiService {
       params['pr_number'] = String(prNumber);
     }
     return this.http.get<CodeReviewRunItem[]>(`${this.baseUrl}/github/reviews`, { params });
+  }
+
+  /** GET /api/integrations/tradingview */
+  getTradingViewConfig(): Observable<TradingViewConfigResponse> {
+    return this.http.get<TradingViewConfigResponse>(`${this.baseUrl}/tradingview`);
+  }
+
+  /** PUT /api/integrations/tradingview */
+  updateTradingViewConfig(body: TradingViewConfigUpdate): Observable<TradingViewConfigResponse> {
+    return this.http.put<TradingViewConfigResponse>(`${this.baseUrl}/tradingview`, body);
+  }
+
+  /** DELETE /api/integrations/tradingview */
+  deleteTradingViewConfig(): Observable<TradingViewConfigResponse> {
+    return this.http.delete<TradingViewConfigResponse>(`${this.baseUrl}/tradingview`);
   }
 }

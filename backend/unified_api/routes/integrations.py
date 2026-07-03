@@ -55,6 +55,7 @@ from unified_api.integrations_store import (
     clear_medium_google_oauth_identity,
     clear_medium_session_storage,
     clear_slack_oauth,
+    clear_tradingview_config,
     generate_medium_google_oauth_state,
     generate_oauth_state,
     get_github_config,
@@ -62,12 +63,14 @@ from unified_api.integrations_store import (
     get_integrations_list,
     get_medium_config,
     get_slack_config,
+    get_tradingview_config,
     set_github_config,
     set_medium_config,
     set_medium_google_oauth_identity,
     set_medium_session_storage_state_json,
     set_slack_config,
     set_slack_oauth_token,
+    set_tradingview_config,
     verify_and_clear_medium_google_oauth_state,
     verify_and_clear_oauth_state,
 )
@@ -213,6 +216,33 @@ class GoogleBrowserLoginStatusResponse(BaseModel):
         ...,
         description="False when POSTGRES_HOST is unset; browser-login credentials are not persisted (PUT returns 503).",
     )
+
+
+class TradingViewConfigUpdate(BaseModel):
+    """Request body for PUT /api/integrations/tradingview."""
+
+    enabled: bool = Field(False, description="Enable the TradingView MCP data source for the Strategy Lab.")
+    mcp_server_url: str = Field(
+        "",
+        description="Base URL of the TradingView MCP server (streamable-HTTP JSON-RPC endpoint).",
+    )
+    tool_name: str = Field(
+        "",
+        description="MCP tool the client calls to fetch OHLCV bars (blank uses the 'get_ohlcv' default).",
+    )
+    auth_token: str = Field(
+        "",
+        description="Bearer token / API key for the MCP server (stored encrypted; empty preserves existing).",
+    )
+
+
+class TradingViewConfigResponse(BaseModel):
+    """Response for GET/PUT/DELETE /api/integrations/tradingview (secrets masked)."""
+
+    enabled: bool
+    mcp_server_url: str = ""
+    tool_name: str = ""
+    auth_token_configured: bool = Field(False, description="True when an encrypted auth token is stored.")
 
 
 # ---------------------------------------------------------------------------
@@ -796,6 +826,74 @@ async def delete_google_browser_login_credentials() -> GoogleBrowserLoginStatusR
         configured=False,
         storage_available=google_browser_login_storage_available(),
     )
+
+
+# ---------------------------------------------------------------------------
+# TradingView MCP integration (data source for the Strategy Lab)
+# ---------------------------------------------------------------------------
+
+
+def _validate_mcp_server_url(url: str) -> None:
+    """Reject a non-empty TradingView MCP URL that is not an http(s) endpoint.
+
+    Preconditions: ``url`` is the raw (already-stripped) server URL.
+    Postconditions: returns ``None`` for an empty URL or one starting with
+        ``http://`` / ``https://``; raises ``HTTPException(400)`` otherwise so a
+        typo can't be persisted as a live endpoint.
+    """
+    if not url:
+        return
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="mcp_server_url must start with http:// or https://",
+        )
+
+
+def _build_tradingview_config_response(cfg: dict) -> TradingViewConfigResponse:
+    return TradingViewConfigResponse(
+        enabled=bool(cfg.get("enabled", False)),
+        mcp_server_url=str(cfg.get("mcp_server_url", "")).strip(),
+        tool_name=str(cfg.get("tool_name", "")).strip(),
+        auth_token_configured=bool(cfg.get("auth_token")),
+    )
+
+
+@router.get("/tradingview", response_model=TradingViewConfigResponse)
+async def get_tradingview() -> TradingViewConfigResponse:
+    """Return the TradingView MCP integration config (auth token masked)."""
+    return _build_tradingview_config_response(get_tradingview_config())
+
+
+@router.put("/tradingview", response_model=TradingViewConfigResponse)
+async def update_tradingview(body: TradingViewConfigUpdate) -> TradingViewConfigResponse:
+    """Save the TradingView MCP config (auth token stored encrypted).
+
+    Requires a server URL when enabling so the Strategy Lab has an endpoint to call.
+    """
+    mcp_server_url = (body.mcp_server_url or "").strip()
+    _validate_mcp_server_url(mcp_server_url)
+
+    if body.enabled and not mcp_server_url and not get_tradingview_config().get("mcp_server_url"):
+        raise HTTPException(
+            status_code=400,
+            detail="mcp_server_url is required when the TradingView integration is enabled.",
+        )
+
+    set_tradingview_config(
+        enabled=body.enabled,
+        mcp_server_url=mcp_server_url,
+        tool_name=(body.tool_name or "").strip(),
+        auth_token=(body.auth_token or "").strip(),
+    )
+    return _build_tradingview_config_response(get_tradingview_config())
+
+
+@router.delete("/tradingview", response_model=TradingViewConfigResponse)
+async def delete_tradingview() -> TradingViewConfigResponse:
+    """Disconnect the TradingView integration (removes the token and resets config)."""
+    clear_tradingview_config()
+    return _build_tradingview_config_response(get_tradingview_config())
 
 
 # ---------------------------------------------------------------------------
