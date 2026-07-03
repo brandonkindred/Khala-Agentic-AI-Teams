@@ -42,9 +42,9 @@ function formatErrorMessage(err: unknown): string {
   switch (status) {
     case HttpStatusCode.NotFound:
       return `Not found: ${err.url ?? statusText}`;
-    case HttpStatusCode.BadRequest:
     // FastAPI reports request-validation failures as 422 with an array-of-{msg}
-    // detail; both shapes format identically.
+    // detail; both validation shapes format identically.
+    case HttpStatusCode.BadRequest:
     case HttpStatusCode.UnprocessableEntity:
       return formatValidationError(err) ?? `Bad request: ${statusText}`;
     case HttpStatusCode.Unauthorized:
