@@ -59,6 +59,15 @@ def test_activity_runs_orchestrator_with_job_wiring(monkeypatch) -> None:
     assert out == {"job_id": job_id, "status": "completed"}
 
 
+def test_plan_from_input_binds_request_repo_path_over_embedded() -> None:
+    """The shared plan builder makes the request's repo_path authoritative — a
+    repo_path embedded in the plan payload must not win."""
+    import coding_team.api.main as main
+
+    plan = main.plan_from_input({"objective": "x", "repo_path": "/embedded"}, "/authoritative")
+    assert plan.repo_path == "/authoritative"
+
+
 def test_run_orchestrator_wired_passes_standard_job_store_wiring(monkeypatch) -> None:
     """The shared helper is the single source of the (update_job_fn, get_job_fn,
     cache_dir) wiring — verify it forwards exactly that to the orchestrator."""

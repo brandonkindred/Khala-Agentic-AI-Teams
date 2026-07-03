@@ -32,10 +32,10 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
         RunRequest,
         create_job,
         get_job,
+        plan_from_input,
         run_orchestrator_wired,
     )
     from coding_team.engine_provider import get_engine_provider
-    from coding_team.models import CodingTeamPlanInput
 
     if get_engine_provider() is None:
         raise RuntimeError(
@@ -54,7 +54,7 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     # POST /run uses — against the real (job_id, repo_path, plan) signature.
     job_id = str(uuid.uuid4())
     create_job(job_id=job_id, repo_path=req.repo_path, plan_input=req.plan_input)
-    plan = CodingTeamPlanInput.model_validate({**req.plan_input, "repo_path": req.repo_path})
+    plan = plan_from_input(req.plan_input, req.repo_path)
     run_orchestrator_wired(job_id, req.repo_path, plan)
     return get_job(job_id) or {"job_id": job_id, "status": "unknown"}
 

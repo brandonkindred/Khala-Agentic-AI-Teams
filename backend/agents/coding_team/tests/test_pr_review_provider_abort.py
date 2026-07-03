@@ -38,7 +38,10 @@ def test_provider_abort_posts_pr_comment_and_fails_job(monkeypatch) -> None:
 
     # Job + review marked failed.
     assert any(u.get("status") == "failed" for u in job_updates)
-    assert any(u.get("status") == "failed" for u in review_updates)
+    # The review row is marked failed AND carries the error (not just status_text),
+    # consistent with _record_failure everywhere else.
+    review_fail = next(u for u in review_updates if u.get("status") == "failed")
+    assert "no engine provider" in (review_fail.get("error") or "")
     # Exactly one PR comment, on the right PR, naming the failure and no token.
     assert len(comments) == 1
     owner, repo, number, body = comments[0]

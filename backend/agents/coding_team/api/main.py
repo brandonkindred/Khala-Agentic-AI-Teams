@@ -387,6 +387,22 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "coding-team"}
 
 
+def plan_from_input(plan_input: Dict[str, Any], repo_path: str) -> CodingTeamPlanInput:
+    """Validate a raw plan dict into a ``CodingTeamPlanInput``, binding *repo_path*.
+
+    Single source of the "merge the request's repo_path into the plan" convention:
+    the ``repo_path`` from the request authoritatively overrides any ``repo_path``
+    embedded in the plan payload, so the orchestrator always runs against the
+    checkout the caller named.
+
+    Preconditions: ``plan_input`` is a mapping (a plan payload); ``repo_path`` is
+    the request's repository path.
+    Postconditions: returns a validated ``CodingTeamPlanInput`` whose ``repo_path``
+    is *repo_path*. Raises ``pydantic.ValidationError`` on an invalid payload.
+    """
+    return CodingTeamPlanInput.model_validate({**plan_input, "repo_path": repo_path})
+
+
 def run_orchestrator_wired(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
     """Run the coding-team orchestrator for *job_id* with the standard job-store wiring.
 
@@ -419,9 +435,7 @@ def post_run(request: RunRequest) -> RunResponse:
     job_id = str(uuid.uuid4())
     create_job(job_id=job_id, repo_path=request.repo_path, plan_input=request.plan_input)
     if request.plan_input:
-        plan = CodingTeamPlanInput.model_validate(
-            {**request.plan_input, "repo_path": request.repo_path}
-        )
+        plan = plan_from_input(request.plan_input, request.repo_path)
 
         def run() -> None:
             _register_run_thread(job_id)
@@ -833,7 +847,7 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     if not repo_path:
         return False
     try:
-        plan = CodingTeamPlanInput.model_validate({**plan_raw, "repo_path": repo_path})
+        plan = plan_from_input(plan_raw, repo_path)
     except Exception:
         logger.exception("Auto-resume for job %s skipped: invalid plan_input.", job_id)
         return False
@@ -1016,7 +1030,7 @@ def resume_job(job_id: str) -> RunResponse:
     repo_path = data.get("repo_path") or plan_raw.get("repo_path")
     if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")
-    plan = CodingTeamPlanInput.model_validate({**plan_raw, "repo_path": repo_path})
+    plan = plan_from_input(plan_raw, repo_path)
 
     ctx = data.get("github_context") or {}
     is_github_job = bool(
@@ -1637,8 +1651,14 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             "which installs the engine provider at startup"
         )
         update_job(job_id, status="failed", phase="completed", error=error)
+        # error=error (not just status_text) so the Code Review page's error column
+        # is populated on this path exactly as _record_failure does everywhere else.
         update_review(
-            job_id, status="failed", status_text="No engine provider configured", completed=True
+            job_id,
+            status="failed",
+            status_text="No engine provider configured",
+            error=error,
+            completed=True,
         )
         # Tell the PR, not just the job store: the reviewer who invoked @khala-review
         # is watching the pull request and would otherwise wait forever on a job that
