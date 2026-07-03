@@ -26,8 +26,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TOOL = "get_ohlcv"
 
-_TRUTHY = {"1", "true", "yes", "on"}
-
 
 @dataclass(frozen=True, slots=True)
 class TradingViewMcpConfig:
@@ -52,47 +50,61 @@ class TradingViewMcpConfig:
 
 
 def _env_flag(name: str) -> bool | None:
-    """Parse a truthy/falsey env flag, returning ``None`` when the var is unset.
+    """Parse a truthy/falsey env flag as a tri-state.
 
+    Preconditions: ``name`` is an environment-variable name.
     Postconditions: ``None`` when ``name`` is absent/blank (so the caller can fall back
-        to the store); otherwise ``True`` for ``1/true/yes/on`` (case-insensitive),
-        ``False`` for anything else.
+        to the store); otherwise the shared :func:`shared_env_config.env_bool` vocabulary
+        (``true/1/yes/on`` → ``True``, ``false/0/no/off`` and any unrecognized value →
+        ``False``). Reuses the platform helper so the truthy set stays single-sourced.
     """
+    from shared_env_config import env_bool
+
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return None
-    return raw.strip().lower() in _TRUTHY
+    return env_bool(name, False)
 
 
 def _backend_root() -> Path:
-    # tradingview_mcp/ -> investment_team/ -> agents/ -> backend/
+    """Return the ``backend/`` repo root, four parents up from this file.
+
+    Postconditions: returns the path ``tradingview_mcp/ → investment_team/ → agents/ →
+        backend/``, so :func:`_ensure_backend_on_path` can put ``unified_api`` on the path.
+    """
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
 def _ensure_backend_on_path() -> None:
+    """Ensure the ``backend/`` root is importable so ``unified_api`` can be lazily loaded.
+
+    Postconditions: prepends :func:`_backend_root` to ``sys.path`` when absent; idempotent.
+    """
     root = str(_backend_root())
     if root not in sys.path:
         sys.path.insert(0, root)
 
 
-def _config_from_store() -> dict | None:
-    """Best-effort read of the Unified API TradingView config.
+def _store_accessors():
+    """Return the Unified API ``(get_meta, get_token)`` accessors, or ``(None, None)``.
 
-    Postconditions: returns the store dict, or ``None`` when the Unified API modules
-        are not importable (isolated team container) — the caller then relies solely
-        on environment variables. Never raises.
+    Postconditions: returns the split settings/token accessors when ``unified_api`` is
+        importable (mono-process deployment); ``(None, None)`` when it is not (isolated
+        team container / CI), so the caller relies solely on environment variables. The
+        split lets the resolver read the JSON settings without paying the credential-store
+        (Postgres) round-trip, and fetch the encrypted token only when the integration is
+        actually enabled. Never raises.
     """
     _ensure_backend_on_path()
     try:
-        from unified_api.integrations_store import get_tradingview_config
+        from unified_api.integrations_store import (
+            get_tradingview_config_meta,
+            get_tradingview_token,
+        )
     except Exception as exc:  # noqa: BLE001 - unified_api not on path is an expected fallback
         logger.debug("TradingView integration store unavailable: %s", exc)
-        return None
-    try:
-        return get_tradingview_config()
-    except Exception as exc:  # noqa: BLE001 - a store read error must not break data fetching
-        logger.warning("TradingView integration config read failed: %s", exc)
-        return None
+        return None, None
+    return get_tradingview_config_meta, get_tradingview_token
 
 
 def resolve_tradingview_mcp_config() -> TradingViewMcpConfig:
@@ -100,21 +112,40 @@ def resolve_tradingview_mcp_config() -> TradingViewMcpConfig:
 
     Preconditions: none.
     Postconditions: returns a :class:`TradingViewMcpConfig`. Each field prefers its
-        environment override when set and falls back to the Unified API store value
-        (or a safe default). ``enabled`` is ``True`` only when explicitly enabled by
-        env flag or store; a missing/garbled value degrades to disabled. Never raises.
+        environment override and falls back to the Unified API store value (or a safe
+        default). The store's JSON settings are read only when an env value is missing
+        (so a fully env-configured deployment never touches the store), and the encrypted
+        token is read **only** when the integration resolves to enabled+URL — so the
+        common disabled path costs at most one JSON read and never a credential-store
+        round-trip. ``enabled`` is ``True`` only when explicitly enabled by env flag or
+        store; a missing/garbled value degrades to disabled. Never raises.
     """
-    store = _config_from_store() or {}
-
     env_url = os.environ.get("TRADINGVIEW_MCP_URL", "").strip()
     env_token = os.environ.get("TRADINGVIEW_MCP_TOKEN", "").strip()
     env_tool = os.environ.get("TRADINGVIEW_MCP_TOOL", "").strip()
     env_enabled = _env_flag("TRADINGVIEW_MCP_ENABLED")
 
-    server_url = env_url or str(store.get("mcp_server_url", "")).strip()
-    auth_token = env_token or str(store.get("auth_token", "")).strip()
-    tool_name = env_tool or str(store.get("tool_name", "")).strip() or _DEFAULT_TOOL
-    enabled = env_enabled if env_enabled is not None else bool(store.get("enabled", False))
+    get_meta, get_token = _store_accessors()
+
+    # Read the JSON settings only when env doesn't fully specify them.
+    meta: dict = {}
+    if get_meta is not None and (not env_url or not env_tool or env_enabled is None):
+        try:
+            meta = get_meta() or {}
+        except Exception as exc:  # noqa: BLE001 - a store read must not break data fetching
+            logger.warning("TradingView settings read failed: %s", exc)
+
+    server_url = env_url or str(meta.get("mcp_server_url", "")).strip()
+    tool_name = env_tool or str(meta.get("tool_name", "")).strip() or _DEFAULT_TOOL
+    enabled = env_enabled if env_enabled is not None else bool(meta.get("enabled", False))
+
+    # Only pay the credential-store read when the integration is actually usable.
+    auth_token = env_token
+    if not auth_token and enabled and server_url and get_token is not None:
+        try:
+            auth_token = (get_token() or "").strip()
+        except Exception as exc:  # noqa: BLE001 - a token read must not break data fetching
+            logger.warning("TradingView token read failed: %s", exc)
 
     return TradingViewMcpConfig(
         enabled=enabled,

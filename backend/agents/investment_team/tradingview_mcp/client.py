@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime
 from typing import Any, Dict, List
 
 import httpx
@@ -165,6 +165,11 @@ class TradingViewMcpClient:
 
     @staticmethod
     def _error_text(result: Dict[str, Any]) -> str:
+        """Return the first text content block of an errored tool result.
+
+        Postconditions: returns the text of the first ``{"type": "text"}`` content block,
+            or ``"unknown error"`` when the result carries no text content.
+        """
         content = result.get("content")
         if isinstance(content, list):
             for block in content:
@@ -213,6 +218,11 @@ class TradingViewMcpClient:
 
     @staticmethod
     def _first(item: Dict[str, Any], keys: tuple[str, ...]) -> Any:
+        """Return the first present, non-``None`` value among ``keys``.
+
+        Postconditions: returns ``item[k]`` for the first ``k`` in ``keys`` that is present
+            with a non-``None`` value (so a legitimate ``0`` is preserved), else ``None``.
+        """
         for key in keys:
             if key in item and item[key] is not None:
                 return item[key]
@@ -220,36 +230,72 @@ class TradingViewMcpClient:
 
     @staticmethod
     def _coerce_date(raw_date: Any) -> str | None:
-        """Coerce a raw date field to an ``YYYY-MM-DD`` string.
+        """Coerce a raw date field to a ``YYYY-MM-DD`` string, parse-first.
 
-        Accepts an ISO date/datetime string (first 10 chars are taken) or an epoch
-        timestamp in seconds or milliseconds. Returns ``None`` when the value can't be
-        interpreted as a date, so the row is dropped rather than mis-dated.
+        Handles the shapes real MCP OHLCV tools emit: an ISO date/datetime string
+        (``"2024-01-02"``, ``"2024-01-02T00:00:00Z"``), a compact ``YYYYMMDD`` calendar
+        integer/string (``20240102``), or an epoch timestamp in seconds or milliseconds.
+        Strings are tried as ISO **first** (so a compact ``"20240102"`` is read as a date,
+        not an epoch), then as a numeric fallback.
+
+        Preconditions: ``raw_date`` is a str / int / float (a ``bool`` is rejected).
+        Postconditions: returns the calendar day as ``YYYY-MM-DD``, or ``None`` when the
+            value can't be interpreted as a date, so the caller drops the row rather than
+            mis-dating it.
         """
         if isinstance(raw_date, bool):
             return None
         if isinstance(raw_date, (int, float)):
-            seconds = raw_date / 1000.0 if raw_date >= 1_000_000_000_000 else float(raw_date)
-            try:
-                return datetime.fromtimestamp(seconds, tz=timezone.utc).date().isoformat()
-            except (OverflowError, OSError, ValueError):
-                return None
+            return TradingViewMcpClient._numeric_to_date(raw_date)
         text = str(raw_date).strip()
         if not text:
             return None
-        # Numeric string epoch (e.g. "1700000000").
-        if text.isdigit():
-            return TradingViewMcpClient._coerce_date(int(text))
-        return text[:10]
+        # ISO first: date.fromisoformat accepts both "2024-01-02" and compact "20240102"
+        # (3.11+), and the [:10] slice trims any trailing time component.
+        try:
+            return date.fromisoformat(text[:10]).isoformat()
+        except ValueError:
+            pass
+        # Numeric string fallback (e.g. "1700000000" epoch, "1700000000.0").
+        try:
+            return TradingViewMcpClient._numeric_to_date(float(text))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _numeric_to_date(value: float) -> str | None:
+        """Interpret a numeric date value as a compact ``YYYYMMDD`` day or an epoch.
+
+        Preconditions: ``value`` is an int/float.
+        Postconditions: an 8-digit integral value in the ``YYYYMMDD`` calendar range is
+            read as that calendar day (financial-feed convention); otherwise the value is
+            treated as an epoch — milliseconds at/above :data:`_EPOCH_MS_THRESHOLD`, else
+            seconds — and converted via the shared UTC helper. ``None`` when neither yields
+            a valid date.
+        """
+        ival = int(value)
+        if value == ival and 1900_01_01 <= ival <= 9999_12_31:
+            try:
+                return datetime.strptime(str(ival), "%Y%m%d").date().isoformat()
+            except ValueError:
+                pass  # not a real calendar day → fall through to epoch handling
+        from ..market_data_service import _EPOCH_MS_THRESHOLD, epoch_to_utc_date
+
+        seconds = value / 1000.0 if abs(value) >= _EPOCH_MS_THRESHOLD else float(value)
+        return epoch_to_utc_date(seconds)
 
     @classmethod
     def _normalize_row(cls, item: Any) -> Dict[str, Any] | None:
         """Map one raw row (dict) to canonical OHLCV keys, or ``None`` if unusable.
 
-        Postconditions: returns a dict with ``date`` (string) and O/H/L/C/volume when
-            a date and at least a close are present; ``volume`` defaults to ``0``.
-            Rows missing a date or close are dropped (returns ``None``) — a bar we
-            can't place in time or price is not usable data.
+        Postconditions: returns a dict with a canonical ``YYYY-MM-DD`` ``date`` and
+            ``open``/``high``/``low``/``close``/``volume`` when a date and close are
+            present. A missing ``open``/``high``/``low`` is filled from the close (a flat
+            bar) so the consumer never has to re-derive it; ``volume`` defaults to ``0``.
+            Rows missing a date or close, or with an un-parseable date, are dropped
+            (``None``) — a bar we can't place in time or price is not usable data. Raw
+            numeric values are passed through un-coerced; finiteness repair is the
+            consumer's job (``MarketDataService._normalize_ohlc_bar``).
         """
         if not isinstance(item, dict):
             return None
@@ -260,11 +306,14 @@ class TradingViewMcpClient:
         bar_date = cls._coerce_date(raw_date)
         if bar_date is None:
             return None
+        open_ = cls._first(item, _OPEN_KEYS)
+        high = cls._first(item, _HIGH_KEYS)
+        low = cls._first(item, _LOW_KEYS)
         return {
             "date": bar_date,
-            "open": cls._first(item, _OPEN_KEYS),
-            "high": cls._first(item, _HIGH_KEYS),
-            "low": cls._first(item, _LOW_KEYS),
+            "open": open_ if open_ is not None else close,
+            "high": high if high is not None else close,
+            "low": low if low is not None else close,
             "close": close,
             "volume": cls._first(item, _VOLUME_KEYS) or 0,
         }

@@ -65,9 +65,39 @@ def _tool_result(rows) -> dict:
     return {"jsonrpc": "2.0", "id": 1, "result": {"content": [], "structuredContent": rows}}
 
 
+def _patch_store(monkeypatch, meta=None, token="", *, token_spy=None):
+    """Patch the config resolver's store accessors.
+
+    ``meta`` None ⇒ store unavailable (both accessors None). Otherwise ``get_meta``
+    returns ``meta`` and ``get_token`` returns ``token`` (or calls ``token_spy``).
+    """
+    if meta is None:
+        monkeypatch.setattr(
+            "investment_team.tradingview_mcp.config._store_accessors",
+            lambda: (None, None),
+        )
+        return
+    get_meta = lambda: meta  # noqa: E731
+    get_token = token_spy if token_spy is not None else (lambda: token)  # noqa: E731
+    monkeypatch.setattr(
+        "investment_team.tradingview_mcp.config._store_accessors",
+        lambda: (get_meta, get_token),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config resolution
 # ---------------------------------------------------------------------------
+
+
+def _clear_env(monkeypatch):
+    for var in (
+        "TRADINGVIEW_MCP_ENABLED",
+        "TRADINGVIEW_MCP_URL",
+        "TRADINGVIEW_MCP_TOKEN",
+        "TRADINGVIEW_MCP_TOOL",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
 
 def test_config_env_overrides_store(monkeypatch):
@@ -75,15 +105,11 @@ def test_config_env_overrides_store(monkeypatch):
     monkeypatch.setenv("TRADINGVIEW_MCP_URL", "https://env.example/mcp")
     monkeypatch.setenv("TRADINGVIEW_MCP_TOKEN", "env-token")
     monkeypatch.setenv("TRADINGVIEW_MCP_TOOL", "env_tool")
-    # Even if the store returns something, env wins.
-    monkeypatch.setattr(
-        "investment_team.tradingview_mcp.config._config_from_store",
-        lambda: {
-            "enabled": False,
-            "mcp_server_url": "https://store/mcp",
-            "auth_token": "s",
-            "tool_name": "t",
-        },
+    # Even if the store returns something, env wins (and the store isn't even read).
+    _patch_store(
+        monkeypatch,
+        meta={"enabled": False, "mcp_server_url": "https://store/mcp", "tool_name": "t"},
+        token="s",
     )
     cfg = resolve_tradingview_mcp_config()
     assert cfg.enabled is True
@@ -94,40 +120,59 @@ def test_config_env_overrides_store(monkeypatch):
 
 
 def test_config_falls_back_to_store(monkeypatch):
-    for var in (
-        "TRADINGVIEW_MCP_ENABLED",
-        "TRADINGVIEW_MCP_URL",
-        "TRADINGVIEW_MCP_TOKEN",
-        "TRADINGVIEW_MCP_TOOL",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(
-        "investment_team.tradingview_mcp.config._config_from_store",
-        lambda: {
-            "enabled": True,
-            "mcp_server_url": "https://store/mcp",
-            "auth_token": "s",
-            "tool_name": "",
-        },
+    _clear_env(monkeypatch)
+    _patch_store(
+        monkeypatch,
+        meta={"enabled": True, "mcp_server_url": "https://store/mcp", "tool_name": ""},
+        token="s",
     )
     cfg = resolve_tradingview_mcp_config()
     assert cfg.enabled is True
     assert cfg.server_url == "https://store/mcp"
     assert cfg.tool_name == "get_ohlcv"  # blank store value defaults
+    assert cfg.auth_token == "s"  # token read because enabled + URL
 
 
 def test_config_disabled_when_nothing(monkeypatch):
-    for var in (
-        "TRADINGVIEW_MCP_ENABLED",
-        "TRADINGVIEW_MCP_URL",
-        "TRADINGVIEW_MCP_TOKEN",
-        "TRADINGVIEW_MCP_TOOL",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr("investment_team.tradingview_mcp.config._config_from_store", lambda: None)
+    _clear_env(monkeypatch)
+    _patch_store(monkeypatch, meta=None)  # store unavailable
     cfg = resolve_tradingview_mcp_config()
     assert cfg.enabled is False
     assert cfg.usable is False
+
+
+def test_config_env_disabled_overrides_store_enabled(monkeypatch):
+    # An explicit falsey env flag is an operator override, not a fallback.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("TRADINGVIEW_MCP_ENABLED", "false")
+    _patch_store(
+        monkeypatch,
+        meta={"enabled": True, "mcp_server_url": "https://store/mcp", "tool_name": ""},
+        token="s",
+    )
+    cfg = resolve_tradingview_mcp_config()
+    assert cfg.enabled is False
+    assert cfg.usable is False
+
+
+def test_config_skips_token_read_when_disabled(monkeypatch):
+    # P2: the encrypted-token accessor must not be hit on the disabled path.
+    _clear_env(monkeypatch)
+    calls = {"n": 0}
+
+    def _spy_token():
+        calls["n"] += 1
+        return "s"
+
+    _patch_store(
+        monkeypatch,
+        meta={"enabled": False, "mcp_server_url": "https://store/mcp", "tool_name": ""},
+        token_spy=_spy_token,
+    )
+    cfg = resolve_tradingview_mcp_config()
+    assert cfg.enabled is False
+    assert cfg.auth_token == ""
+    assert calls["n"] == 0  # token never read while disabled
 
 
 def test_config_usable_requires_url(monkeypatch):
@@ -185,8 +230,8 @@ def test_client_parses_nested_container(monkeypatch):
     c = TradingViewMcpClient("https://tv/mcp")
     out = c.fetch_ohlcv("AAPL", "stocks", "2024-01-01", "2024-01-31")
     assert out[0]["date"] == "2024-01-02"
-    # open/high/low absent -> None; caller (MarketDataService) fills from close.
-    assert out[0]["open"] is None
+    # open/high/low absent -> filled from close by the client (a flat bar).
+    assert out[0]["open"] == out[0]["high"] == out[0]["low"] == out[0]["close"] == 1.5
 
 
 def test_client_parses_epoch_seconds(monkeypatch):
@@ -195,6 +240,31 @@ def test_client_parses_epoch_seconds(monkeypatch):
     c = TradingViewMcpClient("https://tv/mcp")
     out = c.fetch_ohlcv("AAPL", "stocks", "2024-01-01", "2024-01-31")
     assert out[0]["date"] == "2024-01-02"
+
+
+def test_client_parses_epoch_millis(monkeypatch):
+    rows = [{"timestamp": 1704153600000, "close": 42}]  # 2024-01-02 UTC in ms
+    _patch_httpx(monkeypatch, _FakeResponse(_tool_result(rows)))
+    c = TradingViewMcpClient("https://tv/mcp")
+    out = c.fetch_ohlcv("AAPL", "stocks", "2024-01-01", "2024-01-31")
+    assert out[0]["date"] == "2024-01-02"
+
+
+def test_client_parses_compact_yyyymmdd(monkeypatch):
+    # A compact integer date must be read as a calendar day, not an epoch.
+    rows = [{"date": 20240102, "close": 5}, {"date": "20240103", "close": 6}]
+    _patch_httpx(monkeypatch, _FakeResponse(_tool_result(rows)))
+    c = TradingViewMcpClient("https://tv/mcp")
+    out = c.fetch_ohlcv("AAPL", "stocks", "2024-01-01", "2024-01-31")
+    assert [r["date"] for r in out] == ["2024-01-02", "2024-01-03"]
+
+
+def test_client_drops_unparseable_date(monkeypatch):
+    rows = [{"date": "not-a-date", "close": 5}, {"date": "2024-01-02", "close": 6}]
+    _patch_httpx(monkeypatch, _FakeResponse(_tool_result(rows)))
+    c = TradingViewMcpClient("https://tv/mcp")
+    out = c.fetch_ohlcv("AAPL", "stocks", "2024-01-01", "2024-01-31")
+    assert [r["date"] for r in out] == ["2024-01-02"]
 
 
 def test_client_drops_row_without_date_or_close(monkeypatch):
@@ -306,20 +376,28 @@ def test_fetch_tradingview_mcp_returns_bars():
     assert bars[1].volume == 200
 
 
-def test_fetch_tradingview_mcp_fills_missing_ohlc_from_close():
-    rows = [{"date": "2024-01-02", "close": 5.0}]
-    svc = MarketDataService(tradingview_client=_StubClient(rows))
+def _flat(date_str, price):
+    """A fully-formed (client-normalized) flat bar row."""
+    return {
+        "date": date_str,
+        "open": price,
+        "high": price,
+        "low": price,
+        "close": price,
+        "volume": 0,
+    }
+
+
+def test_fetch_tradingview_mcp_accepts_flat_bars():
+    # The client fills O/H/L from close; the service consumes the already-flat row.
+    svc = MarketDataService(tradingview_client=_StubClient([_flat("2024-01-02", 5.0)]))
     bars = svc._fetch_tradingview_mcp("AAPL", "stocks", "2024-01-01", "2024-01-31")
     assert len(bars) == 1
     assert bars[0].open == bars[0].high == bars[0].low == bars[0].close == 5.0
 
 
 def test_fetch_tradingview_mcp_filters_out_of_range():
-    rows = [
-        {"date": "2023-12-31", "close": 1.0},
-        {"date": "2024-01-02", "close": 2.0},
-        {"date": "2024-02-15", "close": 3.0},
-    ]
+    rows = [_flat("2023-12-31", 1.0), _flat("2024-01-02", 2.0), _flat("2024-02-15", 3.0)]
     svc = MarketDataService(tradingview_client=_StubClient(rows))
     bars = svc._fetch_tradingview_mcp("AAPL", "stocks", "2024-01-01", "2024-01-31")
     assert [b.date for b in bars] == ["2024-01-02"]
@@ -332,3 +410,22 @@ def test_fetch_tradingview_mcp_falls_back_on_error():
 
     svc = MarketDataService(tradingview_client=_Boom())
     assert svc._fetch_tradingview_mcp("AAPL", "stocks", "2024-01-01", "2024-01-31") == []
+
+
+def test_market_data_client_resolved_lazily_and_memoized(monkeypatch):
+    # P1: construction does NO config resolution; the chain resolves once, then caches.
+    import investment_team.market_data_service as mds
+
+    calls = {"n": 0}
+
+    def _fake_resolve():
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(mds, "_resolve_tradingview_client", _fake_resolve)
+    svc = MarketDataService()  # default → _UNSET, must not resolve yet
+    assert calls["n"] == 0
+    svc._get_named_provider_chain("stocks")
+    assert calls["n"] == 1
+    svc._get_named_provider_chain("crypto")
+    assert calls["n"] == 1  # memoized, not re-resolved

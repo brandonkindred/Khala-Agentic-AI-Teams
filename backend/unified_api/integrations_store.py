@@ -729,16 +729,17 @@ def clear_github_config() -> None:
 _TRADINGVIEW_DEFAULT_TOOL = "get_ohlcv"
 
 
-def get_tradingview_config() -> dict[str, Any]:
-    """Return the TradingView MCP integration config.
+def get_tradingview_config_meta() -> dict[str, Any]:
+    """Return the JSON-only TradingView settings — no credential-store read.
 
     Preconditions: none.
-    Postconditions: returns a dict with ``enabled`` (bool), ``mcp_server_url`` and
-        ``tool_name`` (stripped strings, from the JSON store) and ``auth_token`` (the
-        decrypted credential, or ``""`` when absent/store-disabled). ``tool_name``
-        defaults to ``get_ohlcv`` when unset. The raw token is included here because
-        team-side readers (the Strategy Lab market-data provider) need the live value;
-        the HTTP layer masks it in its response model. Never raises.
+    Postconditions: returns exactly ``enabled`` (bool), ``mcp_server_url`` and
+        ``tool_name`` (stripped strings), all from the JSON settings file. ``tool_name``
+        defaults to ``get_ohlcv`` when unset. Performs NO credential read, so callers
+        that only need the settings (or will read the token separately) don't pay a
+        Postgres round-trip — the Strategy Lab resolver reads this first and only fetches
+        the encrypted token when the integration is actually enabled. Never raises beyond
+        an underlying JSON-read error.
     """
     with _LOCK:
         data = _read_raw()
@@ -747,8 +748,33 @@ def get_tradingview_config() -> dict[str, Any]:
         "enabled": bool(tv.get("enabled", False)),
         "mcp_server_url": str(tv.get("mcp_server_url", "")).strip(),
         "tool_name": str(tv.get("tool_name", "")).strip() or _TRADINGVIEW_DEFAULT_TOOL,
-        "auth_token": get_credential(_TRADINGVIEW_SERVICE, "auth_token"),
     }
+
+
+def get_tradingview_token() -> str:
+    """Return the decrypted TradingView MCP auth token, or ``""``.
+
+    Preconditions: none.
+    Postconditions: returns the decrypted credential (``""`` when absent / store
+        disabled / unreachable — ``get_credential`` swallows its own errors). This is the
+        only accessor that touches the credential store, so callers can gate the (Postgres)
+        read on whether the integration is enabled. Never raises.
+    """
+    return get_credential(_TRADINGVIEW_SERVICE, "auth_token")
+
+
+def get_tradingview_config() -> dict[str, Any]:
+    """Return the full TradingView MCP config (settings + decrypted token).
+
+    Preconditions: none.
+    Postconditions: :func:`get_tradingview_config_meta` plus ``auth_token`` (the decrypted
+        credential, or ``""``). Used by the HTTP config surface, which needs to report
+        whether a token is stored regardless of the enabled flag; the HTTP layer masks the
+        raw value in its response model. Team-side readers prefer the split
+        meta/token accessors so a disabled integration avoids the credential read. Never
+        raises.
+    """
+    return {**get_tradingview_config_meta(), "auth_token": get_tradingview_token()}
 
 
 def set_tradingview_config(

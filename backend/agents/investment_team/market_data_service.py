@@ -47,6 +47,29 @@ _DEFAULT_MAX_UNIVERSE_SYMBOLS = 20
 # from configuration) from an explicit ``None`` (no client — skip the integration).
 _UNSET = object()
 
+# Epoch magnitude at/above which a timestamp is milliseconds rather than seconds
+# (13-digit ms ≈ year 2001+; 10-digit seconds stay well below this).
+_EPOCH_MS_THRESHOLD = 1_000_000_000_000
+
+
+def epoch_to_utc_date(epoch_seconds: float) -> Optional[str]:
+    """Convert an epoch time in **seconds** to a ``YYYY-MM-DD`` UTC calendar day.
+
+    Single source of truth for epoch→calendar-day conversion shared by the CoinGecko
+    provider and the TradingView MCP client. UTC is explicit (not ``date.fromtimestamp``,
+    which uses the process-local timezone) so ticks near midnight bucket onto the same day
+    on every host / CI runner — the determinism the forward-fill relies on.
+
+    Preconditions: ``epoch_seconds`` is a POSIX timestamp in seconds (callers convert
+        milliseconds themselves).
+    Postconditions: returns the UTC date as ``YYYY-MM-DD``, or ``None`` when the value is
+        out of the representable range (so the caller drops the row rather than raising).
+    """
+    try:
+        return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
 
 def _max_universe_symbols() -> int:
     """Env-var ceiling on the asset-class default universe.
@@ -218,12 +241,14 @@ class MarketDataService:
         # configured and enabled it (via /api/integrations/tradingview or the
         # TRADINGVIEW_MCP_* env vars), it becomes the FIRST provider tried for every
         # asset class, ahead of the free public fallbacks. Unconfigured ⇒ ``None`` and
-        # the chain behaves exactly as before. Tests may inject a client, or pass an
-        # explicit ``None`` to force the integration off without a config lookup.
-        if tradingview_client is _UNSET:
-            self._tradingview_client = _resolve_tradingview_client()
-        else:
-            self._tradingview_client = tradingview_client
+        # the chain behaves exactly as before.
+        #
+        # Resolution is LAZY and memoized (see the ``_tradingview_client`` property): a
+        # ``MarketDataService`` that is constructed but never fetches pays no config /
+        # credential-store I/O at all — the constructor stays free of side effects. Tests
+        # may inject a client, or pass an explicit ``None`` to force the integration off
+        # without any config lookup. ``_UNSET`` means "resolve on first use".
+        self._tradingview_client_cache = tradingview_client
         # Phase 5 (partial): records which provider supplied bars for each
         # symbol on the most recent fetch.  Read by
         # ``execution.intraday_guard.check_intraday_data_source`` to
@@ -248,6 +273,21 @@ class MarketDataService:
         from .market_data_cache import get_default_cache
 
         return get_default_cache()
+
+    @property
+    def _tradingview_client(self) -> Optional[object]:
+        """Return the (lazily resolved, memoized) TradingView MCP client, or ``None``.
+
+        Postconditions: on first access with an unspecified client (``_UNSET``), resolves
+            config from env + the Unified API store exactly once and caches the result
+            (client or ``None``); subsequent accesses reuse it. An injected client or an
+            explicit ``None`` passed to the constructor is returned as-is with no lookup.
+            This keeps the config/credential-store read off the constructor and off any
+            service that is built but never fetches. Never raises.
+        """
+        if self._tradingview_client_cache is _UNSET:
+            self._tradingview_client_cache = _resolve_tradingview_client()
+        return self._tradingview_client_cache
 
     # ------------------------------------------------------------------
     # Public API
@@ -586,12 +626,12 @@ class MarketDataService:
         """Fetch daily OHLCV from the configured TradingView MCP server.
 
         Preconditions: ``self._tradingview_client`` is a configured client (guaranteed
-            by :meth:`_get_named_provider_chain`, which only adds this provider then).
+            by :meth:`_get_named_provider_chain`, which only adds this provider then). Each
+            row from the client already carries a canonical ``YYYY-MM-DD`` ``date`` and
+            O/H/L filled from the close (see ``TradingViewMcpClient._normalize_row``).
         Postconditions: returns normalized bars via the shared
             :meth:`_bars_from_normalized` pipeline, or ``[]`` on any client error so the
             provider chain falls back to the next source (matching every other provider).
-            Rows missing O/H/L fall back to the close, yielding a flat bar rather than a
-            dropped one.
         """
         client = self._tradingview_client
         if client is None:  # defensive: chain only adds us when configured
@@ -604,16 +644,15 @@ class MarketDataService:
 
         normalized: List[Tuple[str, Optional[OHLCVBar], bool]] = []
         for row in rows:
-            bar_date = str(row.get("date", ""))[:10]
+            bar_date = row.get("date", "")
             if not bar_date or bar_date < start_date or bar_date > end_date:
                 continue
-            close = row.get("close")
             bar, repaired = self._normalize_ohlc_bar(
                 date=bar_date,
-                open=row.get("open") if row.get("open") is not None else close,
-                high=row.get("high") if row.get("high") is not None else close,
-                low=row.get("low") if row.get("low") is not None else close,
-                close=close,
+                open=row.get("open"),
+                high=row.get("high"),
+                low=row.get("low"),
+                close=row.get("close"),
                 volume=row.get("volume", 0),
             )
             normalized.append((bar_date, bar, repaired))
@@ -817,16 +856,12 @@ class MarketDataService:
 
                 daily: Dict[str, List[float]] = {}
                 for ts_ms, price in raw.get("prices", []):
-                    # CoinGecko timestamps are UTC epoch milliseconds. Bucket
-                    # them by UTC calendar day explicitly — a naive
-                    # ``date.fromtimestamp`` uses the process-local timezone,
-                    # which shifts ticks near midnight across day boundaries and
-                    # makes the resulting bars (and the shared forward-fill
-                    # output) non-deterministic across hosts / CI runners.
-                    bar_date = (
-                        datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date().isoformat()
-                    )
-                    if start_date <= bar_date <= end_date:
+                    # CoinGecko timestamps are UTC epoch milliseconds. ``epoch_to_utc_date``
+                    # buckets by UTC calendar day explicitly (not the process-local
+                    # timezone), so ticks near midnight land on the same day on every host
+                    # / CI runner — the determinism the shared forward-fill relies on.
+                    bar_date = epoch_to_utc_date(ts_ms / 1000)
+                    if bar_date and start_date <= bar_date <= end_date:
                         daily.setdefault(bar_date, []).append(float(price))
 
                 normalized: List[Tuple[str, Optional[OHLCVBar], bool]] = []

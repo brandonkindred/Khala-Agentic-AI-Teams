@@ -851,6 +851,13 @@ def _validate_mcp_server_url(url: str) -> None:
 
 
 def _build_tradingview_config_response(cfg: dict) -> TradingViewConfigResponse:
+    """Map a stored TradingView config dict to the API response (token masked).
+
+    Preconditions: ``cfg`` is a :func:`get_tradingview_config` dict.
+    Postconditions: returns a :class:`TradingViewConfigResponse` carrying ``enabled``,
+        ``mcp_server_url``, ``tool_name`` and ``auth_token_configured`` (a bool) — the raw
+        ``auth_token`` is never placed on the response.
+    """
     return TradingViewConfigResponse(
         enabled=bool(cfg.get("enabled", False)),
         mcp_server_url=str(cfg.get("mcp_server_url", "")).strip(),
