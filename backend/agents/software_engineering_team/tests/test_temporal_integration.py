@@ -19,14 +19,8 @@ if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
 # Import after path setup
-import importlib.util  # noqa: E402
+from software_engineering_team.api import main as _api_main  # noqa: E402
 
-_spec = importlib.util.spec_from_file_location(
-    "software_engineering_api_main",
-    _team_dir / "api" / "main.py",
-)
-_api_main = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_api_main)
 app = _api_main.app
 
 
