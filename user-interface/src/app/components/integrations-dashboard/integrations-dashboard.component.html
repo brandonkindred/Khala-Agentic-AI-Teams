@@ -695,6 +695,27 @@
             </mat-form-field>
           </div>
 
+          <div class="form-grid">
+            <mat-form-field appearance="outline">
+              <mat-label>Webhook signing secret (optional)</mat-label>
+              <input
+                matInput
+                type="password"
+                [(ngModel)]="githubWebhookSecret"
+                placeholder="whsec_..."
+                autocomplete="new-password"
+              />
+              @if (githubWebhookSecretConfigured && !githubWebhookSecret) {
+                <mat-hint align="end">Saved</mat-hint>
+              }
+              <mat-hint>
+                Required to let collaborators trigger a review by commenting
+                <code>&#64;khala review</code> on a PR. Set the same secret on the GitHub webhook
+                pointing at <code>/api/integrations/github/events</code>.
+              </mat-hint>
+            </mat-form-field>
+          </div>
+
           <div class="form-grid form-grid--two">
             <mat-form-field appearance="outline">
               <mat-label>Owner / Organization</mat-label>

@@ -8,6 +8,7 @@ GitHubClient and a stubbed CodeReviewAgent — no network, no LLM).
 from __future__ import annotations
 
 from typing import Any, Callable, Optional
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -657,6 +658,255 @@ class TestReviewEndpoint:
         review_app["github"]["client"].fail_get_pr = True
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 502
+
+    def test_duplicate_review_for_same_pr_returns_409(self, review_app, monkeypatch) -> None:
+        """A second review while one is already running for the same PR is rejected 409 —
+        the cross-worker duplicate-review guard (also covers the manual UI trigger)."""
+        api = review_app["api"]
+        active = {
+            "job_id": "existing-job",
+            "status": "running",
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [active])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 409
+        assert "already running" in resp.json()["detail"]
+        assert "existing-job" in resp.json()["detail"]
+
+    def test_running_job_for_different_pr_does_not_block(self, review_app, monkeypatch) -> None:
+        """An active review for a DIFFERENT PR (or an issue run) must not block this PR."""
+        api = review_app["api"]
+        other = {
+            "job_id": "other-job",
+            "status": "running",
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 999},
+        }
+        issue_run = {
+            "job_id": "issue-job",
+            "status": "running",
+            "github_context": {"owner": "o", "repo": "r", "issue_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [other, issue_run])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+
+    def test_stale_heartbeat_review_does_not_block_and_marks_zombie_failed(
+        self, review_app, monkeypatch
+    ) -> None:
+        """A crash-orphaned review job (heartbeat far past the staleness cutoff) must not
+        block new reviews of the PR with 409 forever, and is best-effort marked failed."""
+        from datetime import datetime, timedelta, timezone
+
+        api = review_app["api"]
+        stale_stamp = (
+            datetime.now(timezone.utc) - timedelta(seconds=api._REVIEW_GUARD_HEARTBEAT_STALE_S + 60)
+        ).isoformat()
+        zombie = {
+            "job_id": "zombie-job",
+            "status": "running",
+            "last_heartbeat_at": stale_stamp,
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [zombie])
+        marked: list[tuple[str, dict]] = []
+        real_update = api.update_job
+        monkeypatch.setattr(
+            api,
+            "update_job",
+            lambda job_id, **kw: (marked.append((job_id, kw)), real_update(job_id, **kw))[-1],
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200  # unblocked — the zombie no longer counts as running
+        zombie_updates = [kw for jid, kw in marked if jid == "zombie-job"]
+        assert any(kw.get("status") == "failed" for kw in zombie_updates)
+
+    def test_fresh_heartbeat_review_still_blocks(self, review_app, monkeypatch) -> None:
+        """A review whose worker heartbeated recently is live and must keep blocking."""
+        from datetime import datetime, timezone
+
+        api = review_app["api"]
+        live = {
+            "job_id": "live-job",
+            "status": "running",
+            "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [live])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 409
+
+    def test_far_future_heartbeat_treated_as_stale_not_live(self, review_app, monkeypatch) -> None:
+        """A stamp beyond the clock-skew tolerance in the future is implausible (bad
+        clock or corrupt data) — it must NOT count as live, or a dead job would block
+        reviews until that future time passes. Mirrors _answer_wait_heartbeat_fresh."""
+        from datetime import datetime, timedelta, timezone
+
+        api = review_app["api"]
+        far_future = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=api._HEARTBEAT_CLOCK_SKEW_TOLERANCE_S + 3600)
+        ).isoformat()
+        bad = {
+            "job_id": "future-job",
+            "status": "running",
+            "last_heartbeat_at": far_future,
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [bad])
+        monkeypatch.setattr(api, "update_review", lambda *a, **kw: None)
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200  # unblocked
+
+    def test_slightly_future_heartbeat_within_skew_is_live(self, review_app, monkeypatch) -> None:
+        """NTP drift up to the tolerance must still count as live (keeps blocking)."""
+        from datetime import datetime, timedelta, timezone
+
+        api = review_app["api"]
+        slight_future = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=api._HEARTBEAT_CLOCK_SKEW_TOLERANCE_S - 2)
+        ).isoformat()
+        live = {
+            "job_id": "skewed-live-job",
+            "status": "running",
+            "last_heartbeat_at": slight_future,
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [live])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 409
+
+    def test_missing_heartbeat_stamp_treated_as_live(self, review_app, monkeypatch) -> None:
+        """No last_heartbeat_at → treated as live (fail toward blocking duplicates, not
+        starting them) — the job service stamps it on every create/update, so a missing
+        stamp means an unfamiliar store, not a dead worker."""
+        api = review_app["api"]
+        unstamped = {
+            "job_id": "unstamped-job",
+            "status": "running",
+            "github_context": {"owner": "o", "repo": "r", "pr_number": 7},
+        }
+        monkeypatch.setattr(api, "list_jobs", lambda **kw: [unstamped])
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 409
+
+    def test_pr_review_admission_serializes_within_process(self, review_app) -> None:
+        """Two concurrent admissions for the same PR must not overlap — the lock makes
+        the duplicate scan + job creation atomic within the process."""
+        import threading as _threading
+        import time as _time
+
+        api = review_app["api"]
+        order: list[str] = []
+        entered = _threading.Event()
+        release = _threading.Event()
+
+        def first() -> None:
+            with api._pr_review_admission("o", "r", 7):
+                entered.set()
+                release.wait(5)
+                order.append("first-exit")
+
+        def second() -> None:
+            with api._pr_review_admission("o", "r", 7):
+                order.append("second-enter")
+
+        t1 = _threading.Thread(target=first)
+        t1.start()
+        assert entered.wait(5)
+        t2 = _threading.Thread(target=second)
+        t2.start()
+        _time.sleep(0.1)  # give second a window to (wrongly) enter while first holds
+        assert "second-enter" not in order
+        release.set()
+        t1.join(5)
+        t2.join(5)
+        assert order == ["first-exit", "second-enter"]
+
+    def test_pr_review_admission_takes_pg_advisory_lock_when_postgres_enabled(
+        self, review_app, monkeypatch
+    ) -> None:
+        """With Postgres configured, admission additionally takes a transaction-scoped
+        advisory lock keyed on the casefolded owner/repo#pr — the cross-worker half of
+        the mutual exclusion."""
+        import contextlib as _contextlib
+
+        api = review_app["api"]
+        conn = MagicMock()
+
+        @_contextlib.contextmanager
+        def _fake_conn():
+            yield conn
+
+        import shared_postgres
+
+        monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+        monkeypatch.setattr(shared_postgres, "get_conn", _fake_conn)
+        with api._pr_review_admission("Org", "Repo", 7):
+            pass
+        conn.execute.assert_called_once_with(
+            "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+            ("coding_team_review_pr", "org/repo#7"),
+        )
+
+    def test_pr_review_admission_degrades_when_postgres_unavailable(
+        self, review_app, monkeypatch
+    ) -> None:
+        """A failing advisory-lock acquisition degrades to the process-local lock alone
+        (logged) — admission must never raise or block reviews on a Postgres outage."""
+        import shared_postgres
+
+        api = review_app["api"]
+        monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+        monkeypatch.setattr(
+            shared_postgres, "get_conn", MagicMock(side_effect=RuntimeError("pg down"))
+        )
+        with api._pr_review_admission("o", "r", 7):
+            pass  # must not raise
+
+    def test_review_run_wraps_body_in_liveness_heartbeat(self, review_app, monkeypatch) -> None:
+        """_run_pr_review must hold a continuous heartbeat for the job while the review
+        runs (a single review LLM call can outlast the staleness cutoff), stopping it on
+        exit — asserted via the context-manager protocol on a recording stand-in."""
+        import shared_concurrency
+
+        api = review_app["api"]
+        seen: dict[str, Any] = {}
+
+        class _RecordingHB:
+            def __init__(self, beat, interval, **kw):
+                seen["interval"] = interval
+                seen["kwargs"] = kw
+                seen["beat"] = beat
+
+            def __enter__(self):
+                seen["entered"] = True
+                return self
+
+            def __exit__(self, *exc):
+                seen["exited"] = True
+                return False
+
+        monkeypatch.setattr(shared_concurrency, "BackgroundHeartbeat", _RecordingHB)
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        assert seen["entered"] and seen["exited"]
+        assert seen["interval"] == api._REVIEW_HEARTBEAT_INTERVAL_S
+        # The beat touches the job's liveness stamp via the job service.
+        seen["beat"]()
+        job_id = resp.json()["job_id"]
+        assert review_app["jobs"].get_job(job_id) is not None
+
+    def test_heartbeat_job_touches_job_service(self, review_app) -> None:
+        from coding_team import job_store as job_store_mod
+
+        fake_jobs = review_app["jobs"]
+        review_app["client"].post("/review-pr", json=_review_body())
+        # Direct contract: heartbeat_job delegates to the job service's heartbeat.
+        jobs = fake_jobs.list_jobs()
+        assert jobs, "a review job should exist"
+        job_store_mod.heartbeat_job(jobs[0]["job_id"])  # must not raise
 
     def test_agent_failure_marks_job_failed(self, review_app) -> None:
         review_app["github"]["agent_output"] = RuntimeError("llm down")
