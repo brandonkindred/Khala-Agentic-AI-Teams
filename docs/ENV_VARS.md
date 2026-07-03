@@ -121,6 +121,17 @@ rate window otherwise. The provider list is the sole source of LLM resolution: w
 `POSTGRES_HOST` unset) and a non-`dummy` provider, `get_client` raises `LLMNotConfiguredError` (there
 is no single-provider env fallback).
 
+### LLM_COMPACTION_CACHE_SIZE
+Capacity of the process-global memoization cache for `compact_text` (`llm_service/compaction.py`),
+default **256**. `compact_text` compacts oversized text (spec, architecture overview, existing
+codebase, etc.) with an LLM; the result is deterministic given `(model, budget, content)`, so it is
+cached in a bounded LRU keyed on that triple and reused on repeated identical calls — most notably
+the code review agent's review→fix→re-review loop, which hands the same shared context to every task
+and every cycle. Only genuine full compactions are cached; every fallback path (LLM failure, empty
+result, or a chunked run with any degraded chunk) is retried rather than frozen. Set to `0` to
+disable the cache (pure passthrough); a value below 0 is floored to 0, and unparseable values fall
+back to the default.
+
 ---
 
 ## Temporal, Security, and Logging
@@ -308,6 +319,16 @@ Absolute ceilings on the spec / architecture-overview / existing-codebase
 excerpts repeated in every review map call. Defaults `16000` / `4000` / `8000`,
 floors `1000` / `500` / `500`.
 
+### CODE_REVIEW_SIBLING_SURFACE_CHARS
+Cap (chars) on the cross-file "sibling surface" block added to every map prompt —
+the top-level symbols (Python `def`/`class`, TS/JS exports) defined by the *other*
+changed files in the submission, shown so the reviewer can flag a reference to a
+symbol a sibling renamed or removed. Default `2000`, floor `0` (`0` drops the
+block). This single value is reserved in the per-chunk code budget
+(`compute_code_review_chunk_chars`), used to truncate `_sibling_surface`, and
+sliced in the prompt, so the reservation, the cache key, and the prompt can never
+diverge.
+
 ### CODE_REVIEW_MAP_PARALLELISM
 Max concurrent review LLM calls per review run, shared by both phases: the map
 phase (chunk reviews) and the later false-positive verification phase (one call
@@ -323,6 +344,27 @@ bisected. Default `8000`, floor `1000`.
 Max bisect-and-retry recursion depth for a failing review chunk before the run
 fails with `CodeReviewUnavailableError`. Default `3`, floor `0` (`0` disables
 bisection; a chunk then gets only the single same-input retry).
+
+### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
+Max entries in the coordinator's process-global map-phase outcome cache. The
+review→fix→re-review loop re-invokes the whole coordinator after every batch fix,
+but a fix only mutates the files that had issues — so most chunks are byte-identical
+to the previous cycle. The cache reuses the prior map-phase result for any chunk
+whose exact LLM input (rendered `### path ###` content + segment notes) and context
+fingerprint (task/spec/architecture/acceptance/profile inputs plus the resolved
+review model) are unchanged, so only the chunks the fix actually touched go back
+through the LLM. Default `512`, floor `0` (`0` disables the cache entirely — every
+chunk is reviewed from scratch). Only fully-reviewed chunk outcomes are cached;
+degraded "not reviewed" outcomes are never stored, so a transient failure is
+retried for real next cycle. The cache covers the **map phase only** — the
+false-positive verification pass always re-runs against the current whole
+submission, so no coverage or fail-safe guarantee is weakened, and a changed
+profile, task context, or model invalidates the key. Each chunk reviewer is also
+given the *sibling surface* (the top-level symbols the other changed files
+define/export), which is folded into the chunk's cache key: a sibling's
+surface change (a renamed/removed export) re-runs the dependent chunk so the
+reviewer can flag the now-broken cross-file reference, while a body-only sibling
+edit leaves the surface — and the cached chunk — unchanged.
 
 ### CODE_REVIEW_FALSE_POSITIVE_FILTER
 Default-on toggle for the false-positive verification pass. After the map-reduce
@@ -599,6 +641,40 @@ Default token for the coding team's `POST /api/coding-team/run-from-github` flow
 Optional override for the GitHub REST base URL used by the coding team's GitHub client
 (`backend/agents/coding_team/github_source/`). Defaults to `https://api.github.com`; set to a GitHub
 Enterprise URL when relevant.
+
+### GITHUB_WEBHOOK_SECRET
+Signing secret for the GitHub webhook receiver `POST /api/integrations/github/events`, which lets a
+collaborator trigger a PR review by commenting `@khala review` on a pull request. The receiver
+verifies each delivery's `X-Hub-Signature-256` HMAC against this secret and rejects mismatches with
+`401`. A secret stored via `PUT /api/integrations/github` (encrypted in Postgres) takes precedence
+over this env var. When neither is set, the receiver fails closed: a `ping` still succeeds (so you can
+verify webhook delivery during setup), but every review-triggering event is refused with `403` until a
+secret is configured — an unsigned request must never be able to start a paid review. Only
+`issue_comment` events from OWNER/MEMBER/COLLABORATOR authors on the configured `owner/repo` trigger a
+review.
+
+### GITHUB_WEBHOOK_DEDUP_TTL_S / GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES
+Tune the webhook receiver's in-process, per-worker de-duplication of GitHub redeliveries (same
+`X-GitHub-Delivery` id). `GITHUB_WEBHOOK_DEDUP_TTL_S` (default `600`, floor `1`) is how long a delivery
+id is remembered; `GITHUB_WEBHOOK_DEDUP_MAX_ENTRIES` (default `1000`, floor `2`) bounds the table size
+(the oldest half is dropped when exceeded). A delivery stays remembered only while its review is (or
+ended up) in flight: a delivery whose review *failed to start* is forgotten again, so GitHub's
+"Redeliver" button (which reuses the same delivery id) can retry it. This is only a fast-path that
+suppresses re-dispatch of a redelivery landing on the *same* worker; the authoritative, cross-worker
+duplicate-review guard is the coding-team `POST /review-pr` endpoint, which serializes admission (a
+process lock plus, when Postgres is configured, a `pg_advisory_xact_lock` keyed on the PR) and rejects
+a second review while one is already running for the PR (and also covers the manual UI trigger). A
+review job whose worker died mid-review stops blocking new reviews once its liveness heartbeat is
+stale (~5 minutes).
+
+### GITHUB_WEBHOOK_SECRET_CACHE_TTL_S
+How long (seconds, default `30`, floor `0` = disable caching) the unified API caches the GitHub
+webhook signing secret between reads. The webhook endpoint verifies every delivery — including pings
+and event types it ignores — and each uncached read opens a fresh Postgres connection, a cost model
+meant for config-page traffic, not per-delivery volume. Saving or clearing the GitHub integration
+invalidates the cache immediately on the worker that handled it; other workers converge within the
+TTL. Store-outage results are cached too (the route fails closed with 503 either way, and caching
+keeps a delivery storm from hammering a database that is already down).
 
 ### GITHUB_DEPENDENCY_CONCURRENCY
 Bounds the concurrent per-issue `blocked_by` dependency fetches that enrich

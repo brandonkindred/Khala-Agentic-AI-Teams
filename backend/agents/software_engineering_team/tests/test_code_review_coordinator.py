@@ -35,7 +35,12 @@ from code_review_agent.models import (
 )
 from pydantic import ValidationError
 
-from llm_service import LLMJsonParseError, LLMRateLimitError, LLMSemanticExhaustionError
+from llm_service import (
+    LLMJsonParseError,
+    LLMRateLimitError,
+    LLMSemanticExhaustionError,
+    LLMTruncatedError,
+)
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
@@ -201,6 +206,65 @@ def test_run_coordinator_with_multi_file_code_merges_chunk_summaries() -> None:
     # Coordinator concatenates chunk summaries with blank lines between.
     assert "Chunk 1" in result.summary
     assert "Chunk 2" in result.summary
+
+
+class _CompactionCountingClient(DummyLLMClient):
+    """Counts LLM compaction calls (``complete`` with the compactor prompt).
+
+    Chunk review still flows through the inherited dummy behavior; only the
+    compaction path (``compact_text`` → ``_compact_single`` → ``complete``) is
+    tallied, identified by the fixed compactor-prompt marker.
+    """
+
+    _COMPACTOR_MARKER = "precise technical content compactor"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.compaction_calls = 0
+        self._lock = threading.Lock()
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:  # type: ignore[override]
+        if self._COMPACTOR_MARKER in prompt:
+            with self._lock:
+                self.compaction_calls += 1
+            return "COMPACTED"
+        return super().complete(prompt, **kwargs)
+
+
+def test_shared_context_compaction_is_memoized_across_runs() -> None:
+    """The oversized spec/architecture/existing-codebase are compacted once and
+    reused on the next coordinator run (the review→fix→re-review loop passes the
+    same shared context each cycle)."""
+    from software_engineering_team.shared.models import SystemArchitecture
+
+    over_budget = "specification detail line. " * 4000  # well over any budget
+    arch = SystemArchitecture(
+        overview="architecture overview line. " * 4000,
+        architecture_document="# Arch",
+        components=[],
+        decisions=[],
+        diagrams={},
+    )
+
+    def _make_input() -> CodeReviewInput:
+        return CodeReviewInput(
+            code="### app/main.py ###\n" + ("x" * 500),
+            task_description="Add feature",
+            language="python",
+            spec_content=over_budget,
+            architecture=arch,
+            existing_codebase="prior codebase line. " * 4000,
+        )
+
+    client = _CompactionCountingClient()
+
+    run_coordinator(client, _make_input())
+    first_run_calls = client.compaction_calls
+    assert first_run_calls > 0  # compaction actually fired on the cold run
+
+    run_coordinator(client, _make_input())
+    # Second run reuses the memoized compactions — no additional compaction calls.
+    assert client.compaction_calls == first_run_calls
 
 
 def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
@@ -976,6 +1040,8 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     assert _is_content_failure(LLMJsonParseError("bad")) is True
     assert _is_content_failure(LLMSemanticExhaustionError("empty")) is True
     assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
+    # A token-limit truncation is recoverable: a smaller chunk yields a smaller review.
+    assert _is_content_failure(LLMTruncatedError("truncated", finish_reason="length")) is True
     # A JSONDecodeError wrapped by strands must still be recognised via the chain.
     wrapped = RuntimeError("agent failed")
     wrapped.__cause__ = json.JSONDecodeError("Expecting value", "x", 0)
@@ -1001,6 +1067,38 @@ def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
     bad_json = json.JSONDecodeError("Expecting value", "not json", 0)
     result = run_coordinator(
         _SelectiveRaiser("FAILME", exc=bad_json),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+    # Completed (no exception), but bad.py is blocked by a high not-reviewed finding.
+    assert result.approved is False
+    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
+    assert not_reviewed and not_reviewed[0].severity == "high"
+    assert not_reviewed[0].file_path == "bad.py"
+
+
+def test_truncated_chunk_review_degrades_not_fails_closed(monkeypatch) -> None:
+    """A chunk whose review response hits the output-token limit
+    (``LLMTruncatedError``, finish_reason=length) is recoverable model output:
+    it must take the degrade path (bisect/retry, then a blocking high
+    not-reviewed finding, run completes) rather than aborting the whole review
+    job with an unexpected exception. Regression test for a real @khala review
+    run that failed with 'code review failed: Response truncated due to token
+    limit (finish_reason=length)'."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    filler_size = cap - 2_000
+    files = {
+        "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
+        "good.py": "ok = 1\n".ljust(filler_size, "#"),
+    }
+    truncated = LLMTruncatedError(
+        "Response truncated due to token limit (finish_reason=length)",
+        partial_content='{"issues": [',
+        finish_reason="length",
+    )
+    result = run_coordinator(
+        _SelectiveRaiser("FAILME", exc=truncated),
         CodeReviewInput(files=files, task_description="t", language="python"),
     )
     # Completed (no exception), but bad.py is blocked by a high not-reviewed finding.
@@ -1061,15 +1159,15 @@ def test_infra_failure_is_detected_through_exception_chain() -> None:
 def test_large_failing_file_bisects_then_raises_with_ranges() -> None:
     """A single big segment that keeps failing bisects by lines until the
     floor, then the run raises naming an unreviewed range."""
-    n_lines = 425
+    # One chunk (below the map cap) but above the bisect floor, and every half
+    # still carries the failure marker. Size to the middle of that window from
+    # the live budget so the test stays valid if the map budget shifts (e.g. the
+    # sibling-surface reservation).
+    budget = compute_code_review_map_chunk_chars(DummyLLMClient())
+    line_len = 41  # 40-char body + "\n"
+    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
     content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
-    # One chunk (below the map cap) but above the bisect floor, and every
-    # half still carries the failure marker.
-    assert (
-        2 * MIN_SPLIT_SEGMENT_CHARS
-        <= len(content)
-        < compute_code_review_map_chunk_chars(DummyLLMClient())
-    )
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
     client = _SelectiveRaiser("FAILME")
     with pytest.raises(CodeReviewUnavailableError) as excinfo:
         run_coordinator(

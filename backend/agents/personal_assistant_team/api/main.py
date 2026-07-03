@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from llm_service import LLMNotConfiguredError
 
 from ..models import AssistantRequest
 from ..orchestrator.agent import PersonalAssistantOrchestrator
@@ -60,6 +62,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(LLMNotConfiguredError)
+async def _llm_not_configured_handler(_request: Request, exc: LLMNotConfiguredError) -> JSONResponse:
+    """Surface a missing LLM provider as a clean 503 instead of a 500/degraded 200.
+
+    The lazy LLM client (see ``shared/llm.py``) defers provider resolution to the
+    first call, and the specialist agents re-raise ``LLMNotConfiguredError`` rather
+    than swallowing it. This handler turns that propagated error into a structured
+    response so direct specialist endpoints fail the run and the operator can add a
+    provider at ``/llm-config``.
+    """
+    return JSONResponse(
+        status_code=503,
+        content={"detail": str(exc), "error": "llm_not_configured"},
+    )
+
 # Serve static files
 STATIC_DIR = Path(__file__).parent / "static"
 if STATIC_DIR.exists():
@@ -87,7 +105,11 @@ async def serve_ui():
     )
 
 
-llm = get_llm_client("personal_assistant")
+# Resolve the LLM lazily so the service can start (and serve health checks /
+# the /llm-config setup flow) even when no provider is configured yet. A
+# missing provider then fails an individual agent run rather than crashing
+# container startup at import time.
+llm = get_llm_client("personal_assistant", lazy=True)
 credential_store = CredentialStore()
 profile_store = UserProfileStore()
 orchestrator = PersonalAssistantOrchestrator(llm, credential_store, profile_store)

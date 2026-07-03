@@ -42,8 +42,8 @@ from typing import Any, ClassVar, Iterable, List, Optional, get_args
 
 from ..spec_dsl import (
     _INDICATOR_PARAM_SPECS,
+    INDICATOR_HELPER_NAME,
     EntryRule,
-    IndicatorName,
     SignalExitRule,
     Source,
     iter_tree_indicator_refs,
@@ -76,23 +76,31 @@ GATE = "code_conformance"
 _ALLOWED_HOOK_NAMES: frozenset[str] = frozenset({"on_bar", "on_fill", "on_end"})
 
 # DSL → set of acceptable AST call-name(s) for the indicator's named
-# implementation. Most map 1:1 with the indicator name; ``bollinger``
-# accepts the ``bollinger_bands`` helper name from
-# ``strategy_lab/executor/indicators.py``.
+# implementation. These are the REAL callable helper names a named call must
+# resolve to — only names the sandbox ``indicators`` module actually exports —
+# derived from the single ``spec_dsl.INDICATOR_HELPER_NAME`` source (which carries
+# the load-time coverage guard). Most map 1:1 with the indicator name; the
+# channel/band indicators map to their helper (``bollinger`` → ``bollinger_bands``,
+# ``donchian`` → ``donchian_channels``, ``keltner`` → ``keltner_channels``). The bare
+# DSL name is intentionally NOT an alias here: ``donchian``/``keltner``/``bollinger``
+# are not exported callables, so a bare ``donchian(...)`` call would
+# ``NameError``/``ImportError`` at runtime and must not satisfy the gate. The DSL name
+# is credited separately via the ``ctx.indicator('<name>', ...)`` accessor in
+# :meth:`_check_indicator_presence`.
 _INDICATOR_ALLOWED_CALL_NAMES: dict[str, frozenset[str]] = {
-    "sma": frozenset({"sma"}),
-    "ema": frozenset({"ema"}),
-    "rsi": frozenset({"rsi"}),
-    "macd": frozenset({"macd"}),
-    "bollinger": frozenset({"bollinger_bands", "bollinger"}),
-    "atr": frozenset({"atr"}),
-    "adx": frozenset({"adx"}),
-    "stochastic": frozenset({"stochastic"}),
-    "vwap": frozenset({"vwap"}),
+    name: frozenset({helper}) for name, helper in INDICATOR_HELPER_NAME.items()
 }
 
-assert set(_INDICATOR_ALLOWED_CALL_NAMES) == set(IndicatorName.__args__), (
-    "indicator allow-list must cover every DSL IndicatorName literal"
+# Every name a strategy might plausibly call as ``self.<name>(...)`` intending an
+# indicator: BOTH the exported helper names (``bollinger_bands``,
+# ``donchian_channels``, … — what the deterministic compiler emits as inline
+# ``self.<helper>`` methods) AND the bare DSL names (``bollinger``, ``donchian``,
+# ``keltner`` — what a hand/LLM author sees in the spec and may copy verbatim).
+# For 13 of the 16 indicators the two coincide; the union covers the three where
+# they differ. The base ``Strategy`` defines none of these, so an undefined
+# ``self.<name>(...)`` to any of them raises ``AttributeError`` at runtime.
+_KNOWN_INDICATOR_HELPER_NAMES: frozenset[str] = frozenset(_INDICATOR_ALLOWED_CALL_NAMES).union(
+    *_INDICATOR_ALLOWED_CALL_NAMES.values()
 )
 
 # Names recognised as the position-snapshot receiver in exit branches.
@@ -102,41 +110,76 @@ _POSITION_RECEIVER_NAMES: frozenset[str] = frozenset({"position", "pos"})
 _VALID_SOURCES: frozenset[str] = frozenset(get_args(Source))
 
 
-def _indicators_in_predicate(when: Any) -> set[str]:
-    """Return the set of DSL indicator names referenced anywhere in ``when``.
+def _iter_required_indicator_refs(spec: Any):
+    """Yield every ``IndicatorRef`` the generated code is required to read.
 
-    ``when`` is a rule's predicate position: a single ``Predicate`` or an
-    ``all_of`` / ``any_of`` tree. Every leaf predicate's indicator sides are
-    collected so a multi-confirmation entry's full indicator set is required of
-    the generated code, not just the first leg.
+    Pre: ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: yields entry-rule refs on both paths; ``SignalExitRule`` refs only on
+    the compiled path — on the custom-code path exits are engine-owned (the
+    engine computes their indicators via ``_EngineExitDispatcher`` and the
+    strategy authors no exit branch), so requiring the code to read an exit-only
+    indicator would contradict the engine-owned-exits contract. This is the
+    single encoding of the "which rules count as required" policy; both
+    :func:`_collect_required_indicators` and :func:`_required_bollinger_derived_bands`
+    project it so they can never disagree on scope.
     """
-    return {ref.name for ref in iter_tree_indicator_refs(when)}
+    if spec is None:
+        return
+    for rule in getattr(spec, "entry_rules", []) or []:
+        if isinstance(rule, EntryRule):
+            yield from iter_tree_indicator_refs(rule.when)
+    if not getattr(spec, "requires_custom_code", False):
+        for rule in getattr(spec, "exit_rules", []) or []:
+            if isinstance(rule, SignalExitRule):
+                yield from iter_tree_indicator_refs(rule.when)
 
 
 def _collect_required_indicators(spec: Any) -> set[str]:
     """Indicator names the generated code must read at runtime.
 
     Pre: ``spec`` is a ``StrategySpec`` or ``None``.
-    Post: returns the union of indicator names the code is required to
-    compute. Entry-rule indicators are always included — entries are
-    authored inline on both the compiled and custom-code paths.
-    ``SignalExitRule`` indicators are included only for the compiled path:
-    on the custom-code path exits are engine-owned (the engine computes
-    their indicators via ``_EngineExitDispatcher`` and the strategy
-    authors no exit branch), so requiring the code to read an exit-only
-    indicator would contradict the engine-owned-exits contract.
+    Post: returns the union of indicator names required per the policy in
+    :func:`_iter_required_indicator_refs`.
     """
-    if spec is None:
-        return set()
-    refs: set[str] = set()
-    for rule in getattr(spec, "entry_rules", []) or []:
-        if isinstance(rule, EntryRule):
-            refs |= _indicators_in_predicate(rule.when)
-    if not getattr(spec, "requires_custom_code", False):
-        for rule in getattr(spec, "exit_rules", []) or []:
-            if isinstance(rule, SignalExitRule):
-                refs |= _indicators_in_predicate(rule.when)
-    return refs
+    return {ref.name for ref in _iter_required_indicator_refs(spec)}
+
+
+# Bollinger bands the ``bollinger_bands`` helper returns directly, so a plain
+# call reads them and no selector is required.
+_BOLLINGER_BASE_BANDS: frozenset[str] = frozenset({"upper", "middle", "lower"})
+# Derived bands are every other accepted ``bollinger`` band — currently
+# ``percent_b``/``bandwidth`` — which the helper does NOT return; they only
+# materialise when explicitly selected. Derived from the DSL band validator so a
+# future derived band added to spec_dsl is picked up automatically (the
+# ``.allowed`` attribute is set by ``spec_dsl._one_of``); the empty-set guard
+# fails loudly at import if that contract ever changes.
+_BOLLINGER_DERIVED_BANDS: frozenset[str] = (
+    frozenset(_INDICATOR_PARAM_SPECS["bollinger"]["optional"]["band"][1].allowed)
+    - _BOLLINGER_BASE_BANDS
+)
+if not _BOLLINGER_DERIVED_BANDS:
+    raise RuntimeError(
+        "Bollinger band validator exposes no derived bands beyond "
+        f"{sorted(_BOLLINGER_BASE_BANDS)}; spec_dsl._one_of.allowed contract changed."
+    )
+
+
+def _required_bollinger_derived_bands(spec: Any) -> set[str]:
+    """Derived Bollinger bands (e.g. ``percent_b``/``bandwidth``) the code must produce.
+
+    Pre: ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: returns the derived bands any required Bollinger ref selects, over the
+    same rule scope as :func:`_collect_required_indicators` (both project
+    :func:`_iter_required_indicator_refs`). Base bands (upper/middle/lower) are
+    not tracked — the ``bollinger_bands`` helper returns them directly, so a
+    plain call suffices; the derived bands need the selector, so they are
+    credited only by a band-matched read.
+    """
+    return {
+        ref.param("band")
+        for ref in _iter_required_indicator_refs(spec)
+        if ref.name == "bollinger" and ref.param("band") in _BOLLINGER_DERIVED_BANDS
+    }
 
 
 def _collect_called_names_in_methods(cls: ast.ClassDef, method_names: frozenset[str]) -> set[str]:
@@ -326,6 +369,203 @@ def _collect_ctx_indicator_names(cls: ast.ClassDef, method_names: frozenset[str]
         if name:
             out.add(name)
     return out
+
+
+def _keyword_node(node: ast.Call, key: str) -> Optional[ast.keyword]:
+    """Return ``node``'s ``key=`` keyword AST node, or ``None`` when absent."""
+    for kw in node.keywords:
+        if kw.arg == key:
+            return kw
+    return None
+
+
+def _literal_str(node: Optional[ast.AST]) -> Optional[str]:
+    """Return the value of a string-constant AST node, else ``None`` (dynamic)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _is_self_call(node: ast.Call, attr: str) -> bool:
+    """True iff ``node`` is a ``self.<attr>(...)`` method call."""
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == attr
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    )
+
+
+def _class_defines_method(cls: ast.ClassDef, name: str) -> bool:
+    """True iff ``cls`` directly defines a method named ``name``.
+
+    Pre: ``cls`` is a Strategy ClassDef. Post: True only when :func:`_iter_strategy_methods`
+    (the module's single definition of "method directly defined on ``cls``") yields
+    a ``def name`` — used to confirm that a ``self.<name>(...)`` call resolves to a
+    real method rather than an ``AttributeError`` (the base ``Strategy`` provides
+    no indicator helpers; only the compiler's emitted module defines them inline).
+    """
+    return any(m.name == name for m in _iter_strategy_methods(cls))
+
+
+def _collect_produced_bollinger_bands(
+    cls: ast.ClassDef, method_names: frozenset[str]
+) -> tuple[set[str], bool]:
+    """Bollinger selectors the on_bar-reachable code produces, and whether any is dynamic.
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are the on_bar-reachable
+    methods.
+    Post: returns ``(produced, dynamic)``. ``produced`` holds the string-literal
+    bands materialised by a valid selector-aware read:
+
+      * ``ctx.indicator('bollinger', ..., band='<b>')`` — the custom-code accessor;
+      * ``self.bollinger_bands(..., select='<b>')`` — ONLY when the class actually
+        defines a ``bollinger_bands`` method (the compiler's emitted inline helper).
+        The base ``Strategy`` provides no such method, so a custom strategy writing
+        ``self.bollinger_bands`` without defining it would ``AttributeError`` at
+        runtime; it is not credited here and is flagged by
+        :func:`_invalid_bollinger_select_calls`.
+
+    ``dynamic`` is True when such a read carries a NON-literal band/select
+    (``band=self.BAND``): the value is runtime-valid but unresolvable statically,
+    so the caller abstains rather than demanding a band it cannot confirm — matching
+    the gate's abstain-on-dynamic policy elsewhere. A plain ``bollinger_bands(...)``
+    with no ``select=`` yields only base bands and produces nothing here.
+    """
+    defines_helper = _class_defines_method(cls, "bollinger_bands")
+    produced: set[str] = set()
+    dynamic = False
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if not isinstance(node, ast.Call):
+                continue
+            if _is_ctx_indicator_call(node) and _ctx_indicator_arg_name(node) == "bollinger":
+                kw = _keyword_node(node, "band")
+            elif _is_self_call(node, "bollinger_bands") and defines_helper:
+                kw = _keyword_node(node, "select")
+            else:
+                continue
+            if kw is None:
+                continue
+            lit = _literal_str(kw.value)
+            if lit is not None:
+                produced.add(lit)
+            else:
+                dynamic = True
+    return produced, dynamic
+
+
+def _iter_reachable_calls(cls: ast.ClassDef, method_names: frozenset[str]) -> Iterable[ast.Call]:
+    """Yield every ``ast.Call`` in the bodies of ``cls`` methods reachable from on_bar.
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are the on_bar-reachable
+    method names. Post: each call node executed at runtime, once, in source order —
+    the shared traversal behind the per-call conformance checks so they don't each
+    re-walk the class body.
+    """
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if isinstance(node, ast.Call):
+                yield node
+
+
+def _undefined_self_indicator_helper_calls(
+    cls: ast.ClassDef, method_names: frozenset[str]
+) -> list[str]:
+    """Reachable ``self.<helper>(...)`` calls to an indicator helper the class never defines.
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable.
+    Post: one message per distinct indicator-helper name (``sma``, ``macd``,
+    ``bollinger_bands``, ``donchian_channels``, …) that is called as ``self.<name>``
+    but not defined on the class. The compiler emits these helpers as inline
+    ``self.<name>`` methods and DOES define them, so compiled strategies are clean;
+    a custom (hand/LLM-authored) strategy that copies the ``self.<helper>`` calling
+    convention without emitting the helper body raises ``AttributeError`` on the
+    first bar. Flag it (like invalid ctx reads) so the refinement loop fixes the
+    call — read indicators via ``ctx.indicator('<name>', ...)`` or the imported
+    named helper (e.g. ``sma(bars, 50)``) instead.
+    """
+    defined = {m.name for m in _iter_strategy_methods(cls)}
+    flagged: set[str] = set()
+    out: list[str] = []
+    for node in _iter_reachable_calls(cls, method_names):
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        recv = node.func.value
+        helper = node.func.attr
+        if (
+            isinstance(recv, ast.Name)
+            and recv.id == "self"
+            and helper in _KNOWN_INDICATOR_HELPER_NAMES
+            and helper not in defined
+            and helper not in flagged
+        ):
+            flagged.add(helper)
+            out.append(
+                f"self.{helper}(...) is called but the strategy defines no '{helper}' "
+                "method; the base Strategy provides no indicator helpers, so this raises "
+                "AttributeError at runtime. Read indicators via "
+                "``ctx.indicator('<name>', ...)`` (preferred) or the imported named helper "
+                f"(e.g. ``sma(bars, 50)``), not ``self.{helper}(...)``."
+            )
+    return out
+
+
+def _invalid_bollinger_select_calls(
+    cls: ast.ClassDef, method_names: frozenset[str], import_aliases: Optional[dict[str, str]] = None
+) -> list[str]:
+    """Reachable NON-self ``bollinger_bands(..., select=...)`` calls (a runtime TypeError).
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable;
+    ``import_aliases`` maps ``from indicators import bollinger_bands as bb`` bindings.
+    Post: one message per bare / ``indicators.``-qualified / aliased
+    ``bollinger_bands(..., select=...)`` call. The sandbox scalar helper
+    ``bollinger_bands(data, period=20, num_std=2.0)`` has no ``select`` param, so
+    such a call raises ``TypeError``. ``self.bollinger_bands`` is excluded here: the
+    compiler's inline helper accepts ``select`` (valid), and an UNDEFINED
+    ``self.bollinger_bands`` is caught generically by
+    :func:`_undefined_self_indicator_helper_calls` (an ``AttributeError``, not this
+    ``TypeError``).
+    """
+    aliases = import_aliases or {}
+    out: list[str] = []
+    for node in _iter_reachable_calls(cls, method_names):
+        if _keyword_node(node, "select") is None:
+            continue
+        call_name = _get_call_name(node)
+        if aliases.get(call_name, call_name) != "bollinger_bands":
+            continue
+        if _is_self_call(node, "bollinger_bands"):
+            continue  # compiler inline helper (valid) or undefined-self (caught elsewhere)
+        out.append(
+            "bollinger_bands(..., select=...) is invalid: the sandbox "
+            "``indicators.bollinger_bands(data, period, num_std)`` helper has no "
+            "``select`` param and raises TypeError at runtime. Read a derived "
+            "Bollinger band via ``ctx.indicator('bollinger', ..., band='percent_b')``."
+        )
+    return out
+
+
+def _collect_import_aliases(tree: ast.AST) -> dict[str, str]:
+    """Map ``from indicators import <real> as <alias>`` bindings: alias -> real name.
+
+    Pre: ``tree`` is the parsed module AST of the strategy source.
+    Post: returns ``{alias: real_name}`` for every aliased import from the sandbox
+    ``indicators`` module, so a call to the alias can be credited as the real
+    exported helper it binds. Non-aliased imports (already matched by their own
+    name) and imports from other modules are ignored.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "indicators":
+            for a in node.names:
+                if a.asname:
+                    aliases[a.asname] = a.name
+    return aliases
 
 
 def _invalid_ctx_indicator_reads(
@@ -866,8 +1106,10 @@ class CodeConformanceGate(GateResultsMixin):
             # checks, and only when a check actually reads them.
             cctx = _ConformanceCtx(cls=cls, spec=spec)
 
+            import_aliases = _collect_import_aliases(tree)
+
             results: List[QualityGateResult] = []
-            results.extend(self._check_indicator_presence(cctx))
+            results.extend(self._check_indicator_presence(cctx, import_aliases))
             results.extend(self._check_symbol_gate(cctx))
             results.extend(self._check_entry_coverage(cctx))
             results.extend(self._note_signal_exit_engine_ownership(cctx))
@@ -881,7 +1123,9 @@ class CodeConformanceGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Check 1 — indicator presence
     # ------------------------------------------------------------------
-    def _check_indicator_presence(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+    def _check_indicator_presence(
+        self, cctx: _ConformanceCtx, import_aliases: Optional[dict[str, str]] = None
+    ) -> Iterable[QualityGateResult]:
         results: List[QualityGateResult] = []
         # A malformed ``ctx.indicator(...)`` read fails at runtime regardless of
         # whether the spec requires that indicator — flag it here (with a precise
@@ -889,6 +1133,17 @@ class CodeConformanceGate(GateResultsMixin):
         # shadow gate would swallow the exception into a confusing no-trade run.
         target_symbols = frozenset(getattr(cctx.spec, "target_symbols", None) or [])
         for detail in _invalid_ctx_indicator_reads(cctx.cls, cctx.reachable, target_symbols):
+            results.append(self._critical(detail))
+        # A ``bollinger_bands(..., select=...)`` call likewise always TypeErrors in
+        # the sandbox (the scalar helper takes no ``select``), regardless of spec —
+        # including alias-called forms, resolved via ``import_aliases``.
+        for detail in _invalid_bollinger_select_calls(cctx.cls, cctx.reachable, import_aliases):
+            results.append(self._critical(detail))
+        # A ``self.<helper>(...)`` call to any indicator helper the class never
+        # defines raises ``AttributeError`` on the first bar — the base Strategy
+        # provides no such helpers; only the compiler emits them inline. Flag it
+        # generically (covers ``self.bollinger_bands``, ``self.macd``, ``self.sma``…).
+        for detail in _undefined_self_indicator_helper_calls(cctx.cls, cctx.reachable):
             results.append(self._critical(detail))
 
         required = _collect_required_indicators(cctx.spec)
@@ -898,16 +1153,24 @@ class CodeConformanceGate(GateResultsMixin):
             # recognised forms — the engine-backed ``ctx.indicator('<name>', ...)``
             # accessor (preferred) and the legacy named call (e.g. ``sma(...)``,
             # which the deterministic compiler still emits).
-            called = _collect_called_names_in_methods(cctx.cls, cctx.reachable)
-            called |= _collect_ctx_indicator_names(cctx.cls, cctx.reachable)
+            call_names = _collect_called_names_in_methods(cctx.cls, cctx.reachable)
+            # Resolve ``from indicators import bollinger_bands as bb`` bindings so a
+            # call to the alias credits the real exported helper it names.
+            if import_aliases:
+                call_names = call_names | {
+                    import_aliases[n] for n in call_names if n in import_aliases
+                }
+            ctx_names = _collect_ctx_indicator_names(cctx.cls, cctx.reachable)
             missing: List[str] = []
             for name in sorted(required):
-                # The named-call allow-list always contains the DSL name itself,
-                # and ``_collect_ctx_indicator_names`` keys ``ctx.indicator``
-                # reads by that same DSL name, so one intersection test covers
-                # both forms.
-                allowed = _INDICATOR_ALLOWED_CALL_NAMES.get(name, frozenset({name}))
-                if not (called & allowed):
+                # Two independent credit paths, kept separate so a bare DSL-name
+                # call (e.g. ``donchian(...)``) is NOT mistaken for a real read:
+                #  * ``ctx.indicator('<name>', ...)`` — keyed by the DSL name.
+                #  * a legacy named call — must resolve to a REAL exported helper
+                #    name in the allow-list (``sma``, ``donchian_channels``, …),
+                #    never the bare DSL alias (which isn't an exported callable).
+                call_aliases = _INDICATOR_ALLOWED_CALL_NAMES.get(name, frozenset({name}))
+                if name not in ctx_names and not (call_names & call_aliases):
                     missing.append(name)
             if missing:
                 results.append(
@@ -919,6 +1182,27 @@ class CodeConformanceGate(GateResultsMixin):
                         "and calls in unreachable helpers are not recognised."
                     )
                 )
+
+            # A derived Bollinger band (percent_b/bandwidth) needs the selector:
+            # the ``bollinger_bands`` helper returns only upper/middle/lower, so a
+            # plain call satisfies the name-level check above yet never computes
+            # the requested series. Credit these bands only when a reachable read
+            # actually selects them; abstain entirely when a bollinger read uses a
+            # dynamic (non-literal) band, which could satisfy any required band.
+            required_derived = _required_bollinger_derived_bands(cctx.spec)
+            if required_derived:
+                produced, dynamic = _collect_produced_bollinger_bands(cctx.cls, cctx.reachable)
+                if not dynamic:
+                    for band in sorted(required_derived - produced):
+                        results.append(
+                            self._critical(
+                                f"Spec requires the Bollinger '{band}' band but no method "
+                                "reachable from on_bar produces it. Read it via "
+                                f"``ctx.indicator('bollinger', ..., band='{band}')``; a plain "
+                                "bollinger_bands(...) call returns only upper/middle/lower "
+                                "(the sandbox helper has no ``select`` param)."
+                            )
+                        )
         return results
 
     # ------------------------------------------------------------------

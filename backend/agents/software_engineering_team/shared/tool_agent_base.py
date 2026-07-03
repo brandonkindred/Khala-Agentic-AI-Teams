@@ -210,7 +210,9 @@ class BaseReviewToolAgent:
         return getattr(mod, "Agent")
 
     def _run_agent(self, model, prompt: str) -> str:
-        return str(self._agent_factory()(model=model)(prompt)).strip()
+        from software_engineering_team.shared.strands_model import run_strands_agent
+
+        return run_strands_agent(self._agent_factory(), model, prompt)
 
     def _build_code_text(self, current_files: Dict[str, str]) -> str:
         return "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:20])[

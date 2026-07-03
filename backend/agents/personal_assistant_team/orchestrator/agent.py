@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from llm_service import LLMNotConfiguredError
+
 from ..calendar_agent.agent import CalendarAgent
 from ..deal_finder_agent.agent import DealFinderAgent
 from ..doc_generator_agent.agent import DocGeneratorAgent
@@ -87,6 +89,11 @@ class PersonalAssistantOrchestrator:
                 think=False,
                 objective="classify user intent",
             )
+        except LLMNotConfiguredError:
+            # No LLM provider configured: the run must fail so the UI can route
+            # the operator to /llm-config, not silently fall back to a default
+            # intent and mark the job completed.
+            raise
         except JSONExtractionFailure as e:
             logger.error("Intent classification failed with JSON extraction error:\n%s", e)
             return Intent(primary="general", confidence=0.5)
@@ -158,6 +165,10 @@ class PersonalAssistantOrchestrator:
                 actions.append(action_result)
                 results["general"] = action_result.result
 
+        except LLMNotConfiguredError:
+            # A missing LLM provider is a configuration failure, not a handled
+            # per-request error: let it propagate so the job is marked failed.
+            raise
         except Exception as e:
             logger.error("Error handling request: %s", e)
             actions.append(
@@ -607,6 +618,10 @@ class PersonalAssistantOrchestrator:
             )
             response_message = data.get("message", "I've processed your request.")
             suggestions = data.get("follow_up_suggestions", [])
+        except LLMNotConfiguredError:
+            # Surface the misconfiguration as a failed run rather than a canned
+            # fallback response.
+            raise
         except Exception as e:
             logger.warning("Response generation failed: %s", e)
 
@@ -740,6 +755,10 @@ class PersonalAssistantOrchestrator:
                 actions.append(action_result)
                 results["general"] = action_result.result
 
+        except LLMNotConfiguredError:
+            # A missing LLM provider is a configuration failure, not a handled
+            # per-request error: let it propagate so the job is marked failed.
+            raise
         except Exception as e:
             logger.error("Error handling request: %s", e)
             actions.append(

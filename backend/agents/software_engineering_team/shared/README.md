@@ -12,7 +12,6 @@ shared/
 ├── repo_writer.py            # File writing utilities
 ├── repo_utils.py             # Repository utilities
 ├── git_utils.py              # Git operations
-├── command_runner.py         # Shell command execution
 ├── task_parsing.py           # Task parsing utilities
 ├── task_validation.py        # Task validation
 ├── task_utils.py             # Task utilities
@@ -28,7 +27,6 @@ shared/
 ├── prompt_utils.py           # Prompt building utilities
 ├── sla_best_practices.py     # SLA/quality best practices
 ├── planning_cache.py         # Planning result caching
-├── error_parsing.py          # Error message parsing
 └── test_spec_expectations.py # Test specification helpers
 ```
 
@@ -250,12 +248,15 @@ commit_changes(repo_path, "Add new API endpoint")
 merge_branch(repo_path, "feature/new-api", "main")
 ```
 
-## Command Runner (`command_runner.py`)
+## Command Runner (moved to `shared_command_runner`)
 
-Safe shell command execution:
+The command runner now lives in the neutral top-level package
+`shared_command_runner` (see `backend/agents/shared_command_runner/`) so both the
+software-engineering team and the coding team can use it without importing each
+other. Safe shell command execution:
 
 ```python
-from shared.command_runner import run_command
+from shared_command_runner import run_command
 
 result = run_command(
     ["npm", "install"],
@@ -357,15 +358,16 @@ from shared.coding_standards import (
 config = get_linting_config("python")
 ```
 
-## Error Parsing (`error_parsing.py`)
+## Error Parsing (moved to `shared_command_runner.error_parsing`)
 
-Parses error messages from build/test output:
+Parses error messages from build/test output. Now part of the neutral
+`shared_command_runner` package (see `backend/agents/shared_command_runner/`):
 
 ```python
-from shared.error_parsing import parse_errors
+from shared_command_runner import parse_command_failure
 
-errors = parse_errors(build_output)
-# Returns list of structured error objects with file, line, message
+failures = parse_command_failure("pytest", stdout, stderr)
+# Returns list of structured ParsedFailure objects with file, line, message
 ```
 
 ## SLA Best Practices (`sla_best_practices.py`)

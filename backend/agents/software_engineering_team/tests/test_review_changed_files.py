@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from shared_repo_context.repo_utils import read_files_as_dict
 from software_engineering_team.shared.git_utils import list_changed_and_deleted
-from software_engineering_team.shared.repo_utils import read_files_as_dict
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -259,7 +259,7 @@ def test_read_files_as_dict_passes_large_file_untruncated(tmp_path: Path) -> Non
 
 def test_read_repo_files_as_dict_all_types_excludes_build_and_secrets(tmp_path: Path) -> None:
     """The whole-repo reader covers all text types, skipping build dirs + secrets."""
-    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+    from shared_repo_context.repo_utils import read_repo_files_as_dict
 
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "config.yaml").write_text("a: 1\n", encoding="utf-8")
@@ -1031,7 +1031,7 @@ def test_writer_output_keys_none() -> None:
 def test_strip_surrogates_is_injective() -> None:
     """Distinct invalid byte sequences map to distinct, encodable strings, so two
     such filenames do not collide to one review key."""
-    from software_engineering_team.shared.repo_utils import strip_surrogates
+    from shared_repo_context.repo_utils import strip_surrogates
 
     a = strip_surrogates("a\udcff.py")
     b = strip_surrogates("a\udcfe.py")
@@ -1046,7 +1046,7 @@ def test_strip_surrogates_leaves_ordinary_backslash_paths_intact() -> None:
     """A valid path containing a literal backslash is not rewritten — preserving
     it matters more than the purely theoretical surrogate-vs-literal collision, so
     the review-map key keeps matching the real on-disk file."""
-    from software_engineering_team.shared.repo_utils import strip_surrogates
+    from shared_repo_context.repo_utils import strip_surrogates
 
     literal = strip_surrogates("a\\udcff.py")  # backslash-u-d-c-f-f, a real filename
     assert literal == "a\\udcff.py"  # unchanged, single backslash
@@ -1054,7 +1054,7 @@ def test_strip_surrogates_leaves_ordinary_backslash_paths_intact() -> None:
 
 
 def test_is_sensitive_path() -> None:
-    from software_engineering_team.shared.repo_utils import is_sensitive_path
+    from shared_repo_context.repo_utils import is_sensitive_path
 
     # Secrets — excluded (basename, anchored .env, key suffix)
     assert is_sensitive_path(".env")
@@ -1116,7 +1116,7 @@ def test_read_files_as_dict_surrogate_and_literal_backslash_collision(tmp_path: 
 def test_strip_surrogates_preserves_literal_backslash() -> None:
     """An ordinary character — including a literal backslash in a valid POSIX
     filename — is left untouched; only lone surrogates are escaped."""
-    from software_engineering_team.shared.repo_utils import strip_surrogates
+    from shared_repo_context.repo_utils import strip_surrogates
 
     # A real backslash in a path must round-trip unchanged so the review-map key
     # still matches the on-disk file for downstream fix logic.
@@ -1132,7 +1132,7 @@ def test_read_repo_files_as_dict_repo_under_excluded_dir_name(tmp_path: Path) ->
     """When the repo root itself sits under a dir named like an excluded one
     (``node_modules``), files are still read — exclusion is repo-relative, so the
     fallback does not degrade to an empty (trivially approved) review."""
-    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+    from shared_repo_context.repo_utils import read_repo_files_as_dict
 
     repo = tmp_path / "node_modules" / "myproject"
     repo.mkdir(parents=True)
@@ -1426,7 +1426,7 @@ def test_read_files_as_dict_omitted_ignores_extension_filter(tmp_path: Path) -> 
 def test_read_repo_files_as_dict_excludes_virtualenv(tmp_path: Path) -> None:
     """The whole-repo fallback skips venv/.venv/__pycache__ so a local virtual
     environment does not flood the review with dependency files."""
-    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+    from shared_repo_context.repo_utils import read_repo_files_as_dict
 
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
     for d in (".venv", "venv", "__pycache__"):
@@ -1440,7 +1440,7 @@ def test_read_repo_files_as_dict_excludes_virtualenv(tmp_path: Path) -> None:
 
 
 def test_sanitize_path_for_text_escapes_controls_keeps_unicode() -> None:
-    from software_engineering_team.shared.repo_utils import sanitize_path_for_text
+    from shared_repo_context.repo_utils import sanitize_path_for_text
 
     assert sanitize_path_for_text("a\nb\tc.py") == "a\\nb\\tc.py"
     assert sanitize_path_for_text("café.py") == "café.py"  # printable unicode kept
@@ -1591,7 +1591,7 @@ def test_whole_repo_review_input_surfaces_omissions(tmp_path: Path) -> None:
 def test_read_repo_files_as_dict_prunes_excluded_dirs_during_walk(tmp_path: Path) -> None:
     """Excluded dirs are pruned during the walk (os.walk), not enumerated then
     discarded — a .git/node_modules subtree is never descended into."""
-    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+    from shared_repo_context.repo_utils import read_repo_files_as_dict
 
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
     nm = tmp_path / "node_modules" / "dep"
@@ -1864,7 +1864,7 @@ def test_read_files_as_dict_skips_fifo_without_hanging(tmp_path: Path) -> None:
 def test_read_repo_files_as_dict_includes_directory_symlink(tmp_path: Path) -> None:
     """A symlink to a directory is surfaced (by its link target), not silently
     dropped by os.walk's default no-follow behavior."""
-    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+    from shared_repo_context.repo_utils import read_repo_files_as_dict
 
     (tmp_path / "real").mkdir()
     (tmp_path / "real" / "f.py").write_text("x = 1\n", encoding="utf-8")
@@ -2065,7 +2065,7 @@ def test_emptied_uses_real_path_not_review_key() -> None:
     # emptied maps it back through key_to_path.
     import tempfile
 
-    from software_engineering_team.shared.repo_utils import read_files_as_dict
+    from shared_repo_context.repo_utils import read_files_as_dict
 
     with tempfile.TemporaryDirectory() as d:
         p = Path(d)
@@ -2112,7 +2112,7 @@ def test_read_paths_at_merge_base_skips_oversized_blob(tmp_path: Path, monkeypat
 
 def test_read_repo_files_as_dict_excluded_dir_symlink_not_surfaced(tmp_path: Path) -> None:
     """A symlink whose name is an excluded dir (node_modules) is not emitted."""
-    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+    from shared_repo_context.repo_utils import read_repo_files_as_dict
 
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "external").mkdir()
@@ -2179,7 +2179,7 @@ def test_blocking_real_secret_and_unreadable_source(tmp_path: Path) -> None:
 
 def test_read_files_as_dict_omits_oversized_text(tmp_path: Path, monkeypatch) -> None:
     """A text file over the cap is omitted (not loaded whole, not truncated)."""
-    from software_engineering_team.shared import repo_utils
+    from shared_repo_context import repo_utils
 
     (tmp_path / "big.txt").write_text("a" * 1000, encoding="utf-8")
     monkeypatch.setattr(repo_utils, "_MAX_REVIEW_FILE_BYTES", 100)
@@ -2192,7 +2192,7 @@ def test_read_files_as_dict_omits_oversized_text(tmp_path: Path, monkeypatch) ->
 
 def test_read_files_as_dict_binary_without_early_nul(tmp_path: Path) -> None:
     """A binary file whose first chunk has no NUL is still detected (chunked scan)."""
-    from software_engineering_team.shared import repo_utils
+    from shared_repo_context import repo_utils
 
     # First _READ_CHUNK_BYTES are NUL-free text; a NUL appears later.
     data = b"x" * (repo_utils._READ_CHUNK_BYTES + 10) + b"\x00tail"
@@ -2208,7 +2208,7 @@ def test_read_files_as_dict_binary_without_early_nul(tmp_path: Path) -> None:
 
 def test_read_repo_files_as_dict_skips_worktree_git_file(tmp_path: Path) -> None:
     """A regular file named .git (linked worktree gitlink) is not put in review."""
-    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+    from shared_repo_context.repo_utils import read_repo_files_as_dict
 
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / ".git").write_text("gitdir: /host/path/.git/worktrees/wt\n", encoding="utf-8")
@@ -2242,7 +2242,7 @@ def test_find_referencing_paths_caps_mass_deletion(tmp_path: Path) -> None:
 
 
 def test_is_secret_template_path_only_env_family() -> None:
-    from software_engineering_team.shared.repo_utils import is_secret_template_path
+    from shared_repo_context.repo_utils import is_secret_template_path
 
     # Advisory: placeholder env templates.
     assert is_secret_template_path(".env.example") is True
@@ -2271,7 +2271,7 @@ def test_is_secret_template_path_only_env_family() -> None:
 def test_token_is_strong_secret() -> None:
     """The shared per-token predicate matches secret stems, bare and dotted
     basenames, and key/cert suffixes, but not innocuous template tokens."""
-    from software_engineering_team.shared.repo_utils import _token_is_strong_secret
+    from shared_repo_context.repo_utils import _token_is_strong_secret
 
     assert _token_is_strong_secret("secrets") is True  # stem
     assert _token_is_strong_secret("id_rsa") is True  # bare _SENSITIVE_NAMES entry
@@ -2439,7 +2439,7 @@ def test_find_referencing_paths_nonpython_bare_keyword_import(tmp_path: Path) ->
 def test_read_repo_files_as_dict_reviews_file_named_like_excluded_dir(tmp_path: Path) -> None:
     """A regular file literally named like an excluded dir (e.g. `dist`) is still
     reviewed; only a `.git` worktree file is dropped."""
-    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+    from shared_repo_context.repo_utils import read_repo_files_as_dict
 
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "dist").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")  # a script

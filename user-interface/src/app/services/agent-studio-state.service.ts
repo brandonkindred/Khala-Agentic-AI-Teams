@@ -1,5 +1,6 @@
 import { Injectable, computed, signal } from '@angular/core';
 import { AgentStudioHandoffState, STUDIO_STAGES, StudioStageStatus } from '../models/agent-studio.model';
+import type { ProcessStatus } from '../models/agentic-team.model';
 
 /** Total number of stages in the journey. */
 const STAGE_COUNT = STUDIO_STAGES.length;
@@ -23,6 +24,21 @@ export class AgentStudioStateService {
   readonly personaId = signal<string | null>(null);
   /** Stage-1 build slot — the agent being authored (becomes registryAgentId on save). */
   readonly draftAgentId = signal<string | null>(null);
+  /** Stage-3 gate: whether the composed team's roster fully covers its process needs. */
+  readonly rosterFullyStaffed = signal(false);
+  /** Stage-3 gate: status of the process selected as the Stage-4 handoff target. */
+  readonly composeProcessStatus = signal<ProcessStatus | null>(null);
+
+  /**
+   * `${teamId}::${manifestId}` keys the Stage-2 handoff agent has already been
+   * auto-added for (spec §2.4 handoff). Kept in shared session state — not on
+   * the Compose component — so the "at most one auto-add per (team, agent)"
+   * guard survives the Compose component being destroyed and recreated across a
+   * Stage-4 → "iterate roster" back-loop. Instance-local tracking would reset on
+   * that recreation and re-add a handoff agent the user had manually removed,
+   * since `registryAgentId` intentionally stays set for the back-loop.
+   */
+  private readonly handoffConsumed = new Set<string>();
 
   // ── Stepper position ───────────────────────────────────────────────────────
   private readonly _activeStage = signal(0);
@@ -118,6 +134,36 @@ export class AgentStudioStateService {
   setDraftAgentId(id: string | null): void {
     this.draftAgentId.set(id);
   }
+  setRosterFullyStaffed(staffed: boolean): void {
+    this.rosterFullyStaffed.set(staffed);
+  }
+  setComposeProcessStatus(status: ProcessStatus | null): void {
+    this.composeProcessStatus.set(status);
+  }
+
+  /**
+   * Whether the Stage-2 handoff agent has already been auto-added for `key`
+   * (`${teamId}::${manifestId}`) this session.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `true` iff `markHandoffConsumed(key)` was called
+   *   since the last `reset()`.
+   */
+  hasConsumedHandoff(key: string): boolean {
+    return this.handoffConsumed.has(key);
+  }
+
+  /**
+   * Record that the Stage-2 handoff agent's auto-add was attempted for `key`
+   * (`${teamId}::${manifestId}`), so it is not retried this session — including
+   * after the Compose component is recreated by a Stage-4 back-loop.
+   *
+   * Preconditions: none.
+   * Postconditions: `hasConsumedHandoff(key)` returns `true`.
+   */
+  markHandoffConsumed(key: string): void {
+    this.handoffConsumed.add(key);
+  }
 
   /**
    * Reset the session — clear handoff state and return to Stage 1.
@@ -129,6 +175,9 @@ export class AgentStudioStateService {
     this.processId.set(null);
     this.personaId.set(null);
     this.draftAgentId.set(null);
+    this.rosterFullyStaffed.set(false);
+    this.composeProcessStatus.set(null);
+    this.handoffConsumed.clear();
     this._activeStage.set(0);
     this._maxReachedStage.set(0);
   }

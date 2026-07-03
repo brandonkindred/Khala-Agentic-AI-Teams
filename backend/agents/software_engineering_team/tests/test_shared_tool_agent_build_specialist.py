@@ -12,8 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from software_engineering_team.shared import command_runner as cr
-from software_engineering_team.shared.command_runner import CommandResult
+from shared_command_runner import runner as cr
+from shared_command_runner.runner import CommandResult
 from software_engineering_team.shared.tool_agent_build_specialist import (
     BuildSpecialistToolAgentBase,
     run_backend_build_and_parse,
@@ -88,7 +88,7 @@ def test_backend_pytest_failure_reports_issue(tmp_path: Path, monkeypatch):
 
 def test_backend_pytest_failure_maps_parsed_failures(tmp_path: Path, monkeypatch):
     """When pytest output parses into structured failures, each becomes one issue."""
-    from software_engineering_team.shared import error_parsing
+    from shared_command_runner import error_parsing
 
     (tmp_path / "a.py").write_text("print('ok')\n")
     tests_dir = tmp_path / "tests"
@@ -167,7 +167,7 @@ def test_backend_pip_install_failure_is_non_fatal(tmp_path: Path, monkeypatch):
             success=False, exit_code=1, stdout="boom", stderr=""
         ),
     )
-    from software_engineering_team.shared import error_parsing
+    from shared_command_runner import error_parsing
 
     monkeypatch.setattr(error_parsing, "parse_command_failure", lambda *a, **kw: [])
     issues = run_backend_build_and_parse(tmp_path)
@@ -203,7 +203,7 @@ def test_frontend_no_project_returns_empty(tmp_path: Path):
 
 
 def test_frontend_build_failure_generic_issue(tmp_path: Path, monkeypatch):
-    from software_engineering_team.shared import error_parsing
+    from shared_command_runner import error_parsing
 
     (tmp_path / "package.json").write_text('{"name": "x"}\n')
     monkeypatch.setattr(cr, "detect_frontend_framework", lambda p: "react")
@@ -221,7 +221,7 @@ def test_frontend_build_failure_generic_issue(tmp_path: Path, monkeypatch):
 
 def test_frontend_build_failure_maps_parsed_failures(tmp_path: Path, monkeypatch):
     """When the build output parses into structured failures, each becomes one issue."""
-    from software_engineering_team.shared import error_parsing
+    from shared_command_runner import error_parsing
 
     (tmp_path / "package.json").write_text('{"name": "x"}\n')
     monkeypatch.setattr(cr, "detect_frontend_framework", lambda p: "angular")
@@ -246,7 +246,7 @@ def test_frontend_build_failure_maps_parsed_failures(tmp_path: Path, monkeypatch
 
 def _capture_parse_kind(tmp_path: Path, monkeypatch, framework: str) -> str:
     """Run the frontend runner for ``framework`` and return the parse kind it used."""
-    from software_engineering_team.shared import error_parsing
+    from shared_command_runner import error_parsing
 
     (tmp_path / "package.json").write_text('{"name": "x"}\n')
     monkeypatch.setattr(cr, "detect_frontend_framework", lambda p: framework)

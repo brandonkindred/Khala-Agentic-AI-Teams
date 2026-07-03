@@ -32,7 +32,9 @@ def run_meal_plan_activity(job_id: str, request_dict: Dict[str, Any]) -> None:
             logger.info("Job %s cancelled before execution", job_id)
             return
 
-        from nutrition_meal_planning_team.api.main import orchestrator
+        from nutrition_meal_planning_team.api.main import get_orchestrator
+
+        orchestrator = get_orchestrator()
 
         activity.heartbeat("generating_nutrition_plan")
 

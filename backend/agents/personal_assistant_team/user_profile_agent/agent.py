@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
+from llm_service import LLMNotConfiguredError
+
 from ..models import ProfileUpdateSignal, UserProfile
 from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
@@ -118,6 +120,8 @@ class UserProfileAgent:
                 think=False,
                 objective="extract user preferences",
             )
+        except LLMNotConfiguredError:
+            raise
         except JSONExtractionFailure as e:
             logger.error("Failed to extract preferences (JSON extraction failed):\n%s", e)
             return ProfileExtractionResult(

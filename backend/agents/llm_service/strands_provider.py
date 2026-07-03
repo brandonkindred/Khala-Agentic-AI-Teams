@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional
+from typing import Any, AsyncGenerator, Dict, Optional
+
+from strands.models.model import Model
 
 from .factory import get_client
 from .interface import LLMClient
@@ -62,12 +64,77 @@ def _active_provider_key_fingerprint(provider: Optional[str] = None) -> str:
     return sha256_fingerprint(api_key) if api_key else "no-key"
 
 
+class _LazyLLMClientModel(Model):
+    """Defers provider resolution until the first actual model call.
+
+    Resolving a provider eagerly — e.g. when a team constructs its
+    orchestrator as a process-wide singleton at import time — fails hard with
+    ``LLMNotConfiguredError`` when no provider is configured yet, which can
+    crash container startup (or break every endpoint on first use) before the
+    service can serve health checks or the ``/llm-config`` setup flow. This
+    wrapper lets that construction succeed without a live provider; the real
+    ``LLMClientModel`` is built on the first ``stream``/``structured_output``/
+    ``get_max_context_tokens``/``clone`` call, so a missing provider fails the
+    individual agent run instead of process startup.
+
+    ``strands.Agent.__init__`` only stores the ``Model`` it's given — it does
+    not call ``get_config``/``stream``/etc. during construction — so wrapping
+    a Strands ``Agent`` around this lazy stand-in is safe.
+
+    Preconditions: ``agent_key`` is ``None`` or a known agent key.
+    Invariants: the backing ``LLMClientModel`` is resolved at most once (cached).
+    """
+
+    def __init__(self, agent_key: Optional[str] = None, *, response_format: str = "json") -> None:
+        self._agent_key = agent_key
+        self._response_format = response_format
+        self._delegate: Optional[LLMClientModel] = None
+
+    def _resolve(self) -> LLMClientModel:
+        if self._delegate is None:
+            self._delegate = get_strands_model(
+                self._agent_key, response_format=self._response_format
+            )
+        return self._delegate
+
+    def update_config(self, **model_config: Any) -> None:
+        self._resolve().update_config(**model_config)
+
+    def get_config(self) -> Dict[str, Any]:
+        return self._resolve().get_config()
+
+    @property
+    def config(self) -> Dict[str, Any]:
+        return self._resolve().config
+
+    @property
+    def client(self) -> LLMClient:
+        return self._resolve().client
+
+    def get_max_context_tokens(self) -> int:
+        return self._resolve().get_max_context_tokens()
+
+    def clone(self, **overrides: Any) -> LLMClientModel:
+        return self._resolve().clone(**overrides)
+
+    async def stream(self, *args: Any, **kwargs: Any) -> AsyncGenerator[Dict[str, Any], None]:
+        async for event in self._resolve().stream(*args, **kwargs):
+            yield event
+
+    async def structured_output(
+        self, *args: Any, **kwargs: Any
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        async for event in self._resolve().structured_output(*args, **kwargs):
+            yield event
+
+
 def get_strands_model(
     agent_key: Optional[str] = None,
     *,
     response_format: str = "json",
     client: Optional[LLMClient] = None,
-) -> LLMClientModel:
+    lazy: bool = False,
+) -> Model:
     """Return a Strands-compatible model backed by the centralized LLM service.
 
     Model resolution follows the same rules as ``llm_service.factory.get_client``:
@@ -92,14 +159,27 @@ def get_strands_model(
     matching the adapter-side factory's contract. When omitted, results are
     cached by ``(provider, model_id, base_url, response_format, agent_key, api_key_fingerprint)``.
 
+    ``lazy`` defers provider resolution (and therefore ``LLMNotConfiguredError``)
+    until the first actual model call, returning a stand-in ``Model`` immediately.
+    Use this at module/import scope — e.g. a process-wide orchestrator singleton
+    — so a missing provider doesn't crash startup or block non-LLM endpoints;
+    the agent run fails instead, matching the documented no-LLM behavior.
+    Incompatible with an explicit ``client`` (which already bypasses resolution).
+
     Args:
         agent_key: Optional agent identifier for per-agent model overrides.
         response_format: ``"json"`` (default) or ``"text"``.
         client: Optional pre-built ``LLMClient`` to wrap (bypasses cache).
+        lazy: When True, defer provider resolution until first use.
 
     Returns:
-        A configured ``LLMClientModel`` instance backed by the centralized LLM client.
+        A configured ``LLMClientModel`` instance backed by the centralized LLM client,
+        or (when ``lazy=True``) a stand-in ``Model`` that resolves one on first use.
     """
+    if lazy:
+        assert client is None, "lazy=True is incompatible with an explicit client"
+        return _LazyLLMClientModel(agent_key, response_format=response_format)
+
     from . import config as llm_config
 
     # Resolve the active provider ONCE and thread it through the model-id and

@@ -8,17 +8,17 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from coding_team.models import StackSpec
-from software_engineering_team.shared import branch_utils
-from software_engineering_team.shared.git_utils import (
+from shared_dev_models import Task as SETask
+from shared_dev_models import TaskStatus as SETaskStatus
+from shared_dev_models import TaskType
+from shared_git import branch_utils
+from shared_git.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
     create_feature_branch,
     ensure_development_branch,
     initialize_new_repo,
 )
-from software_engineering_team.shared.models import Task as SETask
-from software_engineering_team.shared.models import TaskStatus as SETaskStatus
-from software_engineering_team.shared.models import TaskType
 
 logger = logging.getLogger(__name__)
 

@@ -20,6 +20,7 @@ from typing import Any, Dict, Literal, Optional, Protocol, Sequence, Tuple
 import pandas as pd
 
 from ..indicators.streaming import IndicatorRegistry
+from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
     AllOf,
     AnyOf,
@@ -280,6 +281,14 @@ def evaluate_signal_exit_rules(
 # ---------------------------------------------------------------------------
 
 
+# Trailing-window bound for the alignment/coverage walk — the engine's retention
+# ceiling, shared with ``StreamingHistoryView.max_bars``, the compiler's
+# ``_VWAP_HISTORY``, and the conformance shadow context. Cumulative indicators
+# (``vwap``, ``obv``) re-base to the window start, so all sites derive from the one
+# ``STREAMING_WINDOW_BARS`` constant to keep validation and runtime windows identical.
+_SERIES_WINDOW: int = STREAMING_WINDOW_BARS
+
+
 class _FrameBar:
     """Bar adapter over one OHLCV frame row, for the registry walk below."""
 
@@ -304,10 +313,15 @@ def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
     audit re-evaluates predicates with the same math the engine ran. ``NaN``
     during warm-up (the registry returns ``None``).
 
-    Forward-walks one fresh ``IndicatorRegistry`` over the frame, feeding it the
-    growing prefix so it advances by a single recurrence step per row. This is a
-    post-hoc, per-(ref, symbol) cached pass — not the engine hot path — so the
-    walk's cost (O(window) per row; cumulative for VWAP) is acceptable.
+    Forward-walks one fresh ``IndicatorRegistry`` over the frame, feeding it a
+    deque bounded to ``_SERIES_WINDOW`` (the same retention ceiling as the engine's
+    ``StreamingHistoryView``) so it advances by a single recurrence step per row.
+    The bound is what keeps the cumulative indicators (``vwap``, ``obv``) faithful:
+    they re-base to the window start, so an unbounded prefix would report a
+    full-history value while the runtime traded on the trailing window. Windowed
+    indicators are unaffected (they only read the trailing ``period`` bars). This is
+    a post-hoc, per-(ref, symbol) cached pass — not the engine hot path — so the
+    walk's cost (O(window) per row) is acceptable.
     """
     n = len(df)
     if n == 0:
@@ -323,10 +337,10 @@ def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
         return float(arr[idx]) if arr is not None else 0.0
 
     reg = IndicatorRegistry()
-    bars: list[_FrameBar] = []
+    window: deque[_FrameBar] = deque(maxlen=_SERIES_WINDOW)
     out: list[float] = []
     for idx in range(n):
-        bars.append(
+        window.append(
             _FrameBar(
                 _at(opens, idx),
                 _at(highs, idx),
@@ -335,7 +349,10 @@ def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
                 _at(volumes, idx),
             )
         )
-        value = _registry_indicator(reg, ref, bars)
+        # ``list(window)`` mirrors ``StreamingHistoryView._ensure_bars_list``: the
+        # registry needs a sliceable/indexable sequence, and the deque has already
+        # dropped any bar beyond the trailing window so engine and audit agree.
+        value = _registry_indicator(reg, ref, list(window))
         out.append(math.nan if value is None else value)
     return pd.Series(out, index=df.index, dtype=float)
 
@@ -468,6 +485,26 @@ def _registry_indicator(
         )
     if name == "vwap":
         return reg.vwap(bars)
+    if name == "donchian":
+        return reg.donchian(bars, period=int(ref.param("period")), select=str(ref.param("band")))
+    if name == "keltner":
+        return reg.keltner(
+            bars,
+            period=int(ref.param("period")),
+            atr_period=int(ref.param("atr_period")),
+            multiplier=float(ref.param("multiplier")),
+            select=str(ref.param("band")),
+        )
+    if name == "obv":
+        return reg.obv(bars)
+    if name == "mfi":
+        return reg.mfi(bars, period=int(ref.param("period")))
+    if name == "roc":
+        return reg.roc(bars, period=int(ref.param("period")), source=ref.source)
+    if name == "cci":
+        return reg.cci(bars, period=int(ref.param("period")))
+    if name == "williams_r":
+        return reg.williams_r(bars, period=int(ref.param("period")))
     raise ValueError(f"unknown indicator name: {name!r}")
 
 
@@ -504,12 +541,13 @@ class StreamingHistoryView:
     backfills correctly and a sparsely-queried ref catches up without a stale
     read. The counter is never recycled within a process.
 
-    The deque is bounded to ``max_bars`` (default 500, matching the
-    ``StrategyContext._ingest_bar`` retention ceiling — engine and sandbox must
-    compute MACD/VWAP over the same trailing window for the conformance gate).
+    The deque is bounded to ``max_bars`` (default :data:`STREAMING_WINDOW_BARS`,
+    matching the ``StrategyContext._ingest_bar`` retention ceiling — engine and
+    sandbox must compute MACD/VWAP over the same trailing window for the
+    conformance gate).
     """
 
-    def __init__(self, max_bars: int = 500) -> None:
+    def __init__(self, max_bars: int = STREAMING_WINDOW_BARS) -> None:
         self._bars: deque[BarRecord] = deque(maxlen=max_bars)
         self._max_bars = max_bars
         self._append_counter: int = 0

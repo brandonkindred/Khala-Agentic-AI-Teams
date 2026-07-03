@@ -203,6 +203,207 @@ def test_get_integrations_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert github["enabled"] is False
 
 
+def _install_inmemory_github_credentials(store_mod, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Patch the store module's credential helpers with an in-memory dict.
+
+    Lets the GitHub config tests round-trip PAT + webhook secret without Postgres.
+    """
+    import unified_api.integration_credentials as creds_mod
+
+    creds: dict[tuple[str, str], str] = {}
+
+    def _set(service: str, key: str, value: str) -> None:
+        if value:
+            creds[(service, key)] = value
+        else:
+            creds.pop((service, key), None)
+
+    def _status(service: str, key: str) -> tuple[str, bool]:
+        return creds.get((service, key), ""), True
+
+    def _delete(service: str, key: str) -> None:
+        creds.pop((service, key), None)
+
+    monkeypatch.setattr(store_mod, "set_credential", _set)
+    monkeypatch.setattr(store_mod, "get_credential_status", _status)
+    monkeypatch.setattr(store_mod, "delete_credential", _delete)
+    # get_github_webhook_secret_status() goes through
+    # resolve_credential_with_env_fallback(), which is defined in (and calls
+    # get_credential_status from) integration_credentials.py directly — patching only
+    # the name imported into store_mod's namespace above doesn't reach it, so patch the
+    # source too, at the same in-memory dict.
+    monkeypatch.setattr(creds_mod, "get_credential_status", _status)
+    return creds
+
+
+def test_set_github_config_persists_webhook_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A webhook secret is stored as an encrypted credential and reported as configured."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    creds = _install_inmemory_github_credentials(store, monkeypatch)
+
+    store.set_github_config(enabled=True, owner="acme", repo="widget", webhook_secret="whsec_abc")
+
+    assert creds[("github", "webhook_secret")] == "whsec_abc"
+    assert store.get_github_webhook_secret_status()[0] == "whsec_abc"
+    cfg = store.get_github_config()
+    assert cfg["webhook_secret_configured"] is True
+
+
+def test_set_github_config_blank_webhook_secret_preserves_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty webhook_secret on a later save does not erase the stored one."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    creds = _install_inmemory_github_credentials(store, monkeypatch)
+
+    store.set_github_config(enabled=True, owner="acme", repo="widget", webhook_secret="whsec_abc")
+    store.set_github_config(enabled=True, owner="acme", repo="widget", default_label="x")
+
+    assert creds[("github", "webhook_secret")] == "whsec_abc"
+
+
+def test_get_github_webhook_secret_env_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no stored secret, GITHUB_WEBHOOK_SECRET is used; absent both → None."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    _install_inmemory_github_credentials(store, monkeypatch)
+
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "env_secret")
+    assert store.get_github_webhook_secret_status()[0] == "env_secret"
+    assert store.get_github_config()["webhook_secret_configured"] is True
+
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    # Reads are served from a short-TTL cache (per-delivery webhook traffic must not open
+    # a Postgres connection per event); drop it so the env-var removal is visible now. In
+    # production an env-var change requires a process restart anyway, so the cache can
+    # never mask one.
+    store._invalidate_webhook_secret_cache()
+    assert store.get_github_webhook_secret_status()[0] is None
+    assert store.get_github_config()["webhook_secret_configured"] is False
+
+
+def test_get_github_webhook_secret_status_reports_stored_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    creds = _install_inmemory_github_credentials(store, monkeypatch)
+    creds[("github", "webhook_secret")] = "whsec_abc"
+
+    assert store.get_github_webhook_secret_status() == ("whsec_abc", True)
+
+
+def test_get_github_webhook_secret_status_caches_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-delivery webhook traffic must not open a credential-store connection per
+    event: within the TTL, repeated reads are served from cache (one underlying read)."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    calls = {"n": 0}
+
+    def _counting_resolve(service, key, env_var):
+        calls["n"] += 1
+        return ("whsec_abc", True)
+
+    monkeypatch.setattr(store, "resolve_credential_with_env_fallback", _counting_resolve)
+    store._invalidate_webhook_secret_cache()
+    assert store.get_github_webhook_secret_status() == ("whsec_abc", True)
+    assert store.get_github_webhook_secret_status() == ("whsec_abc", True)
+    assert calls["n"] == 1
+
+
+def test_webhook_secret_cache_invalidated_by_set_and_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rotating or clearing the secret must take effect immediately on this worker —
+    set_github_config and clear_github_config drop the cache."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    creds = _install_inmemory_github_credentials(store, monkeypatch)
+    creds[("github", "webhook_secret")] = "whsec_old"
+
+    assert store.get_github_webhook_secret_status()[0] == "whsec_old"
+    store.set_github_config(enabled=True, owner="acme", repo="widget", webhook_secret="whsec_new")
+    assert store.get_github_webhook_secret_status()[0] == "whsec_new"
+
+    store.clear_github_config()
+    assert store.get_github_webhook_secret_status()[0] is None
+
+
+def test_get_github_config_store_reachable_false_when_secret_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store outage on the webhook-secret read must surface as store_reachable=False
+    even when the PAT read succeeded — otherwise the panel shows the stored secret as
+    'not configured' next to a healthy store flag, inviting a needless secret rotation."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    monkeypatch.setattr(store, "get_credential_status", lambda s, k: ("ghp_tok", True))
+    monkeypatch.setattr(store, "get_github_webhook_secret_status", lambda: (None, False))
+
+    cfg = store.get_github_config()
+    assert cfg["token_configured"] is True
+    assert cfg["store_reachable"] is False
+    assert cfg["webhook_secret_configured"] is False
+
+
+def test_get_github_webhook_secret_status_env_fallback_is_reachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    _install_inmemory_github_credentials(store, monkeypatch)
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "env_secret")
+
+    assert store.get_github_webhook_secret_status() == ("env_secret", True)
+
+
+def test_get_github_webhook_secret_status_unconfigured_but_reachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing stored, no env var, store answered → (None, True): safe to skip
+    signature verification (first-time setup), not a fail-closed situation."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    _install_inmemory_github_credentials(store, monkeypatch)
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+
+    assert store.get_github_webhook_secret_status() == (None, True)
+
+
+def test_get_github_webhook_secret_status_unreachable_store_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A credential-store outage (not merely 'nothing stored') must report
+    store_reachable=False so the webhook route fails closed instead of treating an
+    outage the same as 'no secret configured'."""
+    import unified_api.integration_credentials as creds_mod
+
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setattr(creds_mod, "get_credential_status", lambda service, key: ("", False))
+
+    assert store.get_github_webhook_secret_status() == (None, False)
+
+
+def test_get_github_webhook_secret_status_env_var_overrides_unreachable_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An env-var-configured secret is never blocked by a Postgres outage — the env
+    fallback has no store dependency, so it's reported as reachable regardless."""
+    import unified_api.integration_credentials as creds_mod
+
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "env_secret")
+    monkeypatch.setattr(creds_mod, "get_credential_status", lambda service, key: ("", False))
+
+    assert store.get_github_webhook_secret_status() == ("env_secret", True)
+
+
+def test_clear_github_config_removes_webhook_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disconnecting GitHub deletes the stored webhook secret along with the PAT."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    creds = _install_inmemory_github_credentials(store, monkeypatch)
+
+    store.set_github_config(
+        enabled=True, owner="acme", repo="widget", personal_access_token="ghp_x", webhook_secret="whsec_abc"
+    )
+    store.clear_github_config()
+
+    assert ("github", "webhook_secret") not in creds
+    assert ("github", "personal_access_token") not in creds
+
+
 def test_get_slack_config_invalid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """get_slack_config returns defaults when file contains invalid JSON."""
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
@@ -251,4 +452,3 @@ def test_clear_medium_session_storage_removes_disk_file(tmp_path: Path, monkeypa
     assert not session_path.exists()
     cfg = store.get_medium_config()
     assert cfg["session_configured"] is False
-
