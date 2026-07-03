@@ -81,6 +81,22 @@ def update_job(
     _client(cache_dir).update_job(job_id, heartbeat=heartbeat, **fields)
 
 
+def heartbeat_job(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Touch the job's ``last_heartbeat_at`` without changing any other field.
+
+    Preconditions: ``job_id`` names an existing job.
+    Postconditions: the job service stamps ``last_heartbeat_at`` to now. Liveness
+        consumers (e.g. the PR-review admission guard's staleness cutoff) read this
+        stamp to distinguish a live worker from one that died mid-job. Raises only if
+        the job-service call fails — callers beating from a background thread should
+        wrap it (``BackgroundHeartbeat`` takes an ``on_error``).
+    """
+    _client(cache_dir).heartbeat(job_id)
+
+
 def update_job_task_graph(
     job_id: str,
     task_graph_snapshot: Dict[str, Any],

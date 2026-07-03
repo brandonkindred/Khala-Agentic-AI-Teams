@@ -35,7 +35,12 @@ from code_review_agent.models import (
 )
 from pydantic import ValidationError
 
-from llm_service import LLMJsonParseError, LLMRateLimitError, LLMSemanticExhaustionError
+from llm_service import (
+    LLMJsonParseError,
+    LLMRateLimitError,
+    LLMSemanticExhaustionError,
+    LLMTruncatedError,
+)
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
@@ -1035,6 +1040,8 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     assert _is_content_failure(LLMJsonParseError("bad")) is True
     assert _is_content_failure(LLMSemanticExhaustionError("empty")) is True
     assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
+    # A token-limit truncation is recoverable: a smaller chunk yields a smaller review.
+    assert _is_content_failure(LLMTruncatedError("truncated", finish_reason="length")) is True
     # A JSONDecodeError wrapped by strands must still be recognised via the chain.
     wrapped = RuntimeError("agent failed")
     wrapped.__cause__ = json.JSONDecodeError("Expecting value", "x", 0)
@@ -1060,6 +1067,38 @@ def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
     bad_json = json.JSONDecodeError("Expecting value", "not json", 0)
     result = run_coordinator(
         _SelectiveRaiser("FAILME", exc=bad_json),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+    # Completed (no exception), but bad.py is blocked by a high not-reviewed finding.
+    assert result.approved is False
+    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
+    assert not_reviewed and not_reviewed[0].severity == "high"
+    assert not_reviewed[0].file_path == "bad.py"
+
+
+def test_truncated_chunk_review_degrades_not_fails_closed(monkeypatch) -> None:
+    """A chunk whose review response hits the output-token limit
+    (``LLMTruncatedError``, finish_reason=length) is recoverable model output:
+    it must take the degrade path (bisect/retry, then a blocking high
+    not-reviewed finding, run completes) rather than aborting the whole review
+    job with an unexpected exception. Regression test for a real @khala review
+    run that failed with 'code review failed: Response truncated due to token
+    limit (finish_reason=length)'."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    filler_size = cap - 2_000
+    files = {
+        "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
+        "good.py": "ok = 1\n".ljust(filler_size, "#"),
+    }
+    truncated = LLMTruncatedError(
+        "Response truncated due to token limit (finish_reason=length)",
+        partial_content='{"issues": [',
+        finish_reason="length",
+    )
+    result = run_coordinator(
+        _SelectiveRaiser("FAILME", exc=truncated),
         CodeReviewInput(files=files, task_description="t", language="python"),
     )
     # Completed (no exception), but bad.py is blocked by a high not-reviewed finding.

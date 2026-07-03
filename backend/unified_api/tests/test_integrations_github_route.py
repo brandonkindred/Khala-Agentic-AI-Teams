@@ -129,7 +129,7 @@ def test_run_issue_returns_400_when_integration_disabled(mock_cfg):
     assert "not enabled" in resp.json()["detail"]
 
 
-@patch(f"{_M}.get_credential_status", return_value=("", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("", True))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_400_when_pat_missing(mock_cfg, mock_status):
     # Store reachable, token genuinely absent → 400 "not configured" (a single read
@@ -140,7 +140,7 @@ def test_run_issue_returns_400_when_pat_missing(mock_cfg, mock_status):
     assert "PAT" in resp.json()["detail"]
 
 
-@patch(f"{_M}.get_credential_status", return_value=("", False))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("", False))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_503_when_credential_store_unreachable(mock_cfg, mock_status):
     # An empty PAT while the credential store is unreachable (the SAME read reports it)
@@ -151,7 +151,7 @@ def test_run_issue_returns_503_when_credential_store_unreachable(mock_cfg, mock_
     assert "credential store" in resp.json()["detail"]
 
 
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_400_when_owner_repo_missing(mock_cfg, mock_status):
     mock_cfg.return_value = {**_GH_CFG, "owner": "", "repo": ""}
@@ -160,7 +160,7 @@ def test_run_issue_returns_400_when_owner_repo_missing(mock_cfg, mock_status):
     assert "owner/repo" in resp.json()["detail"]
 
 
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_503_when_service_url_unset(mock_cfg, mock_status, monkeypatch):
     mock_cfg.return_value = dict(_GH_CFG)
@@ -172,7 +172,7 @@ def test_run_issue_returns_503_when_service_url_unset(mock_cfg, mock_status, mon
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone")
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_502_on_clone_failure(mock_cfg, mock_status, mock_clone, mock_path, monkeypatch):
     """A clone failure (e.g. missing git binary) must be a clean 502, not a 500."""
@@ -273,7 +273,7 @@ def test_get_github_degrades_on_probe_timeout(mock_cfg, mock_meta, monkeypatch):
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_returns_502_when_service_unreachable(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -286,7 +286,7 @@ def test_run_issue_returns_502_when_service_unreachable(mock_cfg, mock_cred, moc
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_returns_504_on_service_timeout(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -299,7 +299,7 @@ def test_run_issue_returns_504_on_service_timeout(mock_cfg, mock_cred, mock_clon
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_propagates_upstream_error_detail(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -313,7 +313,7 @@ def test_run_issue_propagates_upstream_error_detail(mock_cfg, mock_cred, mock_cl
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_upstream_error_with_non_json_body(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -326,7 +326,7 @@ def test_run_issue_upstream_error_with_non_json_body(mock_cfg, mock_cred, mock_c
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_502_on_malformed_success_body(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     """A 200 from the service that is missing required fields is a 502, not a 500."""
@@ -345,7 +345,7 @@ def test_run_issue_502_on_malformed_success_body(mock_cfg, mock_cred, mock_clone
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_success_returns_job(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
@@ -365,7 +365,7 @@ def test_run_issue_success_returns_job(mock_cfg, mock_cred, mock_clone, mock_pat
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_forwards_base_branch(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -621,7 +621,7 @@ def test_resolve_repo_path_operator_override_returned_verbatim():
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_cred, mock_clone, monkeypatch):
     """An auto-derived run clones the per-issue folder and forwards repo_path +
@@ -649,7 +649,7 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
-@patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
 @patch(
     f"{_M}.get_github_config_meta",
     return_value={"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"},
@@ -836,3 +836,328 @@ def test_resolve_repo_path_rejects_missing_owner_or_repo(monkeypatch, missing):
     with pytest.raises(HTTPException) as exc:
         _resolve_repo_path(cfg, issue_number=1)
     assert exc.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# POST /github/events: webhook receiver for the "@khala review" PR-comment trigger
+# ---------------------------------------------------------------------------
+
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
+
+_EVENTS = "/api/integrations/github/events"
+
+
+def _sign(secret: str, body: bytes) -> str:
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def test_github_events_ping_returns_ok():
+    """A ping event with a valid signature short-circuits to {"ok": true}."""
+    body = b'{"zen": "Keep it simple."}'
+    with patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={"X-GitHub-Event": "ping", "X-Hub-Signature-256": _sign("whsec", body)},
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+def test_github_events_rejects_bad_signature():
+    body = b'{"action":"created"}'
+    with patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={"X-GitHub-Event": "issue_comment", "X-Hub-Signature-256": _sign("wrong", body)},
+        )
+    assert resp.status_code == 401
+    assert "signature" in resp.json()["detail"].lower()
+
+
+def test_github_events_refuses_review_events_without_secret():
+    """With no secret configured (store reachable, genuinely unset), a review-triggering
+    event is refused with 403 and never dispatched — an unsigned request must not be able
+    to forge a collaborator comment and spend review budget."""
+    body = b'{"action":"created"}'
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=(None, True)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(_EVENTS, content=body, headers={"X-GitHub-Event": "issue_comment"})
+    assert resp.status_code == 403
+    assert "secret" in resp.json()["detail"].lower()
+    disp.assert_not_called()
+
+
+def test_github_events_ping_allowed_without_secret():
+    """``ping`` is exempt from the no-secret refusal so an operator can verify webhook
+    delivery during setup, before a signing secret is configured. It never dispatches
+    review work, so allowing it is safe."""
+    body = b'{"zen": "Keep it simple."}'
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=(None, True)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(_EVENTS, content=body, headers={"X-GitHub-Event": "ping"})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    disp.assert_not_called()
+
+
+def test_github_events_fails_closed_when_secret_store_unreachable():
+    """No secret found AND the store is unreachable (vs. genuinely unconfigured) must
+    reject with 503, never silently skip verification — an unreachable store could be
+    hiding a real stored secret, and treating that the same as "not configured" would
+    let a forged, unsigned payload through for the duration of the outage."""
+    body = b'{"action":"created"}'
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=(None, False)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(_EVENTS, content=body, headers={"X-GitHub-Event": "issue_comment"})
+    assert resp.status_code == 503
+    assert "credential store" in resp.json()["detail"].lower()
+    disp.assert_not_called()
+
+
+def test_github_events_dispatches_valid_signed_comment():
+    body = b'{"action":"created","issue":{"number":42}}'
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={
+                "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Delivery": "delivery-123",
+                "X-Hub-Signature-256": _sign("whsec", body),
+            },
+        )
+    assert resp.status_code == 200
+    disp.assert_called_once()
+    assert disp.call_args[0][0] == "issue_comment"
+    assert disp.call_args[0][1] == {"action": "created", "issue": {"number": 42}}
+    assert disp.call_args[0][2] == "delivery-123"
+
+
+def test_github_events_returns_400_on_invalid_json():
+    body = b"not json"
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={
+                "X-GitHub-Event": "issue_comment",
+                "X-Hub-Signature-256": _sign("whsec", body),
+            },
+        )
+    assert resp.status_code == 400
+    assert "Invalid JSON" in resp.json()["detail"]
+    disp.assert_not_called()
+
+
+def test_github_events_returns_400_on_non_object_body():
+    """Valid JSON that is not an object (e.g. `[]`) is rejected with 400 rather than
+    letting dispatch's payload.get(...) raise AttributeError → an unhandled 500."""
+    body = b"[]"
+    with (
+        patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)),
+        patch("unified_api.github_events_handler.dispatch_github_event") as disp,
+    ):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={
+                "X-GitHub-Event": "issue_comment",
+                "X-Hub-Signature-256": _sign("whsec", body),
+            },
+        )
+    assert resp.status_code == 400
+    assert "JSON object" in resp.json()["detail"]
+    disp.assert_not_called()
+
+
+def test_github_events_non_ascii_signature_returns_401_not_500():
+    """A crafted non-ASCII X-Hub-Signature-256 must be a clean 401, not a 500 from a
+    TypeError inside hmac.compare_digest. The header is sent as raw bytes with a byte
+    >= 0x80 (Starlette decodes it latin-1 server-side, reproducing the attack)."""
+    body = b'{"action":"created"}'
+    with patch("unified_api.integrations_store.get_github_webhook_secret_status", return_value=("whsec", True)):
+        resp = client.post(
+            _EVENTS,
+            content=body,
+            headers={"X-GitHub-Event": "issue_comment", "X-Hub-Signature-256": b"sha256=deadbeef\xff"},
+        )
+    assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# GET /github config status: webhook_secret_configured flag
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{_M}.get_github_config")
+def test_get_github_reports_webhook_secret_configured(mock_cfg):
+    mock_cfg.return_value = {**_GH_STATUS_CFG, "store_reachable": True, "webhook_secret_configured": True}
+    resp = client.get(_GITHUB_CFG_ENDPOINT)
+    assert resp.status_code == 200
+    assert resp.json()["webhook_secret_configured"] is True
+
+
+@patch(f"{_M}.get_github_config")
+def test_get_github_webhook_secret_unconfigured_defaults_false(mock_cfg):
+    mock_cfg.return_value = {**_GH_STATUS_CFG, "store_reachable": True}
+    resp = client.get(_GITHUB_CFG_ENDPOINT)
+    assert resp.status_code == 200
+    assert resp.json()["webhook_secret_configured"] is False
+
+
+# ---------------------------------------------------------------------------
+# POST /github/review-pr: thin wrapper over the shared _start_pr_review helper
+# ---------------------------------------------------------------------------
+
+_REVIEW_PR = "/api/integrations/github/review-pr"
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_review_pr_success_forwards_pr_number(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {
+                "job_id": "rev-1",
+                "pr_number": 7,
+                "pr_url": "https://github.com/acme/widget/pull/7",
+                "status": "pending",
+                "message": "started",
+            },
+        )
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_PR, json={"pr_number": 7})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["job_id"] == "rev-1"
+    assert fake.calls[0][0] == "http://coding:8103/review-pr"
+    assert fake.calls[0][1]["pr_number"] == 7
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_review_pr_forwards_base_branch(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {"job_id": "rev-2", "pr_number": 7, "pr_url": "u", "status": "pending", "message": ""},
+        )
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_REVIEW_PR, json={"pr_number": 7, "base_branch": "develop"})
+    assert resp.status_code == 200
+    assert fake.calls[0][1]["base_branch"] == "develop"
+
+
+# ---------------------------------------------------------------------------
+# _start_pr_review(token=...): webhook path reuses a pre-resolved PAT (no 2nd read)
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+from unified_api.routes.integrations import _start_pr_review  # noqa: E402
+
+
+def test_start_pr_review_with_token_skips_credential_read(monkeypatch):
+    """When a token is passed, the PAT is NOT re-read via resolve_credential_with_env_fallback;
+    only the JSON-only settings are validated, and the passed token is forwarded."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {"job_id": "rev-9", "pr_number": 7, "pr_url": "u", "status": "pending", "message": ""},
+        )
+    )
+    with (
+        patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG)),
+        patch(f"{_M}.resolve_credential_with_env_fallback", side_effect=AssertionError("must not read PAT")) as cred,
+        patch(f"{_M}.httpx.AsyncClient", return_value=fake),
+    ):
+        result = asyncio.run(_start_pr_review(7, None, token="ghp_pre"))
+    assert result.job_id == "rev-9"
+    assert fake.calls[0][1]["github_token"] == "ghp_pre"
+    cred.assert_not_called()
+
+
+def test_start_pr_review_with_token_400_when_disabled():
+    from fastapi import HTTPException as _HTTPExc
+
+    with (
+        patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "enabled": False}),
+        pytest.raises(_HTTPExc) as exc,
+    ):
+        asyncio.run(_start_pr_review(7, None, token="ghp_pre"))
+    assert exc.value.status_code == 400
+    assert "not enabled" in exc.value.detail
+
+
+def test_start_pr_review_with_token_400_when_owner_repo_missing():
+    from fastapi import HTTPException as _HTTPExc
+
+    with (
+        patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "", "repo": ""}),
+        pytest.raises(_HTTPExc) as exc,
+    ):
+        asyncio.run(_start_pr_review(7, None, token="ghp_pre"))
+    assert exc.value.status_code == 400
+    assert "owner/repo" in exc.value.detail
+
+
+def test_start_pr_review_proceeds_when_expected_owner_repo_match(monkeypatch):
+    """When the caller passes the repo it validated and the configured owner/repo still
+    match (case-insensitively), the review starts normally."""
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(
+        result=_FakeResp(
+            200,
+            {"job_id": "rev-9", "pr_number": 7, "pr_url": "u", "status": "pending", "message": ""},
+        )
+    )
+    with (
+        patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG)),
+        patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_pre", True)),
+        patch(f"{_M}.httpx.AsyncClient", return_value=fake),
+    ):
+        # Different case on purpose — GitHub treats owner/repo case-insensitively.
+        result = asyncio.run(
+            _start_pr_review(7, None, token="ghp_pre", expected_owner="ACME", expected_repo="Widget")
+        )
+    assert result.job_id == "rev-9"
+
+
+def test_start_pr_review_409_when_configured_repo_changed():
+    """If the operator repointed the integration between webhook validation and this
+    worker running, the resolved owner/repo no longer match the repo the caller
+    validated — the review must be refused with 409, never run against the new repo."""
+    from fastapi import HTTPException as _HTTPExc
+
+    with (
+        # Config now points at a DIFFERENT repo than the webhook validated.
+        patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "acme", "repo": "other-repo"}),
+        patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_pre", True)),
+        pytest.raises(_HTTPExc) as exc,
+    ):
+        asyncio.run(
+            _start_pr_review(7, None, token="ghp_pre", expected_owner="acme", expected_repo="widget")
+        )
+    assert exc.value.status_code == 409
+    assert "changed" in exc.value.detail.lower()

@@ -49,7 +49,7 @@ from unified_api.google_browser_login_credentials import (
     google_browser_login_storage_available,
     set_google_browser_login_credentials,
 )
-from unified_api.integration_credentials import get_credential_status
+from unified_api.integration_credentials import resolve_credential_with_env_fallback
 from unified_api.integrations_store import (
     clear_github_config,
     clear_medium_google_oauth_identity,
@@ -597,6 +597,109 @@ async def slack_events(request: Request) -> Any:
     return {"ok": True}
 
 
+@router.post("/github/events")
+async def github_events(request: Request) -> Any:
+    """Receive GitHub webhook deliveries and trigger reviews from PR comments.
+
+    Handles:
+    - ``ping``: GitHub's webhook-setup probe → ``{"ok": true}``
+    - ``issue_comment`` (``action == "created"``): a ``@khala review`` comment from a
+      collaborator on a PR starts the existing code-review flow.
+
+    GitHub expects a fast 2xx (deliveries time out), so event processing is handed to a
+    background thread.
+
+    Preconditions: ``request`` is the raw GitHub webhook delivery; the ``X-GitHub-Event``
+        and ``X-Hub-Signature-256`` headers carry the event type and HMAC signature.
+    Postconditions:
+        - When a webhook secret is configured (stored credential or ``GITHUB_WEBHOOK_SECRET``),
+          the ``X-Hub-Signature-256`` HMAC is verified against the raw body and a mismatch
+          raises ``HTTPException(401)``.
+        - Fails closed on a credential-store outage: if the secret is stored only in
+          Postgres and that store is unreachable, this raises ``HTTPException(503)``
+          rather than silently skipping verification — an unreachable store must never
+          be treated the same as "no secret configured", or a forged payload could pass
+          unverified for the duration of the outage.
+        - Fails closed when no secret is configured: ``ping`` still returns ``{"ok": true}``
+          (so an operator can verify delivery during setup), but every other event —
+          each of which can start a paid review from payload-supplied identity — is
+          refused with ``HTTPException(403)`` until a signing secret is set. An unsigned
+          request must never be able to trigger a review.
+        - ``ping`` deliveries return ``{"ok": true}`` after signature handling.
+        - A non-JSON body raises ``HTTPException(400)``; otherwise the event (with the
+          ``X-GitHub-Delivery`` header, used by :func:`dispatch_github_event` to skip a
+          redelivery of the same delivery ID) is dispatched to
+          :func:`dispatch_github_event` (which never raises) and ``{"ok": true}`` is
+          returned. Returns before any review work runs.
+    """
+    from unified_api.github_events_handler import (
+        dispatch_github_event,
+        verify_github_signature,
+    )
+    from unified_api.integrations_store import get_github_webhook_secret_status
+
+    body = await request.body()
+    event_type = request.headers.get("X-GitHub-Event", "").strip()
+    signature = request.headers.get("X-Hub-Signature-256", "")
+
+    secret, secret_store_reachable = await asyncio.to_thread(get_github_webhook_secret_status)
+    if secret:
+        if not verify_github_signature(secret, body, signature):
+            raise HTTPException(status_code=401, detail="Invalid GitHub signature")
+    elif not secret_store_reachable:
+        # Fail closed: we cannot tell whether a secret is actually configured, so
+        # refuse rather than silently skip verification (see docstring above).
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Cannot reach the GitHub credential store (Postgres); webhook signature "
+                "verification is temporarily unavailable. Restore the database connection "
+                "and retry."
+            ),
+        )
+    else:
+        logger.warning(
+            "GitHub webhook secret not configured — only ping is served; review-triggering "
+            "events are refused until a signing secret is set"
+        )
+
+    # Respond to the setup probe before attempting to parse an event payload.
+    if event_type == "ping":
+        return {"ok": True}
+
+    # Beyond ``ping``, every event this endpoint dispatches can start a paid PR review,
+    # and ``dispatch_github_event`` trusts payload fields (``author_association``,
+    # ``repository``) to authorize and scope it. Without a configured signing secret we
+    # cannot authenticate the sender, so an unsigned request could forge a collaborator
+    # ``issue_comment`` for the configured repo and spend review budget. Refuse review-
+    # triggering events when no secret is configured — ``ping`` is allowed above so an
+    # operator can still verify webhook delivery before setting the secret.
+    if not secret:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "GitHub webhook signing secret not configured; refusing to process "
+                "review-triggering events. Configure a secret (stored credential or "
+                "GITHUB_WEBHOOK_SECRET) and retry."
+            ),
+        )
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
+
+    # A real GitHub webhook body is always a JSON object; a non-object (list/number/
+    # string/null) is malformed. Reject it here rather than letting dispatch (which does
+    # ``payload.get(...)``) raise AttributeError → an unhandled 500.
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Webhook payload must be a JSON object.")
+
+    delivery_id = request.headers.get("X-GitHub-Delivery", "").strip()
+    dispatch_github_event(event_type, payload, delivery_id)
+    return {"ok": True}
+
+
 @router.post("/slack/commands")
 async def slack_commands(request: Request) -> Any:
     """
@@ -935,6 +1038,14 @@ class GitHubConfigResponse(BaseModel):
     owner: str
     repo: str
     default_label: str
+    webhook_secret_configured: bool = Field(
+        default=False,
+        description=(
+            "True when a webhook signing secret is configured (stored credential or "
+            "GITHUB_WEBHOOK_SECRET env var), used to verify '@khala review' PR-comment "
+            "webhooks delivered to POST /api/integrations/github/events."
+        ),
+    )
     credential_store_unreachable: bool = Field(
         default=False,
         description=(
@@ -953,6 +1064,7 @@ class GitHubConfigUpdate(BaseModel):
     repo: str = ""
     default_label: str = ""
     repo_path: str = Field(default="", description="Operator override for local checkout path")
+    webhook_secret: str = Field(default="", description="GitHub webhook signing secret; empty preserves existing")
 
 
 class GitHubDependencyRef(BaseModel):
@@ -1038,6 +1150,7 @@ def _build_github_config_response(
         owner=cfg["owner"],
         repo=cfg["repo"],
         default_label=cfg["default_label"],
+        webhook_secret_configured=bool(cfg.get("webhook_secret_configured", False)),
         credential_store_unreachable=credential_store_unreachable,
     )
 
@@ -1048,11 +1161,15 @@ def _degraded_github_config_response() -> GitHubConfigResponse:
     Preconditions: none.
     Postconditions: returns the JSON-only settings (owner/repo/enabled/default_label,
         read via ``get_github_config_meta`` — NO Postgres) with ``token_configured=False``
-        and ``credential_store_unreachable=True``. Only the credential-derived fields are
-        unknown during a store outage; the saved settings are not, so the panel shows the
-        configured repo plus the unreachable warning instead of blanking everything (which
-        would conflate "store down" with "nothing configured"). Never raises — a failure
-        reading even the JSON falls back to empty settings.
+        and ``credential_store_unreachable=True``. ``webhook_secret_configured`` reflects
+        the ``GITHUB_WEBHOOK_SECRET`` env var (readable without Postgres), so an
+        env-configured secret is not falsely reported as absent during a store outage; the
+        stored-credential secret is the only webhook field that is genuinely unknown here.
+        Only the credential-derived fields are unknown during a store outage; the saved
+        settings are not, so the panel shows the configured repo plus the unreachable
+        warning instead of blanking everything (which would conflate "store down" with
+        "nothing configured"). Never raises — a failure reading even the JSON falls back to
+        empty settings.
     """
     try:
         meta = get_github_config_meta()
@@ -1065,6 +1182,7 @@ def _degraded_github_config_response() -> GitHubConfigResponse:
         owner=str(meta.get("owner", "")),
         repo=str(meta.get("repo", "")),
         default_label=str(meta.get("default_label", "")),
+        webhook_secret_configured=bool(os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()),
         credential_store_unreachable=True,
     )
 
@@ -1118,6 +1236,7 @@ async def update_github(body: GitHubConfigUpdate) -> GitHubConfigResponse:
         personal_access_token=body.token,
         default_label=body.default_label,
         repo_path=body.repo_path,
+        webhook_secret=body.webhook_secret,
     )
     return await _github_config_response()
 
@@ -1262,43 +1381,63 @@ def _build_issue_item(raw: dict[str, Any], raw_deps: list[dict[str, Any]]) -> Gi
     )
 
 
-def _resolve_github_target() -> tuple[dict[str, Any], str, str, str]:
+def _resolve_github_target(token_override: str | None = None) -> tuple[dict[str, Any], str, str, str]:
     """Validate GitHub integration config and return (cfg, token, owner, repo).
 
     Preconditions:
-        - The GitHub integration is enabled with a stored PAT and a configured
-          owner/repo.
+        - The GitHub integration is enabled with a configured owner/repo.
+        - When ``token_override`` is ``None``, a stored PAT must be available (read
+          from the credential store here). When supplied, the caller has already
+          resolved a PAT (e.g. the GitHub webhook path, which reads the credential
+          once and reuses it for both the PR-comment reaction and the review start).
     Postconditions:
         - Returns the config dict plus the resolved token/owner/repo. A missing
-          prerequisite raises ``HTTPException(400)``; an empty token while the
-          Postgres credential store is unreachable raises ``HTTPException(503)``
-          instead, so a transient DB outage is never reported as "PAT not
-          configured". The 400-vs-503 decision comes from a SINGLE credential read
-          (:func:`get_credential_status` reports value + reachability together), so
-          there is no second probe and no TOCTOU window between the read and the
-          probe. Blocking I/O — async callers offload via ``asyncio.to_thread``.
-          Shared by every GitHub route so their validation cannot drift.
+          prerequisite raises ``HTTPException(400)``.
+        - When ``token_override`` is ``None`` and no token is found, an unreachable
+          Postgres credential store raises ``HTTPException(503)`` instead of 400, so a
+          transient DB outage is never reported as "PAT not configured". The 400-vs-503
+          decision comes from a SINGLE credential read
+          (:func:`unified_api.integration_credentials.resolve_credential_with_env_fallback`
+          reports value + reachability together — the same shared helper the GitHub
+          webhook signing secret uses, so the two credentials can't silently diverge on
+          this fail-closed behavior), so there is no second probe and no TOCTOU window
+          between the read and the probe.
+        - When ``token_override`` is supplied, the credential-store read is skipped
+          entirely (the store is not re-touched) and ``token_override`` is returned
+          verbatim; only the JSON-only settings (enabled/owner/repo) are validated.
+          This is the ONE validation path shared by every GitHub route — manual UI
+          triggers and the webhook trigger cannot silently drift from each other.
+          Blocking I/O — async callers offload via ``asyncio.to_thread``.
     """
-    # JSON-only settings (no credential read), so the only DB round-trip on this path is
-    # the single get_credential_status below — which yields BOTH the token value and the
-    # 503-vs-400 reachability signal.
+    # JSON-only settings (no credential read) are always checked first.
     cfg = get_github_config_meta()
     if not cfg["enabled"]:
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
-    token, store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")
-    if not token:
-        # An empty token can mean two very different things, and the same read tells
-        # us which: a down credential store (503, transient) vs a genuinely missing
-        # PAT (400, operator action required). No separate probe → no race.
-        if not store_reachable:
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Cannot reach the GitHub credential store (Postgres); the integration "
-                    "is temporarily unavailable. Restore the database connection and retry."
-                ),
-            )
-        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
+    # A pre-resolved PAT is always a non-empty string; both ``None`` and ``""`` mean "no
+    # override, read from the store" — an empty string is never a valid token to forward,
+    # so falling through to the store read is the safe (and intended) behavior here.
+    if token_override:
+        token = token_override
+    else:
+        # The only DB round-trip on this path is the single
+        # resolve_credential_with_env_fallback call below — which yields BOTH the token
+        # value and the 503-vs-400 reachability signal (the PAT has no env fallback, so
+        # env_var is omitted; only the reachability distinction is shared with the
+        # webhook secret's own fail-closed check).
+        token, store_reachable = resolve_credential_with_env_fallback(_GITHUB_SERVICE, "personal_access_token")
+        if not token:
+            # An empty token can mean two very different things, and the same read
+            # tells us which: a down credential store (503, transient) vs a genuinely
+            # missing PAT (400, operator action required). No separate probe → no race.
+            if not store_reachable:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Cannot reach the GitHub credential store (Postgres); the integration "
+                        "is temporarily unavailable. Restore the database connection and retry."
+                    ),
+                )
+            raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
     owner = cfg["owner"]
     repo = cfg["repo"]
     if not owner or not repo:
@@ -1835,9 +1974,18 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         ) from e
 
 
-@router.post("/github/review-pr", response_model=RunPrReviewResponse)
-async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
-    """Start the code-reviewer agents on a specific open pull request.
+async def _start_pr_review(
+    pr_number: int,
+    base_branch: str | None,
+    *,
+    token: str | None = None,
+    expected_owner: str | None = None,
+    expected_repo: str | None = None,
+) -> RunPrReviewResponse:
+    """Resolve the GitHub target and start a PR review on the coding-team service.
+
+    Shared by ``POST /github/review-pr`` (manual UI trigger) and the GitHub webhook
+    handler (``@khala review`` PR comment) so the two paths cannot drift.
 
     Unlike ``run_github_issue`` this does **not** clone the repository: the review
     reads the PR diff and file content purely through the GitHub REST API, so the
@@ -1846,16 +1994,50 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
     touches the checkout.
 
     Preconditions:
-        - GitHub integration is enabled with a stored PAT and a configured owner/repo.
+        - GitHub integration is enabled with a configured owner/repo, and either a
+          stored PAT is available or ``token`` was supplied by the caller.
         - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+        - ``token``, when supplied, is a GitHub PAT the caller already resolved (the
+          webhook path passes this so a single credential-store read serves the whole
+          request); when ``None`` the PAT is read via ``_resolve_github_target``.
+        - ``expected_owner``/``expected_repo``, when supplied, are the repository the
+          caller already validated (the webhook path validated the comment's repo
+          against the configured owner/repo at dispatch time).
     Postconditions:
         - On success returns a ``RunPrReviewResponse`` describing the started review
           job. Every failure path raises ``HTTPException`` with an explanatory detail;
           no ``httpx`` error escapes as an unhandled exception.
+        - When ``expected_owner``/``expected_repo`` are supplied and the currently
+          configured owner/repo no longer match them (the operator repointed the
+          integration between webhook validation and this worker running), raises
+          ``HTTPException(409)`` and starts no review — so an ``@khala review`` on one
+          repo can never launch a review of the same PR number against a *different*,
+          newly configured repo (comparison is case-insensitive, as GitHub treats
+          owner/repo).
     """
-    # Centralized validation (enabled + PAT + owner/repo), which also maps an
-    # unreachable credential store to a 503 rather than a misleading "not configured".
-    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
+    # Single validation path (shared with every other GitHub route via
+    # _resolve_github_target) — token, when pre-resolved by the caller (webhook path),
+    # is forwarded as an override so the credential store is never re-touched; otherwise
+    # it's read here, with the same 503-vs-400 reachability handling as the UI route.
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, token)
+
+    # Revalidate against the repository the caller matched. A webhook delivery is queued
+    # and processed on a worker thread; if the configured owner/repo changed in between,
+    # the resolved owner/repo above would point at the *new* repo while ``pr_number`` came
+    # from a comment on the *old* one. Refuse rather than review the wrong repository.
+    if (
+        expected_owner is not None
+        and expected_repo is not None
+        and (owner.casefold() != expected_owner.casefold() or repo.casefold() != expected_repo.casefold())
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Configured repository changed since the review was requested "
+                f"(expected {expected_owner}/{expected_repo}, now {owner}/{repo}); "
+                "skipping this stale review request."
+            ),
+        )
 
     coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
     if not coding_team_url:
@@ -1865,11 +2047,11 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
         "owner": owner,
         "repo": repo,
         "repo_path": _resolve_repo_path(cfg),
-        "pr_number": body.pr_number,
+        "pr_number": pr_number,
         "github_token": token,
     }
-    if body.base_branch:
-        payload["base_branch"] = body.base_branch
+    if base_branch:
+        payload["base_branch"] = base_branch
 
     target = f"{coding_team_url.rstrip('/')}/review-pr"
     try:
@@ -1915,6 +2097,22 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",
         ) from e
+
+
+@router.post("/github/review-pr", response_model=RunPrReviewResponse)
+async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
+    """Start the code-reviewer agents on a specific open pull request.
+
+    Thin wrapper over :func:`_start_pr_review` (the shared review-start path also used by
+    the ``@khala review`` PR-comment webhook).
+
+    Preconditions: ``body`` carries a ``pr_number`` and optional ``base_branch``; see
+        :func:`_start_pr_review` for the full GitHub-target precondition.
+    Postconditions: returns exactly what :func:`_start_pr_review` returns/raises for
+        ``(body.pr_number, body.base_branch)`` with no pre-resolved token (the PAT is
+        read fresh here) — this route delegates its whole contract to that function.
+    """
+    return await _start_pr_review(body.pr_number, body.base_branch)
 
 
 @router.get("/github/reviews", response_model=list[CodeReviewRunItem])
