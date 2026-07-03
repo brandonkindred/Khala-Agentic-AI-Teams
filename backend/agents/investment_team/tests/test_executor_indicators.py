@@ -416,33 +416,21 @@ def test_stochastic_accepts_bars() -> None:
     assert len(k) == len(d) == 40
 
 
-def test_indicators_registry_uses_windowed_cumulative_helpers() -> None:
-    # The coverage probe must judge cumulative indicators on the runtime's
-    # trailing-window value, so the registry points obv/vwap at windowed wrappers.
+def test_cumulative_specs_use_windowed_wrappers() -> None:
+    # The ``cumulative`` flag exists solely to force a window-bounded helper, so the
+    # honest invariant is a biconditional: a spec is flagged ``cumulative`` IFF its
+    # helper is a ``_windowed_*`` wrapper. Asserting the biconditional directly (rather
+    # than a hardcoded {obv, vwap} set or a ``kwarg_names`` proxy) catches a flag/helper
+    # mismatch in EITHER direction and adapts automatically to any future cumulative
+    # indicator — the coverage probe must judge such an indicator on the runtime's
+    # bounded trailing-window value, never an unbounded full-history one.
+    for name, spec in ind.INDICATORS.items():
+        windowed = spec.helper.__name__.startswith("_windowed_")
+        assert spec.cumulative == windowed, (name, spec.cumulative, spec.helper.__name__)
+    # Anchor the two known cumulative indicators to concrete wrappers, so the
+    # biconditional above can't be satisfied vacuously (every side False).
     assert ind.INDICATORS["obv"].helper is ind._windowed_obv
     assert ind.INDICATORS["vwap"].helper is ind._windowed_vwap
-
-
-def test_cumulative_specs_use_windowed_wrappers() -> None:
-    # The ``cumulative`` flag must track the STRUCTURAL property that motivates it:
-    # a period-less indicator (no scalar kwargs -> a running total over all history)
-    # is exactly the one whose unbounded value diverges from the runtime's bounded
-    # StreamingHistoryView. Derive the expected set from that structure (empty
-    # ``kwarg_names``) rather than hardcoding {obv, vwap}, so a future period-less
-    # indicator added without ``cumulative=True`` (or without a windowed wrapper)
-    # trips this guard instead of silently escaping it.
-    period_less = {name for name, spec in ind.INDICATORS.items() if not spec.kwarg_names}
-    flagged = {name for name, spec in ind.INDICATORS.items() if spec.cumulative}
-    assert flagged == period_less, (flagged, period_less)
-    # Every flagged spec routes through a window-bounded ``_windowed_*`` wrapper...
-    for name in flagged:
-        helper = ind.INDICATORS[name].helper
-        assert helper.__name__.startswith("_windowed_"), (name, helper.__name__)
-    # ...and no non-cumulative spec does (the flag is the single source of truth for
-    # "needs bounding", not an ad-hoc helper-name check).
-    for name, spec in ind.INDICATORS.items():
-        if not spec.cumulative:
-            assert not spec.helper.__name__.startswith("_windowed_"), name
 
 
 def test_windowed_obv_bounds_to_trailing_window() -> None:

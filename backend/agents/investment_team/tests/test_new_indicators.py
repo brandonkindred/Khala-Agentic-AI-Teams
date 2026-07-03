@@ -1649,104 +1649,86 @@ def test_conformance_rejects_aliased_bollinger_bands_select_call() -> None:
     assert any("select" in d.lower() and "typeerror" in d.lower() for d in crits), crits
 
 
-_CC_BOLLINGER_SELF_UNDEFINED = textwrap.dedent("""
-    from contract import Strategy
+def _self_undefined_strategy(call_expr: str, window: int = 20) -> str:
+    """Strategy source whose ``on_bar`` calls ``call_expr`` (an undefined self-helper).
 
-    class S(Strategy):
-        UNIVERSE = frozenset({"QQQ"})
+    Preconditions: ``call_expr`` is a ``self.<name>(...)`` expression the class never
+    defines; ``window`` is the ``ctx.history`` lookback.
+    Postconditions: a syntactically valid single-class strategy that binds the call to a
+    local and gates a trade on it, so the call is reachable from ``on_bar`` and the
+    conformance gate exercises the undefined-self-helper check against it.
+    """
+    return textwrap.dedent(f"""
+        from contract import Strategy
 
-        def on_bar(self, ctx, bar):
-            if bar.symbol not in self.UNIVERSE:
-                return
-            bars = ctx.history(bar.symbol, 20)
-            if len(bars) < 20:
-                return
-            pb = self.bollinger_bands(bars, 20, 2.0, select="percent_b")
-            pos = ctx.position(bar.symbol)
-            qty = max(1, int(ctx.equity * 0.02 / bar.close))
-            if pos is None and pb < 0.05:
-                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
-            elif pos is not None and bar.close < pos.entry_price * 0.95:
-                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
-""")
+        class S(Strategy):
+            UNIVERSE = frozenset({{"QQQ"}})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, {window})
+                if len(bars) < {window}:
+                    return
+                val = {call_expr}
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and val is not None and bar.close > 0:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and bar.close < pos.entry_price * 0.95:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+    """)
 
 
-def test_conformance_rejects_undefined_self_bollinger_bands_select() -> None:
-    # ``self.bollinger_bands(...)`` is only valid as the compiler's inline helper;
-    # a custom strategy that calls it WITHOUT defining the method AttributeErrors at
-    # runtime. The generic undefined-self-helper check flags it (not the select-only
-    # check), so it is neither credited nor exempted.
-    results = CodeConformanceGate().check(_CC_BOLLINGER_SELF_UNDEFINED, _bollinger_percent_b_spec())
-    crits = _crit(results)
-    assert any("bollinger_bands" in d.lower() and "attributeerror" in d.lower() for d in crits), (
-        crits
+@pytest.mark.parametrize(
+    "call_expr, window, spec_factory, needles",
+    [
+        # DSL name differs from helper (bollinger -> bollinger_bands): an undefined
+        # ``self.bollinger_bands`` AttributeErrors, and the derived band it fails to
+        # produce is not credited from the undefined call.
+        pytest.param(
+            'self.bollinger_bands(bars, 20, 2.0, select="percent_b")',
+            20,
+            lambda: _bollinger_percent_b_spec(),
+            [("bollinger_bands", "attributeerror"), ("percent_b", None)],
+            id="bollinger_bands-helper-name",
+        ),
+        # name == helper: a plain undefined ``self.macd`` is flagged too (the check is
+        # not Bollinger-specific).
+        pytest.param(
+            "self.macd(bars, 12, 26, 9)",
+            40,
+            lambda: _bollinger_base_band_spec(),
+            [("macd", "attributeerror")],
+            id="macd-name-equals-helper",
+        ),
+        # bare DSL name whose helper differs (donchian -> donchian_channels): a
+        # hand/LLM author may write ``self.donchian`` (the name it saw in the spec);
+        # the undefined form must still be flagged.
+        pytest.param(
+            "self.donchian(bars, 20)",
+            20,
+            lambda: _bollinger_base_band_spec(),
+            [("donchian", "attributeerror")],
+            id="donchian-bare-dsl-name",
+        ),
+    ],
+)
+def test_conformance_rejects_undefined_self_indicator_helper(
+    call_expr, window, spec_factory, needles
+) -> None:
+    # Any ``self.<indicator>(...)`` the class never defines AttributeErrors on the first
+    # bar (the base Strategy provides no indicator helpers); the conformance gate must
+    # flag it — for the exported helper name AND the bare DSL name — so the refinement
+    # loop fixes the call instead of the strategy crashing in the sandbox.
+    results = CodeConformanceGate().check(
+        _self_undefined_strategy(call_expr, window), spec_factory()
     )
-    # And the derived band is not credited from the undefined self-call.
-    assert any("percent_b" in d.lower() for d in crits), crits
-
-
-_CC_MACD_SELF_UNDEFINED = textwrap.dedent("""
-    from contract import Strategy
-
-    class S(Strategy):
-        UNIVERSE = frozenset({"QQQ"})
-
-        def on_bar(self, ctx, bar):
-            if bar.symbol not in self.UNIVERSE:
-                return
-            bars = ctx.history(bar.symbol, 40)
-            if len(bars) < 40:
-                return
-            line = self.macd(bars, 12, 26, 9)
-            pos = ctx.position(bar.symbol)
-            qty = max(1, int(ctx.equity * 0.02 / bar.close))
-            if pos is None and line > 0:
-                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
-            elif pos is not None and line < 0:
-                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
-""")
-
-
-def test_conformance_rejects_undefined_self_macd_call() -> None:
-    # The generic undefined-self-helper check is not Bollinger-specific: any
-    # ``self.<indicator-helper>(...)`` the class never defines (here ``self.macd``)
-    # is an AttributeError at runtime and must be flagged.
-    results = CodeConformanceGate().check(_CC_MACD_SELF_UNDEFINED, _bollinger_base_band_spec())
     crits = _crit(results)
-    assert any("macd" in d.lower() and "attributeerror" in d.lower() for d in crits), crits
-
-
-_CC_DONCHIAN_SELF_UNDEFINED = textwrap.dedent("""
-    from contract import Strategy
-
-    class S(Strategy):
-        UNIVERSE = frozenset({"QQQ"})
-
-        def on_bar(self, ctx, bar):
-            if bar.symbol not in self.UNIVERSE:
-                return
-            bars = ctx.history(bar.symbol, 20)
-            if len(bars) < 20:
-                return
-            upper = self.donchian(bars, 20)
-            pos = ctx.position(bar.symbol)
-            qty = max(1, int(ctx.equity * 0.02 / bar.close))
-            if pos is None and bar.close > upper:
-                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
-            elif pos is not None and bar.close < pos.entry_price * 0.95:
-                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
-""")
-
-
-def test_conformance_rejects_undefined_self_dsl_name_call() -> None:
-    # The check must cover the bare DSL name too, not just the exported helper name.
-    # A hand/LLM author sees ``donchian`` in the spec and may write ``self.donchian``
-    # (the internal helper is ``donchian_channels``); either undefined form
-    # AttributeErrors at runtime and must be flagged. Guards the three indicators
-    # whose DSL name differs from its helper (bollinger/donchian/keltner).
-    results = CodeConformanceGate().check(_CC_DONCHIAN_SELF_UNDEFINED, _bollinger_base_band_spec())
-    crits = _crit(results)
-    assert any("donchian" in d.lower() and "attributeerror" in d.lower() for d in crits), crits
+    for primary, secondary in needles:
+        assert any(
+            primary in d.lower() and (secondary is None or secondary in d.lower()) for d in crits
+        ), (primary, secondary, crits)
 
 
 def test_conformance_abstains_on_dynamic_bollinger_band() -> None:

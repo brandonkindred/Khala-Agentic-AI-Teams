@@ -45,12 +45,78 @@ def _require_model_source() -> str:
     return _MODEL_TS.read_text(encoding="utf-8")
 
 
+_STRING_PLACEHOLDER = re.compile("\x00(\\d+)\x00")
+
+
+def _mask_strings(text: str) -> tuple[str, list[str]]:
+    """Replace string literals with inert placeholders and strip ``//`` line comments.
+
+    Preconditions: ``text`` begins at a structural position (not inside a string) and
+    uses the ``investment.model.ts`` subset — single/double-quoted strings (with C-style
+    ``\\`` escapes) and ``//`` line comments.
+    Postconditions: ``(masked, strings)`` where every string literal is replaced by a
+    placeholder ``"\\x00<i>\\x00"`` (which contains no JSON-structural character — no
+    quote, bracket, brace, comma or colon) and every ``//`` comment outside a string is
+    removed; ``strings[i]`` is the JSON encoding (via :func:`json.dumps`) of the i-th
+    literal's decoded value. Because all string content is masked out, downstream
+    structural transforms (bracket matching, key quoting, trailing-comma removal) can
+    never touch characters that live inside a string. Raises ``AssertionError`` on an
+    unterminated string literal.
+    """
+    out: list[str] = []
+    strings: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ("'", '"'):  # string literal -> placeholder
+            i, value = _read_string(text, i)
+            out.append(f"\x00{len(strings)}\x00")
+            strings.append(json.dumps(value))
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":  # line comment (outside strings)
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out), strings
+
+
+def _read_string(text: str, i: int) -> tuple[int, str]:
+    """Decode the string literal opening at ``text[i]`` into its Python value.
+
+    Preconditions: ``text[i]`` is a quote (``'`` or ``"``) opening a string with
+    C-style ``\\`` escapes.
+    Postconditions: ``(end, value)`` where ``end`` is the index just past the closing
+    quote and ``value`` is the decoded string (so :func:`json.dumps` can re-encode it
+    correctly, independent of the original quote style). Raises ``AssertionError`` if
+    the string is never closed.
+    """
+    quote = text[i]
+    i += 1
+    n = len(text)
+    buf: list[str] = []
+    _escapes = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:  # escape: decode to the literal char it denotes
+            buf.append(_escapes.get(text[i + 1], text[i + 1]))
+            i += 2
+            continue
+        if ch == quote:
+            return i + 1, "".join(buf)
+        buf.append(ch)
+        i += 1
+    raise AssertionError("unterminated string literal")
+
+
 def _match_balanced(text: str, open_idx: int, open_ch: str, close_ch: str) -> int:
     """Index of the ``close_ch`` that balances the ``open_ch`` at ``open_idx``.
 
-    Precondition: ``text[open_idx] == open_ch``. Postcondition: returns ``j`` such
-    that ``text[open_idx:j+1]`` is bracket-balanced. Ignores brackets — the TS here
-    has no string containing ``{}``/``[]`` — which is sufficient for this source.
+    Preconditions: ``text[open_idx] == open_ch`` and ``text`` is string-masked (see
+    :func:`_mask_strings`), so no bracket lives inside a string literal.
+    Postconditions: returns ``j`` such that ``text[open_idx:j+1]`` is bracket-balanced.
+    Raises ``AssertionError`` if the brackets never balance.
     """
     assert text[open_idx] == open_ch
     depth = 0
@@ -64,60 +130,36 @@ def _match_balanced(text: str, open_idx: int, open_ch: str, close_ch: str) -> in
     raise AssertionError("unbalanced brackets in TS source")
 
 
+def _masked_to_json(masked_body: str, strings: list[str]) -> Any:
+    """Quote keys, drop trailing commas, restore masked strings, and parse as JSON.
+
+    Preconditions: ``masked_body`` is a balanced, string-masked object/array literal
+    (from :func:`_mask_strings`) and ``strings`` its captured JSON string encodings.
+    Postconditions: returns the parsed Python value. Key quoting and trailing-comma
+    removal operate only on masked (structural) text, so string contents — the
+    placeholders — are inert to both regexes and are substituted back verbatim.
+    """
+    body = re.sub(r"([{\[,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', masked_body)  # quote keys
+    body = re.sub(r",(\s*[}\]])", r"\1", body)  # drop trailing commas
+    body = _STRING_PLACEHOLDER.sub(lambda m: strings[int(m.group(1))], body)  # restore strings
+    return json.loads(body)
+
+
 def _ts_object_to_json(literal: str) -> Any:
     """Parse a JSON-like TS object/array literal into Python.
 
     Preconditions: ``literal`` is a balanced TS object/array using the subset in
     ``investment.model.ts`` — ``//`` line comments, unquoted identifier keys,
-    single-quoted strings, and trailing commas. String contents may contain any
-    character (including ``//``, ``'``, ``"``).
-    Postconditions: returns the parsed Python value. String literals are converted to
-    JSON with a single left-to-right scan that tracks string state, so comment
-    stripping and key quoting never touch characters inside a string (a value
-    containing ``//`` or an apostrophe is preserved verbatim). Raises
-    ``json.JSONDecodeError`` if the (transformed) literal is not valid JSON.
+    single/double-quoted strings, and trailing commas. String contents may contain any
+    character (including ``//``, quotes, brackets, commas, colons).
+    Postconditions: returns the parsed Python value. String literals are masked out
+    first (:func:`_mask_strings`), so the structural transforms never reinterpret a
+    character inside a string as syntax — a value containing ``//``, ``, key:``, or a
+    bracket is preserved verbatim. Raises ``json.JSONDecodeError`` if the (transformed)
+    literal is not valid JSON.
     """
-    out: list[str] = []
-    i, n = 0, len(literal)
-    quote = ""  # "" outside a string, else the opening delimiter (' or ")
-    while i < n:
-        ch = literal[i]
-        if quote:
-            if ch == "\\" and i + 1 < n:  # normalise escapes for JSON
-                nxt = literal[i + 1]
-                if nxt == "'":  # apostrophes need no escape in JSON
-                    out.append("'")
-                elif nxt == '"':
-                    out.append('\\"')
-                else:  # keep \n \t \\ \uXXXX etc. verbatim
-                    out.append(literal[i : i + 2])
-                i += 2
-                continue
-            if ch == quote:  # closing delimiter -> JSON double quote
-                out.append('"')
-                quote = ""
-            elif ch == '"':  # a literal " inside a '...' string must be escaped
-                out.append('\\"')
-            else:
-                out.append(ch)
-            i += 1
-            continue
-        if ch in ("'", '"'):  # opening delimiter (either style)
-            out.append('"')
-            quote = ch
-            i += 1
-            continue
-        if ch == "/" and i + 1 < n and literal[i + 1] == "/":  # line comment (outside strings)
-            while i < n and literal[i] != "\n":
-                i += 1
-            continue
-        out.append(ch)
-        i += 1
-    # Keys are now the only bare identifiers followed by ``:``; string values are
-    # already double-quoted, so quoting keys can't touch string contents.
-    text = re.sub(r"([{\[,]\s*)([A-Za-z_]\w*)\s*:", r'\1"\2":', "".join(out))
-    text = re.sub(r",(\s*[}\]])", r"\1", text)  # drop trailing commas
-    return json.loads(text)
+    masked, strings = _mask_strings(literal)
+    return _masked_to_json(masked, strings)
 
 
 def _extract_literal(source: str, anchor: str, open_ch: str, close_ch: str) -> Any:
@@ -125,14 +167,16 @@ def _extract_literal(source: str, anchor: str, open_ch: str, close_ch: str) -> A
 
     Preconditions: ``anchor`` occurs in ``source`` (its first occurrence is used), and
     the next ``open_ch`` after it opens a balanced, JSON-like TS literal.
-    Postconditions: returns the parsed Python value of that literal (via
-    :func:`_ts_object_to_json`). Raises ``ValueError`` if ``anchor``/``open_ch`` is
-    absent and ``AssertionError`` if the brackets never balance.
+    Postconditions: returns the parsed Python value of that literal. String literals are
+    masked before bracket matching, so a brace/bracket inside a string value cannot
+    mis-terminate the slice. Raises ``ValueError`` if ``anchor``/``open_ch`` is absent
+    and ``AssertionError`` if the brackets never balance.
     """
     start = source.index(anchor) + len(anchor)
     open_idx = source.index(open_ch, start)
-    close_idx = _match_balanced(source, open_idx, open_ch, close_ch)
-    return _ts_object_to_json(source[open_idx : close_idx + 1])
+    masked, strings = _mask_strings(source[open_idx:])
+    close_idx = _match_balanced(masked, 0, open_ch, close_ch)
+    return _masked_to_json(masked[: close_idx + 1], strings)
 
 
 def _frontend_name_union(source: str) -> set[str]:
@@ -197,17 +241,33 @@ def _frontend_specs(source: str) -> dict[str, dict[str, Any]]:
 
 
 def test_ts_object_parser_is_string_aware() -> None:
-    # The literal parser must not corrupt string VALUES: ``//`` inside a string is not
-    # a comment, an apostrophe (raw, or escaped in a single-quoted string, or inside a
-    # double-quoted string) is not a delimiter, and trailing commas are dropped. These
-    # guard the parity check against a future benign edit to investment.model.ts.
+    # A string VALUE must be preserved verbatim: characters that are structural OUTSIDE
+    # a string (``//`` comment, ``,``/``:`` delimiters, ``[]``/``{}`` brackets, quotes)
+    # carry no syntactic meaning inside one. These guard the parity check against a
+    # future benign edit to investment.model.ts.
     assert _ts_object_to_json("{ foo: 'a//b', bar: ['x', 'y'], }") == {
         "foo": "a//b",
         "bar": ["x", "y"],
     }
+    # Comma / colon / brackets inside a string must NOT be treated as structure (the
+    # bug the string-aware rewrite fixes): a naive trailing-comma or key-quoting regex
+    # over the whole text would corrupt these.
+    assert _ts_object_to_json("{ label: 'arr [1,]' }") == {"label": "arr [1,]"}
+    assert _ts_object_to_json("{ label: 'min, max: n/a' }") == {"label": "min, max: n/a"}
+    assert _ts_object_to_json("{ label: 'range [2,400]', n: 3 }") == {
+        "label": "range [2,400]",
+        "n": 3,
+    }
+    # Quote handling: escaped apostrophe in a single-quoted string, apostrophe inside a
+    # double-quoted string, and an escaped double-quote.
     assert _ts_object_to_json("{ label: 'd\\'oh', n: 2 }") == {"label": "d'oh", "n": 2}
     assert _ts_object_to_json('{ label: "don\'t" }') == {"label": "don't"}
+    assert _ts_object_to_json('{ label: "say \\"hi\\"" }') == {"label": 'say "hi"'}
+    # C-style escapes decode to their literal char.
+    assert _ts_object_to_json("{ label: 'a\\tb' }") == {"label": "a\tb"}
+    # Line comments (outside strings) and trailing commas are dropped.
     assert _ts_object_to_json("{ a: 1 } // trailing comment") == {"a": 1}
+    assert _ts_object_to_json("{ a: 1, // inline\n b: 2, }") == {"a": 1, "b": 2}
 
 
 def test_frontend_name_union_allows_digits() -> None:
