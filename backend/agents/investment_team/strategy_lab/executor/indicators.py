@@ -387,8 +387,12 @@ def _windowed_vwap(
 
     Preconditions/Postconditions: as :func:`_windowed_obv`, but VWAP is a ratio of
     cumulative sums, so numerator and denominator are each re-based to the window
-    start before dividing. Keeps the probe's VWAP aligned with the runtime's
-    windowed value instead of an unbounded no-reset cumulative.
+    start before dividing. When the trailing window has zero total volume the
+    ratio is undefined, so — mirroring the runtime ``IndicatorRegistry.vwap`` — the
+    value falls back to the window's average close (a finite value the engine
+    evaluates predicates against; without this the probe would see NaN and miss
+    those predicates). Keeps the probe's VWAP aligned with the runtime's windowed
+    value instead of an unbounded no-reset cumulative.
     """
     # Lazy import — probe-only path; see :func:`_windowed_obv`.
     from ..runtime_window import STREAMING_WINDOW_BARS
@@ -402,8 +406,16 @@ def _windowed_vwap(
     cum_vol = volume.cumsum()
     w = STREAMING_WINDOW_BARS
     num = cum_tp_vol - cum_tp_vol.shift(w).fillna(0.0)
-    den = (cum_vol - cum_vol.shift(w).fillna(0.0)).replace(0, np.nan)
-    return num / den
+    den = cum_vol - cum_vol.shift(w).fillna(0.0)
+    # Zero-volume-window fallback = trailing-window average close, matching the
+    # runtime. Window bar count is min(t + 1, w): the trailing sum of a series of
+    # ones re-based the same way as the other cumulatives.
+    ones = pd.Series(1.0, index=close.index)
+    cum_count = ones.cumsum()
+    window_count = cum_count - cum_count.shift(w).fillna(0.0)
+    cum_close = close.cumsum()
+    avg_close = (cum_close - cum_close.shift(w).fillna(0.0)) / window_count
+    return (num / den.replace(0, np.nan)).where(den != 0, avg_close)
 
 
 def mfi(

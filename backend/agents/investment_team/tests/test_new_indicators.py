@@ -1649,6 +1649,40 @@ def test_conformance_rejects_aliased_bollinger_bands_select_call() -> None:
     assert any("select" in d.lower() and "typeerror" in d.lower() for d in crits), crits
 
 
+_CC_BOLLINGER_SELF_UNDEFINED = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            pb = self.bollinger_bands(bars, 20, 2.0, select="percent_b")
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and pb < 0.05:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_rejects_undefined_self_bollinger_bands_select() -> None:
+    # ``self.bollinger_bands(..., select=...)`` is only valid as the compiler's
+    # inline helper; a custom strategy that calls it WITHOUT defining the method
+    # AttributeErrors at runtime, so it must not be credited or exempted — it is
+    # flagged and the derived band is not produced.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_SELF_UNDEFINED, _bollinger_percent_b_spec())
+    crits = _crit(results)
+    assert any("invalid" in d.lower() and "select" in d.lower() for d in crits), crits
+    # And the derived band is not credited from the undefined self-call.
+    assert any("percent_b" in d.lower() for d in crits), crits
+
+
 def test_conformance_abstains_on_dynamic_bollinger_band() -> None:
     # A dynamic (non-literal) band value is runtime-valid but unresolvable
     # statically; the derived-band check must abstain rather than reject.

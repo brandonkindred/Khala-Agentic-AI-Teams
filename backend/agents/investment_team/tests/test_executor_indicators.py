@@ -469,6 +469,41 @@ def test_windowed_obv_matches_runtime_windowed_series() -> None:
     pd.testing.assert_series_equal(win.reset_index(drop=True), ref.reset_index(drop=True))
 
 
+def test_windowed_vwap_zero_volume_window_falls_back_to_avg_close() -> None:
+    # When the trailing window has zero total volume the ratio is undefined; the
+    # runtime IndicatorRegistry.vwap falls back to the window's average close, so
+    # the probe wrapper must too (otherwise it returns NaN and misses predicates
+    # the engine evaluates against a finite value).
+    from investment_team.strategy_lab.executor.predicate_evaluator import (
+        compute_indicator_series,
+    )
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+    from investment_team.strategy_lab.spec_dsl import IndicatorRef
+
+    n = STREAMING_WINDOW_BARS + 30
+    closes = [100.0 + math.sin(i / 2.0) for i in range(n)]
+    # Volume only in the first 10 bars, then zero — the late trailing window has
+    # zero total volume.
+    volume = [1000.0 if i < 10 else 0.0 for i in range(n)]
+    df = pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 1 for c in closes],
+            "low": [c - 1 for c in closes],
+            "close": closes,
+            "volume": volume,
+        }
+    )
+    ref = compute_indicator_series(IndicatorRef(name="vwap"), df)
+    win = ind._windowed_vwap(df["high"], df["low"], df["close"], df["volume"])
+    # Matches the runtime bar-for-bar, and the zero-volume tail is finite (avg close).
+    pd.testing.assert_series_equal(win.reset_index(drop=True), ref.reset_index(drop=True))
+    assert not pd.isna(win.iloc[-1])
+    assert win.iloc[-1] == pytest.approx(
+        sum(closes[-STREAMING_WINDOW_BARS:]) / STREAMING_WINDOW_BARS
+    )
+
+
 def test_windowed_vwap_rebases_to_trailing_window() -> None:
     from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
 

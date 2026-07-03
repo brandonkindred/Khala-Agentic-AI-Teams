@@ -407,6 +407,21 @@ def _is_self_call(node: ast.Call, attr: str) -> bool:
     )
 
 
+def _class_defines_method(cls: ast.ClassDef, name: str) -> bool:
+    """True iff ``cls`` defines a method named ``name`` in its body.
+
+    Pre: ``cls`` is a Strategy ClassDef. Post: True only when the class body
+    contains a (possibly async) ``def name`` — used to confirm that a
+    ``self.<name>(...)`` call actually resolves to a real method rather than an
+    ``AttributeError`` (the base ``Strategy`` provides no ``bollinger_bands``; only
+    the compiler's emitted module defines it as an inline helper).
+    """
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+        for node in cls.body
+    )
+
+
 def _collect_produced_bollinger_bands(
     cls: ast.ClassDef, method_names: frozenset[str]
 ) -> tuple[set[str], bool]:
@@ -418,9 +433,12 @@ def _collect_produced_bollinger_bands(
     bands materialised by a valid selector-aware read:
 
       * ``ctx.indicator('bollinger', ..., band='<b>')`` — the custom-code accessor;
-      * ``self.bollinger_bands(..., select='<b>')`` — the compiler's inline helper,
-        the ONLY ``bollinger_bands`` that accepts ``select`` (the sandbox scalar
-        helper does not — see :func:`_invalid_bollinger_select_calls`).
+      * ``self.bollinger_bands(..., select='<b>')`` — ONLY when the class actually
+        defines a ``bollinger_bands`` method (the compiler's emitted inline helper).
+        The base ``Strategy`` provides no such method, so a custom strategy writing
+        ``self.bollinger_bands`` without defining it would ``AttributeError`` at
+        runtime; it is not credited here and is flagged by
+        :func:`_invalid_bollinger_select_calls`.
 
     ``dynamic`` is True when such a read carries a NON-literal band/select
     (``band=self.BAND``): the value is runtime-valid but unresolvable statically,
@@ -428,6 +446,7 @@ def _collect_produced_bollinger_bands(
     the gate's abstain-on-dynamic policy elsewhere. A plain ``bollinger_bands(...)``
     with no ``select=`` yields only base bands and produces nothing here.
     """
+    defines_helper = _class_defines_method(cls, "bollinger_bands")
     produced: set[str] = set()
     dynamic = False
     for method in _iter_strategy_methods(cls):
@@ -438,7 +457,7 @@ def _collect_produced_bollinger_bands(
                 continue
             if _is_ctx_indicator_call(node) and _ctx_indicator_arg_name(node) == "bollinger":
                 kw = _keyword_node(node, "band")
-            elif _is_self_call(node, "bollinger_bands"):
+            elif _is_self_call(node, "bollinger_bands") and defines_helper:
                 kw = _keyword_node(node, "select")
             else:
                 continue
@@ -455,38 +474,47 @@ def _collect_produced_bollinger_bands(
 def _invalid_bollinger_select_calls(
     cls: ast.ClassDef, method_names: frozenset[str], import_aliases: Optional[dict[str, str]] = None
 ) -> list[str]:
-    """Reachable ``bollinger_bands(..., select=...)`` calls that will TypeError at runtime.
+    """Reachable ``bollinger_bands(..., select=...)`` calls that will fail at runtime.
 
     Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable;
     ``import_aliases`` maps ``from indicators import bollinger_bands as bb`` bindings.
-    Post: one message per non-``self`` ``bollinger_bands`` call passing ``select=``,
-    including alias-called forms (``bb(..., select=...)``) resolved via
-    ``import_aliases``. The sandbox scalar helper copied from
-    ``executor/strategy_indicators.py`` is ``bollinger_bands(data, period=20,
-    num_std=2.0)`` — it has no ``select`` param, so a ``select=`` kwarg is a
-    guaranteed ``TypeError``. Flag it here (like invalid ctx reads) so the
-    refinement loop fixes the call shape instead of the strategy crashing in the
-    sandbox. ``self.bollinger_bands`` (the compiler's inline helper, which does
-    accept ``select``) is excluded.
+    Post: one message per reachable ``bollinger_bands(..., select=...)`` call that is
+    NOT the compiler's inline helper. A ``select=`` call is valid ONLY when it is
+    ``self.bollinger_bands`` AND the class actually defines a ``bollinger_bands``
+    method (the emitted compiled module). Every other form fails at runtime:
+
+      * the sandbox scalar helper ``bollinger_bands(data, period=20, num_std=2.0)``
+        (bare, ``indicators.``-qualified, or aliased) has no ``select`` param →
+        ``TypeError``;
+      * ``self.bollinger_bands(...)`` on a class that never defines it (the base
+        ``Strategy`` does not) → ``AttributeError``.
+
+    Flag it here (like invalid ctx reads) so the refinement loop fixes the call
+    shape instead of the strategy crashing in the sandbox.
     """
     aliases = import_aliases or {}
+    defines_helper = _class_defines_method(cls, "bollinger_bands")
     out: list[str] = []
     for method in _iter_strategy_methods(cls):
         if method.name not in method_names:
             continue
         for node in _iter_method_body_nodes(method):
-            if (
-                isinstance(node, ast.Call)
-                and aliases.get(_get_call_name(node), _get_call_name(node)) == "bollinger_bands"
-                and not _is_self_call(node, "bollinger_bands")
-                and _keyword_node(node, "select") is not None
-            ):
-                out.append(
-                    "bollinger_bands(..., select=...) is invalid: the sandbox "
-                    "``indicators.bollinger_bands(data, period, num_std)`` helper has no "
-                    "``select`` param and raises TypeError at runtime. Read a derived "
-                    "Bollinger band via ``ctx.indicator('bollinger', ..., band='percent_b')``."
-                )
+            if not isinstance(node, ast.Call) or _keyword_node(node, "select") is None:
+                continue
+            if aliases.get(_get_call_name(node), _get_call_name(node)) != "bollinger_bands":
+                continue
+            # Valid only as the compiler's inline helper: self.bollinger_bands on a
+            # class that actually defines the method.
+            if _is_self_call(node, "bollinger_bands") and defines_helper:
+                continue
+            out.append(
+                "bollinger_bands(..., select=...) is invalid here: only the compiler's "
+                "inline ``self.bollinger_bands`` helper accepts ``select``. The sandbox "
+                "``indicators.bollinger_bands(data, period, num_std)`` helper has no "
+                "``select`` param (TypeError), and ``self.bollinger_bands`` is undefined "
+                "on the base Strategy (AttributeError). Read a derived Bollinger band via "
+                "``ctx.indicator('bollinger', ..., band='percent_b')``."
+            )
     return out
 
 
