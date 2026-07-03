@@ -480,6 +480,22 @@ def _collect_produced_bollinger_bands(
     return produced, dynamic
 
 
+def _iter_reachable_calls(cls: ast.ClassDef, method_names: frozenset[str]) -> Iterable[ast.Call]:
+    """Yield every ``ast.Call`` in the bodies of ``cls`` methods reachable from on_bar.
+
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are the on_bar-reachable
+    method names. Post: each call node executed at runtime, once, in source order —
+    the shared traversal behind the per-call conformance checks so they don't each
+    re-walk the class body.
+    """
+    for method in _iter_strategy_methods(cls):
+        if method.name not in method_names:
+            continue
+        for node in _iter_method_body_nodes(method):
+            if isinstance(node, ast.Call):
+                yield node
+
+
 def _undefined_self_indicator_helper_calls(
     cls: ast.ClassDef, method_names: frozenset[str]
 ) -> list[str]:
@@ -499,29 +515,26 @@ def _undefined_self_indicator_helper_calls(
     defined = {m.name for m in _iter_strategy_methods(cls)}
     flagged: set[str] = set()
     out: list[str] = []
-    for method in _iter_strategy_methods(cls):
-        if method.name not in method_names:
+    for node in _iter_reachable_calls(cls, method_names):
+        if not isinstance(node.func, ast.Attribute):
             continue
-        for node in _iter_method_body_nodes(method):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                continue
-            recv = node.func.value
-            helper = node.func.attr
-            if (
-                isinstance(recv, ast.Name)
-                and recv.id == "self"
-                and helper in _KNOWN_INDICATOR_HELPER_NAMES
-                and helper not in defined
-                and helper not in flagged
-            ):
-                flagged.add(helper)
-                out.append(
-                    f"self.{helper}(...) is called but the strategy defines no '{helper}' "
-                    "method; the base Strategy provides no indicator helpers, so this raises "
-                    "AttributeError at runtime. Read indicators via "
-                    "``ctx.indicator('<name>', ...)`` (preferred) or the imported named helper "
-                    f"(e.g. ``sma(bars, 50)``), not ``self.{helper}(...)``."
-                )
+        recv = node.func.value
+        helper = node.func.attr
+        if (
+            isinstance(recv, ast.Name)
+            and recv.id == "self"
+            and helper in _KNOWN_INDICATOR_HELPER_NAMES
+            and helper not in defined
+            and helper not in flagged
+        ):
+            flagged.add(helper)
+            out.append(
+                f"self.{helper}(...) is called but the strategy defines no '{helper}' "
+                "method; the base Strategy provides no indicator helpers, so this raises "
+                "AttributeError at runtime. Read indicators via "
+                "``ctx.indicator('<name>', ...)`` (preferred) or the imported named helper "
+                f"(e.g. ``sma(bars, 50)``), not ``self.{helper}(...)``."
+            )
     return out
 
 
@@ -543,23 +556,20 @@ def _invalid_bollinger_select_calls(
     """
     aliases = import_aliases or {}
     out: list[str] = []
-    for method in _iter_strategy_methods(cls):
-        if method.name not in method_names:
+    for node in _iter_reachable_calls(cls, method_names):
+        if _keyword_node(node, "select") is None:
             continue
-        for node in _iter_method_body_nodes(method):
-            if not isinstance(node, ast.Call) or _keyword_node(node, "select") is None:
-                continue
-            call_name = _get_call_name(node)
-            if aliases.get(call_name, call_name) != "bollinger_bands":
-                continue
-            if _is_self_call(node, "bollinger_bands"):
-                continue  # compiler inline helper (valid) or undefined-self (caught elsewhere)
-            out.append(
-                "bollinger_bands(..., select=...) is invalid: the sandbox "
-                "``indicators.bollinger_bands(data, period, num_std)`` helper has no "
-                "``select`` param and raises TypeError at runtime. Read a derived "
-                "Bollinger band via ``ctx.indicator('bollinger', ..., band='percent_b')``."
-            )
+        call_name = _get_call_name(node)
+        if aliases.get(call_name, call_name) != "bollinger_bands":
+            continue
+        if _is_self_call(node, "bollinger_bands"):
+            continue  # compiler inline helper (valid) or undefined-self (caught elsewhere)
+        out.append(
+            "bollinger_bands(..., select=...) is invalid: the sandbox "
+            "``indicators.bollinger_bands(data, period, num_std)`` helper has no "
+            "``select`` param and raises TypeError at runtime. Read a derived "
+            "Bollinger band via ``ctx.indicator('bollinger', ..., band='percent_b')``."
+        )
     return out
 
 

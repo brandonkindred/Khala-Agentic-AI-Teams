@@ -77,53 +77,37 @@ class _RegBar:
         self.volume = volume
 
 
+def _project_bars(**fields) -> list:
+    """Build registry bars from named OHLCV field sequences; omitted fields default to 0.0.
+
+    Each keyword is a ``_RegBar`` field name (``open``/``high``/``low``/``close``/
+    ``volume``) mapped to a sequence ``_coerce_series`` accepts. Provided series are
+    coerced to floats and zipped positionally (stopping at the shortest, matching the
+    prior per-shape builders); a field not passed is left at ``_RegBar``'s ``0.0``
+    default on every bar — so an indicator that reads only a subset (Donchian:
+    high/low; OBV: close/volume) gets exactly those slots and no placeholder in the
+    ones it never reads. Single source of truth for the four call shapes the scalar
+    wrappers need.
+    """
+    names = list(fields)
+    columns = [[float(v) for v in _impl._coerce_series(fields[name], name)] for name in names]
+    return [_RegBar(**dict(zip(names, row))) for row in zip(*columns)]
+
+
 def _value_bars(values) -> list:
     """Project a single source series onto close-only registry bars.
 
-    ``values`` is any shape ``_coerce_series`` accepts (``pd.Series``,
-    ``list[float]``, ``list[Bar]``, …); the projected scalar lands in ``close``
-    so a registry call with ``source="close"`` reads exactly that series.
+    ``values`` is any shape ``_coerce_series`` accepts; the projected scalar lands in
+    ``close`` so a registry call with ``source="close"`` reads exactly that series.
     """
-    return [_RegBar(close=float(v)) for v in _impl._coerce_series(values)]
+    return _project_bars(close=values)
 
 
 def _ohlc_bars(high, low, close, volume=None) -> list:
-    """Zip separate OHLC(V) sequences into registry bars (atr/adx/stochastic/vwap)."""
-    highs = [float(v) for v in _impl._coerce_series(high, "high")]
-    lows = [float(v) for v in _impl._coerce_series(low, "low")]
-    closes = [float(v) for v in _impl._coerce_series(close, "close")]
-    vols = (
-        [float(v) for v in _impl._coerce_series(volume, "volume")]
-        if volume is not None
-        else [0.0] * len(closes)
-    )
-    return [
-        _RegBar(high=h, low=lo, close=c, volume=vol)
-        for h, lo, c, vol in zip(highs, lows, closes, vols)
-    ]
-
-
-def _hl_bars(high, low) -> list:
-    """Build registry bars from just high/low (Donchian). Other fields default to 0.0.
-
-    Donchian reads only ``bar.high``/``bar.low``; constructing bars with only those
-    fields set avoids feeding a placeholder into an OHLC slot the indicator never
-    reads (vs. reusing ``_ohlc_bars`` with a dummy ``close``).
-    """
-    highs = [float(v) for v in _impl._coerce_series(high, "high")]
-    lows = [float(v) for v in _impl._coerce_series(low, "low")]
-    return [_RegBar(high=h, low=lo) for h, lo in zip(highs, lows)]
-
-
-def _cv_bars(close, volume) -> list:
-    """Build registry bars from just close/volume (OBV). Other fields default to 0.0.
-
-    OBV reads only ``bar.close``/``bar.volume``; this avoids passing ``close`` into
-    the unused high/low slots.
-    """
-    closes = [float(v) for v in _impl._coerce_series(close, "close")]
-    vols = [float(v) for v in _impl._coerce_series(volume, "volume")]
-    return [_RegBar(close=c, volume=vol) for c, vol in zip(closes, vols)]
+    """Zip separate OHLC(V) sequences into registry bars (atr/adx/stochastic/vwap/…)."""
+    if volume is None:
+        return _project_bars(high=high, low=low, close=close)
+    return _project_bars(high=high, low=low, close=close, volume=volume)
 
 
 def _ohlc_bars_from_history(history) -> list:
@@ -224,7 +208,7 @@ def vwap(high, low, close, volume) -> float:
 
 def donchian_channels(high, low, period=20) -> tuple[float, float, float]:
     """Latest (upper, middle, lower) Donchian channel values. See module contract."""
-    bars = _hl_bars(high, low)
+    bars = _project_bars(high=high, low=low)
     reg = IndicatorRegistry()
     p = int(period)
     return (
@@ -250,7 +234,7 @@ def keltner_channels(
 
 def obv(close, volume) -> float:
     """Latest On-Balance Volume value. See module contract."""
-    return _scalar(IndicatorRegistry().obv(_cv_bars(close, volume)))
+    return _scalar(IndicatorRegistry().obv(_project_bars(close=close, volume=volume)))
 
 
 def mfi(high, low, close, volume, period=14) -> float:

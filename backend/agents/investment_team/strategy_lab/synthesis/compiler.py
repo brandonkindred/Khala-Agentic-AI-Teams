@@ -34,7 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import textwrap
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
@@ -334,6 +334,61 @@ def _build_indicator_bindings(
     return out
 
 
+# Per-indicator emit spec: the ordered kwargs to thread into ``self.<method>(history, …)``.
+# Each entry is ``(emit_kwarg, kind, dsl_param)`` where ``kind`` is:
+#   "int"    → ``{emit_kwarg}={int(ref.param(dsl_param))}``
+#   "float"  → ``{emit_kwarg}={float(ref.param(dsl_param))!r}``
+#   "source" → ``{emit_kwarg}={ref.source!r}``            (dsl_param unused)
+#   "select" → ``{emit_kwarg}={str(ref.param(dsl_param))!r}``  (selector for tuple-valued indicators)
+# This replaces a 16-branch if/elif whose bodies differed only in which kwargs they threaded.
+_EMIT_ARGS: dict[str, Tuple[Tuple[str, str, Optional[str]], ...]] = {
+    "sma": (("period", "int", "period"), ("source", "source", None)),
+    "ema": (("period", "int", "period"), ("source", "source", None)),
+    "rsi": (("period", "int", "period"), ("source", "source", None)),
+    "macd": (
+        ("fast", "int", "fast"),
+        ("slow", "int", "slow"),
+        ("signal", "int", "signal"),
+        ("source", "source", None),
+        ("select", "select", "output"),
+    ),
+    "bollinger": (
+        ("period", "int", "period"),
+        ("num_std", "float", "num_std"),
+        ("source", "source", None),
+        ("select", "select", "band"),
+    ),
+    "atr": (("period", "int", "period"),),
+    "adx": (("period", "int", "period"),),
+    "stochastic": (
+        ("k_period", "int", "k_period"),
+        ("d_period", "int", "d_period"),
+        ("select", "select", "output"),
+    ),
+    "vwap": (),
+    "donchian": (("period", "int", "period"), ("select", "select", "band")),
+    "keltner": (
+        ("period", "int", "period"),
+        ("atr_period", "int", "atr_period"),
+        ("multiplier", "float", "multiplier"),
+        ("select", "select", "band"),
+    ),
+    "obv": (),
+    "mfi": (("period", "int", "period"),),
+    "cci": (("period", "int", "period"),),
+    "williams_r": (("period", "int", "period"),),
+    "roc": (("period", "int", "period"), ("source", "source", None)),
+}
+
+# Load-time guard: the emit table must cover exactly the DSL indicator names, or a
+# valid ref would ``KeyError`` at emit time. Mirrors the ``_INDICATOR_METHOD_NAME`` guard.
+if set(_EMIT_ARGS) != set(IndicatorName.__args__):
+    raise RuntimeError(
+        "indicator emit table (_EMIT_ARGS) must cover every DSL indicator; "
+        f"mismatch: {set(IndicatorName.__args__) ^ set(_EMIT_ARGS)}"
+    )
+
+
 def _emit_indicator_call(ref: IndicatorRef) -> str:
     """Render the ``self.<name>(history, ...)`` call expression for one ref.
 
@@ -345,51 +400,17 @@ def _emit_indicator_call(ref: IndicatorRef) -> str:
           stochastic) thread their selector kwarg through to the helper.
     """
     method = _INDICATOR_METHOD_NAME[ref.name]
-    if ref.name in ("sma", "ema"):
-        return f"self.{method}(history, period={int(ref.param('period'))}, source={ref.source!r})"
-    if ref.name == "rsi":
-        return f"self.{method}(history, period={int(ref.param('period'))}, source={ref.source!r})"
-    if ref.name == "macd":
-        return (
-            f"self.{method}(history, fast={int(ref.param('fast'))}, "
-            f"slow={int(ref.param('slow'))}, signal={int(ref.param('signal'))}, "
-            f"source={ref.source!r}, select={str(ref.param('output'))!r})"
-        )
-    if ref.name == "bollinger":
-        return (
-            f"self.{method}(history, period={int(ref.param('period'))}, "
-            f"num_std={float(ref.param('num_std'))!r}, "
-            f"source={ref.source!r}, select={str(ref.param('band'))!r})"
-        )
-    if ref.name in ("atr", "adx"):
-        return f"self.{method}(history, period={int(ref.param('period'))})"
-    if ref.name == "stochastic":
-        return (
-            f"self.{method}(history, k_period={int(ref.param('k_period'))}, "
-            f"d_period={int(ref.param('d_period'))}, "
-            f"select={str(ref.param('output'))!r})"
-        )
-    if ref.name == "vwap":
-        return f"self.{method}(history)"
-    if ref.name == "donchian":
-        return (
-            f"self.{method}(history, period={int(ref.param('period'))}, "
-            f"select={str(ref.param('band'))!r})"
-        )
-    if ref.name == "keltner":
-        return (
-            f"self.{method}(history, period={int(ref.param('period'))}, "
-            f"atr_period={int(ref.param('atr_period'))}, "
-            f"multiplier={float(ref.param('multiplier'))!r}, "
-            f"select={str(ref.param('band'))!r})"
-        )
-    if ref.name == "obv":
-        return f"self.{method}(history)"
-    if ref.name in ("mfi", "cci", "williams_r"):
-        return f"self.{method}(history, period={int(ref.param('period'))})"
-    if ref.name == "roc":
-        return f"self.{method}(history, period={int(ref.param('period'))}, source={ref.source!r})"
-    raise CompilerError(f"unsupported indicator: {ref.name!r}")
+    args = ["history"]
+    for emit_kwarg, kind, dsl_param in _EMIT_ARGS[ref.name]:
+        if kind == "int":
+            args.append(f"{emit_kwarg}={int(ref.param(dsl_param))}")
+        elif kind == "float":
+            args.append(f"{emit_kwarg}={float(ref.param(dsl_param))!r}")
+        elif kind == "source":
+            args.append(f"{emit_kwarg}={ref.source!r}")
+        else:  # "select"
+            args.append(f"{emit_kwarg}={str(ref.param(dsl_param))!r}")
+    return f"self.{method}({', '.join(args)})"
 
 
 # ---------------------------------------------------------------------------
