@@ -39,6 +39,7 @@ from typing import Any, List, Optional, Tuple
 from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
     _INDICATOR_PARAM_SPECS,
+    INDICATOR_HELPER_NAME,
     EntryRule,
     IndicatorName,
     IndicatorRef,
@@ -65,39 +66,10 @@ class CompilerError(Exception):
     """
 
 
-# DSL name → emitted method name. Names must match
-# ``CodeConformanceGate._INDICATOR_ALLOWED_CALL_NAMES`` so the
-# conformance gate credits ``self.<name>(...)`` as the named indicator.
-_INDICATOR_METHOD_NAME: dict[str, str] = {
-    "sma": "sma",
-    "ema": "ema",
-    "rsi": "rsi",
-    "macd": "macd",
-    "bollinger": "bollinger_bands",
-    "atr": "atr",
-    "adx": "adx",
-    "stochastic": "stochastic",
-    "vwap": "vwap",
-    "donchian": "donchian_channels",
-    "keltner": "keltner_channels",
-    "obv": "obv",
-    "mfi": "mfi",
-    "roc": "roc",
-    "cci": "cci",
-    "williams_r": "williams_r",
-}
-
-# Explicit raise (not a bare ``assert``) so this load-time invariant survives
-# ``python -O``: it guards compiler correctness — a DSL indicator missing from
-# this map would ``KeyError`` at emit time (``_INDICATOR_METHOD_NAME[ref.name]``)
-# the first time a spec used it, escaping validation and the readiness gate.
-# Mirrors the identical guard on ``code_conformance._INDICATOR_ALLOWED_CALL_NAMES``.
-if set(_INDICATOR_METHOD_NAME) != set(IndicatorName.__args__):
-    raise RuntimeError(
-        "indicator method map (_INDICATOR_METHOD_NAME) must cover every DSL "
-        f"IndicatorName literal; mismatch: "
-        f"{set(IndicatorName.__args__) ^ set(_INDICATOR_METHOD_NAME)}"
-    )
+# DSL name → emitted method name, derived from the single source of truth in
+# ``spec_dsl.INDICATOR_HELPER_NAME`` (which carries the load-time coverage guard).
+# The conformance gate credits ``self.<name>(...)`` off the same mapping.
+_INDICATOR_METHOD_NAME: dict[str, str] = dict(INDICATOR_HELPER_NAME)
 
 _MIN_WINDOW: int = 20
 

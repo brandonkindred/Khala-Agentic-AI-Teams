@@ -42,8 +42,8 @@ from typing import Any, ClassVar, Iterable, List, Optional, get_args
 
 from ..spec_dsl import (
     _INDICATOR_PARAM_SPECS,
+    INDICATOR_HELPER_NAME,
     EntryRule,
-    IndicatorName,
     SignalExitRule,
     Source,
     iter_tree_indicator_refs,
@@ -77,42 +77,19 @@ _ALLOWED_HOOK_NAMES: frozenset[str] = frozenset({"on_bar", "on_fill", "on_end"})
 
 # DSL → set of acceptable AST call-name(s) for the indicator's named
 # implementation. These are the REAL callable helper names a named call must
-# resolve to — only names the sandbox ``indicators`` module actually exports.
-# Most map 1:1 with the indicator name; the channel/band indicators map to their
-# helper (``bollinger`` → ``bollinger_bands``, ``donchian`` → ``donchian_channels``,
-# ``keltner`` → ``keltner_channels``). The bare DSL name is intentionally NOT an
-# alias here: ``donchian``/``keltner``/``bollinger`` are not exported callables, so a
-# bare ``donchian(...)`` call would ``NameError``/``ImportError`` at runtime and must
-# not satisfy the gate. The DSL name is credited separately via the
-# ``ctx.indicator('<name>', ...)`` accessor in :meth:`_check_indicator_presence`.
+# resolve to — only names the sandbox ``indicators`` module actually exports —
+# derived from the single ``spec_dsl.INDICATOR_HELPER_NAME`` source (which carries
+# the load-time coverage guard). Most map 1:1 with the indicator name; the
+# channel/band indicators map to their helper (``bollinger`` → ``bollinger_bands``,
+# ``donchian`` → ``donchian_channels``, ``keltner`` → ``keltner_channels``). The bare
+# DSL name is intentionally NOT an alias here: ``donchian``/``keltner``/``bollinger``
+# are not exported callables, so a bare ``donchian(...)`` call would
+# ``NameError``/``ImportError`` at runtime and must not satisfy the gate. The DSL name
+# is credited separately via the ``ctx.indicator('<name>', ...)`` accessor in
+# :meth:`_check_indicator_presence`.
 _INDICATOR_ALLOWED_CALL_NAMES: dict[str, frozenset[str]] = {
-    "sma": frozenset({"sma"}),
-    "ema": frozenset({"ema"}),
-    "rsi": frozenset({"rsi"}),
-    "macd": frozenset({"macd"}),
-    "bollinger": frozenset({"bollinger_bands"}),
-    "atr": frozenset({"atr"}),
-    "adx": frozenset({"adx"}),
-    "stochastic": frozenset({"stochastic"}),
-    "vwap": frozenset({"vwap"}),
-    "donchian": frozenset({"donchian_channels"}),
-    "keltner": frozenset({"keltner_channels"}),
-    "obv": frozenset({"obv"}),
-    "mfi": frozenset({"mfi"}),
-    "roc": frozenset({"roc"}),
-    "cci": frozenset({"cci"}),
-    "williams_r": frozenset({"williams_r"}),
+    name: frozenset({helper}) for name, helper in INDICATOR_HELPER_NAME.items()
 }
-
-# Explicit raise (not a bare ``assert``) so this load-time invariant survives
-# ``python -O``: it guards gate correctness — a DSL indicator missing from the
-# allow-list would silently let an unsupported call pass the conformance gate.
-if set(_INDICATOR_ALLOWED_CALL_NAMES) != set(IndicatorName.__args__):
-    raise RuntimeError(
-        "indicator allow-list (_INDICATOR_ALLOWED_CALL_NAMES) must cover every DSL "
-        f"IndicatorName literal; mismatch: "
-        f"{set(IndicatorName.__args__) ^ set(_INDICATOR_ALLOWED_CALL_NAMES)}"
-    )
 
 # Every name a strategy might plausibly call as ``self.<name>(...)`` intending an
 # indicator: BOTH the exported helper names (``bollinger_bands``,

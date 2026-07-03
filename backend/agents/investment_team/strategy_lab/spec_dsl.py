@@ -259,6 +259,41 @@ INDICATOR_OUTPUT_RANGES: dict[str, tuple[float, float]] = {
 }
 
 
+# DSL indicator name → the exported/emitted helper function name. Single source of
+# truth for the name↔helper mapping: the synthesis compiler derives its emitted
+# ``self.<helper>(...)`` method name from this, and the conformance gate derives the
+# call names it credits. Most indicators share the DSL name; only the multi-output
+# channel indicators carry a distinct helper (bollinger→bollinger_bands, etc.). A
+# load-time guard here keeps it covering every ``IndicatorName``, so the two derived
+# tables no longer need their own guards.
+INDICATOR_HELPER_NAME: dict[str, str] = {
+    "sma": "sma",
+    "ema": "ema",
+    "rsi": "rsi",
+    "macd": "macd",
+    "bollinger": "bollinger_bands",
+    "atr": "atr",
+    "adx": "adx",
+    "stochastic": "stochastic",
+    "vwap": "vwap",
+    "donchian": "donchian_channels",
+    "keltner": "keltner_channels",
+    "obv": "obv",
+    "mfi": "mfi",
+    "roc": "roc",
+    "cci": "cci",
+    "williams_r": "williams_r",
+}
+
+# Explicit raise (survives ``python -O``): a DSL indicator missing from this map would
+# make the compiler ``KeyError`` at emit time and the conformance gate miss the call.
+if set(INDICATOR_HELPER_NAME) != set(IndicatorName.__args__):
+    raise RuntimeError(
+        "indicator helper map (INDICATOR_HELPER_NAME) must cover every DSL "
+        f"IndicatorName literal; mismatch: {set(IndicatorName.__args__) ^ set(INDICATOR_HELPER_NAME)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # IndicatorRef — flat shape per issue #537. The `name` field selects the
 # indicator; `params` is a dict whose accepted keys/values are governed by
