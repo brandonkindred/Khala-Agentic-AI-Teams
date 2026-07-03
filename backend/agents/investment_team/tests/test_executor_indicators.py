@@ -418,12 +418,17 @@ def test_stochastic_accepts_bars() -> None:
 
 def test_cumulative_specs_use_windowed_wrappers() -> None:
     # The ``cumulative`` flag exists solely to force a window-bounded helper, so the
-    # honest invariant is a biconditional: a spec is flagged ``cumulative`` IFF its
-    # helper is a ``_windowed_*`` wrapper. Asserting the biconditional directly (rather
-    # than a hardcoded {obv, vwap} set or a ``kwarg_names`` proxy) catches a flag/helper
-    # mismatch in EITHER direction and adapts automatically to any future cumulative
-    # indicator — the coverage probe must judge such an indicator on the runtime's
-    # bounded trailing-window value, never an unbounded full-history one.
+    # only always-true invariant is the biconditional: a spec is flagged ``cumulative``
+    # IFF its helper is a ``_windowed_*`` wrapper. This catches a flag/helper mismatch in
+    # either direction and adapts to any future cumulative indicator.
+    #
+    # We deliberately do NOT also assert "period-less (empty kwarg_names) <=> cumulative":
+    # that is not a true invariant. A parameter-less indicator need not be an unbounded
+    # running total — a stateless per-bar transform (e.g. typical price / HLC3, median
+    # price) also has no scalar kwargs yet is bounded and non-cumulative. Tying the flag
+    # to ``kwarg_names`` would false-alarm on such a future indicator. "Is this indicator
+    # unbounded?" is a semantic property; the flag is its source of truth, and this test
+    # verifies only that the flag and the helper mechanism stay consistent.
     for name, spec in ind.INDICATORS.items():
         windowed = spec.helper.__name__.startswith("_windowed_")
         assert spec.cumulative == windowed, (name, spec.cumulative, spec.helper.__name__)

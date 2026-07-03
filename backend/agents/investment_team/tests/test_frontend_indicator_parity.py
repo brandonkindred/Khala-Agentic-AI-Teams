@@ -47,67 +47,68 @@ def _require_model_source() -> str:
 
 _STRING_PLACEHOLDER = re.compile("\x00(\\d+)\x00")
 
+# One token = a block comment, a line comment, or a single/double-quoted string
+# (``\\.`` inside the string classes swallows any escaped quote, so a quote never
+# closes early). Ordering matters only between the two comment forms and strings:
+# scanning left-to-right, a comment marker inside a string is consumed as part of the
+# string token (the alternation is tried at the opening quote, not mid-string), so
+# ``//`` / ``/*`` inside a value are never mistaken for comments.
+_TS_TOKEN = re.compile(
+    r"/\*.*?\*/"  # block comment (JSDoc), possibly multi-line
+    r"|//[^\n]*"  # line comment
+    r"|'(?:\\.|[^'\\])*'"  # single-quoted string
+    r'|"(?:\\.|[^"\\])*"',  # double-quoted string
+    re.S,
+)
+
+# A backslash escape inside a string: capture the escaped char so the caller can decide
+# whether to unescape it (a quote/backslash) or keep it verbatim (anything else).
+_TS_STRING_ESCAPE = re.compile(r"\\(.)", re.S)
+
+
+def _unescape_ts_string(inner: str) -> str:
+    """Decode the content between a TS string's quotes into its Python value.
+
+    Preconditions: ``inner`` is the text between the delimiters of a single/double-quoted
+    string (delimiters already stripped).
+    Postconditions: only the escapes the model file's quoted values can contain — an
+    escaped quote (``\\'`` / ``\\"``) or backslash (``\\\\``) — are unescaped; every other
+    ``\\x`` sequence is preserved VERBATIM (backslash kept). This is deliberately scoped
+    to the file's vocabulary of plain ASCII identifiers, which carry no escapes: it never
+    executes the string (so an ES6 ``\\u{...}`` or an unknown escape can't crash the
+    parse), and it never silently drops a backslash to produce a plausible-but-wrong
+    value — an exotic future escape stays literal and surfaces as a LOUD parity mismatch.
+    """
+    return _TS_STRING_ESCAPE.sub(
+        lambda m: m.group(1) if m.group(1) in "'\"\\" else m.group(0), inner
+    )
+
 
 def _mask_strings(text: str) -> tuple[str, list[str]]:
-    """Replace string literals with inert placeholders and strip ``//`` line comments.
+    """Replace string literals with inert placeholders and strip comments.
 
     Preconditions: ``text`` begins at a structural position (not inside a string) and
-    uses the ``investment.model.ts`` subset — single/double-quoted strings (with C-style
-    ``\\`` escapes) and ``//`` line comments.
+    uses the ``investment.model.ts`` subset — single/double-quoted strings and
+    ``//`` / ``/* */`` comments.
     Postconditions: ``(masked, strings)`` where every string literal is replaced by a
     placeholder ``"\\x00<i>\\x00"`` (which contains no JSON-structural character — no
-    quote, bracket, brace, comma or colon) and every ``//`` comment outside a string is
-    removed; ``strings[i]`` is the JSON encoding (via :func:`json.dumps`) of the i-th
-    literal's decoded value. Because all string content is masked out, downstream
+    quote, bracket, brace, comma or colon) and every comment is removed; ``strings[i]``
+    is the JSON encoding (via :func:`json.dumps`) of the i-th literal decoded by
+    :func:`_unescape_ts_string`. Because all string content is masked out, downstream
     structural transforms (bracket matching, key quoting, trailing-comma removal) can
-    never touch characters that live inside a string. Raises ``AssertionError`` on an
-    unterminated string literal.
+    never touch characters that live inside a string.
     """
-    out: list[str] = []
     strings: list[str] = []
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch in ("'", '"'):  # string literal -> placeholder
-            i, value = _read_string(text, i)
-            out.append(f"\x00{len(strings)}\x00")
-            strings.append(json.dumps(value))
-            continue
-        if ch == "/" and i + 1 < n and text[i + 1] == "/":  # line comment (outside strings)
-            while i < n and text[i] != "\n":
-                i += 1
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out), strings
 
+    def _replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if token.startswith("/"):  # a // or /* */ comment -> drop it
+            return ""
+        value = _unescape_ts_string(token[1:-1])  # strip delimiters, decode escapes
+        strings.append(json.dumps(value))  # string literal -> placeholder
+        return f"\x00{len(strings) - 1}\x00"
 
-def _read_string(text: str, i: int) -> tuple[int, str]:
-    """Decode the string literal opening at ``text[i]`` into its Python value.
-
-    Preconditions: ``text[i]`` is a quote (``'`` or ``"``) opening a string with
-    C-style ``\\`` escapes.
-    Postconditions: ``(end, value)`` where ``end`` is the index just past the closing
-    quote and ``value`` is the decoded string (so :func:`json.dumps` can re-encode it
-    correctly, independent of the original quote style). Raises ``AssertionError`` if
-    the string is never closed.
-    """
-    quote = text[i]
-    i += 1
-    n = len(text)
-    buf: list[str] = []
-    _escapes = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f"}
-    while i < n:
-        ch = text[i]
-        if ch == "\\" and i + 1 < n:  # escape: decode to the literal char it denotes
-            buf.append(_escapes.get(text[i + 1], text[i + 1]))
-            i += 2
-            continue
-        if ch == quote:
-            return i + 1, "".join(buf)
-        buf.append(ch)
-        i += 1
-    raise AssertionError("unterminated string literal")
+    return _TS_TOKEN.sub(_replace, text), strings
 
 
 def _match_balanced(text: str, open_idx: int, open_ch: str, close_ch: str) -> int:
@@ -149,7 +150,7 @@ def _ts_object_to_json(literal: str) -> Any:
     """Parse a JSON-like TS object/array literal into Python.
 
     Preconditions: ``literal`` is a balanced TS object/array using the subset in
-    ``investment.model.ts`` — ``//`` line comments, unquoted identifier keys,
+    ``investment.model.ts`` — ``//`` and ``/* */`` comments, unquoted identifier keys,
     single/double-quoted strings, and trailing commas. String contents may contain any
     character (including ``//``, quotes, brackets, commas, colons).
     Postconditions: returns the parsed Python value. String literals are masked out
@@ -263,11 +264,28 @@ def test_ts_object_parser_is_string_aware() -> None:
     assert _ts_object_to_json("{ label: 'd\\'oh', n: 2 }") == {"label": "d'oh", "n": 2}
     assert _ts_object_to_json('{ label: "don\'t" }') == {"label": "don't"}
     assert _ts_object_to_json('{ label: "say \\"hi\\"" }') == {"label": 'say "hi"'}
-    # C-style escapes decode to their literal char.
-    assert _ts_object_to_json("{ label: 'a\\tb' }") == {"label": "a\tb"}
-    # Line comments (outside strings) and trailing commas are dropped.
+    # Only quote/backslash escapes are unescaped; any OTHER escape is preserved verbatim
+    # (backslash kept) — the compared vocabulary has none, and keeping it literal means an
+    # exotic future escape fails LOUD (a parity mismatch) rather than crashing the parse
+    # or silently decoding to a plausible-but-wrong value.
+    assert _ts_object_to_json("{ label: 'a\\tb' }") == {"label": "a\\tb"}
+    assert _ts_object_to_json("{ label: 'A is \\u0041' }") == {"label": "A is \\u0041"}
+    # ES6 code-point / unknown escapes must NOT crash the parser (ast.literal_eval did).
+    assert _ts_object_to_json("{ label: 'emoji \\u{1F4C8}' }") == {"label": "emoji \\u{1F4C8}"}
+    # Line AND block comments (outside strings) are dropped; a comment marker inside a
+    # string is preserved.
     assert _ts_object_to_json("{ a: 1 } // trailing comment") == {"a": 1}
     assert _ts_object_to_json("{ a: 1, // inline\n b: 2, }") == {"a": 1, "b": 2}
+    assert _ts_object_to_json("{ a: 1, /* note, with: commas */ b: 2 }") == {"a": 1, "b": 2}
+    assert _ts_object_to_json("{ /**\n * doc\n */ a: 1 }") == {"a": 1}
+    assert _ts_object_to_json("{ label: 'a/*not*/b' }") == {"label": "a/*not*/b"}
+
+
+def test_match_balanced_rejects_unbalanced_brackets() -> None:
+    # The bracket matcher must raise (not silently return a wrong index) on input whose
+    # brackets never close — guards the slice extraction in _extract_literal.
+    with pytest.raises(AssertionError, match="unbalanced"):
+        _match_balanced("{ a: 1 ", 0, "{", "}")
 
 
 def test_frontend_name_union_allows_digits() -> None:
