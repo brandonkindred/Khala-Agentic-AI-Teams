@@ -1,6 +1,9 @@
 """Pydantic request/response models for the coding_team API.
 
 Pure data schemas shared by the route modules; no runtime logic, no I/O.
+
+Invariants:
+    - Import-side-effect free beyond class definition.
 """
 
 from __future__ import annotations

@@ -3,6 +3,11 @@
 Monkeypatched collaborators are dereferenced through the ``main`` module object
 at call time so ``monkeypatch.setattr(main, ...)`` keeps taking effect after the
 split; models are imported directly.
+
+Invariants:
+    - ``_active_run_threads`` / ``_starting_run_jobs`` are the one registry pair;
+      callers mutate them in place under ``_run_thread_lock`` (never rebind), so
+      background threads and the answers/resume routes observe the same maps.
 """
 
 from __future__ import annotations
