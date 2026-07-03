@@ -68,17 +68,20 @@ class _Resp:
 
 
 class _StubClient:
-    """Records request bodies and serves the scripted payload for any URL.
+    """Records request URLs/bodies and serves the scripted payload for any URL.
 
     Postconditions: every ``post`` call is appended to ``self.posts`` as
-        ``{"url", "json"}`` before the scripted response is returned.
+        ``{"url", "json"}`` and every ``get`` URL to ``self.gets`` before the
+        scripted response is returned.
     """
 
     def __init__(self, payload: Any = None) -> None:
         self._payload = payload
         self.posts: list[dict[str, Any]] = []
+        self.gets: list[str] = []
 
     def get(self, url: str, *, timeout: Any = None) -> _Resp:
+        self.gets.append(url)
         return _Resp(200, self._payload)
 
     def post(self, url: str, *, json: Any = None, timeout: Any = None) -> _Resp:
@@ -107,13 +110,17 @@ EXPECTED_MAPPING: dict[PipelineRunStatus, str] = {
 
 
 def test_every_real_status_is_mapped():
-    """Every PipelineRunStatus member has an agreed founder-side mapping."""
+    """Every PipelineRunStatus member has an agreed founder-side mapping.
+
+    Only additions need checking here: *removing* a member already fails
+    loudly at import time, because EXPECTED_MAPPING references members by
+    attribute (an AttributeError errors out the whole module at collection).
+    """
     unmapped = set(PipelineRunStatus) - set(EXPECTED_MAPPING)
-    stale = set(EXPECTED_MAPPING) - set(PipelineRunStatus)
-    assert not unmapped and not stale, (
-        f"PipelineRunStatus drifted (new: {sorted(m.value for m in unmapped)}, "
-        f"removed: {sorted(m.value for m in stale)}). Update AgenticTeamAdapter.poll_build, "
-        "EXPECTED_MAPPING here, and ADR-007's contract-boundary section together."
+    assert not unmapped, (
+        f"PipelineRunStatus gained member(s) {sorted(m.value for m in unmapped)}. "
+        "Update AgenticTeamAdapter.poll_build, EXPECTED_MAPPING here, and ADR-007's "
+        "contract-boundary section together."
     )
 
 
@@ -299,9 +306,24 @@ def test_real_routes_and_mount_prefix(provisioning_app):
         "The unified-API mount prefix for agentic_team_provisioning no longer matches "
         "AgenticTeamAdapter.PROVISIONING_PREFIX — adapter URLs would 404."
     )
-    # And the adapter's URL builder composes prefix + real route path.
-    url = AgenticTeamAdapter("t1", process_id="p1")._url("/test-pipeline/runs")
-    assert url.endswith(agentic_team.PROVISIONING_PREFIX + create.path.replace("{team_id}", "t1"))
+
+    # And the adapter renders *every* URL it calls as prefix + the real route
+    # path — driven through the real adapter methods, so a drifted sub-path in
+    # start_build/poll_build/submit_build_answers (which substring-matched
+    # fakes in the behavioral suite cannot see) fails here.
+    def rendered(route) -> str:
+        path = route.path.replace("{team_id}", "t1").replace("{run_id}", "r1")
+        return agentic_team.PROVISIONING_PREFIX + path
+
+    client = _StubClient({"run_id": "r1", "status": "completed"})
+    adapter = _adapter()
+    adapter.start_build(client, "# SPEC")
+    adapter.poll_build(client, "r1")
+    adapter.submit_build_answers(client, "r1", [{"other_text": "ok"}])
+    create_url, submit_url = (p["url"] for p in client.posts)
+    assert create_url.endswith(rendered(create))
+    assert client.gets[0].endswith(rendered(poll))
+    assert submit_url.endswith(rendered(submit))
 
 
 # ---------------------------------------------------------------------------
@@ -315,12 +337,20 @@ def test_adapter_signatures_match_protocol():
     the behavioral suite) only checks attribute presence, so parameter or
     signature drift on either side is caught here and nowhere else.
 
-    Method names are derived from the Protocol so a method added there is
-    automatically checked against the adapter."""
+    Method names are derived from the Protocol's full MRO, so a method added
+    there — directly or on a base Protocol it inherits — is automatically
+    checked against the adapter."""
     protocol_methods = sorted(
-        name
-        for name, member in vars(TargetTeamAdapter).items()
-        if not name.startswith("_") and inspect.isfunction(member)
+        {
+            name
+            # Walk the MRO so methods inherited from a base Protocol are
+            # guarded too; skip typing machinery (Protocol, Generic) and
+            # object, which contribute no contract methods.
+            for klass in TargetTeamAdapter.__mro__
+            if klass.__module__ not in ("typing", "builtins")
+            for name, member in vars(klass).items()
+            if not name.startswith("_") and inspect.isfunction(member)
+        }
     )
     assert protocol_methods, "TargetTeamAdapter declares no public methods — did the Protocol move?"
 

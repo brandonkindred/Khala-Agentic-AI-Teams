@@ -1,7 +1,7 @@
 # ADR-007 — Founder target-adapter: collapse agentic-team pipelines onto the three-phase Protocol
 
 - **Status**: Accepted
-- **Date**: 2026-07-02
+- **Date**: 2026-07-03
 - **Owner**: User Agent Founder team
 - **Related**: `backend/agents/user_agent_founder/system_design/FEATURE_SPEC_testing_personas.md` (Backend Design section — defines the `TargetTeamAdapter` Protocol)
 
@@ -120,12 +120,16 @@ Founder-internal (defined in `backend/agents/user_agent_founder`):
 
 ## Consequences
 
-- The coupling is accepted and guarded:
+- The coupling is accepted and guarded, split across two suites:
   `backend/agents/user_agent_founder/tests/test_adapter_agentic_team_contract_drift.py`
   imports the **real** provisioning-side models, DTOs, and app routes and
-  fails loudly when any part of the boundary above drifts (the behavioral
-  suite in `test_adapter_agentic_team.py` scripts fake HTTP responses, so it
-  cannot see real-side drift by itself).
+  fails loudly when the provisioning-side surface or the Protocol signatures
+  drift (the behavioral suite in `test_adapter_agentic_team.py` scripts fake
+  HTTP responses, so it cannot see real-side drift by itself). The
+  founder-internal poll-dict keys and terminal strings are exercised through
+  the **real orchestrator** by the behavioral suite's end-to-end persona-run
+  tests — changing the orchestrator's expectations fails there, not in the
+  drift file.
 - Semantic debt is acknowledged: the Protocol's `repo_path` slot carries a
   persona *spec* for agentic targets. Renaming the slot would touch the run
   store and every adapter, so the naming quirk is accepted and documented
