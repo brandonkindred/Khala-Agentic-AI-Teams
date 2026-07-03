@@ -50,15 +50,15 @@ from user_agent_founder.targets.base import TargetTeamAdapter
 class _Resp:
     """Stub httpx response serving one scripted JSON payload.
 
-    Preconditions: ``payload`` is JSON-serializable (it is fed straight to
-        the adapter's ``resp.json()`` consumer).
+    Preconditions: ``payload`` is the decoded-JSON value the adapter will
+        consume. The tripwire only scripts 2xx responses, so no error-path
+        attributes (``.text`` etc.) are modeled.
     Postconditions: ``json()`` returns the payload verbatim.
     """
 
-    def __init__(self, status_code: int = 200, payload: Any = None) -> None:
+    def __init__(self, status_code: int, payload: Any) -> None:
         self.status_code = status_code
-        self._payload = payload if payload is not None else {}
-        self.text = ""
+        self._payload = payload
 
     def json(self) -> Any:
         return self._payload
@@ -75,7 +75,7 @@ class _StubClient:
         scripted response is returned.
     """
 
-    def __init__(self, payload: Any = None) -> None:
+    def __init__(self, payload: Any) -> None:
         self._payload = payload
         self.posts: list[dict[str, Any]] = []
         self.gets: list[str] = []
@@ -231,6 +231,9 @@ def test_start_build_body_validates_against_real_request_model():
     ("answers", "expected_text"),
     [
         ([{"selected_option_id": "other", "other_text": "Ship the MVP"}], "Ship the MVP"),
+        # A one-character answer is the boundary case that actually pins the
+        # DTO's min_length=1 — longer bodies would pass a silently-raised limit.
+        ([{"selected_option_id": "other", "other_text": "y"}], "y"),
         (
             [{"selected_option_id": "other", "other_text": "   "}],
             agentic_team._NO_ANSWER_PLACEHOLDER,
@@ -279,15 +282,15 @@ def provisioning_app(monkeypatch):
     return app
 
 
-def test_real_routes_and_mount_prefix(provisioning_app):
-    """The three routes the adapter calls exist on the real app with
-    TestPipelineRun responses, and the unified-API mount prefix matches the
-    adapter's hardcoded PROVISIONING_PREFIX."""
-    from unified_api.config import TEAM_CONFIGS
+def _pipeline_routes(app):
+    """Return the (create, poll, submit) route objects the adapter calls.
 
+    Postconditions: all three routes exist on the app — a moved or renamed
+        route fails here with instructions, not as an AttributeError later.
+    """
     routes = {
         (method, route.path): route
-        for route in provisioning_app.routes
+        for route in app.routes
         for method in (getattr(route, "methods", None) or ())
     }
     create = routes.get(("POST", "/teams/{team_id}/test-pipeline/runs"))
@@ -297,20 +300,34 @@ def test_real_routes_and_mount_prefix(provisioning_app):
         "A test-pipeline route AgenticTeamAdapter depends on moved or disappeared "
         "from the provisioning app. Update targets/agentic_team.py._url and ADR-007."
     )
-    # The round-trip tests above are only meaningful while these routes still
-    # serialize through the model the payloads were built from.
+    return create, poll, submit
+
+
+def test_real_routes_serialize_through_run_model(provisioning_app):
+    """The create/poll routes serialize through the real run model — the
+    round-trip tests above are only meaningful while this holds."""
+    create, poll, _submit = _pipeline_routes(provisioning_app)
     assert create.response_model is PipelineRunModel
     assert poll.response_model is PipelineRunModel
+
+
+def test_mount_prefix_matches_adapter():
+    """The unified-API mount prefix matches the adapter's hardcoded prefix."""
+    from unified_api.config import TEAM_CONFIGS
 
     assert TEAM_CONFIGS["agentic_team_provisioning"].prefix == agentic_team.PROVISIONING_PREFIX, (
         "The unified-API mount prefix for agentic_team_provisioning no longer matches "
         "AgenticTeamAdapter.PROVISIONING_PREFIX — adapter URLs would 404."
     )
 
-    # And the adapter renders *every* URL it calls as prefix + the real route
-    # path — driven through the real adapter methods, so a drifted sub-path in
-    # start_build/poll_build/submit_build_answers (which substring-matched
-    # fakes in the behavioral suite cannot see) fails here.
+
+def test_adapter_renders_real_route_urls(provisioning_app):
+    """The adapter renders *every* URL it calls as exactly base + prefix + the
+    real route path — driven through the real adapter methods, so a drifted
+    sub-path or a doubled/displaced prefix (which substring or endswith checks
+    cannot see) fails here."""
+    create, poll, submit = _pipeline_routes(provisioning_app)
+
     def rendered(route) -> str:
         path = route.path.replace("{team_id}", "t1").replace("{run_id}", "r1")
         return agentic_team.PROVISIONING_PREFIX + path
@@ -320,10 +337,11 @@ def test_real_routes_and_mount_prefix(provisioning_app):
     adapter.start_build(client, "# SPEC")
     adapter.poll_build(client, "r1")
     adapter.submit_build_answers(client, "r1", [{"other_text": "ok"}])
+    base = agentic_team.UNIFIED_API_BASE.rstrip("/")
     create_url, submit_url = (p["url"] for p in client.posts)
-    assert create_url.endswith(rendered(create))
-    assert client.gets[0].endswith(rendered(poll))
-    assert submit_url.endswith(rendered(submit))
+    assert create_url == base + rendered(create)
+    assert client.gets[0] == base + rendered(poll)
+    assert submit_url == base + rendered(submit)
 
 
 # ---------------------------------------------------------------------------
@@ -340,18 +358,31 @@ def test_adapter_signatures_match_protocol():
     Method names are derived from the Protocol's full MRO, so a method added
     there — directly or on a base Protocol it inherits — is automatically
     checked against the adapter."""
-    protocol_methods = sorted(
-        {
-            name
-            # Walk the MRO so methods inherited from a base Protocol are
-            # guarded too; skip typing machinery (Protocol, Generic) and
-            # object, which contribute no contract methods.
-            for klass in TargetTeamAdapter.__mro__
-            if klass.__module__ not in ("typing", "builtins")
-            for name, member in vars(klass).items()
-            if not name.startswith("_") and inspect.isfunction(member)
-        }
+    protocol_classes = [
+        # Walk the MRO so members inherited from a base Protocol are guarded
+        # too; skip typing machinery (Protocol, Generic) and object, which
+        # contribute no contract members.
+        klass
+        for klass in TargetTeamAdapter.__mro__
+        if klass.__module__ not in ("typing", "builtins")
+    ]
+    public_members = {
+        name: member
+        for klass in protocol_classes
+        for name, member in vars(klass).items()
+        if not name.startswith("_")
+    }
+    # This guard can only compare plain functions. A member declared another
+    # way (property/classmethod/staticmethod) would silently drop out of the
+    # signature check below, so its mere existence fails here first.
+    unguardable = {
+        name for name, member in public_members.items() if not inspect.isfunction(member)
+    }
+    assert not unguardable, (
+        f"Protocol member(s) {sorted(unguardable)} are not plain methods — extend this "
+        "guard to compare their shape, or they drift unchecked."
     )
+    protocol_methods = sorted(public_members)
     assert protocol_methods, "TargetTeamAdapter declares no public methods — did the Protocol move?"
 
     for name in protocol_methods:
@@ -372,7 +403,18 @@ def test_adapter_signatures_match_protocol():
             f"return-annotation drift on {name!r}: adapter {impl_sig} vs Protocol {proto_sig}"
         )
 
-    # Protocol attributes exist (and stay strings) on a constructed adapter.
-    for attr in ("team_key", "display_name"):
-        assert attr in TargetTeamAdapter.__annotations__
-        assert isinstance(getattr(_adapter(), attr), str)
+    # Protocol data attributes: derived from the annotations so a new
+    # attribute (or a changed annotation) is automatically checked, mirroring
+    # the method loop above. Both current attributes are plain strings.
+    assert set(TargetTeamAdapter.__annotations__) == {"team_key", "display_name"}, (
+        "TargetTeamAdapter's data attributes changed — extend this guard (and every "
+        "adapter) to cover the new shape."
+    )
+    adapter = _adapter()
+    for attr, annotation in TargetTeamAdapter.__annotations__.items():
+        # Annotations are strings here (`from __future__ import annotations`).
+        assert annotation == "str", (
+            f"Protocol attribute {attr!r} is now annotated {annotation!r}; update the "
+            "adapter and this guard together."
+        )
+        assert isinstance(getattr(adapter, attr), str)
