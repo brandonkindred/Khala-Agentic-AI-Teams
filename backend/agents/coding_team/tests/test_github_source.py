@@ -237,6 +237,74 @@ class TestClientRetries:
         assert len(slept) == 1
 
 
+class TestClientIssueCommentMarker:
+    def test_add_issue_comment_appends_khala_marker(self) -> None:
+        """Every Khala-posted conversation comment carries the invisible marker so the
+        '@khala review' webhook can recognize (and never re-trigger on) Khala's own
+        output — author identity can't do this, since Khala posts with the operator's
+        PAT and the PAT owner may be exactly the person triggering reviews."""
+        from coding_team.github_source.client import KHALA_COMMENT_MARKER
+
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(201, json={"id": 1})
+
+        _client_with(handler).add_issue_comment("acme", "widget", 42, "Code review failed: boom")
+        assert seen["body"]["body"] == f"Code review failed: boom\n\n{KHALA_COMMENT_MARKER}"
+
+    def test_add_issue_comment_does_not_duplicate_marker(self) -> None:
+        from coding_team.github_source.client import KHALA_COMMENT_MARKER
+
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(201, json={"id": 1})
+
+        body = f"already marked\n\n{KHALA_COMMENT_MARKER}"
+        _client_with(handler).add_issue_comment("acme", "widget", 42, body)
+        assert seen["body"]["body"] == body
+        assert seen["body"]["body"].count(KHALA_COMMENT_MARKER) == 1
+
+
+class TestClientCommentReaction:
+    def test_posts_eyes_reaction_to_comment(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["method"] = req.method
+            seen["path"] = req.url.path
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(201, json={"id": 1, "content": "eyes"})
+
+        client = _client_with(handler)
+        client.create_comment_reaction("acme", "widget", 555)
+        assert seen["method"] == "POST"
+        assert seen["path"] == "/repos/acme/widget/issues/comments/555/reactions"
+        assert seen["body"] == {"content": "eyes"}
+
+    def test_accepts_already_exists_200(self) -> None:
+        # GitHub returns 200 (not 201) when the reaction already exists; both are OK.
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"id": 1, "content": "eyes"})
+
+        result = _client_with(handler).create_comment_reaction(
+            "acme", "widget", 555, content="eyes"
+        )
+        # No exception on a 200 (vs. the 201 the happy-path test exercises), and the
+        # documented contract is a bare None return either way.
+        assert result is None
+
+    def test_raises_on_error(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "Not Found"})
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).create_comment_reaction("acme", "widget", 555)
+
+
 class TestScrubTokenFromText:
     def test_redacts_user_at_url(self) -> None:
         # Build the credentialed URL at runtime so the literal `user:pwd@host`
