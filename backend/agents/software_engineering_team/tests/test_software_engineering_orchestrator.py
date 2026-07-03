@@ -12,7 +12,7 @@ import orchestrator
 import pytest
 
 from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE, LLMRateLimitError
-from software_engineering_team.shared.command_runner import CommandResult
+from shared_command_runner.runner import CommandResult
 from software_engineering_team.shared.models import (
     ProductRequirements,
     SystemArchitecture,
@@ -52,12 +52,10 @@ def test_run_build_verification_appends_fix_line_when_pytest_fails_with_test_err
     )
 
     with patch(
-        "software_engineering_team.shared.command_runner.run_python_syntax_check",
+        "shared_command_runner.runner.run_python_syntax_check",
         return_value=CommandResult(True, 0, "", ""),
     ):
-        with patch(
-            "software_engineering_team.shared.command_runner.run_pytest", return_value=mock_result
-        ):
+        with patch("shared_command_runner.runner.run_pytest", return_value=mock_result):
             ok, error_output = orchestrator._run_build_verification(tmp_path, "backend", "task-1")
 
     assert ok is False
@@ -150,7 +148,7 @@ def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch("orchestrator._get_agents", return_value=mock_agents):
             with patch(
-                "software_engineering_team.shared.command_runner.ensure_backend_project_initialized",
+                "shared_command_runner.runner.ensure_backend_project_initialized",
                 return_value=mock_init_result,
             ):
                 orchestrator.run_failed_tasks(job_id)

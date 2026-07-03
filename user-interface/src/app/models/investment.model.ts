@@ -195,10 +195,18 @@ export type IndicatorName =
   | 'atr'
   | 'adx'
   | 'stochastic'
-  | 'vwap';
+  | 'vwap'
+  | 'donchian'
+  | 'keltner'
+  | 'obv'
+  | 'mfi'
+  | 'roc'
+  | 'cci'
+  | 'williams_r';
 
 export const INDICATOR_NAME_OPTIONS: IndicatorName[] = [
   'sma', 'ema', 'rsi', 'macd', 'bollinger', 'atr', 'adx', 'stochastic', 'vwap',
+  'donchian', 'keltner', 'obv', 'mfi', 'roc', 'cci', 'williams_r',
 ];
 
 export type IndicatorParamValue = number | string;
@@ -263,7 +271,7 @@ export const INDICATOR_SPECS: Record<IndicatorName, IndicatorSpec> = {
     params: [
       { key: 'period', required: false, default: 20, kind: 'int', min: 5, max: 200 },
       { key: 'num_std', required: false, default: 2.0, kind: 'float', min: 0.000001 },
-      { key: 'band', required: false, default: 'middle', kind: 'enum', options: ['upper', 'middle', 'lower'] },
+      { key: 'band', required: false, default: 'middle', kind: 'enum', options: ['upper', 'middle', 'lower', 'percent_b', 'bandwidth'] },
     ],
   },
   atr: {
@@ -283,6 +291,39 @@ export const INDICATOR_SPECS: Record<IndicatorName, IndicatorSpec> = {
     ],
   },
   vwap: { name: 'vwap', allowSource: false, params: [] },
+  donchian: {
+    name: 'donchian', allowSource: false,
+    params: [
+      { key: 'period', required: false, default: 20, kind: 'int', min: 2, max: 400 },
+      { key: 'band', required: false, default: 'middle', kind: 'enum', options: ['upper', 'middle', 'lower'] },
+    ],
+  },
+  keltner: {
+    name: 'keltner', allowSource: false,
+    params: [
+      { key: 'period', required: false, default: 20, kind: 'int', min: 2, max: 400 },
+      { key: 'atr_period', required: false, default: 10, kind: 'int', min: 2, max: 200 },
+      { key: 'multiplier', required: false, default: 2.0, kind: 'float', min: 0.000001 },
+      { key: 'band', required: false, default: 'middle', kind: 'enum', options: ['upper', 'middle', 'lower'] },
+    ],
+  },
+  obv: { name: 'obv', allowSource: false, params: [] },
+  mfi: {
+    name: 'mfi', allowSource: false,
+    params: [{ key: 'period', required: false, default: 14, kind: 'int', min: 2, max: 200 }],
+  },
+  roc: {
+    name: 'roc', allowSource: true,
+    params: [{ key: 'period', required: false, default: 12, kind: 'int', min: 2, max: 400 }],
+  },
+  cci: {
+    name: 'cci', allowSource: false,
+    params: [{ key: 'period', required: false, default: 20, kind: 'int', min: 2, max: 400 }],
+  },
+  williams_r: {
+    name: 'williams_r', allowSource: false,
+    params: [{ key: 'period', required: false, default: 14, kind: 'int', min: 2, max: 200 }],
+  },
 };
 
 export type PredicateSide = IndicatorRef | BarFieldRef;

@@ -73,6 +73,41 @@ def _source_value(bar: Any, source: str) -> float:
     return float(bar.close)
 
 
+def _obv_signed_volume(cur: Any, prev: Any) -> float:
+    """The single-bar OBV term: ``+volume`` on an up-close, ``−volume`` on a down-close.
+
+    Pre: ``cur``/``prev`` are adjacent bars. Post: ``float(cur.volume)`` when the close
+    rose vs. ``prev``, its negation when it fell, ``0.0`` on a flat close. Module-level
+    (like :func:`_source_value`) so the hot-path :meth:`IndicatorRegistry.obv` allocates
+    no per-call closure.
+    """
+    cur_c = float(cur.close)
+    prev_c = float(prev.close)
+    if cur_c > prev_c:
+        return float(cur.volume)
+    if cur_c < prev_c:
+        return -float(cur.volume)
+    return 0.0
+
+
+def _mfi_flow_term(cur: Any, prev: Any) -> Tuple[float, float]:
+    """The single-bar MFI ``(positive, negative)`` raw-money-flow term.
+
+    Pre: ``cur``/``prev`` are adjacent bars. Post: ``(tp·volume, 0)`` when the typical
+    price rose vs. ``prev``, ``(0, tp·volume)`` when it fell, ``(0, 0)`` on a flat move —
+    where ``tp = (high+low+close)/3``. Module-level so :meth:`IndicatorRegistry.mfi`
+    allocates no per-call closure.
+    """
+    tp = (float(cur.high) + float(cur.low) + float(cur.close)) / 3.0
+    tp_prev = (float(prev.high) + float(prev.low) + float(prev.close)) / 3.0
+    rmf = tp * float(cur.volume)
+    if tp > tp_prev:
+        return (rmf, 0.0)
+    if tp < tp_prev:
+        return (0.0, rmf)
+    return (0.0, 0.0)
+
+
 def windowed_ema(
     bars: Sequence[Any],
     period: int,
@@ -707,6 +742,22 @@ class IndicatorRegistry:
             return upper
         if select == "lower":
             return lower
+        if select == "percent_b":
+            # %B locates the live price within the band: 0 at the lower band,
+            # 1 at the upper. Flat window (upper == lower) → neutral 0.5 to
+            # avoid a 0/0; %B is intentionally unbounded outside [0, 1] when
+            # price pierces a band.
+            width = upper - lower
+            if width == 0:
+                return 0.5
+            price = _source_value(bars[-1], source)
+            return (price - lower) / width
+        if select == "bandwidth":
+            # Bandwidth normalises the band width by the middle band; 0 when the
+            # middle is 0 (degenerate) so the result stays finite.
+            if middle == 0:
+                return 0.0
+            return (upper - lower) / middle
         return None
 
     # ----- Stochastic ----------------------------------------------------
@@ -816,6 +867,16 @@ class IndicatorRegistry:
     # ----- VWAP ----------------------------------------------------------
 
     def vwap(self, bars: Sequence[Any]) -> Optional[float]:
+        """Volume-Weighted Average Price, cumulative over ``bars`` at ``bars[-1]``.
+
+        Pre: ``bars`` is non-empty. Post: ``Σ(typical·volume) / Σ volume`` over the
+        window (``typical = (high+low+close)/3``); falls back to the mean close when the
+        window's total volume is 0. Deliberately recomputed exactly over the window
+        (O(window)) rather than incrementally like its cumulative sibling
+        :meth:`obv`: VWAP is a ratio whose zero-volume fallback needs the window's
+        close mean, so an exact per-call sum keeps it bit-stable and simple; the
+        per-bar cost is dominated by the bounded window and a same-bar cache hit.
+        """
         if not bars:
             return None
         key = ("vwap",)
@@ -1021,3 +1082,348 @@ class IndicatorRegistry:
             source=source,
             select=select,
         )
+
+    # ----- Donchian channels --------------------------------------------
+
+    def donchian(
+        self,
+        bars: Sequence[Any],
+        period: int = 20,
+        select: str = "middle",
+    ) -> Optional[float]:
+        """Donchian channel ``(upper | middle | lower)`` at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
+        Post: ``upper`` is the highest high and ``lower`` the lowest low over
+        the trailing ``period`` bars; ``middle`` is their midpoint. The extrema
+        are recomputed over the trailing ``period`` bars — O(period), independent
+        of history length (max/min are not invertible, so a running-sum trick
+        does not apply; a monotonic-deque O(1) form is not worth its complexity
+        for the small ``period`` here). A same-bar fingerprint cache collapses
+        repeated intra-bar reads to one compute.
+        """
+        if not bars or len(bars) < period:
+            return None
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd`.
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("donchian", symbol, period)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            triple = state["value"]
+        else:
+            window = bars[-period:]
+            upper = max(float(b.high) for b in window)
+            lower = min(float(b.low) for b in window)
+            triple = (upper, (upper + lower) / 2.0, lower)
+            self._state[key] = {"fp": fp, "value": triple}
+        upper, middle, lower = triple
+        if select == "upper":
+            return upper
+        if select == "middle":
+            return middle
+        if select == "lower":
+            return lower
+        return None
+
+    # ----- Keltner channels ---------------------------------------------
+
+    def keltner(
+        self,
+        bars: Sequence[Any],
+        period: int = 20,
+        atr_period: int = 10,
+        multiplier: float = 2.0,
+        select: str = "middle",
+    ) -> Optional[float]:
+        """Keltner channel ``(upper | middle | lower)`` at ``bars[-1]``.
+
+        Pre: ``period >= 1``; ``atr_period >= 1``. Returns ``None`` until
+        ``len(bars) >= max(period, atr_period + 1)`` (the ATR leg needs a prior
+        close).
+        Post: ``middle`` is the windowed close-EMA over ``period`` bars; the
+        bands are ``middle ± multiplier × ATR(atr_period)``. Reuses
+        :func:`windowed_ema` for the basis and a **simple average of true range**
+        for the width — identical to :meth:`atr` above, which is itself an SMA of
+        true range (``total / period``), NOT a Wilder/EMA smoothing — so the
+        Keltner ATR leg and a standalone ``atr`` indicator return the same value
+        and the compiler's inline helper agrees bit-for-bit.
+
+        Unlike the pure-windowed indicators (``donchian``/``williams_r``/``cci``/
+        ``mfi``), this method keeps no per-call deque: its dominant cost is the
+        shared :func:`windowed_ema` basis, which is inherently O(period) because the
+        EMA seed slides with the window and cannot be cached locally without
+        changing that shared helper. Caching only the small ``atr_period`` true-range
+        leg would not remove that dominant cost, so it is intentionally left plain.
+        """
+        if not bars or len(bars) < max(period, atr_period + 1):
+            return None
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd` and the sibling
+        # new indicators (donchian/mfi/cci/williams_r).
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("keltner", symbol, period, atr_period, multiplier)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            triple = state["value"]
+        else:
+            middle = windowed_ema(bars, period, "close")
+            total = 0.0
+            for i in range(len(bars) - atr_period, len(bars)):
+                h = float(bars[i].high)
+                low = float(bars[i].low)
+                prev_close = float(bars[i - 1].close)
+                total += max(h - low, abs(h - prev_close), abs(low - prev_close))
+            atr_val = total / atr_period
+            triple = (middle + multiplier * atr_val, middle, middle - multiplier * atr_val)
+            self._state[key] = {"fp": fp, "value": triple}
+        upper, middle, lower = triple
+        if select == "upper":
+            return upper
+        if select == "middle":
+            return middle
+        if select == "lower":
+            return lower
+        return None
+
+    # ----- OBV -----------------------------------------------------------
+
+    def obv(self, bars: Sequence[Any]) -> Optional[float]:
+        """On-Balance Volume at ``bars[-1]`` (cumulative over ``bars``).
+
+        Pre: ``bars`` is non-empty. Post: the running signed-volume total — add
+        ``volume`` when the close rises vs. the prior bar, subtract it when the
+        close falls, leave it unchanged on an equal close. Cumulative over the
+        whole supplied window, so a bounded sliding window re-bases OBV to the
+        window start.
+
+        Cost: O(1) per single-bar advance. Each bar contributes an *invertible*
+        signed-volume term (it depends only on that bar and its predecessor, not
+        on the window aggregate), so the registry keeps a deque of the terms plus
+        their running sum: an ``expand`` appends one term (the oldest bar stays),
+        a ``slide`` also drops the head term (the oldest bar left the window).
+        This is the one place the warm paths differ — a period-less cumulative
+        window grows on expand instead of evicting — unlike the fixed-``period``
+        indicators (:meth:`bollinger_bands`, :meth:`mfi`) whose deque is always
+        full so both paths evict.
+
+        Numerical note: the running sum is add/subtract-maintained (like
+        :meth:`bollinger_bands`), so for non-integer volumes it can differ from an
+        exact per-window re-sum by accumulated floating-point rounding — bounded and
+        far below any predicate threshold, not a fresh exact sum. The unbounded twin
+        :meth:`vwap` is deliberately left as an exact O(window) recompute.
+        """
+        if not bars:
+            return None
+
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd` and the sibling
+        # new indicators (donchian/mfi/cci/williams_r).
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("obv", symbol)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+        deltas: Optional[Deque[float]] = None
+        s = 0.0
+        if state is not None and "deltas" in state:
+            kind = self._advance_kind(state, bars, fp)
+            if kind in ("expand", "slide"):
+                deltas = state["deltas"]
+                s = state["value"]
+                if kind == "slide":
+                    # Oldest bar left the window: its term (the deque head)
+                    # leaves the sum. ``expand`` keeps every bar, so it evicts
+                    # nothing.
+                    s -= deltas.popleft()
+                new_term = _obv_signed_volume(bars[-1], bars[-2])
+                deltas.append(new_term)
+                s += new_term
+        if deltas is None:
+            deltas = deque()
+            s = 0.0
+            for i in range(1, len(bars)):
+                term = _obv_signed_volume(bars[i], bars[i - 1])
+                deltas.append(term)
+                s += term
+        self._state[key] = {"fp": fp, "value": s, "deltas": deltas}
+        return s
+
+    # ----- MFI -----------------------------------------------------------
+
+    def mfi(self, bars: Sequence[Any], period: int = 14) -> Optional[float]:
+        """Money Flow Index (0–100) at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period + 1``
+        (each money-flow term compares typical price against the prior bar).
+        Post: the volume-weighted RSI of typical price over the trailing
+        ``period`` bars. Mirrors :meth:`rsi`'s zero-denominator convention:
+        all-positive flow → 100, no flow at all → 50. Each per-bar
+        ``(positive, negative)`` money-flow term depends only on its own bar and
+        the prior one — not on the window aggregate — so the registry keeps a
+        bounded deque of the terms together with running ``pos``/``neg`` sums and
+        updates both in O(1) on a single-bar advance (subtract the evicted term,
+        add the new one), exactly like :meth:`bollinger_bands`.
+
+        Numerical note: the running ``pos``/``neg`` are add/subtract-maintained (like
+        :meth:`bollinger_bands`), so for non-integer volumes they can differ from an
+        exact per-window re-sum by accumulated floating-point rounding — bounded, and
+        the final MFI is a ratio in ``[0, 100]`` so the output drift is negligible.
+        """
+        if not bars or len(bars) < period + 1:
+            return None
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd`.
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("mfi", symbol, period)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+
+        flows: Optional[Deque[Tuple[float, float]]] = None
+        s_pos = 0.0
+        s_neg = 0.0
+        if state is not None and "flows" in state:
+            kind = self._advance_kind(state, bars, fp)
+            if kind in ("expand", "slide"):
+                flows = state["flows"]
+                s_pos = state["s_pos"]
+                s_neg = state["s_neg"]
+                # The deque is at full capacity (``period`` terms) once warm, so
+                # the append evicts ``flows[0]``; remove it from the running sums
+                # first, then add the new per-bar term — O(1) per advance.
+                outgoing = flows[0]
+                s_pos -= outgoing[0]
+                s_neg -= outgoing[1]
+                new_term = _mfi_flow_term(bars[-1], bars[-2])
+                flows.append(new_term)
+                s_pos += new_term[0]
+                s_neg += new_term[1]
+        if flows is None:
+            flows = deque(maxlen=period)
+            s_pos = 0.0
+            s_neg = 0.0
+            for i in range(len(bars) - period, len(bars)):
+                term = _mfi_flow_term(bars[i], bars[i - 1])
+                flows.append(term)
+                s_pos += term[0]
+                s_neg += term[1]
+        if s_neg == 0:
+            value: float = 100.0 if s_pos > 0 else 50.0
+        else:
+            ratio = s_pos / s_neg
+            value = 100.0 - (100.0 / (1.0 + ratio))
+        self._state[key] = {
+            "fp": fp,
+            "value": value,
+            "flows": flows,
+            "s_pos": s_pos,
+            "s_neg": s_neg,
+        }
+        return value
+
+    # ----- ROC -----------------------------------------------------------
+
+    def roc(
+        self,
+        bars: Sequence[Any],
+        period: int = 12,
+        source: str = "close",
+    ) -> Optional[float]:
+        """Rate of Change (percent) at ``bars[-1]`` over ``period`` bars.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period + 1``.
+        Post: ``100 × (price_now − price_{−period}) / price_{−period}``; ``0.0``
+        when the reference price is exactly 0 (avoids a division by zero).
+        """
+        if not bars or len(bars) < period + 1:
+            return None
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd` and the sibling
+        # new indicators (donchian/mfi/cci/williams_r).
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("roc", symbol, period, source)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+        cur = _source_value(bars[-1], source)
+        prev = _source_value(bars[-1 - period], source)
+        value = 0.0 if prev == 0 else (cur - prev) / prev * 100.0
+        self._state[key] = {"fp": fp, "value": value}
+        return value
+
+    # ----- CCI -----------------------------------------------------------
+
+    def cci(self, bars: Sequence[Any], period: int = 20) -> Optional[float]:
+        """Commodity Channel Index at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
+        Post: ``(tp − sma_tp) / (0.015 × mean_deviation)`` over the trailing
+        ``period`` typical prices, where ``mean_deviation`` is the mean absolute
+        deviation from ``sma_tp``; ``0.0`` when that deviation is 0 (a flat
+        window has no defined CCI). Mean absolute deviation has no incremental
+        form (it depends on the SMA, which shifts as the window slides), so the
+        value is recomputed over the trailing ``period`` typical prices — O(period)
+        regardless. A same-bar fingerprint cache collapses repeated intra-bar reads.
+        """
+        if not bars or len(bars) < period:
+            return None
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd`.
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("cci", symbol, period)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+        tps = [(float(b.high) + float(b.low) + float(b.close)) / 3.0 for b in bars[-period:]]
+        sma_tp = sum(tps) / period
+        mean_dev = sum(abs(t - sma_tp) for t in tps) / period
+        cur_tp = tps[-1]
+        value = 0.0 if mean_dev == 0 else (cur_tp - sma_tp) / (0.015 * mean_dev)
+        self._state[key] = {"fp": fp, "value": value}
+        return value
+
+    # ----- Williams %R ---------------------------------------------------
+
+    def williams_r(self, bars: Sequence[Any], period: int = 14) -> Optional[float]:
+        """Williams %R (−100–0) at ``bars[-1]``.
+
+        Pre: ``period >= 1``. Returns ``None`` until ``len(bars) >= period``.
+        Post: ``−100 × (highest_high − close) / (highest_high − lowest_low)``
+        over the trailing ``period`` bars; ``−50.0`` (neutral) when the range is
+        0, mirroring :meth:`stochastic`'s flat-window convention. The extrema are
+        recomputed over the trailing ``period`` bars — O(period), like
+        :meth:`donchian` (max/min are not invertible). A same-bar fingerprint
+        cache collapses repeated intra-bar reads.
+        """
+        if not bars or len(bars) < period:
+            return None
+        # If two symbols (or two unrelated bar streams) ever share a registry,
+        # the cache must not conflate them — include ``bars[-1].symbol`` in the
+        # key so the slots are disjoint, mirroring :meth:`macd`.
+        symbol = _safe_getattr(bars[-1], "symbol")
+        key = ("williams_r", symbol, period)
+        fp = self._bar_fingerprint(bars)
+        state = self._peek(key)
+        if state is not None and self._is_same_bar(state, fp):
+            return state["value"]
+        window = bars[-period:]
+        highest = max(float(b.high) for b in window)
+        lowest = min(float(b.low) for b in window)
+        rng = highest - lowest
+        close = float(bars[-1].close)
+        value = -50.0 if rng == 0 else -100.0 * (highest - close) / rng
+        self._state[key] = {"fp": fp, "value": value}
+        return value

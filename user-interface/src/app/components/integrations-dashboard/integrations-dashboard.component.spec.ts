@@ -21,6 +21,8 @@ describe('IntegrationsDashboardComponent', () => {
     putGoogleBrowserLoginCredentials: ReturnType<typeof vi.fn>;
     deleteGoogleBrowserLoginCredentials: ReturnType<typeof vi.fn>;
     getGitHubConfig: ReturnType<typeof vi.fn>;
+    updateGitHubConfig: ReturnType<typeof vi.fn>;
+    deleteGitHubConfig: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
@@ -36,6 +38,8 @@ describe('IntegrationsDashboardComponent', () => {
       putGoogleBrowserLoginCredentials: vi.fn(),
       deleteGoogleBrowserLoginCredentials: vi.fn(),
       getGitHubConfig: vi.fn(),
+      updateGitHubConfig: vi.fn(),
+      deleteGitHubConfig: vi.fn(),
     };
     apiSpy.getSlackConfig.mockReturnValue(of({
       enabled: false,
@@ -85,6 +89,33 @@ describe('IntegrationsDashboardComponent', () => {
     );
     component.loadGitHubConfig();
     expect(component.githubStoreUnreachable).toBe(true);
+  });
+
+  it('reflects the webhook-secret configured flag from the API on load', () => {
+    apiSpy.getGitHubConfig.mockReturnValue(
+      of({ enabled: true, token_configured: true, owner: 'acme', repo: 'widget', default_label: '', webhook_secret_configured: true }),
+    );
+    component.githubWebhookSecret = 'leftover';
+    component.loadGitHubConfig();
+    expect(component.githubWebhookSecretConfigured).toBe(true);
+    // The write-only input is always cleared after a load so a saved secret is never re-sent.
+    expect(component.githubWebhookSecret).toBe('');
+  });
+
+  it('sends the webhook secret on save and clears the input afterwards', () => {
+    apiSpy.updateGitHubConfig.mockReturnValue(
+      of({ enabled: true, token_configured: true, owner: 'acme', repo: 'widget', default_label: '', webhook_secret_configured: true }),
+    );
+    component.githubEnabled = true;
+    component.githubOwner = 'acme';
+    component.githubRepo = 'widget';
+    component.githubWebhookSecret = 'whsec_abc';
+    component.saveGitHubConfig();
+    expect(apiSpy.updateGitHubConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ webhook_secret: 'whsec_abc' }),
+    );
+    expect(component.githubWebhookSecretConfigured).toBe(true);
+    expect(component.githubWebhookSecret).toBe('');
   });
 
   it('defaults the GitHub store-unreachable flag to false when absent', () => {

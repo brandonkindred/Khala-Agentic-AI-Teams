@@ -1,20 +1,21 @@
 import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { STUDIO_STAGES } from '../../models/agent-studio.model';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
+import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 
 /**
  * Agent Studio shell — the single `/agent-studio` surface (spec §2.1). Renders
- * the forward-only 4-stage stepper and the active stage. Stage 1 (Build Agent),
- * Stage 2 (Test Agent) and Stage 4 (Test Team w/ Personas) are implemented;
- * Compose (Stage 3) is still stubbed by the placeholder. Owns one
- * `AgentStudioStateService` per session (provided here, not at root, so each
- * visit starts clean).
+ * the forward-only 4-stage stepper and the active stage. All four stages are
+ * implemented: Build Agent, Test Agent, Compose Team, and Test Team w/
+ * Personas. Owns one `AgentStudioStateService` per session (provided here,
+ * not at root, so each visit starts clean).
  */
 @Component({
   selector: 'app-agent-studio-shell',
@@ -22,7 +23,9 @@ import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.compone
   imports: [
     MatButtonModule,
     MatIconModule,
+    MatTooltipModule,
     AgentStudioBuildAgentComponent,
+    AgentStudioComposeTeamComponent,
     AgentStudioPersonaComponent,
     AgentStudioStagePlaceholderComponent,
     AgentStudioTestAgentComponent,
@@ -54,14 +57,33 @@ export class AgentStudioShellComponent {
 
   /**
    * Whether the shell's forward affordance is disabled for the current stage.
-   * Both Build ("Test this agent →") and Test ("Add to team →") require an agent
-   * to have been selected before the journey can move forward — you can't test
-   * or hand off an agent you haven't picked. The remaining stages keep the
-   * scaffold's always-enabled forward step until their own gates land.
+   * Build ("Test this agent →") and Test ("Add to team →") require an agent to
+   * have been selected. Compose ("Test this team →") requires a fully-staffed
+   * roster on a `complete` process (spec §3, Stage 3 handoff gate) — you can't
+   * test-drive a team that isn't staffed or whose process isn't finished.
    */
   readonly forwardDisabled = computed(() => {
     const key = this.activeStageDef().key;
-    return (key === 'build' || key === 'test') && !this.state.registryAgentId();
+    if (key === 'build' || key === 'test') {
+      return !this.state.registryAgentId();
+    }
+    if (key === 'compose') {
+      return !this.state.rosterFullyStaffed() || this.state.composeProcessStatus() !== 'complete';
+    }
+    return false;
+  });
+
+  /**
+   * What's missing for the disabled Compose forward step, shown as the
+   * button's tooltip (spec §3, Stage 3: "disabled-button tooltip lists what's
+   * missing"). `null` once the gate is satisfied (no tooltip needed).
+   */
+  readonly composeForwardDisabledReason = computed(() => {
+    if (this.activeStageDef().key !== 'compose') return null;
+    const missing: string[] = [];
+    if (!this.state.rosterFullyStaffed()) missing.push('a fully-staffed roster');
+    if (this.state.composeProcessStatus() !== 'complete') missing.push('a completed process');
+    return missing.length > 0 ? `Needs: ${missing.join(' and ')}` : null;
   });
 
   /**

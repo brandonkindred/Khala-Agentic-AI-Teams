@@ -2,6 +2,12 @@ python-dotenv>=1.2,<2.0
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
 ollama>=0.6,<1.0
+# Tolerant JSON repair for LLM output. Consumers import it lazily and swallow
+# ImportError by design (salvage must never crash), so a missing wheel silently
+# disables repair — including for the repair-dependent tests that `make install`
+# runs against this file. Keep the pin in lockstep with the service images
+# (team_service/blogging_service requirements) and llm_service/clients/ollama.py.
+json-repair>=0.28,<1.0
 # Official Anthropic SDK for the Claude LLM provider (LLM_PROVIDER=claude)
 anthropic>=0.69,<1.0
 pydantic>=2.12,<3.0

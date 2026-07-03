@@ -150,6 +150,25 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
     return AgentManifest.model_validate(manifest.model_dump(mode="json"))
 
 
+def is_generated_manifest(manifest: AgentManifest) -> bool:
+    """Whether ``manifest`` is a roster-generated agent (vs. a hand-authored /
+    catalog registry agent).
+
+    Generated manifests are ephemeral and roster-owned: :func:`register_team_manifests`
+    (un)registers them as a team's roster changes. They must therefore never be added
+    to a roster via the from-registry path — doing so creates a registry-source row
+    whose ``manifest_id`` the owning team can later unregister, leaving it dangling
+    (broken catalog / invoke). The ``"generated"`` tag is the marker
+    :func:`build_agent_manifest` stamps and the same one
+    :func:`register_team_manifests` keys its stale-cleanup scan on, so classifying on
+    it keeps the two paths in agreement.
+
+    Preconditions: ``manifest`` is a validated :class:`AgentManifest`.
+    Postconditions: returns ``True`` iff ``manifest`` carries the ``"generated"`` tag.
+    """
+    return "generated" in manifest.tags
+
+
 def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> list[AgentManifest]:
     """Build and install the live registry entries for a team's roster.
 
@@ -206,7 +225,7 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
         stale = [
             m.id
             for m in registry.manifests_with_id_prefix(prefix)
-            if "generated" in m.tags and m.id not in new_ids
+            if is_generated_manifest(m) and m.id not in new_ids
         ]
         for agent_id in stale:
             registry.unregister(agent_id)

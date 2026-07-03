@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Optional, Type
 
+from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import EntryRule as _EntryRule
 from ..spec_dsl import Predicate as _Predicate
 from ..spec_dsl import SignalExitRule as _SignalExitRule
@@ -235,8 +236,8 @@ class _ShadowContext:
         self._current_bar_index = index
         self._history.setdefault(bar.symbol, []).append(bar)
         hist = self._history[bar.symbol]
-        if len(hist) > 500:
-            del hist[:-500]
+        if len(hist) > STREAMING_WINDOW_BARS:
+            del hist[:-STREAMING_WINDOW_BARS]
         self._current_symbol = bar.symbol
         self._now = bar.timestamp
 
@@ -836,6 +837,13 @@ def _build_indicators_stub():
         "adx",
         "stochastic",
         "vwap",
+        "donchian_channels",
+        "keltner_channels",
+        "obv",
+        "mfi",
+        "roc",
+        "cci",
+        "williams_r",
     ):
         setattr(mod, _name, getattr(_scalar, _name))
     return mod

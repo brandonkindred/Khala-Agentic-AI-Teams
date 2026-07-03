@@ -5,6 +5,7 @@ FastAPI app for coding_team: GET /health, POST /run, GET /status/{job_id}, GET /
 from __future__ import annotations
 
 import base64
+import contextlib
 import fcntl
 import logging
 import os
@@ -33,6 +34,7 @@ from coding_team.clone_workspace import (  # noqa: E402
     is_per_issue_dir,
     is_within_ephemeral_workspace,
 )
+from coding_team.engine_provider import get_engine_provider  # noqa: E402
 from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
     GitHubClient,
@@ -58,6 +60,7 @@ from coding_team.job_store import (  # noqa: E402
     claim_resume,
     create_job,
     get_job,
+    heartbeat_job,
     list_jobs,
     release_resume_claim,
     update_job,
@@ -73,7 +76,7 @@ from coding_team.review_history_store import (  # noqa: E402
 )
 from coding_team.token_crypto import decrypt_token, encrypt_token  # noqa: E402
 from shared_app import create_team_app  # noqa: E402
-from software_engineering_team.shared.git_utils import (  # noqa: E402
+from shared_git.git_utils import (  # noqa: E402
     DEVELOPMENT_BRANCH,
     commit_working_tree,
     git_identity_env,
@@ -82,6 +85,26 @@ from software_engineering_team.shared.git_utils import (  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+
+def _warn_if_no_engine_provider() -> None:
+    """Startup probe: make a mis-wired deployment visible at boot, not per-job.
+
+    The standalone container must run via ``coding_team_service.main`` (its
+    ``TEAM_MODULE``), which installs the SE-backed engine provider before this
+    app is imported. A process serving this module directly still boots (tests
+    and embedded uses rely on that), but every /run and /review-pr job will fail
+    without a provider — so say it loudly once at startup.
+
+    Postconditions: logs an ERROR when no provider is installed; never raises.
+    """
+    if get_engine_provider() is None:
+        logger.error(
+            "No CodeEngineProvider installed at startup: /run and /review-pr jobs will fail. "
+            "Serve the coding team via coding_team_service.main (TEAM_MODULE) or call "
+            "coding_team.engine_provider.set_engine_provider() before serving traffic."
+        )
+
+
 app = create_team_app(
     service_name="coding-team",
     team_key="coding_team",
@@ -89,6 +112,7 @@ app = create_team_app(
     description="Tech Lead with frontend_v2/backend_v2 implementation teams and Task Graph. POST /run to start a job; poll GET /status/{job_id}.",
     version="0.1.0",
     postgres_schema=CODE_REVIEW_SCHEMA,
+    on_startup=_warn_if_no_engine_provider,
 )
 
 # Tracks the orchestrator thread per job so the answers endpoint can tell whether a blocked wait
@@ -363,27 +387,60 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "coding-team"}
 
 
+def plan_from_input(plan_input: Dict[str, Any], repo_path: str) -> CodingTeamPlanInput:
+    """Validate a raw plan dict into a ``CodingTeamPlanInput``, binding *repo_path*.
+
+    Single source of the "merge the request's repo_path into the plan" convention:
+    the ``repo_path`` from the request authoritatively overrides any ``repo_path``
+    embedded in the plan payload, so the orchestrator always runs against the
+    checkout the caller named.
+
+    Preconditions: ``plan_input`` is a mapping (a plan payload); ``repo_path`` is
+    the request's repository path.
+    Postconditions: returns a validated ``CodingTeamPlanInput`` whose ``repo_path``
+    is *repo_path*. Raises ``pydantic.ValidationError`` on an invalid payload.
+    """
+    return CodingTeamPlanInput.model_validate({**plan_input, "repo_path": repo_path})
+
+
+def run_orchestrator_wired(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
+    """Run the coding-team orchestrator for *job_id* with the standard job-store wiring.
+
+    Single source of the ``(update_job_fn, get_job_fn, cache_dir)`` wiring shared
+    by the POST /run background thread, the resume path, and the Temporal
+    activity, so it cannot drift between them. The github-source path wires a
+    custom ``update_job_fn`` (+ ``on_pause``) and deliberately does not use this.
+
+    Preconditions:
+        - ``job_id`` names an existing job in the process job store; ``plan`` is a
+          validated ``CodingTeamPlanInput`` whose ``repo_path`` equals *repo_path*.
+    Postconditions:
+        - The orchestrator has run to completion (or raised); job state is
+          persisted through ``update_job``. Propagates the orchestrator's
+          exceptions unchanged — callers own their own failure handling.
+    """
+    run_coding_team_orchestrator(
+        job_id,
+        repo_path,
+        plan,
+        update_job_fn=lambda **kw: update_job(job_id, **kw),
+        get_job_fn=get_job,
+        cache_dir=DEFAULT_CACHE_DIR,
+    )
+
+
 @app.post("/run", response_model=RunResponse)
 def post_run(request: RunRequest) -> RunResponse:
     """Start a coding_team job. If plan_input is provided, runs orchestrator in background."""
     job_id = str(uuid.uuid4())
     create_job(job_id=job_id, repo_path=request.repo_path, plan_input=request.plan_input)
     if request.plan_input:
-        plan = CodingTeamPlanInput.model_validate(
-            {**request.plan_input, "repo_path": request.repo_path}
-        )
+        plan = plan_from_input(request.plan_input, request.repo_path)
 
         def run() -> None:
             _register_run_thread(job_id)
             try:
-                run_coding_team_orchestrator(
-                    job_id,
-                    request.repo_path,
-                    plan,
-                    update_job_fn=lambda **kw: update_job(job_id, **kw),
-                    get_job_fn=lambda jid: get_job(jid),
-                    cache_dir=DEFAULT_CACHE_DIR,
-                )
+                run_orchestrator_wired(job_id, request.repo_path, plan)
             except Exception as e:
                 logger.exception("Coding team orchestrator failed: %s", e)
                 # current_activity=None: a crash skips the in-flow clears, and a
@@ -605,14 +662,7 @@ def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlan
             # Registration is inside the try so the finally always releases the claim — even if
             # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
             _register_run_thread(job_id)
-            run_coding_team_orchestrator(
-                job_id,
-                repo_path,
-                plan,
-                update_job_fn=lambda **kw: update_job(job_id, **kw),
-                get_job_fn=lambda jid: get_job(jid),
-                cache_dir=DEFAULT_CACHE_DIR,
-            )
+            run_orchestrator_wired(job_id, repo_path, plan)
         except Exception as e:
             logger.exception("Coding team orchestrator resume failed: %s", e)
             update_job(job_id, status="failed", error=str(e), current_activity=None)
@@ -797,7 +847,7 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     if not repo_path:
         return False
     try:
-        plan = CodingTeamPlanInput.model_validate({**plan_raw, "repo_path": repo_path})
+        plan = plan_from_input(plan_raw, repo_path)
     except Exception:
         logger.exception("Auto-resume for job %s skipped: invalid plan_input.", job_id)
         return False
@@ -980,7 +1030,7 @@ def resume_job(job_id: str) -> RunResponse:
     repo_path = data.get("repo_path") or plan_raw.get("repo_path")
     if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")
-    plan = CodingTeamPlanInput.model_validate({**plan_raw, "repo_path": repo_path})
+    plan = plan_from_input(plan_raw, repo_path)
 
     ctx = data.get("github_context") or {}
     is_github_job = bool(
@@ -1107,6 +1157,108 @@ def _running_job_for_issue(owner: str, repo: str, issue_number: int) -> Optional
             and ctx.get("issue_number") == issue_number
         ):
             return j.get("job_id")
+    return None
+
+
+# A live review thread heartbeats every _REVIEW_HEARTBEAT_INTERVAL_S; a review job whose
+# last_heartbeat_at is older than this cutoff has no live worker anywhere (its process
+# died before the except-path could terminalize it) and must not block new reviews.
+# 10 missed beats plus the shared clock-skew tolerance keeps false stales implausible.
+_REVIEW_GUARD_HEARTBEAT_STALE_S = 300.0
+_REVIEW_HEARTBEAT_INTERVAL_S = 30.0
+
+
+def _review_job_heartbeat_live(job: Dict[str, Any]) -> bool:
+    """True when the job's ``last_heartbeat_at`` says a worker is (plausibly) still alive.
+
+    Preconditions: ``job`` is a job record dict (possibly empty).
+    Postconditions: returns True iff ``last_heartbeat_at`` parses as an ISO timestamp
+        whose age is in ``[-_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S,
+        _REVIEW_GUARD_HEARTBEAT_STALE_S)`` — a stamp up to the skew tolerance in the
+        future still counts as live (NTP drift), but a stamp further in the future is
+        NOT live (implausible skew or corrupt data), mirroring
+        ``_answer_wait_heartbeat_fresh``: a dead job with a far-future stamp must not
+        block new reviews until that future time passes. A MISSING or unparseable
+        stamp returns True (treated as live): the job service stamps
+        ``last_heartbeat_at`` on every create/update, so an absent stamp means an
+        unfamiliar store, and the guard must fail toward blocking duplicates, not toward
+        starting them. Never raises.
+    """
+    raw = (job or {}).get("last_heartbeat_at")
+    if not raw:
+        return True
+    try:
+        beat = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return True
+    if beat.tzinfo is None:
+        beat = beat.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - beat).total_seconds()
+    return -_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S <= age < _REVIEW_GUARD_HEARTBEAT_STALE_S
+
+
+def _running_review_for_pr(owner: str, repo: str, pr_number: int) -> Optional[str]:
+    """Return the job_id of a live non-terminal code-review job already reviewing this PR.
+
+    Preconditions: ``owner``/``repo`` are non-empty repository coordinates; ``pr_number``
+        is a positive PR number.
+    Postconditions: returns the job_id of a non-terminal review job whose
+        ``github_context`` matches (owner, repo, pr_number) — owner/repo
+        case-insensitively, as GitHub treats them — and whose heartbeat is live per
+        :func:`_review_job_heartbeat_live`; ``None`` when no such job exists. A matching
+        job whose heartbeat went stale (its worker crashed before terminalizing it) is
+        NOT returned — it must not block new reviews of the PR forever — and is
+        best-effort marked ``failed`` so it stops surfacing as a zombie running review;
+        a failure to mark it never propagates. Only review jobs carry ``pr_number`` in
+        ``github_context`` (issue runs carry ``issue_number``), so matching on it never
+        collides with an issue run. Raises only if the job-service scan itself fails.
+
+    Cross-worker by construction: the scan reads the shared central job service (the same
+    store ``_running_job_for_issue`` uses), so a review already running under a *different*
+    uvicorn worker is still seen. Callers needing atomicity against concurrent admission
+    must hold :func:`_pr_review_admission` around scan + job creation.
+
+    Performance: O(active-jobs) linear scan over the small non-terminal set (mirrors
+    ``_running_job_for_issue``); add an owner/repo/pr filter to ``list_jobs`` if that set
+    ever grows materially.
+    """
+    for j in list_jobs(active_only=True):
+        ctx = (j or {}).get("github_context") or {}
+        if (
+            str(ctx.get("owner") or "").casefold() == owner.casefold()
+            and str(ctx.get("repo") or "").casefold() == repo.casefold()
+            and ctx.get("pr_number") == pr_number
+        ):
+            job_id = j.get("job_id")
+            if _review_job_heartbeat_live(j):
+                return job_id
+            # Crash-orphaned: no worker has heartbeated it within the cutoff. Unblock
+            # new reviews and terminalize the zombie (best-effort — the unblock matters,
+            # the cleanup is cosmetic).
+            logger.warning(
+                "review job %s for %s/%s#%s has a stale heartbeat; treating as dead and marking failed",
+                job_id,
+                owner,
+                repo,
+                pr_number,
+            )
+            if job_id:
+                try:
+                    update_job(
+                        job_id,
+                        status="failed",
+                        error="review worker heartbeat went stale (process died mid-review)",
+                    )
+                    update_review(
+                        job_id,
+                        status="failed",
+                        error="review worker heartbeat went stale (process died mid-review)",
+                        completed=True,
+                    )
+                except Exception:  # noqa: BLE001 - unblocking admission must not depend on cleanup
+                    logger.warning(
+                        "could not mark stale review job %s failed", job_id, exc_info=True
+                    )
     return None
 
 
@@ -1318,6 +1470,57 @@ def _review_author() -> str:
         return "anonymous"
 
 
+# Serializes review admission (duplicate-scan + job creation) within this process; the
+# Postgres advisory lock in _pr_review_admission extends the same mutual exclusion across
+# worker processes when Postgres is configured.
+_REVIEW_ADMISSION_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _pr_review_admission(owner: str, repo: str, pr_number: int):
+    """Mutual exclusion for PR-review admission (duplicate scan + job creation).
+
+    Preconditions: ``owner``/``repo``/``pr_number`` identify the PR being admitted.
+    Postconditions: while the ``with`` body runs, no other admission for the same PR can
+        run — in this process via ``_REVIEW_ADMISSION_LOCK``, and across worker processes
+        via a Postgres transaction-scoped advisory lock (``pg_advisory_xact_lock`` keyed
+        on the casefolded ``owner/repo#pr``) when Postgres is configured. The advisory
+        lock auto-releases when its transaction ends (body exit, exception, or connection
+        death — crash-safe). When Postgres is unconfigured or the lock cannot be taken,
+        degrades to the process-local lock alone (logged): single-worker admission stays
+        fully serialized, and the residual cross-worker window is the pre-lock behavior,
+        never worse. Exceptions from the body (e.g. the 409) propagate unchanged; lock
+        acquisition itself never raises.
+
+    Invariants: the process lock is always taken before (and released after) the advisory
+        lock's transaction, so lock ordering is fixed and deadlock-free.
+    """
+    with _REVIEW_ADMISSION_LOCK, contextlib.ExitStack() as stack:
+        try:
+            from shared_postgres import (  # noqa: PLC0415 - optional dep path
+                get_conn,
+                is_postgres_enabled,
+            )
+
+            if is_postgres_enabled():
+                conn = stack.enter_context(get_conn())
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                    ("coding_team_review_pr", f"{owner}/{repo}#{pr_number}".casefold()),
+                )
+        except Exception:  # noqa: BLE001 - degrade to process-local admission, never block reviews
+            stack.pop_all().close()
+            logger.warning(
+                "could not take cross-worker review admission lock for %s/%s#%s; "
+                "falling back to process-local admission only",
+                owner,
+                repo,
+                pr_number,
+                exc_info=True,
+            )
+        yield
+
+
 def _start_pr_review_thread(job_id: str, request: ReviewPrRequest, token: str) -> None:
     """Spawn the PR-review hook in a background thread.
 
@@ -1350,23 +1553,42 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
     if not token:
         raise HTTPException(status_code=400, detail="GITHUB_TOKEN not configured")
 
+    # Validate the PR exists BEFORE taking the admission lock: the GitHub round-trip is
+    # the slowest step, and keeping it outside the critical section keeps admission
+    # serialization to two fast job-service writes.
     with GitHubClient(token=token) as client:
         try:
             pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
         except GitHubAPIError as e:
             raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
 
-    job_id = str(uuid.uuid4())
-    create_job(job_id=job_id, repo_path=request.repo_path)
-    update_job(
-        job_id,
-        github_context={
-            "owner": request.owner,
-            "repo": request.repo,
-            "pr_number": request.pr_number,
-            "pr_url": pr.html_url,
-        },
-    )
+    # Cross-worker idempotency: refuse a second review while one is already running for
+    # this PR (the webhook's per-process delivery-id dedup can't see other workers; this
+    # also covers the manual UI trigger). The admission lock makes scan + job creation
+    # atomic — without it, two concurrent requests both pass the scan before either has
+    # written the github_context that makes its job visible to the other.
+    with _pr_review_admission(request.owner, request.repo, request.pr_number):
+        running = _running_review_for_pr(request.owner, request.repo, request.pr_number)
+        if running:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"review job {running} already running for {request.owner}/{request.repo}#{request.pr_number}"
+                ),
+            )
+
+        job_id = str(uuid.uuid4())
+        create_job(job_id=job_id, repo_path=request.repo_path)
+        update_job(
+            job_id,
+            github_context={
+                "owner": request.owner,
+                "repo": request.repo,
+                "pr_number": request.pr_number,
+                "pr_url": pr.html_url,
+            },
+        )
+
     # Persist a row so the Code Review page can show this review's history (best-effort).
     record_review_start(
         job_id, request.owner, request.repo, request.pr_number, pr.html_url, _review_author()
@@ -1417,8 +1639,81 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           alone does not fail the job, since the findings still post.)
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
+    # Resolve the review engine BEFORE any GitHub call: a mis-wired process (no
+    # provider installed) must fail the job immediately instead of burning REST
+    # rate budget on PR metadata + diff assembly and then failing anyway.
+    provider = get_engine_provider()
+    if provider is None:
+        logger.error("PR review %s aborted: no engine provider configured", job_id)
+        error = (
+            "code review failed: no engine provider configured — the standalone "
+            "coding-team service must run via coding_team_service.main (TEAM_MODULE), "
+            "which installs the engine provider at startup"
+        )
+        update_job(job_id, status="failed", phase="completed", error=error)
+        # error=error (not just status_text) so the Code Review page's error column
+        # is populated on this path exactly as _record_failure does everywhere else.
+        update_review(
+            job_id,
+            status="failed",
+            status_text="No engine provider configured",
+            error=error,
+            completed=True,
+        )
+        # Tell the PR, not just the job store: the reviewer who invoked @khala-review
+        # is watching the pull request and would otherwise wait forever on a job that
+        # silently failed. The token is already in hand, so post a scrubbed one-liner
+        # (best-effort — a GitHub outage must not turn this into an unhandled raise).
+        try:
+            with GitHubClient(token=token) as client:
+                _safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    f"Code review could not run: {scrub_token_from_text(error)}",
+                )
+        except Exception as exc:  # noqa: BLE001 - notification is best-effort
+            logger.warning("PR review %s: failed to post abort notice: %s", job_id, exc)
+        return
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
     update_review(job_id, status="running", status_text="Reviewing pull request")
+    # Continuous liveness beat for the admission guard: job updates only land at phase
+    # transitions, and a single review LLM call can run for minutes — without this, a
+    # perfectly healthy review would look heartbeat-stale to _running_review_for_pr.
+    # The context manager guarantees the beat stops on every exit path; on_error keeps
+    # a job-service blip from killing the beat thread (or the review).
+    from shared_concurrency import BackgroundHeartbeat  # noqa: PLC0415 - keep module import light
+
+    review_hb = BackgroundHeartbeat(
+        lambda: heartbeat_job(job_id),
+        _REVIEW_HEARTBEAT_INTERVAL_S,
+        name=f"review-heartbeat-{job_id}",
+        beat_first=True,
+        on_error=lambda exc: logger.warning("review heartbeat error for job %s: %s", job_id, exc),
+    )
+    with review_hb:
+        _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
+
+
+def _run_pr_review_body(
+    job_id: str,
+    request: ReviewPrRequest,
+    token: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    provider: Any,
+) -> None:
+    """The review hook's body, extracted so the heartbeat wrapper stays trivially correct.
+
+    Preconditions: caller has marked the job/review ``running``, holds a live
+        heartbeat for ``job_id``, and passes the already-resolved (non-None)
+        engine ``provider`` — the wrapper fails the job before any GitHub call
+        when no provider is installed.
+    Postconditions: identical to :func:`_run_pr_review` (this IS that contract's
+        implementation; see its docstring). Never raises.
+    """
     try:
         with GitHubClient(token=token) as client:
             pr = client.get_pull_request(owner, repo, pr_number)
@@ -1468,21 +1763,10 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             except GitHubAPIError:
                 reviewer_login = ""
 
-            # Import the reviewer lazily: it pulls in strands/llm_service, and
-            # keeping it out of module import lets tests stub it cheaply.
-            from software_engineering_team.code_review_agent import CodeReviewAgent, CodeReviewInput
-
-            review_input = CodeReviewInput(
-                code=code,
-                # _build_review_code renders every line with its original
-                # line-number prefix; declaring it here (instead of letting the
-                # reviewer sniff the format) keeps issue lines verbatim.
-                pre_numbered=True,
-                task_description=f"Review pull request #{pr_number}: {pr.title}",
-                task_requirements=pr.body or "",
-                language=_infer_review_language(files),
-            )
-
+            # The PR reviewer is an injected engine (software_engineering_team owns
+            # it); coding_team calls it through the CodeEngineProvider so this
+            # package imports nothing from SE. The provider was resolved (and its
+            # absence handled) before the first GitHub call above.
             # Same bridge as the orchestrator's review sites: shared schema,
             # coalescing, swallow-on-failure, and clear-on-exit in one place.
             # last_activity_at is stamped centrally by the job service on every
@@ -1494,7 +1778,17 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             )
 
             try:
-                output = CodeReviewAgent().run(review_input, progress_callback=pr_bridge)
+                output = provider.run_pr_code_review(
+                    code=code,
+                    # _build_review_code renders every line with its original
+                    # line-number prefix; declaring it here (instead of letting the
+                    # reviewer sniff the format) keeps issue lines verbatim.
+                    pre_numbered=True,
+                    task_description=f"Review pull request #{pr_number}: {pr.title}",
+                    task_requirements=pr.body or "",
+                    language=_infer_review_language(files),
+                    progress_callback=pr_bridge,
+                )
             except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
                 logger.exception("PR review agent failed: %s", e)
                 _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
@@ -1511,9 +1805,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             # comments.  anchor_to_first_file returns None only when valid_by_path
             # is empty — but we already exit early in that case, so the filter is
             # just a safety net.
-            anchored_leftovers = [
-                anchor_to_first_file(issue, valid_by_path) for issue in leftovers
-            ]
+            anchored_leftovers = [anchor_to_first_file(issue, valid_by_path) for issue in leftovers]
             comments = comments + [c for c in anchored_leftovers if c is not None]
 
             # Two GitHub endpoints, two shapes. Line-anchored comments ride the
@@ -1723,9 +2015,7 @@ def _submit_review(
     # each scrubbed comment with its original so the dropped set returned to the
     # caller keeps the original identity (with its ``line``).
     body = scrub_token_from_text(body)
-    pairs = [
-        ({**c, "body": scrub_token_from_text(c.get("body", ""))}, c) for c in comments
-    ]
+    pairs = [({**c, "body": scrub_token_from_text(c.get("body", ""))}, c) for c in comments]
 
     events = [event] if event == "COMMENT" else [event, "COMMENT"]
 

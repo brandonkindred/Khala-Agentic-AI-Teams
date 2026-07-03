@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from typing import List
 
-from software_engineering_team.shared.command_runner import run_command
+from shared_command_runner.runner import run_command
 
 from .models import LintExecutionResult, LintIssue, LintPlan
 
@@ -186,7 +186,7 @@ def execute_linter(plan: LintPlan, repo_path: Path, agent_type: str) -> LintExec
 
     if agent_type == "frontend" and plan.linter_name == "ng_lint":
         try:
-            from software_engineering_team.shared.command_runner import run_command_with_nvm
+            from shared_command_runner.runner import run_command_with_nvm
 
             cmd_result = run_command_with_nvm(plan.linter_command, cwd=repo_path)
         except ImportError:
