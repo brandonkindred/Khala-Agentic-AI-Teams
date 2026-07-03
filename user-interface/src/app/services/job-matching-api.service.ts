@@ -20,6 +20,8 @@ import type {
 } from '../models';
 
 const POLL_INTERVAL_MS = 2000;
+/** Consecutive failed status polls tolerated (~10s) before the scan errors out. */
+const MAX_POLL_ERRORS = 5;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 /**
@@ -57,26 +59,19 @@ export class JobMatchingApiService {
   }
 
   /**
-   * Start a scan and emit the final `JobMatchResponse` when it completes.
-   * Errors if the scan ends in `failed` or `cancelled`.
-   */
-  runScan(request: JobMatchRequest): Observable<JobMatchResponse> {
-    return this.startScan(request).pipe(
-      switchMap((submission) => this.pollScan(submission.job_id))
-    );
-  }
-
-  /**
    * Poll a scan to its terminal state and emit the final result. Built on the
    * shared pollWhile operator, so a transient failed poll is swallowed and
    * polling continues — one network blip must not report a running scan as
-   * failed. Errors only when the scan itself ends `failed`/`cancelled`.
+   * failed. A permanent failure (job deleted, API down) still surfaces: after
+   * MAX_POLL_ERRORS consecutive failed polls the error propagates instead of
+   * spinning the progress UI forever. Errors also when the scan itself ends
+   * `failed`/`cancelled`.
    */
   pollScan(jobId: string): Observable<JobMatchResponse> {
     return pollWhile(
       () => this.getScanStatus(jobId),
       (job) => TERMINAL_STATUSES.has(job.status),
-      { intervalMs: POLL_INTERVAL_MS }
+      { intervalMs: POLL_INTERVAL_MS, maxConsecutiveErrors: MAX_POLL_ERRORS }
     ).pipe(
       first((job) => TERMINAL_STATUSES.has(job.status)),
       switchMap((job) =>

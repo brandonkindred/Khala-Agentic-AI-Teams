@@ -13,7 +13,8 @@ const axeOptions = { rules: { 'color-contrast': { enabled: false } } };
 describe('JobScanPanelComponent a11y', () => {
   async function createFixture(runs: unknown[], jobs: unknown[] = []) {
     const apiSpy = {
-      runScan: vi.fn(),
+      startScan: vi.fn(),
+      pollScan: vi.fn(),
       listScanJobs: vi.fn().mockReturnValue(of({ jobs })),
       listRuns: vi.fn().mockReturnValue(of(runs)),
       getRun: vi.fn(),

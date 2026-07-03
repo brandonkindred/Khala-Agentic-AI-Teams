@@ -78,6 +78,13 @@ export class JobScanPanelComponent implements OnInit {
   /** run_id -> loaded detail; presence means the row is expanded. */
   expandedRuns = new Map<string, JobMatchRunDetail | 'loading'>();
 
+  /**
+   * Monotonic token per jobs-list refresh. Refreshes fire from several sites
+   * (submit, completion, cancel, delete); without ordering, a slow early GET
+   * arriving after a later one would revert a terminal job to "running".
+   */
+  private scanJobsSeq = 0;
+
   readonly form = this.fb.nonNullable.group({
     max_queries: [6, [Validators.required, Validators.min(1), Validators.max(25)]],
     max_roles: [40, [Validators.required, Validators.min(1), Validators.max(200)]],
@@ -155,11 +162,16 @@ export class JobScanPanelComponent implements OnInit {
   }
 
   refreshScanJobs(): void {
+    const seq = ++this.scanJobsSeq;
     this.api
       .listScanJobs()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: (res) => (this.scanJobs = res.jobs),
+        next: (res) => {
+          if (seq === this.scanJobsSeq) {
+            this.scanJobs = res.jobs;
+          }
+        },
         error: () => undefined, // the jobs list is auxiliary; scan errors surface elsewhere
       });
   }

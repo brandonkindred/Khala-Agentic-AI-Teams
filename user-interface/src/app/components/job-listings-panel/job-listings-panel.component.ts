@@ -70,25 +70,32 @@ export class JobListingsPanelComponent implements OnInit {
   /** aria-live message announcing the result of the latest load. */
   resultAnnouncement = '';
 
+  /**
+   * Monotonic token per full load; a response applies only if it is still the
+   * newest load. Comparing the *filter value* instead would readmit a stale
+   * response after an A→B→A round trip (both A requests "match" the filter,
+   * so the older one arriving last would win).
+   */
+  private loadSeq = 0;
+  /** Monotonic token per counts-only refresh (see {@link applyUpdate}). */
+  private countsSeq = 0;
+
   ngOnInit(): void {
     this.load();
   }
 
   /** Reload the current filter (also called by the dashboard after a scan). */
   load(): void {
-    // Stale-response guard: rapid filter switches (arrow-key roving fires one
-    // per keystroke) can make an older, slower response arrive last — it must
-    // not overwrite the newer filter's rows and counts.
-    const requested = this.filter;
+    const seq = ++this.loadSeq;
     this.loading = true;
     this.error = null;
     this.api
-      .listListings(requested)
+      .listListings(this.filter)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
-          if (requested !== this.filter) {
-            return;
+          if (seq !== this.loadSeq) {
+            return; // a newer load superseded this response
           }
           this.listings = res.listings;
           this.counts = res.counts;
@@ -97,7 +104,7 @@ export class JobListingsPanelComponent implements OnInit {
             res.listings.length === 1 ? '1 listing shown' : `${res.listings.length} listings shown`;
         },
         error: (err) => {
-          if (requested !== this.filter) {
+          if (seq !== this.loadSeq) {
             return;
           }
           this.error = err?.error?.detail ?? err?.message ?? 'Failed to load listings.';
@@ -231,14 +238,17 @@ export class JobListingsPanelComponent implements OnInit {
         l.fingerprint === updated.fingerprint ? updated : l
       );
     }
-    // Refresh pill counts without refetching the whole page.
-    const requested = this.filter;
+    // Refresh pill counts without refetching the whole page. Apply only while
+    // this is both the newest counts refresh AND no newer full load has fired
+    // (a full load carries fresher counts of its own).
+    const countsSeq = ++this.countsSeq;
+    const loadSeq = this.loadSeq;
     this.api
-      .listListings(requested, 1)
+      .listListings(this.filter, 1)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (res) => {
-          if (requested === this.filter) {
+          if (countsSeq === this.countsSeq && loadSeq === this.loadSeq) {
             this.counts = res.counts;
           }
         },

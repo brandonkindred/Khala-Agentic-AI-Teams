@@ -130,6 +130,21 @@ def test_upsert_profile_preferences_roundtrip(db):
     assert updated.preferences == {"theme": "dark"}
 
 
+def test_upsert_profile_preferences_merge_preserves_other_sections(db):
+    """A profile-page PUT must never clobber a team-owned section (e.g. career)."""
+    up_store.get_profile("default")
+    up_store.merge_preferences({"career": {"target_titles": ["Eng"]}}, "default")
+
+    updated = up_store.upsert_profile(UserProfileUpdate(preferences={"theme": "dark"}))
+    assert updated.preferences["theme"] == "dark"
+    assert updated.preferences["career"] == {"target_titles": ["Eng"]}
+
+    # A key present in the payload still replaces the stored one.
+    updated2 = up_store.upsert_profile(UserProfileUpdate(preferences={"theme": "light"}))
+    assert updated2.preferences["theme"] == "light"
+    assert updated2.preferences["career"] == {"target_titles": ["Eng"]}
+
+
 def test_record_association_is_idempotent(db):
     a = up_store.record_association("brand", "branding", "brand_1", label="Acme")
     assert a is not None
@@ -235,6 +250,16 @@ def test_merge_preferences_preserves_other_sections(db):
     assert merged["career"] == {"target_titles": ["Eng"]}
     assert merged["other"] == {"keep": True}
     assert up_store.get_profile("default").preferences == merged
+
+
+def test_merge_preferences_advances_updated_at(db):
+    up_store.get_profile("default")
+    before = db["profiles"]["default"]["updated_at"]
+    up_store.merge_preferences({"career": {"target_titles": ["Eng"]}}, "default")
+    after = db["profiles"]["default"]["updated_at"]
+    # A section save is a profile update — "last updated" must move.
+    assert after != before
+    assert after >= before  # ISO-8601 strings compare chronologically
 
 
 def test_merge_preferences_requires_existing_row(db):

@@ -68,23 +68,21 @@ describe('JobMatchingApiService', () => {
     httpMock.expectOne(`${baseUrl}/scan/status/j1`).flush({ job_id: 'j1', status: 'running' });
   });
 
-  describe('runScan polling', () => {
+  describe('pollScan', () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());
 
     /** pollWhile schedules polls on a timer; fire the pending tick. */
     const tickPoll = () => vi.advanceTimersByTime(0);
 
-    it('runScan submits then polls until completed', () => {
+    it('polls until completed and emits the result', () => {
       const result = { run_id: 'r1', ranked_jobs: [], total_found: 3, total_ranked: 2 };
       let received: JobMatchResponse | null = null;
-      service.runScan({ top_n: 5 }).subscribe((res) => (received = res));
-
-      const submit = httpMock.expectOne(`${baseUrl}/scan`);
-      expect(submit.request.method).toBe('POST');
-      submit.flush({ job_id: 'j1', status: 'running' });
+      service.pollScan('j1').subscribe((res) => (received = res));
 
       tickPoll();
+      httpMock.expectOne(`${baseUrl}/scan/status/j1`).flush({ job_id: 'j1', status: 'running' });
+      vi.advanceTimersByTime(2000);
       httpMock
         .expectOne(`${baseUrl}/scan/status/j1`)
         .flush({ job_id: 'j1', status: 'completed', result });
@@ -93,15 +91,14 @@ describe('JobMatchingApiService', () => {
       expect(received!.total_ranked).toBe(2);
     });
 
-    it('runScan survives a transient poll failure and keeps polling', () => {
+    it('survives a transient poll failure and keeps polling', () => {
       const result = { run_id: 'r1', ranked_jobs: [], total_found: 1, total_ranked: 1 };
       let received: JobMatchResponse | null = null;
       let errored = false;
-      service.runScan({}).subscribe({
+      service.pollScan('j1').subscribe({
         next: (res) => (received = res),
         error: () => (errored = true),
       });
-      httpMock.expectOne(`${baseUrl}/scan`).flush({ job_id: 'j1', status: 'pending' });
 
       // First poll dies with a network error — the scan must NOT be reported
       // failed; the next interval retries.
@@ -118,10 +115,31 @@ describe('JobMatchingApiService', () => {
       expect(received!.run_id).toBe('r1');
     });
 
-    it('runScan errors on failed status', () => {
+    it('gives up after repeated consecutive poll failures (permanent error)', () => {
+      // A deleted job / dead API must eventually error the stream instead of
+      // spinning the progress UI forever (MAX_POLL_ERRORS = 5).
+      let errored = false;
+      service.pollScan('gone').subscribe({ error: () => (errored = true) });
+
+      tickPoll();
+      httpMock.expectOne(`${baseUrl}/scan/status/gone`).error(new ProgressEvent('error'));
+      for (let i = 0; i < 3; i++) {
+        vi.advanceTimersByTime(2000);
+        httpMock.expectOne(`${baseUrl}/scan/status/gone`).error(new ProgressEvent('error'));
+        expect(errored).toBe(false);
+      }
+      vi.advanceTimersByTime(2000);
+      httpMock.expectOne(`${baseUrl}/scan/status/gone`).error(new ProgressEvent('error'));
+      expect(errored).toBe(true);
+
+      // Terminated: no further polls are scheduled.
+      vi.advanceTimersByTime(10000);
+      httpMock.expectNone(`${baseUrl}/scan/status/gone`);
+    });
+
+    it('errors on failed status', () => {
       let err: Error | undefined;
-      service.runScan({}).subscribe({ error: (e) => (err = e as Error) });
-      httpMock.expectOne(`${baseUrl}/scan`).flush({ job_id: 'j1', status: 'pending' });
+      service.pollScan('j1').subscribe({ error: (e) => (err = e as Error) });
       tickPoll();
       httpMock
         .expectOne(`${baseUrl}/scan/status/j1`)
@@ -129,10 +147,9 @@ describe('JobMatchingApiService', () => {
       expect(err!.message).toContain('boom');
     });
 
-    it('runScan errors when cancelled without result', () => {
+    it('errors when cancelled without result', () => {
       let err: Error | undefined;
-      service.runScan({}).subscribe({ error: (e) => (err = e as Error) });
-      httpMock.expectOne(`${baseUrl}/scan`).flush({ job_id: 'j1', status: 'pending' });
+      service.pollScan('j1').subscribe({ error: (e) => (err = e as Error) });
       tickPoll();
       httpMock.expectOne(`${baseUrl}/scan/status/j1`).flush({ job_id: 'j1', status: 'cancelled' });
       expect(err).toBeDefined();

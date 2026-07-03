@@ -45,18 +45,28 @@ def _validate_identifier(name: str, *, what: str) -> str:
     return name
 
 
-def build_merge_statement(table: str, data_column: str, key_columns: list[str]) -> str:
+def build_merge_statement(
+    table: str,
+    data_column: str,
+    key_columns: list[str],
+    touch_columns: Optional[list[str]] = None,
+) -> str:
     """Build the parameterized ``UPDATE ... RETURNING`` merge statement (pure).
 
     Preconditions:
         - ``table`` and ``data_column`` are valid SQL identifiers.
         - ``key_columns`` is non-empty; each entry is a valid SQL identifier.
+        - ``touch_columns`` entries (if any) are valid SQL identifiers, distinct
+          from ``data_column``.
     Postconditions:
         - Returns a statement with exactly one ``%s`` placeholder for the JSONB
-          patch, followed by one ``%s`` per key column in ``key_columns`` order,
-          and a ``RETURNING <data_column>`` clause.
+          patch, then one per touch column in ``touch_columns`` order, then one
+          per key column in ``key_columns`` order, and a
+          ``RETURNING <data_column>`` clause.
         - The statement performs a shallow top-level merge (``data || patch``);
-          keys present in the patch replace those in the stored document.
+          keys present in the patch replace those in the stored document. Touch
+          columns are plain ``col = %s`` assignments in the same statement (e.g.
+          advancing an ``updated_at`` alongside the merge, still atomically).
     """
     _validate_identifier(table, what="table")
     _validate_identifier(data_column, what="data_column")
@@ -64,9 +74,15 @@ def build_merge_statement(table: str, data_column: str, key_columns: list[str]) 
         raise ValueError("key_columns must be non-empty")
     for col in key_columns:
         _validate_identifier(col, what="key column")
+    set_clauses = [f"{data_column} = {data_column} || %s::jsonb"]
+    for col in touch_columns or []:
+        _validate_identifier(col, what="touch column")
+        if col == data_column:
+            raise ValueError(f"touch column {col!r} conflicts with data_column")
+        set_clauses.append(f"{col} = %s")
     where = " AND ".join(f"{c} = %s" for c in key_columns)
     return (
-        f"UPDATE {table} SET {data_column} = {data_column} || %s::jsonb "
+        f"UPDATE {table} SET {', '.join(set_clauses)} "
         f"WHERE {where} RETURNING {data_column}"
     )
 
@@ -78,6 +94,7 @@ def merge_jsonb_via_cursor(
     key: Mapping[str, Any],
     patch: Mapping[str, Any],
     data_column: str = "data",
+    touch: Optional[Mapping[str, Any]] = None,
     model: Optional[Any] = None,
 ) -> Any:
     """Atomically shallow-merge ``patch`` into a row's JSONB document via ``cur``.
@@ -93,8 +110,12 @@ def merge_jsonb_via_cursor(
         - ``patch`` values are JSON-serialisable (``str``/``int``/``float``/
           ``bool``/``None``/``list``/``dict``) — enums/models must be dumped by
           the caller first.
+        - ``touch`` (if given) maps plain columns to values written alongside
+          the merge (e.g. ``{"updated_at": now}``); column names are trusted
+          code literals distinct from ``data_column``.
     Postconditions:
-        - Issues exactly one ``UPDATE ... RETURNING`` statement.
+        - Issues exactly one ``UPDATE ... RETURNING`` statement (touch columns
+          included — the merge and the touches land atomically or not at all).
         - Returns the merged document as a ``dict`` (or ``model.model_validate``
           of it when ``model`` is given), or ``None`` when no row matched ``key``.
     """
@@ -103,8 +124,9 @@ def merge_jsonb_via_cursor(
     if not key:
         raise ValueError("key must map at least one column to a value")
     key_columns = list(key.keys())
-    stmt = build_merge_statement(table, data_column, key_columns)
-    params = [Json(dict(patch)), *(key[c] for c in key_columns)]
+    touch = dict(touch or {})
+    stmt = build_merge_statement(table, data_column, key_columns, list(touch.keys()))
+    params = [Json(dict(patch)), *touch.values(), *(key[c] for c in key_columns)]
     cur.execute(stmt, params)
     row = cur.fetchone()
     if row is None:
@@ -119,6 +141,7 @@ def merge_jsonb_returning(
     key: Mapping[str, Any],
     patch: Mapping[str, Any],
     data_column: str = "data",
+    touch: Optional[Mapping[str, Any]] = None,
     database: Optional[str] = None,
     model: Optional[Any] = None,
 ) -> Any:
@@ -134,5 +157,5 @@ def merge_jsonb_returning(
 
     with get_conn(database) as conn, conn.cursor(row_factory=dict_row) as cur:
         return merge_jsonb_via_cursor(
-            cur, table, key=key, patch=patch, data_column=data_column, model=model
+            cur, table, key=key, patch=patch, data_column=data_column, touch=touch, model=model
         )

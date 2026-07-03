@@ -15,32 +15,12 @@ from job_matching_team.profile.career_store import (
 )
 from job_matching_team.profile.loader import (
     EXAMPLE_PROFILE_PATH,
-    clear_cache,
     load_job_seeker_profile,
 )
 from job_matching_team.profile.model import JobSeekerProfile, RankingWeights
 
-
-@pytest.fixture(autouse=True)
-def _clear_profile_cache():
-    clear_cache()
-    yield
-    clear_cache()
-
-
-@pytest.fixture(autouse=True)
-def _hermetic_env(monkeypatch):
-    """Keep loader tests independent of the developer's environment.
-
-    Without this, a developer running the suite with the documented local-dev
-    env (``POSTGRES_HOST`` exported, career profile saved) would have the
-    career section pre-empt the YAML chain these tests assert on — and
-    ``get_profile`` would lazily INSERT rows into the shared dev database as
-    a test side effect. Tests that need Postgres re-enable it explicitly.
-    """
-    monkeypatch.delenv("POSTGRES_HOST", raising=False)
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_PATH", raising=False)
-    monkeypatch.delenv("AGENT_CACHE", raising=False)
+# Env scrubbing + loader-cache clearing are autouse fixtures in conftest.py
+# (they must also cover test_api.py, whose GET /profile runs the loader).
 
 
 def test_bundled_example_loads_and_validates():
@@ -73,7 +53,6 @@ def test_env_path_resolution(monkeypatch, tmp_path):
 
 
 def test_agent_cache_resolution(monkeypatch, tmp_path):
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_PATH", raising=False)
     (tmp_path / "job_seeker_profile.yaml").write_text("target_titles: [Platform Eng]\n")
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     profile = load_job_seeker_profile()
@@ -82,8 +61,6 @@ def test_agent_cache_resolution(monkeypatch, tmp_path):
 
 def test_env_path_missing_falls_back_when_not_strict(monkeypatch, tmp_path):
     monkeypatch.setenv("JOB_SEEKER_PROFILE_PATH", str(tmp_path / "absent.yaml"))
-    monkeypatch.delenv("AGENT_CACHE", raising=False)
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_STRICT", raising=False)
     # Missing env path + no cache -> bundled example (no raise).
     profile = load_job_seeker_profile()
     assert isinstance(profile, JobSeekerProfile)
@@ -97,17 +74,12 @@ def test_env_path_missing_raises_when_strict(monkeypatch, tmp_path):
 
 
 def test_strict_mode_raises_when_unresolved(monkeypatch):
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_PATH", raising=False)
-    monkeypatch.delenv("AGENT_CACHE", raising=False)
     monkeypatch.setenv("JOB_SEEKER_PROFILE_STRICT", "true")
     with pytest.raises(FileNotFoundError):
         load_job_seeker_profile()
 
 
 def test_falls_back_to_example_when_unresolved(monkeypatch):
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_PATH", raising=False)
-    monkeypatch.delenv("AGENT_CACHE", raising=False)
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_STRICT", raising=False)
     profile = load_job_seeker_profile()
     # Same content as the bundled example.
     assert profile == JobSeekerProfile.from_yaml_file(EXAMPLE_PROFILE_PATH)
@@ -168,7 +140,6 @@ def _enable_postgres(monkeypatch):
 
 
 def test_load_career_profile_none_when_postgres_disabled(monkeypatch):
-    monkeypatch.delenv("POSTGRES_HOST", raising=False)
     assert load_career_profile() is None
 
 
@@ -220,7 +191,6 @@ def test_load_career_profile_falls_back_on_malformed_section(monkeypatch, caplog
 
 
 def test_save_career_profile_raises_when_postgres_disabled(monkeypatch):
-    monkeypatch.delenv("POSTGRES_HOST", raising=False)
     with pytest.raises(CareerProfileUnavailableError):
         save_career_profile(JobSeekerProfile())
 

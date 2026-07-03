@@ -10,7 +10,14 @@ import {
   ViewChildren,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import {
+  NavigationEnd,
+  NavigationStart,
+  Router,
+  RouterLink,
+  RouterLinkActive,
+  RouterOutlet,
+} from '@angular/router';
 import { filter } from 'rxjs/operators';
 import { MatSidenavContent, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
@@ -77,14 +84,22 @@ export class AppShellComponent {
   private lastOrigin: HTMLElement | null = null;
 
   private previousPath: string | null = null;
+  /** Trigger of the navigation currently completing (recorded at NavigationStart). */
+  private navigationTrigger: NavigationStart['navigationTrigger'] = 'imperative';
 
   constructor() {
-    this.router.events
-      .pipe(
-        filter((e): e is NavigationEnd => e instanceof NavigationEnd),
-        takeUntilDestroyed(this.destroyRef)
-      )
-      .subscribe((event) => this.onNavigationEnd(event));
+    this.router.events.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((event) => {
+      if (event instanceof NavigationStart) {
+        this.onNavigationStart(event);
+      } else if (event instanceof NavigationEnd) {
+        this.onNavigationEnd(event);
+      }
+    });
+  }
+
+  /** Record how the navigation was initiated; NavigationEnd carries no trigger. */
+  onNavigationStart(event: NavigationStart): void {
+    this.navigationTrigger = event.navigationTrigger;
   }
 
   /**
@@ -94,14 +109,16 @@ export class AppShellComponent {
    * would break the very control being operated), move focus to the main
    * content region and start the new view at the top. The window never
    * scrolls in this layout, so scroll-to-top targets the sidenav content —
-   * the app's actual scroll container.
+   * the app's actual scroll container. Browser back/forward (popstate) is a
+   * *return* to a place the user has already been — forcing top-of-page and
+   * stealing focus there would fight history traversal, so it is exempt.
    */
   onNavigationEnd(event: NavigationEnd): void {
     const path = event.urlAfterRedirects.split(/[?#]/)[0];
     const pathChanged = this.previousPath !== null && this.previousPath !== path;
     this.previousPath = path;
-    if (!pathChanged) {
-      return; // initial load, or an in-page query-param/fragment update
+    if (!pathChanged || this.navigationTrigger === 'popstate') {
+      return; // initial load, in-page query-param/fragment update, or history traversal
     }
     document.getElementById('main-content')?.focus({ preventScroll: true });
     this.sidenavContent?.getElementRef().nativeElement.scrollTo({ top: 0 });

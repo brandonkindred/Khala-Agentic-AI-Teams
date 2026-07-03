@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { NavigationEnd, provideRouter } from '@angular/router';
+import { NavigationEnd, NavigationStart, provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
@@ -99,6 +99,28 @@ describe('AppShellComponent', () => {
       component.onNavigationEnd(nav('/job-matching?tab=profile'));
       expect(document.activeElement).not.toBe(main);
       expect(scrollTo).not.toHaveBeenCalled();
+    });
+
+    it('leaves focus and scroll alone on browser back/forward (popstate)', () => {
+      const main = document.getElementById('main-content') as HTMLElement;
+      const scrollTo = vi.fn();
+      component.sidenavContent = {
+        getElementRef: () => ({ nativeElement: { scrollTo } }),
+      } as never;
+
+      component.onNavigationEnd(nav('/dashboard')); // initial load
+      // History traversal returns the user to a known place — do not fight it.
+      component.onNavigationStart(new NavigationStart(2, '/job-matching', 'popstate'));
+      component.onNavigationEnd(nav('/job-matching'));
+      expect(document.activeElement).not.toBe(main);
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      // The next imperative navigation behaves normally again.
+      component.onNavigationStart(new NavigationStart(3, '/dashboard', 'imperative'));
+      component.onNavigationEnd(nav('/dashboard'));
+      expect(document.activeElement).toBe(main);
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0 });
+      (document.activeElement as HTMLElement).blur();
     });
   });
 

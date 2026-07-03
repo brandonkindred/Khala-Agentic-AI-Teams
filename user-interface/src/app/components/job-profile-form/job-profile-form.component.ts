@@ -279,29 +279,12 @@ export class JobProfileFormComponent implements OnInit {
             duration: 3500,
           });
         },
-        error: (err) => {
+        error: () => {
+          // The global errorHandlerInterceptor already surfaced the failure
+          // (assertive, error-styled snackbar with the backend detail) — a
+          // second local toast would stack a duplicate on top of it.
           this.saving = false;
-          this.snackBar.open(formatSaveError(err), 'Dismiss', { duration: 6000 });
         },
       });
   }
-}
-
-/**
- * Render a save failure as a readable sentence. FastAPI validation errors
- * (422) carry `detail` as an array of `{msg}` objects — joined here so the
- * snackbar never shows "[object Object]".
- */
-function formatSaveError(err: unknown): string {
-  const detail = (err as { error?: { detail?: unknown } })?.error?.detail;
-  if (typeof detail === 'string') {
-    return detail;
-  }
-  if (Array.isArray(detail)) {
-    const msgs = detail.map((d) => (d as { msg?: string })?.msg).filter(Boolean);
-    if (msgs.length) {
-      return msgs.join('; ');
-    }
-  }
-  return (err as { message?: string })?.message ?? 'Failed to save the profile.';
 }

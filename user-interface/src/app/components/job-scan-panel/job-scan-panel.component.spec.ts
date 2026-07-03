@@ -2,11 +2,16 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
 import { JobScanPanelComponent } from './job-scan-panel.component';
-import type { JobMatchResponse, JobMatchRunDetail, RankedJob } from '../../models';
+import type {
+  JobMatchResponse,
+  JobMatchRunDetail,
+  RankedJob,
+  ScanJobListItem,
+} from '../../models';
 
 function makeRankedJob(): RankedJob {
   return {
@@ -165,6 +170,23 @@ describe('JobScanPanelComponent', () => {
     component.scanning = true;
     component.startScan();
     expect(apiSpy.startScan).not.toHaveBeenCalled();
+  });
+
+  it('ignores an out-of-order jobs-list response (last refresh wins)', async () => {
+    await setup();
+    // Two refreshes overlap; the older GET resolves last. Without ordering it
+    // would revert the terminal job back to "running".
+    const slow = new Subject<{ jobs: ScanJobListItem[] }>();
+    const fast = new Subject<{ jobs: ScanJobListItem[] }>();
+    apiSpy.listScanJobs.mockReturnValueOnce(slow.asObservable());
+    component.refreshScanJobs(); // e.g. fired at submission time
+    apiSpy.listScanJobs.mockReturnValueOnce(fast.asObservable());
+    component.refreshScanJobs(); // e.g. fired at completion time
+
+    fast.next({ jobs: [{ job_id: 'j1', status: 'completed' } as ScanJobListItem] });
+    slow.next({ jobs: [{ job_id: 'j1', status: 'running' } as ScanJobListItem] });
+
+    expect(component.scanJobs).toEqual([{ job_id: 'j1', status: 'completed' }]);
   });
 
   it('cancels an active scan job', async () => {

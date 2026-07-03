@@ -141,6 +141,32 @@ describe('JobListingsPanelComponent', () => {
     expect(component.counts).toEqual({ new: 2 });
   });
 
+  it('discards a stale response even when the user returns to the same filter (A→B→A)', async () => {
+    await setup();
+    // Three in-flight requests: favorite (abandoned), active (stale), active
+    // (fresh). A filter-value guard would accept the stale active response
+    // because its filter matches again; the sequence token must reject it.
+    const responses: Subject<ListingsResponse>[] = [];
+    apiSpy.listListings.mockImplementation(() => {
+      const s = new Subject<ListingsResponse>();
+      responses.push(s);
+      return s.asObservable();
+    });
+
+    component.setFilter('favorite'); // request in flight, then abandoned
+    component.setFilter('active'); // stale active request in flight
+    component.load(); // fresh active request (e.g. post-scan refresh)
+
+    responses[2].next(
+      makeResponse([makeListing(), makeListing({ fingerprint: 'fp2' })], { new: 2 })
+    );
+    // Older same-filter response lands last — it must NOT win.
+    responses[1].next(makeResponse([makeListing()], { new: 1 }));
+
+    expect(component.listings.length).toBe(2);
+    expect(component.counts).toEqual({ new: 2 });
+  });
+
   it('reloads with the selected filter', async () => {
     await setup();
     component.setFilter('favorite');

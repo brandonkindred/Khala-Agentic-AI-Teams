@@ -74,11 +74,18 @@ class _FakeCursor:
                 # On conflict, apply only the columns named in the SET clause.
                 # Slice the clause text (between "do update set" and "returning")
                 # and read each assignment's left-hand column — robust to the RHS
-                # form (EXCLUDED.col, literal, expression) the store emits.
+                # form (EXCLUDED.col, literal, expression) the store emits. A
+                # `col = table.col || EXCLUDED.col` assignment is the store's
+                # JSONB shallow merge for profile_json — mirror it as a dict
+                # merge instead of a replacement.
                 set_clause = norm.split("do update set", 1)[1].split("returning", 1)[0]
                 for assignment in set_clause.split(","):
                     col = assignment.split("=", 1)[0].strip()
-                    if col in incoming:
+                    if col not in incoming:
+                        continue
+                    if "||" in assignment:
+                        existing[col] = {**existing[col], **incoming[col]}
+                    else:
                         existing[col] = incoming[col]
             self.rowcount = 1
             self._one = dict(self._db["profiles"][user_id])
@@ -106,14 +113,16 @@ class _FakeCursor:
             return
 
         if norm.startswith("update user_profiles set profile_json = profile_json ||"):
-            # merge_preferences: atomic shallow JSONB merge ... RETURNING.
-            patch, user_id = params
+            # merge_preferences: atomic shallow JSONB merge + updated_at touch
+            # ... RETURNING.
+            patch, updated_at, user_id = params
             row = self._db["profiles"].get(user_id)
             if row is None:
                 self._one = None
                 self.rowcount = 0
                 return
             row["profile_json"] = {**row["profile_json"], **_unwrap_json(patch)}
+            row["updated_at"] = updated_at
             self._one = {"profile_json": dict(row["profile_json"])}
             self.rowcount = 1
             return

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { of, throwError } from 'rxjs';
+import { of, throwError, timer } from 'rxjs';
+import { map } from 'rxjs/operators';
 import { pollWhile } from './poll-while';
 
 describe('pollWhile', () => {
@@ -145,9 +146,93 @@ describe('pollWhile', () => {
     expect(completed).toBe(true);
   });
 
+  it('awaits a response slower than the interval instead of cancelling it', () => {
+    // A fixed-rate poller would cancel the in-flight request on every tick and
+    // livelock; the interval must be measured from each poll's completion.
+    let fetches = 0;
+    const emitted: string[] = [];
+    let completed = false;
+    pollWhile(
+      () => {
+        fetches++;
+        return timer(250).pipe(map(() => 'completed')); // slower than intervalMs
+      },
+      (s) => s === 'completed',
+      { intervalMs: 100 },
+    ).subscribe({ next: (v) => emitted.push(v), complete: () => (completed = true) });
+
+    vi.advanceTimersByTime(0); // first poll starts
+    vi.advanceTimersByTime(200); // past two would-be ticks — still in flight
+    expect(fetches).toBe(1);
+    expect(emitted).toEqual([]);
+    vi.advanceTimersByTime(50); // response lands
+    expect(emitted).toEqual(['completed']);
+    expect(completed).toBe(true);
+  });
+
+  it('gives up after maxConsecutiveErrors consecutive failures', () => {
+    let errored: Error | null = null;
+    let fetches = 0;
+    pollWhile(
+      () => {
+        fetches++;
+        return throwError(() => new Error(`boom${fetches}`));
+      },
+      () => false,
+      { intervalMs: 100, maxConsecutiveErrors: 3 },
+    ).subscribe({ error: (e) => (errored = e as Error) });
+
+    vi.advanceTimersByTime(0); // error 1 — swallowed
+    vi.advanceTimersByTime(100); // error 2 — swallowed
+    expect(errored).toBeNull();
+    vi.advanceTimersByTime(100); // error 3 — cap hit, propagates
+    expect(errored).not.toBeNull();
+    expect((errored as unknown as Error).message).toBe('boom3');
+    expect(fetches).toBe(3);
+    // Terminated: no further fetches.
+    vi.advanceTimersByTime(500);
+    expect(fetches).toBe(3);
+  });
+
+  it('a successful poll resets the consecutive-error counter', () => {
+    const results = [
+      throwError(() => new Error('boom1')),
+      throwError(() => new Error('boom2')),
+      of('running'), // resets the counter
+      throwError(() => new Error('boom3')),
+      throwError(() => new Error('boom4')),
+      of('completed'),
+    ];
+    let i = 0;
+    const emitted: string[] = [];
+    let errored = false;
+    let completed = false;
+    pollWhile(() => results[Math.min(i++, results.length - 1)], (s) => s === 'completed', {
+      intervalMs: 100,
+      maxConsecutiveErrors: 3,
+    }).subscribe({
+      next: (v) => emitted.push(v),
+      error: () => (errored = true),
+      complete: () => (completed = true),
+    });
+
+    vi.advanceTimersByTime(0);
+    vi.advanceTimersByTime(500);
+    expect(errored).toBe(false);
+    expect(emitted).toEqual(['running', 'completed']);
+    expect(completed).toBe(true);
+  });
+
   it('throws synchronously when intervalMs <= 0 (precondition)', () => {
     const call = (ms: number) => () => pollWhile(() => of('x'), () => true, { intervalMs: ms });
     expect(call(0)).toThrow(/intervalMs must be > 0/);
     expect(call(-100)).toThrow(/intervalMs must be > 0/);
+  });
+
+  it('throws synchronously when maxConsecutiveErrors < 1 (precondition)', () => {
+    const call = (n: number) => () =>
+      pollWhile(() => of('x'), () => true, { maxConsecutiveErrors: n });
+    expect(call(0)).toThrow(/maxConsecutiveErrors must be >= 1/);
+    expect(call(-2)).toThrow(/maxConsecutiveErrors must be >= 1/);
   });
 });

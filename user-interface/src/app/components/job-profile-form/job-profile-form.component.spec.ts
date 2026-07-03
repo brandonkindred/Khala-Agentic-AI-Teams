@@ -144,18 +144,17 @@ describe('JobProfileFormComponent', () => {
     );
   });
 
-  it('surfaces the backend detail when saving fails', async () => {
+  it('resets saving on failure without opening a duplicate snackbar', async () => {
+    // The global errorHandlerInterceptor owns the error toast; a second local
+    // one would stack a duplicate. (Detail formatting is covered by the
+    // interceptor's own spec.)
     await setup();
     apiSpy.saveProfile.mockReturnValue(
       throwError(() => ({ error: { detail: 'Career profile storage requires Postgres' } }))
     );
     component.save();
     expect(component.saving).toBe(false);
-    expect(snackSpy.open).toHaveBeenCalledWith(
-      'Career profile storage requires Postgres',
-      'Dismiss',
-      expect.anything()
-    );
+    expect(snackSpy.open).not.toHaveBeenCalled();
   });
 
   it('does not save while invalid or already saving', async () => {
@@ -177,26 +176,6 @@ describe('JobProfileFormComponent', () => {
     expect(component.form.invalid).toBe(true);
     component.save();
     expect(apiSpy.saveProfile).not.toHaveBeenCalled();
-  });
-
-  it('renders FastAPI array-shaped 422 details as a readable message', async () => {
-    await setup();
-    apiSpy.saveProfile.mockReturnValue(
-      throwError(() => ({
-        error: {
-          detail: [
-            { msg: 'Input should be a valid integer', loc: ['body', 'salary_min'] },
-            { msg: 'Extra inputs are not permitted' },
-          ],
-        },
-      }))
-    );
-    component.save();
-    expect(snackSpy.open).toHaveBeenCalledWith(
-      'Input should be a valid integer; Extra inputs are not permitted',
-      'Dismiss',
-      expect.anything()
-    );
   });
 
   it('computes each dimension\'s share of the final score from normalized weights', async () => {
