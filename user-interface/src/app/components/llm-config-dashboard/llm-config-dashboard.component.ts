@@ -12,16 +12,17 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatCheckboxModule } from '@angular/material/checkbox';
-import { MatSnackBar } from '@angular/material/snack-bar';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
-import type {
-  LlmProvider,
-  LlmProviderCreate,
-  LlmProviderEntry,
-  LlmProviderListResponse,
-  LlmProviderUpdate,
-  LlmStorageStatus,
+import { NotificationService } from '../../core/notification.service';
+import {
+  providerRequiresApiKey,
+  type LlmProvider,
+  type LlmProviderCreate,
+  type LlmProviderEntry,
+  type LlmProviderListResponse,
+  type LlmProviderUpdate,
+  type LlmStorageStatus,
 } from '../../models/llm-config.model';
 
 const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434';
@@ -70,7 +71,7 @@ function emptyProviderForm(): ProviderForm {
 export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
   private readonly api = inject(LlmConfigApiService);
   private readonly destroyRef = inject(DestroyRef);
-  private readonly snackBar = inject(MatSnackBar);
+  private readonly notifications = inject(NotificationService);
 
   /** Ordered providers (most→least preferred). */
   providers: LlmProviderEntry[] = [];
@@ -95,7 +96,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
 
   /** True for providers that authenticate with an API key (Claude), not a local URL. */
   requiresApiKey(provider: LlmProvider): boolean {
-    return provider === 'claude';
+    return providerRequiresApiKey(provider);
   }
 
   /**
@@ -112,6 +113,8 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     if (this.addForm) {
       const f = this.addForm;
       if (f.label.trim() || f.model.trim() || f.api_key.trim()) return true;
+      // The dropdown defaults to ollama; picking another provider is an edit too.
+      if (f.provider !== emptyProviderForm().provider) return true;
       if (f.base_url.trim() && f.base_url.trim() !== OLLAMA_LOCAL_DEFAULT) return true;
     }
     if (this.editingId !== null) {
@@ -284,6 +287,14 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       return;
     }
     const newKey = form.api_key.trim();
+    const entry = this.providers.find((p) => p.id === this.editingId);
+    // Block saving a key-requiring provider (e.g. switching Ollama→Claude) with
+    // no key at all: no key typed, none already stored, and not an intentional
+    // clear. Keeping an existing key (blank field) or clearing one are allowed.
+    if (this.requiresApiKey(form.provider) && !newKey && !form.clear_api_key && !entry?.api_key_configured) {
+      this.providersError = 'An API key is required for Claude.';
+      return;
+    }
     const body: LlmProviderUpdate = {
       label: form.label.trim(),
       provider: form.provider,
@@ -326,7 +337,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
         this.providersSaving = false;
         // Transient confirmation (matches the app's snackbar convention);
         // errors remain a persistent banner below the form.
-        this.snackBar.open(successMsg, 'Dismiss', { duration: 3000 });
+        this.notifications.saved(successMsg);
         opts?.onSuccess?.();
       },
       error: (err) => {

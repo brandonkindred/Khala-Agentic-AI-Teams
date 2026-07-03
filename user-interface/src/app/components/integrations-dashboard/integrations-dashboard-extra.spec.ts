@@ -455,4 +455,10 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     component.googleAccountPassword = 'pw';
     expect(component.hasUnsavedChanges()).toBe(true);
   });
+
+  it('hasUnsavedChanges is true when a Slack webhook URL (a secret) is typed', () => {
+    fixture.detectChanges();
+    component.webhookUrl = 'https://hooks.slack.com/services/T0/B0/' + 'x'.repeat(40);
+    expect(component.hasUnsavedChanges()).toBe(true);
+  });
 });

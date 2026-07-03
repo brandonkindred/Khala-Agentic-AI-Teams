@@ -1,5 +1,6 @@
 import {
   Component,
+  DestroyRef,
   ElementRef,
   HostListener,
   OnInit,
@@ -9,7 +10,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
-import { toSignal } from '@angular/core/rxjs-interop';
+import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { NgTemplateOutlet } from '@angular/common';
 import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { MatSidenav, MatSidenavModule } from '@angular/material/sidenav';
@@ -62,6 +63,7 @@ const HANDSET_QUERY = '(max-width: 959.98px)';
 export class AppShellComponent implements OnInit {
   private readonly router = inject(Router);
   private readonly breakpoints = inject(BreakpointObserver);
+  private readonly destroyRef = inject(DestroyRef);
   readonly navState = inject(NavStateService);
   readonly profileStore = inject(UserProfileStore);
   readonly navGroups = NAV_GROUPS;
@@ -84,7 +86,10 @@ export class AppShellComponent implements OnInit {
     // In overlay mode, close the drawer after navigating so it doesn't cover
     // the page the user just chose.
     this.router.events
-      .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
+      .pipe(
+        filter((e): e is NavigationEnd => e instanceof NavigationEnd),
+        takeUntilDestroyed(this.destroyRef),
+      )
       .subscribe(() => this.closeDrawerAfterHandsetNav());
   }
 

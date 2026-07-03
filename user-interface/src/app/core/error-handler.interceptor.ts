@@ -1,4 +1,5 @@
 import {
+  HttpContext,
   HttpContextToken,
   HttpInterceptorFn,
   HttpErrorResponse,
@@ -14,6 +15,18 @@ import { catchError, throwError } from 'rxjs';
  * fetches that must not surface an error banner over an unrelated page).
  */
 export const SKIP_ERROR_NOTIFY = new HttpContextToken<boolean>(() => false);
+
+/**
+ * Build an `HttpContext` that opts a request out of the global error toast, for
+ * callers that render their own inline error (e.g. the config dashboards).
+ *
+ * Preconditions: none.
+ * Postconditions: returns a fresh context with `SKIP_ERROR_NOTIFY` set true;
+ * never mutates a shared context.
+ */
+export function skipErrorNotify(): HttpContext {
+  return new HttpContext().set(SKIP_ERROR_NOTIFY, true);
+}
 
 /**
  * HTTP interceptor that catches API errors and displays user-friendly messages via MatSnackBar.

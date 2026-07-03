@@ -2,7 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpContext } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
-import { SKIP_ERROR_NOTIFY } from '../core/error-handler.interceptor';
+import { SKIP_ERROR_NOTIFY, skipErrorNotify } from '../core/error-handler.interceptor';
 import type {
   ProfileOverview,
   UserProfile,
@@ -44,10 +44,11 @@ export class UserProfileApiService {
    * into the stored object server-side (top-level keys overwrite; keys absent
    * from the update survive) — send only the keys you own. There is no
    * key-deletion path, but a `null` value is stored and read as absent (the
-   * sanctioned way to reset a preference).
+   * sanctioned way to reset a preference). The global error toast is suppressed;
+   * the profile page renders its own inline save error.
    */
   updateProfile(body: UserProfileUpdate): Observable<UserProfile> {
-    return this.http.put<UserProfile>(this.baseUrl, body);
+    return this.http.put<UserProfile>(this.baseUrl, body, { context: skipErrorNotify() });
   }
 
   /**
@@ -57,9 +58,10 @@ export class UserProfileApiService {
    * Preconditions: none.
    * Postconditions: the observable emits a `ProfileOverview` whose `profile`,
    * `associations`, and `integrations` are all present, or errors with the
-   * `HttpErrorResponse`.
+   * `HttpErrorResponse`. The global error toast is suppressed; the profile page
+   * renders its own inline load error.
    */
   getOverview(): Observable<ProfileOverview> {
-    return this.http.get<ProfileOverview>(`${this.baseUrl}/overview`);
+    return this.http.get<ProfileOverview>(`${this.baseUrl}/overview`, { context: skipErrorNotify() });
   }
 }

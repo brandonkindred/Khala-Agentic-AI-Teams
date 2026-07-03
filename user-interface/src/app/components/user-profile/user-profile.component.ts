@@ -8,7 +8,6 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { MatSnackBar } from '@angular/material/snack-bar';
 import { RouterLink } from '@angular/router';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import { InitialsAvatarComponent } from '../../shared/avatar/initials-avatar.component';
@@ -21,6 +20,7 @@ import {
 import { UserProfileApiService } from '../../services/user-profile-api.service';
 import { UserProfileStore } from '../../services/user-profile-store.service';
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
+import { NotificationService } from '../../core/notification.service';
 import type { Association, ProfileIntegration } from '../../models/user-profile.model';
 
 /** A display group of associations sharing one artifact type. */
@@ -69,7 +69,7 @@ export class UserProfileComponent implements OnInit, HasUnsavedChanges {
   private readonly api = inject(UserProfileApiService);
   private readonly fb = inject(FormBuilder);
   private readonly destroyRef = inject(DestroyRef);
-  private readonly snackBar = inject(MatSnackBar);
+  private readonly notifications = inject(NotificationService);
   private readonly profileStore = inject(UserProfileStore);
 
   loading = false;
@@ -139,6 +139,9 @@ export class UserProfileComponent implements OnInit, HasUnsavedChanges {
   onBeforeUnload(event: BeforeUnloadEvent): void {
     if (this.hasUnsavedChanges()) {
       event.preventDefault(); // the modern trigger for the generic unload prompt
+      // Legacy engines (older Chromium/Firefox) only prompt when returnValue is
+      // set; assigning a non-empty string keeps the guard working there too.
+      event.returnValue = '';
     }
   }
 
@@ -275,7 +278,7 @@ export class UserProfileComponent implements OnInit, HasUnsavedChanges {
           this.saving = false;
           // Transient confirmation (matches the app's snackbar convention for
           // successful actions); errors stay as persistent banners.
-          this.snackBar.open('Profile saved.', 'Dismiss', { duration: 3000 });
+          this.notifications.saved('Profile saved.');
           // Reflect the saved identity in the shared store (footer avatar).
           this.profileStore.set(value.display_name ?? '', value.avatar_color);
           // The form now matches the persisted state — clear the dirty flag so the

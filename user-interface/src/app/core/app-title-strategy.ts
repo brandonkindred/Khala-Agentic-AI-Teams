@@ -9,12 +9,13 @@ import {
 const APP_NAME = 'Khala';
 
 /**
- * Sets the browser tab title from the active route's `data.title` so wayfinding
+ * Sets the browser tab title from the active route's `title` so wayfinding
  * (WCAG 2.4.2) works on every route, not only the ones wrapped in
- * `app-dashboard-shell`.
+ * `app-dashboard-shell`. Delegates the deepest-title resolution to the base
+ * `TitleStrategy.buildTitle()` and only adds the app-name suffix.
  *
  * Invariants: the document title is always either `"<title> | Khala"` when the
- * deepest activated route defines `data.title`, or `"Khala"` otherwise.
+ * deepest activated route declares a `title`, or `"Khala"` otherwise.
  */
 @Injectable({ providedIn: 'root' })
 export class AppTitleStrategy extends TitleStrategy {
@@ -23,19 +24,11 @@ export class AppTitleStrategy extends TitleStrategy {
   /**
    * Preconditions: `snapshot` is the router state for the navigation just
    * completed.
-   * Postconditions: `document.title` reflects the deepest route's `data.title`
-   * (with the app-name suffix) or the bare app name when none is declared.
+   * Postconditions: `document.title` reflects the deepest route's `title` (with
+   * the app-name suffix) or the bare app name when none is declared.
    */
   override updateTitle(snapshot: RouterStateSnapshot): void {
-    let route = snapshot.root;
-    let pageTitle: string | undefined;
-    while (route) {
-      // Deepest declared title wins (child routes override their parents).
-      if (typeof route.data?.['title'] === 'string') {
-        pageTitle = route.data['title'];
-      }
-      route = route.firstChild!;
-    }
+    const pageTitle = this.buildTitle(snapshot);
     this.title.setTitle(pageTitle ? `${pageTitle} | ${APP_NAME}` : APP_NAME);
   }
 }

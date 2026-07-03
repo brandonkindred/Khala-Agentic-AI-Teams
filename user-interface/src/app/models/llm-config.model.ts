@@ -9,6 +9,21 @@
 export type LlmProvider = 'ollama' | 'claude';
 
 /**
+ * Whether a provider authenticates with an API key (vs. a local base URL).
+ *
+ * The provider list and its auth requirement belong together, so callers (the
+ * add/edit forms and their validation) read the capability from here rather than
+ * hardcoding provider strings that could drift as the union grows.
+ *
+ * Preconditions: `provider` is a member of `LlmProvider`.
+ * Postconditions: returns true iff a saved entry for `provider` is unusable
+ * without a stored API key.
+ */
+export function providerRequiresApiKey(provider: LlmProvider): boolean {
+  return provider === 'claude';
+}
+
+/**
  * Runtime-store state for the settings page:
  * - `available`   — Postgres configured AND reachable (mutations enabled).
  * - `unconfigured`— POSTGRES_HOST unset (providers can't be saved).

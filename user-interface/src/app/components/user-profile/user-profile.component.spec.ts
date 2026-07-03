@@ -207,11 +207,14 @@ describe('UserProfileComponent', () => {
     const event = { preventDefault: vi.fn(), returnValue: undefined } as unknown as BeforeUnloadEvent;
     component.onBeforeUnload(event);
     expect(event.preventDefault).toHaveBeenCalled();
+    // Legacy engines only prompt when returnValue is also assigned.
+    expect(event.returnValue).toBe('');
     // A pristine form leaves the event untouched.
     component.form.markAsPristine();
     const clean = { preventDefault: vi.fn(), returnValue: undefined } as unknown as BeforeUnloadEvent;
     component.onBeforeUnload(clean);
     expect(clean.preventDefault).not.toHaveBeenCalled();
+    expect(clean.returnValue).toBeUndefined();
   });
 
   it('should not save when the email is invalid', async () => {

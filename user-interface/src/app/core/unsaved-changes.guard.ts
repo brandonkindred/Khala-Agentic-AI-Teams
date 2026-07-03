@@ -36,7 +36,9 @@ export const unsavedChangesGuard: CanDeactivateFn<HasUnsavedChanges> = (
     message: 'You have edits that have not been saved. Leaving now discards them.',
     confirmLabel: 'Discard changes',
     cancelLabel: 'Keep editing',
-    variant: 'warn',
+    // 'danger' focuses Cancel and colors the destructive button, so an
+    // accidental Enter keeps editing rather than discarding unsaved work.
+    variant: 'danger',
   };
   return inject(MatDialog)
     .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })

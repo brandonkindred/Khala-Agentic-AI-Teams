@@ -93,11 +93,10 @@
             >
               @if (saving) {
                 <mat-spinner class="up-save-spinner" diameter="18" aria-hidden="true" />
-                <span>Saving…</span>
               } @else {
                 <mat-icon>save</mat-icon>
-                <span>Save profile</span>
               }
+              <span>{{ saving ? 'Saving…' : 'Save profile' }}</span>
             </button>
           </div>
         </form>

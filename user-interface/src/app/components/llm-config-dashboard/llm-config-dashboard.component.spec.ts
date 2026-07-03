@@ -171,6 +171,13 @@ describe('LlmConfigDashboardComponent', () => {
     expect(component.hasUnsavedChanges()).toBe(false);
   });
 
+  it('reports unsaved changes when the add form switches provider off the default', () => {
+    component.startAdd();
+    expect(component.hasUnsavedChanges()).toBe(false); // defaults to ollama
+    component.addForm!.provider = 'claude';
+    expect(component.hasUnsavedChanges()).toBe(true);
+  });
+
   it('reports unsaved changes when an edit changes a field or types a key', () => {
     apiSpy.listProviders.mockReturnValue(of(listResponse([entry({ id: 3, label: 'Orig' })])));
     component.loadProviders();
@@ -180,6 +187,31 @@ describe('LlmConfigDashboardComponent', () => {
     expect(component.hasUnsavedChanges()).toBe(true);
     component.cancelEdit();
     expect(component.hasUnsavedChanges()).toBe(false);
+  });
+
+  it('blocks an edit that switches to Claude with no key (none stored, not clearing)', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(listResponse([entry({ id: 3, provider: 'ollama', api_key_configured: false })])),
+    );
+    component.loadProviders();
+    component.startEdit(component.providers[0]);
+    component.editForm.provider = 'claude';
+    component.editForm.api_key = '';
+    component.submitEdit();
+    expect(apiSpy.updateProvider).not.toHaveBeenCalled();
+    expect(component.providersError).toContain('API key is required');
+  });
+
+  it('allows an edit that keeps an already-configured Claude key (blank field)', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(listResponse([entry({ id: 3, provider: 'claude', api_key_configured: true })])),
+    );
+    component.loadProviders();
+    apiSpy.updateProvider.mockReturnValue(of(listResponse([entry({ id: 3 })])));
+    component.startEdit(component.providers[0]);
+    component.editForm.label = 'Renamed';
+    component.submitEdit();
+    expect(apiSpy.updateProvider).toHaveBeenCalled();
   });
 
   it('rejects an add with a blank label', () => {

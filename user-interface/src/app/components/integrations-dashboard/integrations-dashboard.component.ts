@@ -11,9 +11,9 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatRadioModule } from '@angular/material/radio';
 import { MatDividerModule } from '@angular/material/divider';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { MatSnackBar } from '@angular/material/snack-bar';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
+import { NotificationService } from '../../core/notification.service';
 import type {
   GitHubConfigResponse,
   GitHubConfigUpdate,
@@ -52,7 +52,7 @@ type IntegrationKey = 'google' | 'slack' | 'medium' | 'github';
 export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges {
   private readonly api = inject(IntegrationsApiService);
   private readonly route = inject(ActivatedRoute);
-  private readonly snackBar = inject(MatSnackBar);
+  private readonly notifications = inject(NotificationService);
 
   loadingSlack = false;
   saving = false;
@@ -62,7 +62,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
 
   /** Transient success confirmation (the app's convention for saved actions). */
   private notify(message: string): void {
-    this.snackBar.open(message, 'Dismiss', { duration: 3000 });
+    this.notifications.saved(message);
   }
 
   /**
@@ -73,7 +73,8 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
    *
    * Preconditions: none.
    * Postconditions: true while any save is in flight, or while any write-only
-   * secret field holds text; false otherwise.
+   * secret field holds text; false otherwise. The Slack webhook URL counts: it
+   * embeds a secret token and is never returned by the API.
    */
   hasUnsavedChanges(): boolean {
     if (this.saving || this.mediumSaving || this.savingGoogleBrowserCredentials || this.githubSaving) {
@@ -82,6 +83,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     return !!(
       this.clientSecret.trim() ||
       this.botToken.trim() ||
+      this.webhookUrl.trim() ||
       this.googleAccountPassword.length > 0 ||
       this.githubPat.trim() ||
       this.githubWebhookSecret.trim()
