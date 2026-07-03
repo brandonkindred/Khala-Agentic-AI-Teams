@@ -1,4 +1,5 @@
 import {
+  HttpContextToken,
   HttpInterceptorFn,
   HttpErrorResponse,
   HttpStatusCode,
@@ -8,20 +9,30 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { catchError, throwError } from 'rxjs';
 
 /**
+ * Set on a request's `HttpContext` to suppress the global error toast for that
+ * request (the caller handles failure itself — e.g. background/decorative
+ * fetches that must not surface an error banner over an unrelated page).
+ */
+export const SKIP_ERROR_NOTIFY = new HttpContextToken<boolean>(() => false);
+
+/**
  * HTTP interceptor that catches API errors and displays user-friendly messages via MatSnackBar.
- * Re-throws the error so callers can still handle it.
+ * Re-throws the error so callers can still handle it. Requests carrying
+ * `SKIP_ERROR_NOTIFY` in their context are re-thrown without a toast.
  */
 export const errorHandlerInterceptor: HttpInterceptorFn = (req, next) => {
   const snackBar = inject(MatSnackBar);
 
   return next(req).pipe(
     catchError((err: unknown) => {
-      const message = formatErrorMessage(err);
-      snackBar.open(message, 'Close', {
-        duration: 6000,
-        horizontalPosition: 'end',
-        verticalPosition: 'top',
-      });
+      if (!req.context.get(SKIP_ERROR_NOTIFY)) {
+        const message = formatErrorMessage(err);
+        snackBar.open(message, 'Close', {
+          duration: 6000,
+          horizontalPosition: 'end',
+          verticalPosition: 'top',
+        });
+      }
       return throwError(() => err);
     })
   );

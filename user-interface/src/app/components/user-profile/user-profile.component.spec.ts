@@ -172,13 +172,31 @@ describe('UserProfileComponent', () => {
     expect(component.form.pristine).toBe(true);
   });
 
-  it('should report unsaved changes only while the form is dirty and not saving', async () => {
+  it('should report unsaved changes while the form is dirty, clearing after a successful save', async () => {
     await setup();
     expect(component.hasUnsavedChanges()).toBe(false);
     component.form.patchValue({ bio: 'edit' });
     component.form.markAsDirty();
     expect(component.hasUnsavedChanges()).toBe(true);
     component.save(); // success path marks pristine
+    expect(component.hasUnsavedChanges()).toBe(false);
+  });
+
+  it('should still report unsaved changes DURING an in-flight save', async () => {
+    // Navigating away mid-save cancels the request (takeUntilDestroyed), so the
+    // guard must keep prompting until the save actually completes.
+    const { Subject } = await import('rxjs');
+    const pending = new Subject<typeof PROFILE>();
+    apiSpy.updateProfile.mockReturnValue(pending);
+    await setup();
+    component.form.patchValue({ bio: 'edit' });
+    component.form.markAsDirty();
+    component.save();
+    expect(component.saving).toBe(true);
+    expect(component.hasUnsavedChanges()).toBe(true); // still dirty, save not yet landed
+    pending.next(PROFILE);
+    pending.complete();
+    expect(component.saving).toBe(false);
     expect(component.hasUnsavedChanges()).toBe(false);
   });
 

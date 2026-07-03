@@ -17,6 +17,13 @@ export class UserProfileStore {
   private readonly _displayName = signal('');
   private readonly _avatarColorKey = signal(resolveAvatarColor(undefined).key);
 
+  /**
+   * Monotonic write counter. Every `set()` bumps it; an in-flight `refresh()`
+   * captures it and only applies its (older) response when no `set()` has run
+   * since — so a slow boot-time refresh can't overwrite a fresh save.
+   */
+  private writeSeq = 0;
+
   /** Current display name, or '' when unknown/unset. */
   readonly displayName = this._displayName.asReadonly();
   /** Current avatar color palette key (always valid). */
@@ -29,14 +36,20 @@ export class UserProfileStore {
    *
    * Preconditions: none.
    * Postconditions: on success `displayName`/`avatarColorKey` reflect the
-   * server; on failure the previous values are retained (no error surfaced —
-   * this only feeds decorative chrome).
+   * server UNLESS a `set()` ran while the request was in flight (a fresh save
+   * wins over a stale boot-time fetch); on failure the previous values are
+   * retained. The request is `silent`, so a profile error never surfaces the
+   * global toast over an unrelated page — this only feeds decorative chrome.
    */
   refresh(): void {
+    const seq = this.writeSeq;
     // getProfile() emits once and completes (HttpClient), so no unsubscribe is
     // needed for this root singleton.
-    this.api.getProfile().subscribe({
-      next: (profile) => this.set(profile.display_name ?? '', profile.preferences?.['avatar_color']),
+    this.api.getProfile({ silent: true }).subscribe({
+      next: (profile) => {
+        if (seq !== this.writeSeq) return; // a set() superseded this fetch
+        this.set(profile.display_name ?? '', profile.preferences?.['avatar_color']);
+      },
       error: () => {
         /* decorative-only: keep last-known identity */
       },
@@ -51,6 +64,7 @@ export class UserProfileStore {
    * Postconditions: the signals reflect the given name and resolved color.
    */
   set(displayName: string, colorKey: unknown): void {
+    this.writeSeq++;
     this._displayName.set(displayName ?? '');
     this._avatarColorKey.set(resolveAvatarColor(colorKey).key);
   }

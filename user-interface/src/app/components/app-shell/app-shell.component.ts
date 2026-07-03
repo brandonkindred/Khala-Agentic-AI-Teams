@@ -10,6 +10,7 @@ import {
   signal,
 } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
+import { NgTemplateOutlet } from '@angular/common';
 import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { MatSidenav, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
@@ -17,7 +18,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { BreakpointObserver } from '@angular/cdk/layout';
-import { OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
+import { CdkConnectedOverlay, OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
 import { filter, map } from 'rxjs/operators';
 import { ApiStatusWidgetComponent } from '../api-status-widget/api-status-widget.component';
 import { BreadcrumbComponent } from '../../shared/breadcrumb/breadcrumb.component';
@@ -50,6 +51,7 @@ const HANDSET_QUERY = '(max-width: 959.98px)';
     MatIconModule,
     MatTooltipModule,
     OverlayModule,
+    NgTemplateOutlet,
     ApiStatusWidgetComponent,
     BreadcrumbComponent,
     InitialsAvatarComponent,
@@ -73,6 +75,9 @@ export class AppShellComponent implements OnInit {
   /** The sidebar drawer, closed on navigation while in handset overlay mode. */
   @ViewChild('drawer') private drawer?: MatSidenav;
 
+  /** The open group flyout, if any — repositioned when favorites reflow. */
+  @ViewChild(CdkConnectedOverlay) private flyoutOverlay?: CdkConnectedOverlay;
+
   ngOnInit(): void {
     // Populate the footer avatar's identity once the shell mounts.
     this.profileStore.refresh();
@@ -80,9 +85,19 @@ export class AppShellComponent implements OnInit {
     // the page the user just chose.
     this.router.events
       .pipe(filter((e): e is NavigationEnd => e instanceof NavigationEnd))
-      .subscribe(() => {
-        if (this.isHandset()) this.drawer?.close();
-      });
+      .subscribe(() => this.closeDrawerAfterHandsetNav());
+  }
+
+  /**
+   * Close the overlay drawer after a navigation on handset widths.
+   *
+   * Preconditions: called on NavigationEnd.
+   * Postconditions: on handset viewports the drawer is closed so it doesn't
+   * cover the just-navigated page; on wider viewports (fixed 'side' mode) it is
+   * a no-op.
+   */
+  private closeDrawerAfterHandsetNav(): void {
+    if (this.isHandset()) this.drawer?.close();
   }
 
   /** aria-label for a favorite toggle, phrased by current pinned state. */
@@ -90,6 +105,22 @@ export class AppShellComponent implements OnInit {
     return this.navState.isFavorite(item.id)
       ? `Remove ${item.label} from favorites`
       : `Add ${item.label} to favorites`;
+  }
+
+  /**
+   * Pin/unpin a favorite, keeping an open flyout anchored to its trigger.
+   *
+   * Preconditions: `id` is a NavItem id.
+   * Postconditions: the favorite is toggled (persisted by NavStateService).
+   * Toggling changes the Favorites section height above the flyout's anchor,
+   * so the open overlay is repositioned after the resulting layout settles —
+   * otherwise it would stay at its old coordinates, detached from its trigger.
+   */
+  toggleFavorite(id: string): void {
+    this.navState.toggleFavorite(id);
+    // Defer past the change-detection + layout pass the toggle triggers, then
+    // re-anchor the flyout to its (now shifted) trigger.
+    setTimeout(() => this.flyoutOverlay?.overlayRef?.updatePosition());
   }
 
   /**

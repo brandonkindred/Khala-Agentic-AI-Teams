@@ -26,6 +26,19 @@
         <span>Jobs Dashboard</span>
       </a>
 
+      <!-- Favorite pin/unpin toggle, shared by the favorites list and flyouts. -->
+      <ng-template #favoriteStar let-item>
+        <button type="button"
+                mat-icon-button
+                class="nav-link-star"
+                [class.favorited]="navState.isFavorite(item.id)"
+                [attr.aria-label]="favoriteLabel(item)"
+                [matTooltip]="favoriteLabel(item)"
+                (click)="toggleFavorite(item.id)">
+          <mat-icon>{{ navState.isFavorite(item.id) ? 'star' : 'star_border' }}</mat-icon>
+        </button>
+      </ng-template>
+
       <!-- Favorites section -->
       @if (navState.favoriteItems().length > 0) {
         <div class="nav-favorites">
@@ -39,18 +52,10 @@
                  [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
                  class="nav-link nav-link-favorite"
                  [attr.aria-current]="isActive(item.route) ? 'page' : null">
-                <mat-icon>star</mat-icon>
+                <mat-icon>{{ item.icon }}</mat-icon>
                 <span>{{ item.label }}</span>
               </a>
-              <button type="button"
-                      mat-icon-button
-                      class="nav-link-star"
-                      [attr.aria-label]="favoriteLabel(item)"
-                      [attr.aria-pressed]="navState.isFavorite(item.id)"
-                      [matTooltip]="favoriteLabel(item)"
-                      (click)="navState.toggleFavorite(item.id)">
-                <mat-icon>{{ navState.isFavorite(item.id) ? 'star' : 'star_border' }}</mat-icon>
-              </button>
+              <ng-container *ngTemplateOutlet="favoriteStar; context: { $implicit: item }" />
             </div>
           }
         </div>
@@ -110,15 +115,7 @@
                   <mat-icon>{{ item.icon }}</mat-icon>
                   <span>{{ item.label }}</span>
                 </a>
-                <button type="button"
-                        mat-icon-button
-                        class="nav-link-star"
-                        [attr.aria-label]="favoriteLabel(item)"
-                        [attr.aria-pressed]="navState.isFavorite(item.id)"
-                        [matTooltip]="favoriteLabel(item)"
-                        (click)="navState.toggleFavorite(item.id)">
-                  <mat-icon>{{ navState.isFavorite(item.id) ? 'star' : 'star_border' }}</mat-icon>
-                </button>
+                <ng-container *ngTemplateOutlet="favoriteStar; context: { $implicit: item }" />
               </div>
             }
           </div>

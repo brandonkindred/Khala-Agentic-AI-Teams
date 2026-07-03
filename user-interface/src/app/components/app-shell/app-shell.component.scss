@@ -292,7 +292,7 @@
   }
 
   // When pinned, always fully visible with accent color
-  &[aria-pressed="true"] {
+  &.favorited {
     opacity: 1;
 
     mat-icon {

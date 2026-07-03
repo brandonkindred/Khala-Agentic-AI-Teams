@@ -47,6 +47,24 @@ describe('UserProfileStore', () => {
     expect(store.avatarColorKey()).toBe('blue');
   });
 
+  it('refresh() fetches silently (suppressing the global error toast)', () => {
+    store.refresh();
+    expect(api.getProfile).toHaveBeenCalledWith({ silent: true });
+  });
+
+  it('a set() during an in-flight refresh() wins over the stale response', async () => {
+    const { Subject } = await import('rxjs');
+    const pending = new Subject<typeof PROFILE>();
+    api.getProfile.mockReturnValue(pending);
+    store.refresh(); // captures writeSeq, request in flight
+    store.set('Fresh Save', 'red'); // user saves before the fetch resolves
+    pending.next(PROFILE); // stale boot fetch resolves last
+    pending.complete();
+    // The stale fetch must NOT overwrite the fresh save.
+    expect(store.displayName()).toBe('Fresh Save');
+    expect(store.avatarColorKey()).toBe('red');
+  });
+
   it('set() normalizes an unknown color to the default and blank name', () => {
     store.set('', 'magenta');
     expect(store.hasIdentity()).toBe(false);

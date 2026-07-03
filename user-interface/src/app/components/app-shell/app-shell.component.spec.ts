@@ -3,6 +3,8 @@ import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
+import { BreakpointObserver } from '@angular/cdk/layout';
+import { of } from 'rxjs';
 import { AppShellComponent } from './app-shell.component';
 
 describe('AppShellComponent', () => {
@@ -113,9 +115,9 @@ describe('AppShellComponent', () => {
   it('phrases the favorite toggle label by pinned state', () => {
     const item = component.navGroups[0].items[0];
     expect(component.favoriteLabel(item)).toBe(`Add ${item.label} to favorites`);
-    component.navState.toggleFavorite(item.id);
+    component.toggleFavorite(item.id);
     expect(component.favoriteLabel(item)).toBe(`Remove ${item.label} from favorites`);
-    component.navState.toggleFavorite(item.id); // reset shared localStorage state
+    component.toggleFavorite(item.id); // reset shared localStorage state
   });
 
   it('renders the footer as a generic icon until an identity is known', () => {
@@ -135,5 +137,35 @@ describe('AppShellComponent', () => {
 
   it('defaults to desktop (non-handset) layout', () => {
     expect(component.isHandset()).toBe(false);
+  });
+
+  it('leaves the drawer open after navigating on desktop', () => {
+    const drawer = { close: vi.fn() };
+    (component as any).drawer = drawer;
+    (component as any).closeDrawerAfterHandsetNav();
+    expect(drawer.close).not.toHaveBeenCalled();
+  });
+});
+
+describe('AppShellComponent responsive drawer', () => {
+  it('closes the overlay drawer after navigating on handset widths', async () => {
+    await TestBed.configureTestingModule({
+      imports: [AppShellComponent, NoopAnimationsModule],
+      providers: [
+        provideRouter([]),
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        { provide: BreakpointObserver, useValue: { observe: () => of({ matches: true, breakpoints: {} }) } },
+      ],
+    }).compileComponents();
+    const fixture = TestBed.createComponent(AppShellComponent);
+    const component = fixture.componentInstance;
+    fixture.detectChanges();
+    expect(component.isHandset()).toBe(true);
+    const drawer = { close: vi.fn() };
+    (component as any).drawer = drawer;
+    (component as any).closeDrawerAfterHandsetNav();
+    expect(drawer.close).toHaveBeenCalledTimes(1);
+    TestBed.resetTestingModule();
   });
 });

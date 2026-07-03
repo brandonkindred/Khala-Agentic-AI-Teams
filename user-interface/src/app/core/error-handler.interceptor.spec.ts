@@ -4,9 +4,10 @@ import {
   HttpTestingController,
   provideHttpClientTesting,
 } from '@angular/common/http/testing';
-import { HttpClient } from '@angular/common/http';
-import { errorHandlerInterceptor } from './error-handler.interceptor';
-import { MatSnackBarModule } from '@angular/material/snack-bar';
+import { HttpClient, HttpContext } from '@angular/common/http';
+import { vi } from 'vitest';
+import { errorHandlerInterceptor, SKIP_ERROR_NOTIFY } from './error-handler.interceptor';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { provideAnimations } from '@angular/platform-browser/animations';
 
 describe('errorHandlerInterceptor', () => {
@@ -104,5 +105,39 @@ describe('errorHandlerInterceptor', () => {
     const req = httpMock.expectOne('/test');
     req.flush({ message: 'oops' }, { status: 500, statusText: 'Server Error' });
     expect(error).toBeDefined();
+  });
+});
+
+describe('errorHandlerInterceptor SKIP_ERROR_NOTIFY', () => {
+  let httpMock: HttpTestingController;
+  let http: HttpClient;
+  let snackBar: { open: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    snackBar = { open: vi.fn() };
+    TestBed.configureTestingModule({
+      providers: [
+        provideHttpClient(withInterceptors([errorHandlerInterceptor])),
+        provideHttpClientTesting(),
+        { provide: MatSnackBar, useValue: snackBar },
+      ],
+    });
+    httpMock = TestBed.inject(HttpTestingController);
+    http = TestBed.inject(HttpClient);
+  });
+
+  afterEach(() => httpMock.verify());
+
+  it('suppresses the error toast when the request opts out', () => {
+    const context = new HttpContext().set(SKIP_ERROR_NOTIFY, true);
+    http.get('/silent', { context }).subscribe({ error: () => undefined });
+    httpMock.expectOne('/silent').flush('x', { status: 500, statusText: 'Server Error' });
+    expect(snackBar.open).not.toHaveBeenCalled();
+  });
+
+  it('still toasts for a normal request', () => {
+    http.get('/loud').subscribe({ error: () => undefined });
+    httpMock.expectOne('/loud').flush('x', { status: 500, statusText: 'Server Error' });
+    expect(snackBar.open).toHaveBeenCalledTimes(1);
   });
 });

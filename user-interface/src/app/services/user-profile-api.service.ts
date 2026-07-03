@@ -1,7 +1,8 @@
 import { Injectable, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpContext } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
+import { SKIP_ERROR_NOTIFY } from '../core/error-handler.interceptor';
 import type {
   ProfileOverview,
   UserProfile,
@@ -22,10 +23,14 @@ export class UserProfileApiService {
    *
    * Preconditions: none (the backend auto-creates the default profile on first read).
    * Postconditions: the observable emits the current `UserProfile`, or errors with
-   * the `HttpErrorResponse` (e.g. 503 when profile storage is unavailable).
+   * the `HttpErrorResponse` (e.g. 503 when profile storage is unavailable). When
+   * `options.silent` is true the global error toast is suppressed for this
+   * request (the caller handles failure itself — e.g. the footer avatar fetch).
    */
-  getProfile(): Observable<UserProfile> {
-    return this.http.get<UserProfile>(this.baseUrl);
+  getProfile(options?: { silent?: boolean }): Observable<UserProfile> {
+    const context = new HttpContext();
+    if (options?.silent) context.set(SKIP_ERROR_NOTIFY, true);
+    return this.http.get<UserProfile>(this.baseUrl, { context });
   }
 
   /**

@@ -117,19 +117,28 @@ export class UserProfileComponent implements OnInit, HasUnsavedChanges {
    * guard and the beforeunload prompt).
    *
    * Preconditions: none.
-   * Postconditions: true iff the form has unsaved edits and no save is in
-   * flight; false otherwise.
+   * Postconditions: true iff the form has unsaved edits. This deliberately
+   * still reports true DURING an in-flight save: the save request is cancelled
+   * if the component is destroyed (`takeUntilDestroyed`), so navigating away
+   * mid-save would silently lose the write — the user must be prompted until
+   * the save actually completes (which clears `dirty` via `markAsPristine`).
    */
   hasUnsavedChanges(): boolean {
-    return this.form.dirty && !this.saving;
+    return this.form.dirty;
   }
 
-  /** Native browser prompt when the tab/window closes with unsaved edits. */
+  /**
+   * Native browser prompt when the tab/window closes with unsaved edits.
+   *
+   * Preconditions: invoked by the browser's `beforeunload` event.
+   * Postconditions: when `hasUnsavedChanges()` is true, cancels the event so
+   * the browser shows its generic "leave site?" prompt; otherwise leaves the
+   * event untouched (unload proceeds without a prompt).
+   */
   @HostListener('window:beforeunload', ['$event'])
   onBeforeUnload(event: BeforeUnloadEvent): void {
     if (this.hasUnsavedChanges()) {
-      event.preventDefault();
-      event.returnValue = ''; // required by some browsers to trigger the prompt
+      event.preventDefault(); // the modern trigger for the generic unload prompt
     }
   }
 
