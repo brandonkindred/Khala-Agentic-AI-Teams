@@ -1,0 +1,85 @@
+<div class="compose-stage">
+  <div class="compose-toolbar">
+    <mat-form-field appearance="outline" class="team-select">
+      <mat-label>Team</mat-label>
+      <mat-select
+        [value]="selectedTeamId()"
+        (selectionChange)="selectTeam($event.value)"
+        [disabled]="teamsLoading()"
+      >
+        @for (t of teams(); track t.team_id) {
+          <mat-option [value]="t.team_id">{{ t.name }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    @if (team(); as t) {
+      @if (t.processes.length > 1) {
+        <mat-form-field appearance="outline" class="process-select">
+          <mat-label>Process</mat-label>
+          <mat-select [value]="selectedProcessId()" (selectionChange)="selectProcess($event.value)">
+            @for (p of t.processes; track p.process_id) {
+              <mat-option [value]="p.process_id">{{ p.name || 'Untitled Process' }} ({{ p.status }})</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      }
+    }
+
+    <button mat-stroked-button type="button" class="new-team-btn" (click)="toggleCreateForm()">
+      <mat-icon>{{ showCreateForm() ? 'close' : 'add' }}</mat-icon>
+      {{ showCreateForm() ? 'Cancel' : 'New team' }}
+    </button>
+  </div>
+
+  @if (teamsError()) {
+    <p class="error-text">{{ teamsError() }}</p>
+  }
+
+  @if (showCreateForm()) {
+    <mat-card class="create-card">
+      <mat-card-content>
+        <form [formGroup]="form" (ngSubmit)="onCreateTeam()" class="create-form">
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Team Name</mat-label>
+            <input matInput formControlName="name" placeholder="e.g. Customer Success Team" />
+          </mat-form-field>
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Description</mat-label>
+            <textarea
+              matInput
+              formControlName="description"
+              rows="2"
+              placeholder="A short description of what this team does..."
+            ></textarea>
+          </mat-form-field>
+          @if (createError()) {
+            <p class="error-text">{{ createError() }}</p>
+          }
+          <button mat-raised-button color="primary" type="submit" [disabled]="form.invalid || creating()">
+            @if (creating()) {
+              Creating...
+            } @else {
+              Create Team
+            }
+          </button>
+        </form>
+      </mat-card-content>
+    </mat-card>
+  }
+
+  @if (!selectedTeamId()) {
+    <div class="empty-state">
+      <mat-icon class="empty-icon">groups</mat-icon>
+      <p>Pick an existing team above, or create a new one to start composing its roster and process.</p>
+    </div>
+  } @else if (teamLoadError()) {
+    <p class="error-text">{{ teamLoadError() }}</p>
+  } @else {
+    @if (team(); as t) {
+      <app-process-designer-chat [team]="t" (rosterChanged)="onRosterChanged($event)" />
+    } @else {
+      <div class="loading-state">Loading team...</div>
+    }
+  }
+</div>

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from software_engineering_team.shared.repo_utils import REPO_INSPECT_EXCLUDE_DIRS
+from shared_repo_context.repo_utils import REPO_INSPECT_EXCLUDE_DIRS
 
 from .context import RepoToolContext
 from .definitions import REPO_INSPECT_TOOL_DEFINITIONS

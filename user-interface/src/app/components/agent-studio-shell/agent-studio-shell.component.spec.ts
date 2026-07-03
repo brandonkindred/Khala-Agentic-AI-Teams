@@ -5,6 +5,7 @@ import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-cata
 import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
+import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
@@ -32,6 +33,11 @@ class StubProvisioningDashboardComponent {}
 @Component({ selector: 'app-agent-studio-persona', standalone: true, template: '' })
 class StubPersonaComponent {}
 
+/** Stub the Stage-3 compose component so the shell's Compose-stage tests don't
+ *  pull in its API services / the embedded process-designer-chat. */
+@Component({ selector: 'app-agent-studio-compose-team', standalone: true, template: '' })
+class StubComposeTeamComponent {}
+
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
@@ -49,8 +55,8 @@ describe('AgentStudioShellComponent', () => {
         add: { imports: [StubAgentCatalogComponent, StubProvisioningDashboardComponent] },
       })
       .overrideComponent(AgentStudioShellComponent, {
-        remove: { imports: [AgentStudioPersonaComponent] },
-        add: { imports: [StubPersonaComponent] },
+        remove: { imports: [AgentStudioPersonaComponent, AgentStudioComposeTeamComponent] },
+        add: { imports: [StubPersonaComponent, StubComposeTeamComponent] },
       })
       .compileComponents();
 
@@ -117,13 +123,48 @@ describe('AgentStudioShellComponent', () => {
     expect(component.state.activeStage()).toBe(3);
   });
 
-  it('passes the live handoff into a still-stubbed stage (Compose)', () => {
+  it('renders the real Compose Team stage (not the placeholder) on Stage 3', () => {
+    component.state.navigateToStage(2);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('app-agent-studio-compose-team')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
+  });
+
+  it('passes the live handoff through to Compose', () => {
     component.state.setRegistryAgentId('reg-1');
-    component.state.navigateToStage(2); // Compose is still a placeholder.
+    component.state.navigateToStage(2);
     fixture.detectChanges();
     const map = new Map(Object.entries(component.state.handoff()));
     expect(map.get('registryAgentId')).toBe('reg-1');
-    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeTruthy();
+  });
+
+  it('gates "Test this team →" until the roster is staffed and the process is complete', () => {
+    component.state.navigateToStage(2);
+    fixture.detectChanges();
+    let button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__continue');
+    expect(button.textContent?.trim()).toBe('Test this team →');
+    expect(component.forwardDisabled()).toBe(true);
+    expect(button.disabled).toBe(true);
+    expect(component.composeForwardDisabledReason()).toBe(
+      'Needs: a fully-staffed roster and a completed process',
+    );
+
+    component.state.setRosterFullyStaffed(true);
+    fixture.detectChanges();
+    expect(component.forwardDisabled()).toBe(true);
+    expect(component.composeForwardDisabledReason()).toBe('Needs: a completed process');
+
+    component.state.setComposeProcessStatus('complete');
+    fixture.detectChanges();
+    button = fixture.nativeElement.querySelector('.studio__continue');
+    expect(component.forwardDisabled()).toBe(false);
+    expect(button.disabled).toBe(false);
+    expect(component.composeForwardDisabledReason()).toBeNull();
+  });
+
+  it('composeForwardDisabledReason is null off the Compose stage', () => {
+    expect(component.activeStageDef().key).toBe('build');
+    expect(component.composeForwardDisabledReason()).toBeNull();
   });
 
   it('marks only the active step with aria-current="step"', () => {

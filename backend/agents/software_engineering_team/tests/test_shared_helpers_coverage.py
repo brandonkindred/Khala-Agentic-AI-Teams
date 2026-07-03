@@ -12,7 +12,7 @@ from __future__ import annotations
 
 
 def test_extract_task_assignment_returns_none_on_empty():
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     assert lru.extract_task_assignment_from_content("") is None
     assert lru.extract_task_assignment_from_content("not json at all") is None
@@ -20,7 +20,7 @@ def test_extract_task_assignment_returns_none_on_empty():
 
 def test_extract_task_assignment_finds_bare_json():
     """Bare JSON containing a `tasks` array round-trips through the helper."""
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     raw = '{"tasks": [{"id": "t1", "title": "x"}]}'
     out = lru.extract_task_assignment_from_content(raw)
@@ -29,20 +29,20 @@ def test_extract_task_assignment_finds_bare_json():
 
 
 def test_extract_files_from_content_empty_returns_dict():
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     out = lru.extract_files_from_content("")
     assert isinstance(out, dict)
 
 
 def test_extract_single_python_block_returns_none_when_absent():
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     assert lru.extract_single_python_block("just text") is None
 
 
 def test_extract_single_python_block_finds_fenced_python():
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     raw = "```python\ndef hello(name):\n    return f'Hi {name}'\n```"
     out = lru.extract_single_python_block(raw)
@@ -52,7 +52,7 @@ def test_extract_single_python_block_finds_fenced_python():
 
 def test_extract_single_python_block_ignores_short_body():
     """Bodies shorter than 20 chars are rejected as too small to be useful."""
-    from software_engineering_team.shared import llm_response_utils as lru
+    from shared_llm_recovery import recovery as lru
 
     raw = "```python\nx = 1\n```"
     assert lru.extract_single_python_block(raw) is None
@@ -66,7 +66,7 @@ def test_extract_single_python_block_ignores_short_body():
 def test_parse_pytest_failure_empty_returns_unknown_failure():
     """Empty stdout/stderr still yields a single Unknown ParsedFailure
     so the caller surfaces *something* in the agent feedback."""
-    from software_engineering_team.shared import error_parsing as ep
+    from shared_command_runner import error_parsing as ep
 
     out = ep.parse_pytest_failure("", "")
     assert len(out) >= 1
@@ -74,7 +74,7 @@ def test_parse_pytest_failure_empty_returns_unknown_failure():
 
 
 def test_parse_ng_build_failure_empty_returns_unknown_failure():
-    from software_engineering_team.shared import error_parsing as ep
+    from shared_command_runner import error_parsing as ep
 
     out = ep.parse_ng_build_failure("", "")
     assert len(out) >= 1
@@ -82,7 +82,7 @@ def test_parse_ng_build_failure_empty_returns_unknown_failure():
 
 
 def test_parse_devops_failure_handles_generic_docker_error():
-    from software_engineering_team.shared import error_parsing as ep
+    from shared_command_runner import error_parsing as ep
 
     text = "docker: RUN apt-get install foo failed"
     out = ep.parse_devops_failure(text)
@@ -90,7 +90,7 @@ def test_parse_devops_failure_handles_generic_docker_error():
 
 
 def test_get_failure_class_tag_returns_string():
-    from software_engineering_team.shared.error_parsing import (
+    from shared_command_runner.error_parsing import (
         FailureClass,
         get_failure_class_tag,
     )
@@ -103,7 +103,7 @@ def test_get_failure_class_tag_returns_string():
 
 
 def test_build_agent_feedback_empty_returns_empty_or_string():
-    from software_engineering_team.shared.error_parsing import build_agent_feedback
+    from shared_command_runner.error_parsing import build_agent_feedback
 
     out = build_agent_feedback([])
     assert isinstance(out, str)

@@ -7,8 +7,6 @@ GitHubClient and a stubbed CodeReviewAgent — no network, no LLM).
 
 from __future__ import annotations
 
-import sys
-import types
 from typing import Any, Callable, Optional
 from unittest.mock import MagicMock
 
@@ -508,22 +506,21 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         lambda *a, **kw: api_main._run_pr_review(*a, **kw),
     )
 
-    # Stub the lazily-imported reviewer so no LLM stack loads.
+    # Install a fake engine provider so no LLM stack loads. The PR-review path
+    # calls provider.run_pr_code_review(...) via coding_team.engine_provider; the
+    # monkeypatched module global auto-reverts after the test.
     holder["agent_output"] = _FakeOutput(
         issues=[_FakeReviewIssue("high", line=2), _FakeReviewIssue("low", line=999)]
     )
 
-    class _FakeAgent:
-        def run(self, _inp: Any, progress_callback: Any = None) -> Any:
+    class _FakeProvider:
+        def run_pr_code_review(self, **_kw: Any) -> Any:
             out = holder["agent_output"]
             if isinstance(out, Exception):
                 raise out
             return out
 
-    stub = types.ModuleType("software_engineering_team.code_review_agent")
-    stub.CodeReviewAgent = _FakeAgent  # type: ignore[attr-defined]
-    stub.CodeReviewInput = lambda **kw: kw  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "software_engineering_team.code_review_agent", stub)
+    monkeypatch.setattr("coding_team.engine_provider._provider", _FakeProvider())
 
     from fastapi.testclient import TestClient
 

@@ -1,0 +1,57 @@
+<h2 mat-dialog-title>Add agent from registry</h2>
+
+<mat-dialog-content class="dialog-content">
+  <mat-form-field appearance="outline" class="search-field">
+    <mat-label>Search the agent catalog</mat-label>
+    <input
+      matInput
+      [ngModel]="query()"
+      (ngModelChange)="onQueryChange($event)"
+      placeholder="Name, tag, or team..."
+      aria-label="Search the agent catalog"
+    />
+    <mat-icon matPrefix>search</mat-icon>
+  </mat-form-field>
+
+  @if (error()) {
+    <p class="error-text">{{ error() }}</p>
+  }
+
+  @if (loading()) {
+    <div class="loading-row">
+      <mat-spinner diameter="24" />
+      <span>Searching...</span>
+    </div>
+  } @else if (results().length === 0) {
+    <p class="empty-text">No agents match this search.</p>
+  } @else {
+    <ul class="result-list">
+      @for (agent of results(); track agent.id) {
+        <li
+          class="result-item"
+          [class.added]="isAlreadyOnRoster(agent.id)"
+          role="button"
+          tabindex="0"
+          (click)="choose(agent)"
+          (keydown.enter)="choose(agent)"
+        >
+          <div class="result-identity">
+            <span class="result-name">{{ agent.name }}</span>
+            <span class="result-summary">{{ agent.summary }}</span>
+          </div>
+          @if (isAlreadyOnRoster(agent.id)) {
+            <span class="added-badge">Added</span>
+          } @else {
+            <button mat-icon-button matTooltip="Add to roster" [attr.aria-label]="'Add ' + agent.name">
+              <mat-icon>add_circle</mat-icon>
+            </button>
+          }
+        </li>
+      }
+    </ul>
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-stroked-button type="button" (click)="cancel()">Close</button>
+</mat-dialog-actions>

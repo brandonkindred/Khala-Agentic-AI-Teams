@@ -200,6 +200,55 @@ describe('InvestmentStrategyComponent', () => {
     expect(indicator.get('params')!.get('period')!.value).toBe(7);
   });
 
+  it('preserves a newly added catalogue indicator (donchian) without a prefill error', () => {
+    const spec = baseSpec({
+      entry_rules: [
+        {
+          kind: 'entry',
+          side: 'long',
+          when: {
+            lhs: { name: 'donchian' as 'sma', params: { period: 20, band: 'upper' } },
+            op: '>',
+            rhs: 30,
+          },
+        },
+      ],
+    });
+
+    component.populateForm(spec);
+    fixture.detectChanges();
+
+    expect(component.hasPrefillErrors).toBe(false);
+    const indicator = component.entryRulesArray.at(0).get('when')!.get('lhs')!.get('indicator')!;
+    expect(indicator.get('name')!.value).toBe('donchian');
+    expect(indicator.get('params')!.get('band')!.value).toBe('upper');
+    expect(indicator.get('params')!.get('period')!.value).toBe(20);
+  });
+
+  it('preserves a derived Bollinger band (percent_b) from the extended options', () => {
+    const spec = baseSpec({
+      entry_rules: [
+        {
+          kind: 'entry',
+          side: 'long',
+          when: {
+            lhs: { name: 'bollinger', params: { period: 20, band: 'percent_b' } },
+            op: '<',
+            rhs: 0.05,
+          },
+        },
+      ],
+    });
+
+    component.populateForm(spec);
+    fixture.detectChanges();
+
+    expect(component.hasPrefillErrors).toBe(false);
+    const indicator = component.entryRulesArray.at(0).get('when')!.get('lhs')!.get('indicator')!;
+    expect(indicator.get('name')!.value).toBe('bollinger');
+    expect(indicator.get('params')!.get('band')!.value).toBe('percent_b');
+  });
+
   it('blocks submit when an RHS constant is left blank', async () => {
     component.form.patchValue({ hypothesis: 'h', signal_definition: 's' });
     component.addEntryRule();

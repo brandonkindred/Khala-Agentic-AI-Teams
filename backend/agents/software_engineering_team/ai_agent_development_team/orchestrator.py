@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from llm_service import LLMClient
+from shared_repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.models import Task
 
 from .models import (
@@ -63,24 +64,14 @@ class AIAgentDevelopmentTeamLead:
 
     @staticmethod
     def _read_repo_code(repo_path: Path, max_chars: int = 20_000) -> str:
-        exts = {".py", ".md", ".yaml", ".yml", ".json", ".toml"}
-        chunks = []
-        total = 0
-        for file_path in sorted(repo_path.rglob("*")):
-            if not file_path.is_file() or file_path.suffix not in exts:
-                continue
-            if any(
-                skip in file_path.parts
-                for skip in (".git", "node_modules", "__pycache__", ".venv", "venv")
-            ):
-                continue
-            text = file_path.read_text(encoding="utf-8", errors="replace")
-            chunk = f"--- {file_path.relative_to(repo_path)} ---\n{text}\n"
-            if total + len(chunk) > max_chars:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-        return "\n".join(chunks)
+        """Read source files into a single string via the shared budgeted scanner."""
+        return read_repo_code_budgeted(
+            repo_path,
+            extensions={".py", ".md", ".yaml", ".yml", ".json", ".toml"},
+            exclude_dirs={".git", "node_modules", "__pycache__", ".venv", "venv"},
+            max_chars=max_chars,
+            empty="",
+        )
 
     def run_workflow(
         self,

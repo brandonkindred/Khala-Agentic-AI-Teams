@@ -588,19 +588,12 @@ def _stub_heavy_modules() -> None:
         stub.run_coding_team_orchestrator = _noop  # type: ignore[attr-defined]
         sys.modules["coding_team.orchestrator"] = stub
 
-    # software_engineering_team.shared.git_utils.DEVELOPMENT_BRANCH only.
-    if "software_engineering_team" not in sys.modules:
-        sys.modules["software_engineering_team"] = types.ModuleType("software_engineering_team")
-    if "software_engineering_team.shared" not in sys.modules:
-        sys.modules["software_engineering_team.shared"] = types.ModuleType(
-            "software_engineering_team.shared"
-        )
-    if "software_engineering_team.shared.git_utils" not in sys.modules:
-        gu = types.ModuleType("software_engineering_team.shared.git_utils")
-        gu.DEVELOPMENT_BRANCH = "development"  # type: ignore[attr-defined]
-        sys.modules["software_engineering_team.shared.git_utils"] = gu
+    # git_utils now lives in the neutral, stdlib-only shared_git package, so the
+    # real module imports cheaply. Importing it (instead of injecting a fake into
+    # sys.modules) avoids leaking a stub that poisons other test files under xdist.
+    import shared_git.git_utils  # noqa: F401
 
-    gu_mod = sys.modules["software_engineering_team.shared.git_utils"]
+    gu_mod = sys.modules["shared_git.git_utils"]
     if not hasattr(gu_mod, "git_identity_env"):
         # Functional stand-in mirroring the real helper: api.main imports it
         # for the recovered-WIP merge, which needs a complete commit identity

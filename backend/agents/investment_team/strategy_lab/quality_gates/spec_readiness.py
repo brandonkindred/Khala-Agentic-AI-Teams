@@ -235,7 +235,9 @@ _INDICATOR_REQUIRED_PARAMS: dict[str, frozenset[str]] = {
 
 # Indicator concept vocabulary for prose mentions in the hypothesis.
 _CONCEPT_TERMS = re.compile(
-    r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|stochastic|adx|vwap)\b",
+    r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|stochastic|adx|vwap|"
+    r"donchian|keltner|obv|on[\s-]balance\s+volume|mfi|money\s+flow|roc|"
+    r"rate\s+of\s+change|cci|williams_r|williams)\b",
     re.IGNORECASE,
 )
 # Map each prose concept to the set of DSL indicator names that satisfy it.
@@ -252,6 +254,18 @@ _CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
     "stochastic": frozenset({"stochastic"}),
     "adx": frozenset({"adx"}),
     "vwap": frozenset({"vwap"}),
+    "donchian": frozenset({"donchian"}),
+    "keltner": frozenset({"keltner"}),
+    "obv": frozenset({"obv"}),
+    "on balance volume": frozenset({"obv"}),
+    "on-balance volume": frozenset({"obv"}),
+    "mfi": frozenset({"mfi"}),
+    "money flow": frozenset({"mfi"}),
+    "roc": frozenset({"roc"}),
+    "rate of change": frozenset({"roc"}),
+    "cci": frozenset({"cci"}),
+    "williams_r": frozenset({"williams_r"}),
+    "williams": frozenset({"williams_r"}),
 }
 
 
@@ -1329,7 +1343,9 @@ class SpecReadinessGate(GateResultsMixin):
             if isinstance(rule, EntryRule) and isinstance(rule.when, (Predicate, AllOf, AnyOf)):
                 yield rule.when, "entry", f"entry_rules[{idx}]"
         for idx, rule in enumerate(spec.exit_rules):
-            if isinstance(rule, SignalExitRule) and isinstance(rule.when, (Predicate, AllOf, AnyOf)):
+            if isinstance(rule, SignalExitRule) and isinstance(
+                rule.when, (Predicate, AllOf, AnyOf)
+            ):
                 yield rule.when, "signal_exit", f"exit_rules[{idx}]"
 
     @staticmethod

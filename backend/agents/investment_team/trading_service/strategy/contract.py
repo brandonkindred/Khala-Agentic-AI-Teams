@@ -24,6 +24,16 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+# ``runtime_window`` is a top-level module in the flat sandbox (copied in by
+# ``StreamingHarness``, same as ``indicators``/``_streaming_indicators``), or
+# the in-package module under tests / the shadow gate. Unlike the optional
+# ``indicators`` module, every ``StrategyContext`` needs a retention bound, so
+# this import is unconditional (not deferred into a method).
+try:
+    from runtime_window import STREAMING_WINDOW_BARS  # type: ignore[import-not-found]
+except ImportError:
+    from ...strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+
 
 class OrderSide(str, Enum):
     LONG = "long"
@@ -538,9 +548,12 @@ class StrategyContext:
         self._history.setdefault(bar.symbol, []).append(bar)
         # Bound the retained history to keep strategy subprocess memory sane;
         # strategies that need more are expected to maintain their own state.
+        # ``STREAMING_WINDOW_BARS`` is the single source of truth for this
+        # ceiling — the alignment/coverage audit and the conformance shadow
+        # context must trim to the same bound this production context uses.
         hist = self._history[bar.symbol]
-        if len(hist) > 500:
-            del hist[:-500]
+        if len(hist) > STREAMING_WINDOW_BARS:
+            del hist[:-STREAMING_WINDOW_BARS]
         self._current_symbol = bar.symbol
         self._now = bar.timestamp
 

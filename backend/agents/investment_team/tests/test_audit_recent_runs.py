@@ -664,6 +664,108 @@ class TestCheckNarrativeFidelity:
         assert result.status == "FAIL"
         assert "ema" in result.details
 
+    def test_fail_phantom_new_indicator(self) -> None:
+        # A narrative that name-drops one of the newly added catalogue indicators
+        # (here Donchian) without the spec using it must be flagged as a phantom —
+        # the regression this guards is the audit vocab missing the new names.
+        from investment_team.scripts.audit_recent_runs import check_narrative_fidelity
+
+        rec = _synthetic_record(
+            analysis_narrative="Price broke the Donchian channel, confirming the breakout."
+        )
+        result = check_narrative_fidelity(rec)
+        assert result.status == "FAIL"
+        assert "donchian" in result.details
+
+    def test_pass_indicator_nested_in_boolean_tree(self) -> None:
+        # A confirmation-stacked entry expresses its signals as an all_of/any_of
+        # tree, nesting the indicators under ``of``. The phantom check must see
+        # those nested indicators — otherwise a narrative that names one is
+        # wrongly flagged phantom and the audit fails a valid run.
+        from investment_team.scripts.audit_recent_runs import check_narrative_fidelity
+
+        rec = _synthetic_record(
+            analysis_narrative="A moving average trend filter confirmed the momentum entry."
+        )
+        rec["strategy"]["entry_rules"] = [
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "kind": "all_of",
+                    "of": [
+                        {
+                            "lhs": {"name": "sma", "params": {"period": 50}, "source": "close"},
+                            "op": "<",
+                            "rhs": {"name": "sma", "params": {"period": 20}, "source": "close"},
+                        },
+                        {
+                            "lhs": {"name": "rsi", "params": {"period": 14}, "source": "close"},
+                            "op": "<",
+                            "rhs": 30,
+                        },
+                    ],
+                },
+                "note": "trend + momentum",
+            },
+        ]
+        # "moving average" resolves to {sma, ema}; sma is nested in the all_of.
+        assert check_narrative_fidelity(rec).status == "PASS"
+
+    def test_fail_phantom_still_fires_for_indicator_absent_from_tree(self) -> None:
+        # The recursion must not blunt real phantom detection: an indicator that
+        # appears in neither the top level nor any nested branch of the tree is
+        # still a phantom when the narrative names it.
+        from investment_team.scripts.audit_recent_runs import check_narrative_fidelity
+
+        rec = _synthetic_record(analysis_narrative="The MACD histogram drove the signal.")
+        rec["strategy"]["entry_rules"] = [
+            {
+                "kind": "entry",
+                "side": "long",
+                "when": {
+                    "kind": "any_of",
+                    "of": [
+                        {
+                            "lhs": {"name": "sma", "params": {"period": 20}, "source": "close"},
+                            "op": ">",
+                            "rhs": {"name": "sma", "params": {"period": 50}, "source": "close"},
+                        },
+                        {
+                            "lhs": {"name": "rsi", "params": {"period": 14}, "source": "close"},
+                            "op": ">",
+                            "rhs": 70,
+                        },
+                    ],
+                },
+                "note": "trend or momentum",
+            },
+        ]
+        result = check_narrative_fidelity(rec)
+        assert result.status == "FAIL"
+        assert "macd" in result.details
+
+    @pytest.mark.parametrize(
+        "prose,concept",
+        [
+            ("On-Balance Volume confirmed the move", "on-balance volume"),
+            ("the Money Flow Index was overbought", "money flow"),
+            ("a sharp Rate of Change spike", "rate of change"),
+            ("Williams %R turned up", "williams"),
+            ("the williams_r value crossed -80", "williams_r"),
+        ],
+    )
+    def test_fail_phantom_prose_form(self, prose: str, concept: str) -> None:
+        # Both prose long-forms ("On-Balance Volume" / "Money Flow Index" /
+        # "Rate of Change" / "Williams %R") and the exact DSL identifier
+        # ("williams_r") must be detected as phantom mentions.
+        from investment_team.scripts.audit_recent_runs import check_narrative_fidelity
+
+        rec = _synthetic_record(analysis_narrative=prose)
+        result = check_narrative_fidelity(rec)
+        assert result.status == "FAIL"
+        assert concept in result.details
+
 
 # ---------------------------------------------------------------------------
 # Check 8: Liquidity realism
@@ -979,3 +1081,32 @@ class TestRiskLimitWhitelistSync:
         # stays as the surviving deployed-capital cap.
         assert "max_loss_per_trade_pct" not in _RISK_LIMIT_KEYS
         assert "max_position_pct" in _RISK_LIMIT_KEYS
+
+
+class TestIndicatorVocabSync:
+    """The audit replicates the indicator concept vocabulary (DSL tokens + prose
+    aliases) as decoupled literals — it imports no gate/DSL modules at runtime.
+    These guards keep the replica byte-for-byte in sync with ``spec_readiness`` and
+    covering every ``IndicatorName``, so a newly supported indicator — or a new
+    prose alias for one — can't be added while narrative-fidelity audits stay blind
+    to phantom use of it (the gap that let prose like 'On-Balance Volume' or
+    'Williams %R' slip past when the catalogue first expanded)."""
+
+    def test_audit_concepts_match_spec_readiness(self) -> None:
+        from investment_team.scripts.audit_recent_runs import (
+            _CONCEPT_TERMS,
+            _CONCEPT_TO_INDICATOR_NAMES,
+        )
+        from investment_team.strategy_lab.quality_gates import spec_readiness
+
+        assert _CONCEPT_TO_INDICATOR_NAMES == spec_readiness._CONCEPT_TO_INDICATOR_NAMES
+        assert _CONCEPT_TERMS.pattern == spec_readiness._CONCEPT_TERMS.pattern
+
+    def test_audit_concepts_cover_every_dsl_indicator(self) -> None:
+        import typing
+
+        from investment_team.scripts.audit_recent_runs import _CONCEPT_TO_INDICATOR_NAMES
+        from investment_team.strategy_lab.spec_dsl import IndicatorName
+
+        covered: set[str] = set().union(*_CONCEPT_TO_INDICATOR_NAMES.values())
+        assert covered == set(typing.get_args(IndicatorName))

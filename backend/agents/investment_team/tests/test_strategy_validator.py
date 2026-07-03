@@ -189,6 +189,109 @@ def test_rules_term_missing_from_hypothesis_emits_warning() -> None:
     )
 
 
+def test_new_indicator_vocabulary_is_recognised_in_consistency_check() -> None:
+    """The channel/volume/momentum indicators added to the catalogue must be
+    recognised by the hypothesis-vs-rules consistency vocabulary.
+
+    Otherwise a hypothesis that name-drops e.g. Donchian, Williams %R or money
+    flow while the rules use a different indicator would slip past this check —
+    the same gap the older nine-indicator vocabulary would have left.
+    """
+    spec = _spec(
+        hypothesis="Donchian breakout confirmed by Williams %R and money flow",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 20})
+                ),
+            ),
+        ],
+        exit_=[StopLossRule(pct=0.03)],
+    )
+    results = StrategySpecValidator().validate(spec)
+    warnings = _warnings(results)
+    lowered = " ".join(warnings).lower()
+    assert any("Hypothesis/rules consistency" in w for w in warnings), warnings
+    assert "donchian" in lowered
+    assert "williams" in lowered
+    assert "money flow" in lowered
+
+
+def test_prose_alias_matches_dsl_token_no_spurious_warning() -> None:
+    """A prose alias in the hypothesis and the DSL token a rule renders are the
+    same concept — no consistency warning.
+
+    ``format_rules_for_prompt`` renders an OBV rule as ``obv(...)`` while the
+    hypothesis says "on-balance volume"; resolving both to ``{obv}`` before
+    comparing avoids a spurious "each side is orphaned" mismatch. Same idea
+    fixes the pre-existing "moving average" vs ``sma`` case.
+    """
+    obv_spec = _spec(
+        hypothesis="On-Balance Volume confirms accumulation before entry",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(lhs=IndicatorRef(name="obv"), op=">", rhs=0),
+            ),
+        ],
+        exit_=[
+            SignalExitRule(when=Predicate(lhs=IndicatorRef(name="obv"), op="<", rhs=0)),
+        ],
+    )
+    warnings = _warnings(StrategySpecValidator().validate(obv_spec))
+    assert not any("Hypothesis/rules consistency" in w for w in warnings), warnings
+
+    ma_spec = _spec(
+        hypothesis="A moving average crossover drives the entry",
+        entry=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="sma", params={"period": 20}),
+                    op=">",
+                    rhs=IndicatorRef(name="sma", params={"period": 50}),
+                ),
+            ),
+        ],
+        exit_=[StopLossRule(pct=0.03)],
+    )
+    warnings = _warnings(StrategySpecValidator().validate(ma_spec))
+    assert not any("Hypothesis/rules consistency" in w for w in warnings), warnings
+
+
+def test_channel_indicator_rule_matches_hypothesis_no_spurious_warning() -> None:
+    """A structured donchian/keltner rule is read from the ref, not the rendered
+    text, so an aligned channel-breakout spec draws no consistency warning.
+
+    ``format_rules_for_prompt`` renders these refs band-suffixed (``donchian_upper(20)``),
+    which a ``\\b``-anchored concept regex can't match; collecting the rules-side
+    concept from the structured ref instead avoids flagging the rule as absent
+    from its own hypothesis.
+    """
+    for ind in ("donchian", "keltner"):
+        spec = _spec(
+            # No extra strategy-concept words (e.g. "breakout") — just the indicator,
+            # so an aligned spec should draw no consistency warning at all.
+            hypothesis=f"A {ind} channel strategy",
+            entry=[
+                EntryRule(
+                    side="long",
+                    when=Predicate(
+                        lhs="bar.close",
+                        op=">",
+                        rhs=IndicatorRef(name=ind, params={"band": "upper", "period": 20}),
+                    ),
+                ),
+            ],
+            exit_=[StopLossRule(pct=0.03)],
+        )
+        warnings = _warnings(StrategySpecValidator().validate(spec))
+        # The fix: the indicator is read from the structured ref, so it is never
+        # reported orphaned despite rendering as ``donchian_upper(20)``.
+        assert not any("Hypothesis/rules consistency" in w for w in warnings), (ind, warnings)
+
+
 def test_aligned_hypothesis_and_rules_emit_no_consistency_warning() -> None:
     """When hypothesis and rules share concept vocabulary, no warning fires."""
     spec = _spec(
