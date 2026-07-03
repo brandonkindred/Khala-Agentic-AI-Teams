@@ -28,10 +28,14 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     """
     import uuid
 
-    from coding_team.api.main import DEFAULT_CACHE_DIR, RunRequest, create_job, get_job, update_job
+    from coding_team.api.main import (
+        RunRequest,
+        create_job,
+        get_job,
+        run_orchestrator_wired,
+    )
     from coding_team.engine_provider import get_engine_provider
     from coding_team.models import CodingTeamPlanInput
-    from coding_team.orchestrator import run_coding_team_orchestrator
 
     if get_engine_provider() is None:
         raise RuntimeError(
@@ -46,19 +50,12 @@ def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
             "CodingTeamWorkflow requires a plan_input to execute; received a job-only request "
             "with no plan."
         )
-    # Mirror the POST /run background path: mint a job, wire the orchestrator to the
-    # job store, and run it against the real (job_id, repo_path, plan) signature.
+    # Mint a job and run it through the shared orchestrator wiring — the same path
+    # POST /run uses — against the real (job_id, repo_path, plan) signature.
     job_id = str(uuid.uuid4())
     create_job(job_id=job_id, repo_path=req.repo_path, plan_input=req.plan_input)
     plan = CodingTeamPlanInput.model_validate({**req.plan_input, "repo_path": req.repo_path})
-    run_coding_team_orchestrator(
-        job_id,
-        req.repo_path,
-        plan,
-        update_job_fn=lambda **kw: update_job(job_id, **kw),
-        get_job_fn=get_job,
-        cache_dir=DEFAULT_CACHE_DIR,
-    )
+    run_orchestrator_wired(job_id, req.repo_path, plan)
     return get_job(job_id) or {"job_id": job_id, "status": "unknown"}
 
 

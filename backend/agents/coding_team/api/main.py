@@ -387,6 +387,32 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "coding-team"}
 
 
+def run_orchestrator_wired(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
+    """Run the coding-team orchestrator for *job_id* with the standard job-store wiring.
+
+    Single source of the ``(update_job_fn, get_job_fn, cache_dir)`` wiring shared
+    by the POST /run background thread, the resume path, and the Temporal
+    activity, so it cannot drift between them. The github-source path wires a
+    custom ``update_job_fn`` (+ ``on_pause``) and deliberately does not use this.
+
+    Preconditions:
+        - ``job_id`` names an existing job in the process job store; ``plan`` is a
+          validated ``CodingTeamPlanInput`` whose ``repo_path`` equals *repo_path*.
+    Postconditions:
+        - The orchestrator has run to completion (or raised); job state is
+          persisted through ``update_job``. Propagates the orchestrator's
+          exceptions unchanged — callers own their own failure handling.
+    """
+    run_coding_team_orchestrator(
+        job_id,
+        repo_path,
+        plan,
+        update_job_fn=lambda **kw: update_job(job_id, **kw),
+        get_job_fn=get_job,
+        cache_dir=DEFAULT_CACHE_DIR,
+    )
+
+
 @app.post("/run", response_model=RunResponse)
 def post_run(request: RunRequest) -> RunResponse:
     """Start a coding_team job. If plan_input is provided, runs orchestrator in background."""
@@ -400,14 +426,7 @@ def post_run(request: RunRequest) -> RunResponse:
         def run() -> None:
             _register_run_thread(job_id)
             try:
-                run_coding_team_orchestrator(
-                    job_id,
-                    request.repo_path,
-                    plan,
-                    update_job_fn=lambda **kw: update_job(job_id, **kw),
-                    get_job_fn=lambda jid: get_job(jid),
-                    cache_dir=DEFAULT_CACHE_DIR,
-                )
+                run_orchestrator_wired(job_id, request.repo_path, plan)
             except Exception as e:
                 logger.exception("Coding team orchestrator failed: %s", e)
                 # current_activity=None: a crash skips the in-flow clears, and a
@@ -629,14 +648,7 @@ def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlan
             # Registration is inside the try so the finally always releases the claim — even if
             # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
             _register_run_thread(job_id)
-            run_coding_team_orchestrator(
-                job_id,
-                repo_path,
-                plan,
-                update_job_fn=lambda **kw: update_job(job_id, **kw),
-                get_job_fn=lambda jid: get_job(jid),
-                cache_dir=DEFAULT_CACHE_DIR,
-            )
+            run_orchestrator_wired(job_id, repo_path, plan)
         except Exception as e:
             logger.exception("Coding team orchestrator resume failed: %s", e)
             update_job(job_id, status="failed", error=str(e), current_activity=None)

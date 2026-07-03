@@ -29,9 +29,6 @@ def test_activity_raises_without_plan(monkeypatch) -> None:
 
 
 def test_activity_runs_orchestrator_with_job_wiring(monkeypatch) -> None:
-    import sys
-    import types
-
     import coding_team.api.main as main
     import coding_team.engine_provider as ep
 
@@ -39,25 +36,16 @@ def test_activity_runs_orchestrator_with_job_wiring(monkeypatch) -> None:
     created: dict = {}
     monkeypatch.setattr(main, "create_job", lambda **kw: created.update(kw), raising=True)
     monkeypatch.setattr(main, "get_job", lambda jid: {"job_id": jid, "status": "completed"})
-    monkeypatch.setattr(main, "update_job", lambda *a, **k: None)
 
     captured: dict = {}
 
-    def _fake_orch(job_id, repo_path, plan, **kwargs):
+    # The activity mints a job, builds the plan, and delegates to the shared
+    # ``run_orchestrator_wired``. Patch that seam on the (stable-identity) api.main
+    # module — no ``coding_team.orchestrator`` sys.modules gymnastics needed.
+    def _fake_wired(job_id, repo_path, plan):
         captured["args"] = (job_id, repo_path, plan)
-        captured["kwargs"] = kwargs
-        return None
 
-    # The activity resolves ``run_coding_team_orchestrator`` via a lazy
-    # ``from coding_team.orchestrator import ...``. A sibling suite
-    # (test_github_source) leaks a *stubbed* ``coding_team.orchestrator`` module
-    # into ``sys.modules`` under xdist, so monkeypatching an imported module
-    # object races that leak (the activity may read a different object). Own the
-    # ``sys.modules`` entry for the test's duration instead, so the activity
-    # imports our fake deterministically; ``setitem`` restores the original.
-    fake_orch = types.ModuleType("coding_team.orchestrator")
-    fake_orch.run_coding_team_orchestrator = _fake_orch  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "coding_team.orchestrator", fake_orch)
+    monkeypatch.setattr(main, "run_orchestrator_wired", _fake_wired)
 
     out = run_pipeline_activity({"repo_path": "/repo", "plan_input": {"objective": "ship it"}})
 
@@ -66,9 +54,30 @@ def test_activity_runs_orchestrator_with_job_wiring(monkeypatch) -> None:
     assert repo_path == "/repo"
     # plan is a CodingTeamPlanInput carrying the repo_path merged in.
     assert getattr(plan, "repo_path", None) == "/repo"
-    # The orchestrator is wired to the job store, not left to a file fallback.
-    assert callable(captured["kwargs"].get("update_job_fn"))
-    assert captured["kwargs"].get("get_job_fn") is main.get_job
     assert created["job_id"] == job_id
     # The activity returns the final job snapshot.
     assert out == {"job_id": job_id, "status": "completed"}
+
+
+def test_run_orchestrator_wired_passes_standard_job_store_wiring(monkeypatch) -> None:
+    """The shared helper is the single source of the (update_job_fn, get_job_fn,
+    cache_dir) wiring — verify it forwards exactly that to the orchestrator."""
+    import coding_team.api.main as main
+    from coding_team.models import CodingTeamPlanInput
+
+    captured: dict = {}
+
+    def _fake_orch(job_id, repo_path, plan, **kwargs):
+        captured["args"] = (job_id, repo_path, plan)
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(main, "run_coding_team_orchestrator", _fake_orch)
+
+    plan = CodingTeamPlanInput.model_validate({"objective": "x", "repo_path": "/repo"})
+    main.run_orchestrator_wired("job-9", "/repo", plan)
+
+    assert captured["args"] == ("job-9", "/repo", plan)
+    kwargs = captured["kwargs"]
+    assert callable(kwargs["update_job_fn"])  # closes over job_id → update_job
+    assert kwargs["get_job_fn"] is main.get_job
+    assert kwargs["cache_dir"] == main.DEFAULT_CACHE_DIR
