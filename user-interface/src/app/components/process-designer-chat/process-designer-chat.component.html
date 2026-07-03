@@ -86,12 +86,28 @@
             {{ v.is_fully_staffed ? 'Fully Staffed' : v.gaps.length + ' gap' + (v.gaps.length !== 1 ? 's' : '') }}
           </mat-chip>
         }
+        <button mat-icon-button [matMenuTriggerFor]="addAgentMenu" matTooltip="Add an agent" aria-label="Add an agent">
+          <mat-icon>person_add</mat-icon>
+        </button>
+        <mat-menu #addAgentMenu="matMenu">
+          <button mat-menu-item (click)="openAddFromRegistry()">
+            <mat-icon>travel_explore</mat-icon>
+            <span>Search registry agents</span>
+          </button>
+          <button mat-menu-item (click)="suggestAgentViaChat()">
+            <mat-icon>smart_toy</mat-icon>
+            <span>Suggest via chat</span>
+          </button>
+        </mat-menu>
         <button mat-icon-button (click)="refreshRoster()" matTooltip="Refresh roster" [disabled]="rosterLoading()">
           <mat-icon>sync</mat-icon>
         </button>
       </mat-card-header>
 
       <mat-card-content>
+        @if (rosterActionError()) {
+          <p class="error-text">{{ rosterActionError() }}</p>
+        }
         @if (rosterLoading() && rosterAgents().length === 0) {
           <div class="roster-loading">
             <div class="typing-indicator">
@@ -131,6 +147,23 @@
                     <span class="agent-name">{{ agent.agent_name }}</span>
                     <span class="agent-role">{{ agent.role }}</span>
                   </div>
+                  <span
+                    class="source-badge"
+                    [class.registry]="agent.source === 'registry'"
+                    [class.generated]="agent.source === 'generated'"
+                    [matTooltip]="agent.source === 'registry' ? 'Added from the agent registry' : 'Generated for this team'"
+                  >
+                    {{ agent.source === 'registry' ? '✦' : '⚙' }}
+                  </span>
+                  <button
+                    mat-icon-button
+                    class="agent-delete-btn"
+                    matTooltip="Remove from roster"
+                    [attr.aria-label]="'Remove ' + agent.agent_name"
+                    (click)="deleteAgent(agent, $event)"
+                  >
+                    <mat-icon>delete_outline</mat-icon>
+                  </button>
                   <mat-icon class="expand-icon">
                     {{ expandedAgent() === agent.agent_name ? 'expand_less' : 'expand_more' }}
                   </mat-icon>
@@ -138,56 +171,119 @@
 
                 @if (expandedAgent() === agent.agent_name) {
                   <div class="agent-details">
-                    @if (agent.skills.length > 0) {
-                      <div class="detail-group">
-                        <span class="detail-label">
-                          <mat-icon>psychology</mat-icon> Skills
-                        </span>
-                        <div class="detail-tags">
-                          @for (s of agent.skills; track s) {
-                            <span class="tag skill">{{ s }}</span>
-                          }
+                    @if (editingAgent() === agent.agent_name) {
+                      <div
+                        class="agent-edit-form"
+                        role="group"
+                        aria-label="Edit agent"
+                        tabindex="-1"
+                        (click)="$event.stopPropagation()"
+                        (keydown)="$event.stopPropagation()"
+                      >
+                        <mat-form-field appearance="outline" class="edit-field">
+                          <mat-label>Role</mat-label>
+                          <input
+                            matInput
+                            [ngModel]="editDraft().role"
+                            (ngModelChange)="updateEditDraftField('role', $event)"
+                          />
+                        </mat-form-field>
+                        <mat-form-field appearance="outline" class="edit-field">
+                          <mat-label>Skills (comma-separated)</mat-label>
+                          <input
+                            matInput
+                            [ngModel]="editDraft().skills"
+                            (ngModelChange)="updateEditDraftField('skills', $event)"
+                          />
+                        </mat-form-field>
+                        <mat-form-field appearance="outline" class="edit-field">
+                          <mat-label>Capabilities (comma-separated)</mat-label>
+                          <input
+                            matInput
+                            [ngModel]="editDraft().capabilities"
+                            (ngModelChange)="updateEditDraftField('capabilities', $event)"
+                          />
+                        </mat-form-field>
+                        <mat-form-field appearance="outline" class="edit-field">
+                          <mat-label>Tools (comma-separated)</mat-label>
+                          <input
+                            matInput
+                            [ngModel]="editDraft().tools"
+                            (ngModelChange)="updateEditDraftField('tools', $event)"
+                          />
+                        </mat-form-field>
+                        <mat-form-field appearance="outline" class="edit-field">
+                          <mat-label>Expertise (comma-separated)</mat-label>
+                          <input
+                            matInput
+                            [ngModel]="editDraft().expertise"
+                            (ngModelChange)="updateEditDraftField('expertise', $event)"
+                          />
+                        </mat-form-field>
+                        <div class="agent-edit-actions">
+                          <button mat-raised-button color="primary" (click)="saveAgentEdits(agent, $event)">
+                            <mat-icon>check</mat-icon> Save
+                          </button>
+                          <button mat-stroked-button (click)="cancelEditAgent($event)">Cancel</button>
                         </div>
                       </div>
-                    }
-                    @if (agent.capabilities.length > 0) {
-                      <div class="detail-group">
-                        <span class="detail-label">
-                          <mat-icon>bolt</mat-icon> Capabilities
-                        </span>
-                        <div class="detail-tags">
-                          @for (c of agent.capabilities; track c) {
-                            <span class="tag capability">{{ c }}</span>
-                          }
+                    } @else {
+                      @if (agent.skills.length > 0) {
+                        <div class="detail-group">
+                          <span class="detail-label">
+                            <mat-icon>psychology</mat-icon> Skills
+                          </span>
+                          <div class="detail-tags">
+                            @for (s of agent.skills; track s) {
+                              <span class="tag skill">{{ s }}</span>
+                            }
+                          </div>
                         </div>
-                      </div>
-                    }
-                    @if (agent.tools.length > 0) {
-                      <div class="detail-group">
-                        <span class="detail-label">
-                          <mat-icon>build</mat-icon> Tools
-                        </span>
-                        <div class="detail-tags">
-                          @for (t of agent.tools; track t) {
-                            <span class="tag tool">{{ t }}</span>
-                          }
+                      }
+                      @if (agent.capabilities.length > 0) {
+                        <div class="detail-group">
+                          <span class="detail-label">
+                            <mat-icon>bolt</mat-icon> Capabilities
+                          </span>
+                          <div class="detail-tags">
+                            @for (c of agent.capabilities; track c) {
+                              <span class="tag capability">{{ c }}</span>
+                            }
+                          </div>
                         </div>
-                      </div>
-                    }
-                    @if (agent.expertise.length > 0) {
-                      <div class="detail-group">
-                        <span class="detail-label">
-                          <mat-icon>school</mat-icon> Expertise
-                        </span>
-                        <div class="detail-tags">
-                          @for (e of agent.expertise; track e) {
-                            <span class="tag expertise">{{ e }}</span>
-                          }
+                      }
+                      @if (agent.tools.length > 0) {
+                        <div class="detail-group">
+                          <span class="detail-label">
+                            <mat-icon>build</mat-icon> Tools
+                          </span>
+                          <div class="detail-tags">
+                            @for (t of agent.tools; track t) {
+                              <span class="tag tool">{{ t }}</span>
+                            }
+                          </div>
                         </div>
+                      }
+                      @if (agent.expertise.length > 0) {
+                        <div class="detail-group">
+                          <span class="detail-label">
+                            <mat-icon>school</mat-icon> Expertise
+                          </span>
+                          <div class="detail-tags">
+                            @for (e of agent.expertise; track e) {
+                              <span class="tag expertise">{{ e }}</span>
+                            }
+                          </div>
+                        </div>
+                      }
+                      @if (agent.skills.length === 0 && agent.capabilities.length === 0 && agent.tools.length === 0 && agent.expertise.length === 0) {
+                        <p class="no-detail-text">No skills, capabilities, tools, or expertise defined yet.</p>
+                      }
+                      <div class="agent-details-actions">
+                        <button mat-stroked-button (click)="startEditAgent(agent, $event)">
+                          <mat-icon>edit</mat-icon> Edit
+                        </button>
                       </div>
-                    }
-                    @if (agent.skills.length === 0 && agent.capabilities.length === 0 && agent.tools.length === 0 && agent.expertise.length === 0) {
-                      <p class="no-detail-text">No skills, capabilities, tools, or expertise defined yet.</p>
                     }
                   </div>
                 }
