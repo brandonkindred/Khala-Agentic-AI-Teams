@@ -102,7 +102,12 @@ export class AddAgentFromRegistryDialogComponent implements OnInit {
         // results (and the error banner) in place rather than blanking the list.
         if (agents === null) return;
         this.loading.set(false);
-        this.results.set(agents);
+        // Generated agents (roster-owned, tagged "generated") are managed on their
+        // team's roster and are rejected by the from-registry endpoint, so never
+        // offer them here — otherwise a generated agent (whose null-manifest roster
+        // row can't be matched to `existingManifestIds`) would appear addable and
+        // dead-end on a 409.
+        this.results.set(agents.filter((a) => !a.tags.includes('generated')));
       });
   }
 

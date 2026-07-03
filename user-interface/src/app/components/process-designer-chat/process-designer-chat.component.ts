@@ -245,11 +245,14 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
             this.rosterLoading.set(false);
             this.rosterChanged.emit(result);
           },
-          error: () => {
+          error: (err) => {
             if (seq !== this.rosterRefreshSeq) return;
             this.rosterValidation.set(null);
             this.rosterLoading.set(false);
             this.rosterChanged.emit(null);
+            // Surface the failure too: clearing the gate silently disables the
+            // embedding stage's "Test this team →" with no explanation otherwise.
+            this.rosterActionError.set(err?.error?.detail ?? 'Failed to validate the roster');
           },
         });
       },

@@ -19,8 +19,8 @@ from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
 from agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
+    is_generated_manifest,
     register_team_manifests,
-    team_id_prefix,
 )
 from agentic_team_provisioning.models import (
     SOURCE_GENERATED,
@@ -433,7 +433,7 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     Preconditions: ``req.manifest_id`` is non-empty (enforced by the request model).
     Postconditions: ``201`` with the projected roster agent persisted on the roster;
         ``404`` if the team or the manifest id is unknown (roster unchanged); ``409``
-        if the manifest is *this team's own generated agent* (see below; roster
+        if the manifest is a *generated* roster agent (any team's — see below; roster
         unchanged); ``422`` if the resolved manifest is too malformed to project (e.g.
         blank name/id), so a bad registry entry surfaces as a client error rather than
         an unhandled 500.
@@ -446,24 +446,25 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     manifest = get_registry().get(req.manifest_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent manifest: {req.manifest_id}")
-    # Reject re-adding *this team's own* generated manifest. A generated roster row
-    # carries ``manifest_id=None`` but is registered in-process under
-    # ``manifest_agent_id(team_id, name)`` (this team's injective prefix), so the
-    # manifest-id-only "already on roster" guards on the callers (the add dialog's
-    # ``existingManifestIds``, the Stage-2 handoff auto-add) don't see it and would
-    # let it through. Projecting it back would create a registry-source row carrying
-    # that same id, and the ``on_replaced`` cleanup below unregisters exactly that
-    # manifest (it belonged to the generated row being replaced) — leaving a roster
-    # entry whose manifest no longer resolves for the catalog / invoke route. Such an
-    # agent is already on the roster in generated form and is managed there, not via
-    # the registry. (Another team's generated manifest has a different prefix and is a
-    # legitimate cross-team add — the same-name registry swap flow is unaffected.)
-    if req.manifest_id.startswith(team_id_prefix(team_id)):
+    # Reject adding a *generated* roster manifest via the registry. Generated agents
+    # are registered in-process (so they surface in the catalog) but are ephemeral and
+    # roster-owned: ``register_team_manifests`` (un)registers them as their team's
+    # roster changes. Projecting one back here creates a registry-source row whose
+    # ``manifest_id`` the owning team can later unregister — leaving a roster entry
+    # whose manifest no longer resolves for the catalog / invoke route. This is true
+    # both for *this* team's own generated agent (already on the roster in generated
+    # form; the manifest-id-only "already on roster" guards on the callers miss it
+    # because a generated row carries ``manifest_id=None``) AND for another team's
+    # generated agent (it would dangle the moment that team drops the agent). Classify
+    # on the ``"generated"`` tag — the same marker ``register_team_manifests`` uses — so
+    # a hand-authored registry agent (real catalog entry, e.g. the same-name swap flow)
+    # is unaffected.
+    if is_generated_manifest(manifest):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Agent '{manifest.name}' is a generated agent of this team; it is "
-                "already managed on the roster and cannot be added from the registry."
+                f"Agent '{manifest.name}' is a generated team agent; generated agents "
+                "are managed on their team's roster and cannot be added from the registry."
             ),
         )
     try:

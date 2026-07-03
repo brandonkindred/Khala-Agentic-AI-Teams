@@ -342,6 +342,35 @@ def test_from_registry_rejects_own_generated_manifest_409(
     assert registry.get(gen_manifest.id) is not None
 
 
+def test_from_registry_rejects_another_teams_generated_manifest_409(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """A *different* team's generated manifest is also rejected (409).
+
+    Generated manifests are ephemeral and roster-owned; adding one to another team
+    would leave that row dangling the moment the owning team drops the agent (its
+    ``register_team_manifests`` unregisters the manifest). The guard classifies on the
+    ``"generated"`` tag, not this team's id prefix, so cross-team generated adds are
+    refused too — leaving the target roster unchanged.
+    """
+    from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+    other_team_id = _new_team()
+    other_gen = AgenticTeamAgent(
+        agent_name="Scout", role="Researches", skills=["x"], source="generated"
+    )
+    other_manifest = build_agent_manifest(other_team_id, other_gen)
+    registry.register(other_manifest)
+
+    team_id = _new_team()  # a distinct team with a different id prefix
+    resp = client.post(
+        f"/teams/{team_id}/agents/from-registry", json={"manifest_id": other_manifest.id}
+    )
+    assert resp.status_code == 409
+    assert client.get(f"/teams/{team_id}/agents").json() == []
+    assert registry.get(other_manifest.id) is not None
+
+
 def test_llm_save_preserves_registry_agents(client: TestClient, registry: _FakeRegistry) -> None:
     """A chat-driven roster save must not drop a user-added registry agent, and a
     generated agent can't overwrite one by name (registry wins the collision).

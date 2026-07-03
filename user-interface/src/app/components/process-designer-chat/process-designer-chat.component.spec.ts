@@ -164,6 +164,23 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.rosterLoading()).toBe(false);
   });
 
+  it('surfaces an error and clears the gate when validateRoster fails', () => {
+    // The list load succeeds but validation blips. The gate must clear (so the
+    // embedding stage drops "Test this team →") AND an error must surface, rather
+    // than the forward button silently disabling with no explanation.
+    component.rosterValidation.set(validation({ is_fully_staffed: true }));
+    const seen: (RosterValidationResult | null)[] = [];
+    component.rosterChanged.subscribe((v) => seen.push(v));
+
+    api.validateRoster.mockReturnValueOnce(throwError(() => ({ error: { detail: 'nope' } })));
+    component.refreshRoster();
+
+    expect(component.rosterActionError()).toBe('nope');
+    expect(component.rosterLoading()).toBe(false);
+    expect(component.rosterValidation()).toBeNull();
+    expect(seen).toEqual([null]);
+  });
+
   it('drops a stale refresh: an older validateRoster completing last cannot clobber the newer result', () => {
     const v1 = new Subject<RosterValidationResult>();
     const v2 = new Subject<RosterValidationResult>();

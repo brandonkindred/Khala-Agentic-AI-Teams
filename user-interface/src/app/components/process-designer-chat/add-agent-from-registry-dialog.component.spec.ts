@@ -57,6 +57,18 @@ describe('AddAgentFromRegistryDialogComponent', () => {
     expect(fixture.componentInstance.results()).toHaveLength(1);
   });
 
+  it('filters out generated (roster-owned) agents from the results', async () => {
+    // A generated agent is rejected by the from-registry endpoint (it belongs to a
+    // team's roster), so it must never appear as addable here.
+    const listAgents = vi.fn().mockReturnValue(
+      of([summary('reg.1'), { ...summary('gen.1'), tags: ['generated', 'agentic_team_provisioning'] }]),
+    );
+    const { fixture } = configure({ existingManifestIds: [] }, listAgents);
+    fixture.detectChanges();
+    await flush();
+    expect(fixture.componentInstance.results().map((r) => r.id)).toEqual(['reg.1']);
+  });
+
   it('shows loading immediately on open (not the empty state) before the debounce fires', () => {
     const listAgents = vi.fn().mockReturnValue(of([summary('a.1')]));
     const { fixture } = configure({ existingManifestIds: [] }, listAgents);
