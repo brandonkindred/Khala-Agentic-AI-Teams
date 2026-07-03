@@ -217,6 +217,35 @@ def test_compute_regime_summary_flat_series_warmup_failure() -> None:
     assert summary.degraded
 
 
+def test_compute_regime_summary_nan_close_never_leaks() -> None:
+    """A NaN close (gap/halt day) must never crash the summary or leak a NaN
+    into a classified entry.
+
+    In practice a NaN close poisons the SMA200/ADX warmup and the benchmark
+    degrades cleanly; the ATR%-distribution filter (``c == c``) is the
+    second line of defence so that, on any path where a benchmark IS still
+    classified, no NaN slips into the percentile. Either way the result is
+    well-formed: cleanly degraded, or a finite entry — never a NaN-valued one,
+    never an exception."""
+    bars = _uptrend_low_vol_bars()
+    bars[30] = OHLCVBar(
+        date="2025-01-031",
+        open=float("nan"),
+        high=bars[30].high,
+        low=bars[30].low,
+        close=float("nan"),
+        volume=1000.0,
+    )
+    # Must not raise.
+    summary = compute_regime_summary(
+        lambda *_a: bars, computed_at=_COMPUTED_AT, benchmarks={"stocks": "SPY"}
+    )
+    for entry in summary.entries:
+        # No NaN leaked into a classified entry.
+        assert entry.atr_pct == entry.atr_pct
+        assert 0.0 <= entry.atr_pct_percentile <= 1.0
+
+
 def test_compute_regime_summary_partial_degrade() -> None:
     """One good benchmark + one failing benchmark → one entry, still degraded."""
     good = _uptrend_low_vol_bars()

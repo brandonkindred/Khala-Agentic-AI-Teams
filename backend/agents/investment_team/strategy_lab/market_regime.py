@@ -168,8 +168,11 @@ def _classify_benchmark(asset_class: str, symbol: str, bars: List[OHLCVBar]) -> 
     closes = [float(b.close) for b in bars]
     atr_pct_series = [
         float(a) / c
+        # Drop warmup NaN ATR (a != a), NaN closes (c != c — NaN is truthy, so a
+        # bare ``and c`` would let a gap-day close slip a NaN into the series and
+        # silently deflate the percentile), and zero closes (division guard).
         for a, c in zip(atr_series.tolist(), closes)
-        if a == a and c  # drop warmup NaNs (a != a) and any zero close
+        if a == a and c == c and c
     ]
     if not atr_pct_series or any(v != v for v in (sma50, sma200, adx_value, close)):
         raise ValueError(f"{symbol}: indicators did not warm up on supplied bars")
