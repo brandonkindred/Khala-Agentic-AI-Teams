@@ -342,6 +342,21 @@ def _design_max_llm_calls() -> int:
         return 120
 
 
+def _env_flag(name: str, *, default: bool = True) -> bool:
+    """Resolve a boolean on/off env toggle.
+
+    Pre: ``name`` is a non-empty env-var name.
+    Post: returns ``default`` when the var is unset; otherwise ``True`` only
+    for the recognised truthy values ``true``/``1``/``yes`` (case-insensitive),
+    ``False`` for anything else. Centralises the truthy-env idiom that the
+    strategy-lab toggles share.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("true", "1", "yes")
+
+
 def _mechanical_repair_enabled() -> bool:
     """Resolve the deterministic mechanical-repair pre-flight toggle.
 
@@ -351,8 +366,7 @@ def _mechanical_repair_enabled() -> bool:
     ``true``/``1``/``yes`` (case-insensitive); anything else disables the
     pre-flight and restores the pure LLM-revise behaviour. Default ``true``.
     """
-    raw = os.environ.get("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", "true")
-    return raw.strip().lower() in ("true", "1", "yes")
+    return _env_flag("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED")
 
 
 MAX_CODE_REFINEMENT_ROUNDS = 50
@@ -800,8 +814,7 @@ class StrategyLabOrchestrator:
         is itself fail-open, and any unexpected error here degrades to ``None``
         rather than crashing the cycle.
         """
-        raw = os.environ.get("STRATEGY_LAB_REGIME_SUMMARY_ENABLED", "true")
-        if raw.strip().lower() not in {"true", "1", "yes"}:
+        if not _env_flag("STRATEGY_LAB_REGIME_SUMMARY_ENABLED"):
             return None
         try:
             return compute_regime_summary(
