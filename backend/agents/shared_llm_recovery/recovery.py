@@ -367,15 +367,25 @@ def _accept_with_keys(
     (``None`` / empty), any dict is accepted (the caller has no schema to anchor
     on).
 
-    Preconditions: ``required_keys`` is ``None``, a single key str, or a
-    collection of str.
-    Postconditions: returns a pure predicate; never raises.
+    Preconditions: ``required_keys`` is ``None``, a single key str, or an
+    iterable of str.
+    Postconditions: returns a pure predicate; never raises. An absent, empty, or
+    empty-yielding ``required_keys`` accepts any dict (no schema to anchor on).
     """
     if not required_keys:
         return lambda parsed: True
-    # A bare ``str`` is a single key, not an iterable of one-character keys —
-    # ``tuple("tasks")`` would anchor on ``('t','a','s','k','s')`` and mis-match.
-    keys = (required_keys,) if isinstance(required_keys, str) else tuple(required_keys)
+    # A bare ``str``/``bytes`` is a single key, not an iterable of one-character
+    # keys — ``tuple("tasks")`` would anchor on ``('t','a','s','k','s')``. Any
+    # other iterable (list/tuple/set/generator) is materialized once so it is
+    # iterated exactly once regardless of candidate count, and so an empty one
+    # (e.g. a generator that yields nothing) falls back to accept-any rather than
+    # reject-everything.
+    if isinstance(required_keys, (str, bytes)):
+        keys: Tuple[Any, ...] = (required_keys,)
+    else:
+        keys = tuple(required_keys)
+        if not keys:
+            return lambda parsed: True
     return lambda parsed: any(k in parsed for k in keys)
 
 

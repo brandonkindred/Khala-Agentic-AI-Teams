@@ -194,6 +194,16 @@ def test_required_keys_as_bare_string_is_a_single_key() -> None:
     assert extract_json_object('{"answer": 42} {"s": 99}', required_keys="tasks") is None
 
 
+def test_required_keys_iterable_forms_are_equivalent() -> None:
+    """tuple/list/set/generator anchors behave identically; an empty-yielding one
+    falls back to accept-any rather than rejecting every candidate."""
+    text = '{"tokens": 1}\n{"approved": false}'
+    for form in (("approved",), ["approved"], {"approved"}, (k for k in ["approved"])):
+        assert extract_json_object(text, required_keys=form) == {"approved": False}
+    # An empty generator (truthy but yields nothing) is "no anchor" → accept any.
+    assert extract_json_object('{"x": 1}', required_keys=(k for k in [])) == {"x": 1}
+
+
 def test_leading_empty_dict_does_not_shadow_recall_payload() -> None:
     """An accepted empty ``{}`` is a last resort: it must not short-circuit the
     recall scan that recovers a non-empty object derailed by a prose brace/quote."""
