@@ -29,9 +29,11 @@ def test_activity_raises_without_plan(monkeypatch) -> None:
 
 
 def test_activity_runs_orchestrator_with_job_wiring(monkeypatch) -> None:
+    import sys
+    import types
+
     import coding_team.api.main as main
     import coding_team.engine_provider as ep
-    import coding_team.orchestrator as orch
 
     monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
     created: dict = {}
@@ -46,7 +48,16 @@ def test_activity_runs_orchestrator_with_job_wiring(monkeypatch) -> None:
         captured["kwargs"] = kwargs
         return None
 
-    monkeypatch.setattr(orch, "run_coding_team_orchestrator", _fake_orch)
+    # The activity resolves ``run_coding_team_orchestrator`` via a lazy
+    # ``from coding_team.orchestrator import ...``. A sibling suite
+    # (test_github_source) leaks a *stubbed* ``coding_team.orchestrator`` module
+    # into ``sys.modules`` under xdist, so monkeypatching an imported module
+    # object races that leak (the activity may read a different object). Own the
+    # ``sys.modules`` entry for the test's duration instead, so the activity
+    # imports our fake deterministically; ``setitem`` restores the original.
+    fake_orch = types.ModuleType("coding_team.orchestrator")
+    fake_orch.run_coding_team_orchestrator = _fake_orch  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "coding_team.orchestrator", fake_orch)
 
     out = run_pipeline_activity({"repo_path": "/repo", "plan_input": {"objective": "ship it"}})
 

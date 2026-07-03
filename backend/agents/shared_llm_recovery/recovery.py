@@ -83,11 +83,13 @@ def _balanced_object_spans(text: str) -> Tuple[List[Tuple[int, int]], int]:
 def _looks_like_json_object(fragment: str) -> bool:
     """True when *fragment* is shaped like a JSON object literal.
 
-    The first non-space character after the opening ``{`` must be a quote (a
-    quoted key) or a closing ``}`` (an empty object). This gates tolerant repair
-    so prose braces such as ``{see the "spec" above}`` are never fabricated into
-    a dict, while genuine model slips still pass: ``{"a": 1,}`` (trailing comma)
-    and ``{"a": `` (max-tokens truncation) both start with a quoted key.
+    Either an empty object (``{}``), or the first non-space character after the
+    opening ``{`` is a quote (a quoted key) AND a ``:`` appears later (the
+    key/value separator). This gates tolerant repair so prose braces are never
+    fabricated into a dict — both ``{see the "spec" above}`` (no leading quote)
+    and ``{"name" property}`` (quoted word but no colon) are rejected — while
+    genuine model slips still pass: ``{"a": 1,}`` (trailing comma) and ``{"a": ``
+    (max-tokens truncation) are a quoted key followed by a colon.
 
     Preconditions: ``fragment`` is a str.
     Postconditions: bool; never raises.
@@ -96,7 +98,13 @@ def _looks_like_json_object(fragment: str) -> bool:
     if not inner.startswith("{"):
         return False
     rest = inner[1:].lstrip()
-    return rest.startswith('"') or rest.startswith("}")
+    if rest.startswith("}"):
+        return True
+    # A real object literal: a quoted key, then eventually its ``:`` separator.
+    # The bare colon check is deliberately permissive (a ``:`` inside a string
+    # value counts) — its only job is to reject prose braces that carry a quoted
+    # word but no key/value structure, which json-repair would otherwise coerce.
+    return rest.startswith('"') and ":" in rest
 
 
 def _repair_object(fragment: str) -> Optional[Dict[str, Any]]:
@@ -217,7 +225,9 @@ def _descend_envelope(
     Preconditions/Postconditions: as ``_select_object``.
     """
     for _start, obj in reversed(candidates):
-        nested = [(0, v) for v in obj.values() if isinstance(v, dict)]
+        # Preserve document order among the parent's dict values so the LAST
+        # accepted child wins the positional tiebreak, per _select_object's rule.
+        nested = [(i, v) for i, v in enumerate(obj.values()) if isinstance(v, dict)]
         pick = _select_object(nested, accept)
         if pick is not None:
             return pick
@@ -258,6 +268,23 @@ def _salvage_object(
     stripped = _strip_wrappers(content)
     spans, first_unclosed = _balanced_object_spans(stripped)
 
+    # An accepted but EMPTY ``{}`` is only ever a last resort: it must not
+    # short-circuit a later strategy that would find a non-empty payload (e.g. a
+    # leading ``{}`` shadowing a real object the recall scan recovers). Non-empty
+    # accepted dicts win immediately; an empty one is stashed and returned only
+    # if every strategy is exhausted.
+    best_empty: Optional[Dict[str, Any]] = None
+
+    def _use(pick: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        nonlocal best_empty
+        if pick is None:
+            return None
+        if pick:
+            return pick
+        if best_empty is None:
+            best_empty = pick
+        return None
+
     # Strategy 1: top-level spans, strict-then-object-shaped-repair.
     pool: List[Tuple[int, Dict[str, Any]]] = []
     repairs = 0
@@ -275,21 +302,23 @@ def _salvage_object(
             repaired = _repair_object(fragment)
             if repaired is not None:
                 pool.append((start, repaired))
-    pick = _select_object(pool, accept)
-    if pick is not None:
-        return pick
+    result = _use(_select_object(pool, accept))
+    if result is not None:
+        return result
 
     # Strategy 2: envelope descent into rejected top-level objects.
-    pick = _descend_envelope(pool, accept)
-    if pick is not None:
-        return pick
+    result = _use(_descend_envelope(pool, accept))
+    if result is not None:
+        return result
 
     # Strategy 3: whole payload inside a markdown fence (on STRIPPED text).
     fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", stripped, re.IGNORECASE)
     if fence:
         parsed = _parse_or_repair(fence.group(1).strip())
         if parsed is not None and accept(parsed):
-            return parsed
+            result = _use(parsed)
+            if result is not None:
+                return result
 
     # Strategy 4: max-tokens truncation — the first object never closed.
     if first_unclosed != -1:
@@ -297,14 +326,20 @@ def _salvage_object(
         if _looks_like_json_object(fragment):
             repaired = _repair_object(fragment)
             if repaired is not None and accept(repaired):
-                return repaired
+                result = _use(repaired)
+                if result is not None:
+                    return result
 
     # Strategy 5: recall fallback — strict objects buried under prose.
     recall = list(_iter_strict_objects(stripped))
-    pick = _select_object(recall, accept)
-    if pick is not None:
-        return pick
-    return _descend_envelope(recall, accept)
+    result = _use(_select_object(recall, accept))
+    if result is not None:
+        return result
+    result = _use(_descend_envelope(recall, accept))
+    if result is not None:
+        return result
+
+    return best_empty
 
 
 def _has_tasks(parsed: Dict[str, Any]) -> bool:
@@ -325,12 +360,15 @@ def _accept_with_keys(
     (``None`` / empty), any dict is accepted (the caller has no schema to anchor
     on).
 
-    Preconditions: ``required_keys`` is ``None`` or a collection of str.
+    Preconditions: ``required_keys`` is ``None``, a single key str, or a
+    collection of str.
     Postconditions: returns a pure predicate; never raises.
     """
     if not required_keys:
         return lambda parsed: True
-    keys = tuple(required_keys)
+    # A bare ``str`` is a single key, not an iterable of one-character keys —
+    # ``tuple("tasks")`` would anchor on ``('t','a','s','k','s')`` and mis-match.
+    keys = (required_keys,) if isinstance(required_keys, str) else tuple(required_keys)
     return lambda parsed: any(k in parsed for k in keys)
 
 

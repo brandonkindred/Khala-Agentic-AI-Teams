@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shared_llm_recovery import extract_json_object
+from shared_llm_recovery import extract_json_object, extract_task_assignment_from_content
 
 
 def test_empty_or_blank_returns_none() -> None:
@@ -174,3 +174,34 @@ def test_fenced_payload_under_unclosed_prose_brace_is_repaired() -> None:
     comma) via the fence path, not the span path."""
     text = 'note: config { started but never closed\n```json\n{"approved": true,}\n```\n'
     assert extract_json_object(text, required_keys=("approved",)) == {"approved": True}
+
+
+def test_quoted_word_without_colon_is_not_fabricated() -> None:
+    """A trailing prose brace with a quoted word but NO colon (``{"name" property}``)
+    must not be json-repaired into a dict that shadows the real payload."""
+    assert extract_json_object('{"status": "done"}\nUse the {"name" property}.') == {
+        "status": "done"
+    }
+
+
+def test_required_keys_as_bare_string_is_a_single_key() -> None:
+    """A bare-string ``required_keys`` is one key, not an iterable of characters —
+    ``"tasks"`` must not anchor on ``('t','a','s','k','s')``."""
+    assert extract_json_object('{"tasks": [{"id": 1}]}', required_keys="tasks") == {
+        "tasks": [{"id": 1}]
+    }
+    # And a junk object carrying a stray single-char key must not be accepted.
+    assert extract_json_object('{"answer": 42} {"s": 99}', required_keys="tasks") is None
+
+
+def test_leading_empty_dict_does_not_shadow_recall_payload() -> None:
+    """An accepted empty ``{}`` is a last resort: it must not short-circuit the
+    recall scan that recovers a non-empty object derailed by a prose brace/quote."""
+    assert extract_json_object('{} and "prose { open" {"real": 1}') == {"real": 1}
+
+
+def test_envelope_descent_prefers_last_matching_child() -> None:
+    """Among sibling children that both match the anchor, the LAST wins — matching
+    the top-level positional tiebreak."""
+    text = '{"first": {"tasks": [{"id": 1}]}, "second": {"tasks": [{"id": 2}]}}'
+    assert extract_task_assignment_from_content(text) == {"tasks": [{"id": 2}]}
