@@ -357,13 +357,19 @@ def _windowed_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     """OBV re-based to the trailing ``STREAMING_WINDOW_BARS`` window (coverage probe only).
 
     Preconditions: ``close``/``volume`` are coercible series of equal length.
-    Postconditions: a same-length series equal, at bar ``t``, to the signed-volume
-    sum over the trailing ``STREAMING_WINDOW_BARS`` bars — ``full_obv[t] -
-    full_obv[t - window]`` (the shifted term is 0 during warm-up, so the value
-    equals full-history OBV until the window fills, exactly as the runtime
-    accumulates from the first bar). The unbounded :func:`obv` grows without limit
-    over long histories, so the probe would otherwise judge absolute-threshold OBV
-    predicates on values the runtime (bounded ``StreamingHistoryView``) never sees.
+    Postconditions: a same-length series matching the runtime's windowed OBV bar
+    for bar. The runtime computes OBV over a trailing window of
+    ``STREAMING_WINDOW_BARS`` bars whose OLDEST bar has no in-window predecessor,
+    so its close-to-close direction is undefined and it contributes 0 — i.e. the
+    window carries ``STREAMING_WINDOW_BARS - 1`` signed terms. Hence the shift is
+    ``window - 1``: ``full_obv[t] - full_obv[t - (window - 1)]`` sums exactly the
+    signed volume of bars ``[t - window + 2 .. t]``. (Using ``window`` would
+    over-count by the boundary bar's signed volume, since ``full_obv`` signs that
+    bar against the bar just OUTSIDE the window.) The shifted term is 0 during
+    warm-up, so the value equals full-history OBV until the window fills. The
+    unbounded :func:`obv` grows without limit over long histories, so the probe
+    would otherwise judge absolute-threshold OBV predicates on values the runtime
+    (bounded ``StreamingHistoryView``) never sees.
     """
     # Imported lazily: this wrapper is only reached from the coverage probe (a
     # package context), never in the flat strategy sandbox where this module is
@@ -371,7 +377,7 @@ def _windowed_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     from ..runtime_window import STREAMING_WINDOW_BARS
 
     full = obv(close, volume)
-    return full - full.shift(STREAMING_WINDOW_BARS).fillna(0.0)
+    return full - full.shift(STREAMING_WINDOW_BARS - 1).fillna(0.0)
 
 
 def _windowed_vwap(

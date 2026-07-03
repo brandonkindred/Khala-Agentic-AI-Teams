@@ -452,18 +452,24 @@ def _collect_produced_bollinger_bands(
     return produced, dynamic
 
 
-def _invalid_bollinger_select_calls(cls: ast.ClassDef, method_names: frozenset[str]) -> list[str]:
+def _invalid_bollinger_select_calls(
+    cls: ast.ClassDef, method_names: frozenset[str], import_aliases: Optional[dict[str, str]] = None
+) -> list[str]:
     """Reachable ``bollinger_bands(..., select=...)`` calls that will TypeError at runtime.
 
-    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable.
-    Post: one message per non-``self`` ``bollinger_bands`` call passing ``select=``.
-    The sandbox scalar helper copied from ``executor/strategy_indicators.py`` is
-    ``bollinger_bands(data, period=20, num_std=2.0)`` — it has no ``select`` param,
-    so a ``select=`` kwarg is a guaranteed ``TypeError``. Flag it here (like invalid
-    ctx reads) so the refinement loop fixes the call shape instead of the strategy
-    crashing in the sandbox. ``self.bollinger_bands`` (the compiler's inline helper,
-    which does accept ``select``) is excluded.
+    Pre: ``cls`` is the Strategy ClassDef; ``method_names`` are on_bar-reachable;
+    ``import_aliases`` maps ``from indicators import bollinger_bands as bb`` bindings.
+    Post: one message per non-``self`` ``bollinger_bands`` call passing ``select=``,
+    including alias-called forms (``bb(..., select=...)``) resolved via
+    ``import_aliases``. The sandbox scalar helper copied from
+    ``executor/strategy_indicators.py`` is ``bollinger_bands(data, period=20,
+    num_std=2.0)`` — it has no ``select`` param, so a ``select=`` kwarg is a
+    guaranteed ``TypeError``. Flag it here (like invalid ctx reads) so the
+    refinement loop fixes the call shape instead of the strategy crashing in the
+    sandbox. ``self.bollinger_bands`` (the compiler's inline helper, which does
+    accept ``select``) is excluded.
     """
+    aliases = import_aliases or {}
     out: list[str] = []
     for method in _iter_strategy_methods(cls):
         if method.name not in method_names:
@@ -471,7 +477,7 @@ def _invalid_bollinger_select_calls(cls: ast.ClassDef, method_names: frozenset[s
         for node in _iter_method_body_nodes(method):
             if (
                 isinstance(node, ast.Call)
-                and _get_call_name(node) == "bollinger_bands"
+                and aliases.get(_get_call_name(node), _get_call_name(node)) == "bollinger_bands"
                 and not _is_self_call(node, "bollinger_bands")
                 and _keyword_node(node, "select") is not None
             ):
@@ -1069,8 +1075,9 @@ class CodeConformanceGate(GateResultsMixin):
         for detail in _invalid_ctx_indicator_reads(cctx.cls, cctx.reachable, target_symbols):
             results.append(self._critical(detail))
         # A ``bollinger_bands(..., select=...)`` call likewise always TypeErrors in
-        # the sandbox (the scalar helper takes no ``select``), regardless of spec.
-        for detail in _invalid_bollinger_select_calls(cctx.cls, cctx.reachable):
+        # the sandbox (the scalar helper takes no ``select``), regardless of spec —
+        # including alias-called forms, resolved via ``import_aliases``.
+        for detail in _invalid_bollinger_select_calls(cctx.cls, cctx.reachable, import_aliases):
             results.append(self._critical(detail))
 
         required = _collect_required_indicators(cctx.spec)

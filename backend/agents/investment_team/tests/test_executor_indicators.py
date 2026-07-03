@@ -431,13 +431,42 @@ def test_windowed_obv_bounds_to_trailing_window() -> None:
     volume = pd.Series([1.0] * n)
     full = ind.obv(close, volume)
     win = ind._windowed_obv(close, volume)
-    # Full OBV grows without bound; the windowed value is capped at the window size.
+    # Full OBV grows without bound; the windowed value is capped at the trailing
+    # window. The oldest in-window bar has no in-window predecessor so it
+    # contributes 0, leaving window-1 signed terms (unit volume here => W-1).
     assert full.iloc[-1] == pytest.approx(n - 1)
-    assert win.iloc[-1] == pytest.approx(STREAMING_WINDOW_BARS)
+    assert win.iloc[-1] == pytest.approx(STREAMING_WINDOW_BARS - 1)
     # Before the window fills, the two agree (nothing has slid off yet).
     assert win.iloc[STREAMING_WINDOW_BARS - 1] == pytest.approx(
         full.iloc[STREAMING_WINDOW_BARS - 1]
     )
+
+
+def test_windowed_obv_matches_runtime_windowed_series() -> None:
+    # The strongest contract: the probe's windowed OBV must equal the runtime's
+    # per-bar windowed value bar-for-bar. This pins the shift boundary — an
+    # off-by-one over-counts by the boundary bar's signed volume near the edge.
+    from investment_team.strategy_lab.executor.predicate_evaluator import (
+        compute_indicator_series,
+    )
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+    from investment_team.strategy_lab.spec_dsl import IndicatorRef
+
+    n = STREAMING_WINDOW_BARS + 40
+    closes = [100.0 + 10 * math.sin(i / 3.0) + (i % 7) for i in range(n)]  # non-monotone
+    volume = [1000.0 + (i % 5) * 100 for i in range(n)]
+    df = pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 1 for c in closes],
+            "low": [c - 1 for c in closes],
+            "close": closes,
+            "volume": volume,
+        }
+    )
+    ref = compute_indicator_series(IndicatorRef(name="obv"), df)
+    win = ind._windowed_obv(df["close"], df["volume"])
+    pd.testing.assert_series_equal(win.reset_index(drop=True), ref.reset_index(drop=True))
 
 
 def test_windowed_vwap_rebases_to_trailing_window() -> None:

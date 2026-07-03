@@ -156,8 +156,11 @@ class StreamingHarness:
             "indicators",
             "streaming.py",
         )
-        if os.path.exists(registry_src):
-            shutil.copy2(registry_src, os.path.join(tmp, "_streaming_indicators.py"))
+        # Mandatory: the sandbox ``indicators`` module (``strategy_indicators``)
+        # imports this as ``_streaming_indicators``, so copy it unconditionally —
+        # a missing source fails loudly here rather than as a per-subprocess
+        # ``from _streaming_indicators import IndicatorRegistry`` crash.
+        shutil.copy2(registry_src, os.path.join(tmp, "_streaming_indicators.py"))
         # ``contract.py`` (copied unconditionally above) imports this constant at
         # module top for its history-retention bound, so ``runtime_window`` is a
         # MANDATORY sandbox dependency, not an optional one: copy it
