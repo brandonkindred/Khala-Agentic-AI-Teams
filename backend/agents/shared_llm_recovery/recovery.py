@@ -276,6 +276,13 @@ def _salvage_object(
     best_empty: Optional[Dict[str, Any]] = None
 
     def _use(pick: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Return *pick* if it is a non-empty dict; stash an empty one instead.
+
+        Preconditions: ``pick`` is an accepted dict or ``None``.
+        Postconditions: returns ``pick`` when it is truthy (non-empty); records
+        the first empty ``{}`` in ``best_empty`` and returns ``None`` so the
+        caller keeps searching; returns ``None`` for ``None``.
+        """
         nonlocal best_empty
         if pick is None:
             return None
