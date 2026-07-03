@@ -79,6 +79,39 @@ describe('UserProfileComponent', () => {
     expect(component.groups[0].label).toBeTruthy();
   });
 
+  it('should render a Career group linking to the job matching dashboard', async () => {
+    apiSpy.getOverview.mockReturnValue(
+      of({
+        ...OVERVIEW,
+        associations: [
+          ...ASSOCIATIONS,
+          {
+            id: 'a3',
+            user_id: 'default',
+            artifact_type: 'career',
+            team: 'job_matching',
+            artifact_id: 'career:default',
+            label: 'Career profile',
+            role: 'owner',
+            created_at: '',
+          },
+        ],
+      })
+    );
+    await setup();
+    const career = component.groups.find((g) => g.type === 'career');
+    expect(career).toBeDefined();
+    expect(career!.label).toBe('Career');
+    expect(career!.route).toBe('/job-matching');
+    expect(career!.items[0].label).toBe('Career profile');
+    const link = (fixture.nativeElement as HTMLElement).querySelector(
+      'a.up-item-label'
+    ) as HTMLAnchorElement;
+    expect(link).toBeTruthy();
+    expect(link.getAttribute('href')).toBe('/job-matching');
+    expect(link.textContent).toContain('Career profile');
+  });
+
   it('should reload the overview when the refresh control is clicked', async () => {
     await setup();
     expect(apiSpy.getOverview).toHaveBeenCalledTimes(1);

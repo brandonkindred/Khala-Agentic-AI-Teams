@@ -1,0 +1,148 @@
+<article class="listing-card" [class.pending]="pending">
+  <div class="listing-main">
+    <div class="listing-score">
+      <span class="score-value">{{ scorePercent }}%</span>
+      <span class="rec-badge" [class]="'rec-badge ' + listing.recommendation">{{
+        listing.recommendation
+      }}</span>
+    </div>
+
+    <div class="listing-body">
+      <div class="listing-title-row">
+        <span class="listing-title">{{ listing.posting.title || 'Untitled role' }}</span>
+        <span class="listing-company">{{ listing.posting.company }}</span>
+        <span class="status-badge" [class]="'status-badge status-' + listing.status">{{
+          statusLabel
+        }}</span>
+      </div>
+      <div class="listing-meta">
+        @if (listing.posting.location) {
+          <span>{{ listing.posting.location }} · {{ listing.posting.remote_mode }}</span>
+        } @else {
+          <span>{{ listing.posting.remote_mode }}</span>
+        }
+        <span>{{ salaryLabel }}</span>
+        <span>Seen {{ listing.times_seen }}×</span>
+      </div>
+    </div>
+
+    <div class="listing-actions">
+      @if (!readonly) {
+        @if (isTriagedAway) {
+          <button
+            mat-stroked-button
+            [disabled]="pending"
+            (click)="setStatus('new')"
+            matTooltip="Return this listing to the inbox"
+          >
+            <mat-icon>undo</mat-icon>
+            Restore
+          </button>
+        } @else {
+          <button
+            mat-icon-button
+            [disabled]="pending"
+            [attr.aria-pressed]="isFavorite"
+            [attr.aria-label]="isFavorite ? 'Remove from favorites' : 'Add to favorites'"
+            [matTooltip]="isFavorite ? 'Remove from favorites' : 'Add to favorites'"
+            (click)="toggleFavorite()"
+          >
+            <mat-icon [class.favorite-on]="isFavorite">{{
+              isFavorite ? 'star' : 'star_border'
+            }}</mat-icon>
+          </button>
+          <button
+            mat-stroked-button
+            [disabled]="pending"
+            (click)="setStatus('poor_fit')"
+            matTooltip="The match is off — keep it visible but flagged"
+          >
+            Poor fit
+          </button>
+          <button
+            mat-stroked-button
+            [disabled]="pending"
+            (click)="setStatus('not_interested')"
+            matTooltip="Hide from the active list"
+          >
+            Not interested
+          </button>
+          <button
+            mat-stroked-button
+            [disabled]="pending"
+            (click)="setStatus('archived')"
+            matTooltip="Archive this listing"
+          >
+            <mat-icon>archive</mat-icon>
+            Archive
+          </button>
+        }
+      }
+      <button
+        mat-stroked-button
+        class="review-toggle"
+        (click)="toggleExpanded()"
+        [attr.aria-expanded]="expanded"
+      >
+        {{ expanded ? 'Hide' : 'Review' }}
+      </button>
+    </div>
+  </div>
+
+  @if (expanded) {
+    <div class="listing-detail">
+      <div class="detail-grid">
+        <div class="detail-text">
+          <h4 class="detail-label">Why this score</h4>
+          <p class="rationale">{{ listing.rationale || 'No rationale recorded.' }}</p>
+
+          <h4 class="detail-label">Concerns</h4>
+          @if (listing.concerns.length) {
+            <ul class="concerns">
+              @for (concern of listing.concerns; track concern) {
+                <li>{{ concern }}</li>
+              }
+            </ul>
+          } @else {
+            <p class="detail-muted">No concerns raised.</p>
+          }
+
+          @if (listing.posting.description) {
+            <h4 class="detail-label">Posting</h4>
+            <p class="detail-muted description">{{ listing.posting.description }}</p>
+          }
+
+          <p class="detail-facts">
+            @if (listing.posting.source) {
+              <span>Source: {{ listing.posting.source }}</span>
+            }
+            <span>Run {{ listing.run_id }}</span>
+            @if (listing.posting.url) {
+              <a [href]="listing.posting.url" target="_blank" rel="noopener">
+                Open original posting
+                <mat-icon inline>open_in_new</mat-icon>
+              </a>
+            }
+          </p>
+        </div>
+
+        <div class="detail-scores">
+          <h4 class="detail-label">Fit breakdown</h4>
+          @for (dim of subScoreLabels; track dim.key) {
+            <div class="sub-score-row">
+              <span class="sub-score-name">{{ dim.label }}</span>
+              <div
+                class="sub-score-bar"
+                role="img"
+                [attr.aria-label]="dim.label + ' fit ' + (subScore(dim.key) | number: '1.2-2')"
+              >
+                <span [style.width.%]="subScore(dim.key) * 100"></span>
+              </div>
+              <span class="sub-score-value">{{ subScore(dim.key) | number: '1.2-2' }}</span>
+            </div>
+          }
+        </div>
+      </div>
+    </div>
+  }
+</article>

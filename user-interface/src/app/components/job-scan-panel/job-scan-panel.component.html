@@ -1,0 +1,177 @@
+<mat-card appearance="outlined" class="scan-card">
+  <mat-card-header>
+    <mat-card-title>Start a scan</mat-card-title>
+    <mat-card-subtitle>
+      Searches the web for open roles matching your career profile, then ranks them best-first.
+    </mat-card-subtitle>
+  </mat-card-header>
+  <mat-card-content>
+    <form [formGroup]="form" (ngSubmit)="startScan()">
+      <div class="scan-fields">
+        <mat-form-field appearance="outline">
+          <mat-label>Search queries</mat-label>
+          <input matInput type="number" min="1" max="25" formControlName="max_queries" />
+          <mat-hint>1–25 distinct queries</mat-hint>
+        </mat-form-field>
+        <mat-form-field appearance="outline">
+          <mat-label>Max roles to collect</mat-label>
+          <input matInput type="number" min="1" max="200" formControlName="max_roles" />
+          <mat-hint>before ranking</mat-hint>
+        </mat-form-field>
+        <mat-form-field appearance="outline">
+          <mat-label>Ranked roles to return</mat-label>
+          <input matInput type="number" min="1" max="200" formControlName="top_n" />
+        </mat-form-field>
+        <mat-checkbox formControlName="exclude_seen" class="exclude-seen">
+          Skip roles seen in earlier runs
+        </mat-checkbox>
+      </div>
+
+      <mat-expansion-panel class="overrides-panel">
+        <mat-expansion-panel-header>
+          <mat-panel-title>Overrides for this run only</mat-panel-title>
+          <mat-panel-description>Leave blank to use your career profile</mat-panel-description>
+        </mat-expansion-panel-header>
+        <div class="scan-fields">
+          <mat-form-field appearance="outline">
+            <mat-label>Target titles</mat-label>
+            <input matInput formControlName="override_titles" placeholder="Comma-separated" />
+          </mat-form-field>
+          <mat-form-field appearance="outline">
+            <mat-label>Locations</mat-label>
+            <input matInput formControlName="override_locations" placeholder="Comma-separated" />
+          </mat-form-field>
+          <mat-form-field appearance="outline">
+            <mat-label>Extra keywords</mat-label>
+            <input matInput formControlName="override_keywords" placeholder="Comma-separated" />
+          </mat-form-field>
+        </div>
+      </mat-expansion-panel>
+
+      <div class="scan-submit">
+        <button
+          mat-flat-button
+          color="primary"
+          type="submit"
+          [disabled]="form.invalid || scanning"
+        >
+          {{ scanning ? 'Scanning…' : 'Start scan' }}
+        </button>
+        @if (scanning) {
+          <mat-progress-bar mode="indeterminate" aria-label="Scan in progress" />
+        }
+      </div>
+      @if (scanError) {
+        <p class="scan-error" role="alert">{{ scanError }}</p>
+      }
+    </form>
+  </mat-card-content>
+</mat-card>
+
+@if (scanJobs.length) {
+  <mat-card appearance="outlined" class="scan-card">
+    <mat-card-header>
+      <mat-card-title>Scan jobs</mat-card-title>
+    </mat-card-header>
+    <mat-card-content>
+      @for (job of scanJobs; track job.job_id) {
+        <div class="scan-job-row">
+          <span class="status-chip" [class]="'status-chip ' + job.status">{{ job.status }}</span>
+          <span class="job-id">{{ job.job_id }}</span>
+          <span class="spacer"></span>
+          @if (isActive(job)) {
+            <button mat-stroked-button (click)="cancelJob(job)">Cancel</button>
+          } @else {
+            <button
+              mat-icon-button
+              aria-label="Delete scan job"
+              (click)="deleteJob(job)"
+            >
+              <mat-icon>delete_outline</mat-icon>
+            </button>
+          }
+        </div>
+      }
+    </mat-card-content>
+  </mat-card>
+}
+
+<mat-card appearance="outlined" class="scan-card">
+  <mat-card-header>
+    <mat-card-title>Run history</mat-card-title>
+    <mat-card-subtitle>
+      Click a run to see the roles it ranked. Manage them in the Listings tab.
+    </mat-card-subtitle>
+  </mat-card-header>
+  <mat-card-content>
+    @if (runsLoading) {
+      <mat-progress-bar mode="indeterminate" aria-label="Loading runs" />
+    } @else if (!runs.length) {
+      <p class="no-runs">No runs yet — start your first scan above.</p>
+    } @else {
+      <div class="runs-table-wrap">
+        <table class="runs-table" aria-label="Run history">
+          <thead>
+            <tr>
+              <th scope="col">Run</th>
+              <th scope="col">Status</th>
+              <th scope="col">Found</th>
+              <th scope="col">Ranked</th>
+              <th scope="col">Completed</th>
+              <th scope="col"><span class="cdk-visually-hidden">Expand</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (run of runs; track run.run_id) {
+              <tr class="run-row">
+                <td class="run-id">{{ run.run_id }}</td>
+                <td>
+                  <span class="status-chip" [class]="'status-chip ' + run.status">{{
+                    run.status
+                  }}</span>
+                </td>
+                <td>{{ run.total_found }}</td>
+                <td>{{ run.total_ranked }}</td>
+                <td>{{ run.completed_at ?? '—' }}</td>
+                <td>
+                  <button
+                    mat-icon-button
+                    [attr.aria-label]="'Toggle roles for run ' + run.run_id"
+                    [attr.aria-expanded]="expandedRuns.has(run.run_id)"
+                    (click)="toggleRun(run)"
+                  >
+                    <mat-icon>{{
+                      expandedRuns.has(run.run_id) ? 'expand_less' : 'expand_more'
+                    }}</mat-icon>
+                  </button>
+                </td>
+              </tr>
+              @if (expandedRuns.has(run.run_id)) {
+                <tr>
+                  <td colspan="6" class="run-detail-cell">
+                    @if (isRunLoading(run.run_id)) {
+                      <mat-progress-bar mode="indeterminate" aria-label="Loading run detail" />
+                    } @else {
+                      @if (runDetail(run.run_id); as detail) {
+                        @if (detail.ranked_jobs.length) {
+                          @for (job of detail.ranked_jobs; track job.posting.fingerprint) {
+                            <app-job-listing-card
+                              [listing]="asListing(job, run.run_id)"
+                              [readonly]="true"
+                            />
+                          }
+                        } @else {
+                          <p class="no-runs">This run ranked no roles.</p>
+                        }
+                      }
+                    }
+                  </td>
+                </tr>
+              }
+            }
+          </tbody>
+        </table>
+      </div>
+    }
+  </mat-card-content>
+</mat-card>

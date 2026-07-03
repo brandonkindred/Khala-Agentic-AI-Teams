@@ -251,6 +251,14 @@ export const routes: Routes = [
           ),
         data: { breadcrumb: 'Road Trip Planning', title: 'Road Trip Planning' },
       },
+      {
+        path: 'job-matching',
+        loadComponent: () =>
+          import('./components/job-matching-dashboard/job-matching-dashboard.component').then(
+            (m) => m.JobMatchingDashboardComponent,
+          ),
+        data: { breadcrumb: 'Job Matching', title: 'Job Matching' },
+      },
     ],
   },
   { path: '**', redirectTo: '/dashboard' },

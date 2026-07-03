@@ -1,0 +1,24 @@
+<app-dashboard-shell
+  title="Job Matching"
+  subtitle="Scans open roles matching your career profile and ranks the best to apply for"
+  icon="work"
+  [healthCheck]="healthCheck"
+>
+  <mat-tab-group animationDuration="0ms">
+    <mat-tab label="Listings">
+      <div class="tab-body">
+        <app-job-listings-panel />
+      </div>
+    </mat-tab>
+    <mat-tab label="Scan & Runs">
+      <div class="tab-body">
+        <app-job-scan-panel (scanCompleted)="onScanCompleted()" />
+      </div>
+    </mat-tab>
+    <mat-tab label="Profile">
+      <div class="tab-body">
+        <app-job-profile-form />
+      </div>
+    </mat-tab>
+  </mat-tab-group>
+</app-dashboard-shell>

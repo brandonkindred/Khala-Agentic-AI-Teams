@@ -1,0 +1,46 @@
+<div class="listings-toolbar">
+  <div class="filter-pills" role="radiogroup" aria-label="Listing status filter">
+    @for (f of filters; track f.key) {
+      <button
+        class="filter-pill"
+        role="radio"
+        [attr.aria-checked]="filter === f.key"
+        [class.selected]="filter === f.key"
+        (click)="setFilter(f.key)"
+      >
+        {{ f.label }} <b>{{ countFor(f.key) }}</b>
+      </button>
+    }
+  </div>
+  <button mat-icon-button aria-label="Refresh listings" (click)="load()">
+    <mat-icon>refresh</mat-icon>
+  </button>
+</div>
+
+@if (loading) {
+  <app-loading-spinner message="Loading listings…" />
+} @else if (error) {
+  <div class="listings-error" role="alert">
+    <mat-icon>error_outline</mat-icon>
+    <span>{{ error }}</span>
+    <button mat-stroked-button (click)="load()">Retry</button>
+  </div>
+} @else if (!listings.length) {
+  <app-empty-state
+    icon="work_outline"
+    [title]="filter === 'active' ? 'No listings yet' : 'Nothing here'"
+    [description]="
+      filter === 'active'
+        ? 'Run a scan from the Scan & Runs tab and the roles it finds will show up here, ranked best-first.'
+        : 'No listings match this filter.'
+    "
+  />
+} @else {
+  @for (listing of listings; track listing.fingerprint) {
+    <app-job-listing-card
+      [listing]="listing"
+      [pending]="pendingFingerprint === listing.fingerprint"
+      (statusChange)="onStatusChange(listing, $event)"
+    />
+  }
+}

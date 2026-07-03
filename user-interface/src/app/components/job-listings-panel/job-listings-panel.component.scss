@@ -1,0 +1,51 @@
+.listings-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.filter-pills {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.filter-pill {
+  border: 1px solid #dde4ec;
+  background: #fff;
+  border-radius: 999px;
+  padding: 5px 13px;
+  color: #5b6b7c;
+  font: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
+
+  b {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &.selected {
+    background: #1c2733;
+    border-color: #1c2733;
+    color: #fff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #3b5bdb;
+    outline-offset: 2px;
+  }
+}
+
+.listings-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid #f3c4b8;
+  border-radius: 10px;
+  background: #fbede6;
+  color: #c2410c;
+}

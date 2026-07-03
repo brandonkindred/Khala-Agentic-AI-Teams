@@ -1,9 +1,18 @@
-"""Tests for the job-seeker profile model and loader."""
+"""Tests for the job-seeker profile model, loader, and career store."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from job_matching_team.profile import career_store
+from job_matching_team.profile.career_store import (
+    CAREER_SECTION_KEY,
+    CareerProfileUnavailableError,
+    load_career_profile,
+    save_career_profile,
+)
 from job_matching_team.profile.loader import (
     EXAMPLE_PROFILE_PATH,
     clear_cache,
@@ -130,6 +139,149 @@ def test_weights_normalize_to_one():
     w = RankingWeights()
     norm = w.normalized()
     assert pytest.approx(sum(norm.values()), abs=1e-9) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Career store (profile persisted in the central user profile)
+# ---------------------------------------------------------------------------
+
+
+def _enable_postgres(monkeypatch):
+    import shared_postgres
+
+    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+
+
+def test_load_career_profile_none_when_postgres_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    assert load_career_profile() is None
+
+
+def test_load_career_profile_returns_validated_section(monkeypatch):
+    _enable_postgres(monkeypatch)
+    section = {"target_titles": ["Career Eng"], "salary_min": 123000}
+    monkeypatch.setattr(
+        career_store,
+        "get_profile",
+        lambda user_id: SimpleNamespace(preferences={CAREER_SECTION_KEY: section}),
+    )
+    profile = load_career_profile()
+    assert profile.target_titles == ["Career Eng"]
+    assert profile.salary_min == 123000
+
+
+def test_load_career_profile_none_when_section_absent(monkeypatch):
+    _enable_postgres(monkeypatch)
+    monkeypatch.setattr(
+        career_store, "get_profile", lambda user_id: SimpleNamespace(preferences={})
+    )
+    assert load_career_profile() is None
+
+
+def test_load_career_profile_none_on_operational_failure(monkeypatch):
+    _enable_postgres(monkeypatch)
+
+    def boom(user_id):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(career_store, "get_profile", boom)
+    assert load_career_profile() is None
+
+
+def test_load_career_profile_raises_on_malformed_section(monkeypatch):
+    _enable_postgres(monkeypatch)
+    monkeypatch.setattr(
+        career_store,
+        "get_profile",
+        lambda user_id: SimpleNamespace(
+            preferences={CAREER_SECTION_KEY: {"remote_preference": "bogus"}}
+        ),
+    )
+    with pytest.raises(Exception):
+        load_career_profile()
+
+
+def test_save_career_profile_raises_when_postgres_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    with pytest.raises(CareerProfileUnavailableError):
+        save_career_profile(JobSeekerProfile())
+
+
+def test_save_career_profile_merges_and_records_association(monkeypatch):
+    _enable_postgres(monkeypatch)
+    existing = {"other_section": {"keep": True}}
+    saved_updates = []
+    associations = []
+
+    monkeypatch.setattr(
+        career_store, "get_profile", lambda user_id: SimpleNamespace(preferences=dict(existing))
+    )
+
+    def fake_upsert(update, user_id):
+        saved_updates.append((update, user_id))
+        return SimpleNamespace(preferences=update.preferences)
+
+    monkeypatch.setattr(career_store, "upsert_profile", fake_upsert)
+    monkeypatch.setattr(
+        career_store,
+        "record_association_safe",
+        lambda *a, **kw: associations.append((a, kw)),
+    )
+
+    result = save_career_profile(JobSeekerProfile(target_titles=["Staff Eng"]))
+
+    assert result.target_titles == ["Staff Eng"]
+    update, user_id = saved_updates[0]
+    # Other profile_json sections are preserved, career section written.
+    assert update.preferences["other_section"] == {"keep": True}
+    assert update.preferences[CAREER_SECTION_KEY]["target_titles"] == ["Staff Eng"]
+    assert user_id == "default"
+    # The Career card association is recorded best-effort.
+    (artifact_type, team, artifact_id), kwargs = associations[0]
+    assert artifact_type == "career"
+    assert team == "job_matching"
+    assert artifact_id == "career:default"
+    assert kwargs["label"] == "Career profile"
+
+
+def test_save_career_profile_wraps_operational_failure(monkeypatch):
+    _enable_postgres(monkeypatch)
+
+    def boom(user_id):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(career_store, "get_profile", boom)
+    with pytest.raises(CareerProfileUnavailableError):
+        save_career_profile(JobSeekerProfile())
+
+
+def test_loader_prefers_career_section(monkeypatch):
+    monkeypatch.setattr(
+        career_store,
+        "load_career_profile",
+        lambda: JobSeekerProfile(target_titles=["From User Profile"]),
+    )
+    profile = load_job_seeker_profile()
+    assert profile.target_titles == ["From User Profile"]
+
+
+def test_loader_falls_back_to_yaml_when_career_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(career_store, "load_career_profile", lambda: None)
+    p = tmp_path / "env_profile.yaml"
+    p.write_text("target_titles: [From YAML]\n")
+    monkeypatch.setenv("JOB_SEEKER_PROFILE_PATH", str(p))
+    profile = load_job_seeker_profile()
+    assert profile.target_titles == ["From YAML"]
+
+
+def test_loader_explicit_path_skips_career_section(monkeypatch, tmp_path):
+    def boom():
+        raise AssertionError("career store must not be consulted for explicit paths")
+
+    monkeypatch.setattr(career_store, "load_career_profile", boom)
+    p = tmp_path / "prof.yaml"
+    p.write_text("target_titles: [Explicit]\n")
+    assert load_job_seeker_profile(p).target_titles == ["Explicit"]
 
 
 def test_zero_weights_fall_back_to_uniform():

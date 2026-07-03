@@ -157,6 +157,110 @@ def test_cancel_missing_job(client):
     assert client.post("/scan/jobs/missing/cancel").status_code == 404
 
 
+def test_put_profile_saves_career_section(client, monkeypatch):
+    saved = []
+
+    def fake_save(profile):
+        saved.append(profile)
+        return profile
+
+    monkeypatch.setattr(api_main, "save_career_profile", fake_save)
+    resp = client.put("/profile", json={"target_titles": ["Staff Eng"], "salary_min": 200000})
+    assert resp.status_code == 200
+    assert resp.json()["target_titles"] == ["Staff Eng"]
+    assert saved[0].salary_min == 200000
+
+
+def test_put_profile_503_when_store_unavailable(client, monkeypatch):
+    from job_matching_team.profile.career_store import CareerProfileUnavailableError
+
+    def fake_save(profile):
+        raise CareerProfileUnavailableError("Postgres unavailable")
+
+    monkeypatch.setattr(api_main, "save_career_profile", fake_save)
+    resp = client.put("/profile", json={})
+    assert resp.status_code == 503
+    assert "Postgres" in resp.json()["detail"]
+
+
+def test_put_profile_rejects_invalid_payload(client):
+    assert client.put("/profile", json={"remote_preference": "bogus"}).status_code == 422
+
+
+def _fake_listing(status="new"):
+    from job_matching_team.models import Listing
+
+    posting = JobPosting(company="Acme", title="Engineer", location="NYC").ensure_fingerprint()
+    return Listing(
+        fingerprint=posting.fingerprint,
+        posting=posting,
+        score=0.9,
+        recommendation="apply",
+        rationale="fit",
+        run_id="r1",
+        status=status,
+    )
+
+
+class FakeListingStore:
+    def __init__(self):
+        self.calls = []
+
+    def list_listings(self, *, status="active", limit=200):
+        from job_matching_team.models import ListingsResponse
+
+        self.calls.append(("list", status, limit))
+        return ListingsResponse(listings=[_fake_listing()], total=1, counts={"new": 1})
+
+    def update_listing_state(self, fingerprint, update):
+        self.calls.append(("update", fingerprint, update))
+        if fingerprint == "missing":
+            return None
+        return _fake_listing(status=update.status)
+
+
+def test_list_listings_delegates_to_store(client, monkeypatch):
+    from job_matching_team import store as store_mod
+
+    fake = FakeListingStore()
+    monkeypatch.setattr(store_mod, "get_store", lambda: fake)
+    resp = client.get("/listings", params={"status": "favorite", "limit": 10})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["counts"] == {"new": 1}
+    assert body["listings"][0]["posting"]["company"] == "Acme"
+    assert fake.calls == [("list", "favorite", 10)]
+
+
+def test_list_listings_rejects_invalid_filter(client):
+    assert client.get("/listings", params={"status": "bogus"}).status_code == 422
+    assert client.get("/listings", params={"limit": 0}).status_code == 422
+
+
+def test_patch_listing_updates_status(client, monkeypatch):
+    from job_matching_team import store as store_mod
+
+    fake = FakeListingStore()
+    monkeypatch.setattr(store_mod, "get_store", lambda: fake)
+    resp = client.patch("/listings/abc123", json={"status": "archived"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "archived"
+    kind, fingerprint, update = fake.calls[0]
+    assert (kind, fingerprint, update.status) == ("update", "abc123", "archived")
+
+
+def test_patch_listing_404_when_unknown(client, monkeypatch):
+    from job_matching_team import store as store_mod
+
+    monkeypatch.setattr(store_mod, "get_store", lambda: FakeListingStore())
+    assert client.patch("/listings/missing", json={"status": "favorite"}).status_code == 404
+
+
+def test_patch_listing_rejects_invalid_status(client):
+    assert client.patch("/listings/abc", json={"status": "starred"}).status_code == 422
+
+
 def test_runs_endpoints_use_store(client, monkeypatch):
     from job_matching_team import store as store_mod
     from job_matching_team.models import RunDetail, RunSummary

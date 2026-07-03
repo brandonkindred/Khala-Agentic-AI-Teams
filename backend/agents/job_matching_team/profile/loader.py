@@ -1,13 +1,18 @@
 """Resolve and cache a :class:`JobSeekerProfile` for the matching pipeline.
 
 Resolution order:
-    1. ``$JOB_SEEKER_PROFILE_PATH``
-    2. ``$AGENT_CACHE/job_seeker_profile.yaml``
-    3. The bundled ``job_seeker_profile.example.yaml`` (with a WARN log line)
+    1. The career section of the central user profile
+       (``user_profiles.profile_json["career"]`` via
+       :mod:`job_matching_team.profile.career_store`)
+    2. ``$JOB_SEEKER_PROFILE_PATH``
+    3. ``$AGENT_CACHE/job_seeker_profile.yaml``
+    4. The bundled ``job_seeker_profile.example.yaml`` (with a WARN log line)
 
-Set ``JOB_SEEKER_PROFILE_STRICT=true`` to disable the example fallback
-(raises instead). Parsed profiles are cached by ``(resolved_path, mtime_ns)``
-so repeated calls within a run do not re-read or re-validate the YAML.
+The YAML chain (2-4) is the offline/legacy fallback; edits made through the
+API always land in the career section. Set ``JOB_SEEKER_PROFILE_STRICT=true``
+to disable the example fallback (raises instead). Parsed YAML profiles are
+cached by ``(resolved_path, mtime_ns)`` so repeated calls within a run do not
+re-read or re-validate the file.
 """
 
 from __future__ import annotations
@@ -68,11 +73,14 @@ def load_job_seeker_profile(path: Optional[Path | str] = None) -> JobSeekerProfi
     """Load and return a :class:`JobSeekerProfile`.
 
     Args:
-        path: Optional explicit path. When given, env-var resolution is skipped.
+        path: Optional explicit path. When given, both the career-section and
+            env-var resolution are skipped.
 
     Postconditions:
-        * Returns a validated profile. When no file is found and strict mode is
-          off, the bundled example is used (with a WARN log line).
+        * Returns a validated profile. The career section of the central user
+          profile wins when present; otherwise the YAML chain applies. When no
+          file is found and strict mode is off, the bundled example is used
+          (with a WARN log line).
 
     Raises:
         FileNotFoundError: If an explicit ``path`` is missing, or if strict mode
@@ -83,6 +91,13 @@ def load_job_seeker_profile(path: Optional[Path | str] = None) -> JobSeekerProfi
         if not resolved.is_file():
             raise FileNotFoundError(f"Job seeker profile not found: {resolved}")
     else:
+        # Prefer the career section of the central user profile; ``None`` means
+        # absent or operationally unavailable, either way the YAML chain applies.
+        from .career_store import load_career_profile
+
+        career = load_career_profile()
+        if career is not None:
+            return career
         resolved = _resolve_path()
 
     if resolved is None:

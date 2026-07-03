@@ -82,7 +82,13 @@
               <ul class="up-list">
                 @for (item of group.items; track item.id) {
                   <li class="up-list-item">
-                    <span class="up-item-label">{{ item.label || item.artifact_id }}</span>
+                    @if (group.route) {
+                      <a class="up-item-label" [routerLink]="group.route">{{
+                        item.label || item.artifact_id
+                      }}</a>
+                    } @else {
+                      <span class="up-item-label">{{ item.label || item.artifact_id }}</span>
+                    }
                     <span class="up-item-meta">{{ item.team }} · {{ item.role }}</span>
                   </li>
                 }
