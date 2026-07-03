@@ -48,7 +48,7 @@ planning-v3 / coding-team `create_job`, and agentic `create_team`.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/user-profile` | Current (default) profile; created on first read. |
-| PUT | `/api/user-profile` | Partial update; scalars written verbatim, `preferences` merged key-by-key (absent keys survive; no key deletion). |
+| PUT | `/api/user-profile` | Partial update; scalars written verbatim, `preferences` merged by top-level key (absent keys survive; no key deletion — a `null` value is stored and readers treat it as absent). |
 | GET | `/api/user-profile/associations?artifact_type=` | Linked artifacts, newest first. |
 | GET | `/api/user-profile/integrations` | Integration status (pass-through to the integrations store). |
 | GET | `/api/user-profile/overview` | Aggregated profile + associations + integrations in one response (so the profile page loads in one round-trip). |

@@ -395,42 +395,71 @@ describe('UserProfileComponent', () => {
     expect(component.form.value.avatar_color).toBe('amber');
   });
 
-  it('should omit preferences entirely on a save when no color was chosen or stored', async () => {
-    // A bio-only save must not stamp the default color onto a profile that
-    // never picked one — omitting the field leaves server preferences alone.
+  it('should omit preferences entirely on a save when no swatch was picked', async () => {
+    // A bio-only save must not write avatar_color at all: it would stamp the
+    // default onto never-chose profiles and could overwrite a concurrent
+    // tab's newer choice with this tab's stale loaded value. The key must be
+    // ABSENT — not present-with-null/undefined — so the backend merge is
+    // never entered (hence toHaveProperty, not a loose objectContaining).
     apiSpy.getOverview.mockReturnValue(
-      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark' } } }),
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark', avatar_color: 'blue' } } }),
     );
     await setup();
     component.form.patchValue({ bio: 'updated' });
     component.save();
-    expect(apiSpy.updateProfile).toHaveBeenCalledWith(
-      expect.not.objectContaining({ preferences: expect.anything() }),
-    );
+    expect(apiSpy.updateProfile.mock.calls[0][0]).not.toHaveProperty('preferences');
   });
 
-  it('should keep sending a stored avatar color on unrelated saves', async () => {
-    apiSpy.getOverview.mockReturnValue(
-      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { avatar_color: 'blue' } } }),
-    );
-    await setup();
-    component.form.patchValue({ bio: 'updated' });
-    component.save();
-    expect(apiSpy.updateProfile).toHaveBeenCalledWith(
-      expect.objectContaining({ preferences: { avatar_color: 'blue' } }),
-    );
-  });
-
-  it('should keep sending the color on later saves once one has been saved', async () => {
-    // First save persists the picked color; a later bio-only save must not
-    // silently stop sending it (the flag flips after a successful save).
+  it('should stop sending the color on later saves once it is persisted', async () => {
+    // After a successful save the control is pristine again; the stored color
+    // survives server-side via the merge, so later saves omit the key.
     await setup(); // PROFILE.preferences is {} — nothing stored initially
     component.selectAvatarColor('green');
     component.save();
+    expect(apiSpy.updateProfile.mock.calls[0][0]).toHaveProperty('preferences', {
+      avatar_color: 'green',
+    });
     component.save(); // pristine again after success; no swatch touched
-    expect(apiSpy.updateProfile).toHaveBeenLastCalledWith(
-      expect.objectContaining({ preferences: { avatar_color: 'green' } }),
+    expect(apiSpy.updateProfile.mock.calls[1][0]).not.toHaveProperty('preferences');
+  });
+
+  it('should preserve unsaved edits when a reload happens mid-edit', async () => {
+    // The "Refresh linked work" button re-runs load(); a dirty form must keep
+    // the user's edits instead of being overwritten by server state.
+    await setup();
+    component.form.patchValue({ bio: 'work in progress' });
+    component.form.markAsDirty();
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, bio: 'server bio' } }),
     );
+    component.load();
+    expect(component.form.value.bio).toBe('work in progress');
+    // The non-form view state still refreshes.
+    expect(component.groups.length).toBe(2);
+  });
+
+  it('should patch the form from a reload when it is pristine', async () => {
+    await setup();
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, bio: 'server bio' } }),
+    );
+    component.load();
+    expect(component.form.value.bio).toBe('server bio');
+  });
+
+  it('should move focus to the first field after a successful banner retry', async () => {
+    vi.useFakeTimers();
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    apiSpy.getOverview.mockReturnValue(of(OVERVIEW));
+    component.retryLoad();
+    fixture.detectChanges(); // form renders now that loading finished
+    vi.advanceTimersByTime(0); // flush the deferred focus
+    const input = (fixture.nativeElement as HTMLElement).querySelector(
+      'input[formcontrolname="display_name"]',
+    );
+    expect(document.activeElement).toBe(input);
+    vi.useRealTimers();
   });
 
   it('should live-update the avatar initials from the display name control', async () => {

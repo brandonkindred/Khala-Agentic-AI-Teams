@@ -9,7 +9,7 @@ changing these routes.
 
 Endpoints:
 - GET    /api/user-profile                 -> current profile
-- PUT    /api/user-profile                 -> update profile fields (preferences merge key-by-key)
+- PUT    /api/user-profile                 -> update profile fields (preferences merge by top-level key)
 - GET    /api/user-profile/associations    -> linked artifacts (optional ?artifact_type=)
 - GET    /api/user-profile/integrations    -> integration status (pass-through)
 - GET    /api/user-profile/overview        -> profile + associations + integrations (one round-trip)

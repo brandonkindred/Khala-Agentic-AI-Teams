@@ -1,4 +1,4 @@
-import { Component, DestroyRef, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, ElementRef, OnInit, ViewChild, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
@@ -76,13 +76,14 @@ export class UserProfileComponent implements OnInit {
   profileLoaded = false;
 
   /**
-   * True when the server already has an `avatar_color` preference (or one was
-   * saved this session). Saves include the key only when this is true or the
-   * user picked a swatch — so a profile that never chose a color isn't
-   * silently pinned to the current default by an unrelated (e.g. bio-only)
-   * save, and keeps following the app default if it ever changes.
+   * Set when the user clicks the banner's Retry: after the retried load
+   * succeeds, focus moves to the first form field so keyboard/AT users don't
+   * lose their place when the (focused) Retry button unmounts.
    */
-  private hadStoredAvatarColor = false;
+  private focusFormAfterLoad = false;
+
+  /** First form field, the focus target after a successful banner Retry. */
+  @ViewChild('displayNameInput') private displayNameInput?: ElementRef<HTMLInputElement>;
 
   groups: AssociationGroup[] = [];
   integrations: ProfileIntegration[] = [];
@@ -109,8 +110,10 @@ export class UserProfileComponent implements OnInit {
    * Preconditions: none — a no-op while a previous load is still in flight, so
    * overlapping requests can't race to set the view. Clears any prior `success`
    * banner so a stale "Profile saved." message can't linger across a reload.
-   * Postconditions: on success `form` is patched and `groups`/`totalAssociations`/
-   * `integrations` reflect the response. On a 2xx response whose shape is
+   * Postconditions: on success `groups`/`totalAssociations`/`integrations`
+   * reflect the response, and `form` is patched ONLY while pristine — a dirty
+   * form keeps the user's unsaved edits (e.g. a "Refresh linked work" click
+   * mid-edit must not silently discard them). On a 2xx response whose shape is
    * malformed (missing `profile`/`associations`/`integrations`), `error` is set
    * and `groups`/`integrations`/`totalAssociations` are cleared so a broken
    * contract can't leave stale artifacts on screen. On an HTTP error, `error` is
@@ -146,29 +149,49 @@ export class UserProfileComponent implements OnInit {
           return;
         }
         const { profile, associations, integrations } = overview;
-        // `preferences` is free-form JSONB; the optional chain yields undefined
-        // for null/garbage containers and resolveAvatarColor defends the rest.
-        const storedAvatarColor = profile.preferences?.['avatar_color'];
-        this.hadStoredAvatarColor = storedAvatarColor !== undefined;
-        this.form.patchValue({
-          // `?? ''` defends against a null slipping through a technically-valid
-          // body; the backend columns are NOT NULL DEFAULT so this is belt-and-braces.
-          display_name: profile.display_name ?? '',
-          email: profile.email ?? '',
-          bio: profile.bio ?? '',
-          avatar_color: resolveAvatarColor(storedAvatarColor).key,
-        });
+        if (this.form.pristine) {
+          this.form.patchValue({
+            // `?? ''` defends against a null slipping through a technically-valid
+            // body; the backend columns are NOT NULL DEFAULT so this is belt-and-braces.
+            display_name: profile.display_name ?? '',
+            email: profile.email ?? '',
+            bio: profile.bio ?? '',
+            // `preferences` is free-form JSONB; the optional chain yields undefined
+            // for null/garbage containers and resolveAvatarColor defends the rest.
+            avatar_color: resolveAvatarColor(profile.preferences?.['avatar_color']).key,
+          });
+        }
         this.groups = this.groupAssociations(associations);
         this.totalAssociations = this.groups.reduce((sum, g) => sum + g.items.length, 0);
         this.integrations = integrations;
         this.profileLoaded = true; // the form now reflects real server state — saving is safe
         this.loading = false;
+        if (this.focusFormAfterLoad) {
+          this.focusFormAfterLoad = false;
+          // The form renders on the next change-detection pass, after this
+          // handler returns — defer the focus until it exists.
+          setTimeout(() => this.displayNameInput?.nativeElement.focus());
+        }
       },
       error: () => {
+        this.focusFormAfterLoad = false; // the alert announces the failure instead
         this.error = 'Failed to load your profile. Please try again.';
         this.loading = false;
       },
     });
+  }
+
+  /**
+   * Retry a failed initial load from the error banner.
+   *
+   * Preconditions: none — delegates to `load()`, which guards re-entry.
+   * Postconditions: identical to `load()`, plus on success keyboard focus
+   * moves to the first form field (the Retry button unmounts while focused,
+   * which would otherwise drop focus to the document body).
+   */
+  retryLoad(): void {
+    this.focusFormAfterLoad = true;
+    this.load();
   }
 
   /**
@@ -194,18 +217,18 @@ export class UserProfileComponent implements OnInit {
     this.error = null;
     this.success = null;
     const value = this.form.getRawValue();
-    // Only the key this page owns, and only when the user picked a color (or
-    // one is already stored): the backend merges preferences key-by-key, and
-    // omitting the field entirely leaves server-side preferences untouched —
-    // so a bio-only save can't stamp the default color onto a profile that
-    // never chose one.
-    const includeAvatarColor = this.form.controls.avatar_color.dirty || this.hadStoredAvatarColor;
+    // Send avatar_color only when the user picked a swatch this session: the
+    // backend merges preferences key-by-key, so omitting the field leaves the
+    // stored value untouched. Re-sending a merely-loaded value would stamp
+    // the default onto never-chose profiles and could overwrite a concurrent
+    // tab's newer choice with this tab's stale one.
+    const avatarColorPicked = this.form.controls.avatar_color.dirty;
     this.api
       .updateProfile({
         display_name: value.display_name ?? '',
         email: value.email ?? '',
         bio: value.bio ?? '',
-        ...(includeAvatarColor
+        ...(avatarColorPicked
           ? { preferences: { avatar_color: value.avatar_color ?? DEFAULT_AVATAR_COLOR } }
           : {}),
       })
@@ -214,9 +237,6 @@ export class UserProfileComponent implements OnInit {
         next: () => {
           this.saving = false;
           this.success = 'Profile saved.';
-          // A saved color is now server-side state — later saves keep sending it.
-          // (includeAvatarColor already subsumes the previous flag value.)
-          this.hadStoredAvatarColor = includeAvatarColor;
           // The form now matches the persisted state — clear the dirty flag so an
           // unsaved-changes guard doesn't prompt after a successful save.
           this.form.markAsPristine();

@@ -17,7 +17,7 @@
         <!-- Retry only before the first successful load (the dead-end case);
              after a failed SAVE, reloading here would discard unsaved edits. -->
         @if (!profileLoaded) {
-          <button mat-stroked-button type="button" class="up-retry" (click)="load()">
+          <button mat-stroked-button type="button" class="up-retry" (click)="retryLoad()">
             <mat-icon aria-hidden="true">refresh</mat-icon>
             Retry
           </button>
@@ -69,7 +69,7 @@
 
           <mat-form-field appearance="outline">
             <mat-label>Display name</mat-label>
-            <input matInput formControlName="display_name" autocomplete="name" />
+            <input #displayNameInput matInput formControlName="display_name" autocomplete="name" />
           </mat-form-field>
 
           <mat-form-field appearance="outline">

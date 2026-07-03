@@ -37,8 +37,9 @@ export class UserProfileApiService {
    * Postconditions: the observable emits the updated `UserProfile`, or errors with
    * the `HttpErrorResponse`. A present `preferences` dict is MERGED key-by-key
    * into the stored object server-side (top-level keys overwrite; keys absent
-   * from the update survive) — send only the keys you own; there is no
-   * key-deletion path.
+   * from the update survive) — send only the keys you own. There is no
+   * key-deletion path, but a `null` value is stored and read as absent (the
+   * sanctioned way to reset a preference).
    */
   updateProfile(body: UserProfileUpdate): Observable<UserProfile> {
     return this.http.put<UserProfile>(this.baseUrl, body);
