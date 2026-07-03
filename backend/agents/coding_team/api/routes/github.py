@@ -1,0 +1,120 @@
+"""coding_team API — github-issue-driven run route.
+
+Handlers register on a module-local ``APIRouter`` that ``main`` mounts with
+``app.include_router`` (absolute paths unchanged). Collaborators are dereferenced
+through the ``main`` hub so patches applied to ``main`` still take effect.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import uuid
+from pathlib import Path
+from typing import Any, Dict
+
+# Ensure backend/agents is on path for coding_team and job_service_client
+from fastapi import APIRouter, HTTPException
+
+from coding_team.api import main as _main
+from coding_team.api.models import (
+    RunFromGitHubRequest,
+    RunFromGitHubResponse,
+)
+from coding_team.github_source import (
+    GitHubAPIError,
+    NotAnIssueError,
+    is_ready,
+    issue_to_plan_input,
+    pick_ready_issue,
+)
+from coding_team.token_crypto import encrypt_token
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+@router.post("/run-from-github", response_model=RunFromGitHubResponse)
+def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse:
+    """Discover (or verify) a ready GitHub issue and start a coding job for it."""
+    token = request.github_token or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise HTTPException(status_code=400, detail="GITHUB_TOKEN not configured")
+    if not Path(request.repo_path).is_dir():
+        raise HTTPException(status_code=400, detail=f"repo_path not found: {request.repo_path}")
+
+    with _main.GitHubClient(token=token) as client:
+        try:
+            if request.issue_number is not None:
+                issue = client.get_issue(request.owner, request.repo, request.issue_number)
+                ready = is_ready(client, request.owner, request.repo, issue)
+                if not ready.ready:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"issue #{issue.number} blocked by sub-issues {list(ready.blocking)}"
+                        ),
+                    )
+            else:
+                picked = pick_ready_issue(client, request.owner, request.repo, label=request.label)
+                if picked is None:
+                    raise HTTPException(status_code=404, detail="no ready issues")
+                issue, ready = picked
+        except NotAnIssueError as e:
+            # Operator passed a PR number — that's a 400, not an upstream error.
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except GitHubAPIError as e:
+            raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
+
+    running = _main._running_job_for_issue(request.owner, request.repo, issue.number)
+    if running:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"job {running} already running for {request.owner}/{request.repo}#{issue.number}"
+            ),
+        )
+
+    plan = issue_to_plan_input(
+        issue,
+        request.repo_path,
+        list(ready.sub_issues),
+        request.owner,
+        request.repo,
+    )
+
+    job_id = str(uuid.uuid4())
+    _main.create_job(job_id=job_id, repo_path=request.repo_path, plan_input=plan.model_dump())
+    job_fields: Dict[str, Any] = {
+        "github_context": {
+            "owner": request.owner,
+            "repo": request.repo,
+            "issue_number": issue.number,
+            "issue_url": issue.html_url,
+            "base_branch": request.base_branch,
+            "remote": request.remote,
+            # Persisted so a resume reconstructs the SAME cleanup decision the
+            # fresh run made; without it a resumed job would default to False and
+            # leak its ephemeral per-issue checkout on clean completion.
+            "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
+        },
+    }
+    # Persist the token (encrypted) so a resume after the orchestrator thread dies (server restart,
+    # different worker process) can re-drive the GitHub publish flow. In the standard deployment the
+    # token is a per-request PAT from the credential store and the coding-team container has no
+    # GITHUB_TOKEN env, so without this the job could never resume. Only OPAQUE CIPHERTEXT is stored
+    # — never a usable PAT — because the raw job record is echoed verbatim by the generic
+    # GET /api/jobs/{team} route. When no encryption key is configured the token is not persisted
+    # and resume falls back to GITHUB_TOKEN env (or refuses); we never store plaintext.
+    encrypted = encrypt_token(token)
+    if encrypted:
+        job_fields["github_token_encrypted"] = encrypted
+    _main.update_job(job_id, **job_fields)
+
+    _main._start_hook_thread(job_id, request, plan, issue, token)
+    return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)
+
+
+# ---------------------------------------------------------------------------
+# Pull-request review flow (code reviewer agents review an open PR)
+# ---------------------------------------------------------------------------

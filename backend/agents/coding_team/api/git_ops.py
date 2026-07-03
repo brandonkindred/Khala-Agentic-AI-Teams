@@ -1,0 +1,1152 @@
+"""coding_team API — git/branch machinery: auth env, active-issue tracking, ephemeral checkouts, rescue branches, issue-branch prep, and the github-hook run flow.
+
+Monkeypatched collaborators are dereferenced through the ``main`` module object
+at call time so ``monkeypatch.setattr(main, ...)`` keeps taking effect after the
+split; models are imported directly.
+"""
+
+from __future__ import annotations
+
+import base64
+import fcntl
+import logging
+import os
+import shutil
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+# Ensure backend/agents is on path for coding_team and job_service_client
+from coding_team import hitl
+from coding_team.api import main as _main
+from coding_team.api.models import (
+    RunFromGitHubRequest,
+)
+from coding_team.clone_workspace import (
+    clone_lock_path,
+    is_per_issue_dir,
+    is_within_ephemeral_workspace,
+)
+from coding_team.github_source import (
+    GitHubAPIError,
+    Issue,
+    scrub_token_from_text,
+)
+from coding_team.github_source.client import _is_safe_ref
+from coding_team.job_store import (
+    DEFAULT_CACHE_DIR,
+)
+from coding_team.models import CodingTeamPlanInput
+from shared_git.git_utils import (
+    DEVELOPMENT_BRANCH,
+    git_identity_env,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _record_failure(
+    client: _main.GitHubClient, owner: str, repo: str, num: int, job_id: str, error: str
+) -> None:
+    """Mark the job failed, capture the error, and post a (scrubbed) comment.
+
+    Used for every post-orchestrator failure so callers polling /status see a
+    consistent ``status="failed"`` instead of stale ``status="completed"``.
+    """
+    safe = scrub_token_from_text(error)
+    # status_text/current_activity are reset so a failed job cannot keep claiming
+    # mid-review progress (e.g. a frozen "Reviewing PR #7 (85%)" line) forever.
+    _main.update_job(job_id, status="failed", error=safe, status_text=None, current_activity=None)
+    # No-op for non-review jobs (no matching code_review_runs row); persists the
+    # failure for review jobs so the Code Review page shows the failed outcome.
+    _main.update_review(job_id, status="failed", error=safe, completed=True)
+    _main._safe_comment(client, owner, repo, num, f"Coding team job `{job_id}` failed: {safe}")
+
+
+def _has_merged_tasks(job: Dict[str, Any]) -> bool:
+    """True iff the job landed at least one REAL merge — a task that is MERGED and actually changed
+    code. Tasks the Tech Lead adjudicated as already-done (``resolved_without_changes``) are MERGED
+    but landed no diff on ``development``, so they do not count: a job whose only merged tasks are
+    such no-op resolutions has nothing to publish, and treating them as publishable would push an
+    empty branch / open a no-op PR instead of reporting that no real work landed."""
+    return any(
+        (t or {}).get("status") == "merged" and not (t or {}).get("resolved_without_changes")
+        for t in (job.get("task_graph_snapshot") or [])
+    )
+
+
+def _failed_tasks(job: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Tasks that reached the terminal FAILED state (rejected past the revision cap, blocked by a
+    failed dependency, or an unrecoverable implementation/review error)."""
+    return [
+        t for t in (job.get("task_graph_snapshot") or []) if (t or {}).get("status") == "failed"
+    ]
+
+
+def _format_failed_tasks(failed: List[Dict[str, Any]]) -> str:
+    """Render a markdown bullet list of failed tasks for a PR body / issue comment."""
+    return "\n".join(
+        f"- `{(t.get('id') or '?')}`: {((t.get('title') or '').strip() or 'untitled')}"
+        for t in failed
+    )
+
+
+def _truncate_title(title: str, issue_num: int, limit: int = 256) -> str:
+    suffix = f" (closes #{issue_num})"
+    head = title[: max(0, limit - len(suffix))].rstrip()
+    return f"{head}{suffix}" if head else f"Issue #{issue_num}{suffix}"
+
+
+def _git_auth_env(token: str) -> Dict[str, str]:
+    """Build an env dict that injects Basic credentials via ``GIT_CONFIG_*`` vars.
+
+    Mirrors the unified API's clone-time auth (``_git_auth_env`` in
+    ``unified_api/routes/integrations.py``): the credential is passed
+    transiently through the environment and never written to ``.git/config``.
+    That matters because the checkout lives on the shared ``agents_data``
+    volume — a persisted token would outlive the job and leak across runs.
+
+    The scheme must be ``Basic`` with the ``x-access-token`` username:
+    GitHub's git smart-HTTP endpoint rejects a ``Bearer`` header (401
+    ``invalid credentials``) even for a valid token — Bearer is only accepted
+    by the REST API — after which git tries to prompt for a username and
+    fails headless ("terminal prompts disabled").
+
+    Preconditions:
+        - ``token`` is a non-empty GitHub credential authorizing the operation.
+    Postconditions:
+        - Returns a copy of ``os.environ`` augmented with a single transient
+          ``http.extraHeader`` git-config entry (Authorization: Basic) and
+          ``GIT_TERMINAL_PROMPT=0`` so a missing/invalid credential fails fast
+          instead of blocking on an interactive prompt until the git timeout.
+    """
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return {
+        **os.environ,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraHeader",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def _scrub_auth_header_values(msg: str, env: Optional[Dict[str, str]]) -> str:
+    """Redact the transient auth header from git output.
+
+    ``scrub_token_from_text`` only covers URL-embedded credentials; the
+    header value built by ``_git_auth_env`` is a second representation of
+    the token (Basic + base64) that verbose/trace git output can echo. Job
+    errors and issue comments are built from these messages, so every
+    representation must be redacted.
+
+    Postconditions:
+        - Neither the full header value, the ``Basic <b64>`` credential, nor
+          the bare base64 form appears in the returned text.
+    """
+    if not env:
+        return msg
+    header = env.get("GIT_CONFIG_VALUE_0") or ""
+    if not header.startswith("Authorization: "):
+        return msg
+    credential = header[len("Authorization: ") :]  # "Basic <b64>"
+    encoded = credential.rsplit(" ", 1)[-1]
+    for needle in (header, credential, encoded):
+        if needle:
+            msg = msg.replace(needle, "***")
+    return msg
+
+
+def _git(
+    repo_path: str,
+    *args: str,
+    timeout: float = 120.0,
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[int, str]:
+    """Run a git subcommand in ``repo_path``.
+
+    Postconditions:
+        - Returns ``(returncode, scrubbed_message)``; the message has any
+          URL-embedded token redacted via ``scrub_token_from_text`` and, when
+          an auth env was supplied, the transient Authorization header value
+          (including its base64 form) redacted as well.
+        - ``env=None`` (default) inherits the parent environment, preserving the
+          prior behaviour for local-only operations. Pass an auth env (see
+          ``_git_auth_env``) for network operations against a private remote.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", repo_path, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+        msg = _scrub_auth_header_values((r.stderr or r.stdout).strip(), env)
+        return r.returncode, scrub_token_from_text(msg)
+    except subprocess.TimeoutExpired:
+        return 124, f"git {' '.join(args)} timed out after {timeout}s"
+    except Exception as e:  # noqa: BLE001
+        return 1, scrub_token_from_text(_scrub_auth_header_values(str(e), env))
+
+
+RESCUE_BRANCH_PREFIX = "khala/rescue/"
+ACTIVE_ISSUE_CONFIG_KEY = "khala.active-issue"
+
+
+def _utc_timestamp() -> str:
+    """Wall-clock UTC stamp used in rescue branch names (patchable in tests)."""
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def _read_active_issue(repo_path: str) -> Optional[int]:
+    """Read the repo-local active-issue marker.
+
+    The marker means: a job for that issue was mid-flight on this checkout
+    and terminated abnormally (restart, kill, delete). It is the only state
+    that survives job deletion, so leftover work is attributed through it.
+
+    Postconditions:
+        - Returns the issue number, or None when the marker is absent or
+          unparseable (treated as unattributed).
+    """
+    rc, msg = _main._git(repo_path, "config", "--local", "--get", ACTIVE_ISSUE_CONFIG_KEY)
+    if rc != 0:
+        return None
+    try:
+        return int(msg.strip())
+    except ValueError:
+        return None
+
+
+def _write_active_issue(repo_path: str, issue_number: int) -> None:
+    """Record that a job for issue_number is mid-flight on this checkout."""
+    _main._git(repo_path, "config", "--local", ACTIVE_ISSUE_CONFIG_KEY, str(issue_number))
+
+
+def _clear_active_issue(repo_path: str) -> None:
+    """Remove the marker; idempotent (unsetting a missing key is a no-op)."""
+    _main._git(repo_path, "config", "--local", "--unset", ACTIVE_ISSUE_CONFIG_KEY)
+
+
+def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
+    """Remove the marker only when it belongs to this job's issue.
+
+    Two different issues may legitimately run against the same checkout (the
+    duplicate guard is per-issue); an older job publishing after a newer job
+    prepped must not unset the newer job's marker, or a crash of the newer
+    job would lose its development-work attribution.
+
+    Postconditions:
+        - The marker is unset iff it equaled ``issue_number``; any other
+          value (or no marker) is left untouched.
+    """
+    if _read_active_issue(repo_path) == issue_number:
+        _clear_active_issue(repo_path)
+
+
+def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
+    """Resolve ``repo_path`` and return it iff it is a platform-owned per-issue
+    git checkout safe to delete; otherwise ``None``.
+
+    Resolving here (and handing the resolved ``Path`` back) means the path that is
+    *validated* is the exact symlink-collapsed path the caller then deletes,
+    closing the check-resolved / delete-raw-string gap a directory→symlink swap
+    could otherwise exploit. Four conditions must all hold:
+
+    1. the checkout root itself is NOT a symlink — a legitimate platform-owned
+       per-issue checkout is a real directory created by ``git clone``. Resolving
+       a symlinked root would follow it to its target, so a job that replaced its
+       own ``issue-7`` directory with a symlink to a concurrently-running
+       ``issue-8`` checkout would otherwise make cleanup delete the *sibling*;
+    2. the path lives strictly under one of this deployment's ephemeral
+       workspace roots (``is_within_ephemeral_workspace``) — so an
+       operator-pinned or arbitrary path is never eligible (and a filesystem
+       root or shallow system dir like ``/`` or ``/data`` is excluded because it
+       is not under a workspace root), even if a caller sets the cleanup flag and
+       points ``repo_path`` at someone else's repo;
+    3. its final component is the auto-derived ``issue-{N}`` per-issue shape
+       (``is_per_issue_dir``) — so a repo-level checkout that merely sits under an
+       ephemeral root (e.g. the PR-review path ``.../github_workspaces/owner/repo``)
+       is never deleted, matching the contract that only per-issue clones are
+       reclaimed;
+    4. it is actually a git checkout (carries a ``.git`` entry).
+
+    Preconditions:
+        - None on caller state; ``repo_path`` may be any string (it is validated
+          here precisely because it originates from an untrusted request).
+    Postconditions:
+        - Returns the resolved ``Path`` when all four conditions hold; ``None`` on
+          any resolution error (null byte / unresolvable) or when any condition
+          fails. Pure apart from filesystem reads.
+    """
+    try:
+        raw = Path(repo_path)
+        resolved = raw.resolve()
+        root_is_symlink = raw.is_symlink()
+    except (OSError, ValueError):
+        return None
+    # Refuse a symlinked checkout root: resolving it would follow the link to its
+    # target and delete *that* (e.g. a sibling issue-N checkout), not the job's own
+    # directory. A real per-issue checkout is never a symlink.
+    if root_is_symlink:
+        return None
+    # ``resolve()`` defaults to ``strict=False`` (Python 3.6+), so a not-yet-created
+    # path resolves without raising; passing the already-resolved path to is_within
+    # keeps its internal resolve idempotent.
+    if not is_within_ephemeral_workspace(resolved):
+        return None
+    if not is_per_issue_dir(resolved.name):
+        return None
+    if not (resolved / ".git").exists():
+        return None
+    return resolved
+
+
+def _is_ephemeral_checkout_path(repo_path: str) -> bool:
+    """True only for a platform-owned per-issue git checkout that is safe to delete.
+
+    Thin boolean view over ``_ephemeral_checkout_target`` (see it for the four
+    conditions and the threat model). Kept as a predicate for call sites that only
+    need the yes/no answer.
+
+    Preconditions:
+        - None on caller state; ``repo_path`` may be any string.
+    Postconditions:
+        - Returns True iff ``_ephemeral_checkout_target`` resolves a deletable
+          checkout for ``repo_path``; False otherwise. Pure apart from filesystem
+          reads.
+    """
+    return _ephemeral_checkout_target(repo_path) is not None
+
+
+def _cleanup_issue_checkout(repo_path: str) -> None:
+    """Remove a platform-owned, ephemeral per-issue checkout after clean success.
+
+    Only called once the job has completed with every task merged and the work
+    published to a PR, so the local clone holds nothing the remote does not. The
+    folder is recreated by the caller's clone-or-fetch on a later run.
+
+    Concurrency:
+        The ``rmtree`` runs while holding the SAME sibling ``flock`` that
+        unified_api's ``_ensure_repo_clone`` takes around clone/fetch. Without it,
+        a quick ``/api/integrations/github/run-issue`` retry — whose clone happens
+        in unified_api *before* the coding-team active-job guard runs — could
+        clone/fetch into the directory mid-rmtree. The lock lives in the
+        checkout's parent, so it survives the rmtree. The lock file is
+        deliberately NOT unlinked: unlinking a flock'd file lets a waiter keep the
+        old (now-orphaned) inode while a later run creates a fresh lock file and
+        locks the new inode, so two runs would each think they hold "the" lock.
+        Leaving it makes a stable per-issue lock both clone and cleanup share; the
+        files are tiny and bounded by the number of distinct issues per repo.
+
+    Postconditions:
+        - Best-effort: the checkout is removed only when
+          ``_ephemeral_checkout_target`` resolves ``repo_path`` to a
+          platform-owned, non-shallow per-issue git checkout under an ephemeral
+          root, and the resolved (symlink-collapsed) path it returns is the one
+          deleted; an unsafe path is refused (logged, left in place). Never
+          raises — a cleanup failure (permissions, lock unavailable, race with a
+          concurrent reader) must not turn a successful job into a failure; it is
+          caught and logged. The success line is logged only after ``rmtree``
+          returns.
+
+    Note:
+        ``rmtree`` is not atomic. A failure partway through can leave a
+        partially-deleted directory at ``repo_path`` (possibly missing
+        ``.git``); the retained lock keeps serialising access, but a later retry
+        whose ``_ensure_repo_clone`` finds a non-empty, non-git directory will
+        fail its ``git clone`` and the leftover must be cleared manually. This is
+        rare (``rmtree`` usually fails atomically on a permission error) and the
+        published work is already safe on the remote PR.
+    """
+    target = _ephemeral_checkout_target(repo_path)
+    if target is None:
+        logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
+        return
+
+    # Hold the clone lock around the delete so a concurrent _ensure_repo_clone
+    # can't interleave a clone/fetch into the directory being removed. Key the lock
+    # on the RESOLVED checkout path (not the raw request string): _ensure_repo_clone
+    # receives the already-resolved checkout path from _resolve_repo_path, so keying
+    # on the raw string would, for a symlinked path, lock a different name and leave
+    # the real checkout unguarded. The lock lives in the checkout's parent, so it
+    # outlives the rmtree. clone_lock_path would only raise ValueError on an
+    # empty-name path, which a validated per-issue target never is — but guard it
+    # anyway so a future change can't break the "never raises" contract.
+    try:
+        lock_path = clone_lock_path(target)
+    except ValueError as e:
+        logger.warning("Skipping checkout cleanup; invalid lock path for %s: %s", target, e)
+        return
+    try:
+        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in finally
+    except OSError as e:
+        # Can't take the lock (e.g. parent vanished) — skip rather than delete
+        # unsynchronised and risk racing a concurrent clone. Best-effort.
+        logger.warning("Skipping checkout cleanup; could not open clone lock %s: %s", lock_path, e)
+        return
+    try:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        except OSError as e:
+            # flock can fail (e.g. ENOLCK on some network filesystems). Cleanup must
+            # never turn a successful job into a failure, so skip rather than let it
+            # propagate — honouring the "never raises" contract.
+            logger.warning(
+                "Skipping checkout cleanup; could not acquire clone lock %s: %s", lock_path, e
+            )
+            return
+        # Re-validate under the lock, but on the SAME resolved ``target`` captured
+        # before locking — NOT by re-resolving the raw ``repo_path``. Re-resolving
+        # would let a symlink swapped between the first resolve and lock
+        # acquisition redirect the delete to a different checkout than the one this
+        # lock protects (the lock is keyed on the original ``target``). Operating
+        # on the fixed resolved path closes that window: it is the real directory
+        # (never a symlink), so rmtree hits the intended checkout, and rmtree does
+        # not follow symlinks *inside* the tree (it unlinks the link, never its
+        # target), so a symlink planted in the checkout can't redirect the delete.
+        if not (
+            is_within_ephemeral_workspace(target)
+            and is_per_issue_dir(target.name)
+            and (target / ".git").exists()
+        ):
+            logger.warning("Checkout no longer a deletable per-issue path under lock: %s", target)
+            return
+        try:
+            shutil.rmtree(target)
+            logger.info("Removed ephemeral per-issue checkout at %s", target)
+        except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
+            # exc_info so a partial-rmtree failure (the non-atomic case noted
+            # above) is diagnosable from the traceback, not just the message.
+            logger.warning(
+                "Failed to remove ephemeral checkout at %s: %s", repo_path, e, exc_info=True
+            )
+    finally:
+        # Release and close, but do NOT unlink the lock file (see Concurrency).
+        # Both are wrapped so a degenerate flock/close can't break "never raises".
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            lock_file.close()
+        except OSError:
+            pass
+
+
+def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
+    """True if ref resolves to a commit and has commits not reachable from base_ref."""
+    rc, _ = _main._git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    if rc != 0:
+        return False
+    rc, out = _main._git(repo_path, "rev-list", "--count", f"{base_ref}..{ref}")
+    if rc != 0:
+        return False
+    try:
+        return int(out.strip()) > 0
+    except ValueError:
+        return False
+
+
+def _reachable_from(repo_path: str, tip: str, container: str) -> bool:
+    """True if tip is an ancestor of container (resetting container keeps tip reachable)."""
+    rc, _ = _main._git(repo_path, "merge-base", "--is-ancestor", tip, container)
+    return rc == 0
+
+
+def _rescue_branch_name(repo_path: str, issue: Optional[int]) -> Optional[str]:
+    """Allocate an unused rescue branch name.
+
+    Postconditions:
+        - Returns `khala/rescue/issue-<issue>-<ts>` (issue known) or
+          `khala/rescue/<ts>`, suffixed `-1`..`-9` on collision; None when
+          all ten candidates exist.
+    """
+    tag = f"issue-{issue}-" if issue is not None else ""
+    base = f"{RESCUE_BRANCH_PREFIX}{tag}{_main._utc_timestamp()}"
+    for cand in [base] + [f"{base}-{i}" for i in range(1, 10)]:
+        rc, _ = _main._git(repo_path, "rev-parse", "--verify", "--quiet", f"refs/heads/{cand}")
+        if rc != 0:
+            return cand
+    return None
+
+
+def _latest_issue_rescue_ref(repo_path: str, issue_number: int) -> Optional[str]:
+    """Newest rescue ref for the issue (timestamps sort lexicographically)."""
+    rc, out = _main._git(
+        repo_path,
+        "for-each-ref",
+        "--sort=-refname",
+        "--count=1",
+        "--format=%(refname:short)",
+        f"refs/heads/{RESCUE_BRANCH_PREFIX}issue-{issue_number}-*",
+    )
+    if rc != 0 or not out.strip():
+        return None
+    return out.strip().splitlines()[0]
+
+
+def _working_tree_dirty(repo_path: str) -> Tuple[bool, bool, Optional[str]]:
+    """Inspect the working tree.
+
+    Postconditions:
+        - Returns (status_ok, dirty, listing). status_ok=False means
+          `git status` itself failed (state unknowable — callers must fail
+          closed, never attempt recovery); listing then carries the error.
+        - When status_ok, listing is bounded porcelain output (or None when
+          clean) so conflicting paths can be surfaced without dumping file
+          contents.
+    """
+    rc, msg = _main._git(repo_path, "status", "--porcelain")
+    if rc != 0:
+        return False, True, msg or "git status failed"
+    return True, bool(msg.strip()), msg if msg.strip() else None
+
+
+def _recover_dirty_tree(
+    repo_path: str, marker: Optional[int], issue_number: Optional[int], listing: str
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Commit or preserve a dirty working tree before branch prep.
+
+    Same-issue work (marker == issue_number, HEAD on a real branch) is
+    committed in place so it can seed continuation; anything else — foreign
+    issue, unknown attribution, detached HEAD — is moved onto a rescue
+    branch. Work is never deleted.
+
+    Preconditions:
+        - The working tree is dirty and `git status` succeeded (callers
+          gate on _working_tree_dirty's status_ok).
+    Postconditions:
+        - On success (error is None) the working tree is clean and the prior
+          dirty state is committed on the returned-or-noted branch; wip_tip
+          names the continuation seed candidate when the work belongs to
+          issue_number, else None; note is operator-facing.
+        - On failure (error set) nothing has been deleted.
+    """
+    same_issue = marker is not None and issue_number is not None and marker == issue_number
+    rc, head = _main._git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
+    head_branch = head.strip() if rc == 0 else "HEAD"
+    on_branch = head_branch not in ("", "HEAD")
+
+    if same_issue and on_branch:
+        ok, msg = _main.commit_working_tree(
+            repo_path,
+            f"wip: recover uncommitted changes from interrupted run (issue {issue_number})",
+        )
+        if not ok:
+            return None, None, msg
+        note = f"♻️ Recovered uncommitted changes from an interrupted run (committed on `{head_branch}`)."
+        return head_branch, note, None
+
+    rescue = _main._rescue_branch_name(repo_path, marker)
+    if rescue is None:
+        return None, None, "could not allocate a rescue branch name"
+    rc, msg = _main._git(repo_path, "checkout", "-b", rescue, "--")
+    if rc != 0:
+        return None, None, f"rescue branch creation failed: {msg}"
+    was = f" (was on `{head_branch}`)" if on_branch else ""
+    ok, msg = _main.commit_working_tree(
+        repo_path,
+        f"wip: rescue uncommitted changes from interrupted run{was}\n\n{listing}".rstrip(),
+    )
+    if not ok:
+        return None, None, f"rescue commit failed: {msg}"
+    wip_tip = rescue if same_issue else None
+    note = f"♻️ Recovered uncommitted changes from an interrupted run; preserved on local branch `{rescue}`."
+    return wip_tip, note, None
+
+
+def _preserve_if_would_orphan(
+    repo_path: str, branch: str, base_ref: str, seed: str, marker: Optional[int]
+) -> Optional[str]:
+    """Create a rescue ref for `branch` (any committish, including a
+    remote-tracking ref) when adopting `seed` would strand its commits.
+
+    Invariant served: no commits visible to branch prep may become
+    unreachable — neither through prep's own `checkout -B` resets of local
+    branches, nor through the job's eventual `--force-with-lease` push
+    replacing a remote issue tip the chosen seed does not contain.
+
+    Postconditions:
+        - Returns None when nothing needed preserving or a rescue ref now
+          holds the tip; returns an error string when preservation was
+          needed but failed (callers must fail closed).
+    """
+    if branch == seed:
+        return None
+    if not _is_ahead(repo_path, branch, base_ref):
+        return None
+    if _reachable_from(repo_path, branch, seed):
+        return None
+    name = _main._rescue_branch_name(repo_path, marker)
+    if name is None:
+        return f"could not allocate a rescue branch to preserve `{branch}`"
+    rc, msg = _main._git(repo_path, "branch", name, branch)
+    if rc != 0:
+        return f"failed to preserve `{branch}` before reset: {msg}"
+    logger.warning("Preserved %s on %s before reset (ahead of %s)", branch, name, base_ref)
+    return None
+
+
+def _prepare_issue_branch(
+    repo_path: str,
+    remote: str,
+    default_branch: str,
+    integration_branch: str,
+    token: Optional[str] = None,
+    issue_number: Optional[int] = None,
+) -> Tuple[bool, Optional[str], List[str]]:
+    """Prepare development + integration branches, recovering interrupted state.
+
+    Dirty trees are recovered (same-issue work committed in place, foreign
+    work preserved on khala/rescue/* branches), the integration branch is
+    seeded from the best prior-progress tip so a new job picks up where the
+    previous one left off, and no reset may orphan commits.
+
+    Preconditions:
+        - repo_path is a git checkout; ref arguments may be untrusted.
+    Postconditions (success):
+        - integration_branch is checked out with a clean working tree;
+          khala.active-issue records issue_number when provided; every commit
+          reachable from a local branch on entry is still reachable from some
+          local or remote ref; the returned notes describe recovery and
+          continuation actions for operator-facing reporting.
+    Postconditions (failure):
+        - No uncommitted work has been deleted and no commit that was
+          reachable on entry has become unreachable.
+    """
+    notes: List[str] = []
+
+    # Defense-in-depth: reject ref names that could be parsed as git options.
+    # This must precede dirty-tree recovery — a request that can never
+    # proceed must not commit WIP, create rescue branches, or switch the
+    # checkout on its way to being rejected.
+    if not _is_safe_ref(default_branch):
+        return False, f"unsafe default_branch ref: {default_branch!r}", notes
+    if not _is_safe_ref(integration_branch):
+        return False, f"unsafe integration_branch ref: {integration_branch!r}", notes
+
+    marker = _read_active_issue(repo_path)
+
+    status_ok, dirty, listing = _main._working_tree_dirty(repo_path)
+    if not status_ok:
+        return False, f"cannot inspect working tree: {listing}", notes
+    wip_tip: Optional[str] = None
+    if dirty:
+        wip_tip, note, recover_err = _recover_dirty_tree(
+            repo_path, marker, issue_number, listing or ""
+        )
+        if recover_err:
+            return (
+                False,
+                "working tree has uncommitted changes; clean it before retrying:\n"
+                f"{listing}\n(automatic recovery failed: {recover_err})",
+                notes,
+            )
+        if note:
+            notes.append(note)
+
+    # The marker is NOT cleared here even after recovery: it also drives
+    # same-issue continuation (development as a seed candidate), and the
+    # development-ahead commits it attributes remain on the checkout until
+    # the re-seed below succeeds. The only safe transition is the success
+    # path's _write_active_issue overwrite; every failure exit retains it
+    # so a retry can still attribute and continue the prior work.
+
+    # `fetch` is the only network op here (the checkouts below are local), so it
+    # needs the credential. The clone was authenticated transiently by the
+    # unified API; that auth is not persisted, so we re-supply it per fetch.
+    auth_env = _git_auth_env(token) if token else None
+    rc, msg = _main._git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
+    if rc != 0:
+        return False, msg, notes
+    # The issue branch may exist remotely from a previous job that pushed
+    # before dying; fetch it as a continuation candidate (absence is fine).
+    base_ref = f"{remote}/{default_branch}"
+    remote_issue_ref = f"{remote}/{integration_branch}"
+    rc_issue_fetch, issue_fetch_msg = _main._git(
+        repo_path, "fetch", "--", remote, integration_branch, env=auth_env
+    )
+    if rc_issue_fetch != 0:
+        # `fetch` exit codes do not distinguish "no such remote ref" from a
+        # transient transport failure, and only confirmed absence may take
+        # the deletion path below — dropping the tracking ref on a network
+        # blip would hide live remote progress from candidate selection and
+        # let the final force-with-lease push race against it. Probe absence
+        # explicitly: `ls-remote --exit-code` exits 2 when the remote has no
+        # matching head, 0 when it does, anything else on transport failure.
+        rc_probe, probe_out = _main._git(
+            repo_path,
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "--",
+            remote,
+            integration_branch,
+            env=auth_env,
+        )
+        if rc_probe == 0:
+            return (
+                False,
+                f"could not fetch remote issue branch {integration_branch!r} "
+                f"(it exists on the remote — transient failure?): {issue_fetch_msg}",
+                notes,
+            )
+        if rc_probe != 2:
+            return (
+                False,
+                f"cannot verify whether remote issue branch {integration_branch!r} still "
+                f"exists (fetch failed: {issue_fetch_msg}; probe failed: {probe_out})",
+                notes,
+            )
+        # The remote branch is absent (deleted/pruned — the probe confirmed
+        # it, and the base-branch fetch succeeded so the remote itself is
+        # reachable). A stale remote-tracking ref from an earlier fetch would
+        # otherwise pose as live remote state: candidate selection could seed
+        # from it and the final force push would republish commits the remote
+        # deliberately no longer has. Pin its tip first (never-lose-work
+        # invariant), then
+        # drop the tracking ref. The rescue is deliberately UNTAGGED: a
+        # remote deletion is an explicit signal not to continue this state,
+        # so it is preserved for manual recovery without becoming an
+        # automatic continuation candidate (unlike preserved local
+        # divergence, which the system itself was still carrying).
+        if _is_ahead(repo_path, remote_issue_ref, base_ref):
+            preserve_err = _main._preserve_if_would_orphan(
+                repo_path, remote_issue_ref, base_ref, base_ref, None
+            )
+            if preserve_err:
+                return False, preserve_err, notes
+        _main._git(repo_path, "update-ref", "-d", f"refs/remotes/{remote_issue_ref}")
+        # Postcondition, not return-code, check: deletion legitimately fails
+        # when the ref never existed (fresh issue), but a ref that SURVIVES
+        # (lock, permissions, concurrent git op) would re-enter candidate
+        # selection and re-anchor the remote floor to a state the remote
+        # deliberately deleted — fail closed instead.
+        rc_gone, _ = _main._git(
+            repo_path, "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote_issue_ref}"
+        )
+        if rc_gone == 0:
+            return (
+                False,
+                f"could not drop stale remote-tracking ref {remote_issue_ref!r}; "
+                f"refusing to continue while it can pose as live remote state",
+                notes,
+            )
+    candidates: List[str] = []
+    if marker is not None and issue_number is not None and marker == issue_number:
+        # Same-issue continuation: the interrupted run's progress may live on
+        # BOTH the wip tip (wherever HEAD was at crash time) and development
+        # (merged task work). Order graph-aware — a tip containing the other
+        # goes first; diverged tips put development first (the canonical
+        # integration line; the wip branch is never reset, and a diverged
+        # integration-branch wip is pinned by the orphan-prevention pass).
+        if wip_tip and wip_tip != DEVELOPMENT_BRANCH:
+            if _reachable_from(repo_path, DEVELOPMENT_BRANCH, wip_tip):
+                candidates.extend((wip_tip, DEVELOPMENT_BRANCH))
+            else:
+                candidates.extend((DEVELOPMENT_BRANCH, wip_tip))
+        else:
+            candidates.append(DEVELOPMENT_BRANCH)
+    # Local-vs-remote issue tip: prefer local only when it already contains
+    # the remote tip. The eventual publish is `push --force-with-lease` and
+    # this function's own fetch refreshes the lease, so seeding from a tip
+    # that lacks remote-only commits would let the push silently drop them.
+    # A diverged local tip is pinned by the orphan-prevention pass below.
+    if _reachable_from(repo_path, remote_issue_ref, integration_branch):
+        candidates.extend((integration_branch, remote_issue_ref))
+    else:
+        candidates.extend((remote_issue_ref, integration_branch))
+    if issue_number is not None:
+        rescue_ref = _latest_issue_rescue_ref(repo_path, issue_number)
+        if rescue_ref:
+            candidates.append(rescue_ref)
+    # Remote floor: when the remote issue branch is live and ahead, no
+    # candidate that lacks its commits may seed — the force-with-lease push
+    # (lease refreshed by this function's own fetch) would silently drop the
+    # remote-only commits from the published PR. Locally-pinned rescue refs
+    # are no substitute for commits the remote is expected to keep.
+    remote_floor = _is_ahead(repo_path, remote_issue_ref, base_ref)
+
+    def _eligible(candidate: str) -> bool:
+        if not _is_ahead(repo_path, candidate, base_ref):
+            return False
+        if not remote_floor or candidate == remote_issue_ref:
+            return True
+        return _reachable_from(repo_path, remote_issue_ref, candidate)
+
+    seed = next((c for c in candidates if _eligible(c)), base_ref)
+
+    if seed != base_ref:
+        rc, count = _main._git(repo_path, "rev-list", "--count", f"{base_ref}..{seed}")
+        ahead = count.strip() if rc == 0 else "?"
+        notes.append(
+            f"▶️ Continuing issue from previous progress: `{seed}` ({ahead} commits ahead of `{default_branch}`)."
+        )
+
+    # Invariant: no commits visible to prep — on local branches about to be
+    # reset, or on the just-fetched remote issue tip that the final
+    # --force-with-lease push would replace — may become unreachable.
+    # Rescue-tag attribution is per ref: work on the issue branch (local or
+    # remote tip) belongs to the issue being prepared by construction, so its
+    # rescue ref is issue-tagged for _latest_issue_rescue_ref continuation;
+    # development work is only attributable through the marker.
+    for ref, owner_issue in (
+        (DEVELOPMENT_BRANCH, marker),
+        (integration_branch, issue_number),
+        (remote_issue_ref, issue_number),
+    ):
+        preserve_err = _main._preserve_if_would_orphan(repo_path, ref, base_ref, seed, owner_issue)
+        if preserve_err:
+            return False, preserve_err, notes
+
+    rc, msg = _main._git(repo_path, "checkout", "-B", DEVELOPMENT_BRANCH, seed, "--")
+    if rc != 0:
+        return False, msg, notes
+
+    if (
+        wip_tip
+        and _is_safe_ref(wip_tip)
+        and not _reachable_from(repo_path, wip_tip, DEVELOPMENT_BRANCH)
+    ):
+        # Same-issue WIP was recovered onto a branch that diverged from the
+        # chosen seed (e.g. a feature branch cut before other work merged
+        # into development). Recovery reported that WIP as continuation
+        # state, so it must reach the resumed line — left only on a side
+        # branch the orchestrator never reads, "recovered" would be a lie.
+        # Merge it in; on conflict, abort and tell the operator rather than
+        # guessing a resolution (the WIP branch itself is never reset, so
+        # nothing is lost either way).
+        rc, msg = _main._git(repo_path, "merge", "--no-edit", wip_tip, env=git_identity_env())
+        if rc == 0:
+            notes.append(
+                f"🔀 Merged recovered work-in-progress from `{wip_tip}` into the continuation line."
+            )
+        else:
+            _main._git(repo_path, "merge", "--abort")
+            status_ok, still_dirty, _ = _main._working_tree_dirty(repo_path)
+            if not status_ok or still_dirty:
+                return (
+                    False,
+                    f"merge of recovered work-in-progress `{wip_tip}` failed and could not "
+                    f"be cleanly aborted: {msg}",
+                    notes,
+                )
+            notes.append(
+                f"⚠️ Recovered work-in-progress on `{wip_tip}` conflicts with the continuation "
+                f"line; left unmerged on that branch for manual integration."
+            )
+
+    rc, msg = _main._git(repo_path, "checkout", "-B", integration_branch, "--")
+    if rc != 0:
+        return False, msg, notes
+    if issue_number is not None:
+        _write_active_issue(repo_path, issue_number)
+    return True, None, notes
+
+
+def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, Optional[str]]:
+    if not _is_safe_ref(branch) or not _is_safe_ref(source_ref):
+        return False, f"unsafe ref: {branch!r} <- {source_ref!r}"
+    rc, msg = _main._git(repo_path, "branch", "-f", "--", branch, source_ref)
+    return (rc == 0), (None if rc == 0 else msg)
+
+
+def _push_branch(
+    repo_path: str, remote: str, branch: str, token: Optional[str] = None
+) -> Tuple[bool, Optional[str]]:
+    if not _is_safe_ref(branch):
+        return False, f"unsafe branch name: {branch!r}"
+    # Push is a network op against the (HTTPS) origin; supply the transient
+    # credential so the PR branch actually lands instead of hanging on an auth
+    # prompt until the timeout (GIT_TERMINAL_PROMPT=0 turns that into a fast
+    # failure for public repos too).
+    rc, msg = _main._git(
+        repo_path,
+        "push",
+        "--force-with-lease",
+        "-u",
+        remote,
+        branch,
+        timeout=180,
+        env=_git_auth_env(token) if token else None,
+    )
+    return (rc == 0), (None if rc == 0 else msg)
+
+
+def _defer_terminal_success(job_id: str):
+    """Build an ``update_job_fn`` that holds the job non-terminal until publish.
+
+    The orchestrator marks its job ``completed`` when the code work finishes,
+    but the GitHub hook keeps mutating the shared checkout afterwards
+    (fast-forward, push, PR creation, marker clear) and the busy-checkout
+    guard keys liveness off the job store's non-terminal statuses. Mapping the orchestrator's
+    terminal success to ``(running, publishing)`` keeps the job visible to
+    the guard for that whole window; ``_run_with_github_hooks`` sets the real
+    terminal status only once it is fully done with the checkout. Failure
+    statuses pass through unchanged — every post-orchestrator failure path
+    stops touching the checkout.
+
+    Postconditions:
+        - The returned callable forwards every update to ``update_job`` for
+          ``job_id``, rewriting only ``status="completed"`` updates.
+    """
+
+    def _update(**kw: Any) -> None:
+        if kw.get("status") in hitl.TERMINAL_SUCCESS_STATUSES:
+            kw = {**kw, "status": "running", "phase": "publishing"}
+        _main.update_job(job_id, **kw)
+
+    return _update
+
+
+def _run_with_github_hooks(
+    job_id: str,
+    request: RunFromGitHubRequest,
+    plan: CodingTeamPlanInput,
+    issue: Issue,
+    token: str,
+) -> None:
+    """Wrap the orchestrator with GitHub-side actions: comments, branch prep, push, PR."""
+    owner, repo, num = request.owner, request.repo, issue.number
+    integration_branch = f"khala/issue-{num}"
+
+    with _main.GitHubClient(token=token) as client:
+        # Validate the token via get_repo *before* posting the start-comment
+        # so a bad token surfaces a single failure event on the issue rather
+        # than a silently-dropped comment + a separate failure later.
+        try:
+            default_branch = client.get_repo(owner, repo).default_branch
+        except GitHubAPIError as e:
+            _record_failure(client, owner, repo, num, job_id, f"github get_repo: {e}")
+            return
+        base = request.base_branch or default_branch
+
+        # Branch prep mutates the shared checkout; never do that under a
+        # sibling job that is actively working it. Leftovers from DEAD jobs
+        # are recovered below — live work is not a leftover.
+        sibling = _main._running_sibling_on_checkout(request.repo_path, job_id)
+        if sibling is not None:
+            sib_ctx = sibling.get("github_context") or {}
+            _record_failure(
+                client,
+                owner,
+                repo,
+                num,
+                job_id,
+                f"checkout busy: job `{sibling.get('job_id')}` "
+                f"(issue #{sib_ctx.get('issue_number', '?')}) is still running on this "
+                f"checkout; retry after it finishes",
+            )
+            return
+
+        _main._safe_comment(client, owner, repo, num, f"Coding team started job `{job_id}`.")
+
+        prep_ok, prep_err, prep_notes = _main._prepare_issue_branch(
+            request.repo_path, request.remote, base, integration_branch, token, issue_number=num
+        )
+        if not prep_ok:
+            _record_failure(client, owner, repo, num, job_id, f"branch prep failed: {prep_err}")
+            return
+        for note in prep_notes:
+            _main._safe_comment(client, owner, repo, num, note)
+
+        # When the coding team pauses for a user decision, surface the questions on the issue so a
+        # human can answer them (via POST /run/{job_id}/answers); the hook thread stays blocked in
+        # the orchestrator's wait until they do.
+        def _on_pause(questions: List[Dict[str, Any]]) -> None:
+            _main._safe_comment(
+                client, owner, repo, num, _main._format_questions_comment(questions, job_id)
+            )
+
+        _main._register_run_thread(job_id)
+        try:
+            _main.run_coding_team_orchestrator(
+                job_id,
+                request.repo_path,
+                plan,
+                update_job_fn=_defer_terminal_success(job_id),
+                get_job_fn=lambda jid: _main.get_job(jid),
+                cache_dir=DEFAULT_CACHE_DIR,
+                on_pause=_on_pause,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Coding team orchestrator failed: %s", e)
+            _record_failure(client, owner, repo, num, job_id, str(e))
+            return
+
+        job_after = _main.get_job(job_id) or {}
+        # The orchestrator may have already set a terminal/paused status — e.g. a decision pause
+        # timed out (status=failed) or is still waiting for the user. Surface that diagnostic rather
+        # than overwriting it with the generic "no merged tasks" message, which would hide the real
+        # cause (an unanswered question) from the operator.
+        if job_after.get("status") in ("failed", "cancelled", "waiting_for_user"):
+            reason = (
+                job_after.get("error") or job_after.get("status_text") or job_after.get("status")
+            )
+            _main._safe_comment(
+                client, owner, repo, num, f"Coding team job `{job_id}` did not complete: {reason}"
+            )
+            return
+
+        if job_after.get("already_complete"):
+            # The team determined the issue's work was already done (planning recognized it, or every
+            # task resolved as already-satisfied with no real diff). Recommend closing the issue and
+            # do NOT open a no-op PR — there is nothing to merge.
+            evidence = str(job_after.get("completion_evidence") or "").strip()
+            body = f"Coding team job `{job_id}`: this work appears to be already complete"
+            if evidence:
+                body += f" — {evidence}"
+            body += f"\n\nNo changes were needed. Recommend closing #{num}."
+            _main._safe_comment(client, owner, repo, num, body)
+            # An already-complete run is a clean no-op success, so it must run the SAME checkout
+            # cleanup as the normal success path below — otherwise it leaves the active-issue marker
+            # set (a later same-issue retry would treat stale local state as interrupted progress)
+            # and leaks the per-issue clone when cleanup_checkout_on_success is set. Cleanup runs
+            # BEFORE the terminal status write so the job stays in list_jobs(active_only=True) while
+            # the checkout is removed (same ordering rationale as the merged-work path).
+            _main._clear_active_issue_if_matches(request.repo_path, num)
+            if request.cleanup_checkout_on_success:
+                _main._cleanup_issue_checkout(request.repo_path)
+            _main.update_job(
+                job_id,
+                status="already_complete",
+                phase="completed",
+                status_text="Work already complete; no changes needed",
+            )
+            return
+
+        if not _has_merged_tasks(job_after):
+            _main.update_job(
+                job_id,
+                status="failed",
+                error="orchestrator produced no merged tasks",
+            )
+            _main._safe_comment(
+                client,
+                owner,
+                repo,
+                num,
+                f"Coding team job `{job_id}` finished but produced no merged tasks.",
+            )
+            return
+
+        ff_ok, ff_err = _main._fast_forward(
+            request.repo_path, integration_branch, DEVELOPMENT_BRANCH
+        )
+        if not ff_ok:
+            _record_failure(client, owner, repo, num, job_id, f"fast-forward failed: {ff_err}")
+            return
+
+        push_ok, push_err = _main._push_branch(
+            request.repo_path, request.remote, integration_branch, token
+        )
+        if not push_ok:
+            _record_failure(client, owner, repo, num, job_id, f"git push failed: {push_err}")
+            return
+
+        try:
+            existing = client.find_existing_pr(owner, repo, integration_branch)
+        except GitHubAPIError as e:
+            _record_failure(client, owner, repo, num, job_id, f"github find_existing_pr: {e}")
+            return
+
+        # Some tasks may have merged while others reached a terminal FAILED state. We still
+        # publish the merged work, but the PR and the job status must surface the gap rather than
+        # present incomplete work as a clean success.
+        failed = _failed_tasks(_main.get_job(job_id) or {})
+        # Only auto-close the issue when every task landed. A partial result still leaves
+        # requested work undone, so use a non-closing reference ("Refs") to avoid closing the
+        # issue when the PR merges into the default branch.
+        ref_keyword = "Refs" if failed else "Closes"
+        pr_body = f"{ref_keyword} #{num}\n\nGenerated by Khala coding team job `{job_id}`."
+        if failed:
+            pr_body += (
+                f"\n\n> ⚠️ {len(failed)} task(s) did not complete and are **not** included in "
+                f"this PR:\n{_format_failed_tasks(failed)}"
+            )
+
+        if existing is not None:
+            pr_url, created = existing.html_url, False
+            # Always refresh the reused PR's body so it reflects the latest run: add a
+            # partial-failure warning when this run left tasks unfinished, and clear a stale
+            # warning (and old job id) from an earlier partial run that a later retry completed.
+            try:
+                updated = client.update_pull_request(
+                    owner=owner, repo=repo, number=existing.number, body=pr_body
+                )
+                pr_url = updated.html_url
+            except GitHubAPIError as e:
+                # Non-fatal: the warning (if any) is still posted as a comment below.
+                logger.warning("Failed to update reused PR #%s body: %s", existing.number, e)
+        else:
+            try:
+                pr = client.create_pull_request(
+                    owner=owner,
+                    repo=repo,
+                    title=_truncate_title(issue.title, num),
+                    head=integration_branch,
+                    base=base,
+                    body=pr_body,
+                    draft=True,
+                )
+            except GitHubAPIError as e:
+                _record_failure(
+                    client, owner, repo, num, job_id, f"github create_pull_request: {e}"
+                )
+                return
+            pr_url, created = pr.html_url, True
+
+        _main.update_job(job_id, github_pr_url=pr_url, integration_branch=integration_branch)
+        if created:
+            _main._safe_comment(client, owner, repo, num, f"Draft PR opened: {pr_url}")
+        else:
+            _main._safe_comment(client, owner, repo, num, f"Reusing existing draft PR: {pr_url}")
+        if failed:
+            _main._safe_comment(
+                client,
+                owner,
+                repo,
+                num,
+                f"⚠️ {len(failed)} task(s) did not complete and were not merged:\n"
+                f"{_format_failed_tasks(failed)}",
+            )
+        # Publication is the marker's end of life: the work now lives on the
+        # remote PR branch, so the checkout no longer holds unpublished work
+        # for this issue. Every earlier return (orchestrator failure, no
+        # merged tasks, fast-forward/push/PR failure) retains the marker so a
+        # retry continues from development instead of starting over. Scoped
+        # to this job's issue: a sibling job for another issue may have
+        # re-marked the checkout since this job prepped.
+        _main._clear_active_issue_if_matches(request.repo_path, num)
+
+        # Drop the per-issue clone only on a clean completion: every task merged
+        # and the work published to the PR, so nothing local is unrecoverable. A
+        # partial result (some tasks FAILED) keeps the checkout so a retry can
+        # seed from its local progress, as does every earlier failure return.
+        # Operator-managed checkouts never set the flag, so they are never removed.
+        #
+        # Cleanup runs BEFORE the terminal status update so the job stays in
+        # list_jobs(active_only=True) while the checkout is being removed: a
+        # quick same-issue retry is then rejected by the duplicate guard in
+        # /run-from-github instead of cloning into a directory mid-rmtree. That
+        # guard (_running_job_for_issue) scans the active-jobs list by
+        # github_context, NOT the active-issue git-config marker cleared just
+        # above — the marker only attributes leftover work to an issue after a
+        # job dies — so clearing the marker early does not open the race.
+        if not failed and request.cleanup_checkout_on_success:
+            _main._cleanup_issue_checkout(request.repo_path)
+
+        # Terminal status comes last: the busy-checkout guard treats a
+        # terminal job as done with the checkout, so this must be the hook's
+        # final action after every checkout-touching step above (including the
+        # cleanup rmtree). A job that merged some work but also has failed tasks
+        # is reported as a partial success so it is not presented as a clean
+        # completion.
+        _main.update_job(
+            job_id,
+            status="completed_with_failures" if failed else "completed",
+            phase="completed",
+        )
