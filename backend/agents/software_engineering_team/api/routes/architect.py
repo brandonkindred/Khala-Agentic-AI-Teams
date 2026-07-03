@@ -1,10 +1,4 @@
-"""SE team API — architect design route: synchronous architecture generation from a spec.
-
-Route handlers register on a module-local ``APIRouter`` that ``main`` mounts with
-``app.include_router``; absolute paths are unchanged. Monkeypatched collaborators
-(background runners, ``SUPERVISOR_LOG_DIR``) are dereferenced through the ``main``
-module object at call time so ``monkeypatch.setattr(main, ...)`` still takes effect.
-"""
+"""SE team API — architect design route: synchronous architecture generation from a spec."""
 
 import logging
 

@@ -1,10 +1,4 @@
-"""SE team API — product-analysis (PRA) run, start-from-spec, status, answers, auto-answer and jobs routes.
-
-Route handlers register on a module-local ``APIRouter`` that ``main`` mounts with
-``app.include_router``; absolute paths are unchanged. Monkeypatched collaborators
-(background runners, ``SUPERVISOR_LOG_DIR``) are dereferenced through the ``main``
-module object at call time so ``monkeypatch.setattr(main, ...)`` still takes effect.
-"""
+"""SE team API — product-analysis (PRA) run, start-from-spec, status, answers, auto-answer and jobs routes."""
 
 import logging
 import threading

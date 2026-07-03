@@ -1,10 +1,4 @@
-"""SE team API — run-team job lifecycle routes (create, upload, list, status, retry, cancel, delete, resume, restart, llm-recheck).
-
-Route handlers register on a module-local ``APIRouter`` that ``main`` mounts with
-``app.include_router``; absolute paths are unchanged. Monkeypatched collaborators
-(background runners, ``SUPERVISOR_LOG_DIR``) are dereferenced through the ``main``
-module object at call time so ``monkeypatch.setattr(main, ...)`` still takes effect.
-"""
+"""SE team API — run-team job lifecycle routes (create, upload, list, status, retry, cancel, delete, resume, restart, llm-recheck)."""
 
 import logging
 import threading

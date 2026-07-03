@@ -12,6 +12,9 @@ Invariants:
 import sys
 from pathlib import Path
 
+# This bootstraps the very directory ``shared_app`` lives under, so it cannot use
+# ``shared_app.bootstrap_syspath`` (the import would fail before the path is set).
+# Kept as a minimal raw insert; other teams import the shared helper instead.
 _agents_root = Path(__file__).resolve().parent.parent.parent
 if str(_agents_root) not in sys.path:
     sys.path.insert(0, str(_agents_root))  # pragma: no cover  # process-bootstrap only

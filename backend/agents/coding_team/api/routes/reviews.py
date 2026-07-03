@@ -1,9 +1,4 @@
-"""coding_team API — PR-review routes: review-pr and reviews list.
-
-Handlers register on a module-local ``APIRouter`` that ``main`` mounts with
-``app.include_router`` (absolute paths unchanged). Collaborators are dereferenced
-through the ``main`` hub so patches applied to ``main`` still take effect.
-"""
+"""coding_team API — PR-review routes: review-pr and reviews list."""
 
 from __future__ import annotations
 

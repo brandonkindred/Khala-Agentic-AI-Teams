@@ -1,9 +1,4 @@
-"""coding_team API — core job lifecycle routes: health, run, status, jobs list.
-
-Handlers register on a module-local ``APIRouter`` that ``main`` mounts with
-``app.include_router`` (absolute paths unchanged). Collaborators are dereferenced
-through the ``main`` hub so patches applied to ``main`` still take effect.
-"""
+"""coding_team API — core job lifecycle routes: health, run, status, jobs list."""
 
 from __future__ import annotations
 

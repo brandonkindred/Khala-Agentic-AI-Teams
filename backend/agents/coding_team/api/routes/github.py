@@ -1,9 +1,4 @@
-"""coding_team API — github-issue-driven run route.
-
-Handlers register on a module-local ``APIRouter`` that ``main`` mounts with
-``app.include_router`` (absolute paths unchanged). Collaborators are dereferenced
-through the ``main`` hub so patches applied to ``main`` still take effect.
-"""
+"""coding_team API — github-issue-driven run route."""
 
 from __future__ import annotations
 

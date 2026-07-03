@@ -1,10 +1,4 @@
-"""SE team API — backend/frontend code-v2 sub-team run and status routes.
-
-Route handlers register on a module-local ``APIRouter`` that ``main`` mounts with
-``app.include_router``; absolute paths are unchanged. Monkeypatched collaborators
-(background runners, ``SUPERVISOR_LOG_DIR``) are dereferenced through the ``main``
-module object at call time so ``monkeypatch.setattr(main, ...)`` still takes effect.
-"""
+"""SE team API — backend/frontend code-v2 sub-team run and status routes."""
 
 import logging
 import threading

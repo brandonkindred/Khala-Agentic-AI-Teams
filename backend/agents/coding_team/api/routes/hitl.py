@@ -1,9 +1,4 @@
-"""coding_team API — human-in-the-loop routes: submit answers and resume.
-
-Handlers register on a module-local ``APIRouter`` that ``main`` mounts with
-``app.include_router`` (absolute paths unchanged). Collaborators are dereferenced
-through the ``main`` hub so patches applied to ``main`` still take effect.
-"""
+"""coding_team API — human-in-the-loop routes: submit answers and resume."""
 
 from __future__ import annotations
 
