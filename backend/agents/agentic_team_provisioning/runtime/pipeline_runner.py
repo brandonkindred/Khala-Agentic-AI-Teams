@@ -13,15 +13,17 @@ is decided in Postgres via single-row compare-and-swap, not in process memory, s
 it is correct regardless of which uvicorn worker serves ``POST .../input`` and it
 survives a service restart. The in-memory ``threading.Event`` is only a
 same-worker wakeup optimization; the submitted answer is persisted to the DB and
-re-read by the waiting thread. WAIT waits are bounded by a configurable timeout,
-and a heartbeat + advisory-locked reaper fails runs whose worker has died
-(orphans) without ever touching a live sibling worker's run.
+re-read by the waiting thread. WAIT waits are bounded by a configurable timeout.
+
+A per-run heartbeat thread refreshes a liveness timestamp for the whole duration a
+run executes — including inside long synchronous ``call_agent`` steps — so an
+advisory-locked reaper can fail runs whose worker has actually died (orphans)
+without ever reaping a live run that merely happens to be slow.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -35,6 +37,8 @@ from agentic_team_provisioning.models import (
 )
 from agentic_team_provisioning.runtime.agent_builder import build_agent, call_agent
 from agentic_team_provisioning.testing.store import AgenticTestStore
+from shared_env import parse_int
+from shared_postgres import is_postgres_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -53,74 +57,56 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-def _env_int(name: str, default: int, *, minimum: int, maximum: Optional[int] = None) -> int:
-    """Parse an int env var defensively: garbage -> default, then clamp to bounds.
-
-    Mirrors ``team_service/entrypoint.py:_env_int`` (which is int-only and in another
-    package, hence the local copy).
-
-    Preconditions: ``minimum <= (maximum or +inf)``.
-    Postconditions: returns an int in ``[minimum, maximum]``.
-    """
-    assert maximum is None or minimum <= maximum, "minimum must not exceed maximum"
-    raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
-        value = default
-    else:
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            logger.warning("Invalid value for %s: %r; using default %d", name, raw, default)
-            value = default
-    if value < minimum:
-        value = minimum
-    if maximum is not None and value > maximum:
-        value = maximum
-    return value
-
-
 class PipelineRunner:
     """Walks the process DAG, runs agents at each step, pauses at WAIT steps.
 
     Invariants:
-        - A run is resumed/timed-out/cancelled by exactly one actor, enforced by the
-          store's compare-and-swap out of ``waiting_for_input``.
+        - A run is resumed/timed-out/cancelled/completed by exactly one actor,
+          enforced by the store's compare-and-swap out of its prior status.
         - ``_resume_events[run_id]`` exists only for a run whose worker thread is live
           in *this* process; its absence never strands a run (resume is DB-driven).
+        - While a run executes, a heartbeat thread keeps ``heartbeat_at`` fresh, so a
+          live run is never reaped as an orphan.
     """
 
     def __init__(self, store: AgenticTestStore, *, start_sweeper: bool = True) -> None:
         """Preconditions: ``store`` is an ``AgenticTestStore``.
 
-        Postconditions: config knobs are parsed once; if ``start_sweeper`` a daemon
-        thread is running that periodically reaps orphaned runs. Tests pass
-        ``start_sweeper=False`` to keep the background thread out of assertions.
+        Postconditions: config knobs are parsed once; if ``start_sweeper`` and Postgres
+        is configured, a daemon thread is running that periodically reaps orphaned runs.
+        Tests pass ``start_sweeper=False`` to keep the background thread out of
+        assertions.
         """
         self._store = store
         self._resume_events: dict[str, threading.Event] = {}
 
-        self._wait_timeout_s = _env_int(
+        self._wait_timeout_s = parse_int(
             "AGENTIC_TEAM_PIPELINE_WAIT_TIMEOUT_S",
             _DEFAULT_WAIT_TIMEOUT_S,
             minimum=_MIN_WAIT_TIMEOUT_S,
             maximum=_MAX_WAIT_TIMEOUT_S,
         )
-        self._wait_poll_s = _env_int(
+        self._wait_poll_s = parse_int(
             "AGENTIC_TEAM_PIPELINE_WAIT_POLL_S",
             _DEFAULT_WAIT_POLL_S,
             minimum=_MIN_WAIT_POLL_S,
             maximum=_MAX_WAIT_POLL_S,
         )
-        # Staleness must exceed a couple of poll intervals so a live waiter that just
+        # Staleness must exceed a couple of poll intervals so a live run that just
         # heartbeated is never mistaken for an orphan.
-        self._stale_s = _env_int(
+        self._stale_s = parse_int(
             "AGENTIC_TEAM_PIPELINE_STALE_S",
             _DEFAULT_STALE_S,
             minimum=2 * self._wait_poll_s,
         )
+        # Heartbeat comfortably inside the staleness window (half of it) so a live run
+        # stays fresh with margin, while keeping the heartbeat write rate modest.
+        self._heartbeat_interval_s = max(1, self._stale_s // 2)
 
         self._sweeper_stop = threading.Event()
-        if start_sweeper:
+        # No Postgres -> the reaper's queries would just raise; skip the sweeper so it
+        # doesn't spin logging errors (and leak a thread) in tests / no-DB dev.
+        if start_sweeper and is_postgres_enabled():
             threading.Thread(
                 target=self._run_sweeper, daemon=True, name="pipeline-orphan-sweeper"
             ).start()
@@ -162,8 +148,15 @@ class PipelineRunner:
         return won
 
     def cancel_run(self, run_id: str) -> None:
-        """Cancel a running or waiting pipeline run."""
-        self._store.update_pipeline_run(run_id, status="cancelled", finished_at=_now_iso())
+        """Cancel a running or waiting pipeline run.
+
+        Preconditions: ``run_id`` is a non-empty str.
+        Postconditions: the run is ``cancelled`` iff it was still active (compare-and-
+        swap), so a cancel racing a completed/failed outcome cannot clobber the real
+        result; any local waiter is woken so its thread observes the cancel promptly.
+        """
+        assert run_id, "run_id must be non-empty"
+        self._store.try_cancel_pipeline_run(run_id)
         event = self._resume_events.get(run_id)
         if event:
             event.set()
@@ -171,6 +164,7 @@ class PipelineRunner:
     def reap_orphaned_runs(self) -> int:
         """Fail active runs whose heartbeat has gone stale (orphaned by a dead worker).
 
+        Preconditions: none.
         Postconditions: returns the number of runs transitioned to ``failed`` (0 if
         another worker held the reaper's advisory lock). Safe to call from any worker
         and at startup — never touches freshly-heartbeated (live) runs.
@@ -183,9 +177,11 @@ class PipelineRunner:
     def _run_sweeper(self) -> None:
         """Periodically reap orphans so a single crashed worker's runs don't linger.
 
-        Runs until ``_sweeper_stop`` is set (only in tests); otherwise for the life of
-        the daemon. A reap failure is logged and retried on the next tick — the sweeper
-        must never die silently, or orphans would only be reaped on the next restart.
+        Preconditions: called on a dedicated daemon thread.
+        Postconditions: runs until ``_sweeper_stop`` is set (only in tests), otherwise
+        for the life of the daemon. A reap failure is logged and retried on the next
+        tick — the sweeper must never die silently, or orphans would only be reaped on
+        the next restart.
         """
         while not self._sweeper_stop.wait(self._stale_s):
             try:
@@ -195,6 +191,26 @@ class PipelineRunner:
             except Exception:
                 logger.exception("Pipeline orphan sweeper tick failed; will retry")
 
+    def _heartbeat_loop(self, run_id: str, stop: threading.Event) -> None:
+        """Keep ``heartbeat_at`` fresh for the whole time a run executes.
+
+        Runs on its own daemon thread alongside the executor so that even a long
+        synchronous ``call_agent`` step (which never yields to the executor) still
+        looks alive to the reaper. Heartbeats immediately, then every
+        ``_heartbeat_interval_s`` until ``stop`` is set (in the executor's ``finally``).
+
+        Preconditions: ``run_id`` is a non-empty str.
+        Postconditions: issues heartbeats until stopped; a heartbeat error is logged and
+        retried rather than killing the thread.
+        """
+        while True:
+            try:
+                self._store.heartbeat_pipeline_run(run_id)
+            except Exception:
+                logger.exception("Heartbeat for pipeline run %s failed; will retry", run_id)
+            if stop.wait(self._heartbeat_interval_s):
+                return
+
     def _execute(
         self,
         run_id: str,
@@ -203,6 +219,13 @@ class PipelineRunner:
         resume_event: threading.Event,
     ) -> None:
         """Main pipeline execution loop."""
+        stop_heartbeat = threading.Event()
+        threading.Thread(
+            target=self._heartbeat_loop,
+            args=(run_id, stop_heartbeat),
+            daemon=True,
+            name=f"pipeline-hb-{run_id[:16]}",
+        ).start()
         try:
             agents_by_name: dict[str, AgenticTeamAgent] = {a.agent_name: a for a in team_agents}
             step_order = self._topological_sort(process.steps)
@@ -213,16 +236,17 @@ class PipelineRunner:
             step_results: list[dict[str, Any]] = []
 
             for step in step_order:
-                # Check for cancellation before each step
+                # Stop if the run reached a terminal state out-of-band (cancelled by a
+                # user, or reaped/expired by another actor). Checking before each step
+                # — and completing via a CAS below — prevents resurrecting a run that
+                # has already been finalized.
                 run_data = self._store.get_pipeline_run(run_id)
-                if run_data and run_data.get("status") == "cancelled":
+                if run_data and run_data.get("status") in ("cancelled", "failed", "completed"):
                     return
 
-                self._store.update_pipeline_run(
-                    run_id, current_step_id=step.step_id, status="running"
-                )
-                # Heartbeat so the reaper can tell this live run apart from an orphan.
-                self._store.heartbeat_pipeline_run(run_id)
+                # Only advance the cursor; status stays 'running' (set at creation and
+                # on resume) so this write can't resurrect a concurrently-cancelled run.
+                self._store.update_pipeline_run(run_id, current_step_id=step.step_id)
 
                 if step.step_type == StepType.WAIT:
                     resumed = self._handle_wait_step(
@@ -242,18 +266,17 @@ class PipelineRunner:
                         run_id, step, prev_output, step_results, agents_by_name
                     )
 
-            self._store.update_pipeline_run(
-                run_id,
-                status="completed",
-                step_results=step_results,
-                finished_at=_now_iso(),
-            )
+            # Complete only if still running — a run cancelled/reaped mid-step must keep
+            # its terminal state rather than being clobbered back to completed.
+            if not self._store.try_complete_pipeline_run(run_id, step_results):
+                logger.info("Pipeline run %s finished executing but was already terminal", run_id)
         except Exception as exc:
             logger.exception("Pipeline run %s failed", run_id)
             self._store.update_pipeline_run(
                 run_id, status="failed", error=str(exc), finished_at=_now_iso()
             )
         finally:
+            stop_heartbeat.set()
             self._resume_events.pop(run_id, None)
 
     def _handle_action_step(
@@ -312,8 +335,9 @@ class PipelineRunner:
             - Returns ``None`` when the run reached a terminal state while waiting: it
               timed out (this call claims the ``failed`` transition via compare-and-swap
               and records a ``timed_out`` step), or it was cancelled/reaped by another
-              actor. In every ``None`` case the run row is already terminal, so the
-              caller must stop without overwriting it.
+              actor (the pending WAIT step is marked to match so the audit panel is
+              consistent). In every ``None`` case the run row is already terminal, so
+              the caller must stop without overwriting it.
         """
         prompt_text = step.description or f"Human input required for: {step.name}"
 
@@ -336,7 +360,6 @@ class PipelineRunner:
             human_prompt=prompt_text,
             step_results=step_results,
         )
-        self._store.heartbeat_pipeline_run(run_id)
 
         deadline = time.monotonic() + self._wait_timeout_s
         while True:
@@ -359,12 +382,9 @@ class PipelineRunner:
                     )
                     return None
 
-            wait_slice = self._wait_poll_s if remaining <= 0 else min(self._wait_poll_s, remaining)
+            wait_slice = min(self._wait_poll_s, remaining) if remaining > 0 else self._wait_poll_s
             resume_event.wait(timeout=wait_slice)
 
-            # Heartbeat so the reaper knows this waiter is alive on this worker, then
-            # re-read the authoritative status from the DB.
-            self._store.heartbeat_pipeline_run(run_id)
             run_data = self._store.get_pipeline_run(run_id)
             status = (run_data or {}).get("status")
 
@@ -376,7 +396,12 @@ class PipelineRunner:
                 self._store.update_pipeline_run(run_id, step_results=step_results)
                 return human_input
             if status in ("cancelled", "failed", "completed"):
-                # Cancelled, expired, or reaped by another actor — stop cleanly.
+                # Cancelled, expired, or reaped by another actor. Reconcile the WAIT
+                # step so the audit panel doesn't show a step still "waiting" under a
+                # terminated run, then stop.
+                if status in ("cancelled", "failed"):
+                    result["status"] = status
+                    self._store.update_pipeline_run(run_id, step_results=step_results)
                 return None
             # Still waiting_for_input -> loop until resumed or the deadline elapses.
 

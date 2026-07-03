@@ -96,6 +96,22 @@ class _FakeStore:
             row.update(status="failed", error=error, finished_at=_now())
             return True
 
+    def try_complete_pipeline_run(self, run_id: str, step_results: list) -> bool:
+        with self._lock:
+            row = self._rows.get(run_id)
+            if not row or row["status"] != "running":
+                return False
+            row.update(status="completed", step_results=step_results, finished_at=_now())
+            return True
+
+    def try_cancel_pipeline_run(self, run_id: str) -> bool:
+        with self._lock:
+            row = self._rows.get(run_id)
+            if not row or row["status"] not in ("running", "waiting_for_input"):
+                return False
+            row.update(status="cancelled", finished_at=_now())
+            return True
+
     def consume_pipeline_human_input(self, run_id: str) -> str:
         row = self._rows.get(run_id)
         if not row:
@@ -395,6 +411,96 @@ def test_run_failure_marks_failed(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert _wait_for(lambda: store.get_pipeline_run("r1")["status"] == "failed")
     assert store.get_pipeline_run("r1")["error"] == "kaboom"
+
+
+def test_long_step_is_not_false_reaped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow synchronous step keeps heartbeating (background thread), so a concurrent
+    reap with a short staleness window must NOT fail the live run."""
+    monkeypatch.setattr(
+        "agentic_team_provisioning.runtime.pipeline_runner.build_agent",
+        lambda *a, **k: object(),
+    )
+
+    def _slow(_agent, _inp):
+        time.sleep(0.3)
+        return "done"
+
+    monkeypatch.setattr("agentic_team_provisioning.runtime.pipeline_runner.call_agent", _slow)
+    store = _FakeStore()
+    # Mirror create_pipeline_run, which seeds heartbeat_at so a brand-new run is never
+    # reaped in the window before the background heartbeat thread's first tick.
+    store.seed("r1", heartbeat_at=_now())
+    agent = AgenticTeamAgent(agent_name="worker", role="doer")
+    runner = _make_runner(store)
+    # Staleness far shorter than the step; heartbeat interval far shorter than staleness.
+    runner._stale_s = 0.1
+    runner._heartbeat_interval_s = 0.02
+    runner.start_run("r1", [agent], _action_process())
+
+    # Reap repeatedly while the 0.3s step runs; the live run must survive.
+    for _ in range(6):
+        assert runner.reap_orphaned_runs() == 0
+        assert store.get_pipeline_run("r1")["status"] != "failed"
+        time.sleep(0.05)
+
+    assert _wait_for(lambda: store.get_pipeline_run("r1")["status"] == "completed")
+
+
+def test_out_of_band_termination_is_not_resurrected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If a run is terminated (e.g. reaped) mid-step, the executor must not clobber it
+    back to completed via the final write."""
+    monkeypatch.setattr(
+        "agentic_team_provisioning.runtime.pipeline_runner.build_agent",
+        lambda *a, **k: object(),
+    )
+    store = _FakeStore()
+    store.seed("r1")
+
+    def _reap_midstep(_agent, _inp):
+        # Simulate a concurrent reap/expire flipping the run to a terminal state while
+        # the (last) step is still executing.
+        store._rows["r1"]["status"] = "failed"
+        store._rows["r1"]["error"] = "orphaned: reaped"
+        return "out"
+
+    monkeypatch.setattr(
+        "agentic_team_provisioning.runtime.pipeline_runner.call_agent", _reap_midstep
+    )
+    agent = AgenticTeamAgent(agent_name="worker", role="doer")
+    runner = _make_runner(store)
+    runner.start_run("r1", [agent], _action_process())
+
+    # The final try_complete CAS must lose (status != running), so the run stays failed.
+    time.sleep(0.2)
+    row = store.get_pipeline_run("r1")
+    assert row["status"] == "failed"
+    assert row["error"] == "orphaned: reaped"
+
+
+def test_cancel_does_not_clobber_completed_run() -> None:
+    """cancel_run is a compare-and-swap: cancelling an already-terminal run is a no-op."""
+    store = _FakeStore()
+    store.seed("r1", status="completed", finished_at=_now())
+    runner = _make_runner(store)
+    runner.cancel_run("r1")
+    assert store.get_pipeline_run("r1")["status"] == "completed"
+
+
+def test_cancelled_wait_step_is_reconciled() -> None:
+    """When a waiting run is cancelled, the pending WAIT step_result is marked so the
+    audit panel doesn't show a step still 'waiting' under a cancelled run."""
+    store = _FakeStore()
+    store.seed("r1")
+    runner = _make_runner(store)
+    runner.start_run("r1", [], _wait_process())
+
+    assert _wait_for(lambda: store.get_pipeline_run("r1")["status"] == "waiting_for_input")
+    runner.cancel_run("r1")
+
+    assert _wait_for(lambda: store.get_pipeline_run("r1")["status"] == "cancelled")
+    assert _wait_for(
+        lambda: store.get_pipeline_run("r1")["step_results"][0]["status"] == "cancelled"
+    )
 
 
 # ---------------------------------------------------------------------------

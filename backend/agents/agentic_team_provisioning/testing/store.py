@@ -242,9 +242,12 @@ class AgenticTestStore:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO agentic_test_pipeline_runs "
-                "(run_id, team_id, process_id, status, initial_input, step_results, started_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (run_id, team_id, process_id, "running", initial_input, Json([]), now),
+                "(run_id, team_id, process_id, status, initial_input, step_results, "
+                "started_at, heartbeat_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                # heartbeat_at is set at creation so the row is never mistaken for a
+                # stale orphan in the window before the runner's first heartbeat.
+                (run_id, team_id, process_id, "running", initial_input, Json([]), now, now),
             )
         return {
             "run_id": run_id,
@@ -412,16 +415,66 @@ class AgenticTestStore:
                 (now, run_id),
             )
 
+    @timed_query(store=_STORE, op="try_complete_pipeline_run")
+    def try_complete_pipeline_run(self, run_id: str, step_results: list) -> bool:
+        """Atomically complete a run, but only if it is still ``running``.
+
+        Guards the terminal write with ``WHERE status = 'running'`` so a run that was
+        cancelled, reaped, or expired out-of-band mid-step is not clobbered back to
+        ``completed``.
+
+        Preconditions: ``run_id`` is a non-empty str; ``step_results`` is a list.
+        Postconditions: returns True iff the row was ``running`` and is now
+        ``completed`` with ``step_results`` and ``finished_at`` set; False (no-op) if
+        the run already reached a terminal state.
+        """
+        assert run_id, "run_id must be non-empty"
+        now = _now()
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE agentic_test_pipeline_runs "
+                "SET status = 'completed', step_results = %s, finished_at = %s "
+                "WHERE run_id = %s AND status = 'running'",
+                (Json(step_results), now, run_id),
+            )
+            return cur.rowcount > 0
+
+    @timed_query(store=_STORE, op="try_cancel_pipeline_run")
+    def try_cancel_pipeline_run(self, run_id: str) -> bool:
+        """Atomically cancel a run, but only if it is still active.
+
+        Guards with ``WHERE status IN ('running', 'waiting_for_input')`` so a cancel
+        that races a completed/failed outcome cannot overwrite the real result.
+
+        Preconditions: ``run_id`` is a non-empty str.
+        Postconditions: returns True iff the row was active and is now ``cancelled``
+        with ``finished_at`` set; False (no-op) if the run was already terminal.
+        """
+        assert run_id, "run_id must be non-empty"
+        now = _now()
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE agentic_test_pipeline_runs "
+                "SET status = 'cancelled', finished_at = %s "
+                "WHERE run_id = %s AND status IN ('running', 'waiting_for_input')",
+                (now, run_id),
+            )
+            return cur.rowcount > 0
+
     @timed_query(store=_STORE, op="reap_orphaned_pipeline_runs")
     def reap_orphaned_pipeline_runs(self, error: str, stale_seconds: int) -> int:
         """Fail active runs whose heartbeat has gone stale (orphaned by a dead worker).
 
-        Guarded by a Postgres advisory lock so that, with multiple uvicorn workers,
-        only one worker reaps per sweep. Staleness is measured on ``heartbeat_at``
-        (not row age): a live sibling-worker run heartbeats within its poll interval,
-        so it is never reaped; an orphaned run stops heartbeating and is reaped once
-        it exceeds ``stale_seconds``. Rows with a NULL heartbeat (created before this
-        feature, or never heartbeated) are treated as stale.
+        Guarded by a *transaction-scoped* Postgres advisory lock so that, with
+        multiple uvicorn workers, only one worker reaps per sweep. The xact-level lock
+        (``pg_try_advisory_xact_lock``) is released automatically when the surrounding
+        ``get_conn`` transaction commits or rolls back, so a failing UPDATE cannot leak
+        the lock onto the pooled connection and permanently disable reaping.
+
+        Staleness is measured on ``heartbeat_at`` (not row age): a live run heartbeats
+        within its poll interval, so it is never reaped; an orphaned run stops
+        heartbeating and is reaped once it exceeds ``stale_seconds``. Rows with a NULL
+        heartbeat (created before this feature) are treated as stale.
 
         Preconditions:
             ``error`` is a str; ``stale_seconds`` is a positive int.
@@ -435,21 +488,18 @@ class AgenticTestStore:
         # Stable, arbitrary advisory-lock key for the pipeline-run reaper.
         lock_key = 0x41544D50  # "ATMP"
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_key,))
+            cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (lock_key,))
             got = cur.fetchone()
             if not got or not got[0]:
                 return 0
-            try:
-                cur.execute(
-                    "UPDATE agentic_test_pipeline_runs "
-                    "SET status = 'failed', error = %s, finished_at = %s "
-                    "WHERE status IN ('running', 'waiting_for_input') "
-                    "AND (heartbeat_at IS NULL OR heartbeat_at < %s)",
-                    (error, now, now - timedelta(seconds=stale_seconds)),
-                )
-                return cur.rowcount
-            finally:
-                cur.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+            cur.execute(
+                "UPDATE agentic_test_pipeline_runs "
+                "SET status = 'failed', error = %s, finished_at = %s "
+                "WHERE status IN ('running', 'waiting_for_input') "
+                "AND (heartbeat_at IS NULL OR heartbeat_at < %s)",
+                (error, now, now - timedelta(seconds=stale_seconds)),
+            )
+            return cur.rowcount
 
 
 # ---------------------------------------------------------------------------

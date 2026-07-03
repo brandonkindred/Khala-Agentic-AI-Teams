@@ -487,13 +487,23 @@ class _FakeCursor:
 
         # -- pipeline runs ------------------------------------------------
         # Advisory lock (reap): a no-op that always "acquires" in the single-process
-        # fake. Must precede the generic UPDATE fallthrough below.
-        if "pg_try_advisory_lock" in norm or "pg_advisory_unlock" in norm:
+        # fake. Matches the session, xact, and unlock variants. Must precede the
+        # generic UPDATE fallthrough below.
+        if "advisory" in norm:
             self._last_fetch_one = (True,)
             return
 
         if norm.startswith("insert into agentic_test_pipeline_runs"):
-            run_id, team_id, process_id, status, initial_input, step_results, started_at = params
+            (
+                run_id,
+                team_id,
+                process_id,
+                status,
+                initial_input,
+                step_results,
+                started_at,
+                heartbeat_at,
+            ) = params
             self._db["pipeline_runs"][run_id] = {
                 "run_id": run_id,
                 "team_id": team_id,
@@ -507,7 +517,7 @@ class _FakeCursor:
                 "error": None,
                 "started_at": started_at,
                 "finished_at": None,
-                "heartbeat_at": None,
+                "heartbeat_at": heartbeat_at,
             }
             self.rowcount = 1
             return
@@ -545,6 +555,32 @@ class _FakeCursor:
                     human_input=human_input,
                     heartbeat_at=heartbeat_at,
                 )
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # try_complete_pipeline_run (CAS to 'completed', WHERE status='running').
+        if norm.startswith("update agentic_test_pipeline_runs set status = 'completed'"):
+            step_results, finished_at, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] == "running":
+                row.update(
+                    status="completed",
+                    step_results=_unwrap_json(step_results),
+                    finished_at=finished_at,
+                )
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # try_cancel_pipeline_run (CAS to 'cancelled', WHERE status active).
+        if norm.startswith("update agentic_test_pipeline_runs set status = 'cancelled'"):
+            finished_at, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] in ("running", "waiting_for_input"):
+                row.update(status="cancelled", finished_at=finished_at)
                 self.rowcount = 1
             else:
                 self.rowcount = 0

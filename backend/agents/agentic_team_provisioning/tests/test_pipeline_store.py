@@ -94,6 +94,36 @@ def test_try_expire_is_a_compare_and_swap(fake_pg: dict) -> None:
     assert store.try_resume_pipeline_run("r1", "late") is False
 
 
+def test_try_complete_only_from_running(fake_pg: dict) -> None:
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")  # status='running'
+
+    assert store.try_complete_pipeline_run("r1", [{"step_id": "s1"}]) is True
+    row = store.get_pipeline_run("r1")
+    assert row["status"] == "completed"
+    assert row["finished_at"] is not None
+
+    # A run already terminal (e.g. cancelled) is not clobbered back to completed.
+    store.create_pipeline_run("r2", "t1", "p1")
+    store.update_pipeline_run("r2", status="cancelled")
+    assert store.try_complete_pipeline_run("r2", []) is False
+    assert store.get_pipeline_run("r2")["status"] == "cancelled"
+
+
+def test_try_cancel_only_from_active(fake_pg: dict) -> None:
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")  # running
+    assert store.try_cancel_pipeline_run("r1") is True
+    assert store.get_pipeline_run("r1")["status"] == "cancelled"
+
+    store.create_pipeline_run("r2", "t1", "p1")
+    store.update_pipeline_run("r2", status="completed")
+    assert store.try_cancel_pipeline_run("r2") is False  # terminal -> no clobber
+    assert store.get_pipeline_run("r2")["status"] == "completed"
+
+
 def test_consume_human_input_defaults_empty(fake_pg: dict) -> None:
     _seed_team(fake_pg)
     store = AgenticTestStore()
