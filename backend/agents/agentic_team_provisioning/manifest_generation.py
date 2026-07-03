@@ -225,7 +225,7 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
         stale = [
             m.id
             for m in registry.manifests_with_id_prefix(prefix)
-            if "generated" in m.tags and m.id not in new_ids
+            if is_generated_manifest(m) and m.id not in new_ids
         ]
         for agent_id in stale:
             registry.unregister(agent_id)
