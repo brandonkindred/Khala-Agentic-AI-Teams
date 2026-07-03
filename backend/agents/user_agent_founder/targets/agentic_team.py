@@ -22,6 +22,12 @@ orchestrator changes:
 
 It targets the *existing* provisioning endpoints under
 ``/api/agentic-team-provisioning`` — no new provisioning routes are required.
+
+The decision to collapse rather than generalize the Protocol — and the exact
+contract boundary this adapter depends on — is recorded in
+``system_design/adr/ADR-007-founder-agentic-team-adapter-collapse.md``;
+``tests/test_adapter_agentic_team_contract_drift.py`` is the tripwire that
+fails when either side's shape drifts.
 """
 
 from __future__ import annotations
