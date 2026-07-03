@@ -333,6 +333,33 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.editingAgent()).toBeNull();
   });
 
+  it('saveAgentEdits sends only the fields changed since the edit form opened', () => {
+    const a = agent({
+      agent_name: 'Writer',
+      role: 'Writes',
+      skills: ['seo'],
+      capabilities: ['gen'],
+      tools: ['Git'],
+      expertise: ['x'],
+    });
+    component.startEditAgent(a, new Event('click'));
+    // The user edits only the role; every other field is left as the form opened.
+    // A full-object save would clobber skills/etc. the chat may have refreshed
+    // meanwhile, so only the touched field must be sent (backend PUT is partial).
+    component.updateEditDraftField('role', 'Lead writer');
+    component.saveAgentEdits(a, new Event('click'));
+    expect(api.updateTeamAgent).toHaveBeenCalledWith('t-1', 'Writer', { role: 'Lead writer' });
+    expect(component.editingAgent()).toBeNull();
+  });
+
+  it('saveAgentEdits skips the request entirely when nothing changed', () => {
+    const a = agent({ agent_name: 'Writer', role: 'Writes', skills: ['seo'] });
+    component.startEditAgent(a, new Event('click'));
+    component.saveAgentEdits(a, new Event('click'));
+    expect(api.updateTeamAgent).not.toHaveBeenCalled();
+    expect(component.editingAgent()).toBeNull();
+  });
+
   it('saveAgentEdits surfaces an error and stays in edit mode', () => {
     api.updateTeamAgent.mockReturnValueOnce(throwError(() => ({ error: { detail: 'bad edit' } })));
     component.editingAgent.set('Writer');

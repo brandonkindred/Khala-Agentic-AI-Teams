@@ -42,6 +42,7 @@ import type {
   ProcessDefinition,
   ProcessStep,
   RosterValidationResult,
+  UpdateAgentRequest,
 } from '../../models';
 
 let _stepCounter = 0;
@@ -117,6 +118,12 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   /** Name of the roster agent currently in inline-edit mode (`null` if none). */
   editingAgent = signal<string | null>(null);
   editDraft = signal<AgentEditDraft>({ role: '', skills: '', capabilities: '', tools: '', expertise: '' });
+  /**
+   * Snapshot of the row's fields as the edit form opened, used to send only the
+   * fields the user actually changed on save (see `saveAgentEdits`). `null` when
+   * no edit is in progress.
+   */
+  private readonly editOriginal = signal<AgentEditDraft | null>(null);
   /** Monotonic stamp for `refreshRoster`; guards against out-of-order refresh results. */
   private rosterRefreshSeq = 0;
 
@@ -349,19 +356,22 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   startEditAgent(agent: AgenticTeamAgent, event: Event): void {
     event.stopPropagation();
     this.rosterActionError.set(null);
-    this.editDraft.set({
+    const snapshot: AgentEditDraft = {
       role: agent.role,
       skills: agent.skills.join(', '),
       capabilities: agent.capabilities.join(', '),
       tools: agent.tools.join(', '),
       expertise: agent.expertise.join(', '),
-    });
+    };
+    this.editDraft.set({ ...snapshot });
+    this.editOriginal.set(snapshot);
     this.editingAgent.set(agent.agent_name);
   }
 
   cancelEditAgent(event: Event): void {
     event.stopPropagation();
     this.editingAgent.set(null);
+    this.editOriginal.set(null);
   }
 
   /** Update a single field of the in-progress edit draft (template can't spread). */
@@ -372,20 +382,39 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   saveAgentEdits(agent: AgenticTeamAgent, event: Event): void {
     event.stopPropagation();
     const draft = this.editDraft();
+    const original = this.editOriginal();
     const toList = (s: string) =>
       s.split(',').map((v) => v.trim()).filter((v) => v.length > 0);
+
+    // Send ONLY the fields the user actually changed vs. what the form opened
+    // with. The backend PUT is a partial update (exclude_unset), so omitting an
+    // untouched field preserves whatever newer value the chat or another roster
+    // mutation wrote for it while this form was open — a full-object save would
+    // clobber those with the stale draft. Raw-string compare suffices: an
+    // untouched field is byte-identical to its `startEditAgent` snapshot. With no
+    // baseline (a save racing the form close) fall back to sending the field so a
+    // real edit isn't silently dropped.
+    const changed = (field: keyof AgentEditDraft) => !original || draft[field] !== original[field];
+    const updates: UpdateAgentRequest = {};
+    if (changed('role')) updates.role = draft.role.trim();
+    if (changed('skills')) updates.skills = toList(draft.skills);
+    if (changed('capabilities')) updates.capabilities = toList(draft.capabilities);
+    if (changed('tools')) updates.tools = toList(draft.tools);
+    if (changed('expertise')) updates.expertise = toList(draft.expertise);
+
+    // Nothing changed → close the form without a redundant write.
+    if (Object.keys(updates).length === 0) {
+      this.editingAgent.set(null);
+      this.editOriginal.set(null);
+      return;
+    }
     this.rosterActionError.set(null);
     this.api
-      .updateTeamAgent(this.team.team_id, agent.agent_name, {
-        role: draft.role.trim(),
-        skills: toList(draft.skills),
-        capabilities: toList(draft.capabilities),
-        tools: toList(draft.tools),
-        expertise: toList(draft.expertise),
-      })
+      .updateTeamAgent(this.team.team_id, agent.agent_name, updates)
       .subscribe({
         next: () => {
           this.editingAgent.set(null);
+          this.editOriginal.set(null);
           this.refreshRoster();
         },
         error: (err) => {

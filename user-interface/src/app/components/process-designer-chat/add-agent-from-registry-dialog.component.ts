@@ -12,6 +12,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { Subject, catchError, debounceTime, of, switchMap } from 'rxjs';
 import { AgentCatalogApiService } from '../../services/agent-catalog-api.service';
 import type { AgentSummary } from '../../models/agent-catalog.model';
@@ -51,6 +52,7 @@ export type AddAgentFromRegistryDialogResult = string;
     MatIconModule,
     MatInputModule,
     MatProgressSpinnerModule,
+    MatTooltipModule,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './add-agent-from-registry-dialog.component.html',
