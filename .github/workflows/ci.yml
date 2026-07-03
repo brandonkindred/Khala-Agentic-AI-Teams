@@ -185,6 +185,18 @@ jobs:
               - 'backend/agents/agent_registry/**'
             sales:
               - 'backend/agents/sales_team/**'
+            # user_agent_founder's drift tripwire imports the real
+            # agentic_team_provisioning models and app routes (and, via its
+            # models, agent_registry), so provisioning-side changes must run
+            # the founder suite — that tripwire is the only cross-team guard
+            # on the founder↔agentic-team contract boundary (see
+            # system_design/adr/ADR-007). agentic_team_provisioning's own
+            # suite is not in the matrix yet (pre-existing failures); until
+            # it is, this filter is what turns CI red on that boundary.
+            user_agent_founder:
+              - 'backend/agents/user_agent_founder/**'
+              - 'backend/agents/agentic_team_provisioning/**'
+              - 'backend/agents/agent_registry/**'
             # Each docker_* filter mirrors what its Dockerfile actually
             # copies into the image, so a change to any baked-in source
             # triggers a rebuild and main never publishes stale code.
@@ -263,6 +275,8 @@ jobs:
               - '!backend/agents/agent_registry/**'
               - '!backend/agents/sales_team/**'
               - '!backend/agents/agent_cognition/**'
+              - '!backend/agents/user_agent_founder/**'
+              - '!backend/agents/agentic_team_provisioning/**'
               # shared_backend paths (already trigger fan-out separately)
               - '!backend/agents/shared_postgres/**'
               - '!backend/agents/shared_neo4j/**'
@@ -302,6 +316,7 @@ jobs:
           F_AGENT_PROVISIONING: ${{ steps.filter.outputs.agent_provisioning }}
           F_SALES: ${{ steps.filter.outputs.sales }}
           F_AGENT_REPO_TOOLS: ${{ steps.filter.outputs.agent_repo_tools }}
+          F_USER_AGENT_FOUNDER: ${{ steps.filter.outputs.user_agent_founder }}
           F_DOCKER_BLOGGING_SERVICE: ${{ steps.filter.outputs.docker_blogging_service }}
           F_DOCKER_TEAM_SERVICE: ${{ steps.filter.outputs.docker_team_service }}
         run: |
@@ -368,10 +383,14 @@ jobs:
                   "tests": "agent_repo_tools/tests/",
                   "source": "agent_repo_tools",
               },
+              "user_agent_founder": {
+                  "tests": "user_agent_founder/tests/",
+                  "source": "user_agent_founder",
+              },
           }
 
           misc_entry = {
-              "name": "Misc Teams (market_research + soc2 + social_marketing + sales + agent_repo_tools)",
+              "name": "Misc Teams (market_research + soc2 + social_marketing + sales + agent_repo_tools + user_agent_founder)",
               "tests": "BATCHED",
               "source": "BATCHED",
               "batched_teams": [v for v in misc_teams.values()],
