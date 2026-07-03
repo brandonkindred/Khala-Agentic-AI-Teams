@@ -34,15 +34,26 @@ from __future__ import annotations
 import hashlib
 import json
 import textwrap
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
+from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
+    _INDICATOR_PARAM_SPECS,
+    INDICATOR_HELPER_NAME,
     EntryRule,
+    IndicatorName,
     IndicatorRef,
     SignalExitRule,
     VolatilityTargetSizing,
     is_entry_anchored_exit,
     iter_tree_indicator_refs,
+)
+
+# Indicators that accept a ``source`` override, derived from the DSL param specs
+# so the emitted ``_src`` helper is requested for exactly the source-aware
+# indicators — no hand-maintained tuple to drift from ``allow_source``.
+_SOURCE_AWARE_NAMES: frozenset[str] = frozenset(
+    name for name, spec in _INDICATOR_PARAM_SPECS.items() if spec.get("allow_source")
 )
 
 
@@ -55,28 +66,18 @@ class CompilerError(Exception):
     """
 
 
-# DSL name → emitted method name. Names must match
-# ``CodeConformanceGate._INDICATOR_ALLOWED_CALL_NAMES`` so the
-# conformance gate credits ``self.<name>(...)`` as the named indicator.
-_INDICATOR_METHOD_NAME: dict[str, str] = {
-    "sma": "sma",
-    "ema": "ema",
-    "rsi": "rsi",
-    "macd": "macd",
-    "bollinger": "bollinger_bands",
-    "atr": "atr",
-    "adx": "adx",
-    "stochastic": "stochastic",
-    "vwap": "vwap",
-}
+# DSL name → emitted method name, derived from the single source of truth in
+# ``spec_dsl.INDICATOR_HELPER_NAME`` (which carries the load-time coverage guard).
+# The conformance gate credits ``self.<name>(...)`` off the same mapping.
+_INDICATOR_METHOD_NAME: dict[str, str] = dict(INDICATOR_HELPER_NAME)
 
 _MIN_WINDOW: int = 20
 
-# VWAP requests the deepest retained history. Sandbox VWAP is
+# VWAP (and OBV) request the deepest retained history. Both are
 # cumulative-over-the-series, not rolling, so a smaller request would
-# silently change signal semantics; 500 matches the harness retention
-# ceiling in ``StrategyContext._ingest_bar``.
-_VWAP_HISTORY: int = 500
+# silently change signal semantics; this mirrors the harness retention
+# ceiling in ``StrategyContext._ingest_bar`` via the shared constant.
+_VWAP_HISTORY: int = STREAMING_WINDOW_BARS
 
 
 def compile_strategy(spec: Any) -> str:
@@ -137,9 +138,7 @@ def compile_strategy(spec: Any) -> str:
 
     indicator_bindings = _build_indicator_bindings(indicator_refs)
     used_helper_names = sorted({_INDICATOR_METHOD_NAME[ref.name] for ref in indicator_refs})
-    needs_source_helper = any(
-        ref.name in ("sma", "ema", "rsi", "macd", "bollinger") for ref in indicator_refs
-    )
+    needs_source_helper = any(ref.name in _SOURCE_AWARE_NAMES for ref in indicator_refs)
 
     # ``history_depth`` (request) and ``warmup_min`` (gate) are decoupled
     # so VWAP's cumulative-style depth request doesn't bind the warm-up
@@ -256,6 +255,23 @@ def _lookback_for(ref: IndicatorRef) -> int:
         # Cumulative sum has no strict warm-up, but a 1-bar VWAP is just
         # (h+l+c)/3 and not informative — floor to ``_MIN_WINDOW``.
         return _MIN_WINDOW
+    if name == "donchian":
+        return int(ref.param("period"))
+    if name == "keltner":
+        # EMA basis needs ``period`` bars; the ATR leg needs ``atr_period + 1``.
+        return max(int(ref.param("period")), int(ref.param("atr_period")) + 1)
+    if name == "obv":
+        # Cumulative like VWAP — no strict warm-up; floor to ``_MIN_WINDOW``.
+        return _MIN_WINDOW
+    if name == "mfi":
+        # Each money-flow term compares typical price against the prior bar.
+        return int(ref.param("period")) + 1
+    if name == "roc":
+        return int(ref.param("period")) + 1
+    if name == "cci":
+        return int(ref.param("period"))
+    if name == "williams_r":
+        return int(ref.param("period"))
     raise CompilerError(f"unsupported indicator: {name!r}")
 
 
@@ -263,11 +279,12 @@ def _history_depth_for(ref: IndicatorRef) -> int:
     """Return the depth to request from ``ctx.history(symbol, n)``.
 
     Pre:  ``ref.name`` is one of the supported indicator names.
-    Post: for non-VWAP indicators, equals :func:`_lookback_for`.
-          For VWAP, returns ``_VWAP_HISTORY`` so the cumulative-style
-          helper sees the deepest history the harness retains.
+    Post: for non-cumulative indicators, equals :func:`_lookback_for`.
+          For the cumulative-style indicators (VWAP, OBV), returns
+          ``_VWAP_HISTORY`` so the helper sees the deepest history the
+          harness retains.
     """
-    if ref.name == "vwap":
+    if ref.name in ("vwap", "obv"):
         return _VWAP_HISTORY
     return _lookback_for(ref)
 
@@ -289,6 +306,61 @@ def _build_indicator_bindings(
     return out
 
 
+# Per-indicator emit spec: the ordered kwargs to thread into ``self.<method>(history, …)``.
+# Each entry is ``(emit_kwarg, kind, dsl_param)`` where ``kind`` is:
+#   "int"    → ``{emit_kwarg}={int(ref.param(dsl_param))}``
+#   "float"  → ``{emit_kwarg}={float(ref.param(dsl_param))!r}``
+#   "source" → ``{emit_kwarg}={ref.source!r}``            (dsl_param unused)
+#   "select" → ``{emit_kwarg}={str(ref.param(dsl_param))!r}``  (selector for tuple-valued indicators)
+# This replaces a 16-branch if/elif whose bodies differed only in which kwargs they threaded.
+_EMIT_ARGS: dict[str, Tuple[Tuple[str, str, Optional[str]], ...]] = {
+    "sma": (("period", "int", "period"), ("source", "source", None)),
+    "ema": (("period", "int", "period"), ("source", "source", None)),
+    "rsi": (("period", "int", "period"), ("source", "source", None)),
+    "macd": (
+        ("fast", "int", "fast"),
+        ("slow", "int", "slow"),
+        ("signal", "int", "signal"),
+        ("source", "source", None),
+        ("select", "select", "output"),
+    ),
+    "bollinger": (
+        ("period", "int", "period"),
+        ("num_std", "float", "num_std"),
+        ("source", "source", None),
+        ("select", "select", "band"),
+    ),
+    "atr": (("period", "int", "period"),),
+    "adx": (("period", "int", "period"),),
+    "stochastic": (
+        ("k_period", "int", "k_period"),
+        ("d_period", "int", "d_period"),
+        ("select", "select", "output"),
+    ),
+    "vwap": (),
+    "donchian": (("period", "int", "period"), ("select", "select", "band")),
+    "keltner": (
+        ("period", "int", "period"),
+        ("atr_period", "int", "atr_period"),
+        ("multiplier", "float", "multiplier"),
+        ("select", "select", "band"),
+    ),
+    "obv": (),
+    "mfi": (("period", "int", "period"),),
+    "cci": (("period", "int", "period"),),
+    "williams_r": (("period", "int", "period"),),
+    "roc": (("period", "int", "period"), ("source", "source", None)),
+}
+
+# Load-time guard: the emit table must cover exactly the DSL indicator names, or a
+# valid ref would ``KeyError`` at emit time. Mirrors the ``_INDICATOR_METHOD_NAME`` guard.
+if set(_EMIT_ARGS) != set(IndicatorName.__args__):
+    raise RuntimeError(
+        "indicator emit table (_EMIT_ARGS) must cover every DSL indicator; "
+        f"mismatch: {set(IndicatorName.__args__) ^ set(_EMIT_ARGS)}"
+    )
+
+
 def _emit_indicator_call(ref: IndicatorRef) -> str:
     """Render the ``self.<name>(history, ...)`` call expression for one ref.
 
@@ -300,33 +372,17 @@ def _emit_indicator_call(ref: IndicatorRef) -> str:
           stochastic) thread their selector kwarg through to the helper.
     """
     method = _INDICATOR_METHOD_NAME[ref.name]
-    if ref.name in ("sma", "ema"):
-        return f"self.{method}(history, period={int(ref.param('period'))}, source={ref.source!r})"
-    if ref.name == "rsi":
-        return f"self.{method}(history, period={int(ref.param('period'))}, source={ref.source!r})"
-    if ref.name == "macd":
-        return (
-            f"self.{method}(history, fast={int(ref.param('fast'))}, "
-            f"slow={int(ref.param('slow'))}, signal={int(ref.param('signal'))}, "
-            f"source={ref.source!r}, select={str(ref.param('output'))!r})"
-        )
-    if ref.name == "bollinger":
-        return (
-            f"self.{method}(history, period={int(ref.param('period'))}, "
-            f"num_std={float(ref.param('num_std'))!r}, "
-            f"source={ref.source!r}, select={str(ref.param('band'))!r})"
-        )
-    if ref.name in ("atr", "adx"):
-        return f"self.{method}(history, period={int(ref.param('period'))})"
-    if ref.name == "stochastic":
-        return (
-            f"self.{method}(history, k_period={int(ref.param('k_period'))}, "
-            f"d_period={int(ref.param('d_period'))}, "
-            f"select={str(ref.param('output'))!r})"
-        )
-    if ref.name == "vwap":
-        return f"self.{method}(history)"
-    raise CompilerError(f"unsupported indicator: {ref.name!r}")
+    args = ["history"]
+    for emit_kwarg, kind, dsl_param in _EMIT_ARGS[ref.name]:
+        if kind == "int":
+            args.append(f"{emit_kwarg}={int(ref.param(dsl_param))}")
+        elif kind == "float":
+            args.append(f"{emit_kwarg}={float(ref.param(dsl_param))!r}")
+        elif kind == "source":
+            args.append(f"{emit_kwarg}={ref.source!r}")
+        else:  # "select"
+            args.append(f"{emit_kwarg}={str(ref.param(dsl_param))!r}")
+    return f"self.{method}({', '.join(args)})"
 
 
 # ---------------------------------------------------------------------------
@@ -639,12 +695,24 @@ _HELPER_BODIES: dict[str, str] = {
             mean = s / period
             var = max(0.0, sq / period - mean * mean)
             std = math.sqrt(var) if var > 0 else 0.0
+            upper = mean + num_std * std
+            lower = mean - num_std * std
             if select == "middle":
                 return mean
             if select == "upper":
-                return mean + num_std * std
+                return upper
             if select == "lower":
-                return mean - num_std * std
+                return lower
+            if select == "percent_b":
+                width = upper - lower
+                if width == 0:
+                    return 0.5
+                price = self._src(history[-1], source)
+                return (price - lower) / width
+            if select == "bandwidth":
+                if mean == 0:
+                    return 0.0
+                return (upper - lower) / mean
             return None
         """
     ),
@@ -727,6 +795,128 @@ _HELPER_BODIES: dict[str, str] = {
             if den == 0:
                 return sum(b.close for b in history) / len(history)
             return num / den
+        """
+    ),
+    "donchian_channels": textwrap.dedent(
+        """\
+        def donchian_channels(self, history, period=20, select="middle"):
+            if len(history) < period:
+                return None
+            window = history[-period:]
+            upper = max(b.high for b in window)
+            lower = min(b.low for b in window)
+            if select == "upper":
+                return upper
+            if select == "lower":
+                return lower
+            if select == "middle":
+                return (upper + lower) / 2.0
+            return None
+        """
+    ),
+    "keltner_channels": textwrap.dedent(
+        """\
+        def keltner_channels(self, history, period=20, atr_period=10, multiplier=2.0, select="middle"):
+            if len(history) < max(period, atr_period + 1):
+                return None
+            alpha = 2.0 / (period + 1.0)
+            middle = history[-period].close
+            for b in history[-period + 1:]:
+                middle = alpha * b.close + (1.0 - alpha) * middle
+            # Simple average of true range (matches IndicatorRegistry.atr and
+            # the streaming keltner — atr is an SMA of TR, not Wilder-smoothed).
+            total = 0.0
+            for i in range(len(history) - atr_period, len(history)):
+                h = history[i].high
+                low = history[i].low
+                prev_close = history[i - 1].close
+                total += max(h - low, abs(h - prev_close), abs(low - prev_close))
+            atr_val = total / atr_period
+            if select == "middle":
+                return middle
+            if select == "upper":
+                return middle + multiplier * atr_val
+            if select == "lower":
+                return middle - multiplier * atr_val
+            return None
+        """
+    ),
+    "obv": textwrap.dedent(
+        """\
+        def obv(self, history):
+            if not history:
+                return None
+            value = 0.0
+            for i in range(1, len(history)):
+                cur = history[i].close
+                prev = history[i - 1].close
+                if cur > prev:
+                    value += history[i].volume
+                elif cur < prev:
+                    value -= history[i].volume
+            return value
+        """
+    ),
+    "mfi": textwrap.dedent(
+        """\
+        def mfi(self, history, period=14):
+            if len(history) < period + 1:
+                return None
+            pos = 0.0
+            neg = 0.0
+            for i in range(len(history) - period, len(history)):
+                cur = history[i]
+                prev = history[i - 1]
+                tp = (cur.high + cur.low + cur.close) / 3.0
+                tp_prev = (prev.high + prev.low + prev.close) / 3.0
+                rmf = tp * cur.volume
+                if tp > tp_prev:
+                    pos += rmf
+                elif tp < tp_prev:
+                    neg += rmf
+            if neg == 0:
+                return 100.0 if pos > 0 else 50.0
+            ratio = pos / neg
+            return 100.0 - (100.0 / (1.0 + ratio))
+        """
+    ),
+    "roc": textwrap.dedent(
+        """\
+        def roc(self, history, period=12, source="close"):
+            if len(history) < period + 1:
+                return None
+            cur = self._src(history[-1], source)
+            prev = self._src(history[-1 - period], source)
+            if prev == 0:
+                return 0.0
+            return (cur - prev) / prev * 100.0
+        """
+    ),
+    "cci": textwrap.dedent(
+        """\
+        def cci(self, history, period=20):
+            if len(history) < period:
+                return None
+            tps = [(b.high + b.low + b.close) / 3.0 for b in history[-period:]]
+            sma_tp = sum(tps) / period
+            mean_dev = sum(abs(t - sma_tp) for t in tps) / period
+            if mean_dev == 0:
+                return 0.0
+            return (tps[-1] - sma_tp) / (0.015 * mean_dev)
+        """
+    ),
+    "williams_r": textwrap.dedent(
+        """\
+        def williams_r(self, history, period=14):
+            if len(history) < period:
+                return None
+            window = history[-period:]
+            highest = max(b.high for b in window)
+            lowest = min(b.low for b in window)
+            rng = highest - lowest
+            if rng == 0:
+                return -50.0
+            return -100.0 * (highest - history[-1].close) / rng
         """
     ),
 }

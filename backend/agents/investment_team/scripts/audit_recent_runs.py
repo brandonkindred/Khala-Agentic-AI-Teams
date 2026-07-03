@@ -42,19 +42,45 @@ _RISK_LIMIT_TIGHTEN_DIR: Dict[str, Optional[str]] = {
 
 _RISK_LIMIT_KEYS = frozenset(_RISK_LIMIT_TIGHTEN_DIR.keys())
 
-_INDICATOR_NAMES = frozenset(
-    {
-        "sma",
-        "ema",
-        "rsi",
-        "macd",
-        "bollinger",
-        "atr",
-        "adx",
-        "stochastic",
-        "vwap",
-    }
+# Indicator concept vocabulary for narrative mentions, mirrored from
+# ``spec_readiness`` as a decoupled literal copy (the audit imports no gate/DSL
+# modules at runtime). The regex matches both DSL tokens *and* the common prose
+# forms ("on-balance volume", "money flow", "rate of change", "williams"/
+# "williams_r", …), and the map resolves each match to the DSL indicator(s) it
+# names — so a narrative that name-drops an indicator can't slip past
+# ``check_narrative_fidelity`` whether it uses prose or the exact DSL identifier.
+# ``tests/test_audit_recent_runs.py`` asserts both stay byte-for-byte in sync with
+# ``spec_readiness`` and that the map covers every ``IndicatorName``.
+_CONCEPT_TERMS = re.compile(
+    r"\b(rsi|macd|moving\s+average|ema|sma|bollinger|atr|stochastic|adx|vwap|"
+    r"donchian|keltner|obv|on[\s-]balance\s+volume|mfi|money\s+flow|roc|"
+    r"rate\s+of\s+change|cci|williams_r|williams)\b",
+    re.IGNORECASE,
 )
+_CONCEPT_TO_INDICATOR_NAMES: dict[str, frozenset[str]] = {
+    "rsi": frozenset({"rsi"}),
+    "macd": frozenset({"macd"}),
+    "moving average": frozenset({"sma", "ema"}),
+    "ema": frozenset({"ema"}),
+    "sma": frozenset({"sma"}),
+    "bollinger": frozenset({"bollinger"}),
+    "atr": frozenset({"atr"}),
+    "stochastic": frozenset({"stochastic"}),
+    "adx": frozenset({"adx"}),
+    "vwap": frozenset({"vwap"}),
+    "donchian": frozenset({"donchian"}),
+    "keltner": frozenset({"keltner"}),
+    "obv": frozenset({"obv"}),
+    "on balance volume": frozenset({"obv"}),
+    "on-balance volume": frozenset({"obv"}),
+    "mfi": frozenset({"mfi"}),
+    "money flow": frozenset({"mfi"}),
+    "roc": frozenset({"roc"}),
+    "rate of change": frozenset({"roc"}),
+    "cci": frozenset({"cci"}),
+    "williams_r": frozenset({"williams_r"}),
+    "williams": frozenset({"williams_r"}),
+}
 
 _MULTIPLIER_TOL = 1e-6
 
@@ -458,6 +484,19 @@ def _collect_spec_indicators(record: Dict[str, Any]) -> set[str]:
     def _extract_from_predicate(pred: Any) -> None:
         if not isinstance(pred, dict):
             return
+        # A ``when`` position is either a leaf comparison (lhs/op/rhs) or a
+        # boolean combinator (``all_of``/``any_of`` with an ``of`` list of
+        # child trees). Confirmation-stacked entries — the DSL's flagship
+        # multi-signal form — nest their indicators under ``of``, so recurse
+        # into the children before reading lhs/rhs; otherwise a narrative that
+        # names a nested indicator is wrongly flagged phantom. The audit walks
+        # the raw record dict (it is deliberately decoupled from the DSL), so
+        # it dispatches on the dict shape rather than importing the tree walker.
+        children = pred.get("of")
+        if isinstance(children, list):
+            for child in children:
+                _extract_from_predicate(child)
+            return
         lhs = pred.get("lhs")
         if isinstance(lhs, dict) and lhs.get("name"):
             indicators.add(lhs["name"].lower())
@@ -483,10 +522,18 @@ def check_narrative_fidelity(record: Dict[str, Any]) -> CheckResult:
         return CheckResult(name, "SKIP", "No analysis_narrative")
 
     spec_indicators = _collect_spec_indicators(record)
-    phantoms = []
-    for ind in sorted(_INDICATOR_NAMES):
-        if re.search(rf"\b{ind}\b", narrative, re.IGNORECASE) and ind not in spec_indicators:
-            phantoms.append(ind)
+    # Match DSL tokens and common prose forms, normalising whitespace exactly as
+    # spec_readiness does, then resolve each mention to the indicator(s) it could
+    # name. A mention is phantom only when *none* of those indicators is in the
+    # spec (so "moving average" is satisfied by either SMA or EMA).
+    mentioned = {
+        re.sub(r"\s+", " ", m.group(0).lower()) for m in _CONCEPT_TERMS.finditer(narrative)
+    }
+    phantoms = sorted(
+        concept
+        for concept in mentioned
+        if not (_CONCEPT_TO_INDICATOR_NAMES.get(concept, frozenset()) & spec_indicators)
+    )
 
     if phantoms:
         return CheckResult(name, "FAIL", f"Phantom indicators in narrative: {', '.join(phantoms)}")

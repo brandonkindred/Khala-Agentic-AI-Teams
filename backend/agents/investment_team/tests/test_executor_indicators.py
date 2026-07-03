@@ -414,3 +414,124 @@ def test_stochastic_accepts_bars() -> None:
     bars = _bars(40)
     k, d = ind.stochastic(bars, bars, bars, k_period=14, d_period=3)
     assert len(k) == len(d) == 40
+
+
+def test_cumulative_specs_use_windowed_wrappers() -> None:
+    # The ``cumulative`` flag exists solely to force a window-bounded helper, so the
+    # only always-true invariant is the biconditional: a spec is flagged ``cumulative``
+    # IFF its helper is a ``_windowed_*`` wrapper. This catches a flag/helper mismatch in
+    # either direction and adapts to any future cumulative indicator.
+    #
+    # We deliberately do NOT also assert "period-less (empty kwarg_names) <=> cumulative":
+    # that is not a true invariant. A parameter-less indicator need not be an unbounded
+    # running total — a stateless per-bar transform (e.g. typical price / HLC3, median
+    # price) also has no scalar kwargs yet is bounded and non-cumulative. Tying the flag
+    # to ``kwarg_names`` would false-alarm on such a future indicator. "Is this indicator
+    # unbounded?" is a semantic property; the flag is its source of truth, and this test
+    # verifies only that the flag and the helper mechanism stay consistent.
+    for name, spec in ind.INDICATORS.items():
+        windowed = spec.helper.__name__.startswith("_windowed_")
+        assert spec.cumulative == windowed, (name, spec.cumulative, spec.helper.__name__)
+    # Anchor the two known cumulative indicators to concrete wrappers, so the
+    # biconditional above can't be satisfied vacuously (every side False).
+    assert ind.INDICATORS["obv"].helper is ind._windowed_obv
+    assert ind.INDICATORS["vwap"].helper is ind._windowed_vwap
+
+
+def test_windowed_obv_bounds_to_trailing_window() -> None:
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+
+    n = STREAMING_WINDOW_BARS + 50
+    close = pd.Series([100.0 + i for i in range(n)])  # strictly rising -> +1/bar
+    volume = pd.Series([1.0] * n)
+    full = ind.obv(close, volume)
+    win = ind._windowed_obv(close, volume)
+    # Full OBV grows without bound; the windowed value is capped at the trailing
+    # window. The oldest in-window bar has no in-window predecessor so it
+    # contributes 0, leaving window-1 signed terms (unit volume here => W-1).
+    assert full.iloc[-1] == pytest.approx(n - 1)
+    assert win.iloc[-1] == pytest.approx(STREAMING_WINDOW_BARS - 1)
+    # Before the window fills, the two agree (nothing has slid off yet).
+    assert win.iloc[STREAMING_WINDOW_BARS - 1] == pytest.approx(
+        full.iloc[STREAMING_WINDOW_BARS - 1]
+    )
+
+
+def test_windowed_obv_matches_runtime_windowed_series() -> None:
+    # The strongest contract: the probe's windowed OBV must equal the runtime's
+    # per-bar windowed value bar-for-bar. This pins the shift boundary — an
+    # off-by-one over-counts by the boundary bar's signed volume near the edge.
+    from investment_team.strategy_lab.executor.predicate_evaluator import (
+        compute_indicator_series,
+    )
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+    from investment_team.strategy_lab.spec_dsl import IndicatorRef
+
+    n = STREAMING_WINDOW_BARS + 40
+    closes = [100.0 + 10 * math.sin(i / 3.0) + (i % 7) for i in range(n)]  # non-monotone
+    volume = [1000.0 + (i % 5) * 100 for i in range(n)]
+    df = pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 1 for c in closes],
+            "low": [c - 1 for c in closes],
+            "close": closes,
+            "volume": volume,
+        }
+    )
+    ref = compute_indicator_series(IndicatorRef(name="obv"), df)
+    win = ind._windowed_obv(df["close"], df["volume"])
+    pd.testing.assert_series_equal(win.reset_index(drop=True), ref.reset_index(drop=True))
+
+
+def test_windowed_vwap_zero_volume_window_falls_back_to_avg_close() -> None:
+    # When the trailing window has zero total volume the ratio is undefined; the
+    # runtime IndicatorRegistry.vwap falls back to the window's average close, so
+    # the probe wrapper must too (otherwise it returns NaN and misses predicates
+    # the engine evaluates against a finite value).
+    from investment_team.strategy_lab.executor.predicate_evaluator import (
+        compute_indicator_series,
+    )
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+    from investment_team.strategy_lab.spec_dsl import IndicatorRef
+
+    n = STREAMING_WINDOW_BARS + 30
+    closes = [100.0 + math.sin(i / 2.0) for i in range(n)]
+    # Volume only in the first 10 bars, then zero — the late trailing window has
+    # zero total volume.
+    volume = [1000.0 if i < 10 else 0.0 for i in range(n)]
+    df = pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 1 for c in closes],
+            "low": [c - 1 for c in closes],
+            "close": closes,
+            "volume": volume,
+        }
+    )
+    ref = compute_indicator_series(IndicatorRef(name="vwap"), df)
+    win = ind._windowed_vwap(df["high"], df["low"], df["close"], df["volume"])
+    # Matches the runtime bar-for-bar, and the zero-volume tail is finite (avg close).
+    pd.testing.assert_series_equal(win.reset_index(drop=True), ref.reset_index(drop=True))
+    assert not pd.isna(win.iloc[-1])
+    assert win.iloc[-1] == pytest.approx(
+        sum(closes[-STREAMING_WINDOW_BARS:]) / STREAMING_WINDOW_BARS
+    )
+
+
+def test_windowed_vwap_rebases_to_trailing_window() -> None:
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+
+    n = STREAMING_WINDOW_BARS + 50
+    high = pd.Series([101.0 + i for i in range(n)])
+    low = pd.Series([99.0 + i for i in range(n)])
+    close = pd.Series([100.0 + i for i in range(n)])
+    volume = pd.Series([1.0] * n)
+    full = ind.vwap(high, low, close, volume)
+    win = ind._windowed_vwap(high, low, close, volume)
+    # On a rising series the unbounded VWAP lags far below the trailing-window
+    # VWAP (which tracks the recent, higher typical prices).
+    assert win.iloc[-1] > full.iloc[-1]
+    # Windowed VWAP stays within the trailing window's typical-price range.
+    tp = (high + low + close) / 3
+    assert win.iloc[-1] == pytest.approx(tp.iloc[-STREAMING_WINDOW_BARS:].mean(), rel=1e-9)

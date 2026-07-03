@@ -88,6 +88,23 @@ class TestGenerateConformanceFixtures:
         assert fixtures[0].synthesizable is False
         assert fixtures[0].unsynthesizable_reason == "tree_predicate"
 
+    def test_roc_vs_negative_threshold_synthesizable(self):
+        """ROC is a percent oscillator often compared to thresholds <= 0. The
+        fixture must drive the percent change (not a price level) across the
+        threshold, so even a deep-negative threshold produces both verdict states
+        instead of degenerate/penny bars or a false ``no_predicate_state_change``.
+        """
+        for threshold in (-5.0, -60.0, 5.0):
+            pred = Predicate(
+                lhs=IndicatorRef(name="roc", params={"period": 12}), op="<", rhs=threshold
+            )
+            spec = _spec(entry_rules=[EntryRule(when=pred, side="long")])
+            fixtures = generate_conformance_fixtures(spec)
+            assert len(fixtures) == 1
+            f = fixtures[0]
+            assert f.synthesizable is True, (threshold, f.unsynthesizable_reason)
+            assert f.unsynthesizable_reason is None, (threshold, f.unsynthesizable_reason)
+
     def test_stop_loss_excluded(self):
         spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
         fixtures = generate_conformance_fixtures(spec)

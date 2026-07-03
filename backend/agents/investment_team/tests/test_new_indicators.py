@@ -1,0 +1,1906 @@
+"""Coverage for the expanded indicator catalogue.
+
+Adds Donchian/Keltner channels, Bollinger %B/bandwidth, OBV, MFI, ROC, CCI and
+Williams %R across every layer they touch:
+
+* **Param validation** — the DSL ``IndicatorRef`` registry rejects out-of-range
+  / mistyped params and unknown selectors, and honours ``allow_source``.
+* **Streaming correctness** — the registry's cold-start, bar-by-bar (warm-path)
+  and sliding-window outputs all agree with an independent reference, and the
+  bounded oscillators stay inside their declared ``output_range``.
+* **Scalar wrappers + accessor** — ``executor.strategy_indicators`` helpers and
+  ``indicator_value`` return the registry's trailing value.
+* **Compile + conformance** — each indicator compiles into a runnable strategy,
+  the inline helper matches the registry, and a custom-code strategy reading the
+  indicator passes / fails the predicate-conformance gate as expected.
+"""
+
+from __future__ import annotations
+
+import random
+import sys
+import textwrap
+import types
+from dataclasses import dataclass
+from typing import Optional
+
+import pandas as pd
+import pytest
+from pydantic import ValidationError
+
+from investment_team.models import StrategySpec
+from investment_team.strategy_lab.executor import indicators as pdi
+from investment_team.strategy_lab.executor import strategy_indicators as si
+from investment_team.strategy_lab.executor.strategy_indicators import indicator_value
+from investment_team.strategy_lab.indicators.streaming import IndicatorRegistry
+from investment_team.strategy_lab.quality_gates.code_conformance import (
+    CodeConformanceGate,
+)
+from investment_team.strategy_lab.quality_gates.predicate_conformance import (
+    PredicateConformanceGate,
+)
+from investment_team.strategy_lab.quality_gates.predicate_conformance_fixtures import (
+    generate_conformance_fixtures,
+)
+from investment_team.strategy_lab.spec_dsl import (
+    EntryRule,
+    FixedFractionSizing,
+    IndicatorRef,
+    Predicate,
+    StopLossRule,
+    format_rules_for_prompt,
+)
+from investment_team.strategy_lab.synthesis.compiler import compile_strategy
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Bar:
+    timestamp: str
+    open: float = 100.0
+    high: float = 100.0
+    low: float = 100.0
+    close: float = 100.0
+    volume: float = 1.0
+    symbol: str = "X"
+
+
+def _series(n: int, seed: int = 0) -> list[_Bar]:
+    rng = random.Random(seed)
+    bars: list[_Bar] = []
+    close = 100.0
+    for i in range(n):
+        close = max(5.0, close + rng.uniform(-3.0, 3.0) + i * 0.05)
+        spread = 1.0 + rng.uniform(0.0, 0.5)
+        bars.append(
+            _Bar(
+                timestamp=f"2024-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
+                open=close - 0.1,
+                high=close + spread,
+                low=max(0.5, close - spread),
+                close=close,
+                volume=1000.0 + (i % 7) * 250.0,
+            )
+        )
+    return bars
+
+
+# ---------------------------------------------------------------------------
+# Independent reference implementations (mirror the registry math).
+# ---------------------------------------------------------------------------
+
+
+def _wema(vals: list[float], period: int) -> float:
+    """Windowed EMA over ``vals`` seeded from the first element (the registry's basis)."""
+    alpha = 2.0 / (period + 1.0)
+    v = vals[0]
+    for x in vals[1:]:
+        v = alpha * x + (1.0 - alpha) * v
+    return v
+
+
+def _ref_donchian(bars, period: int, select: str) -> Optional[float]:
+    """Donchian band: highest high / lowest low (and midpoint) over ``period`` bars."""
+    if len(bars) < period:
+        return None
+    w = bars[-period:]
+    upper = max(b.high for b in w)
+    lower = min(b.low for b in w)
+    return {"upper": upper, "lower": lower, "middle": (upper + lower) / 2.0}[select]
+
+
+def _ref_keltner(bars, period: int, atr_period: int, mult: float, select: str) -> Optional[float]:
+    """Keltner band: close-EMA basis ± ``mult`` × simple-average ATR(``atr_period``)."""
+    if len(bars) < max(period, atr_period + 1):
+        return None
+    middle = _wema([b.close for b in bars[-period:]], period)
+    total = 0.0
+    for i in range(len(bars) - atr_period, len(bars)):
+        h, low, pc = bars[i].high, bars[i].low, bars[i - 1].close
+        total += max(h - low, abs(h - pc), abs(low - pc))
+    atr_val = total / atr_period
+    return {
+        "middle": middle,
+        "upper": middle + mult * atr_val,
+        "lower": middle - mult * atr_val,
+    }[select]
+
+
+def _ref_obv(bars) -> Optional[float]:
+    """On-Balance Volume: cumulative volume signed by the close-to-close direction."""
+    if not bars:
+        return None
+    val = 0.0
+    for i in range(1, len(bars)):
+        if bars[i].close > bars[i - 1].close:
+            val += bars[i].volume
+        elif bars[i].close < bars[i - 1].close:
+            val -= bars[i].volume
+    return val
+
+
+def _ref_mfi(bars, period: int) -> Optional[float]:
+    """Money Flow Index: volume-weighted RSI of typical price (no-flow window → 50)."""
+    if len(bars) < period + 1:
+        return None
+    pos = neg = 0.0
+    for i in range(len(bars) - period, len(bars)):
+        tp = (bars[i].high + bars[i].low + bars[i].close) / 3.0
+        tpp = (bars[i - 1].high + bars[i - 1].low + bars[i - 1].close) / 3.0
+        rmf = tp * bars[i].volume
+        if tp > tpp:
+            pos += rmf
+        elif tp < tpp:
+            neg += rmf
+    if neg == 0:
+        return 100.0 if pos > 0 else 50.0
+    return 100.0 - 100.0 / (1.0 + pos / neg)
+
+
+def _ref_roc(bars, period: int) -> Optional[float]:
+    """Rate of Change (percent) over ``period`` bars; zero reference price → 0.0."""
+    if len(bars) < period + 1:
+        return None
+    cur, prev = bars[-1].close, bars[-1 - period].close
+    return 0.0 if prev == 0 else (cur - prev) / prev * 100.0
+
+
+def _ref_cci(bars, period: int) -> Optional[float]:
+    """Commodity Channel Index: typical-price deviation / (0.015 × mean deviation)."""
+    if len(bars) < period:
+        return None
+    tps = [(b.high + b.low + b.close) / 3.0 for b in bars[-period:]]
+    sma_tp = sum(tps) / period
+    md = sum(abs(t - sma_tp) for t in tps) / period
+    return 0.0 if md == 0 else (tps[-1] - sma_tp) / (0.015 * md)
+
+
+def _ref_williams(bars, period: int) -> Optional[float]:
+    """Williams %R: close position within the trailing high/low range (flat → −50)."""
+    if len(bars) < period:
+        return None
+    w = bars[-period:]
+    hi = max(b.high for b in w)
+    lo = min(b.low for b in w)
+    rng = hi - lo
+    return -50.0 if rng == 0 else -100.0 * (hi - bars[-1].close) / rng
+
+
+def _ref_bb(bars, period: int, num_std: float, select: str) -> Optional[float]:
+    """Bollinger derived outputs: %B = (price−lower)/(upper−lower); bandwidth = width/mean."""
+    if len(bars) < period:
+        return None
+    vals = [b.close for b in bars[-period:]]
+    mean = sum(vals) / period
+    var = max(0.0, sum(v * v for v in vals) / period - mean * mean)
+    std = var**0.5
+    upper, lower = mean + num_std * std, mean - num_std * std
+    if select == "percent_b":
+        width = upper - lower
+        return 0.5 if width == 0 else (bars[-1].close - lower) / width
+    if select == "bandwidth":
+        return 0.0 if mean == 0 else (upper - lower) / mean
+    raise AssertionError(select)
+
+
+# (id, registry-call, reference-call, warmup_min) — one row per new output.
+_CASES = [
+    (
+        "donchian_upper",
+        lambda r, b: r.donchian(b, 20, "upper"),
+        lambda b: _ref_donchian(b, 20, "upper"),
+        20,
+    ),
+    (
+        "donchian_middle",
+        lambda r, b: r.donchian(b, 20, "middle"),
+        lambda b: _ref_donchian(b, 20, "middle"),
+        20,
+    ),
+    (
+        "donchian_lower",
+        lambda r, b: r.donchian(b, 20, "lower"),
+        lambda b: _ref_donchian(b, 20, "lower"),
+        20,
+    ),
+    (
+        "keltner_upper",
+        lambda r, b: r.keltner(b, 20, 10, 1.5, "upper"),
+        lambda b: _ref_keltner(b, 20, 10, 1.5, "upper"),
+        20,
+    ),
+    (
+        "keltner_middle",
+        lambda r, b: r.keltner(b, 20, 10, 1.5, "middle"),
+        lambda b: _ref_keltner(b, 20, 10, 1.5, "middle"),
+        20,
+    ),
+    (
+        "keltner_lower",
+        lambda r, b: r.keltner(b, 20, 10, 1.5, "lower"),
+        lambda b: _ref_keltner(b, 20, 10, 1.5, "lower"),
+        20,
+    ),
+    ("obv", lambda r, b: r.obv(b), lambda b: _ref_obv(b), 2),
+    ("mfi", lambda r, b: r.mfi(b, 14), lambda b: _ref_mfi(b, 14), 15),
+    ("roc", lambda r, b: r.roc(b, 12), lambda b: _ref_roc(b, 12), 13),
+    ("cci", lambda r, b: r.cci(b, 20), lambda b: _ref_cci(b, 20), 20),
+    ("williams_r", lambda r, b: r.williams_r(b, 14), lambda b: _ref_williams(b, 14), 14),
+    (
+        "bb_percent_b",
+        lambda r, b: r.bollinger_bands(b, 20, 2.0, select="percent_b"),
+        lambda b: _ref_bb(b, 20, 2.0, "percent_b"),
+        20,
+    ),
+    (
+        "bb_bandwidth",
+        lambda r, b: r.bollinger_bands(b, 20, 2.0, select="bandwidth"),
+        lambda b: _ref_bb(b, 20, 2.0, "bandwidth"),
+        20,
+    ),
+]
+_CASE_IDS = [c[0] for c in _CASES]
+
+
+# ---------------------------------------------------------------------------
+# Streaming correctness
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case", _CASES, ids=_CASE_IDS)
+def test_cold_start_matches_reference(case) -> None:
+    """A fresh registry at every history depth must match the reference."""
+    _id, reg_call, ref_call, warm = case
+    bars = _series(80, seed=11)
+    for n in range(warm, len(bars) + 1):
+        sub = bars[:n]
+        got = reg_call(IndicatorRegistry(), sub)
+        exp = ref_call(sub)
+        assert got == pytest.approx(exp, rel=0, abs=1e-9), f"{_id} n={n}"
+
+
+@pytest.mark.parametrize("case", _CASES, ids=_CASE_IDS)
+def test_streaming_bar_by_bar_matches_reference(case) -> None:
+    """One registry driven bar-by-bar (warm path) must match the reference."""
+    _id, reg_call, ref_call, warm = case
+    bars = _series(80, seed=37)
+    reg = IndicatorRegistry()
+    for n in range(warm, len(bars) + 1):
+        sub = bars[:n]
+        got = reg_call(reg, sub)
+        exp = ref_call(sub)
+        assert got == pytest.approx(exp, rel=0, abs=1e-9), f"{_id} n={n}"
+
+
+@pytest.mark.parametrize("case", _CASES, ids=_CASE_IDS)
+def test_sliding_window_matches_cold_compute(case) -> None:
+    """A registry driven with a fixed-length sliding window matches a cold compute."""
+    _id, reg_call, ref_call, _warm = case
+    bars = _series(120, seed=88)
+    window = 50
+    reg = IndicatorRegistry()
+    for offset in range(0, len(bars) - window + 1):
+        sliding = bars[offset : offset + window]
+        got = reg_call(reg, sliding)
+        cold = reg_call(IndicatorRegistry(), sliding)
+        assert got == pytest.approx(cold, rel=0, abs=1e-9), f"{_id} offset={offset}"
+
+
+def _fractional_volume_series(n: int, seed: int) -> list[_Bar]:
+    """Like ``_series`` but with FRACTIONAL (crypto-style) volumes.
+
+    ``_series`` uses exactly-representable volumes (``1000 + k*250``), which makes the
+    incremental running sums bit-exact and hides any float drift. Fractional volumes
+    exercise the running-sum accumulation in obv/mfi.
+    """
+    rng = random.Random(seed)
+    bars: list[_Bar] = []
+    close = 100.0
+    for i in range(n):
+        close = max(5.0, close + rng.uniform(-3.0, 3.0) + i * 0.03)
+        spread = 1.0 + rng.uniform(0.0, 0.5)
+        bars.append(
+            _Bar(
+                timestamp=f"2024-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}",
+                open=close - 0.1,
+                high=close + spread,
+                low=max(0.5, close - spread),
+                close=close,
+                volume=rng.uniform(0.0001, 3.5),
+            )
+        )
+    return bars
+
+
+@pytest.mark.parametrize(
+    "reg_call, ref_call, warm",
+    [
+        (lambda r, b: r.obv(b), lambda b: _ref_obv(b), 2),
+        (lambda r, b: r.mfi(b, 14), lambda b: _ref_mfi(b, 14), 15),
+    ],
+    ids=["obv", "mfi"],
+)
+def test_obv_mfi_expand_then_slide_with_fractional_volume(reg_call, ref_call, warm) -> None:
+    # The incremental obv/mfi keep a deque + running sum. Drive ONE registry through an
+    # EXPAND phase (growing prefix), then a SLIDE phase (fixed window moving past the
+    # same bars), then a REPLAY/seek — the exact transitions the pure-expand and
+    # pure-slide tests never combine — with fractional volumes so the running sums
+    # actually accumulate float rounding. The value must track an independent reference
+    # within a bounded tolerance (running sums are not bit-exact to a fresh re-sum, by
+    # design — same tradeoff as bollinger_bands — but the drift stays far below any
+    # predicate threshold).
+    bars = _fractional_volume_series(160, seed=13)
+    reg = IndicatorRegistry()
+    window = 40
+    # Expand: growing prefix.
+    for n in range(warm, 80):
+        got = reg_call(reg, bars[:n])
+        assert got == pytest.approx(ref_call(bars[:n]), rel=0, abs=1e-6), f"expand n={n}"
+    # Slide: fixed window advancing past the just-seen bars (expand→slide boundary).
+    for offset in range(41, 120):
+        sliding = bars[offset : offset + window]
+        got = reg_call(reg, sliding)
+        assert got == pytest.approx(ref_call(sliding), rel=0, abs=1e-6), f"slide offset={offset}"
+    # Replay/seek: a shorter earlier window forces _advance_kind == "none" (cold rebuild),
+    # which must recover exactly rather than mis-reuse stale deque/running-sum state.
+    replay = bars[10:60]
+    assert reg_call(reg, replay) == pytest.approx(ref_call(replay), rel=0, abs=1e-6)
+
+
+def test_same_bar_repeat_returns_cached() -> None:
+    """Re-querying the same trailing bar returns the cached value (same-bar fingerprint hit)."""
+    bars = _series(60, seed=5)
+    reg = IndicatorRegistry()
+    for _id, reg_call, ref_call, _warm in _CASES:
+        first = reg_call(reg, bars)
+        second = reg_call(reg, bars)
+        assert first == pytest.approx(second), _id
+        # The cached value must also be *correct*, not merely stable — a registry
+        # that cached a wrong value would otherwise pass the idempotency check.
+        assert first == pytest.approx(ref_call(bars), rel=0, abs=1e-9), _id
+
+
+def test_warmup_returns_none() -> None:
+    """Each new indicator (and the derived Bollinger outputs) returns None below its warmup."""
+    reg = IndicatorRegistry()
+    assert reg.donchian(_series(10), 20, "upper") is None
+    assert reg.keltner(_series(10), 20, 10, 2.0, "middle") is None
+    assert reg.mfi(_series(5), 14) is None
+    assert reg.roc(_series(5), 12) is None
+    assert reg.cci(_series(10), 20) is None
+    assert reg.williams_r(_series(10), 14) is None
+    assert reg.obv([]) is None
+    # The derived Bollinger outputs share the band warmup contract: insufficient
+    # bars (< period) yield None, exactly like the upper/middle/lower selectors.
+    assert reg.bollinger_bands(_series(10), 20, 2.0, select="percent_b") is None
+    assert reg.bollinger_bands(_series(10), 20, 2.0, select="bandwidth") is None
+
+
+def test_mfi_and_williams_r_stay_in_range() -> None:
+    """The two new bounded oscillators stay within their declared output_range at every depth."""
+    bars = _series(120, seed=21)
+    reg = IndicatorRegistry()
+    # Start at 14 so the first valid value of each oscillator is range-checked:
+    # williams_r warms up at 14 bars, mfi at 15 (period + 1). The None guards skip
+    # the depths where an indicator hasn't warmed up yet.
+    for n in range(14, len(bars) + 1):
+        sub = bars[:n]
+        m = reg.mfi(sub, 14)
+        w = reg.williams_r(sub, 14)
+        if m is not None:
+            assert 0.0 <= m <= 100.0
+        if w is not None:
+            assert -100.0 <= w <= 0.0
+
+
+def test_flat_window_neutral_conventions() -> None:
+    """Degenerate (flat) windows return finite neutral values, never divide-by-zero."""
+    flat = [
+        _Bar(timestamp=f"t{i}", open=50, high=50, low=50, close=50, volume=100) for i in range(30)
+    ]
+    reg = IndicatorRegistry()
+    assert reg.williams_r(flat, 14) == -50.0
+    assert reg.roc(flat, 12) == 0.0  # flat window → zero percent change
+    assert reg.cci(flat, 20) == 0.0
+    assert reg.mfi(flat, 14) == 50.0  # no up/down typical-price moves
+    assert reg.obv(flat) == 0.0
+    assert reg.bollinger_bands(flat, 20, 2.0, select="percent_b") == 0.5
+    assert reg.bollinger_bands(flat, 20, 2.0, select="bandwidth") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# DSL param validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,params",
+    [
+        ("donchian", {"period": 1}),
+        ("donchian", {"period": 401}),
+        ("donchian", {"period": 2.5}),
+        ("donchian", {"band": "nope"}),
+        ("keltner", {"multiplier": 0}),
+        ("keltner", {"atr_period": 1}),
+        ("keltner", {"period": 401}),
+        ("keltner", {"band": "nope"}),  # unknown band selector
+        ("mfi", {"period": 1}),
+        ("mfi", {"period": 201}),
+        ("roc", {"period": 1}),
+        ("roc", {"period": 401}),
+        ("cci", {"period": 1}),
+        ("cci", {"period": 401}),
+        ("williams_r", {"period": 1}),
+        ("williams_r", {"period": 201}),
+        ("obv", {"period": 5}),  # OBV takes no params
+        ("bollinger", {"band": "invalid_band"}),  # unknown derived-output selector
+    ],
+)
+def test_param_validation_rejects(name, params) -> None:
+    with pytest.raises(ValidationError):
+        IndicatorRef(name=name, params=params)
+
+
+@pytest.mark.parametrize("name", ["donchian", "keltner", "obv", "mfi", "cci", "williams_r"])
+def test_ohlc_indicators_reject_source_override(name) -> None:
+    with pytest.raises(ValidationError):
+        IndicatorRef(name=name, source="high")
+
+
+def test_roc_accepts_source_override() -> None:
+    ref = IndicatorRef(name="roc", source="hl2", params={"period": 5})
+    assert ref.source == "hl2"
+    assert ref.param("period") == 5
+
+
+@pytest.mark.parametrize("band", ["percent_b", "bandwidth", "upper", "middle", "lower"])
+def test_bollinger_accepts_source_override(band) -> None:
+    """Bollinger is source-aware: a source override is accepted for every band, including %B/bandwidth."""
+    ref = IndicatorRef(name="bollinger", source="hl2", params={"band": band, "period": 20})
+    assert ref.source == "hl2"
+    assert ref.param("band") == band
+
+
+@pytest.mark.parametrize("band", ["percent_b", "bandwidth", "upper", "middle", "lower"])
+def test_bollinger_new_bands_accepted(band) -> None:
+    ref = IndicatorRef(name="bollinger", params={"band": band})
+    assert ref.param("band") == band
+
+
+@pytest.mark.parametrize(
+    "ref,fragment",
+    [
+        (
+            IndicatorRef(name="donchian", params={"band": "upper", "period": 20}),
+            "donchian_upper(20)",
+        ),
+        (
+            IndicatorRef(
+                name="keltner",
+                params={"band": "lower", "period": 20, "atr_period": 10, "multiplier": 1.5},
+            ),
+            "keltner_lower(20,10,1.5)",
+        ),
+        (IndicatorRef(name="obv"), "obv()"),
+        (IndicatorRef(name="mfi", params={"period": 14}), "mfi(14)"),
+        (IndicatorRef(name="roc", params={"period": 12}), "roc(12)"),
+        (IndicatorRef(name="roc", params={"period": 12}, source="hl2"), "roc(12, source=hl2)"),
+        (IndicatorRef(name="cci", params={"period": 20}), "cci(20)"),
+        (IndicatorRef(name="williams_r", params={"period": 14}), "williams_r(14)"),
+        # The derived Bollinger outputs must also render (prose / readiness / docs).
+        (
+            IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20}),
+            "bollinger_percent_b(20,2)",
+        ),
+        (
+            IndicatorRef(name="bollinger", params={"band": "bandwidth", "period": 20}),
+            "bollinger_bandwidth(20,2)",
+        ),
+    ],
+)
+def test_prose_formatter_renders_new_indicators(ref, fragment) -> None:
+    rules = [EntryRule(side="long", when=Predicate(lhs=ref, op="<", rhs=0.0))]
+    assert fragment in format_rules_for_prompt(rules)
+
+
+def test_defaults_filled_for_new_indicators() -> None:
+    assert IndicatorRef(name="donchian").param("period") == 20
+    assert IndicatorRef(name="donchian").param("band") == "middle"
+    assert IndicatorRef(name="keltner").param("atr_period") == 10
+    assert IndicatorRef(name="keltner").param("multiplier") == 2.0
+    assert IndicatorRef(name="keltner").param("band") == "middle"
+    assert IndicatorRef(name="mfi").param("period") == 14
+    assert IndicatorRef(name="roc").param("period") == 12
+    assert IndicatorRef(name="cci").param("period") == 20
+    assert IndicatorRef(name="williams_r").param("period") == 14
+    # The new Bollinger band outputs inherit the indicator's num_std default (2.0),
+    # so the prose formatter and downstream layers receive the right width.
+    assert IndicatorRef(name="bollinger", params={"band": "percent_b"}).param("num_std") == 2.0
+    assert IndicatorRef(name="bollinger", params={"band": "bandwidth"}).param("num_std") == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Scalar wrappers + accessor
+# ---------------------------------------------------------------------------
+
+
+def test_scalar_wrappers_match_registry() -> None:
+    bars = _series(80, seed=6)
+    highs = [b.high for b in bars]
+    lows = [b.low for b in bars]
+    closes = [b.close for b in bars]
+    vols = [b.volume for b in bars]
+    reg = IndicatorRegistry()
+
+    assert si.obv(closes, vols) == pytest.approx(reg.obv(bars))
+    assert si.mfi(highs, lows, closes, vols, 14) == pytest.approx(reg.mfi(bars, 14))
+    assert si.roc(closes, 12) == pytest.approx(reg.roc(bars, 12))
+    assert si.cci(highs, lows, closes, 20) == pytest.approx(reg.cci(bars, 20))
+    assert si.williams_r(highs, lows, closes, 14) == pytest.approx(reg.williams_r(bars, 14))
+
+    d_u, d_m, d_l = si.donchian_channels(highs, lows, 20)
+    assert d_u == pytest.approx(reg.donchian(bars, 20, "upper"))
+    assert d_m == pytest.approx(reg.donchian(bars, 20, "middle"))
+    assert d_l == pytest.approx(reg.donchian(bars, 20, "lower"))
+
+    k_u, k_m, k_l = si.keltner_channels(highs, lows, closes, 20, 10, 1.5)
+    assert k_u == pytest.approx(reg.keltner(bars, 20, 10, 1.5, "upper"))
+    assert k_m == pytest.approx(reg.keltner(bars, 20, 10, 1.5, "middle"))
+    assert k_l == pytest.approx(reg.keltner(bars, 20, 10, 1.5, "lower"))
+
+
+def test_accessor_matches_registry() -> None:
+    bars = _series(80, seed=8)
+    reg = IndicatorRegistry()
+    assert indicator_value("williams_r", bars, period=14) == pytest.approx(reg.williams_r(bars, 14))
+    assert indicator_value("donchian", bars, band="upper", period=20) == pytest.approx(
+        reg.donchian(bars, 20, "upper")
+    )
+    assert indicator_value(
+        "keltner", bars, band="lower", period=20, atr_period=10, multiplier=1.5
+    ) == pytest.approx(reg.keltner(bars, 20, 10, 1.5, "lower"))
+    assert indicator_value("obv", bars) == pytest.approx(reg.obv(bars))
+    assert indicator_value("mfi", bars, period=14) == pytest.approx(reg.mfi(bars, 14))
+    assert indicator_value("cci", bars, period=20) == pytest.approx(reg.cci(bars, 20))
+    assert indicator_value("roc", bars, period=10, source="close") == pytest.approx(
+        reg.roc(bars, 10)
+    )
+    assert indicator_value("bollinger", bars, band="percent_b", period=20) == pytest.approx(
+        reg.bollinger_bands(bars, 20, 2.0, select="percent_b")
+    )
+    assert indicator_value("bollinger", bars, band="bandwidth", period=20) == pytest.approx(
+        reg.bollinger_bands(bars, 20, 2.0, select="bandwidth")
+    )
+
+
+def test_accessor_rejects_bad_params() -> None:
+    bars = _series(40)
+    with pytest.raises(ValueError):
+        indicator_value("mfi", bars, period=1)
+    with pytest.raises(ValueError):
+        indicator_value("obv", bars, source="high")  # OHLC indicator, no source override
+    with pytest.raises(ValueError):
+        indicator_value("donchian", bars, band="nope")
+
+
+# ---------------------------------------------------------------------------
+# Compile + conformance
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _contract_module():
+    """Install a minimal ``contract`` module so compiled strategies exec.
+
+    Saves and restores any pre-existing ``sys.modules['contract']`` so the
+    injection is exception-safe and leaves global state exactly as found (the
+    suite runs under pytest-xdist, which isolates by process, so this is a
+    within-worker hygiene measure, not a cross-worker race).
+    """
+    mod = types.ModuleType("contract")
+
+    class Strategy:  # noqa: D401 - test stub
+        def __init__(self):
+            pass
+
+    mod.Strategy = Strategy
+    _saved = sys.modules.get("contract")
+    sys.modules["contract"] = mod
+    try:
+        yield
+    finally:
+        if _saved is not None:
+            sys.modules["contract"] = _saved
+        else:
+            sys.modules.pop("contract", None)
+
+
+def _compile_spec(ref: IndicatorRef) -> StrategySpec:
+    return StrategySpec(
+        strategy_id="new-ind",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=ref))],
+        exit_rules=[StopLossRule(pct=0.05)],
+        sizing=FixedFractionSizing(fraction=0.02),
+        target_symbols=["QQQ"],
+    )
+
+
+_COMPILE_REFS = [
+    IndicatorRef(name="donchian", params={"band": "upper", "period": 20}),
+    IndicatorRef(
+        name="keltner", params={"band": "lower", "period": 20, "atr_period": 10, "multiplier": 1.5}
+    ),
+    IndicatorRef(name="obv"),
+    IndicatorRef(name="mfi", params={"period": 14}),
+    IndicatorRef(name="roc", params={"period": 10}),
+    IndicatorRef(name="cci", params={"period": 20}),
+    IndicatorRef(name="williams_r", params={"period": 14}),
+    IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20}),
+    IndicatorRef(name="bollinger", params={"band": "bandwidth", "period": 20}),
+]
+
+
+@pytest.mark.parametrize(
+    "ref",
+    _COMPILE_REFS,
+    # Prefix the positional index so the ids are collision-proof even if two refs
+    # share a name and band (pytest errors on duplicate parametrize ids).
+    ids=[
+        f"{i}-{r.name}-{r.param('band') if 'band' in r.params else 'scalar'}"
+        for i, r in enumerate(_COMPILE_REFS)
+    ],
+)
+def test_compiles_and_inline_helper_matches_registry(ref, _contract_module) -> None:
+    code = compile_strategy(_compile_spec(ref))
+    assert "ctx.submit_order" not in code
+    ns: dict = {}
+    exec(compile(code, "<compiled>", "exec"), ns)  # noqa: S102 - compiling our own output
+    strat = ns["CompiledStrategy"]()
+
+    bars = _series(120, seed=5)
+    method_map = {
+        "donchian": "donchian_channels",
+        "keltner": "keltner_channels",
+        "bollinger": "bollinger_bands",
+    }
+    method = getattr(strat, method_map.get(ref.name, ref.name))
+    reg = IndicatorRegistry()
+
+    if ref.name == "donchian":
+        compiled = method(bars, period=20, select="upper")
+        expected = reg.donchian(bars, 20, "upper")
+    elif ref.name == "keltner":
+        compiled = method(bars, period=20, atr_period=10, multiplier=1.5, select="lower")
+        expected = reg.keltner(bars, 20, 10, 1.5, "lower")
+    elif ref.name == "bollinger":
+        band = ref.param("band")
+        compiled = method(bars, period=20, num_std=2.0, select=band)
+        expected = reg.bollinger_bands(bars, 20, 2.0, select=band)
+    elif ref.name == "obv":
+        compiled, expected = method(bars), reg.obv(bars)
+    elif ref.name == "roc":
+        compiled, expected = method(bars, period=10), reg.roc(bars, 10)
+    elif ref.name == "mfi":
+        compiled, expected = method(bars, period=14), reg.mfi(bars, 14)
+    elif ref.name == "cci":
+        compiled, expected = method(bars, period=20), reg.cci(bars, 20)
+    else:  # williams_r
+        compiled, expected = method(bars, period=14), reg.williams_r(bars, 14)
+
+    assert compiled == pytest.approx(expected, rel=0, abs=1e-9)
+
+
+def test_conformance_fixture_synthesizes_for_new_indicator() -> None:
+    """The conformance fixtures drive a new-indicator predicate through both states."""
+    spec = StrategySpec(
+        strategy_id="conf",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="williams_r", params={"period": 14}),
+                    op="<",
+                    rhs=-80.0,
+                ),
+            )
+        ],
+        exit_rules=[],
+        target_symbols=["TEST"],
+        requires_custom_code=True,
+    )
+    fixtures = generate_conformance_fixtures(spec)
+    assert len(fixtures) == 1
+    fx = fixtures[0]
+    assert fx.synthesizable, fx.unsynthesizable_reason
+    assert any(v is True for v in fx.expected_verdicts)
+    assert any(v is False for v in fx.expected_verdicts)
+
+
+_FAITHFUL_WILLIAMS = textwrap.dedent("""\
+    class MyStrategy:
+        UNIVERSE = frozenset({"TEST"})
+        def on_bar(self, ctx, bar):
+            if ctx.is_warmup:
+                return
+            if bar.symbol not in self.UNIVERSE:
+                return
+            wr = ctx.indicator("williams_r", period=14)
+            if wr is None:
+                return
+            position = ctx.position(bar.symbol)
+            if position is None and wr < -80:
+                ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+""")
+
+_DRIFTED_WILLIAMS = textwrap.dedent("""\
+    class MyStrategy:
+        UNIVERSE = frozenset({"TEST"})
+        def on_bar(self, ctx, bar):
+            if ctx.is_warmup:
+                return
+            if bar.symbol not in self.UNIVERSE:
+                return
+            wr = ctx.indicator("williams_r", period=14)
+            if wr is None:
+                return
+            position = ctx.position(bar.symbol)
+            # DRIFT: > instead of <
+            if position is None and wr > -80:
+                ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+""")
+
+
+def _conf_spec(custom: bool = True) -> StrategySpec:
+    return StrategySpec(
+        strategy_id="conf-gate",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="williams_r", params={"period": 14}),
+                    op="<",
+                    rhs=-80.0,
+                ),
+            )
+        ],
+        exit_rules=[],
+        target_symbols=["TEST"],
+        requires_custom_code=custom,
+    )
+
+
+def test_conformance_gate_passes_faithful_williams() -> None:
+    gate = PredicateConformanceGate()
+    results = gate.check(_FAITHFUL_WILLIAMS, _conf_spec())
+    assert any(r.passed for r in results)
+    assert all(r.passed for r in results)
+
+
+def test_conformance_gate_fails_drifted_williams() -> None:
+    gate = PredicateConformanceGate()
+    results = gate.check(_DRIFTED_WILLIAMS, _conf_spec())
+    assert any(not r.passed for r in results)
+
+
+# ---------------------------------------------------------------------------
+# Pandas reference (executor/indicators.py) — series-shaped consumers + registry
+# ---------------------------------------------------------------------------
+
+
+def _frame():
+    bars = _series(80, seed=14)
+    return (
+        pd.Series([b.high for b in bars]),
+        pd.Series([b.low for b in bars]),
+        pd.Series([b.close for b in bars]),
+        pd.Series([b.volume for b in bars]),
+    )
+
+
+def test_pandas_donchian_orders_bands() -> None:
+    """Pandas Donchian bands are correctly ordered (upper >= middle >= lower)."""
+    high, low, _close, _vol = _frame()
+    upper, middle, lower = pdi.donchian_channels(high, low, period=20)
+    mask = middle.notna()
+    assert (upper[mask] >= middle[mask]).all()
+    assert (middle[mask] >= lower[mask]).all()
+
+
+def test_pandas_keltner_orders_bands() -> None:
+    """Pandas Keltner bands are correctly ordered (upper >= middle >= lower)."""
+    high, low, close, _vol = _frame()
+    upper, middle, lower = pdi.keltner_channels(high, low, close, period=20, atr_period=10)
+    mask = middle.notna() & upper.notna()
+    assert (upper[mask] >= middle[mask]).all()
+    assert (middle[mask] >= lower[mask]).all()
+
+
+def test_pandas_keltner_matches_registry_and_warmup() -> None:
+    """Pandas Keltner uses the registry's windowed-EMA basis and warm-up contract.
+
+    The Series helper must agree with ``IndicatorRegistry.keltner`` value-for-value
+    (windowed EMA, not an expanding ewm) and stay NaN until ``max(period, atr_period
+    + 1)`` bars, so the static coverage probe never sees a Keltner value the runtime
+    would still report as None.
+    """
+    high, low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    reg = IndicatorRegistry()
+    upper, middle, lower = pdi.keltner_channels(high, low, close, 20, 10, 2.0)
+    assert float(middle.iloc[-1]) == pytest.approx(reg.keltner(bars, 20, 10, 2.0, "middle"))
+    assert float(upper.iloc[-1]) == pytest.approx(reg.keltner(bars, 20, 10, 2.0, "upper"))
+    assert float(lower.iloc[-1]) == pytest.approx(reg.keltner(bars, 20, 10, 2.0, "lower"))
+    # Warm-up boundary: max(period=20, atr_period+1=11) = 20 → first value at index 19.
+    assert pd.isna(middle.iloc[18]) and reg.keltner(bars[:19], 20, 10, 2.0, "middle") is None
+    assert pd.notna(middle.iloc[19]) and reg.keltner(bars[:20], 20, 10, 2.0, "middle") is not None
+
+
+def test_pandas_keltner_warmup_when_atr_period_dominates() -> None:
+    """The warm-up follows ``max(period, atr_period + 1)`` even when atr_period wins.
+
+    The earlier test has period > atr_period; here atr_period + 1 is the larger term,
+    so the boundary must shift to it (and still match the registry value-for-value).
+    """
+    high, low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    reg = IndicatorRegistry()
+    # period=10, atr_period=30 → max(10, 31) = 31 → first value at index 30 (31 bars).
+    upper, middle, lower = pdi.keltner_channels(high, low, close, 10, 30, 2.0)
+    assert pd.isna(middle.iloc[29]) and reg.keltner(bars[:30], 10, 30, 2.0, "middle") is None
+    assert pd.notna(middle.iloc[30]) and reg.keltner(bars[:31], 10, 30, 2.0, "middle") is not None
+    assert float(middle.iloc[-1]) == pytest.approx(reg.keltner(bars, 10, 30, 2.0, "middle"))
+
+
+def test_pandas_mfi_warmup_requires_prior_bar() -> None:
+    """Pandas MFI emits its first value only once ``period + 1`` bars exist.
+
+    Each money-flow term compares against the previous bar, so the Series helper must
+    match ``IndicatorRegistry.mfi`` — None until ``period + 1`` bars — rather than
+    emitting one bar early off the zero-filled first diff.
+    """
+    high, low, close, vol = _frame()
+    bars = _series(80, seed=14)
+    reg = IndicatorRegistry()
+    series = pdi.mfi(high, low, close, vol, 14)
+    # period=14 → first value at index 14 (the 15th bar), NaN at index 13.
+    assert pd.isna(series.iloc[13]) and reg.mfi(bars[:14], 14) is None
+    assert pd.notna(series.iloc[14]) and reg.mfi(bars[:15], 14) is not None
+
+
+def test_pandas_obv_matches_registry_tail() -> None:
+    """Pandas OBV tail equals the streaming registry's OBV."""
+    _high, _low, close, vol = _frame()
+    bars = _series(80, seed=14)
+    assert float(pdi.obv(close, vol).iloc[-1]) == pytest.approx(IndicatorRegistry().obv(bars))
+
+
+def test_pandas_mfi_bounded_and_matches_registry_tail() -> None:
+    """Pandas MFI stays in [0, 100] and its tail matches the registry."""
+    high, low, close, vol = _frame()
+    series = pdi.mfi(high, low, close, vol, period=14)
+    finite = series.dropna()
+    assert (finite >= 0).all() and (finite <= 100).all()
+    bars = _series(80, seed=14)
+    assert float(series.iloc[-1]) == pytest.approx(IndicatorRegistry().mfi(bars, 14))
+
+
+def test_pandas_roc_matches_registry_tail() -> None:
+    """Pandas ROC tail equals the streaming registry's ROC."""
+    _high, _low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    assert float(pdi.roc(close, period=12).iloc[-1]) == pytest.approx(
+        IndicatorRegistry().roc(bars, 12)
+    )
+
+
+def test_pandas_cci_matches_registry_tail() -> None:
+    """Pandas CCI tail equals the streaming registry's CCI."""
+    high, low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    assert float(pdi.cci(high, low, close, period=20).iloc[-1]) == pytest.approx(
+        IndicatorRegistry().cci(bars, 20)
+    )
+
+
+def test_pandas_williams_r_bounded_and_matches_registry_tail() -> None:
+    """Pandas Williams %R stays in [-100, 0] and its tail matches the registry."""
+    high, low, close, _vol = _frame()
+    series = pdi.williams_r(high, low, close, period=14)
+    finite = series.dropna()
+    assert (finite >= -100).all() and (finite <= 0).all()
+    bars = _series(80, seed=14)
+    assert float(series.iloc[-1]) == pytest.approx(IndicatorRegistry().williams_r(bars, 14))
+
+
+def _pandas_bb_percent_b(close: pd.Series, period: int, num_std: float) -> pd.Series:
+    """Derive Bollinger %B from the pandas reference bands: (close − lower) / (upper − lower)."""
+    upper, _middle, lower = pdi.bollinger_bands(close, period, num_std)
+    return (close - lower) / (upper - lower)
+
+
+def _pandas_bb_bandwidth(close: pd.Series, period: int, num_std: float) -> pd.Series:
+    """Derive Bollinger bandwidth from the pandas reference bands: (upper − lower) / middle."""
+    upper, middle, lower = pdi.bollinger_bands(close, period, num_std)
+    return (upper - lower) / middle
+
+
+def _ref_bb_sample(bars, period: int, num_std: float, select: str) -> Optional[float]:
+    """%B / bandwidth using *sample* std (ddof=1), matching pandas ``rolling().std()``.
+
+    The streaming registry uses population variance (``sq/period − mean²``, ddof=0), but the
+    pandas reference ``bollinger_bands`` builds its bands from ``Series.rolling().std()`` —
+    pandas' sample std. This reference mirrors that convention so the pandas derived outputs
+    can be cross-checked against an independent computation rather than the registry tail.
+    """
+    if len(bars) < period:
+        return None
+    vals = [b.close for b in bars[-period:]]
+    mean = sum(vals) / period
+    var = sum((v - mean) ** 2 for v in vals) / (period - 1)  # sample variance (ddof=1)
+    std = var**0.5
+    upper, lower = mean + num_std * std, mean - num_std * std
+    if select == "percent_b":
+        width = upper - lower
+        return 0.5 if width == 0 else (bars[-1].close - lower) / width
+    if select == "bandwidth":
+        return 0.0 if mean == 0 else (upper - lower) / mean
+    raise AssertionError(select)
+
+
+def test_pandas_bb_percent_b_matches_sample_std_reference() -> None:
+    """%B derived from the pandas bands matches an independent sample-std reference tail.
+
+    The pandas bands use sample std (ddof=1), so this verifies the static reference layer
+    against a hand-rolled sample-std computation — not the registry, which uses population
+    std and so produces slightly different Bollinger values by construction.
+    """
+    _high, _low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    derived = _pandas_bb_percent_b(close, 20, 2.0)
+    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_sample(bars, 20, 2.0, "percent_b"))
+    # Warmup rows (insufficient bars for the rolling std) stay NaN, like the bands.
+    assert pd.isna(derived.iloc[0])
+
+
+def test_pandas_bb_bandwidth_matches_sample_std_reference() -> None:
+    """Bandwidth derived from the pandas bands matches an independent sample-std reference tail."""
+    _high, _low, close, _vol = _frame()
+    bars = _series(80, seed=14)
+    derived = _pandas_bb_bandwidth(close, 20, 2.0)
+    assert float(derived.iloc[-1]) == pytest.approx(_ref_bb_sample(bars, 20, 2.0, "bandwidth"))
+    assert pd.isna(derived.iloc[0])
+
+
+def test_pandas_bb_flat_window_neutral_conventions() -> None:
+    """Flat-window neutral values (%B→0.5, bandwidth→0) live in the registry/accessor.
+
+    The raw pandas bands collapse on a flat window (std=0 → upper==middle==lower), so a
+    naive band-derived %B is 0/0 (NaN) while bandwidth is 0/mean (0.0). The neutral %B=0.5
+    convention is applied by the registry (``select='percent_b'``), not the raw bands — this
+    test pins both behaviours so the divergence is intentional and documented.
+    """
+    flat_close = pd.Series([50.0] * 30)
+    reg = IndicatorRegistry()
+    flat_bars = [
+        _Bar(timestamp=f"t{i}", open=50, high=50, low=50, close=50, volume=100) for i in range(30)
+    ]
+    # Registry applies the neutral conventions.
+    assert reg.bollinger_bands(flat_bars, 20, 2.0, select="percent_b") == 0.5
+    assert reg.bollinger_bands(flat_bars, 20, 2.0, select="bandwidth") == 0.0
+    # Raw band-derived bandwidth agrees (0 width / 50 mean = 0); derived %B is the 0/0 NaN
+    # the registry's neutral convention exists to replace.
+    assert float(_pandas_bb_bandwidth(flat_close, 20, 2.0).iloc[-1]) == 0.0
+    assert pd.isna(_pandas_bb_percent_b(flat_close, 20, 2.0).iloc[-1])
+
+
+@pytest.mark.parametrize(
+    "name,arity",
+    [
+        ("donchian_channels", 3),
+        ("keltner_channels", 3),
+        ("obv", None),
+        ("mfi", None),
+        ("roc", None),
+        ("cci", None),
+        ("williams_r", None),
+    ],
+)
+def test_indicators_registry_has_new_specs(name, arity) -> None:
+    """The new pandas helpers are registered in INDICATORS with the expected tuple arity."""
+    assert name in pdi.INDICATORS
+    assert pdi.INDICATORS[name].tuple_arity == arity
+
+
+# ---------------------------------------------------------------------------
+# Engine series dispatch — compute_indicator_series routes through the
+# streaming registry (the per-bar engine path) for every new IndicatorRef.
+# ---------------------------------------------------------------------------
+
+
+# (IndicatorRef, expected-value via the PUBLIC IndicatorRegistry API). Building
+# the expected value from the public registry — rather than the engine's private
+# dispatch helper — keeps the test a public-vs-public cross-check: the public
+# ``compute_indicator_series`` (engine path) must agree with a fresh registry call.
+_SERIES_CASES = [
+    (
+        IndicatorRef(name="donchian", params={"band": "upper", "period": 20}),
+        lambda r, b: r.donchian(b, 20, "upper"),
+    ),
+    (
+        IndicatorRef(name="donchian", params={"band": "middle", "period": 20}),
+        lambda r, b: r.donchian(b, 20, "middle"),
+    ),
+    (
+        IndicatorRef(name="donchian", params={"band": "lower", "period": 20}),
+        lambda r, b: r.donchian(b, 20, "lower"),
+    ),
+    (
+        IndicatorRef(
+            name="keltner",
+            params={"band": "lower", "period": 20, "atr_period": 10, "multiplier": 1.5},
+        ),
+        lambda r, b: r.keltner(b, 20, 10, 1.5, "lower"),
+    ),
+    (IndicatorRef(name="obv"), lambda r, b: r.obv(b)),
+    (IndicatorRef(name="mfi", params={"period": 14}), lambda r, b: r.mfi(b, 14)),
+    (IndicatorRef(name="roc", params={"period": 12}), lambda r, b: r.roc(b, 12)),
+    (IndicatorRef(name="cci", params={"period": 20}), lambda r, b: r.cci(b, 20)),
+    (IndicatorRef(name="williams_r", params={"period": 14}), lambda r, b: r.williams_r(b, 14)),
+    (
+        IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20}),
+        lambda r, b: r.bollinger_bands(b, 20, 2.0, select="percent_b"),
+    ),
+    (
+        IndicatorRef(name="bollinger", params={"band": "bandwidth", "period": 20}),
+        lambda r, b: r.bollinger_bands(b, 20, 2.0, select="bandwidth"),
+    ),
+]
+
+
+@pytest.mark.parametrize("case", _SERIES_CASES, ids=[c[0].sig_id for c in _SERIES_CASES])
+def test_compute_indicator_series_matches_registry_tail(case) -> None:
+    """The public engine series path agrees with a fresh public registry call."""
+    from investment_team.strategy_lab.executor.predicate_evaluator import (
+        compute_indicator_series,
+    )
+
+    ref, expected_call = case
+    bars = _series(80, seed=23)
+    df = pd.DataFrame(
+        {
+            "open": [b.open for b in bars],
+            "high": [b.high for b in bars],
+            "low": [b.low for b in bars],
+            "close": [b.close for b in bars],
+            "volume": [b.volume for b in bars],
+        }
+    )
+    series = compute_indicator_series(ref, df)
+    expected = expected_call(IndicatorRegistry(), bars)
+    assert float(series.iloc[-1]) == pytest.approx(expected, rel=0, abs=1e-9)
+
+
+def test_retention_window_constant_is_single_source_of_truth() -> None:
+    """Every trailing-window bound derives from the one ``STREAMING_WINDOW_BARS``.
+
+    Cumulative indicators (vwap, obv) re-base to the window start, so the audit walk,
+    the streaming-history deque, the compiler's cumulative-history depth, the
+    conformance shadow context, and the *production* ``StrategyContext`` must all use
+    the same retention ceiling. This guards against a future edit reintroducing a
+    private ``500`` literal at one site and silently diverging validation from
+    runtime — including the production context itself, not just the validation layers.
+    """
+    from investment_team.strategy_lab.executor.predicate_evaluator import (
+        _SERIES_WINDOW,
+        StreamingHistoryView,
+    )
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+    from investment_team.strategy_lab.synthesis.compiler import _VWAP_HISTORY
+    from investment_team.trading_service.strategy.contract import (
+        STREAMING_WINDOW_BARS as _CONTRACT_WINDOW,
+    )
+
+    assert _SERIES_WINDOW == STREAMING_WINDOW_BARS
+    assert _VWAP_HISTORY == STREAMING_WINDOW_BARS
+    assert StreamingHistoryView()._max_bars == STREAMING_WINDOW_BARS
+    assert _CONTRACT_WINDOW == STREAMING_WINDOW_BARS
+
+
+def test_strategy_context_ingest_bar_trims_to_shared_window() -> None:
+    """The production context's history bound is the shared constant, not a literal.
+
+    Directly exercises ``StrategyContext._ingest_bar`` rather than just comparing
+    constants, so a future refactor that keeps the imported name but stops using it
+    in ``_ingest_bar`` (e.g. reverting to a stray literal) is still caught.
+    """
+    from investment_team.strategy_lab.runtime_window import STREAMING_WINDOW_BARS
+    from investment_team.trading_service.strategy.contract import Bar, StrategyContext
+
+    ctx = StrategyContext.__new__(StrategyContext)
+    ctx._history = {}
+    for i in range(STREAMING_WINDOW_BARS + 10):
+        ctx._ingest_bar(
+            Bar(
+                symbol="TEST", timestamp=f"t{i}", open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0
+            )
+        )
+    assert len(ctx._history["TEST"]) == STREAMING_WINDOW_BARS
+    # The retained tail is the most recent bars, not the earliest.
+    assert ctx._history["TEST"][-1].timestamp == f"t{STREAMING_WINDOW_BARS + 9}"
+
+
+@pytest.mark.parametrize(
+    "name,period", [("donchian", 14), ("williams_r", 14), ("cci", 14), ("mfi", 14)]
+)
+def test_windowed_deque_cache_keys_are_symbol_scoped(name: str, period: int) -> None:
+    """Two symbol-tagged streams sharing one registry must not cross-contaminate.
+
+    ``donchian``/``williams_r``/``cci``/``mfi`` each keep a bounded deque of
+    per-bar contributions across calls (an incremental cache), so the cache key
+    must include ``bars[-1].symbol`` — exactly like ``macd`` already does —
+    or two different symbols sharing one ``IndicatorRegistry`` could silently
+    append one symbol's bar onto another symbol's cached window.
+    """
+    bars_a = _series(21, seed=41)
+    bars_b = _series(21, seed=42)
+    for b in bars_a:
+        b.symbol = "AAPL"
+    for b in bars_b:
+        b.symbol = "MSFT"
+    # Force a coincident close on a bar the close-leg fallback could latch onto.
+    bars_b[-2] = _Bar(
+        timestamp=bars_b[-2].timestamp,
+        open=bars_a[-1].close,
+        high=bars_a[-1].close + 1,
+        low=bars_a[-1].close - 1,
+        close=bars_a[-1].close,
+        volume=bars_b[-2].volume,
+        symbol="MSFT",
+    )
+
+    reg = IndicatorRegistry()
+    getattr(reg, name)(bars_a, period)  # populate the AAPL slot first
+    shared = getattr(reg, name)(bars_b, period)  # MSFT slot on the SAME registry
+    fresh = getattr(IndicatorRegistry(), name)(bars_b, period)  # ground truth
+    assert shared == pytest.approx(fresh), (
+        f"{name}: shared-registry result diverged from a fresh one"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,call",
+    [
+        ("keltner", lambda reg, bars: reg.keltner(bars, 14, 10, 2.0)),
+        ("roc", lambda reg, bars: reg.roc(bars, 12)),
+        ("obv", lambda reg, bars: reg.obv(bars)),
+    ],
+)
+def test_recompute_indicator_cache_keys_are_symbol_scoped(name, call) -> None:
+    """keltner/roc/obv keep no per-call deque and fully recompute on a cache miss,
+    so they cannot corrupt state across symbols the way the deque indicators can —
+    but their cache slots must still be per-symbol so a shared ``IndicatorRegistry``
+    keeps disjoint slots (matching :meth:`macd` and the deque siblings
+    donchian/mfi/cci/williams_r) instead of two symbols thrashing one slot.
+    """
+    bars_a = _series(21, seed=41)
+    bars_b = _series(21, seed=42)
+    for b in bars_a:
+        b.symbol = "AAPL"
+    for b in bars_b:
+        b.symbol = "MSFT"
+
+    reg = IndicatorRegistry()
+    call(reg, bars_a)  # AAPL slot
+    call(reg, bars_b)  # MSFT slot on the SAME registry
+    slots = [k for k in reg._state if k[0] == name]
+    symbols_seen = {k[1] for k in slots}
+    assert symbols_seen == {"AAPL", "MSFT"}, (
+        f"{name}: expected disjoint per-symbol slots, got {slots}"
+    )
+
+
+def test_indicator_method_map_covers_every_dsl_name() -> None:
+    """The compiler's DSL-name → helper-method map must cover every ``IndicatorName``.
+
+    A missing entry ``KeyError``s at emit time the first time a spec uses the new
+    indicator — after validation and the readiness gate already accepted it. The
+    compiler enforces this with a load-time ``raise`` (mirroring the identical
+    guard on ``code_conformance._INDICATOR_ALLOWED_CALL_NAMES``); this test states
+    the contract explicitly and localises a drift to a named assertion.
+    """
+    from investment_team.strategy_lab.spec_dsl import IndicatorName
+    from investment_team.strategy_lab.synthesis.compiler import _INDICATOR_METHOD_NAME
+
+    assert set(_INDICATOR_METHOD_NAME) == set(IndicatorName.__args__)
+
+
+def test_compute_indicator_series_obv_bounded_to_runtime_window() -> None:
+    """OBV is cumulative, so the audit walk must bound to the runtime's trailing window.
+
+    Past the engine's retention ceiling the alignment/coverage path must compute OBV
+    over the same trailing window the runtime traded on (``StreamingHistoryView``),
+    not full history — otherwise a long backtest would validate predicates against a
+    full-history OBV the runtime never saw.
+    """
+    from investment_team.strategy_lab.executor.predicate_evaluator import (
+        BarRecord,
+        StreamingHistoryView,
+        compute_indicator_series,
+    )
+
+    n = 520  # > the 500-bar window
+    # Strictly rising closes, unit volume → OBV gains 1 per bar, so the window start
+    # matters: the trailing-500 window yields a different total than full history.
+    df = pd.DataFrame(
+        {
+            "open": [100.0 + i for i in range(n)],
+            "high": [100.5 + i for i in range(n)],
+            "low": [99.5 + i for i in range(n)],
+            "close": [100.0 + i for i in range(n)],
+            "volume": [1.0] * n,
+        }
+    )
+    ref = IndicatorRef(name="obv")
+    audit_tail = float(compute_indicator_series(ref, df).iloc[-1])
+
+    view = StreamingHistoryView()
+    for i in range(n):
+        view.append(
+            BarRecord(
+                timestamp=f"t{i}",
+                open=100.0 + i,
+                high=100.5 + i,
+                low=99.5 + i,
+                close=100.0 + i,
+                volume=1.0,
+            )
+        )
+    runtime_tail = view.indicator(ref, view.length() - 1)
+
+    # The audit matches the runtime's trailing-window OBV …
+    assert audit_tail == pytest.approx(runtime_tail)
+    # … and is strictly less than the full-history OBV it would report unbounded
+    # (the dropped early bars each contributed +1 to a full-history cumulative sum).
+    rising_bars = [
+        _Bar(
+            timestamp=f"t{i}",
+            open=100.0 + i,
+            high=100.5 + i,
+            low=99.5 + i,
+            close=100.0 + i,
+            volume=1.0,
+        )
+        for i in range(n)
+    ]
+    full_history = IndicatorRegistry().obv(rising_bars)
+    assert audit_tail < full_history
+
+
+# ---------------------------------------------------------------------------
+# Pandas reference — degenerate-window edge cases match the streaming registry
+# (and the documented safe defaults), with warm-up rows left NaN.
+# ---------------------------------------------------------------------------
+
+
+def _flat_bars(n: int = 30, price: float = 50.0, volume: float = 100.0) -> list[_Bar]:
+    return [
+        _Bar(timestamp=f"t{i}", open=price, high=price, low=price, close=price, volume=volume)
+        for i in range(n)
+    ]
+
+
+def test_pandas_flat_window_matches_registry_safe_defaults() -> None:
+    """ROC/CCI/Williams %R/MFI references return safe defaults (not NaN) on a flat window."""
+    flat = _flat_bars()
+    high = pd.Series([b.high for b in flat])
+    low = pd.Series([b.low for b in flat])
+    close = pd.Series([b.close for b in flat])
+    vol = pd.Series([b.volume for b in flat])
+    reg = IndicatorRegistry()
+
+    assert float(pdi.roc(close, 12).iloc[-1]) == pytest.approx(reg.roc(flat, 12)) == 0.0
+    assert float(pdi.cci(high, low, close, 20).iloc[-1]) == pytest.approx(reg.cci(flat, 20)) == 0.0
+    assert (
+        float(pdi.williams_r(high, low, close, 14).iloc[-1])
+        == pytest.approx(reg.williams_r(flat, 14))
+        == -50.0
+    )
+    # Flat typical price → no money flow at all → neutral 50 (not 100).
+    assert (
+        float(pdi.mfi(high, low, close, vol, 14).iloc[-1])
+        == pytest.approx(reg.mfi(flat, 14))
+        == 50.0
+    )
+
+
+def test_pandas_warmup_rows_stay_nan() -> None:
+    """The safe-default substitution must not overwrite warm-up NaNs."""
+    flat = _flat_bars()
+    high = pd.Series([b.high for b in flat])
+    low = pd.Series([b.low for b in flat])
+    close = pd.Series([b.close for b in flat])
+    vol = pd.Series([b.volume for b in flat])
+    assert pd.isna(pdi.roc(close, 12).iloc[0])
+    assert pd.isna(pdi.cci(high, low, close, 20).iloc[0])
+    assert pd.isna(pdi.williams_r(high, low, close, 14).iloc[0])
+    assert pd.isna(pdi.mfi(high, low, close, vol, 14).iloc[0])
+
+
+def test_pandas_roc_zero_reference_price_returns_zero() -> None:
+    """A zero reference price yields 0.0, not inf/NaN — matching the registry."""
+    series = pd.Series([0.0] * 13 + [5.0])
+    assert float(pdi.roc(series, 12).iloc[-1]) == 0.0
+
+
+def test_pandas_mfi_up_only_window_returns_100() -> None:
+    """A window with only up-moves (neg flow 0, pos flow > 0) still returns 100."""
+    rising = [
+        _Bar(timestamp=f"t{i}", open=50 + i, high=51 + i, low=49 + i, close=50 + i, volume=100)
+        for i in range(20)
+    ]
+    high = pd.Series([b.high for b in rising])
+    low = pd.Series([b.low for b in rising])
+    close = pd.Series([b.close for b in rising])
+    vol = pd.Series([b.volume for b in rising])
+    assert float(pdi.mfi(high, low, close, vol, 14).iloc[-1]) == pytest.approx(
+        IndicatorRegistry().mfi(rising, 14)
+    )
+    assert float(pdi.mfi(high, low, close, vol, 14).iloc[-1]) == 100.0
+
+
+# ---------------------------------------------------------------------------
+# ROC accessor honours a non-close source (the _value_bars projection pattern).
+# ---------------------------------------------------------------------------
+
+
+def test_accessor_roc_honours_non_close_source() -> None:
+    bars = _series(60, seed=9)
+    reg = IndicatorRegistry()
+    # ctx.indicator projects the requested source into the registry's close slot,
+    # so roc over ``high`` equals a registry roc whose source is ``high`` — and
+    # differs from the close-sourced value, proving the source threads through.
+    # (The synthetic bars are symmetric, so hl2 == close; ``high`` is distinct.)
+    got = indicator_value("roc", bars, period=10, source="high")
+    assert got == pytest.approx(reg.roc(bars, 10, source="high"))
+    assert got != pytest.approx(reg.roc(bars, 10, source="close"))
+
+
+# ---------------------------------------------------------------------------
+# Conformance fixtures handle cumulative indicators (OBV) through the public
+# generator — exercising the cumulative warm-up sizing path without coupling to
+# the private helper. (OBV-vs-number is not synthesizable with the generic
+# oscillating recipe, so the generator returns a cleanly-marked fixture rather
+# than crashing — the contract we assert here.)
+# ---------------------------------------------------------------------------
+
+
+def test_conformance_generator_handles_obv_predicate() -> None:
+    spec = StrategySpec(
+        strategy_id="conf-obv",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(side="long", when=Predicate(lhs=IndicatorRef(name="obv"), op=">", rhs=0.0))
+        ],
+        exit_rules=[],
+        target_symbols=["TEST"],
+        requires_custom_code=True,
+    )
+    fixtures = generate_conformance_fixtures(spec)
+    assert len(fixtures) == 1
+    fx = fixtures[0]
+    assert fx.rule_kind == "entry"
+    # Either it synthesizes both verdict states, or it is cleanly marked
+    # unsynthesizable with a reason — never a half-built fixture.
+    if fx.synthesizable:
+        assert any(v is True for v in fx.expected_verdicts)
+        assert any(v is False for v in fx.expected_verdicts)
+    else:
+        assert fx.unsynthesizable_reason
+        assert fx.bars == []
+
+
+# ---------------------------------------------------------------------------
+# Code-conformance: the DSL name is credited via ctx.indicator, but a bare
+# channel-helper call (donchian/keltner — not exported by the sandbox) is NOT.
+# ---------------------------------------------------------------------------
+
+
+def _donchian_spec() -> StrategySpec:
+    return StrategySpec(
+        strategy_id="cc-donchian",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ Donchian breakout.",
+        signal_definition="close > donchian upper",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close",
+                    op=">",
+                    rhs=IndicatorRef(name="donchian", params={"band": "upper", "period": 20}),
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+        requires_custom_code=True,
+    )
+
+
+_CC_CTX_INDICATOR = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            upper = ctx.indicator("donchian", period=20, band="upper")
+            if upper is None:
+                return
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and bar.close > upper:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+# A bare ``donchian(...)`` call: the sandbox exports ``donchian_channels``, not
+# ``donchian``, so this would NameError at runtime and must NOT satisfy check #1.
+_CC_BARE_DONCHIAN_CALL = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            upper = donchian(bars, 20)
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and bar.close > upper:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def _crit(results) -> list:
+    return [r.details for r in results if r.severity == "critical" and not r.passed]
+
+
+def test_conformance_credits_donchian_via_ctx_indicator() -> None:
+    results = CodeConformanceGate().check(_CC_CTX_INDICATOR, _donchian_spec())
+    assert not any("donchian" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def test_conformance_rejects_bare_donchian_call() -> None:
+    results = CodeConformanceGate().check(_CC_BARE_DONCHIAN_CALL, _donchian_spec())
+    # The bare, non-exported ``donchian(...)`` name must not credit the indicator.
+    assert any("donchian" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def _bollinger_percent_b_spec() -> StrategySpec:
+    return StrategySpec(
+        strategy_id="cc-bb-pb",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ Bollinger %B mean reversion.",
+        signal_definition="percent_b < 0.05",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs=IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20}),
+                    op="<",
+                    rhs=0.05,
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+        requires_custom_code=True,
+    )
+
+
+_CC_BOLLINGER_CTX_PB = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            pb = ctx.indicator("bollinger", period=20, num_std=2.0, band="percent_b")
+            if pb is None:
+                return
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and pb < 0.05:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+# Reads the base bands via a plain ``bollinger_bands(...)`` call (which returns
+# only upper/middle/lower) but never computes %B — this satisfies the name-level
+# presence check yet does NOT produce the required derived band.
+_CC_BOLLINGER_BARE_BANDS = textwrap.dedent("""
+    from contract import Strategy
+    from indicators import bollinger_bands
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            upper, middle, lower = bollinger_bands(bars, 20, 2.0)
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and bar.close < lower:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_credits_bollinger_percent_b_via_ctx_indicator() -> None:
+    results = CodeConformanceGate().check(_CC_BOLLINGER_CTX_PB, _bollinger_percent_b_spec())
+    assert not any("percent_b" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def test_conformance_rejects_bare_bollinger_bands_for_derived_band() -> None:
+    # bollinger_bands(...) returns only upper/middle/lower, so it must not credit
+    # a required percent_b band even though it credits the bollinger *name*.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_BARE_BANDS, _bollinger_percent_b_spec())
+    crits = _crit(results)
+    assert any("percent_b" in d.lower() for d in crits), crits
+
+
+def test_conformance_compiled_bollinger_percent_b_passes() -> None:
+    # The deterministic compiler emits ``bollinger_bands(..., select='percent_b')``,
+    # which DOES produce the derived band — the band-aware check must credit it.
+    ref = IndicatorRef(name="bollinger", params={"band": "percent_b", "period": 20})
+    code = compile_strategy(_compile_spec(ref))
+    results = CodeConformanceGate().check(code, _compile_spec(ref))
+    assert not any("percent_b" in d.lower() for d in _crit(results)), _crit(results)
+
+
+# Custom code that follows the OLD (bad) remediation and calls the sandbox helper
+# with select= — a guaranteed TypeError (indicators.bollinger_bands has no select).
+_CC_BOLLINGER_BANDS_SELECT = textwrap.dedent("""
+    from contract import Strategy
+    from indicators import bollinger_bands
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            pb = bollinger_bands(bars, 20, 2.0, select="percent_b")
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and pb < 0.05:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+# Custom code that selects the derived band dynamically (runtime-valid, but the
+# static gate cannot resolve the literal) — the gate must abstain, not reject.
+_CC_BOLLINGER_DYNAMIC_BAND = textwrap.dedent("""
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+        BAND = "percent_b"
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            pb = ctx.indicator("bollinger", period=20, num_std=2.0, band=self.BAND)
+            if pb is None:
+                return
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and pb < 0.05:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_rejects_bollinger_bands_select_call() -> None:
+    # The sandbox ``indicators.bollinger_bands`` helper takes no ``select`` kwarg,
+    # so a ``select=`` call is a guaranteed runtime TypeError — flag it (don't
+    # credit it) so the refinement loop fixes the call shape.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_BANDS_SELECT, _bollinger_percent_b_spec())
+    crits = _crit(results)
+    assert any("select" in d.lower() and "typeerror" in d.lower() for d in crits), crits
+
+
+_CC_BOLLINGER_ALIASED_SELECT = textwrap.dedent("""
+    from contract import Strategy
+    from indicators import bollinger_bands as bb
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            pb = bb(bars, 20, 2.0, select="percent_b")
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and pb < 0.05:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_rejects_aliased_bollinger_bands_select_call() -> None:
+    # Same TypeError as the direct form, reached through an import alias — the
+    # invalid-select check must resolve the alias, not just match the bare name.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_ALIASED_SELECT, _bollinger_base_band_spec())
+    crits = _crit(results)
+    assert any("select" in d.lower() and "typeerror" in d.lower() for d in crits), crits
+
+
+def _self_undefined_strategy(call_expr: str, window: int = 20) -> str:
+    """Strategy source whose ``on_bar`` calls ``call_expr`` (an undefined self-helper).
+
+    Preconditions: ``call_expr`` is a ``self.<name>(...)`` expression the class never
+    defines; ``window`` is the ``ctx.history`` lookback.
+    Postconditions: a syntactically valid single-class strategy that binds the call to a
+    local and gates a trade on it, so the call is reachable from ``on_bar`` and the
+    conformance gate exercises the undefined-self-helper check against it.
+    """
+    return textwrap.dedent(f"""
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({{"QQQ"}})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, {window})
+                if len(bars) < {window}:
+                    return
+                val = {call_expr}
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and val is not None and bar.close > 0:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and bar.close < pos.entry_price * 0.95:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+    """)
+
+
+@pytest.mark.parametrize(
+    "call_expr, window, spec_factory, needles",
+    [
+        # DSL name differs from helper (bollinger -> bollinger_bands): an undefined
+        # ``self.bollinger_bands`` AttributeErrors, and the derived band it fails to
+        # produce is not credited from the undefined call.
+        pytest.param(
+            'self.bollinger_bands(bars, 20, 2.0, select="percent_b")',
+            20,
+            lambda: _bollinger_percent_b_spec(),
+            [("bollinger_bands", "attributeerror"), ("percent_b", None)],
+            id="bollinger_bands-helper-name",
+        ),
+        # name == helper: a plain undefined ``self.macd`` is flagged too (the check is
+        # not Bollinger-specific).
+        pytest.param(
+            "self.macd(bars, 12, 26, 9)",
+            40,
+            lambda: _bollinger_base_band_spec(),
+            [("macd", "attributeerror")],
+            id="macd-name-equals-helper",
+        ),
+        # bare DSL name whose helper differs (donchian -> donchian_channels): a
+        # hand/LLM author may write ``self.donchian`` (the name it saw in the spec);
+        # the undefined form must still be flagged.
+        pytest.param(
+            "self.donchian(bars, 20)",
+            20,
+            lambda: _bollinger_base_band_spec(),
+            [("donchian", "attributeerror")],
+            id="donchian-bare-dsl-name",
+        ),
+    ],
+)
+def test_conformance_rejects_undefined_self_indicator_helper(
+    call_expr, window, spec_factory, needles
+) -> None:
+    # Any ``self.<indicator>(...)`` the class never defines AttributeErrors on the first
+    # bar (the base Strategy provides no indicator helpers); the conformance gate must
+    # flag it — for the exported helper name AND the bare DSL name — so the refinement
+    # loop fixes the call instead of the strategy crashing in the sandbox.
+    results = CodeConformanceGate().check(
+        _self_undefined_strategy(call_expr, window), spec_factory()
+    )
+    crits = _crit(results)
+    for primary, secondary in needles:
+        assert any(
+            primary in d.lower() and (secondary is None or secondary in d.lower()) for d in crits
+        ), (primary, secondary, crits)
+
+
+def test_conformance_abstains_on_dynamic_bollinger_band() -> None:
+    # A dynamic (non-literal) band value is runtime-valid but unresolvable
+    # statically; the derived-band check must abstain rather than reject.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_DYNAMIC_BAND, _bollinger_percent_b_spec())
+    assert not any("percent_b" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def _bollinger_base_band_spec() -> StrategySpec:
+    return StrategySpec(
+        strategy_id="cc-bb-lower",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="QQQ Bollinger lower-band bounce.",
+        signal_definition="close < lower band",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close",
+                    op="<",
+                    rhs=IndicatorRef(name="bollinger", params={"band": "lower", "period": 20}),
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+        requires_custom_code=True,
+    )
+
+
+_CC_BOLLINGER_ALIASED_IMPORT = textwrap.dedent("""
+    from contract import Strategy
+    from indicators import bollinger_bands as bb
+
+    class S(Strategy):
+        UNIVERSE = frozenset({"QQQ"})
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            bars = ctx.history(bar.symbol, 20)
+            if len(bars) < 20:
+                return
+            upper, middle, lower = bb(bars, 20, 2.0)
+            pos = ctx.position(bar.symbol)
+            qty = max(1, int(ctx.equity * 0.02 / bar.close))
+            if pos is None and bar.close < lower:
+                ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+            elif pos is not None and bar.close < pos.entry_price * 0.95:
+                ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+""")
+
+
+def test_conformance_credits_aliased_indicators_import() -> None:
+    # ``from indicators import bollinger_bands as bb; bb(...)`` runs fine in the
+    # sandbox; the presence check must resolve the alias to the real helper name
+    # and not falsely report the indicator as unread.
+    results = CodeConformanceGate().check(_CC_BOLLINGER_ALIASED_IMPORT, _bollinger_base_band_spec())
+    assert not any("bollinger" in d.lower() for d in _crit(results)), _crit(results)
+
+
+def test_source_aware_names_derived_from_allow_source() -> None:
+    # The compiler's source-aware set must equal spec_dsl's allow_source flags, so
+    # a source-aware indicator can never be added without its ``_src`` helper.
+    from investment_team.strategy_lab.spec_dsl import _INDICATOR_PARAM_SPECS
+    from investment_team.strategy_lab.synthesis.compiler import _SOURCE_AWARE_NAMES
+
+    expected = {n for n, s in _INDICATOR_PARAM_SPECS.items() if s.get("allow_source")}
+    assert _SOURCE_AWARE_NAMES == expected
+
+
+def test_bollinger_derived_bands_derived_from_dsl() -> None:
+    # The gate's derived-band set is the DSL's bollinger band options minus the
+    # base bands, so a future derived band added to spec_dsl is picked up.
+    from investment_team.strategy_lab.quality_gates.code_conformance import (
+        _BOLLINGER_BASE_BANDS,
+        _BOLLINGER_DERIVED_BANDS,
+    )
+    from investment_team.strategy_lab.spec_dsl import _INDICATOR_PARAM_SPECS
+
+    allowed = _INDICATOR_PARAM_SPECS["bollinger"]["optional"]["band"][1].allowed
+    assert _BOLLINGER_DERIVED_BANDS == frozenset(allowed) - _BOLLINGER_BASE_BANDS
+    assert _BOLLINGER_DERIVED_BANDS == {"percent_b", "bandwidth"}
+    assert not (_BOLLINGER_DERIVED_BANDS & _BOLLINGER_BASE_BANDS)
+
+
+def test_indicator_value_dispatch_covers_every_valid_name() -> None:
+    # Every _VALID_INDICATORS name must reach a real dispatch branch, never the
+    # vwap default; a missing branch raises "no dispatch branch".
+    from investment_team.strategy_lab.executor.strategy_indicators import (
+        _VALID_INDICATORS,
+        indicator_value,
+    )
+
+    bars = _series(40)
+    for name in _VALID_INDICATORS:
+        try:
+            indicator_value(name, bars)
+        except ValueError as e:  # e.g. sma/ema "requires a 'period' param" is fine
+            assert "no dispatch branch" not in str(e), name
+
+
+def test_indicator_value_raises_for_undispatched_valid_name(monkeypatch) -> None:
+    import investment_team.strategy_lab.executor.strategy_indicators as si
+
+    monkeypatch.setattr(si, "_VALID_INDICATORS", set(si._VALID_INDICATORS) | {"aroon"})
+    monkeypatch.setattr(
+        si, "_INDICATOR_PARAM_VALIDATORS", {**si._INDICATOR_PARAM_VALIDATORS, "aroon": {}}
+    )
+    with pytest.raises(ValueError, match="no dispatch branch"):
+        si.indicator_value("aroon", _series(40))
