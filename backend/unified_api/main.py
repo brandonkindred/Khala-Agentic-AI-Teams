@@ -33,6 +33,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from shared_env_config import env_float
+from unified_api.bounded_executor import get_or_recreate_executor
 from unified_api.config import TEAM_CONFIGS, get_enabled_teams
 
 logging.basicConfig(
@@ -658,10 +659,12 @@ def _get_probe_executor() -> futures.ThreadPoolExecutor:
     work onto a closed executor and silently fail. With this lazy
     accessor every probe / retry call enters with a live executor —
     or creates a fresh one if the previous lifespan tore it down.
+    Shares its lazy-create/recreate-after-shutdown logic with
+    ``github_events_handler._get_dispatch_executor`` via
+    :func:`unified_api.bounded_executor.get_or_recreate_executor`.
     """
     global _PROBE_EXECUTOR
-    if _PROBE_EXECUTOR is None or getattr(_PROBE_EXECUTOR, "_shutdown", False):
-        _PROBE_EXECUTOR = futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pd-health-probe")
+    _PROBE_EXECUTOR = get_or_recreate_executor(_PROBE_EXECUTOR, max_workers=2, thread_name_prefix="pd-health-probe")
     return _PROBE_EXECUTOR
 
 
