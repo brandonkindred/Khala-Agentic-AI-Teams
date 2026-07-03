@@ -49,20 +49,10 @@ from product_delivery.models import (  # noqa: E402 — must come after sys.path
     Story,
 )
 
-# RunTeamRequest is defined in api/main.py alongside the FastAPI app —
-# importing the whole module at collection time pulls in the SE
-# pipeline. We mirror the orchestrator-loader pattern above and lazy-
-# load just the class we need from a fresh module spec.
-_api_spec = importlib.util.spec_from_file_location(
-    "software_engineering_api_main_for_test",
-    _team_dir / "api" / "main.py",
-)
-_api_main = importlib.util.module_from_spec(_api_spec)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _load_api_main() -> None:
-    _api_spec.loader.exec_module(_api_main)
+# RunTeamRequest lives in the api.models module and is re-exported from
+# api.main; import the package module by its qualified name (unambiguous, so
+# no file-spec juggling needed).
+from software_engineering_team.api import main as _api_main  # noqa: E402
 
 
 def _now() -> datetime:

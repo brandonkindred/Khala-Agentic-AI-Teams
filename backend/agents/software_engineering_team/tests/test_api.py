@@ -6,7 +6,6 @@ those made by orchestrator background threads spawned from API endpoints)
 lands in a per-test in-memory dict.
 """
 
-import importlib.util
 import os
 import subprocess
 
@@ -22,12 +21,8 @@ from fastapi.testclient import TestClient
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
-_spec = importlib.util.spec_from_file_location(
-    "software_engineering_api_main",
-    _team_dir / "api" / "main.py",
-)
-_api_main = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_api_main)
+from software_engineering_team.api import main as _api_main  # noqa: E402
+
 app = _api_main.app
 
 
