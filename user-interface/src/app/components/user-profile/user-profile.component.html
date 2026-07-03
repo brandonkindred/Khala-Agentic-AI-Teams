@@ -33,17 +33,20 @@
               <span class="up-identity-hint">Avatar initials come from your display name.</span>
               <div class="up-swatches" role="radiogroup" aria-label="Avatar color">
                 @for (option of avatarColors; track option.key) {
+                  @let checked = form.controls.avatar_color.value === option.key;
                   <button
                     type="button"
                     class="up-swatch"
                     role="radio"
-                    [attr.aria-checked]="form.controls.avatar_color.value === option.key"
-                    [class.selected]="form.controls.avatar_color.value === option.key"
+                    [attr.aria-checked]="checked"
+                    [class.selected]="checked"
                     [attr.aria-label]="option.label"
-                    [style.backgroundColor]="'var(' + option.cssVar + ')'"
+                    [tabindex]="checked ? 0 : -1"
+                    [style.backgroundColor]="option.fill"
                     (click)="selectAvatarColor(option.key)"
+                    (keydown)="onSwatchKeydown($event)"
                   >
-                    @if (form.controls.avatar_color.value === option.key) {
+                    @if (checked) {
                       <mat-icon aria-hidden="true">check</mat-icon>
                     }
                   </button>
@@ -71,7 +74,12 @@
           </mat-form-field>
 
           <div class="up-actions">
-            <button mat-flat-button color="primary" type="submit" [disabled]="saving">
+            <button
+              mat-flat-button
+              color="primary"
+              type="submit"
+              [disabled]="saving || !profileLoaded"
+            >
               <mat-icon>save</mat-icon>
               {{ saving ? 'Saving…' : 'Save profile' }}
             </button>

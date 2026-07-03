@@ -61,8 +61,9 @@ describe('AppShellComponent', () => {
       '.footer-profile-link',
     ) as HTMLAnchorElement;
     expect(link).toBeTruthy();
+    // Route/label derive from the 'user-profile' NavItem in navigation.model.ts.
     expect(link.getAttribute('href')).toBe('/user-profile');
-    expect(link.getAttribute('aria-label')).toBe('User profile');
+    expect(link.getAttribute('aria-label')).toBe('User Profile');
     // Not the current page by default, so no aria-current.
     expect(link.getAttribute('aria-current')).toBeNull();
   });

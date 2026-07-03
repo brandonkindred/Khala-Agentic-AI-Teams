@@ -1,4 +1,4 @@
-import { Component, Input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { AvatarColorOption, resolveAvatarColor } from './avatar-colors';
 
@@ -55,6 +55,9 @@ export function computeInitials(name: string): string {
     </span>
   `,
   styleUrl: './initials-avatar.component.scss',
+  // Inputs are plain values, so OnPush limits the template getters to ticks
+  // where name/colorKey/size actually changed instead of every parent tick.
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class InitialsAvatarComponent {
   /** Name the initials are derived from; blank renders the icon fallback. */

@@ -17,18 +17,26 @@ export interface AvatarColorOption {
   label: string;
   /** CSS custom property name (including leading `--`) supplying the fill. */
   cssVar: string;
+  /** Ready-to-bind CSS value (`var(<cssVar>)`) so templates never rebuild it. */
+  fill: string;
 }
 
 /** The selectable palette, mapped onto bright semantic theme tokens. */
 export const AVATAR_COLOR_OPTIONS: readonly AvatarColorOption[] = [
-  { key: 'amber', label: 'Amber', cssVar: '--kh-accent' },
-  { key: 'green', label: 'Green', cssVar: '--kh-success' },
-  { key: 'blue', label: 'Blue', cssVar: '--kh-info' },
-  { key: 'red', label: 'Red', cssVar: '--kh-error' },
+  { key: 'amber', label: 'Amber', cssVar: '--kh-accent', fill: 'var(--kh-accent)' },
+  { key: 'green', label: 'Green', cssVar: '--kh-success', fill: 'var(--kh-success)' },
+  { key: 'blue', label: 'Blue', cssVar: '--kh-info', fill: 'var(--kh-info)' },
+  { key: 'red', label: 'Red', cssVar: '--kh-error', fill: 'var(--kh-error)' },
 ];
 
 /** Fallback color key used when a stored value is missing or unrecognized. */
 export const DEFAULT_AVATAR_COLOR = 'amber';
+
+// Resolved once at module init so the palette invariant (the default key
+// exists) fails fast here rather than at first fallback deep in a render.
+const DEFAULT_OPTION: AvatarColorOption = AVATAR_COLOR_OPTIONS.find(
+  (option) => option.key === DEFAULT_AVATAR_COLOR,
+)!;
 
 /**
  * Resolve a stored color key to its palette option.
@@ -39,7 +47,5 @@ export const DEFAULT_AVATAR_COLOR = 'amber';
  * key; otherwise returns the `DEFAULT_AVATAR_COLOR` option. Never throws.
  */
 export function resolveAvatarColor(key: unknown): AvatarColorOption {
-  const match = AVATAR_COLOR_OPTIONS.find((option) => option.key === key);
-  // The default key is a palette invariant, so the non-null assertion is safe.
-  return match ?? AVATAR_COLOR_OPTIONS.find((option) => option.key === DEFAULT_AVATAR_COLOR)!;
+  return AVATAR_COLOR_OPTIONS.find((option) => option.key === key) ?? DEFAULT_OPTION;
 }

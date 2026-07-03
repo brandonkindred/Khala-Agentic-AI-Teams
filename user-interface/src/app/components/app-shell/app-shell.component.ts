@@ -9,7 +9,7 @@ import { OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
 import { ApiStatusWidgetComponent } from '../api-status-widget/api-status-widget.component';
 import { BreadcrumbComponent } from '../../shared/breadcrumb/breadcrumb.component';
 import { NavStateService } from '../../services/nav-state.service';
-import { NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from '../../models/navigation.model';
+import { ALL_NAV_ITEMS, NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from '../../models/navigation.model';
 
 /**
  * Application shell with sidebar navigation and main content area.
@@ -41,6 +41,16 @@ export class AppShellComponent {
   private readonly router = inject(Router);
   readonly navState = inject(NavStateService);
   readonly navGroups = NAV_GROUPS;
+
+  /**
+   * The footer profile link's route/icon/label come from the nav model so the
+   * Settings-flyout entry and the footer can never drift apart.
+   *
+   * Invariants: the 'user-profile' NavItem exists in NAV_GROUPS (settings
+   * group) — the non-null assertion fails fast at construction if it is ever
+   * removed, rather than rendering a dead footer link.
+   */
+  readonly profileNavItem: NavItem = ALL_NAV_ITEMS.find((item) => item.id === 'user-profile')!;
 
   /** All focusable elements in the nav for arrow-key navigation. */
   @ViewChildren('navFocusable') navFocusableElements!: QueryList<ElementRef<HTMLElement>>;

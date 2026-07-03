@@ -315,6 +315,75 @@ describe('UserProfileComponent', () => {
     );
   });
 
+  it('should block saving until a load has succeeded', async () => {
+    // A save after a failed load would PUT constructor defaults + empty
+    // preferences, which the backend applies wholesale — wiping the profile.
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    expect(component.profileLoaded).toBe(false);
+    const btn = (fixture.nativeElement as HTMLElement).querySelector(
+      'button[type="submit"]',
+    ) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    component.save();
+    expect(apiSpy.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('should re-enable saving once a retry load succeeds', async () => {
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    apiSpy.getOverview.mockReturnValue(of(OVERVIEW));
+    component.load();
+    expect(component.profileLoaded).toBe(true);
+    component.save();
+    expect(apiSpy.updateProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it('should rove tabindex so only the checked swatch is a tab stop', async () => {
+    await setup();
+    const radios = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.up-swatch'),
+    );
+    expect(radios.length).toBe(4);
+    expect(radios.filter((r) => r.tabIndex === 0).length).toBe(1);
+    expect(radios.filter((r) => r.tabIndex === -1).length).toBe(3);
+    const checked = radios.find((r) => r.tabIndex === 0);
+    expect(checked?.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('should move the selection with arrow keys, wrapping at the ends', async () => {
+    await setup();
+    expect(component.form.value.avatar_color).toBe('amber');
+    // Roving tabindex: each keydown targets the currently checked radio.
+    const checkedRadio = () =>
+      (fixture.nativeElement as HTMLElement).querySelector(
+        '.up-swatch[aria-checked="true"]',
+      ) as HTMLButtonElement;
+    const press = (key: string) => {
+      checkedRadio().dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+      fixture.detectChanges();
+    };
+    press('ArrowRight');
+    expect(component.form.value.avatar_color).toBe('green');
+    press('ArrowLeft');
+    expect(component.form.value.avatar_color).toBe('amber');
+    // Left from the first entry wraps to the last.
+    press('ArrowUp');
+    expect(component.form.value.avatar_color).toBe('red');
+    press('ArrowDown');
+    expect(component.form.value.avatar_color).toBe('amber');
+    expect(component.form.dirty).toBe(true);
+  });
+
+  it('should leave non-arrow keys alone in the swatch radiogroup', async () => {
+    await setup();
+    const radio = (fixture.nativeElement as HTMLElement).querySelector('.up-swatch') as HTMLButtonElement;
+    const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    radio.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(component.form.value.avatar_color).toBe('amber');
+  });
+
   it('should live-update the avatar initials from the display name control', async () => {
     await setup();
     component.form.patchValue({ display_name: 'Grace Hopper' });

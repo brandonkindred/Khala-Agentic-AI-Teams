@@ -67,6 +67,13 @@ export class UserProfileComponent implements OnInit {
   saving = false;
   error: string | null = null;
   success: string | null = null;
+  /**
+   * True once at least one load has succeeded. Saving is blocked until then:
+   * the backend PUT replaces `preferences` (and profile fields) wholesale, so
+   * submitting the constructor-default form after a failed load would wipe
+   * the real server-side profile.
+   */
+  profileLoaded = false;
 
   groups: AssociationGroup[] = [];
   integrations: ProfileIntegration[] = [];
@@ -155,6 +162,7 @@ export class UserProfileComponent implements OnInit {
         this.groups = this.groupAssociations(associations);
         this.totalAssociations = this.groups.reduce((sum, g) => sum + g.items.length, 0);
         this.integrations = integrations;
+        this.profileLoaded = true; // the form now reflects real server state — saving is safe
         this.loading = false;
       },
       error: () => {
@@ -167,13 +175,17 @@ export class UserProfileComponent implements OnInit {
   /**
    * Persist the editable profile fields.
    *
-   * Preconditions: none enforced — a no-op (marking the form touched) when
-   * `form.invalid` (e.g. a malformed email), and a no-op while a previous save
-   * is still in flight, so a double-submit can't send duplicate updates.
-   * Postconditions: when the form is valid, exactly one of `success` ('Profile
-   * saved.') or `error` is set after the request settles, and `saving` is false.
+   * Preconditions: none enforced — a no-op until a load has succeeded
+   * (`profileLoaded`; see that field for why saving earlier is destructive),
+   * a no-op (marking the form touched) when `form.invalid` (e.g. a malformed
+   * email), and a no-op while a previous save is still in flight, so a
+   * double-submit can't send duplicate updates.
+   * Postconditions: when the form is valid and loaded, exactly one of `success`
+   * ('Profile saved.') or `error` is set after the request settles, and
+   * `saving` is false.
    */
   save(): void {
+    if (!this.profileLoaded) return; // never overwrite the server with unloaded defaults
     if (this.form.invalid) {
       this.form.markAllAsTouched();
       return;
@@ -228,6 +240,37 @@ export class UserProfileComponent implements OnInit {
   selectAvatarColor(key: string): void {
     this.form.controls.avatar_color.setValue(key);
     this.form.controls.avatar_color.markAsDirty();
+  }
+
+  /**
+   * Arrow-key selection within the avatar color radiogroup (WAI-ARIA radio
+   * pattern: the group is one tab stop and arrows move the selection).
+   *
+   * Preconditions: `event.currentTarget` is a `.up-swatch` radio button
+   * inside the `.up-swatches` radiogroup (palette order).
+   * Postconditions: on Arrow keys the selection moves to the next/previous
+   * palette color (wrapping) with the same side effects as a click, focus
+   * follows the selection, and the event's default is suppressed; all other
+   * keys are left untouched.
+   */
+  onSwatchKeydown(event: KeyboardEvent): void {
+    const delta =
+      event.key === 'ArrowRight' || event.key === 'ArrowDown'
+        ? 1
+        : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+          ? -1
+          : 0;
+    if (delta === 0) return;
+    event.preventDefault();
+    // Normalize first so a programmatically-set unknown key still has a
+    // well-defined position to move from.
+    const currentKey = resolveAvatarColor(this.form.controls.avatar_color.value).key;
+    const index = this.avatarColors.findIndex((option) => option.key === currentKey);
+    const nextIndex = (index + delta + this.avatarColors.length) % this.avatarColors.length;
+    this.selectAvatarColor(this.avatarColors[nextIndex].key);
+    const group = (event.currentTarget as HTMLElement).closest('.up-swatches');
+    const radios = group?.querySelectorAll<HTMLButtonElement>('.up-swatch');
+    radios?.[nextIndex]?.focus();
   }
 
   /** Group flat associations into the fixed display order, dropping empties. */
