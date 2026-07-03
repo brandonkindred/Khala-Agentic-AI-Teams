@@ -21,6 +21,10 @@ export const errorHandlerInterceptor: HttpInterceptorFn = (req, next) => {
         duration: 6000,
         horizontalPosition: 'end',
         verticalPosition: 'top',
+        // Errors must interrupt: polite announcements are routinely missed.
+        politeness: 'assertive',
+        // Severity styling from the design system (red border accent).
+        panelClass: 'kh-snack-error',
       });
       return throwError(() => err);
     })

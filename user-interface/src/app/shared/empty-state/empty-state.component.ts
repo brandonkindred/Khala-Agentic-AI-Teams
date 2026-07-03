@@ -23,6 +23,11 @@ export class EmptyStateComponent {
   @Input() description = '';
   /** Example prompts the user can click to quick-start. */
   @Input() examples: string[] = [];
+  /**
+   * Heading level for the title (2 or 3). Use 3 when the empty state renders
+   * inside a section that already has an h2, so the outline stays ordered.
+   */
+  @Input() headingLevel: 2 | 3 = 2;
   /** Emitted when the user clicks an example prompt. */
   @Output() exampleClick = new EventEmitter<string>();
 }

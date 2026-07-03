@@ -151,7 +151,7 @@ export class RoadTripPlanningDashboardComponent implements OnInit, AfterViewChec
   }
 
   onRestart(): void {
-    this.snackBar.open('Started a new trip', 'OK', { duration: 2000 });
+    this.snackBar.open('Started a new trip', 'OK', { duration: 4000 });
     this.startFreshConversation();
     this.persistSession();
   }
@@ -393,7 +393,7 @@ export class RoadTripPlanningDashboardComponent implements OnInit, AfterViewChec
     }
     if (changed || result.declined) {
       this.dirtyRePlan = this.itinerary !== null && changed;
-      this.snackBar.open(`Updated ${labelFor(key).toLowerCase()}`, 'OK', { duration: 1800 });
+      this.snackBar.open(`Updated ${labelFor(key).toLowerCase()}`, 'OK', { duration: 4000 });
     }
     this.persistSession();
   }

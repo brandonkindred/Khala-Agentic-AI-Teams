@@ -3,13 +3,15 @@
   @for (s of statuses; track s.name) {
     <span
       class="status"
+      role="img"
+      tabindex="0"
       [attr.aria-label]="s.name + ': ' + (s.ok ? 'Healthy' : 'Unavailable')"
       [matTooltip]="s.name + ': ' + (s.ok ? 'Healthy' : 'Unavailable')"
     >
       @if (s.ok) {
-        <mat-icon color="primary" class="icon">check_circle</mat-icon>
+        <mat-icon color="primary" class="icon" aria-hidden="true">check_circle</mat-icon>
       } @else {
-        <mat-icon color="warn" class="icon">error</mat-icon>
+        <mat-icon color="warn" class="icon" aria-hidden="true">error</mat-icon>
       }
     </span>
   }

@@ -533,3 +533,24 @@ a {
   background: rgba(251, 191, 36, 0.4);
   color: #fafafa;
 }
+
+// ============================================================================
+// Reduced-motion overrides (must stay LAST in this file)
+// ============================================================================
+// The global reset at the top of this file uses the universal selector, which
+// loses the cascade to the `.kh-btn-*` class rules above (both are !important,
+// class specificity wins). Repeating the duration reset here at class
+// specificity — and zeroing the hover `transform` movement, which duration
+// resets never touch — makes the preference actually hold. (WCAG 2.3.3)
+@media (prefers-reduced-motion: reduce) {
+  .kh-btn-primary,
+  .kh-btn-ghost {
+    transition-duration: 0.01ms !important;
+  }
+
+  .kh-btn-primary:hover,
+  .kh-btn-ghost:hover,
+  .kh-card:hover {
+    transform: none !important;
+  }
+}
