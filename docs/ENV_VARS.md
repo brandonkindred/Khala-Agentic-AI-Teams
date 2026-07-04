@@ -389,8 +389,14 @@ to the previous cycle. The cache reuses the prior map-phase result for any chunk
 whose exact LLM input (rendered `### path ###` content + segment notes) and context
 fingerprint (task/spec/architecture/acceptance/profile inputs plus the resolved
 review model) are unchanged, so only the chunks the fix actually touched go back
-through the LLM. Default `512`, floor `0` (`0` disables the cache entirely — every
-chunk is reviewed from scratch). Only fully-reviewed chunk outcomes are cached;
+through the LLM. The same knob also gates **single-flight de-duplication**: within
+one submission the map phase reviews chunks in parallel, so two byte-identical
+chunks could otherwise miss the cache at the same moment and each fire the LLM
+before either result is stored. Instead the first worker reviews while the rest
+block and reuse its outcome, so concurrent duplicates trigger a single review.
+Default `512`, floor `0` (`0` disables the cache **and** the single-flight
+de-duplication entirely — every chunk is reviewed from scratch). Only
+fully-reviewed chunk outcomes are cached;
 degraded "not reviewed" outcomes are never stored, so a transient failure is
 retried for real next cycle. The cache covers the **map phase only** — the
 false-positive verification pass always re-runs against the current whole

@@ -22,16 +22,24 @@ The process-global cache is cleared around every test by the autouse
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional
 
 import pytest
 from code_review_agent import coordinator as coord
 from code_review_agent import mapping
 from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import run_coordinator
-from code_review_agent.models import CodeReviewInput, ReviewProfile
+from code_review_agent.models import (
+    ChunkReviewOutput,
+    CodeReviewInput,
+    CodeReviewUnavailableError,
+    FileSegment,
+    ReviewChunk,
+    ReviewProfile,
+)
 
-from llm_service import LLMSemanticExhaustionError
+from llm_service import LLMRateLimitError, LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
@@ -540,6 +548,154 @@ def test_sibling_body_only_edit_keeps_dependent_cached() -> None:
     # B's body changes but its surface (def foo) does not: B misses, A stays cached.
     run_coordinator(client, _two_file_input(a, _defined_file("foo", body="2")))
     assert client.map_calls == 3
+
+
+# ---------------------------------------------------------------------------
+# Single-flight de-duplication of concurrent identical chunks
+# ---------------------------------------------------------------------------
+
+
+class _BlockingReviewer:
+    """Duck-typed ``ChunkReviewAgent`` whose ``run`` counts calls and parks.
+
+    ``run`` blocks on ``release`` so a test can hold the leader inside its single
+    review while a second thread asks for the identical chunk — opening the real
+    concurrency window the single-flight guard must close. Returns ``output`` or,
+    when ``error`` is set, raises it (to exercise the leader-error / waiter-reraise
+    path).
+    """
+
+    def __init__(
+        self,
+        *,
+        output: Optional[ChunkReviewOutput] = None,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        self._output = output
+        self._error = error
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._lock = threading.Lock()
+        self.calls = 0
+
+    def run(self, chunk_input: Any) -> ChunkReviewOutput:
+        with self._lock:
+            self.calls += 1
+        self.entered.set()
+        self.release.wait(5)
+        if self._error is not None:
+            raise self._error
+        assert self._output is not None
+        return self._output
+
+
+def _single_chunk() -> ReviewChunk:
+    return ReviewChunk(segments=[FileSegment(path="app/a.py", content="def f():\n    return 1\n")])
+
+
+def _wait_until(predicate: Any, timeout: float = 1.0) -> None:
+    """Poll ``predicate`` until true or ``timeout`` elapses (early-out helper).
+
+    Used only to shorten the window before releasing a parked leader: it returns
+    the instant a regression makes the waiter fire its own review (so the test
+    catches it fast), and otherwise waits the full timeout for the waiter to park.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not predicate():
+        time.sleep(0.005)
+
+
+def test_concurrent_duplicate_chunks_share_one_review() -> None:
+    """Two workers asking for the identical chunk at once trigger a single review.
+
+    Thread A becomes the leader and parks inside its one ``run`` call; thread B
+    finds the in-flight slot, waits, and reuses A's outcome — so the real reviewer
+    runs exactly once and both callers get equal but independent outcomes.
+    """
+    reviewer = _BlockingReviewer(output=ChunkReviewOutput(approved=True, issues=[], summary="ok"))
+    chunk = _single_chunk()
+    base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
+    context_fp = "fp"
+    results: Dict[str, mapping._ChunkOutcome] = {}
+    waiter_started = threading.Event()
+
+    def leader() -> None:
+        results["a"] = mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+
+    def waiter() -> None:
+        waiter_started.set()
+        results["b"] = mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+
+    t_a = threading.Thread(target=leader)
+    t_a.start()
+    assert reviewer.entered.wait(5)  # leader is inside its single review, slot held
+    assert reviewer.calls == 1
+
+    t_b = threading.Thread(target=waiter)
+    t_b.start()
+    assert waiter_started.wait(5)
+    # Give the waiter time to either park (single-flight) or, on a regression,
+    # fire its own review (calls -> 2); the helper returns early in the latter.
+    _wait_until(lambda: reviewer.calls == 2, timeout=0.5)
+    reviewer.release.set()
+    t_a.join(5)
+    t_b.join(5)
+
+    assert reviewer.calls == 1  # single review despite two concurrent asks
+    assert results["a"].approved_flags == [True]
+    assert results["b"].approved_flags == [True]
+    assert results["b"].summaries == results["a"].summaries
+    assert results["a"] is not results["b"]  # each caller owns an independent clone
+    assert mapping._CHUNK_INFLIGHT == {}  # slot released after completion
+
+
+def test_inflight_waiter_reraises_leader_error() -> None:
+    """When the leader's single review fails, its waiter re-raises the same error.
+
+    The waiter never fires its own LLM call, the failed outcome is not cached, and
+    the in-flight slot is cleared so a later cycle retries for real.
+    """
+    reviewer = _BlockingReviewer(error=LLMRateLimitError("rate limited"))
+    chunk = _single_chunk()
+    base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
+    context_fp = "fp"
+    errors: Dict[str, BaseException] = {}
+    waiter_started = threading.Event()
+
+    def call(tag: str) -> None:
+        try:
+            mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+        except BaseException as exc:  # noqa: BLE001 — record what each thread raised
+            errors[tag] = exc
+
+    def waiter() -> None:
+        waiter_started.set()
+        call("b")
+
+    t_a = threading.Thread(target=lambda: call("a"))
+    t_a.start()
+    assert reviewer.entered.wait(5)
+
+    t_b = threading.Thread(target=waiter)
+    t_b.start()
+    assert waiter_started.wait(5)
+    _wait_until(lambda: reviewer.calls == 2, timeout=0.5)
+    reviewer.release.set()
+    t_a.join(5)
+    t_b.join(5)
+
+    assert reviewer.calls == 1  # only the leader ran; the waiter reused the failure
+    # An infra failure surfaces as CodeReviewUnavailableError from both threads.
+    assert isinstance(errors["a"], CodeReviewUnavailableError)
+    assert errors["b"] is errors["a"]  # the waiter re-raised the leader's exception
+    assert mapping._CHUNK_INFLIGHT == {}  # slot cleared, nothing cached
+
+    # The failed key was not cached and the slot is free, so a fresh call runs the
+    # real review again (rather than a 0-call hit) — proving the failure is retried.
+    reviewer.release.set()  # already set; the next run returns from wait() at once
+    with pytest.raises(CodeReviewUnavailableError):
+        mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+    assert reviewer.calls == 2
 
 
 def test_lru_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:

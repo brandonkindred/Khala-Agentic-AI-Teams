@@ -4,8 +4,9 @@ Owns the per-chunk review call and everything around it: failure classification
 (infrastructure vs recoverable content vs unexpected defect), retry/bisection
 recovery, the degraded "not reviewed" fallback, the process-global map-phase
 outcome cache (keyed on the chunk's exact LLM input + a context/model
-fingerprint + the sibling surface), the cross-file sibling-surface extraction,
-and the parallel fan-out ``_map_chunks``.
+fingerprint + the sibling surface), single-flight de-duplication of concurrent
+identical chunks, the cross-file sibling-surface extraction, and the parallel
+fan-out ``_map_chunks``.
 
 Safety contract (see ``coordinator`` module docstring for the whole pipeline):
 - Infrastructure failures raise ``CodeReviewUnavailableError`` immediately.
@@ -15,6 +16,11 @@ Safety contract (see ``coordinator`` module docstring for the whole pipeline):
 - Only fully-reviewed outcomes are cached; degraded outcomes never are. A cache
   hit reproduces identical findings/verdicts (deep clone on store and retrieve),
   and a miss simply recomputes, so correctness never depends on a hit.
+- Concurrent reviews of the *same* chunk key are de-duplicated to a single real
+  review: one worker (the leader) runs it while the rest (waiters) block and
+  reuse its outcome — or re-raise its exception — so byte-identical chunks that
+  the parallel map fans out at the same time never fire redundant LLM calls,
+  even before the first result is cached.
 
 Known limitations:
 - The sibling surface is a names-only, cross-file-only, best-effort heuristic, so
@@ -84,6 +90,39 @@ DEFAULT_CHUNK_OUTCOME_CACHE_SIZE = 512  # CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE, 
 _CHUNK_OUTCOME_CACHE: "OrderedDict[str, _ChunkOutcome]" = OrderedDict()
 _CHUNK_OUTCOME_CACHE_LOCK = threading.Lock()
 
+# In-flight reviews, keyed by the same chunk cache key. A miss registers one
+# ``_InflightReview`` here so concurrent workers asking for the identical chunk
+# become waiters on the leader rather than each firing the LLM (single-flight).
+# Guarded by ``_CHUNK_OUTCOME_CACHE_LOCK`` — every access is a bare dict
+# get/set/pop, never the review itself, so hold times stay tiny.
+_CHUNK_INFLIGHT: "Dict[str, _InflightReview]" = {}
+
+
+class _InflightReview:
+    """One in-progress map-phase review that concurrent workers can wait on.
+
+    The first worker to miss the cache for a chunk key becomes the *leader*: it
+    runs the single real review and, when done, publishes the result here and
+    wakes any *waiters* — later workers that found this record and blocked
+    instead of issuing their own duplicate LLM call.
+
+    Invariants:
+        - Exactly one of ``outcome`` / ``error`` is set, and it is assigned
+          *before* ``done`` fires. ``threading.Event`` provides the happens-before
+          edge, so a waiter that returns from ``done.wait()`` reads the published
+          value safely.
+        - The leader owns the ``_CHUNK_INFLIGHT`` slot for this key from
+          registration until it pops the slot; a waiter only ever reads through a
+          record reference it captured under the lock.
+    """
+
+    __slots__ = ("done", "outcome", "error")
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.outcome: Optional["_ChunkOutcome"] = None
+        self.error: Optional[BaseException] = None
+
 
 def _chunk_outcome_cache_size() -> int:
     return parse_env_int(
@@ -92,16 +131,20 @@ def _chunk_outcome_cache_size() -> int:
 
 
 def clear_chunk_outcome_cache() -> None:
-    """Drop every cached map-phase outcome.
+    """Drop every cached map-phase outcome and any in-flight registration.
 
     Postconditions:
         - The process-global cache is empty; the next review of any chunk is a
           guaranteed miss. Intended for tests (the cache persists across
           ``run_coordinator`` calls by design) and for callers that must force a
           cold review.
+        - The in-flight registry is cleared too. In production it is empty
+          whenever no review is running (a leader always pops its own slot); this
+          keeps a test that clears mid-flight from stranding a stale record.
     """
     with _CHUNK_OUTCOME_CACHE_LOCK:
         _CHUNK_OUTCOME_CACHE.clear()
+        _CHUNK_INFLIGHT.clear()
 
 
 @dataclass
@@ -648,7 +691,7 @@ def _cached_review_chunk(
     sibling_surface: str = "",
     surface_by_path: Optional[Dict[str, List[str]]] = None,
 ) -> _ChunkOutcome:
-    """Review one chunk, reusing a cached map-phase outcome when unchanged.
+    """Review one chunk, reusing a cached or in-flight map-phase outcome.
 
     Preconditions:
         - Same as ``_review_chunk_with_recovery`` for ``base_input``.
@@ -662,20 +705,31 @@ def _cached_review_chunk(
 
     Postconditions:
         - When caching is disabled (``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` ==
-          0) this is a pure passthrough to ``_review_chunk_with_recovery`` —
-          behavior is identical to no cache at all.
+          0) this is a pure passthrough to ``_review_chunk_with_recovery`` — no
+          caching and no single-flight, identical to no cache at all.
         - On a hit, returns a deep clone of the stored outcome (never the shared
           instance), so the caller may mutate it freely; findings/verdicts are
           reproduced identically.
-        - On a miss, runs the real review and — only when the outcome came from
-          the exact full-chunk LLM input (no ``not_reviewed_issues`` and
+        - Single-flight: at most one worker (the leader) runs the real review for
+          a given chunk key at a time. Concurrent workers asking for the same key
+          block until the leader finishes, then reuse a deep clone of its outcome
+          (or re-raise its exception) instead of firing a duplicate LLM call — so
+          byte-identical chunks the parallel map fans out simultaneously trigger a
+          single review, even before the result is cached. This handoff covers
+          *every* outcome, including the degraded/bisected ones that are never
+          stored in the LRU.
+        - On a leader miss, runs the real review and — only when the outcome came
+          from the exact full-chunk LLM input (no ``not_reviewed_issues`` and
           *exactly one* ``approved_flags`` entry) — stores a clone under the
           chunk key, evicting the oldest entry past capacity. Degraded outcomes
           (a transient failure is retried for real next cycle) and bisected
           recoveries (>= 2 sub-reviews, reduced context — re-attempted at full
           context next cycle) are never cached.
         - Never suppresses ``_review_chunk_with_recovery``'s exceptions
-          (infrastructure failure, unexpected defect): they propagate unchanged.
+          (infrastructure failure, unexpected defect): the leader re-raises them
+          unchanged and hands the same exception to its waiters, so they fail the
+          same way rather than re-running. The failed key is left uncached and
+          its in-flight slot cleared, so the next cycle retries for real.
     """
     capacity = _chunk_outcome_cache_size()
     if capacity <= 0:
@@ -688,15 +742,48 @@ def _cached_review_chunk(
         hit = _CHUNK_OUTCOME_CACHE.get(key)
         if hit is not None:
             _CHUNK_OUTCOME_CACHE.move_to_end(key)
+            inflight: Optional[_InflightReview] = None
+            is_leader = False
+        else:
+            inflight = _CHUNK_INFLIGHT.get(key)
+            if inflight is None:
+                # No cached result and no review under way: take ownership so
+                # concurrent duplicates wait on us instead of re-reviewing.
+                inflight = _InflightReview()
+                _CHUNK_INFLIGHT[key] = inflight
+                is_leader = True
+            else:
+                is_leader = False
     if hit is not None:
         # Clone outside the lock: a stored entry is never mutated in place, so the
         # captured reference stays valid even if another thread evicts it, and the
         # deep copy no longer serializes other workers on the cache lock.
         return hit.clone()
 
-    outcome = _review_chunk_with_recovery(
-        reviewer, chunk, base_input, sibling_surface, surface_by_path
-    )
+    if not is_leader:
+        # Waiter: an identical chunk is already being reviewed. Block for it and
+        # reuse its result rather than firing a second LLM call. ``inflight`` was
+        # captured under the lock, so it stays valid even after the leader pops
+        # the slot; ``Event.wait`` returns at once if the leader already finished.
+        inflight.done.wait()
+        if inflight.error is not None:
+            raise inflight.error
+        return inflight.outcome.clone()
+
+    # Leader: run the single real review for this key, then publish to waiters.
+    try:
+        outcome = _review_chunk_with_recovery(
+            reviewer, chunk, base_input, sibling_surface, surface_by_path
+        )
+    except BaseException as exc:
+        # Fail closed for the caller and every waiter: hand them the same
+        # exception (so they don't re-run), free the slot so a later cycle can
+        # retry for real, and re-raise unchanged.
+        with _CHUNK_OUTCOME_CACHE_LOCK:
+            _CHUNK_INFLIGHT.pop(key, None)
+        inflight.error = exc
+        inflight.done.set()
+        raise
 
     # Cache only an outcome produced from the *exact full-chunk* LLM input: no
     # degraded ("not reviewed") coverage findings, and exactly one sub-review.
@@ -716,6 +803,15 @@ def _cached_review_chunk(
             _CHUNK_OUTCOME_CACHE.move_to_end(key)
             while len(_CHUNK_OUTCOME_CACHE) > capacity:
                 _CHUNK_OUTCOME_CACHE.popitem(last=False)
+
+    # Publish an independent clone to any waiters (they clone again per caller),
+    # then release the slot and wake them. Assigning before ``set()`` gives the
+    # waiter a safe read; popping before ``set()`` means new arrivals become the
+    # next leader rather than joining a completed record.
+    inflight.outcome = outcome.clone()
+    with _CHUNK_OUTCOME_CACHE_LOCK:
+        _CHUNK_INFLIGHT.pop(key, None)
+    inflight.done.set()
     return outcome
 
 
