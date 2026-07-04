@@ -742,18 +742,6 @@ def test_short_circuit_bypasses_model() -> None:
     assert second.approved is True  # served from cache, never saw the reject response
 
 
-def test_short_circuit_ignores_changed_files_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The submission key excludes ``changed_files``: identical files still hit."""
-    client = _CountingClient(_APPROVED)
-
-    run_coordinator(client, _one_file_input())  # full review, approves, caches
-
-    spy = _chunking_spy(monkeypatch)
-    # Same files, now carrying a changed-files hint — still the same submission.
-    run_coordinator(client, _one_file_input(changed_files=["app/a.py"]))
-    assert spy["n"] == 0  # short-circuited despite the differing hint
-
-
 def test_rejected_submission_is_not_short_circuited(monkeypatch: pytest.MonkeyPatch) -> None:
     """A rejection is never stored, so an identical resubmission reviews again."""
     client = _CountingClient(_REJECTED)
@@ -823,23 +811,3 @@ def test_submission_cache_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -
     assert spy["n"] == 1
 
 
-def test_changed_files_limits_primary_chunks_to_named_paths() -> None:
-    """Only files named in ``changed_files`` are reviewed as primary chunks."""
-    client = _CountingClient(_APPROVED)
-    a = "x" * 12_000
-    b = "y" * 12_000
-
-    data = _two_file_input(a, b, changed_files=["app/a.py"])
-    run_coordinator(client, data)
-    assert client.map_calls == 1  # only app/a.py chunked; app/b.py not a primary chunk
-
-
-def test_changed_files_no_overlap_reviews_all_files() -> None:
-    """A stale ``changed_files`` hint naming no current path reviews everything."""
-    client = _CountingClient(_APPROVED)
-    a = "x" * 12_000
-    b = "y" * 12_000
-
-    data = _two_file_input(a, b, changed_files=["gone/removed.py"])
-    run_coordinator(client, data)
-    assert client.map_calls == 2  # fail-safe: full review, no changed line dropped

@@ -624,6 +624,24 @@ def _half_sibling_surface(
     return _sibling_surface(half, surface_by_path)
 
 
+def _stable_json_digest(payload: Dict) -> str:
+    """SHA-256 of a JSON-native mapping, deterministic across runs.
+
+    Preconditions:
+        - Every value in ``payload`` (recursively) is natively JSON-serializable
+          (str/number/bool/list/dict/None); a non-serializable value raises
+          ``TypeError`` rather than being coerced, so a caller bug surfaces
+          instead of silently producing an unstable key.
+
+    Postconditions:
+        - Returns a hex digest that is identical for two payloads with the same
+          contents regardless of key insertion order (``sort_keys=True``), and
+          differs whenever any value differs. The single hashing idiom shared by
+          the map-phase context fingerprint and the submission fingerprint.
+    """
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     """Hash the review inputs shared by every chunk in one coordinator run.
 
@@ -653,8 +671,7 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     }
     normalized["profile"] = getattr(profile, "value", profile)
     normalized["__model__"] = model_fingerprint
-    payload = json.dumps(normalized, sort_keys=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return _stable_json_digest(normalized)
 
 
 def _chunk_cache_key(chunk: ReviewChunk, context_fp: str, sibling_surface: str) -> str:

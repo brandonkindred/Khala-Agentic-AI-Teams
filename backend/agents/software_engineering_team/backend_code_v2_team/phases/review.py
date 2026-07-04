@@ -576,19 +576,12 @@ def run_code_review_phase(
     linting_tool_agent: Any = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "python",
-    changed_files: Optional[List[str]] = None,
 ) -> PhaseReviewResult:
     """
     Run code review phase only: build verification + lint + code review.
 
     This is the first phase after coding, focusing on code quality, syntax,
     and adherence to coding standards.
-
-    ``changed_files``, when set, is the subset of ``files`` the preceding fix pass
-    changed; it is forwarded to the code-review agent so only those files are
-    reviewed as primary chunks while the whole submission stays reachable for
-    cross-file verification. ``None`` (the default, e.g. the first review of a
-    microtask) reviews every file.
     """
     task_id = task.id
     microtask_id = microtask.id
@@ -663,7 +656,6 @@ def run_code_review_phase(
             # its own prompts — no header parsing, no upstream truncation.
             cr_input = _CRInput(
                 files=files,
-                changed_files=changed_files,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],

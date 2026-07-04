@@ -175,29 +175,6 @@ def _generate_microtask_files(
     return dict(mt.output_files)
 
 
-def _changed_review_paths(
-    prev: Optional[Dict[str, str]], current: Dict[str, str]
-) -> Optional[List[str]]:
-    """Paths in ``current`` whose content differs from the previous review.
-
-    Preconditions:
-        - ``current`` is the file map about to be submitted to code review.
-        - ``prev`` is the map submitted to the last code review this microtask, or
-          ``None`` before the first review.
-
-    Postconditions:
-        - Returns ``None`` when ``prev`` is ``None`` (the first review, so every
-          file is reviewed).
-        - Otherwise returns the added/modified paths (content differs from
-          ``prev``); the code-review agent narrows its primary chunks to these
-          while the whole submission stays reachable for cross-file verification.
-          A path removed since ``prev`` is simply absent (nothing to re-review).
-    """
-    if prev is None:
-        return None
-    return [path for path, content in current.items() if prev.get(path) != content]
-
-
 def run_execution_with_review_gates(
     *,
     llm: LLMClient,
@@ -359,11 +336,6 @@ def run_execution_with_review_gates(
         qa_result = PhaseReviewResult(passed=True, phase_name="qa")
         sec_result = PhaseReviewResult(passed=True, phase_name="security")
 
-        # Files submitted to the previous code review this microtask, so each
-        # re-review scopes to just what the intervening fix changed. ``None`` marks
-        # the first review (a full review); ``_changed_review_paths`` diffs it.
-        prev_cr_files: Optional[Dict[str, str]] = None
-
         # ── Sequential Review Gates with Batch Fixes ──────────────────────────
         # Flow: Code Review -> QA -> Security -> Documentation
         # After QA/Security fixes, restart from Code Review
@@ -391,8 +363,6 @@ def run_execution_with_review_gates(
                     f"Code review (cycle {total_cycles})...",
                 )
 
-            cr_changed = _changed_review_paths(prev_cr_files, microtask_files)
-            prev_cr_files = dict(microtask_files)
             cr_result = run_code_review_phase(
                 llm=llm,
                 task=task,
@@ -403,7 +373,6 @@ def run_execution_with_review_gates(
                 code_review_agent=deps.code_review_agent,
                 linting_tool_agent=deps.linting_tool_agent,
                 detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
-                changed_files=cr_changed,
             )
 
             cr_retry = 0
@@ -466,8 +435,6 @@ def run_execution_with_review_gates(
                         "Re-running code review...",
                     )
 
-                cr_changed = _changed_review_paths(prev_cr_files, microtask_files)
-                prev_cr_files = dict(microtask_files)
                 cr_result = run_code_review_phase(
                     llm=llm,
                     task=task,
@@ -478,7 +445,6 @@ def run_execution_with_review_gates(
                     code_review_agent=deps.code_review_agent,
                     linting_tool_agent=deps.linting_tool_agent,
                     detail_callback=lambda d: _detail_cb(d, current_idx, "code_review"),
-                    changed_files=cr_changed,
                 )
 
             if not cr_result.passed:

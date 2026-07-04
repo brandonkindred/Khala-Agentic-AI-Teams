@@ -18,7 +18,6 @@ from code_review_agent.coordinator import (
     MIN_SPLIT_SEGMENT_CHARS,
     _issues_from_chunk_output,
     _segment_range_label,
-    _select_changed_blocks,
     _validate_line,
     build_review_chunks,
     cap_chunk_content,
@@ -48,31 +47,6 @@ from software_engineering_team.shared.context_sizing import compute_code_review_
 # ---------------------------------------------------------------------------
 # Pure-function tests
 # ---------------------------------------------------------------------------
-
-
-def test_select_changed_blocks_none_reviews_everything() -> None:
-    """No changed-files hint returns every block (a full review)."""
-    blocks = [("app/a.py", "a"), ("app/b.py", "b")]
-    assert _select_changed_blocks(blocks, None) == blocks
-
-
-def test_select_changed_blocks_filters_to_named_paths() -> None:
-    """A changed-files hint keeps only the named paths, in order."""
-    blocks = [("app/a.py", "a"), ("app/b.py", "b"), ("app/c.py", "c")]
-    selected = _select_changed_blocks(blocks, ["app/c.py", "app/a.py"])
-    assert selected == [("app/a.py", "a"), ("app/c.py", "c")]
-
-
-def test_select_changed_blocks_empty_overlap_falls_back_to_full() -> None:
-    """A hint that matches no current path fails safe to the full block set."""
-    blocks = [("app/a.py", "a"), ("app/b.py", "b")]
-    assert _select_changed_blocks(blocks, ["does/not/exist.py"]) == blocks
-
-
-def test_select_changed_blocks_empty_hint_falls_back_to_full() -> None:
-    """An empty changed-files list is a no-match hint, not a review-nothing order."""
-    blocks = [("app/a.py", "a")]
-    assert _select_changed_blocks(blocks, []) == blocks
 
 
 def test_parse_code_into_file_blocks_single_file() -> None:
