@@ -8,6 +8,12 @@ fingerprint + the sibling surface), single-flight de-duplication of concurrent
 identical chunks, the cross-file sibling-surface extraction, and the parallel
 fan-out ``_map_chunks``.
 
+It is also the home of the code-review fingerprint helpers — ``_stable_json_digest``
+and ``_review_model_fingerprint`` plus the ``_context_fingerprint`` (map-phase) and
+``_submission_fingerprint`` (coordinator submission-level short-circuit) keys built
+on them — so the hashing primitive stays internal to the one module that owns the
+cache-key machinery; the coordinator imports the fingerprints it needs.
+
 Safety contract (see ``coordinator`` module docstring for the whole pipeline):
 - Infrastructure failures raise ``CodeReviewUnavailableError`` immediately.
 - Known content failures bisect/retry, then degrade to a blocking ``high`` "not
