@@ -21,6 +21,21 @@ out-of-range → clamped to the documented floor/ceiling unless noted.
 ### STRATEGY_LAB_MARKET_DATA_*
 Strategy Lab market-data cache/timeout/provider tuning.
 
+## TradingView MCP data source
+
+The Strategy Lab can pull OHLCV price data from a **TradingView MCP server** in preference to the
+free public providers. Configure it once from the Integrations UI (**Integrations → TradingView**,
+backed by `GET/PUT/DELETE /api/integrations/tradingview` — server URL + optional bearer token stored
+Fernet-encrypted), or point a container at a server directly with the `TRADINGVIEW_MCP_*`
+environment variables (see `docs/ENV_VARS.md`; env overrides the stored config).
+
+When enabled with a URL, `MarketDataService` prepends a `tradingview_mcp` provider to the front of
+its per-asset-class chain, so it is tried **before** Yahoo / Twelve Data / CoinGecko / Alpha Vantage
+for every symbol; any TradingView error transparently falls back to the next provider. The client
+(`investment_team/tradingview_mcp/`) issues a single MCP `tools/call` (default tool `get_ohlcv`) over
+streamable-HTTP JSON-RPC and tolerates both `structuredContent` and JSON text-content result shapes.
+Unconfigured, the chain is unchanged.
+
 ### STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS
 Hard ceiling on the asset-class default universe used when `spec.target_symbols` is empty (default
 `20`). When the cap actually truncates the default a `logger.warning` fires. Non-empty

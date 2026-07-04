@@ -24,6 +24,9 @@ describe('IntegrationsDashboardComponent', () => {
     getGitHubConfig: ReturnType<typeof vi.fn>;
     updateGitHubConfig: ReturnType<typeof vi.fn>;
     deleteGitHubConfig: ReturnType<typeof vi.fn>;
+    getTradingViewConfig: ReturnType<typeof vi.fn>;
+    updateTradingViewConfig: ReturnType<typeof vi.fn>;
+    deleteTradingViewConfig: ReturnType<typeof vi.fn>;
   };
   let snackBar: { open: ReturnType<typeof vi.fn> };
 
@@ -43,6 +46,9 @@ describe('IntegrationsDashboardComponent', () => {
       getGitHubConfig: vi.fn(),
       updateGitHubConfig: vi.fn(),
       deleteGitHubConfig: vi.fn(),
+      getTradingViewConfig: vi.fn(),
+      updateTradingViewConfig: vi.fn(),
+      deleteTradingViewConfig: vi.fn(),
     };
     apiSpy.getSlackConfig.mockReturnValue(of({
       enabled: false,
@@ -56,6 +62,9 @@ describe('IntegrationsDashboardComponent', () => {
     apiSpy.getGoogleBrowserLoginStatus.mockReturnValue(of({ configured: false }));
     apiSpy.getMediumConfig.mockReturnValue(of({ enabled: false }));
     apiSpy.getGitHubConfig.mockReturnValue(of({ enabled: false, token_configured: false, owner: '', repo: '', default_label: '' }));
+    apiSpy.getTradingViewConfig.mockReturnValue(
+      of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+    );
 
     await TestBed.configureTestingModule({
       imports: [IntegrationsDashboardComponent, NoopAnimationsModule],

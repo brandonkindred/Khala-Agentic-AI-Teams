@@ -189,6 +189,24 @@ export interface RunPrReviewResponse {
   message: string;
 }
 
+/** TradingView MCP config response (GET/PUT/DELETE /api/integrations/tradingview). */
+export interface TradingViewConfigResponse {
+  enabled: boolean;
+  mcp_server_url: string;
+  tool_name: string;
+  /** True when an encrypted auth token is stored (the token itself is never returned). */
+  auth_token_configured: boolean;
+}
+
+/** Request body for PUT /api/integrations/tradingview. */
+export interface TradingViewConfigUpdate {
+  enabled: boolean;
+  mcp_server_url: string;
+  tool_name: string;
+  /** Bearer token / API key; empty preserves the existing stored token. */
+  auth_token: string;
+}
+
 /**
  * One persisted code-review run for a pull request
  * (GET /api/integrations/github/reviews). Backed by the coding team's

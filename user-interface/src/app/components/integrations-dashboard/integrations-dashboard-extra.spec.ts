@@ -19,6 +19,9 @@ interface ApiStub {
   getSlackOAuthUrl: ReturnType<typeof vi.fn>;
   disconnectSlack: ReturnType<typeof vi.fn>;
   getGitHubConfig: ReturnType<typeof vi.fn>;
+  getTradingViewConfig: ReturnType<typeof vi.fn>;
+  updateTradingViewConfig: ReturnType<typeof vi.fn>;
+  deleteTradingViewConfig: ReturnType<typeof vi.fn>;
 }
 
 describe('IntegrationsDashboardComponent (extra coverage)', () => {
@@ -59,6 +62,9 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
       mediumBrowserLoginSession: vi.fn().mockReturnValue(of({ enabled: true, oauth_provider: 'google', session_configured: true })),
       getSlackOAuthUrl: vi.fn().mockReturnValue(of({ url: 'https://slack.com/oauth' })),
       getGitHubConfig: vi.fn().mockReturnValue(of({ enabled: false, token_configured: false, owner: '', repo: '', default_label: '' })),
+      getTradingViewConfig: vi.fn().mockReturnValue(of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false })),
+      updateTradingViewConfig: vi.fn().mockReturnValue(of({ enabled: true, mcp_server_url: 'https://tv/mcp', tool_name: 'get_ohlcv', auth_token_configured: true })),
+      deleteTradingViewConfig: vi.fn().mockReturnValue(of({ enabled: false, mcp_server_url: '', tool_name: '', auth_token_configured: false })),
       disconnectSlack: vi.fn().mockReturnValue(of({
         enabled: false,
         webhook_configured: false,
@@ -429,6 +435,97 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     expect(component.error).toBe('disconnect fail');
   });
 
+  // -------------------------------------------------------------------------
+  // TradingView
+  // -------------------------------------------------------------------------
+
+  it('loadTradingViewConfig applies config on ngOnInit', () => {
+    api.getTradingViewConfig.mockReturnValue(
+      of({ enabled: true, mcp_server_url: 'https://tv/mcp', tool_name: 'fb', auth_token_configured: true }),
+    );
+    fixture.detectChanges();
+    expect(component.tradingViewEnabled).toBe(true);
+    expect(component.tradingViewServerUrl).toBe('https://tv/mcp');
+    expect(component.tradingViewToolName).toBe('fb');
+    expect(component.tradingViewTokenConfigured).toBe(true);
+    expect(component.tradingViewToken).toBe('');
+  });
+
+  it('loadTradingViewConfig handles error', () => {
+    api.getTradingViewConfig.mockReturnValue(throwError(() => ({ error: { detail: 'tv down' } })));
+    fixture.detectChanges();
+    expect(component.tradingViewError).toBe('tv down');
+  });
+
+  it('serverUrlInvalid flags non-http URLs only', () => {
+    fixture.detectChanges();
+    component.tradingViewServerUrl = '';
+    expect(component.serverUrlInvalid()).toBe(false);
+    component.tradingViewServerUrl = 'ftp://bad';
+    expect(component.serverUrlInvalid()).toBe(true);
+    component.tradingViewServerUrl = 'https://ok/mcp';
+    expect(component.serverUrlInvalid()).toBe(false);
+  });
+
+  it('saveTradingViewConfig blocks an invalid URL', () => {
+    fixture.detectChanges();
+    component.tradingViewServerUrl = 'ftp://bad';
+    component.saveTradingViewConfig();
+    expect(component.tradingViewError).toContain('http');
+    expect(api.updateTradingViewConfig).not.toHaveBeenCalled();
+  });
+
+  it('saveTradingViewConfig requires a URL when enabling', () => {
+    fixture.detectChanges();
+    component.tradingViewEnabled = true;
+    component.tradingViewServerUrl = '';
+    component.saveTradingViewConfig();
+    expect(component.tradingViewError).toContain('required');
+    expect(api.updateTradingViewConfig).not.toHaveBeenCalled();
+  });
+
+  it('saveTradingViewConfig posts and applies the response', () => {
+    fixture.detectChanges();
+    component.tradingViewEnabled = true;
+    component.tradingViewServerUrl = 'https://tv/mcp';
+    component.tradingViewToolName = '';
+    component.tradingViewToken = 'secret';
+    component.saveTradingViewConfig();
+    expect(api.updateTradingViewConfig).toHaveBeenCalledWith({
+      enabled: true,
+      mcp_server_url: 'https://tv/mcp',
+      tool_name: '',
+      auth_token: 'secret',
+    });
+    expect(snackBar.open).toHaveBeenCalledWith('TradingView integration saved.', 'Dismiss', {
+      duration: 3000,
+    });
+    expect(component.tradingViewTokenConfigured).toBe(true);
+    expect(component.tradingViewToken).toBe('');
+  });
+
+  it('saveTradingViewConfig surfaces a save error', () => {
+    fixture.detectChanges();
+    api.updateTradingViewConfig.mockReturnValue(throwError(() => ({ message: 'save fail' })));
+    component.tradingViewServerUrl = 'https://tv/mcp';
+    component.saveTradingViewConfig();
+    expect(component.tradingViewError).toBe('save fail');
+  });
+
+  it('disconnectTradingView clears config and handles error', () => {
+    fixture.detectChanges();
+    component.disconnectTradingView();
+    expect(api.deleteTradingViewConfig).toHaveBeenCalled();
+    expect(snackBar.open).toHaveBeenCalledWith('TradingView disconnected.', 'Dismiss', {
+      duration: 3000,
+    });
+    expect(component.tradingViewEnabled).toBe(false);
+
+    api.deleteTradingViewConfig.mockReturnValue(throwError(() => ({ message: 'disc fail' })));
+    component.disconnectTradingView();
+    expect(component.tradingViewError).toBe('disc fail');
+  });
+
   // ---------------------------------------------------------------------
   // Unsaved-changes guard
   // ---------------------------------------------------------------------
@@ -453,6 +550,9 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     expect(component.hasUnsavedChanges()).toBe(true);
     component.githubPat = '';
     component.googleAccountPassword = 'pw';
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.googleAccountPassword = '';
+    component.tradingViewToken = 'tv-secret';
     expect(component.hasUnsavedChanges()).toBe(true);
   });
 

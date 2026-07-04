@@ -76,6 +76,7 @@ _BROWSER_SESSION_ROOT_LOGGED = False
 _SLACK_SERVICE = "slack"
 _MEDIUM_SERVICE = "medium"
 _GITHUB_SERVICE = "github"
+_TRADINGVIEW_SERVICE = "tradingview"
 
 
 def _get_integrations_path() -> Path:
@@ -509,6 +510,7 @@ def get_integrations_list() -> list[dict[str, Any]]:
     slack = data.get("slack") or {}
     medium = data.get("medium") or {}
     github = data.get("github") or {}
+    tradingview = data.get("tradingview") or {}
     gh_owner = str(github.get("owner", "")).strip()
     gh_repo = str(github.get("repo", "")).strip()
     return [
@@ -531,6 +533,12 @@ def get_integrations_list() -> list[dict[str, Any]]:
             "type": "github",
             "enabled": bool(github.get("enabled", False)),
             "channel": f"{gh_owner}/{gh_repo}" if gh_owner and gh_repo else None,
+        },
+        {
+            "id": "tradingview",
+            "type": "tradingview",
+            "enabled": bool(tradingview.get("enabled", False)),
+            "channel": str(tradingview.get("mcp_server_url", "")).strip() or None,
         },
     ]
 
@@ -707,5 +715,113 @@ def clear_github_config() -> None:
             "repo": "",
             "default_label": "",
             "repo_path": "",
+        }
+        _write_raw(data)
+
+
+# ---------------------------------------------------------------------------
+# TradingView (MCP data source for the Strategy Lab)
+# ---------------------------------------------------------------------------
+
+# Default MCP tool the client invokes to fetch OHLCV bars. The server implementer
+# can override it per configuration; this keeps a sensible default so a minimal
+# setup (URL + token) works out of the box.
+_TRADINGVIEW_DEFAULT_TOOL = "get_ohlcv"
+
+
+def get_tradingview_config_meta() -> dict[str, Any]:
+    """Return the JSON-only TradingView settings — no credential-store read.
+
+    Preconditions: none.
+    Postconditions: returns exactly ``enabled`` (bool), ``mcp_server_url`` and
+        ``tool_name`` (stripped strings), all from the JSON settings file. ``tool_name``
+        defaults to ``get_ohlcv`` when unset. Performs NO credential read, so callers
+        that only need the settings (or will read the token separately) don't pay a
+        Postgres round-trip — the Strategy Lab resolver reads this first and only fetches
+        the encrypted token when the integration is actually enabled. Never raises beyond
+        an underlying JSON-read error.
+    """
+    with _LOCK:
+        data = _read_raw()
+    tv = data.get("tradingview") or {}
+    return {
+        "enabled": bool(tv.get("enabled", False)),
+        "mcp_server_url": str(tv.get("mcp_server_url", "")).strip(),
+        "tool_name": str(tv.get("tool_name", "")).strip() or _TRADINGVIEW_DEFAULT_TOOL,
+    }
+
+
+def get_tradingview_token() -> str:
+    """Return the decrypted TradingView MCP auth token, or ``""``.
+
+    Preconditions: none.
+    Postconditions: returns the decrypted credential (``""`` when absent / store
+        disabled / unreachable — ``get_credential`` swallows its own errors). This is the
+        only accessor that touches the credential store, so callers can gate the (Postgres)
+        read on whether the integration is enabled. Never raises.
+    """
+    return get_credential(_TRADINGVIEW_SERVICE, "auth_token")
+
+
+def get_tradingview_config() -> dict[str, Any]:
+    """Return the full TradingView MCP config (settings + decrypted token).
+
+    Preconditions: none.
+    Postconditions: :func:`get_tradingview_config_meta` plus ``auth_token`` (the decrypted
+        credential, or ``""``). Used by the HTTP config surface, which needs to report
+        whether a token is stored regardless of the enabled flag; the HTTP layer masks the
+        raw value in its response model. Team-side readers prefer the split
+        meta/token accessors so a disabled integration avoids the credential read. Never
+        raises.
+    """
+    return {**get_tradingview_config_meta(), "auth_token": get_tradingview_token()}
+
+
+def set_tradingview_config(
+    *,
+    enabled: bool,
+    mcp_server_url: str = "",
+    tool_name: str = "",
+    auth_token: str = "",
+) -> None:
+    """Persist the TradingView MCP config. Token goes encrypted to Postgres; rest to JSON.
+
+    Preconditions: all arguments are strings (``enabled`` a bool). A blank
+        ``mcp_server_url``/``tool_name`` preserves the existing stored value; a blank
+        ``auth_token`` leaves the stored credential untouched (so re-saving settings
+        without re-entering the token does not wipe it).
+    Postconditions: the non-blank ``auth_token`` is written encrypted via
+        ``set_credential``; the JSON settings (enabled/mcp_server_url/tool_name) are
+        rewritten atomically under ``_LOCK``. Returns ``None``.
+    """
+    if auth_token.strip():
+        set_credential(_TRADINGVIEW_SERVICE, "auth_token", auth_token.strip())
+
+    with _LOCK:
+        data = _read_raw()
+        existing = data.get("tradingview") or {}
+        data["tradingview"] = {
+            "enabled": enabled,
+            "mcp_server_url": mcp_server_url.strip() or existing.get("mcp_server_url", ""),
+            "tool_name": tool_name.strip() or existing.get("tool_name", ""),
+        }
+        _write_raw(data)
+
+
+def clear_tradingview_config() -> None:
+    """Remove the TradingView auth token and reset config to disabled defaults.
+
+    Preconditions: none.
+    Postconditions: deletes the stored ``auth_token`` credential and rewrites the JSON
+        settings to the disabled-defaults shape (enabled=False, empty
+        mcp_server_url/tool_name) atomically under ``_LOCK``. Idempotent. Returns ``None``.
+    """
+    delete_credential(_TRADINGVIEW_SERVICE, "auth_token")
+    with _LOCK:
+        data = _read_raw()
+        data["tradingview"] = {
+            "enabled": False,
+            "mcp_server_url": "",
+            "tool_name": "",
         }
         _write_raw(data)

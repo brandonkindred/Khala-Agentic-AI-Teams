@@ -25,11 +25,13 @@ import type {
   SlackConfigResponse,
   SlackConfigUpdate,
   SlackMode,
+  TradingViewConfigResponse,
+  TradingViewConfigUpdate,
 } from '../../models/integrations.model';
 
 const SLACK_WEBHOOK_PREFIX = 'https://hooks.slack.com/';
 
-type IntegrationKey = 'google' | 'slack' | 'medium' | 'github';
+type IntegrationKey = 'google' | 'slack' | 'medium' | 'github' | 'tradingview';
 
 @Component({
   selector: 'app-integrations-dashboard',
@@ -73,7 +75,13 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
    * embeds a secret token and is never returned by the API.
    */
   hasUnsavedChanges(): boolean {
-    if (this.saving || this.mediumSaving || this.savingGoogleBrowserCredentials || this.githubSaving) {
+    if (
+      this.saving ||
+      this.mediumSaving ||
+      this.savingGoogleBrowserCredentials ||
+      this.githubSaving ||
+      this.tradingViewSaving
+    ) {
       return true;
     }
     return !!(
@@ -82,7 +90,8 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       this.webhookUrl.trim() ||
       this.googleAccountPassword.length > 0 ||
       this.githubPat.trim() ||
-      this.githubWebhookSecret.trim()
+      this.githubWebhookSecret.trim() ||
+      this.tradingViewToken.trim()
     );
   }
 
@@ -93,7 +102,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.expanded = this.expanded === key ? null : key;
   }
 
-  readonly totalIntegrations = 4;
+  readonly totalIntegrations = 5;
 
   get connectedCount(): number {
     let n = 0;
@@ -101,6 +110,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     if (this.oauthConnected) n += 1;
     if (this.mediumReadyForStats) n += 1;
     if (this.githubTokenConfigured && this.githubOwner && this.githubRepo) n += 1;
+    if (this.tradingViewEnabled && !!this.tradingViewServerUrl) n += 1;
     return n;
   }
 
@@ -134,6 +144,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.loadSlackConfig();
     this.loadMediumConfig();
     this.loadGitHubConfig();
+    this.loadTradingViewConfig();
     this.handleOAuthCallback();
   }
 
@@ -676,6 +687,101 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.githubError = extractErrorDetail(err, 'Failed to disconnect GitHub.');
         this.githubDisconnecting = false;
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // TradingView (MCP market-data source for the Strategy Lab)
+  // ---------------------------------------------------------------------------
+
+  tradingViewLoading = false;
+  tradingViewSaving = false;
+  tradingViewDisconnecting = false;
+  tradingViewError: string | null = null;
+
+  tradingViewEnabled = false;
+  tradingViewServerUrl = '';
+  tradingViewToolName = '';
+  // Write-only; the token is never returned by the API. `tradingViewTokenConfigured`
+  // reflects whether one is stored so the field can show "Saved" without exposing it.
+  tradingViewToken = '';
+  tradingViewTokenConfigured = false;
+
+  serverUrlInvalid(): boolean {
+    const u = (this.tradingViewServerUrl || '').trim();
+    if (!u) return false;
+    return !u.startsWith('http://') && !u.startsWith('https://');
+  }
+
+  private applyTradingViewConfig(res: TradingViewConfigResponse): void {
+    this.tradingViewEnabled = res.enabled;
+    this.tradingViewServerUrl = res.mcp_server_url;
+    this.tradingViewToolName = res.tool_name;
+    this.tradingViewTokenConfigured = res.auth_token_configured;
+    // Never repopulate the secret from a response.
+    this.tradingViewToken = '';
+  }
+
+  loadTradingViewConfig(): void {
+    this.tradingViewLoading = true;
+    this.tradingViewError = null;
+    this.api.getTradingViewConfig().subscribe({
+      next: (res: TradingViewConfigResponse) => {
+        this.applyTradingViewConfig(res);
+        this.tradingViewLoading = false;
+      },
+      error: (err) => {
+        this.tradingViewError = extractErrorDetail(err, 'Failed to load TradingView config.');
+        this.tradingViewLoading = false;
+      },
+    });
+  }
+
+  saveTradingViewConfig(): void {
+    const serverUrl = this.tradingViewServerUrl.trim();
+    if (this.serverUrlInvalid()) {
+      this.tradingViewError = 'Server URL must start with http:// or https://';
+      return;
+    }
+    if (this.tradingViewEnabled && !serverUrl) {
+      this.tradingViewError = 'Server URL is required to enable the TradingView integration.';
+      return;
+    }
+
+    this.tradingViewSaving = true;
+    this.tradingViewError = null;
+    const body: TradingViewConfigUpdate = {
+      enabled: this.tradingViewEnabled,
+      mcp_server_url: serverUrl,
+      tool_name: this.tradingViewToolName.trim(),
+      auth_token: this.tradingViewToken,
+    };
+    this.api.updateTradingViewConfig(body).subscribe({
+      next: (res: TradingViewConfigResponse) => {
+        this.applyTradingViewConfig(res);
+        this.notifications.saved('TradingView integration saved.');
+        this.tradingViewSaving = false;
+      },
+      error: (err) => {
+        this.tradingViewError = extractErrorDetail(err, 'Failed to save TradingView config.');
+        this.tradingViewSaving = false;
+      },
+    });
+  }
+
+  disconnectTradingView(): void {
+    this.tradingViewDisconnecting = true;
+    this.tradingViewError = null;
+    this.api.deleteTradingViewConfig().subscribe({
+      next: (res: TradingViewConfigResponse) => {
+        this.applyTradingViewConfig(res);
+        this.notifications.saved('TradingView disconnected.');
+        this.tradingViewDisconnecting = false;
+      },
+      error: (err) => {
+        this.tradingViewError = extractErrorDetail(err, 'Failed to disconnect TradingView.');
+        this.tradingViewDisconnecting = false;
       },
     });
   }

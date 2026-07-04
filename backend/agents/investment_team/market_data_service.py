@@ -13,7 +13,7 @@ import math
 import os
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
@@ -24,6 +24,7 @@ from .data_providers.symbol_maps import (
     resolve_alphavantage_stock,
     resolve_twelve_data,
 )
+from .date_utils import epoch_to_utc_date
 from .models import StrategySpec
 from .strategy_lab_context import normalize_asset_class
 from .symbols import (
@@ -42,6 +43,10 @@ logger = logging.getLogger(__name__)
 _ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "").strip()
 
 _DEFAULT_MAX_UNIVERSE_SYMBOLS = 20
+
+# Sentinel distinguishing "caller did not specify a TradingView client" (resolve one
+# from configuration) from an explicit ``None`` (no client — skip the integration).
+_UNSET = object()
 
 
 def _max_universe_symbols() -> int:
@@ -71,6 +76,24 @@ def _max_universe_symbols() -> int:
         )
         return _DEFAULT_MAX_UNIVERSE_SYMBOLS
     return max(1, value)
+
+
+def _resolve_tradingview_client() -> Optional[object]:
+    """Best-effort build of the TradingView MCP client from configuration.
+
+    Preconditions: none.
+    Postconditions: returns a ``TradingViewMcpClient`` when the integration is enabled
+        and has a server URL, else ``None``. Any import/resolution failure degrades to
+        ``None`` (the service runs on its public free-tier chain) — market-data fetching
+        must never break because the optional TradingView integration misbehaves.
+    """
+    try:
+        from .tradingview_mcp.provider import build_tradingview_client
+
+        return build_tradingview_client()
+    except Exception as exc:  # noqa: BLE001 - the integration is strictly optional
+        logger.warning("TradingView MCP client unavailable: %s", exc)
+        return None
 
 
 class OHLCVBar(BaseModel):
@@ -190,8 +213,21 @@ class MarketDataService:
         http_timeout: float = 30.0,
         *,
         cache: Optional["MarketDataCache"] = None,
+        tradingview_client: object = _UNSET,
     ) -> None:
         self._timeout = http_timeout
+        # TradingView MCP data source (Strategy Lab integration). When a user has
+        # configured and enabled it (via /api/integrations/tradingview or the
+        # TRADINGVIEW_MCP_* env vars), it becomes the FIRST provider tried for every
+        # asset class, ahead of the free public fallbacks. Unconfigured ⇒ ``None`` and
+        # the chain behaves exactly as before.
+        #
+        # Resolution is LAZY and memoized (see the ``_tradingview_client`` property): a
+        # ``MarketDataService`` that is constructed but never fetches pays no config /
+        # credential-store I/O at all — the constructor stays free of side effects. Tests
+        # may inject a client, or pass an explicit ``None`` to force the integration off
+        # without any config lookup. ``_UNSET`` means "resolve on first use".
+        self._tradingview_client_cache = tradingview_client
         # Phase 5 (partial): records which provider supplied bars for each
         # symbol on the most recent fetch.  Read by
         # ``execution.intraday_guard.check_intraday_data_source`` to
@@ -216,6 +252,22 @@ class MarketDataService:
         from .market_data_cache import get_default_cache
 
         return get_default_cache()
+
+    @property
+    def _tradingview_client(self) -> Optional[object]:
+        """Return the (lazily resolved, memoized) TradingView MCP client, or ``None``.
+
+        Preconditions: none.
+        Postconditions: on first access with an unspecified client (``_UNSET``), resolves
+            config from env + the Unified API store exactly once and caches the result
+            (client or ``None``); subsequent accesses reuse it. An injected client or an
+            explicit ``None`` passed to the constructor is returned as-is with no lookup.
+            This keeps the config/credential-store read off the constructor and off any
+            service that is built but never fetches. Never raises.
+        """
+        if self._tradingview_client_cache is _UNSET:
+            self._tradingview_client_cache = _resolve_tradingview_client()
+        return self._tradingview_client_cache
 
     # ------------------------------------------------------------------
     # Public API
@@ -522,20 +574,76 @@ class MarketDataService:
         The slug is stable across monkey-patching in tests — it's what the
         intraday-safety guard inspects when deciding whether to hard-fail
         a run that fell back to an unreliable OHLCV source.
+
+        A configured TradingView MCP source is prepended for every asset class so the
+        Strategy Lab prefers the user's TradingView data before falling back to the
+        free public providers.
         """
         if asset_class == "crypto":
-            return [
+            chain: list[tuple[str, _FetchFn]] = [
                 ("yahoo", self._fetch_yahoo),
                 ("twelve_data", self._fetch_twelve_data),
                 ("coingecko", self._fetch_coingecko),
             ]
-        chain: list[tuple[str, _FetchFn]] = [
-            ("yahoo", self._fetch_yahoo),
-            ("twelve_data", self._fetch_twelve_data),
-        ]
-        if _ALPHA_VANTAGE_API_KEY:
-            chain.append(("alphavantage", self._fetch_alphavantage))
+        else:
+            chain = [
+                ("yahoo", self._fetch_yahoo),
+                ("twelve_data", self._fetch_twelve_data),
+            ]
+            if _ALPHA_VANTAGE_API_KEY:
+                chain.append(("alphavantage", self._fetch_alphavantage))
+        if self._tradingview_client is not None:
+            chain.insert(0, ("tradingview_mcp", self._fetch_tradingview_mcp))
         return chain
+
+    # ------------------------------------------------------------------
+    # Provider 0: TradingView MCP (user-configured Strategy Lab integration)
+    # ------------------------------------------------------------------
+
+    def _fetch_tradingview_mcp(
+        self, symbol: str, asset_class: str, start_date: str, end_date: str
+    ) -> List[OHLCVBar]:
+        """Fetch daily OHLCV from the configured TradingView MCP server.
+
+        Preconditions: ``self._tradingview_client`` is a configured client (guaranteed
+            by :meth:`_get_named_provider_chain`, which only adds this provider then). Each
+            row from the client already carries a canonical ``YYYY-MM-DD`` ``date`` and
+            O/H/L filled from the close (see ``TradingViewMcpClient._normalize_row``).
+        Postconditions: returns normalized bars via the shared
+            :meth:`_bars_from_normalized` pipeline, or ``[]`` on any client error so the
+            provider chain falls back to the next source (matching every other provider).
+        """
+        client = self._tradingview_client
+        if client is None:  # defensive: chain only adds us when configured
+            return []
+        try:
+            rows = client.fetch_ohlcv(symbol, asset_class, start_date, end_date)
+        except Exception as exc:  # noqa: BLE001 - a TradingView failure must fall back
+            logger.warning("TradingView MCP fetch failed for %s (%s): %s", symbol, asset_class, exc)
+            return []
+
+        normalized: List[Tuple[str, Optional[OHLCVBar], bool]] = []
+        for row in rows:
+            # Defensive: the production client already yields a bare ``YYYY-MM-DD`` string,
+            # but coerce here too so an alternate/injected client returning a datetime-
+            # shaped or non-string date can't key a mis-bucketed bar or raise a TypeError
+            # in the string range comparison below.
+            bar_date = str(row.get("date", ""))[:10]
+            if not bar_date or bar_date < start_date or bar_date > end_date:
+                continue
+            bar, repaired = self._normalize_ohlc_bar(
+                date=bar_date,
+                open=row.get("open"),
+                high=row.get("high"),
+                low=row.get("low"),
+                close=row.get("close"),
+                volume=row.get("volume", 0),
+            )
+            normalized.append((bar_date, bar, repaired))
+        # TradingView MCP rows may arrive newest-first or oldest-first; sort by date so
+        # forward-fill carry-forward is always chronological regardless of server order.
+        normalized.sort(key=lambda entry: entry[0])
+        return self._bars_from_normalized(normalized, provider="TradingView MCP", symbol=symbol)
 
     # ------------------------------------------------------------------
     # Provider 1: Yahoo Finance
@@ -732,16 +840,12 @@ class MarketDataService:
 
                 daily: Dict[str, List[float]] = {}
                 for ts_ms, price in raw.get("prices", []):
-                    # CoinGecko timestamps are UTC epoch milliseconds. Bucket
-                    # them by UTC calendar day explicitly — a naive
-                    # ``date.fromtimestamp`` uses the process-local timezone,
-                    # which shifts ticks near midnight across day boundaries and
-                    # makes the resulting bars (and the shared forward-fill
-                    # output) non-deterministic across hosts / CI runners.
-                    bar_date = (
-                        datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date().isoformat()
-                    )
-                    if start_date <= bar_date <= end_date:
+                    # CoinGecko timestamps are UTC epoch milliseconds. ``epoch_to_utc_date``
+                    # buckets by UTC calendar day explicitly (not the process-local
+                    # timezone), so ticks near midnight land on the same day on every host
+                    # / CI runner — the determinism the shared forward-fill relies on.
+                    bar_date = epoch_to_utc_date(ts_ms / 1000)
+                    if bar_date and start_date <= bar_date <= end_date:
                         daily.setdefault(bar_date, []).append(float(price))
 
                 normalized: List[Tuple[str, Optional[OHLCVBar], bool]] = []
