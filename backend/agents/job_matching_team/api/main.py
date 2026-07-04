@@ -178,9 +178,17 @@ def _run_scan_background(job_id: str, request: JobMatchRequest) -> None:
 def _dispatch_scan_via_temporal(job_id: str, payload: JobMatchRequest) -> bool:
     """Dispatch a scan to Temporal when enabled. Returns True if dispatched.
 
-    Falls back to the daemon-thread path (returns False) when Temporal is
-    disabled or the Temporal package can't be imported, so behavior is
-    unchanged whenever ``TEMPORAL_ADDRESS`` is unset.
+    Preconditions:
+        * ``job_id`` refers to a job row already created by the caller.
+    Postconditions:
+        * Returns False (dispatch not attempted) when Temporal is disabled or the
+          Temporal package can't be imported — the caller then runs the scan on a
+          daemon thread, so behavior is unchanged whenever ``TEMPORAL_ADDRESS`` is
+          unset.
+        * Returns True after a durable ``JobMatchingWorkflow`` has been started.
+        * Raises (does not fall back) when Temporal is enabled but the workflow
+          fails to start, so the caller can surface the failure rather than
+          silently double-running a scan the workflow may have partially started.
     """
     try:
         from shared_temporal import is_temporal_enabled
@@ -202,10 +210,22 @@ def start_scan(payload: JobMatchRequest) -> ScanJobResponse:
     Runs the scan on a durable Temporal workflow when ``TEMPORAL_ADDRESS`` is
     set, else on a daemon thread. Both paths track status through the same job
     store, so ``GET /scan/status/{job_id}`` is identical either way.
+
+    Postconditions:
+        * On success a job row exists and its scan is running (workflow or
+          thread); the returned ``job_id`` polls it.
+        * If Temporal dispatch fails, the job row is marked FAILED (never left
+          stuck PENDING) and a 503 is raised.
     """
     job_id = str(uuid4())
     create_job(job_id)
-    if not _dispatch_scan_via_temporal(job_id, payload):
+    try:
+        dispatched = _dispatch_scan_via_temporal(job_id, payload)
+    except Exception as exc:  # noqa: BLE001 - surface as 503, don't orphan the job
+        logger.exception("Temporal dispatch failed for scan %s", job_id)
+        update_job(job_id, status=JOB_STATUS_FAILED, error=f"Temporal dispatch failed: {exc}")
+        raise HTTPException(status_code=503, detail="Temporal dispatch failed; scan not started")
+    if not dispatched:
         thread = threading.Thread(target=_run_scan_background, args=(job_id, payload), daemon=True)
         thread.start()
     return ScanJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)

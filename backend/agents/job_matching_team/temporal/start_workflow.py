@@ -37,6 +37,13 @@ def _wait_for_client(timeout_s: float = CLIENT_READY_TIMEOUT_S) -> tuple[Any, An
     (local dev) the daemon thread can lag behind the first request by tens of
     milliseconds. Polling here turns that race into a short wait instead of a
     500.
+
+    Preconditions:
+        * ``timeout_s`` >= 0.
+    Postconditions:
+        * Returns a ``(client, loop)`` pair, both non-None, as soon as the worker
+          thread has connected.
+        * Raises ``RuntimeError`` if neither is populated within ``timeout_s``.
     """
     deadline = time.monotonic() + timeout_s
     while True:
@@ -50,6 +57,15 @@ def _wait_for_client(timeout_s: float = CLIENT_READY_TIMEOUT_S) -> tuple[Any, An
 
 
 def _run_async(coro: Any) -> Any:
+    """Run ``coro`` on the worker's event loop from this synchronous thread.
+
+    Preconditions:
+        * ``coro`` is an awaitable produced for the worker's loop (e.g. a
+          ``client.start_workflow(...)`` coroutine).
+    Postconditions:
+        * Returns the coroutine's result, or re-raises its exception / a
+          ``TimeoutError`` if it does not finish within ``START_WORKFLOW_TIMEOUT``.
+    """
     _, loop = _wait_for_client()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=START_WORKFLOW_TIMEOUT)

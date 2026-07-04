@@ -18,6 +18,7 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 
 @activity.defn(name="job_matching_run_scan")
@@ -32,8 +33,10 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
     Business exceptions are recorded on the job store as FAILED and
     **swallowed** (not re-raised), so a deterministic failure does not trigger
     Temporal's retry loop. A genuine worker/process crash leaves the activity
-    task unfinished, which Temporal retries independently — that is what makes
-    an in-flight scan survive a restart without duplicating a failed run.
+    task unfinished, which Temporal retries (bounded — see the workflow's
+    ``RetryPolicy``) — that is what makes an in-flight scan survive a restart.
+    The scan is not idempotent (each attempt starts a fresh run and spends LLM
+    calls), so the bounded retry caps how much duplicate work a crash can cause.
 
     Preconditions:
         * ``job_id`` refers to a job row already created by ``POST /scan``.
@@ -81,4 +84,8 @@ class JobMatchingWorkflow:
             run_scan_activity,
             args=[job_id, request],
             start_to_close_timeout=timedelta(minutes=30),
+            # The activity swallows business failures (records FAILED, returns),
+            # so retries only fire on a worker/process crash. Bound them: the scan
+            # is not idempotent, so unlimited retries would re-run full scans.
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )

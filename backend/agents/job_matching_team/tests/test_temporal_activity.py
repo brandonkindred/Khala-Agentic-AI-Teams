@@ -140,7 +140,7 @@ def test_activity_signature_takes_job_id_first():
 
 def test_workflow_run_delegates_to_activity(monkeypatch):
     """JobMatchingWorkflow.run hands (job_id, request) to run_scan_activity with
-    the 30-minute timeout."""
+    the 30-minute timeout and a bounded retry policy."""
     import asyncio
     from datetime import timedelta
 
@@ -148,8 +148,13 @@ def test_workflow_run_delegates_to_activity(monkeypatch):
 
     captured: dict = {}
 
-    async def _fake_execute_activity(activity_fn, *, args, start_to_close_timeout):
-        captured.update(fn=activity_fn, args=args, timeout=start_to_close_timeout)
+    async def _fake_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        captured.update(
+            fn=activity_fn,
+            args=args,
+            timeout=start_to_close_timeout,
+            retry_policy=retry_policy,
+        )
         return {"ok": True}
 
     monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
@@ -160,3 +165,5 @@ def test_workflow_run_delegates_to_activity(monkeypatch):
     assert captured["fn"] is wf.run_scan_activity
     assert captured["args"] == ["job-9", {"top_n": 1}]
     assert captured["timeout"] == timedelta(minutes=30)
+    # Bounded retry: a non-idempotent scan must not retry-storm on a crash.
+    assert captured["retry_policy"].maximum_attempts == 3

@@ -157,6 +157,27 @@ def test_scan_dispatches_via_temporal_when_enabled(client, monkeypatch):
     assert dispatched[0][1]["top_n"] == 3
 
 
+def test_scan_returns_503_and_marks_failed_when_temporal_dispatch_fails(client, monkeypatch):
+    """A Temporal dispatch failure must not orphan a PENDING job: the job is
+    marked FAILED and the caller gets a 503, not a bare 500 with a stuck row."""
+    import shared_temporal
+    from job_matching_team.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _boom(job_id, request):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(sw, "start_job_matching_workflow", _boom)
+
+    resp = client.post("/scan", json={"top_n": 1})
+    assert resp.status_code == 503
+    # No orphaned PENDING row: the one job recorded is FAILED.
+    jobs = client.get("/scan/jobs").json()["jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "failed"
+
+
 def test_scan_falls_back_to_thread_when_temporal_disabled(client, monkeypatch):
     """When Temporal is disabled the dispatch helper reports no-dispatch and the
     thread path runs the scan to completion."""

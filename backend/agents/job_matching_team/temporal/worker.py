@@ -22,9 +22,11 @@ logger = logging.getLogger(__name__)
 def start_job_matching_temporal_worker_thread() -> bool:
     """Start the job matching Temporal worker (no-op when disabled).
 
-    Returns True if a worker thread is running (or already running), False when
-    Temporal is disabled. Safe to call multiple times — the underlying
-    ``start_team_worker`` is idempotent per team.
+    Postconditions:
+        * Returns True if a worker thread is running (or already running) after
+          the call; False when Temporal is disabled (``TEMPORAL_ADDRESS`` unset).
+        * Idempotent — the underlying ``start_team_worker`` is per-team, so
+          repeated calls do not start duplicate workers.
     """
     if not is_temporal_enabled():
         return False
