@@ -232,15 +232,28 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   /**
    * The step currently being worked on (1-based), for the "step N of M" label.
-   * It is `completedStepCount + 1` — the step in flight after the finished ones —
-   * which keeps the number aligned with `current_step_id` (and thus
-   * `currentStepName`), instead of the `step_results.length` count that lags the
-   * running action step by one. Clamped to the DAG length so a looped/branching
-   * run can never read a nonsensical "step 5 of 4".
+   * Derived from the SAME source as `currentStepName` — the pipeline cursor
+   * `current_step_id` — so the number and the name can never disagree: it is the
+   * cursor step's position among the recorded steps (its `step_results` index +
+   * 1), or, when the cursor points at a not-yet-recorded running step, one past
+   * the recorded ones. This matters at a step boundary: the runner records a
+   * step 'completed' and advances the cursor in two separate writes, so a poll
+   * landing between them sees the cursor still on the just-finished step —
+   * deriving the number from that cursor keeps the label consistent (e.g.
+   * "step 2 · <s2 name>", never "step 3 · <s2 name>"). Clamped to the DAG length
+   * so a looped/branching run can never read a nonsensical "step 5 of 4".
    */
-  readonly currentStepNumber = computed(() =>
-    Math.min(this.completedStepCount() + 1, this.totalSteps()),
-  );
+  readonly currentStepNumber = computed(() => {
+    const pr = this.pipelineRun();
+    if (!pr) {
+      return 0;
+    }
+    const results = pr.step_results ?? [];
+    const cursor = pr.current_step_id;
+    const idx = cursor ? results.findIndex((r) => r.step_id === cursor) : -1;
+    const position = idx >= 0 ? idx + 1 : results.length + 1;
+    return Math.min(position, this.totalSteps());
+  });
 
   /**
    * True once "step N of M" can be shown: a live run with a known DAG length.

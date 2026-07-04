@@ -1106,6 +1106,23 @@ describe('AgentStudioPersonaComponent', () => {
     expect(text).not.toContain('step 2 of 4 ·');
   });
 
+  it('keeps the step number aligned with the name at a step boundary (cursor not yet advanced)', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    // Boundary: step 2's result is recorded 'completed' but the runner has not
+    // yet advanced the cursor, so current_step_id still points at s2 (the two are
+    // separate DB writes). The number must follow the cursor (2), not jump to 3.
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2, { current_step_id: 's2' })));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.currentStepNumber()).toBe(2);
+    expect(component.currentStepName()).toBe('Write'); // s2
+    const text = fixture.nativeElement.textContent;
+    expect(text).toContain('step 2 of 4');
+    expect(text).not.toContain('step 3 of 4'); // no number/name mismatch
+  });
+
   it('hides live progress/thinking when the pipeline has failed before the founder status catches up', () => {
     build({ team: TEAM_WITH_STEPS });
     fixture.detectChanges();
