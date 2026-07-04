@@ -1,40 +1,39 @@
-"""Temporal workflow + activity wrapping the investment team orchestrator."""
+"""Temporal workflows + worker wiring for the investment team.
+
+Mirrors ``user_agent_founder.temporal``: workflow/activity definitions live in
+:mod:`workflows` (sandbox-safe), and worker startup lives in :mod:`worker`,
+invoked by the generic team_service entrypoint at boot via the
+``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC`` env vars.
+
+Importing this package has NO side effects. In particular it must not call
+``is_temporal_enabled()`` / ``os.getenv`` at module level: doing so both races
+the first request (the worker connects its client asynchronously) and trips the
+temporalio workflow sandbox when it re-imports the module to register the
+workflows. Worker startup is therefore the entrypoint's job, never an
+import-time side effect.
+"""
 
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import Any
+from investment_team.temporal.workflows import (
+    InvestmentBacktestWorkflow,
+    InvestmentStrategyLabWorkflow,
+    run_backtest_activity,
+    run_strategy_lab_activity,
+)
 
-from temporalio import activity, workflow
+WORKFLOWS = [InvestmentStrategyLabWorkflow, InvestmentBacktestWorkflow]
+ACTIVITIES = [run_strategy_lab_activity, run_backtest_activity]
+TASK_QUEUE = "investment-queue"
+WORKFLOW_ID_PREFIX = "investment-"
 
-
-@activity.defn(name="investment_run_pipeline")
-def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
-    from investment_team.api.main import CreateProposalRequest
-    from investment_team.orchestrator import InvestmentTeamOrchestrator
-
-    req = CreateProposalRequest(**request)
-    result = InvestmentTeamOrchestrator().run_web_action(req)
-    if hasattr(result, "model_dump"):
-        return result.model_dump()
-    return result if isinstance(result, dict) else {"result": result}
-
-
-@workflow.defn(name="InvestmentWorkflow")
-class InvestmentWorkflow:
-    @workflow.run
-    async def run(self, request: dict[str, Any]) -> dict[str, Any]:
-        return await workflow.execute_activity(
-            run_pipeline_activity,
-            request,
-            start_to_close_timeout=timedelta(hours=2),
-        )
-
-
-WORKFLOWS = [InvestmentWorkflow]
-ACTIVITIES = [run_pipeline_activity]
-
-from shared_temporal import is_temporal_enabled, start_team_worker  # noqa: E402
-
-if is_temporal_enabled():
-    start_team_worker("investment", WORKFLOWS, ACTIVITIES, task_queue="investment-queue")
+__all__ = [
+    "ACTIVITIES",
+    "InvestmentBacktestWorkflow",
+    "InvestmentStrategyLabWorkflow",
+    "TASK_QUEUE",
+    "WORKFLOWS",
+    "WORKFLOW_ID_PREFIX",
+    "run_backtest_activity",
+    "run_strategy_lab_activity",
+]
