@@ -689,6 +689,55 @@ def test_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
     assert captured["code"] == ""
 
 
+def test_run_code_review_phase_forwards_changed_files(monkeypatch, tmp_path: Path):
+    """``run_code_review_phase`` threads ``changed_files`` into ``CodeReviewInput``.
+
+    On a retry the caller passes only the files the fix changed; the review agent
+    must receive them so it can scope its primary chunks while ``files`` still
+    holds the whole submission for cross-file verification.
+    """
+    from software_engineering_team.backend_code_v2_team.models import Microtask
+    from software_engineering_team.backend_code_v2_team.phases.review import run_code_review_phase
+
+    captured: dict = {}
+
+    def _capture(inp, **kw):
+        captured["files"] = inp.files
+        captured["changed_files"] = inp.changed_files
+        return MagicMock(issues=[])
+
+    cr_agent = MagicMock()
+    cr_agent.run.side_effect = _capture
+
+    files = {"app/a.py": "y = 1", "app/b.py": "z = 2"}
+    mt = Microtask(id="mt-1", title="T", description="d")
+
+    # First review: no hint → whole submission reviewed.
+    run_code_review_phase(
+        llm=MagicMock(),
+        task=_task(),
+        microtask=mt,
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+    )
+    assert captured["files"] == files
+    assert captured["changed_files"] is None
+
+    # Retry: only app/a.py changed → hint forwarded, files still whole.
+    run_code_review_phase(
+        llm=MagicMock(),
+        task=_task(),
+        microtask=mt,
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        changed_files=["app/a.py"],
+    )
+    assert captured["files"] == files
+    assert captured["changed_files"] == ["app/a.py"]
+
+
 def test_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, tmp_path: Path):
     """If code_review_agent fails, we still call LLM fallback."""
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod

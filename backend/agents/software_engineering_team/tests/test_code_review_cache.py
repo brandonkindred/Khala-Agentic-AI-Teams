@@ -290,6 +290,9 @@ class _FailFullThenBisectClient(DummyLLMClient):
 
 def test_bisected_recovery_outcome_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     """A chunk that only succeeds via bisection is re-attempted next cycle, not cached."""
+    # Isolate the chunk cache: the submission-level short-circuit would otherwise
+    # serve the (approved) second run before chunking, masking chunk-cache behavior.
+    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "0")
     # Lower the bisect floor so a modest single chunk (well under the map budget,
     # so it isn't pre-split) is still large enough to bisect during recovery.
     monkeypatch.setenv("CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS", "2000")
@@ -314,6 +317,9 @@ def test_bisected_recovery_outcome_is_not_cached(monkeypatch: pytest.MonkeyPatch
 def test_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     """Size 0 disables the cache: every run re-invokes the model, as before."""
     monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "0")
+    # Also disable the submission-level short-circuit so this isolates the chunk
+    # cache's passthrough rather than the coarser identical-submission skip.
+    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "0")
     client = _CountingClient(_APPROVED)
     data = _one_file_input()
 
@@ -647,6 +653,9 @@ def test_waiter_reraises_resolved_inflight_exception() -> None:
 def test_lru_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Past capacity, the oldest entry is evicted and re-reviewed on return."""
     monkeypatch.setenv("CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", "1")
+    # Disable the submission-level short-circuit so identical reruns exercise the
+    # chunk cache's LRU eviction rather than being served whole from above.
+    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "0")
     client = _CountingClient(_APPROVED)
 
     a = _one_file_input(task_description="A")  # distinct context → distinct key
@@ -658,3 +667,179 @@ def test_lru_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.map_calls == 2
     run_coordinator(client, a)  # map_calls=3, A was evicted → miss
     assert client.map_calls == 3
+
+
+# ---------------------------------------------------------------------------
+# Submission-level short-circuit + changed-files scoping
+# ---------------------------------------------------------------------------
+
+# A rejecting response (blocking ``high``) so the submission is *not* approved
+# and therefore never stored in the submission-level cache.
+_REJECTED = {
+    "approved": False,
+    "issues": [
+        {
+            "severity": "high",
+            "category": "correctness",
+            "file_path": "app/a.py",
+            "description": "Missing input validation",
+            "suggestion": "Validate inputs",
+        }
+    ],
+    "summary": "Rejected",
+}
+
+
+def _chunking_spy(monkeypatch: pytest.MonkeyPatch) -> Dict[str, int]:
+    """Count calls to ``build_review_chunks`` inside the coordinator.
+
+    A short-circuited run returns before chunking, so the spy staying at 0 proves
+    the whole review pipeline (chunk → map → false-positive → merge) was skipped —
+    a stronger signal than a bare LLM-call count, which the chunk cache alone can
+    already hold flat.
+    """
+    calls = {"n": 0}
+    original = coord.build_review_chunks
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "build_review_chunks", _spy)
+    return calls
+
+
+def test_identical_approved_submission_short_circuits_entire_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A byte-identical, previously-approved submission does zero review work."""
+    client = _CountingClient(_APPROVED)
+    data = _one_file_input()
+
+    first = run_coordinator(client, data)  # cold: reviews and caches the approval
+    assert first.approved is True
+
+    spy = _chunking_spy(monkeypatch)
+    calls_before = client.calls
+    second = run_coordinator(client, data)
+
+    assert spy["n"] == 0  # never chunked → no map/false-positive/merge → no LLM calls
+    assert client.calls == calls_before  # no new model calls of any kind
+    assert second.approved is True
+    assert [i.model_dump() for i in second.issues] == [i.model_dump() for i in first.issues]
+
+
+def test_short_circuit_bypasses_model() -> None:
+    """The short-circuit reproduces the approval without consulting the model."""
+    # Second canned response would reject; a real re-review would surface it.
+    client = _SwitchingClient([_APPROVED, _REJECTED])
+    data = _one_file_input()
+
+    first = run_coordinator(client, data)
+    assert first.approved is True
+
+    second = run_coordinator(client, data)
+    assert second.approved is True  # served from cache, never saw the reject response
+
+
+def test_short_circuit_ignores_changed_files_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The submission key excludes ``changed_files``: identical files still hit."""
+    client = _CountingClient(_APPROVED)
+
+    run_coordinator(client, _one_file_input())  # full review, approves, caches
+
+    spy = _chunking_spy(monkeypatch)
+    # Same files, now carrying a changed-files hint — still the same submission.
+    run_coordinator(client, _one_file_input(changed_files=["app/a.py"]))
+    assert spy["n"] == 0  # short-circuited despite the differing hint
+
+
+def test_rejected_submission_is_not_short_circuited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rejection is never stored, so an identical resubmission reviews again."""
+    client = _CountingClient(_REJECTED)
+    data = _one_file_input()
+
+    first = run_coordinator(client, data)
+    assert first.approved is False
+
+    spy = _chunking_spy(monkeypatch)
+    second = run_coordinator(client, data)
+    assert spy["n"] == 1  # reviewed again (no submission short-circuit)
+    assert second.approved is False
+
+
+def test_short_circuit_returns_independent_clone() -> None:
+    """Mutating a short-circuit result never corrupts the cached entry."""
+    client = _CountingClient(_APPROVED)
+    data = _one_file_input()
+
+    run_coordinator(client, data)
+    served = run_coordinator(client, data)  # short-circuited clone
+    served.summary = "mutated by caller"  # caller mutates its own copy
+
+    again = run_coordinator(client, data)
+    assert again.summary != "mutated by caller"  # cache entry untouched
+
+
+def test_submission_cache_disabled_reviews_every_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``CODE_REVIEW_SUBMISSION_CACHE_SIZE=0`` disables the short-circuit."""
+    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "0")
+    client = _CountingClient(_APPROVED)
+    data = _one_file_input()
+
+    run_coordinator(client, data)
+    spy = _chunking_spy(monkeypatch)
+    run_coordinator(client, data)
+    assert spy["n"] == 1  # no short-circuit; the review ran again
+
+
+def test_clear_submission_cache_forces_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clearing the submission cache forces a cold re-review."""
+    client = _CountingClient(_APPROVED)
+    data = _one_file_input()
+
+    run_coordinator(client, data)
+    coord.clear_submission_outcome_cache()
+
+    spy = _chunking_spy(monkeypatch)
+    run_coordinator(client, data)
+    assert spy["n"] == 1  # cache cleared → review ran again
+
+
+def test_submission_cache_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Past capacity, the oldest approved submission is evicted and re-reviewed."""
+    monkeypatch.setenv("CODE_REVIEW_SUBMISSION_CACHE_SIZE", "1")
+    client = _CountingClient(_APPROVED)
+    a = _one_file_input(task_description="A")  # distinct submissions → distinct keys
+    b = _one_file_input(task_description="B")
+
+    run_coordinator(client, a)  # caches A
+    run_coordinator(client, b)  # caches B, evicts A (capacity 1)
+
+    spy = _chunking_spy(monkeypatch)
+    run_coordinator(client, b)  # B still cached → short-circuit
+    assert spy["n"] == 0
+    run_coordinator(client, a)  # A was evicted → full review again
+    assert spy["n"] == 1
+
+
+def test_changed_files_limits_primary_chunks_to_named_paths() -> None:
+    """Only files named in ``changed_files`` are reviewed as primary chunks."""
+    client = _CountingClient(_APPROVED)
+    a = "x" * 12_000
+    b = "y" * 12_000
+
+    data = _two_file_input(a, b, changed_files=["app/a.py"])
+    run_coordinator(client, data)
+    assert client.map_calls == 1  # only app/a.py chunked; app/b.py not a primary chunk
+
+
+def test_changed_files_no_overlap_reviews_all_files() -> None:
+    """A stale ``changed_files`` hint naming no current path reviews everything."""
+    client = _CountingClient(_APPROVED)
+    a = "x" * 12_000
+    b = "y" * 12_000
+
+    data = _two_file_input(a, b, changed_files=["gone/removed.py"])
+    run_coordinator(client, data)
+    assert client.map_calls == 2  # fail-safe: full review, no changed line dropped

@@ -307,6 +307,12 @@ class CodeReviewInput(BaseModel):
           mapping) or via an explicitly passed ``code`` string. Constructing
           the input with neither, or with ``files={}``, raises ``ValueError``
           so a caller bug never silently becomes an approved empty review.
+
+    Invariants:
+        - ``changed_files`` (when set) only narrows which files are reviewed as
+          primary map chunks; it never removes a file from ``files``, so the
+          whole submission remains available to the false-positive verifier's
+          codebase index. It is a review-scoping hint, not a source channel.
     """
 
     code: str = Field(
@@ -318,6 +324,14 @@ class CodeReviewInput(BaseModel):
         default=None,
         description="Preferred input: mapping of file path to file content. "
         "When set, ``code`` is ignored and no header parsing happens.",
+    )
+    changed_files: Optional[List[str]] = Field(
+        default=None,
+        description="On a fix-pass retry, the subset of ``files`` the preceding fix actually "
+        "changed. When set, only these paths are reviewed as primary map chunks; every file in "
+        "``files`` still populates the false-positive verifier's codebase index, so unchanged "
+        "files stay reachable for cross-file checks without being re-reviewed. ``None`` (the "
+        "default) reviews every file, reproducing today's behavior for every existing caller.",
     )
     pre_numbered: bool = Field(
         default=False,
