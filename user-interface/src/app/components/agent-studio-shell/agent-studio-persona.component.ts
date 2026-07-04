@@ -172,6 +172,23 @@ export class AgentStudioPersonaComponent implements OnInit {
     return r ? TERMINAL_STATUSES.has(r.status) : false;
   });
 
+  /**
+   * The underlying pipeline run has itself reached a terminal state
+   * (completed/failed/cancelled). The founder `/status` the run head shows lags
+   * the pipeline by up to a poll interval, so a pipeline that has already
+   * failed/finished can still be reported as in-progress by the founder run for
+   * ~10s. Keying "live" off the pipeline's own status too means a dead run stops
+   * rendering the in-progress bar + "thinking…" promptly instead of masquerading
+   * as healthy during that lag.
+   */
+  readonly pipelineTerminal = computed(() => {
+    const s = this.pipelineRun()?.status;
+    return s ? TERMINAL_STATUSES.has(s) : false;
+  });
+
+  /** The run is genuinely still in flight: neither the founder run nor the pipeline is terminal. */
+  readonly runLive = computed(() => !this.runTerminal() && !this.pipelineTerminal());
+
   // ── Live-run progress (spec §Stage 4 "Run progress UI") ───────────────────
   // The header sets expectations for slow autonomous runs: an elapsed counter
   // (above), an animated "persona is thinking…" indicator, and a step progress
@@ -232,7 +249,7 @@ export class AgentStudioPersonaComponent implements OnInit {
    * indeterminate bar rather than a determinate bar frozen at 0%.)
    */
   readonly stepProgressKnown = computed(
-    () => !this.runTerminal() && this.totalSteps() > 0 && this.pipelineRun() != null,
+    () => this.runLive() && this.totalSteps() > 0 && this.pipelineRun() != null,
   );
 
   /**
@@ -246,7 +263,10 @@ export class AgentStudioPersonaComponent implements OnInit {
     if (total <= 0) {
       return 0;
     }
-    return Math.min(100, Math.round((this.completedStepCount() / total) * 100));
+    // Floor (not round) so the bar can't display 100% while the final step is
+    // still running — round() would hit 100 at completed/total ≥ 0.995 (e.g. a
+    // hypothetical 199-of-200), contradicting the "never pins at 100%" contract.
+    return Math.min(100, Math.floor((this.completedStepCount() / total) * 100));
   });
 
   /** Name of the current pipeline step, for a "step 2 of 4 · Write" label. */

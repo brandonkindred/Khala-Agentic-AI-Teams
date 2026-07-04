@@ -832,6 +832,8 @@ describe('AgentStudioPersonaComponent', () => {
     fixture.detectChanges();
     expect(component.totalSteps()).toBe(0);
     expect(component.stepProgressKnown()).toBe(false);
+    // The divide-by-zero guard returns 0 rather than NaN for a 0-step process.
+    expect(component.stepPercent()).toBe(0);
     expect(fixture.nativeElement.textContent).not.toContain('step ');
     const bar = fixture.nativeElement.querySelector('mat-progress-bar');
     expect(bar?.getAttribute('mode')).toBe('indeterminate');
@@ -1070,5 +1072,56 @@ describe('AgentStudioPersonaComponent', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('shows the indeterminate bar (not a frozen-0% determinate) for a just-started run', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    // Pipeline run exists (DAG known) but no step has finished yet.
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(0)));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.completedStepCount()).toBe(0);
+    expect(component.currentStepNumber()).toBe(1);
+    expect(component.stepProgressKnown()).toBe(true);
+    // The "step 1 of 4" label shows (known block), but the bar is indeterminate.
+    expect(fixture.nativeElement.textContent).toContain('step 1 of 4');
+    const bar = fixture.nativeElement.querySelector('mat-progress-bar');
+    expect(bar?.getAttribute('mode')).toBe('indeterminate');
+  });
+
+  it('renders no step name when the pipeline cursor is null (between steps)', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    // 1 step finished, but current_step_id momentarily null.
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(1, { current_step_id: null })));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.currentStepName()).toBe('');
+    const text = fixture.nativeElement.textContent;
+    expect(text).toContain('step 2 of 4');
+    // No " · <name>" suffix when the cursor is null.
+    expect(text).not.toContain('step 2 of 4 ·');
+  });
+
+  it('hides live progress/thinking when the pipeline has failed before the founder status catches up', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    // Founder run still reports in-progress (it lags up to a poll interval)…
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob({ status: 'polling_build' })));
+    // …but the underlying pipeline has already failed.
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2, { status: 'failed' })));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.runTerminal()).toBe(false); // founder not yet terminal
+    expect(component.pipelineTerminal()).toBe(true);
+    expect(component.runLive()).toBe(false);
+    expect(component.stepProgressKnown()).toBe(false);
+    const text = fixture.nativeElement.textContent;
+    // A dead run must not keep rendering as healthy in-progress.
+    expect(text).not.toContain('persona is thinking…');
+    expect(text).not.toContain('step 3 of 4');
   });
 });

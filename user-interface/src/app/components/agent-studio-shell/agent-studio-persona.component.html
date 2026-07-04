@@ -191,10 +191,13 @@
                 <span class="persona__run-id">run {{ r.run_id }}</span>
                 <span class="persona__run-status">status: {{ r.status }}</span>
                 <span class="persona__run-elapsed">{{ elapsedSec() }}s</span>
-                @if (!runTerminal()) {
+                @if (runLive()) {
                   <!-- Animated liveness cue so a slow-but-healthy run never reads
                        as stalled; during a WAIT step the persona is formulating
-                       its free-text answer, so we say so explicitly. -->
+                       its free-text answer, so we say so explicitly. `runLive`
+                       (not just the founder status) also hides this once the
+                       pipeline itself is terminal, so a failed run doesn't keep
+                       "thinking" during the founder-status lag. -->
                   <span class="persona__thinking" aria-live="polite"
                     >persona is thinking…@if (isWaiting()) {
                       <span class="persona__waiting">(answering a question)</span>
@@ -202,7 +205,7 @@
                   >
                 }
               </div>
-              @if (!runTerminal()) {
+              @if (runLive()) {
                 <!-- Step progress bar (spec Stage 4): a determinate "step N of M"
                      when the process DAG length is known, otherwise the
                      indeterminate fallback. The visible label carries the live
