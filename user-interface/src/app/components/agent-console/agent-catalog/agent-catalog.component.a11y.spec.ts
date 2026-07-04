@@ -2,17 +2,9 @@ import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { AgentCatalogApiService } from '../../../services/agent-catalog-api.service';
 import { AgentCatalogComponent } from './agent-catalog.component';
-
-// `color-contrast` disabled — jsdom can't compute composited colours. Contrast
-// is enforced by src/styles/scss-contrast-guard.spec.ts + browser axe DevTools.
-const axeOptions = {
-  rules: {
-    'color-contrast': { enabled: false },
-  },
-};
+import { expectNoAxeViolations } from '../../../testing/a11y';
 
 describe('AgentCatalogComponent a11y', () => {
   const agent = {
@@ -57,8 +49,7 @@ describe('AgentCatalogComponent a11y', () => {
     // Guard: a catalog card is in the DOM so axe audits the real grid.
     expect(fixture.nativeElement.querySelector('.agent-card')).toBeTruthy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 
   it('has no axe violations in the empty (no agents) state', async () => {
@@ -68,8 +59,7 @@ describe('AgentCatalogComponent a11y', () => {
     // Guard: the empty-state panel is what axe should be auditing.
     expect(fixture.nativeElement.querySelector('.agent-catalog__empty-state')).toBeTruthy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 
   it('has no axe violations in the error state', async () => {
@@ -81,7 +71,6 @@ describe('AgentCatalogComponent a11y', () => {
     // Guard: the role="alert" error banner is rendered.
     expect(fixture.nativeElement.querySelector('.agent-catalog__error')).toBeTruthy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 });

@@ -2,17 +2,9 @@ import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { InvestmentChatComponent } from './investment-chat.component';
-
-// `color-contrast` disabled — jsdom can't compute composited colours. Contrast
-// is enforced by src/styles/scss-contrast-guard.spec.ts + browser axe DevTools.
-const axeOptions = {
-  rules: {
-    'color-contrast': { enabled: false },
-  },
-};
+import { expectNoAxeViolations } from '../../testing/a11y';
 
 describe('InvestmentChatComponent a11y', () => {
   const setup = async () => {
@@ -41,7 +33,6 @@ describe('InvestmentChatComponent a11y', () => {
     expect(fixture.nativeElement.querySelector('.chat-container')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('.message')).toBeTruthy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 });

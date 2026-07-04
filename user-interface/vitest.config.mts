@@ -17,7 +17,7 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['src/app/**/*.ts'],
-      exclude: ['**/*.spec.ts', '**/*.mock.ts', '**/*.model.ts', '**/environments/*.ts', '**/index.ts', '**/*.module.ts'],
+      exclude: ['**/*.spec.ts', '**/testing/**', '**/*.mock.ts', '**/*.model.ts', '**/environments/*.ts', '**/index.ts', '**/*.module.ts'],
       thresholds: {
         lines: 90,
       },

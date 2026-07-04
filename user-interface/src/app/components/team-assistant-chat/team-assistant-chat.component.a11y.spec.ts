@@ -2,17 +2,9 @@ import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { TeamAssistantApiService } from '../../services/team-assistant-api.service';
 import { TeamAssistantChatComponent } from './team-assistant-chat.component';
-
-// `color-contrast` disabled — jsdom can't compute composited colours. Contrast
-// is enforced by src/styles/scss-contrast-guard.spec.ts + browser axe DevTools.
-const axeOptions = {
-  rules: {
-    'color-contrast': { enabled: false },
-  },
-};
+import { expectNoAxeViolations } from '../../testing/a11y';
 
 describe('TeamAssistantChatComponent a11y', () => {
   const stateResponse = {
@@ -52,8 +44,7 @@ describe('TeamAssistantChatComponent a11y', () => {
     expect(fixture.nativeElement.querySelector('.chat-layout')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('.message.assistant')).toBeTruthy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 
   it('has no axe violations with an empty conversation', async () => {
@@ -67,7 +58,6 @@ describe('TeamAssistantChatComponent a11y', () => {
     expect(fixture.nativeElement.querySelector('.chat-layout')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('.message')).toBeFalsy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 });

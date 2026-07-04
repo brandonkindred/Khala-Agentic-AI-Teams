@@ -1,11 +1,7 @@
 import { Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { axe } from 'vitest-axe';
+import { expectNoAxeViolations } from '../../testing/a11y';
 import { InlineBannerComponent, InlineBannerVariant } from './inline-banner.component';
-
-// `color-contrast` is disabled because jsdom can't paint; contrast is enforced
-// by the --kh-* token system + the SCSS contrast guard spec.
-const axeOptions = { rules: { 'color-contrast': { enabled: false } } };
 
 describe('InlineBannerComponent', () => {
   let fixture: ComponentFixture<InlineBannerComponent>;
@@ -105,8 +101,7 @@ describe('InlineBannerComponent', () => {
     // The projected control must be a sibling of the live region, never inside it.
     expect(alert.querySelector('button')).toBeNull();
     expect(host.nativeElement.querySelector('.kh-banner__actions button')).toBeTruthy();
-    const results = await axe(host.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(host.nativeElement);
   }, 15000);
 });
 

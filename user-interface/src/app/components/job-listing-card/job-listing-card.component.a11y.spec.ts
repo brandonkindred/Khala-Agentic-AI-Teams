@@ -1,8 +1,8 @@
 import { TestBed } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
-import { axe } from 'vitest-axe';
 import { JobListingCardComponent } from './job-listing-card.component';
 import type { Listing } from '../../models';
+import { expectNoAxeViolations } from '../../testing/a11y';
 
 const LISTING: Listing = {
   fingerprint: 'fp1',
@@ -36,17 +36,11 @@ const LISTING: Listing = {
   status: 'new',
 };
 
-// `color-contrast` is disabled because jsdom can't paint; contrast is
-// enforced by the --kh-* token system + the SCSS contrast guard spec.
-// `aria-required-parent` is disabled because the card host is role="listitem":
-// its required role="list" parent is supplied by the listings panel (verified
-// in that panel's own a11y spec), not by this isolated fragment.
-const axeOptions = {
-  rules: {
-    'color-contrast': { enabled: false },
-    'aria-required-parent': { enabled: false },
-  },
-};
+// `aria-required-parent` is disabled (on top of the shared color-contrast
+// exception) because the card host is role="listitem": its required
+// role="list" parent is supplied by the listings panel (verified in that
+// panel's own a11y spec), not by this isolated fragment.
+const cardExtraRules = { 'aria-required-parent': { enabled: false } };
 
 describe('JobListingCardComponent a11y', () => {
   async function createFixture() {
@@ -64,8 +58,7 @@ describe('JobListingCardComponent a11y', () => {
     const fixture = await createFixture();
     // Guard: don't pass axe vacuously against an empty DOM.
     expect(fixture.nativeElement.querySelector('.listing-card')).toBeTruthy();
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement, cardExtraRules);
   }, 15000);
 
   it('has no axe violations with the review detail expanded', async () => {
@@ -76,7 +69,6 @@ describe('JobListingCardComponent a11y', () => {
     expect(
       fixture.nativeElement.querySelectorAll('.sub-score-bar[role="meter"]').length
     ).toBe(6);
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement, cardExtraRules);
   }, 15000);
 });
