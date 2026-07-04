@@ -332,25 +332,36 @@ class AgenticTestStore:
     # worker serves the ``/input`` request.
 
     @timed_query(store=_STORE, op="try_resume_pipeline_run")
-    def try_resume_pipeline_run(self, run_id: str, human_input: str) -> bool:
-        """Atomically move a waiting run back to ``running`` with the human answer.
+    def try_resume_pipeline_run(self, run_id: str, human_input: str, stale_seconds: int) -> bool:
+        """Atomically move a *live* waiting run back to ``running`` with the answer.
+
+        The freshness guard (``heartbeat_at`` within ``stale_seconds``) makes resume
+        consistent with the reaper: a waiting run is resumable only while a worker is
+        actually driving it (its heartbeat thread keeps ``heartbeat_at`` current). An
+        orphaned waiting run — e.g. one whose worker died on a restart, whose heartbeat
+        has gone stale (or NULL) — is refused here just as the reaper would fail it,
+        rather than being resumed into a ``running`` state that no thread can advance.
 
         Preconditions:
-            ``run_id`` is a non-empty str; ``human_input`` is a str (may be empty).
+            ``run_id`` is a non-empty str; ``human_input`` is a str (may be empty);
+            ``stale_seconds`` is a positive int.
         Postconditions:
-            Returns True iff the row was in ``waiting_for_input`` and is now
-            ``running`` with ``human_input`` persisted, ``human_prompt`` cleared, and
-            ``heartbeat_at`` refreshed. Returns False (no-op) if the row already left
-            ``waiting_for_input`` (timed out, cancelled, completed, or reaped).
+            Returns True iff the row was ``waiting_for_input`` with a fresh heartbeat
+            and is now ``running`` with ``human_input`` persisted, ``human_prompt``
+            cleared, and ``heartbeat_at`` refreshed. Returns False (no-op) if the row
+            already left ``waiting_for_input`` (timed out, cancelled, completed, reaped)
+            or is an orphan with a stale/absent heartbeat.
         """
         assert run_id, "run_id must be non-empty"
+        assert stale_seconds > 0, "stale_seconds must be positive"
         now = _now()
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE agentic_test_pipeline_runs "
                 "SET status = 'running', human_prompt = NULL, human_input = %s, heartbeat_at = %s "
-                "WHERE run_id = %s AND status = 'waiting_for_input'",
-                (human_input, now, run_id),
+                "WHERE run_id = %s AND status = 'waiting_for_input' "
+                "AND heartbeat_at IS NOT NULL AND heartbeat_at >= %s",
+                (human_input, now, run_id, now - timedelta(seconds=stale_seconds)),
             )
             return cur.rowcount > 0
 

@@ -75,11 +75,15 @@ class _FakeStore:
             row.update(fields)
             return True
 
-    def try_resume_pipeline_run(self, run_id: str, human_input: str) -> bool:
+    def try_resume_pipeline_run(self, run_id: str, human_input: str, stale_seconds: int) -> bool:
+        cutoff = _now() - timedelta(seconds=stale_seconds)
         with self._lock:
             row = self._rows.get(run_id)
             if not row or row["status"] != "waiting_for_input":
                 return False
+            hb = row.get("heartbeat_at")
+            if hb is None or hb < cutoff:
+                return False  # orphaned (stale heartbeat) -> not resumable
             row.update(
                 status="running",
                 human_prompt=None,
@@ -157,10 +161,12 @@ def _make_runner(
 ) -> PipelineRunner:
     runner = PipelineRunner(store, start_sweeper=False)
     # Override the env-derived bounds directly so tests run in milliseconds without
-    # tripping the production floor clamps.
+    # tripping the production floor clamps. Heartbeat far more often than the staleness
+    # window so a live run always looks fresh (resume-gate + reaper both key on it).
     runner._wait_timeout_s = timeout_s
     runner._wait_poll_s = poll_s
     runner._stale_s = 1
+    runner._heartbeat_interval_s = 0.02
     return runner
 
 
@@ -224,7 +230,8 @@ def test_wait_resume_cross_worker_via_db() -> None:
 
     assert _wait_for(lambda: store.get_pipeline_run("r1")["status"] == "waiting_for_input")
     # Simulate a sibling worker resuming: flip the DB directly, do NOT set the Event.
-    assert store.try_resume_pipeline_run("r1", "db answer") is True
+    # The waiter's heartbeat thread keeps the run fresh, so the resume CAS accepts it.
+    assert store.try_resume_pipeline_run("r1", "db answer", runner._stale_s) is True
 
     assert _wait_for(lambda: store.get_pipeline_run("r1")["status"] == "completed")
     assert store.get_pipeline_run("r1")["step_results"][0]["output"] == "db answer"
@@ -272,17 +279,37 @@ def test_submit_returns_false_when_not_waiting() -> None:
 def test_resume_and_expire_are_mutually_exclusive() -> None:
     """Compare-and-swap guarantees exactly one winner out of waiting_for_input."""
     store = _FakeStore()
-    store.seed("r1", status="waiting_for_input")
-    assert store.try_resume_pipeline_run("r1", "x") is True
+    store.seed("r1", status="waiting_for_input", heartbeat_at=_now())
+    assert store.try_resume_pipeline_run("r1", "x", 30) is True
     # Once resumed, the expire CAS must lose.
     assert store.try_expire_pipeline_run("r1", "wait_timeout: too late") is False
     assert store.get_pipeline_run("r1")["status"] == "running"
 
-    store.seed("r2", status="waiting_for_input")
+    store.seed("r2", status="waiting_for_input", heartbeat_at=_now())
     assert store.try_expire_pipeline_run("r2", "wait_timeout: too late") is True
     # Once expired, the resume CAS must lose (no lost input into a dead run).
-    assert store.try_resume_pipeline_run("r2", "x") is False
-    assert store.get_pipeline_run("r2")["status"] == "failed"
+    assert store.try_resume_pipeline_run("r2", "x", 30) is False
+
+
+def test_resume_rejects_orphaned_stale_run() -> None:
+    """A waiting run whose heartbeat has gone stale (worker died on restart) is not
+    resumable — submit returns False so the endpoint 409s instead of falsely
+    succeeding on a run no thread will advance."""
+    store = _FakeStore()
+    store.seed(
+        "r1",
+        status="waiting_for_input",
+        heartbeat_at=_now() - timedelta(seconds=120),
+    )
+    runner = _make_runner(store)
+    assert runner.submit_human_input("r1", "answer") is False
+    assert store.get_pipeline_run("r1")["status"] == "waiting_for_input"
+
+    # A NULL-heartbeat waiting run (pre-feature / never heartbeated) is likewise refused.
+    store.seed("r2", status="waiting_for_input", heartbeat_at=None)
+    assert runner.submit_human_input("r2", "answer") is False
+    # Submit only refuses — it does not itself reap; the sweeper handles the row.
+    assert store.get_pipeline_run("r2")["status"] == "waiting_for_input"
 
 
 # ---------------------------------------------------------------------------

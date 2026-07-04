@@ -132,13 +132,15 @@ class PipelineRunner:
         """Resume a paused pipeline run with human input.
 
         Preconditions: ``run_id`` is a non-empty str; ``user_input`` is a str.
-        Postconditions: returns True iff the run was ``waiting_for_input`` and has been
-        atomically moved to ``running`` (input persisted). Returns False if the run is
-        no longer resumable (timed out, cancelled, completed, or reaped) — the caller
-        should surface a 409. Never forces a non-waiting run to ``running``.
+        Postconditions: returns True iff the run was ``waiting_for_input`` with a live
+        (fresh-heartbeat) worker and has been atomically moved to ``running`` (input
+        persisted). Returns False if the run is no longer resumable — timed out,
+        cancelled, completed, reaped, or orphaned by a restart (stale heartbeat, so no
+        worker would drive it) — and the caller should surface a 409. Never forces a
+        non-waiting run to ``running`` and never resumes a run into a stuck state.
         """
         assert run_id, "run_id must be non-empty"
-        won = self._store.try_resume_pipeline_run(run_id, user_input)
+        won = self._store.try_resume_pipeline_run(run_id, user_input, self._stale_s)
         if won:
             # Fast same-worker wakeup; on another worker the waiter observes the DB
             # flip on its next poll tick instead.

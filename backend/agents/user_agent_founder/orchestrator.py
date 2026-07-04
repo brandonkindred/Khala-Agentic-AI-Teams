@@ -143,14 +143,31 @@ def _answer_pending_questions(
         try:
             submit_fn(answers)
         except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
             logger.warning(
                 "Answer submission attempt %d/%d failed for job %s: %s %s",
                 attempt + 1,
                 ANSWER_POST_RETRIES,
                 job_id,
-                exc.response.status_code,
+                code,
                 exc.response.text,
             )
+            # A non-retryable client error (e.g. 409 — the target run is no longer
+            # resumable: it timed out, was cancelled, or was reaped) will never
+            # succeed on retry. Stop immediately so the persona doesn't burn its whole
+            # retry+backoff budget on a dead run; the next poll observes the terminal
+            # status and aborts the phase cleanly. 408/429 and 5xx stay retryable.
+            if code not in (408, 429) and code < 500:
+                store.add_chat_message(
+                    run_id=run_id,
+                    role="system",
+                    content=(
+                        f"Target team rejected the answer (HTTP {code}); the run is no "
+                        "longer resumable, so no further attempts will be made."
+                    ),
+                    message_type="status_update",
+                )
+                return False
         except Exception:
             logger.exception(
                 "Answer submission attempt %d/%d crashed for job %s",
@@ -524,6 +541,4 @@ def run_workflow(
         logger.exception("Founder workflow crashed: run_id=%s", run_id)
         store.update_run(run_id, status="failed", error=str(exc))
         _sync_job_status(run_id, "failed", error=str(exc))
-        store.add_chat_message(
-            run_id, "system", f"Workflow failed: {str(exc)}", "status_update"
-        )
+        store.add_chat_message(run_id, "system", f"Workflow failed: {str(exc)}", "status_update")

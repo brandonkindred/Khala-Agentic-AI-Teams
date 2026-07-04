@@ -544,11 +544,12 @@ class _FakeCursor:
                 self._last_fetch_all = rows[:limit]
             return
 
-        # try_resume_pipeline_run (compare-and-swap into 'running').
+        # try_resume_pipeline_run (compare-and-swap into 'running', fresh-heartbeat).
         if norm.startswith("update agentic_test_pipeline_runs set status = 'running'"):
-            human_input, heartbeat_at, run_id = params
+            human_input, heartbeat_at, run_id, cutoff = params
             row = self._db["pipeline_runs"].get(run_id)
-            if row and row["status"] == "waiting_for_input":
+            hb = row["heartbeat_at"] if row else None
+            if row and row["status"] == "waiting_for_input" and hb is not None and hb >= cutoff:
                 row.update(
                     status="running",
                     human_prompt=None,

@@ -60,20 +60,39 @@ def test_create_get_update_list_roundtrip(fake_pg: dict) -> None:
 def test_try_resume_is_a_compare_and_swap(fake_pg: dict) -> None:
     _seed_team(fake_pg)
     store = AgenticTestStore()
-    store.create_pipeline_run("r1", "t1", "p1")
+    store.create_pipeline_run("r1", "t1", "p1")  # heartbeat_at seeded fresh at create
 
     # Not waiting yet -> CAS loses.
-    assert store.try_resume_pipeline_run("r1", "answer") is False
+    assert store.try_resume_pipeline_run("r1", "answer", 3600) is False
 
     store.update_pipeline_run("r1", status="waiting_for_input")
-    assert store.try_resume_pipeline_run("r1", "answer") is True
+    assert store.try_resume_pipeline_run("r1", "answer", 3600) is True
     row = store.get_pipeline_run("r1")
     assert row["status"] == "running"
     assert row["human_prompt"] is None
     assert store.consume_pipeline_human_input("r1") == "answer"
 
     # Second resume loses (already left waiting_for_input).
-    assert store.try_resume_pipeline_run("r1", "again") is False
+    assert store.try_resume_pipeline_run("r1", "again", 3600) is False
+
+
+def test_try_resume_rejects_stale_orphan(fake_pg: dict) -> None:
+    """A waiting run whose heartbeat has gone stale is not resumable (its worker died);
+    resume refuses it just as the reaper would fail it, so submit surfaces a 409."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")
+    store.update_pipeline_run(
+        "r1",
+        status="waiting_for_input",
+        heartbeat_at=datetime.now(tz=timezone.utc) - timedelta(seconds=120),
+    )
+    assert store.try_resume_pipeline_run("r1", "answer", 30) is False
+    assert store.get_pipeline_run("r1")["status"] == "waiting_for_input"
+
+    # NULL heartbeat (pre-feature / never heartbeated) is likewise not resumable.
+    store.update_pipeline_run("r1", heartbeat_at=None)
+    assert store.try_resume_pipeline_run("r1", "answer", 30) is False
 
 
 def test_try_expire_is_a_compare_and_swap(fake_pg: dict) -> None:
@@ -91,7 +110,7 @@ def test_try_expire_is_a_compare_and_swap(fake_pg: dict) -> None:
     assert row["finished_at"] is not None
 
     # Resume must lose against an expired run.
-    assert store.try_resume_pipeline_run("r1", "late") is False
+    assert store.try_resume_pipeline_run("r1", "late", 3600) is False
 
 
 def test_try_complete_only_from_running(fake_pg: dict) -> None:
