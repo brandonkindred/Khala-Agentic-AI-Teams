@@ -27,13 +27,30 @@
   color: var(--kh-text-primary);
 
   // Projected `[banner-message]` content is in the host's encapsulation, so
-  // ::ng-deep is required to give inline `<code>` the same boxed treatment the
-  // per-feature banners used to hand-roll — centralized here once.
-  ::ng-deep code {
-    background: var(--kh-surface-3);
-    padding: 0.05em 0.35em;
-    border-radius: 4px;
-    font-size: 0.85em;
+  // ::ng-deep is required to give inline `<code>` and the lead-in `<strong>` /
+  // body `<p>` message idiom the compact treatment the per-feature banners used
+  // to hand-roll — centralized here once.
+  ::ng-deep {
+    code {
+      background: var(--kh-surface-3);
+      padding: 0.05em 0.35em;
+      border-radius: 4px;
+      font-size: 0.85em;
+    }
+
+    // A `<strong>` at the start of a banner message is a lead-in heading (same
+    // convention as app-error-message), so lay it out on its own line.
+    strong {
+      display: block;
+      margin-bottom: var(--kh-space-1);
+    }
+
+    // Banner paragraphs sit flush — the banner's own padding provides spacing,
+    // so drop the browser-default paragraph margins.
+    p {
+      margin: 0;
+      line-height: 1.4;
+    }
   }
 }
 

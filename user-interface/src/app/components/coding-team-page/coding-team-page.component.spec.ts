@@ -645,7 +645,7 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       showRun({ waiting_for_answers: true, pending_questions: [QUESTION] });
       const el: HTMLElement = fixture.nativeElement;
-      expect(el.querySelector('app-inline-banner[variant="info"]')).not.toBeNull();
+      expect(el.querySelector('app-inline-banner[variant="warning"]')).not.toBeNull();
       expect(el.querySelector('app-pending-questions')).not.toBeNull();
       expect(el.textContent).toContain('Which auth flow?');
     });

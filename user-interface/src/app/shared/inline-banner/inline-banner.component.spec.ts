@@ -57,6 +57,31 @@ describe('InlineBannerComponent', () => {
     expect(fixture.nativeElement.querySelector('.kh-banner__icon')?.textContent?.trim()).toBe('cloud_off');
   });
 
+  // The `live` override decouples announcement urgency from the visual severity.
+  it('forces a polite live region on a warning banner when live="polite"', () => {
+    fixture.componentRef.setInput('variant', 'warning');
+    fixture.componentRef.setInput('live', 'polite');
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.kh-banner--warning')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('.kh-banner__msg[role="status"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('forces an assertive live region when live="assertive"', () => {
+    fixture.componentRef.setInput('variant', 'info');
+    fixture.componentRef.setInput('live', 'assertive');
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.kh-banner__msg[role="alert"]')).toBeTruthy();
+  });
+
+  it('renders no live region when live="off"', () => {
+    fixture.componentRef.setInput('variant', 'info');
+    fixture.componentRef.setInput('live', 'off');
+    fixture.detectChanges();
+    const msg = fixture.nativeElement.querySelector('.kh-banner__msg') as HTMLElement;
+    expect(msg.hasAttribute('role')).toBe(false);
+  });
+
   it('collapses the action slot when nothing is projected', () => {
     fixture.detectChanges();
     const actions = fixture.nativeElement.querySelector('.kh-banner__actions') as HTMLElement;

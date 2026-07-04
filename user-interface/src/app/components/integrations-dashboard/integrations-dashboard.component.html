@@ -95,7 +95,7 @@
             <app-inline-banner variant="error" [message]="googleBrowserError" />
           }
           @if (!googleBrowserStorageAvailable) {
-            <app-inline-banner variant="info">
+            <app-inline-banner variant="info" live="off">
               <span banner-message>
                 The API is not running with PostgreSQL. Start the stack via Docker (or set
                 <code>POSTGRES_HOST</code>) to save encrypted Google credentials.
@@ -509,7 +509,7 @@
           </div>
 
           @if (mediumProvider !== 'google') {
-            <app-inline-banner variant="info">
+            <app-inline-banner variant="info" live="off">
               <span banner-message>
                 {{ mediumProviderLabel }} selected. Browser automation is oriented around Google sign-in —
                 pick Google if you use “Continue with Google” on Medium.

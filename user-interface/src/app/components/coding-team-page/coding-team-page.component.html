@@ -365,7 +365,8 @@
             }
             @if (jobStatusHasPendingQuestions) {
               <app-inline-banner
-                variant="info"
+                variant="warning"
+                live="polite"
                 icon="help_outline"
                 message="The coding team is paused and needs your decisions before it can continue."
               />
@@ -378,7 +379,8 @@
             }
             @if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers) {
               <app-inline-banner
-                variant="info"
+                variant="warning"
+                live="polite"
                 icon="play_circle_outline"
                 message="Answers were received but the run could not restart automatically."
               >
