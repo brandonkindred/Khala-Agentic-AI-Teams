@@ -14,7 +14,6 @@ from typing import Any, Dict
 import pytest
 from fastapi.testclient import TestClient
 
-from market_research_team.api import main as api_main
 from market_research_team.api.main import app
 
 client = TestClient(app)
@@ -91,7 +90,9 @@ def test_market_research_job_failure_captured(monkeypatch: pytest.MonkeyPatch) -
         def run(self, *_args, **_kwargs):  # pragma: no cover - used via monkeypatch
             raise RuntimeError("orchestrator exploded")
 
-    monkeypatch.setattr(api_main, "MarketResearchOrchestrator", _BoomOrchestrator)
+    monkeypatch.setattr(
+        "market_research_team.pipeline.MarketResearchOrchestrator", _BoomOrchestrator
+    )
 
     response = client.post(
         "/market-research/run",

@@ -74,24 +74,28 @@ def _parse_insights_from_text(text: str) -> List[InterviewInsight]:
     data = _parse_json(text, {})
     if isinstance(data, dict):
         # Single insight or nested structure
-        return [InterviewInsight(
-            source="graph_analysis",
-            user_jobs=_ensure_list(data.get("user_jobs"), []),
-            pain_points=_ensure_list(data.get("pain_points"), []),
-            desired_outcomes=_ensure_list(data.get("desired_outcomes"), []),
-            direct_quotes=_ensure_list(data.get("direct_quotes"), []),
-        )]
+        return [
+            InterviewInsight(
+                source="graph_analysis",
+                user_jobs=_ensure_list(data.get("user_jobs"), []),
+                pain_points=_ensure_list(data.get("pain_points"), []),
+                desired_outcomes=_ensure_list(data.get("desired_outcomes"), []),
+                direct_quotes=_ensure_list(data.get("direct_quotes"), []),
+            )
+        ]
     if isinstance(data, list):
         insights = []
         for item in data:
             if isinstance(item, dict):
-                insights.append(InterviewInsight(
-                    source=item.get("source", "graph_analysis"),
-                    user_jobs=_ensure_list(item.get("user_jobs"), []),
-                    pain_points=_ensure_list(item.get("pain_points"), []),
-                    desired_outcomes=_ensure_list(item.get("desired_outcomes"), []),
-                    direct_quotes=_ensure_list(item.get("direct_quotes"), []),
-                ))
+                insights.append(
+                    InterviewInsight(
+                        source=item.get("source", "graph_analysis"),
+                        user_jobs=_ensure_list(item.get("user_jobs"), []),
+                        pain_points=_ensure_list(item.get("pain_points"), []),
+                        desired_outcomes=_ensure_list(item.get("desired_outcomes"), []),
+                        direct_quotes=_ensure_list(item.get("direct_quotes"), []),
+                    )
+                )
         return insights
     return []
 
@@ -105,20 +109,24 @@ def _parse_signals_from_text(text: str) -> List[MarketSignal]:
     """Parse psychology/consistency agent output into MarketSignal list."""
     data = _parse_json(text, [])
     if isinstance(data, dict):
-        return [MarketSignal(
-            signal=_signal_name(data.get("signal")),
-            confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.5))),
-            evidence=_ensure_list(data.get("evidence"), []),
-        )]
+        return [
+            MarketSignal(
+                signal=_signal_name(data.get("signal")),
+                confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.5))),
+                evidence=_ensure_list(data.get("evidence"), []),
+            )
+        ]
     if isinstance(data, list):
         signals = []
         for item in data:
             if isinstance(item, dict):
-                signals.append(MarketSignal(
-                    signal=_signal_name(item.get("signal")),
-                    confidence=min(1.0, max(0.0, _safe_float(item.get("confidence"), 0.5))),
-                    evidence=_ensure_list(item.get("evidence"), []),
-                ))
+                signals.append(
+                    MarketSignal(
+                        signal=_signal_name(item.get("signal")),
+                        confidence=min(1.0, max(0.0, _safe_float(item.get("confidence"), 0.5))),
+                        evidence=_ensure_list(item.get("evidence"), []),
+                    )
+                )
         return signals
     return []
 
@@ -137,7 +145,9 @@ def _parse_viability_from_text(text: str, mission: ResearchMission) -> Viability
     return ViabilityRecommendation(
         verdict=verdict,
         confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.5))),
-        rationale=_ensure_list(data.get("rationale"), [f"Mission concept: {mission.product_concept}."]),
+        rationale=_ensure_list(
+            data.get("rationale"), [f"Mission concept: {mission.product_concept}."]
+        ),
         suggested_next_experiments=_ensure_list(
             data.get("suggested_next_experiments"),
             ["Run a concierge MVP with 3-5 target users for one core workflow."],
@@ -194,16 +204,20 @@ class MarketResearchOrchestrator:
         if is_split:
             if not loaded:
                 # No transcripts → deterministic fallback (no LLM call needed)
-                market_signals.append(MarketSignal(
-                    signal="Cross-interview theme consistency",
-                    confidence=0.55,
-                    evidence=[
-                        "Insufficient transcript volume for consistency scoring; collect 5+ interviews."
-                    ],
-                ))
+                market_signals.append(
+                    MarketSignal(
+                        signal="Cross-interview theme consistency",
+                        confidence=0.55,
+                        evidence=[
+                            "Insufficient transcript volume for consistency scoring; collect 5+ interviews."
+                        ],
+                    )
+                )
             else:
                 consistency_text = extract_node_text(result, "consistency")
-                consistency_signals = _parse_signals_from_text(consistency_text) if consistency_text else []
+                consistency_signals = (
+                    _parse_signals_from_text(consistency_text) if consistency_text else []
+                )
                 market_signals.extend(consistency_signals)
 
         # Ensure minimum signals
@@ -211,15 +225,23 @@ class MarketResearchOrchestrator:
             market_signals.append(_DEFAULT_SIGNALS_FALLBACK[len(market_signals)])
 
         viability_text = extract_node_text(result, "viability_synthesis")
-        recommendation = _parse_viability_from_text(viability_text, mission) if viability_text else ViabilityRecommendation(
-            verdict="insufficient_evidence",
-            confidence=0.3,
-            rationale=["Graph execution produced no viability output."],
-            suggested_next_experiments=["Re-run analysis with transcript data."],
+        recommendation = (
+            _parse_viability_from_text(viability_text, mission)
+            if viability_text
+            else ViabilityRecommendation(
+                verdict="insufficient_evidence",
+                confidence=0.3,
+                rationale=["Graph execution produced no viability output."],
+                suggested_next_experiments=["Re-run analysis with transcript data."],
+            )
         )
 
         scripts_text = extract_node_text(result, "scripts")
-        scripts = _parse_scripts_from_text(scripts_text) if scripts_text else list(_DEFAULT_SCRIPTS_FALLBACK)
+        scripts = (
+            _parse_scripts_from_text(scripts_text)
+            if scripts_text
+            else list(_DEFAULT_SCRIPTS_FALLBACK)
+        )
 
         if not human_review.approved:
             return TeamOutput(
