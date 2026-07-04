@@ -11,12 +11,17 @@ import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
+import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { EMPTY, Subscription, catchError, interval, switchMap, timeout } from 'rxjs';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
-import type { AgenticTeam, ProcessDefinition } from '../../models/agentic-team.model';
+import type {
+  AgenticTeam,
+  ProcessDefinition,
+  TestPipelineRun,
+} from '../../models/agentic-team.model';
 import type { PersonaInfo, PersonaTestRunDetail } from '../../models/persona-testing.model';
 import { AgenticTeamTestPanelComponent } from '../agentic-team-test-panel/agentic-team-test-panel.component';
 import {
@@ -70,6 +75,7 @@ type StudioPersonaMode = 'manual' | 'persona';
   imports: [
     MatButtonModule,
     MatIconModule,
+    MatProgressBarModule,
     MatTooltipModule,
     MatDialogModule,
     AgenticTeamTestPanelComponent,
@@ -103,6 +109,15 @@ export class AgentStudioPersonaComponent implements OnInit {
   // ── Live run ────────────────────────────────────────────────────────────
   readonly run = signal<PersonaTestRunDetail | null>(null);
   readonly elapsedSec = signal(0);
+  /**
+   * The underlying agentic test-pipeline run, read directly from the
+   * provisioning service so the header can show real step/WAIT progress the
+   * founder `/status` endpoint collapses away. Populated once the founder run
+   * carries an `se_job_id` (which, for `agentic_team:*` targets, IS the pipeline
+   * run id — see the orchestrator's build-phase `_on_started`). Null until then,
+   * and left intact at terminal so the finished run keeps its last step state.
+   */
+  readonly pipelineRun = signal<TestPipelineRun | null>(null);
   private pollSub: Subscription | null = null;
   private elapsedSub: Subscription | null = null;
   /**
@@ -148,6 +163,59 @@ export class AgentStudioPersonaComponent implements OnInit {
     const r = this.run();
     return r ? TERMINAL_STATUSES.has(r.status) : false;
   });
+
+  // ── Live-run progress (spec §Stage 4 "Run progress UI") ───────────────────
+  // The header sets expectations for slow autonomous runs: an elapsed counter
+  // (above), an animated "persona is thinking…" indicator, and a step progress
+  // bar when the process DAG length is known — falling back to an indeterminate
+  // bar otherwise. Step/WAIT data comes from `pipelineRun` (the real pipeline
+  // run), not the founder `/status` payload, which omits it.
+
+  /** The process being driven (the run's, else the launcher selection). */
+  readonly selectedProcess = computed<ProcessDefinition | undefined>(() =>
+    (this.team()?.processes ?? []).find((p) => p.process_id === this.selectedProcessId()),
+  );
+
+  /**
+   * DAG length (the "of M" denominator). For a branching DAG this is an upper
+   * bound — a run executes one path — so "step N of M" is an accepted
+   * approximation (the spec gates the bar only on "DAG length known").
+   */
+  readonly totalSteps = computed(() => this.selectedProcess()?.steps?.length ?? 0);
+
+  /**
+   * Steps executed so far including the in-progress/waiting one (the "N"). The
+   * pipeline runner appends one `step_results` entry per executed step (the WAIT
+   * step included), so this is the honest, monotonic step number — preferred
+   * over indexing `current_step_id` into the declared (possibly reordered) list.
+   */
+  readonly currentStepCount = computed(() => this.pipelineRun()?.step_results?.length ?? 0);
+
+  /** True once a real "step N of M" can be shown (else the bar is indeterminate). */
+  readonly stepProgressKnown = computed(
+    () => !this.runTerminal() && this.totalSteps() > 0 && this.currentStepCount() > 0,
+  );
+
+  /** Determinate bar value; clamped so a branching over-count can't exceed 100%. */
+  readonly stepPercent = computed(() => {
+    const total = this.totalSteps();
+    if (total <= 0) {
+      return 0;
+    }
+    return Math.min(100, Math.round((this.currentStepCount() / total) * 100));
+  });
+
+  /** Name of the current pipeline step, for a "step 2 of 4 · Write" label. */
+  readonly currentStepName = computed(() => {
+    const stepId = this.pipelineRun()?.current_step_id;
+    if (!stepId) {
+      return '';
+    }
+    return this.selectedProcess()?.steps?.find((s) => s.step_id === stepId)?.name ?? '';
+  });
+
+  /** The pipeline paused on a free-text WAIT step: the persona is formulating an answer. */
+  readonly isWaiting = computed(() => this.pipelineRun()?.status === 'waiting_for_input');
 
   ngOnInit(): void {
     const teamId = this.teamId();
@@ -332,6 +400,9 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.stopPolling();
     this.activeRunId = runId;
     this.run.set(null);
+    // Clear the prior run's pipeline state so a new launch doesn't briefly show
+    // the last run's step progress before the first pipeline read lands.
+    this.pipelineRun.set(null);
     this.elapsedSec.set(0);
     this.elapsedSub = interval(1000)
       .pipe(takeUntilDestroyed(this.destroyRef))
@@ -391,9 +462,39 @@ export class AgentStudioPersonaComponent implements OnInit {
       this.error.set(null);
     }
     this.run.set(detail);
+    // Piggyback a pipeline-run read on the founder poll (same 10s cadence, no
+    // second poller to manage) to refresh the real step/WAIT progress. Fires on
+    // the terminal status too, so the finished run captures its final step state.
+    const teamId = this.teamId();
+    if (detail.se_job_id && teamId) {
+      this.fetchPipelineRun(teamId, detail.se_job_id);
+    }
     if (TERMINAL_STATUSES.has(detail.status)) {
       this.stopPolling();
     }
+  }
+
+  /**
+   * Read the underlying agentic test-pipeline run for its step/WAIT progress.
+   * Best-effort and self-contained: a failure (e.g. a non-agentic `se_job_id`
+   * with no pipeline run, or a transient outage) is swallowed and the header
+   * simply degrades to the indeterminate "thinking…" bar — it never surfaces an
+   * error or throws. Guarded against a superseded run by matching the response's
+   * `run_id` to the current run's `se_job_id` (a newer run has a different one),
+   * which also lets a post-terminal read apply after `activeRunId` is cleared.
+   */
+  private fetchPipelineRun(teamId: string, pipelineRunId: string): void {
+    this.agenticApi
+      .getPipelineRun(teamId, pipelineRunId)
+      .pipe(
+        catchError(() => EMPTY),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe((pr) => {
+        if (pr && this.run()?.se_job_id === pr.run_id) {
+          this.pipelineRun.set(pr);
+        }
+      });
   }
 
   private stopPolling(): void {

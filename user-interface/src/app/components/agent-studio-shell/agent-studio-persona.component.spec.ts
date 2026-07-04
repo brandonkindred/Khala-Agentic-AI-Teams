@@ -37,6 +37,53 @@ const TEAM_NO_COMPLETE = {
   ],
 };
 
+// A complete process with a known 4-step DAG, so "step N of M" can be exercised.
+const STEPS = [
+  { step_id: 's1', name: 'Plan', description: '', step_type: 'action', agents: [], next_steps: [] },
+  { step_id: 's2', name: 'Write', description: '', step_type: 'action', agents: [], next_steps: [] },
+  { step_id: 's3', name: 'Review', description: '', step_type: 'action', agents: [], next_steps: [] },
+  { step_id: 's4', name: 'Publish', description: '', step_type: 'action', agents: [], next_steps: [] },
+];
+const TEAM_WITH_STEPS = {
+  ...TEAM,
+  processes: [
+    { process_id: 'p1', name: 'Content pipeline', description: '', steps: STEPS, status: 'complete' },
+  ],
+};
+
+// Build a status payload that carries an se_job_id (the pipeline run id), so the
+// component piggybacks a pipeline-run read on the founder poll.
+const statusWithJob = (over: Record<string, unknown> = {}) => ({
+  run_id: 'run-1',
+  status: 'polling_build',
+  se_job_id: 'pipe-1',
+  decisions: [],
+  ...over,
+});
+
+// Build a TestPipelineRun with `count` recorded steps (N) and a given status.
+const pipelineRun = (count: number, over: Record<string, unknown> = {}) => ({
+  run_id: 'pipe-1',
+  team_id: 't1',
+  process_id: 'p1',
+  status: 'running',
+  current_step_id: count > 0 ? `s${count}` : null,
+  initial_input: null,
+  step_results: Array.from({ length: count }, (_, i) => ({
+    step_id: `s${i + 1}`,
+    step_name: '',
+    agent_name: '',
+    input: '',
+    output: '',
+    status: 'completed',
+  })),
+  human_prompt: null,
+  error: null,
+  started_at: '',
+  finished_at: null,
+  ...over,
+});
+
 const PERSONAS = [
   { id: 'startup-founder', name: 'Startup Founder', description: '', icon: 'rocket', is_builtin: true },
   { id: 'impatient-pm', name: 'Impatient PM', description: '', icon: 'person', is_builtin: false },
@@ -46,7 +93,7 @@ describe('AgentStudioPersonaComponent', () => {
   let component: AgentStudioPersonaComponent;
   let fixture: ComponentFixture<AgentStudioPersonaComponent>;
   let state: AgentStudioStateService;
-  let agenticApi: { getTeam: ReturnType<typeof vi.fn> };
+  let agenticApi: { getTeam: ReturnType<typeof vi.fn>; getPipelineRun: ReturnType<typeof vi.fn> };
   let personaApi: {
     getPersonas: ReturnType<typeof vi.fn>;
     startTest: ReturnType<typeof vi.fn>;
@@ -62,7 +109,11 @@ describe('AgentStudioPersonaComponent', () => {
     dialogResult?: unknown;
   } = {}) => {
     const { teamId = 't1', team = TEAM, dialogResult } = opts;
-    agenticApi = { getTeam: vi.fn().mockReturnValue(of({ team })) };
+    agenticApi = {
+      getTeam: vi.fn().mockReturnValue(of({ team })),
+      // Default: no pipeline run available (header falls back to indeterminate).
+      getPipelineRun: vi.fn().mockReturnValue(of(null)),
+    };
     personaApi = {
       getPersonas: vi.fn().mockReturnValue(of({ personas: PERSONAS })),
       startTest: vi.fn().mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' })),
@@ -733,5 +784,140 @@ describe('AgentStudioPersonaComponent', () => {
     personaApi.getRunStatus.mockReturnValue(of(null));
     expect(() => component.launch()).not.toThrow();
     expect(component.run()).toBeNull();
+  });
+
+  // ── Run-progress header (step bar + WAIT indicator) ─────────────────────────
+
+  it('renders "step N of M" when the pipeline run and process DAG are known', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2)));
+    component.launch();
+    fixture.detectChanges();
+    // Pipeline read is piggybacked on the founder poll, keyed on se_job_id.
+    expect(agenticApi.getPipelineRun).toHaveBeenCalledWith('t1', 'pipe-1');
+    expect(component.totalSteps()).toBe(4);
+    expect(component.currentStepCount()).toBe(2);
+    expect(component.stepProgressKnown()).toBe(true);
+    expect(component.stepPercent()).toBe(50);
+    expect(component.currentStepName()).toBe('Write');
+    const text = fixture.nativeElement.textContent;
+    expect(text).toContain('step 2 of 4');
+    expect(text).toContain('Write');
+    // Determinate bar is shown (not the indeterminate fallback).
+    const bar = fixture.nativeElement.querySelector('mat-progress-bar');
+    expect(bar?.getAttribute('mode')).toBe('determinate');
+  });
+
+  it('falls back to the indeterminate bar when the DAG length is unknown', () => {
+    // TEAM's single complete process has no steps → totalSteps 0 → no "step N of M".
+    build();
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2)));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.totalSteps()).toBe(0);
+    expect(component.stepProgressKnown()).toBe(false);
+    expect(fixture.nativeElement.textContent).not.toContain('step ');
+    const bar = fixture.nativeElement.querySelector('mat-progress-bar');
+    expect(bar?.getAttribute('mode')).toBe('indeterminate');
+  });
+
+  it('falls back to the indeterminate bar before any pipeline run is available', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    // Non-terminal founder status carries an se_job_id, but the pipeline read
+    // returns nothing yet (run just started) → no step count → indeterminate.
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    agenticApi.getPipelineRun.mockReturnValue(of(null));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.pipelineRun()).toBeNull();
+    expect(component.currentStepCount()).toBe(0);
+    expect(component.stepProgressKnown()).toBe(false);
+    const bar = fixture.nativeElement.querySelector('mat-progress-bar');
+    expect(bar?.getAttribute('mode')).toBe('indeterminate');
+  });
+
+  it('flags isWaiting during a waiting_for_input WAIT step', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob({ status: 'answering_build_questions' })));
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2, { status: 'waiting_for_input' })));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.isWaiting()).toBe(true);
+    // The animated thinking indicator is shown while the run is live.
+    expect(fixture.nativeElement.textContent).toContain('persona is thinking…');
+  });
+
+  it('ignores a stale pipeline response whose run_id is not the current se_job_id', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob())); // se_job_id 'pipe-1'
+    // A pipeline read for a different (superseded) run must not populate the signal.
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(3, { run_id: 'pipe-OTHER' })));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.pipelineRun()).toBeNull();
+    expect(component.stepProgressKnown()).toBe(false);
+  });
+
+  it('swallows a pipeline-read error and degrades to the indeterminate bar', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    agenticApi.getPipelineRun.mockReturnValue(throwError(() => new Error('blip')));
+    expect(() => component.launch()).not.toThrow();
+    fixture.detectChanges();
+    expect(component.pipelineRun()).toBeNull();
+    // A pipeline failure must not surface as a run/launch error.
+    expect(component.error()).toBeNull();
+    const bar = fixture.nativeElement.querySelector('mat-progress-bar');
+    expect(bar?.getAttribute('mode')).toBe('indeterminate');
+  });
+
+  it('does not read the pipeline when the founder status carries no se_job_id', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    // se_job_id absent (e.g. spec-gen phase before the build starts).
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'generating_spec', decisions: [] }));
+    component.launch();
+    expect(agenticApi.getPipelineRun).not.toHaveBeenCalled();
+    expect(component.stepProgressKnown()).toBe(false);
+  });
+
+  it('resets pipeline progress on a new launch so a prior run does not bleed through', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(3)));
+    component.launch();
+    expect(component.currentStepCount()).toBe(3);
+
+    // A second launch clears the prior pipeline state before the first read lands.
+    personaApi.startTest.mockReturnValue(of({ job_id: 'run-2', status: 'running', message: '' }));
+    personaApi.getRunStatus.mockReturnValue(new Subject());
+    component.launch();
+    expect(component.pipelineRun()).toBeNull();
+    expect(component.currentStepCount()).toBe(0);
+  });
+
+  it('hides the progress bar and thinking indicator once the run is terminal', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(
+      of(statusWithJob({ status: 'completed' })),
+    );
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(4, { status: 'completed' })));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.runTerminal()).toBe(true);
+    // stepProgressKnown is gated on !runTerminal, so no bar/thinking is shown.
+    expect(component.stepProgressKnown()).toBe(false);
+    expect(fixture.nativeElement.querySelector('mat-progress-bar')).toBeNull();
+    expect(fixture.nativeElement.textContent).not.toContain('persona is thinking…');
   });
 });
