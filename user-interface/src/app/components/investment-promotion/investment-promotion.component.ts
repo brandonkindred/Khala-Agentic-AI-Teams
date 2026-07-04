@@ -14,6 +14,7 @@ import { MatListModule } from '@angular/material/list';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatStepperModule } from '@angular/material/stepper';
 
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import {
   IPS,
@@ -42,6 +43,7 @@ import {
     MatListModule,
     MatTooltipModule,
     MatStepperModule,
+    InlineBannerComponent,
   ],
   templateUrl: './investment-promotion.component.html',
   styleUrl: './investment-promotion.component.scss',

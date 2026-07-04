@@ -50,14 +50,16 @@
 
   <!-- Confirmation Banner -->
   @if (sessionStatus === 'awaiting_confirmation') {
-    <div class="confirmation-banner">
-      <mat-icon>task_alt</mat-icon>
-      <span>Your advisor has gathered enough information to build your profile.</span>
+    <app-inline-banner
+      variant="success"
+      icon="task_alt"
+      message="Your advisor has gathered enough information to build your profile."
+    >
       <button mat-flat-button color="primary" (click)="onConfirmProfile()" [disabled]="loading">
         <mat-icon>check</mat-icon>
         Create My IPS
       </button>
-    </div>
+    </app-inline-banner>
   }
 
   <!-- Input Area -->

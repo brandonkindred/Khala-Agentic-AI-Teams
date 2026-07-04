@@ -16,10 +16,7 @@
           <span>Loading workflow status...</span>
         </div>
       } @else if (error) {
-        <div class="error-banner">
-          <mat-icon>error</mat-icon>
-          <span>{{ error }}</span>
-        </div>
+        <app-inline-banner variant="error" [message]="error" />
       } @else if (workflowStatus) {
         <!-- Mode Indicator -->
         <section class="mode-section">

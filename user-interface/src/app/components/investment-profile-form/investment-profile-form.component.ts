@@ -14,6 +14,7 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import {
   CreateProfileRequest,
@@ -44,6 +45,7 @@ import {
     MatDividerModule,
     MatProgressBarModule,
     MatTooltipModule,
+    InlineBannerComponent,
   ],
   templateUrl: './investment-profile-form.component.html',
   styleUrl: './investment-profile-form.component.scss',

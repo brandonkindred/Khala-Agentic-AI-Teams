@@ -17,6 +17,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import type { AdvisorChatMessage, IPS } from '../../models';
 
@@ -32,6 +33,7 @@ import type { AdvisorChatMessage, IPS } from '../../models';
     MatIconModule,
     MatProgressSpinnerModule,
     MatChipsModule,
+    InlineBannerComponent,
   ],
   templateUrl: './investment-chat.component.html',
   styleUrl: './investment-chat.component.scss',
