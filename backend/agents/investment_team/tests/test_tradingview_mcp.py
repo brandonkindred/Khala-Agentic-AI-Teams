@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from investment_team.market_data_service import MarketDataService
@@ -28,6 +30,12 @@ class _FakeResponse:
         return None
 
     def json(self):
+        # Mirror httpx.Response.json(), which parses the body text with the stdlib json
+        # module (accepting NaN/Infinity by default). When only ``text`` is supplied we
+        # parse it here so tests exercise the client's real wire→dict decode path rather
+        # than being handed a pre-parsed dict.
+        if self._json is None and self.text:
+            return json.loads(self.text)
         return self._json
 
 
@@ -208,8 +216,6 @@ def test_client_sends_auth_header(monkeypatch):
 
 
 def test_client_parses_text_content_json(monkeypatch):
-    import json
-
     rows = [{"time": "2024-05-06T00:00:00Z", "o": 10, "h": 11, "l": 9, "c": 10.5, "v": 5}]
     body = {
         "jsonrpc": "2.0",
@@ -269,9 +275,9 @@ def test_client_drops_unparseable_date(monkeypatch):
 
 def test_client_drops_nonfinite_and_negative_dates_without_aborting(monkeypatch):
     # A NaN/Inf/negative date field must drop only that row, never raise and lose the
-    # whole symbol's bars. (json.loads accepts NaN/Infinity by default.)
-    import json
-
+    # whole symbol's bars. Pass the RAW JSON text (with bare NaN/Infinity) so the client's
+    # own wire decode (resp.json()) parses it — httpx/json.loads accept those by default —
+    # exercising the end-to-end path, not a pre-parsed dict.
     raw = (
         '{"jsonrpc":"2.0","id":1,"result":{"structuredContent":['
         '{"date":NaN,"close":1},'
@@ -279,8 +285,7 @@ def test_client_drops_nonfinite_and_negative_dates_without_aborting(monkeypatch)
         '{"date":-5,"close":3},'
         '{"date":"2024-01-02","close":4}]}}'
     )
-    parsed = json.loads(raw)
-    _patch_httpx(monkeypatch, _FakeResponse(parsed))
+    _patch_httpx(monkeypatch, _FakeResponse(text=raw))
     c = TradingViewMcpClient("https://tv/mcp")
     out = c.fetch_ohlcv("AAPL", "stocks", "2024-01-01", "2024-01-31")
     assert [r["date"] for r in out] == ["2024-01-02"]
@@ -349,8 +354,6 @@ def test_client_raises_on_http_error(monkeypatch):
 
 
 def test_client_decodes_sse(monkeypatch):
-    import json
-
     rows = [{"date": "2024-01-02", "close": 3}]
     payload = json.dumps(_tool_result(rows))
     sse_text = f"event: message\ndata: {payload}\n\n"
