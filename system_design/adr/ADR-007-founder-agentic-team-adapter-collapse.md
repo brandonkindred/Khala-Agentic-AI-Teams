@@ -50,13 +50,17 @@ tripwire test that fails loudly when either side's shape moves.
 The collapse rules (implemented in `AgenticTeamAdapter`):
 
 - **Analysis is a no-op pass-through.** `start_from_spec` records the persona
-  spec and returns a sentinel job id without any HTTP call; `poll_analysis`
-  reports immediate completion and hands the spec forward in the Protocol's
-  `repo_path` slot, so the orchestrator persists it and a resumed run still
-  carries it into `start_build`. `submit_analysis_answers` is a no-op — the
-  collapsed phase never raises questions.
-- **Build is the test-pipeline run.** `start_build` POSTs the spec as the
-  pipeline's `initial_input` and returns the pipeline `run_id`.
+  spec on the adapter and returns a sentinel job id without any HTTP call;
+  `poll_analysis` reports immediate completion carrying no phase output. The
+  spec reaches `start_build` via the adapter's own `self._spec` — set live by
+  `start_from_spec`, or seeded at construction from the persisted `spec_content`
+  column when a resumed run skips that call — so the Protocol's `repo_path`
+  analysis→build slot is left NULL (an agentic team has no filesystem repo).
+  `submit_analysis_answers` is a no-op — the collapsed phase never raises
+  questions.
+- **Build is the test-pipeline run.** `start_build` POSTs the spec (from
+  `self._spec`) as the pipeline's `initial_input` and returns the pipeline
+  `run_id`.
 - **A WAIT step becomes exactly one free-text question.** `poll_build` maps a
   `waiting_for_input` run with a non-empty `human_prompt` to a single pending
   question with empty `options` (forcing the persona's free-text "other"
@@ -115,8 +119,9 @@ Founder-internal (defined in `backend/agents/user_agent_founder`):
   `runtime_checkable`, so `isinstance` checks attribute *presence* only;
   signature drift is caught by the tripwire, not by `isinstance`.
 - Poll-dict keys the orchestrator consumes: `status`, `waiting_for_answers`,
-  `pending_questions`, `_poll_error`, `repo_path`, and the terminal status
-  strings `completed`/`failed`/`cancelled`.
+  `pending_questions`, `_poll_error`, and the terminal status strings
+  `completed`/`failed`/`cancelled`. (The agentic adapter does not emit
+  `repo_path`; its analysis phase carries no filesystem path.)
 
 ## Consequences
 
@@ -131,10 +136,13 @@ Founder-internal (defined in `backend/agents/user_agent_founder`):
   one per terminal outcome (completed, failed, cancelled) plus the
   transient-poll-error retry path — so changing the orchestrator's
   expectations fails there, not in the drift file.
-- Semantic debt is acknowledged: the Protocol's `repo_path` slot carries a
-  persona *spec* for agentic targets. Renaming the slot would touch the run
-  store and every adapter, so the naming quirk is accepted and documented
-  here instead.
+- The former overload of the Protocol's `repo_path` slot to carry a persona
+  *spec* for agentic targets has been removed: the agentic adapter threads the
+  spec through its own `self._spec` and leaves `repo_path` NULL, so `repo_path`
+  now means only a real filesystem path (the software-engineering target). The
+  analysis-phase success signal was decoupled from a non-NULL `repo_path`
+  (`_run_product_analysis` returns an explicit `(ok, repo_path)`), which is what
+  had forced a value into the slot.
 - Protocol generalization is deferred, with the revisit trigger above.
 - CI caveat: the tripwire lives in the founder test suite, which is not
   currently part of the per-team CI test matrix — it fires wherever the

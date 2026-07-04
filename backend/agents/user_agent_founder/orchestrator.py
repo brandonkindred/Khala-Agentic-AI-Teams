@@ -340,8 +340,16 @@ def _run_product_analysis(
     project_name: str,
     *,
     existing_job_id: str | None = None,
-) -> str | None:
-    """Submit spec for product analysis and poll until complete. Returns repo_path or None."""
+) -> tuple[bool, str | None]:
+    """Submit spec for product analysis and poll until complete.
+
+    Returns ``(ok, repo_path)``. ``ok=False`` means the phase failed and the run
+    is already marked failed; the caller must abort without treating ``repo_path``
+    as a signal. On success ``repo_path`` is the target's analysis→build handoff:
+    a real filesystem path for the software-engineering target, or ``None`` for a
+    target whose analysis yields no repo (the agentic-team target), in which case
+    the ``repo_path`` column is persisted NULL.
+    """
 
     def _on_started(job_id: str) -> None:
         store.update_run(run_id, analysis_job_id=job_id)
@@ -364,7 +372,7 @@ def _run_product_analysis(
         failure_label="Product analysis",
     )
     if not ok or status_data is None:
-        return None
+        return False, None
 
     repo_path = status_data.get("repo_path")
     store.update_run(run_id, repo_path=repo_path)
@@ -375,7 +383,7 @@ def _run_product_analysis(
         "Analysis complete. Starting target-team build.",
         "status_update",
     )
-    return repo_path
+    return True, repo_path
 
 
 def _run_target_team(
@@ -383,12 +391,17 @@ def _run_target_team(
     agent: FounderAgent,
     store: FounderRunStore,
     run_id: str,
-    repo_path: str,
+    repo_path: str | None,
     adapter: TargetTeamAdapter,
     *,
     existing_job_id: str | None = None,
 ) -> bool:
-    """Start the target-team build and poll until complete. Returns True on success."""
+    """Start the target-team build and poll until complete. Returns True on success.
+
+    ``repo_path`` is the analysis→build handoff — a real path for the
+    software-engineering target, or ``None`` for the agentic-team target (whose
+    ``start_build`` ignores it and sources the spec from the adapter itself).
+    """
 
     def _on_started(job_id: str) -> None:
         store.update_run(run_id, se_job_id=job_id)
@@ -496,7 +509,10 @@ def run_workflow(
 
         with httpx.Client() as client:
             # Phase 2: Product analysis (skip entirely if repo_path stored;
-            # skip submit only if analysis_job_id stored without repo_path)
+            # skip submit only if analysis_job_id stored without repo_path).
+            # Note: the agentic-team target has no repo path — it leaves this
+            # column NULL — so its Phase 2 (a no-op pass-through) simply re-runs
+            # on resume; the spec reaches build via the adapter, not repo_path.
             if run.repo_path:
                 repo_path: str | None = run.repo_path
                 logger.info(
@@ -511,7 +527,7 @@ def run_workflow(
                     "status_update",
                 )
             else:
-                repo_path = _run_product_analysis(
+                ok, repo_path = _run_product_analysis(
                     client,
                     agent,
                     store,
@@ -521,7 +537,7 @@ def run_workflow(
                     project_name,
                     existing_job_id=run.analysis_job_id,
                 )
-                if repo_path is None:
+                if not ok:
                     return  # status already set to failed
 
             # Phase 3: target-team build (skip submit if se_job_id stored)

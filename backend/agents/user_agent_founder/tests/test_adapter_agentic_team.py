@@ -243,37 +243,50 @@ def test_url_construction_targets_provisioning_mount():
 
 
 def test_analysis_is_noop_passthrough():
-    """The analysis phase is a no-op pass-through that carries the spec forward without HTTP."""
+    """The analysis phase is a no-op that completes without HTTP and carries no output.
+
+    The spec reaches build via the adapter's own state (see
+    test_constructor_spec_seed_reaches_build), not through the poll's phase output.
+    """
     from user_agent_founder.targets import AgenticTeamAdapter
 
     adapter = AgenticTeamAdapter("t1", process_id="p1")
     fake = _FakeHttpxClient()
     job_id = adapter.start_from_spec(fake, "proj", "# SPEC BODY")
-    # No HTTP call; spec carried forward as repo_path on the next poll.
+    # No HTTP call; the spec is captured on the adapter, not emitted as repo_path.
     assert fake.posts == []
     assert job_id  # a non-empty sentinel
     status = adapter.poll_analysis(fake, job_id)
-    assert status == {"status": "completed", "repo_path": "# SPEC BODY"}
+    assert status == {"status": "completed"}
     assert fake.gets == []
     # submit_analysis_answers is a no-op (the collapsed phase raises no questions).
     assert adapter.submit_analysis_answers(fake, job_id, [{"x": 1}]) is None
 
 
-def test_constructor_spec_seed_survives_resume_without_start_from_spec():
-    """Resume window: the analysis sentinel was stored but repo_path wasn't, so a
-    fresh adapter never sees start_from_spec — the constructor seed (from the
-    persisted run row) must still carry the spec to the build phase."""
+def test_constructor_spec_seed_reaches_build():
+    """Resume window: the analysis sentinel was stored but the run never re-ran
+    start_from_spec, so a fresh adapter carries the spec only via its constructor
+    seed (from the persisted spec_content). That seed must reach start_build's
+    initial_input — the analysis phase itself emits no phase output."""
     from user_agent_founder.targets import AgenticTeamAdapter, get_adapter
 
     adapter = AgenticTeamAdapter("t1", process_id="p1", spec="# PERSISTED SPEC")
-    # poll_analysis is reached directly (start_from_spec skipped on resume).
-    assert adapter.poll_analysis(_FakeHttpxClient(), "noop") == {
-        "status": "completed",
-        "repo_path": "# PERSISTED SPEC",
-    }
+    # poll_analysis is reached directly (start_from_spec skipped on resume) and
+    # carries no repo_path.
+    assert adapter.poll_analysis(_FakeHttpxClient(), "noop") == {"status": "completed"}
+    # The seeded spec — not the ignored repo_path arg — becomes initial_input.
+    fake = _FakeHttpxClient(
+        post_responses={"/test-pipeline/runs": _FakeResponse(201, {"run_id": "run-seed"})}
+    )
+    assert adapter.start_build(fake, "ignored-repo-path") == "run-seed"
+    assert fake.posts[0]["json"] == {"process_id": "p1", "initial_input": "# PERSISTED SPEC"}
     # get_adapter threads the seed through too.
     seeded = get_adapter("agentic_team:t1", process_id="p1", spec="# VIA FACTORY")
-    assert seeded.poll_analysis(_FakeHttpxClient(), "noop")["repo_path"] == "# VIA FACTORY"
+    seeded_fake = _FakeHttpxClient(
+        post_responses={"/test-pipeline/runs": _FakeResponse(201, {"run_id": "run-factory"})}
+    )
+    seeded.start_build(seeded_fake, "ignored-repo-path")
+    assert seeded_fake.posts[0]["json"]["initial_input"] == "# VIA FACTORY"
 
 
 # ---------------------------------------------------------------------------
@@ -282,14 +295,16 @@ def test_constructor_spec_seed_survives_resume_without_start_from_spec():
 
 
 def test_start_build_posts_process_and_spec_returns_run_id():
-    """start_build POSTs process_id + initial_input and returns the pipeline run_id."""
+    """start_build POSTs process_id + the seeded spec as initial_input and returns
+    the pipeline run_id. The spec comes from the adapter's own state; the repo_path
+    argument is the SE-only Protocol handoff and is ignored here."""
     from user_agent_founder.targets import AgenticTeamAdapter
 
-    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    adapter = AgenticTeamAdapter("t1", process_id="proc1", spec="# SPEC")
     fake = _FakeHttpxClient(
         post_responses={"/test-pipeline/runs": _FakeResponse(201, {"run_id": "run-9"})}
     )
-    run_id = adapter.start_build(fake, "# SPEC")
+    run_id = adapter.start_build(fake, "ignored-repo-path")
     assert run_id == "run-9"
     assert fake.posts[0]["url"].endswith("/teams/t1/test-pipeline/runs")
     assert fake.posts[0]["json"] == {"process_id": "proc1", "initial_input": "# SPEC"}
@@ -299,22 +314,37 @@ def test_start_build_requires_process_id():
     """start_build raises StartFailed(400) when process_id is None."""
     from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
 
-    adapter = AgenticTeamAdapter("t1", process_id=None)
+    adapter = AgenticTeamAdapter("t1", process_id=None, spec="# SPEC")
     with pytest.raises(StartFailed) as exc:
-        adapter.start_build(_FakeHttpxClient(), "# SPEC")
+        adapter.start_build(_FakeHttpxClient(), "ignored-repo-path")
     assert exc.value.status_code == 400
+
+
+def test_start_build_requires_spec():
+    """start_build raises StartFailed(400) when the persona spec is empty — an
+    empty initial_input would otherwise be rejected by the provisioning endpoint's
+    min_length check with an opaque 422."""
+    from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
+
+    adapter = AgenticTeamAdapter("t1", process_id="proc1")  # no spec seeded
+    fake = _FakeHttpxClient()
+    with pytest.raises(StartFailed) as exc:
+        adapter.start_build(fake, "ignored-repo-path")
+    assert exc.value.status_code == 400
+    # Fails fast before any HTTP call.
+    assert fake.posts == []
 
 
 def test_start_build_raises_on_http_error():
     """start_build raises StartFailed with the upstream status code on an HTTP error."""
     from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
 
-    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    adapter = AgenticTeamAdapter("t1", process_id="proc1", spec="# SPEC")
     fake = _FakeHttpxClient(
         post_responses={"/test-pipeline/runs": _FakeResponse(404, {}, text="no such process")}
     )
     with pytest.raises(StartFailed) as exc:
-        adapter.start_build(fake, "# SPEC")
+        adapter.start_build(fake, "ignored-repo-path")
     assert exc.value.status_code == 404
 
 
@@ -323,10 +353,10 @@ def test_start_build_raises_when_response_has_no_run_id():
     an empty job id that the orchestrator would poll to timeout."""
     from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
 
-    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    adapter = AgenticTeamAdapter("t1", process_id="proc1", spec="# SPEC")
     fake = _FakeHttpxClient(post_responses={"/test-pipeline/runs": _FakeResponse(201, {})})
     with pytest.raises(StartFailed) as exc:
-        adapter.start_build(fake, "# SPEC")
+        adapter.start_build(fake, "ignored-repo-path")
     assert exc.value.status_code == 502
 
 
@@ -335,12 +365,12 @@ def test_start_build_raises_on_non_json_2xx():
     not an unhandled JSONDecodeError crashing the worker thread."""
     from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
 
-    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    adapter = AgenticTeamAdapter("t1", process_id="proc1", spec="# SPEC")
     fake = _FakeHttpxClient(
         post_responses={"/test-pipeline/runs": _FakeResponse(200, bad_json=True)}
     )
     with pytest.raises(StartFailed) as exc:
-        adapter.start_build(fake, "# SPEC")
+        adapter.start_build(fake, "ignored-repo-path")
     assert exc.value.status_code == 502
 
 
@@ -359,12 +389,12 @@ def test_start_build_raises_on_json_list_2xx():
     not an unhandled AttributeError crashing the worker thread."""
     from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
 
-    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    adapter = AgenticTeamAdapter("t1", process_id="proc1", spec="# SPEC")
     fake = _FakeHttpxClient(
         post_responses={"/test-pipeline/runs": _FakeResponse(200, list_body=[{"run_id": "x"}])}
     )
     with pytest.raises(StartFailed) as exc:
-        adapter.start_build(fake, "# SPEC")
+        adapter.start_build(fake, "ignored-repo-path")
     assert exc.value.status_code == 502
 
 
@@ -391,9 +421,9 @@ def test_start_build_converts_transport_error_to_start_failed():
         def post(self, *a, **kw):
             raise httpx.ConnectError("connection refused")
 
-    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    adapter = AgenticTeamAdapter("t1", process_id="proc1", spec="# SPEC")
     with pytest.raises(StartFailed) as exc:
-        adapter.start_build(_BoomClient(), "# SPEC")
+        adapter.start_build(_BoomClient(), "ignored-repo-path")
     assert exc.value.status_code == 502
 
 
@@ -419,12 +449,12 @@ def test_start_build_truncates_upstream_error_body():
     StartFailed detail so an internal error page isn't echoed wholesale."""
     from user_agent_founder.targets import AgenticTeamAdapter, StartFailed
 
-    adapter = AgenticTeamAdapter("t1", process_id="proc1")
+    adapter = AgenticTeamAdapter("t1", process_id="proc1", spec="# SPEC")
     fake = _FakeHttpxClient(
         post_responses={"/test-pipeline/runs": _FakeResponse(500, text="x" * 1000)}
     )
     with pytest.raises(StartFailed) as exc:
-        adapter.start_build(fake, "# SPEC")
+        adapter.start_build(fake, "ignored-repo-path")
     assert exc.value.status_code == 500
     assert len(exc.value.body) <= 200
 
