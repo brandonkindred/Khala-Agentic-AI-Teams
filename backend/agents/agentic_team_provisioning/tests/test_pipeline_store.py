@@ -143,6 +143,22 @@ def test_try_cancel_only_from_active(fake_pg: dict) -> None:
     assert store.get_pipeline_run("r2")["status"] == "completed"
 
 
+def test_try_fail_only_from_active(fake_pg: dict) -> None:
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")  # running
+    assert store.try_fail_pipeline_run("r1", "boom") is True
+    row = store.get_pipeline_run("r1")
+    assert row["status"] == "failed"
+    assert row["error"] == "boom"
+
+    # An already-terminal run (cancelled) is not clobbered to failed.
+    store.create_pipeline_run("r2", "t1", "p1")
+    store.update_pipeline_run("r2", status="cancelled")
+    assert store.try_fail_pipeline_run("r2", "boom") is False
+    assert store.get_pipeline_run("r2")["status"] == "cancelled"
+
+
 def test_consume_human_input_defaults_empty(fake_pg: dict) -> None:
     _seed_team(fake_pg)
     store = AgenticTestStore()

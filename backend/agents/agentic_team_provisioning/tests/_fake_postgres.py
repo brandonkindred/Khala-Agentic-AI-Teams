@@ -587,7 +587,24 @@ class _FakeCursor:
                 self.rowcount = 0
             return
 
-        # try_expire_pipeline_run (CAS to 'failed', single row).
+        # try_fail_pipeline_run (CAS to 'failed', single row, WHERE status active).
+        # Must precede try_expire: both SET status='failed' WHERE run_id, but this one
+        # is gated on `status IN (...)` (an active run) rather than 'waiting_for_input'.
+        if (
+            norm.startswith("update agentic_test_pipeline_runs set status = 'failed'")
+            and "where run_id" in norm
+            and "status in (" in norm
+        ):
+            error, finished_at, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] in ("running", "waiting_for_input"):
+                row.update(status="failed", error=error, finished_at=finished_at)
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # try_expire_pipeline_run (CAS to 'failed', single row, WHERE waiting_for_input).
         if (
             norm.startswith("update agentic_test_pipeline_runs set status = 'failed'")
             and "where run_id" in norm

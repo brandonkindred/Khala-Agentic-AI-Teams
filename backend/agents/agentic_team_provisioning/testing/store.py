@@ -25,12 +25,23 @@ logger = logging.getLogger(__name__)
 _STORE = "agentic_team_testing"
 
 
-def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
-
-
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+def _stale_cutoff(now: datetime, stale_seconds: int) -> datetime:
+    """Heartbeat-staleness boundary shared by resume and the reaper.
+
+    A single source so the two callers can never diverge: a run is "live" iff its
+    ``heartbeat_at >= _stale_cutoff(now, stale_seconds)``, and the reaper fails runs
+    strictly older than the same instant — keeping "resumable" and "reap-safe"
+    complementary by construction.
+
+    Preconditions: ``stale_seconds`` is a positive int.
+    Postconditions: returns ``now - stale_seconds``.
+    """
+    assert stale_seconds > 0, "stale_seconds must be positive"
+    return now - timedelta(seconds=stale_seconds)
 
 
 def _row_ts(value: Any) -> str:
@@ -361,7 +372,7 @@ class AgenticTestStore:
                 "SET status = 'running', human_prompt = NULL, human_input = %s, heartbeat_at = %s "
                 "WHERE run_id = %s AND status = 'waiting_for_input' "
                 "AND heartbeat_at IS NOT NULL AND heartbeat_at >= %s",
-                (human_input, now, run_id, now - timedelta(seconds=stale_seconds)),
+                (human_input, now, run_id, _stale_cutoff(now, stale_seconds)),
             )
             return cur.rowcount > 0
 
@@ -472,6 +483,30 @@ class AgenticTestStore:
             )
             return cur.rowcount > 0
 
+    @timed_query(store=_STORE, op="try_fail_pipeline_run")
+    def try_fail_pipeline_run(self, run_id: str, error: str) -> bool:
+        """Atomically fail a run, but only if it is still active.
+
+        Guards with ``WHERE status IN ('running', 'waiting_for_input')`` so an executor
+        exception raised after the run was already finalized out-of-band (cancelled by a
+        user, or reaped/expired by another actor) cannot clobber that terminal state or
+        overwrite its recorded error/finished_at.
+
+        Preconditions: ``run_id`` is a non-empty str; ``error`` is a str.
+        Postconditions: returns True iff the row was active and is now ``failed`` with
+        ``error`` and ``finished_at`` set; False (no-op) if the run was already terminal.
+        """
+        assert run_id, "run_id must be non-empty"
+        now = _now()
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE agentic_test_pipeline_runs "
+                "SET status = 'failed', error = %s, finished_at = %s "
+                "WHERE run_id = %s AND status IN ('running', 'waiting_for_input')",
+                (error, now, run_id),
+            )
+            return cur.rowcount > 0
+
     @timed_query(store=_STORE, op="reap_orphaned_pipeline_runs")
     def reap_orphaned_pipeline_runs(self, error: str, stale_seconds: int) -> int:
         """Fail active runs whose heartbeat has gone stale (orphaned by a dead worker).
@@ -508,7 +543,7 @@ class AgenticTestStore:
                 "SET status = 'failed', error = %s, finished_at = %s "
                 "WHERE status IN ('running', 'waiting_for_input') "
                 "AND (heartbeat_at IS NULL OR heartbeat_at < %s)",
-                (error, now, now - timedelta(seconds=stale_seconds)),
+                (error, now, _stale_cutoff(now, stale_seconds)),
             )
             return cur.rowcount
 

@@ -301,9 +301,8 @@ class AgenticTeamAdapter:
             a WAIT step (``poll_build`` only ever raises one question at a time).
         Postconditions: the first answer's free text is submitted to resume the
             run. Raises ``httpx.HTTPStatusError`` on a non-2xx response; the
-            orchestrator retries transient failures (transport, 408/429, 5xx) with
-            backoff but stops immediately on a non-retryable client error such as a
-            409 (the run is no longer resumable).
+            orchestrator retries every failure with backoff except a 409, which it
+            treats as terminal (the run is no longer resumable).
         """
         first = answers[0] if answers else {}
         # The WAIT question carries empty options, so ``selected_option_id`` is

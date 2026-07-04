@@ -152,18 +152,20 @@ def _answer_pending_questions(
                 code,
                 exc.response.text,
             )
-            # A non-retryable client error (e.g. 409 — the target run is no longer
-            # resumable: it timed out, was cancelled, or was reaped) will never
-            # succeed on retry. Stop immediately so the persona doesn't burn its whole
-            # retry+backoff budget on a dead run; the next poll observes the terminal
-            # status and aborts the phase cleanly. 408/429 and 5xx stay retryable.
-            if code not in (408, 429) and code < 500:
+            # A 409 specifically means the target run is no longer resumable (it timed
+            # out, was cancelled, or was reaped) — retrying will never succeed, so stop
+            # immediately rather than burning the whole retry+backoff budget on a dead
+            # run; the next poll observes the terminal status and aborts cleanly. Every
+            # other status (incl. transient 4xx like 404 "not yet visible" or 422/403
+            # blips, and all 5xx) stays retryable, matching the prior blanket policy —
+            # this guard is scoped to the one code that is provably terminal.
+            if code == 409:
                 store.add_chat_message(
                     run_id=run_id,
                     role="system",
                     content=(
-                        f"Target team rejected the answer (HTTP {code}); the run is no "
-                        "longer resumable, so no further attempts will be made."
+                        "Target team reports the run is no longer resumable (HTTP 409); "
+                        "no further answer attempts will be made."
                     ),
                     message_type="status_update",
                 )

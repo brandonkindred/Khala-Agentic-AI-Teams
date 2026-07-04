@@ -24,6 +24,7 @@ from agentic_team_provisioning.models import (
     StepType,
 )
 from agentic_team_provisioning.runtime.pipeline_runner import PipelineRunner
+from shared_concurrency import BackgroundHeartbeat
 
 
 def _now() -> datetime:
@@ -114,6 +115,14 @@ class _FakeStore:
             if not row or row["status"] not in ("running", "waiting_for_input"):
                 return False
             row.update(status="cancelled", finished_at=_now())
+            return True
+
+    def try_fail_pipeline_run(self, run_id: str, error: str) -> bool:
+        with self._lock:
+            row = self._rows.get(run_id)
+            if not row or row["status"] not in ("running", "waiting_for_input"):
+                return False
+            row.update(status="failed", error=error, finished_at=_now())
             return True
 
     def consume_pipeline_human_input(self, run_id: str) -> str:
@@ -531,41 +540,44 @@ def test_cancelled_wait_step_is_reconciled() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Background sweeper
+# Background sweeper (BackgroundHeartbeat-driven _sweep_once beat)
 # ---------------------------------------------------------------------------
 
 
+def test_sweep_once_reaps_only_stale_orphans() -> None:
+    store = _FakeStore()
+    store.seed("live", status="waiting_for_input", heartbeat_at=_now())
+    store.seed("orphan", status="running", heartbeat_at=_now() - timedelta(seconds=3600))
+    runner = _make_runner(store)
+    runner._sweep_once()
+    assert store.get_pipeline_run("orphan")["status"] == "failed"
+    assert store.get_pipeline_run("live")["status"] == "waiting_for_input"
+
+
+def test_sweep_once_propagates_reap_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_sweep_once must NOT swallow a reap error — the BackgroundHeartbeat driver's
+    on_error handles it and keeps ticking, so swallowing here would hide failures."""
+    store = _FakeStore()
+    runner = _make_runner(store)
+
+    def _boom() -> int:
+        raise RuntimeError("transient")
+
+    monkeypatch.setattr(runner, "reap_orphaned_runs", _boom)
+    with pytest.raises(RuntimeError):
+        runner._sweep_once()
+
+
 def test_sweeper_reaps_orphans_periodically() -> None:
+    """End-to-end: the BackgroundHeartbeat driving _sweep_once reaps on its interval."""
     store = _FakeStore()
     store.seed("orphan", status="waiting_for_input", heartbeat_at=None)
     runner = _make_runner(store)
-    runner._stale_s = 0.02
-    thread = threading.Thread(target=runner._run_sweeper, daemon=True)
-    thread.start()
+    sweeper = BackgroundHeartbeat(
+        runner._sweep_once, 0.02, stop_event=runner._sweeper_stop, on_error=lambda _e: None
+    )
+    sweeper.start()
     try:
         assert _wait_for(lambda: store.get_pipeline_run("orphan")["status"] == "failed")
     finally:
-        runner._sweeper_stop.set()
-        thread.join(timeout=2)
-
-
-def test_sweeper_survives_a_reap_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = _FakeStore()
-    runner = _make_runner(store)
-    runner._stale_s = 0.02
-    calls = {"n": 0}
-
-    def _flaky() -> int:
-        calls["n"] += 1
-        raise RuntimeError("transient")
-
-    monkeypatch.setattr(runner, "reap_orphaned_runs", _flaky)
-    thread = threading.Thread(target=runner._run_sweeper, daemon=True)
-    thread.start()
-    try:
-        # The sweeper must keep ticking despite the reap raising each time.
-        assert _wait_for(lambda: calls["n"] >= 2)
-        assert thread.is_alive()
-    finally:
-        runner._sweeper_stop.set()
-        thread.join(timeout=2)
+        sweeper.stop()

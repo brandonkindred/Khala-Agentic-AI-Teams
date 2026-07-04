@@ -78,6 +78,25 @@ def test_retryable_5xx_exhausts_attempts(monkeypatch) -> None:
     assert calls["n"] == ANSWER_POST_RETRIES
 
 
+def test_transient_404_is_retried(monkeypatch) -> None:
+    """Only 409 is terminal; other 4xx (e.g. a transient 404 'not yet visible') must
+    still exhaust the retry budget rather than short-circuiting."""
+    monkeypatch.setattr(orchestrator.time, "sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def _submit(_answers: list[dict[str, Any]]) -> None:
+        calls["n"] += 1
+        raise _http_error(404)
+
+    store = _FakeStore()
+    result = _answer_pending_questions(_FakeAgent(), store, "run1", "job1", _questions(), _submit)
+
+    assert result is False
+    assert calls["n"] == ANSWER_POST_RETRIES  # retried, not short-circuited
+    # And it must NOT be mislabeled as "no longer resumable".
+    assert not any("no longer resumable" in m.get("content", "") for m in store.chat_messages)
+
+
 def test_success_returns_true(monkeypatch) -> None:
     monkeypatch.setattr(orchestrator.time, "sleep", lambda _s: None)
     calls = {"n": 0}
