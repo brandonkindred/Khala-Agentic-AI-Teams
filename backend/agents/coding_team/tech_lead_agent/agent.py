@@ -169,7 +169,10 @@ class TechLeadAgent:
         self._plan_agent = Agent(model=model, system_prompt=prompts.PLAN_TO_TASK_GRAPH_SYSTEM)
         self._groom_agent = Agent(model=model, system_prompt=prompts.GROOM_TASK_SYSTEM)
         self._assignment_agent = Agent(model=model, system_prompt=prompts.ASSIGNMENT_SYSTEM)
-        self._review_agent = Agent(model=model, system_prompt=prompts.CODE_REVIEW_SYSTEM)
+        # No shared review agent: run_code_review builds a fresh Agent per call. A Strands Agent
+        # accumulates conversation state (self.messages) across calls, so a single shared instance is
+        # unsafe under the orchestrator's concurrent review fan-out — two reviews would race on the
+        # same history and cross-contaminate each other's evidence. A per-call agent is independent.
         self._adjudication_agent = Agent(
             model=model, system_prompt=prompts.REVISION_ADJUDICATION_SYSTEM
         )
@@ -440,6 +443,12 @@ class TechLeadAgent:
                 logger.warning("review progress callback failed (ignored): %s", e)
 
         attempt_no = 0
+        # Fresh, call-local review agent: this method runs concurrently across tasks in the
+        # orchestrator's review fan-out, and a Strands Agent mutates its own conversation history on
+        # every call. A per-call instance keeps each review's history isolated (no shared mutable
+        # state across threads); it also means each review starts from a clean slate rather than
+        # inheriting prior tasks' turns.
+        review_agent = Agent(model=self._model, system_prompt=prompts.CODE_REVIEW_SYSTEM)
 
         def _attempt_review() -> Dict[str, Any]:
             nonlocal attempt_no
@@ -449,7 +458,7 @@ class TechLeadAgent:
                 f"attempt {attempt_no}/{attempts}",
                 min(0.1 + 0.8 * (attempt_no - 1) / attempts, 0.9),
             )
-            data = _agent_call_json(self._review_agent, user, required_keys=("approved",))
+            data = _agent_call_json(review_agent, user, required_keys=("approved",))
             # A response that parses as JSON but carries no usable verdict is not a substantive
             # rejection — it's an unusable review. ``approved`` must be a real boolean: a missing or
             # null verdict, or a fabricated non-bool that tolerant repair completed from a truncated

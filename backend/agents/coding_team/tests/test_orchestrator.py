@@ -297,7 +297,9 @@ def test_review_missing_approved_is_infra_error_not_rejection(monkeypatch):
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
     # Valid JSON, but no verdict — e.g. a weak/over-context model that omits 'approved'.
-    monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt, required_keys=None: {"reason": "hmm"})
+    monkeypatch.setattr(
+        tl_mod, "_agent_call_json", lambda agent, prompt, required_keys=None: {"reason": "hmm"}
+    )
     tl = tl_mod.TechLeadAgent(model=object())
 
     out = tl.run_code_review("t", "d", [], "evidence")
@@ -2289,7 +2291,11 @@ def test_tech_lead_review_no_callback_unchanged(monkeypatch):
     monkeypatch.setattr(
         tl_mod,
         "_agent_call_json",
-        lambda agent, prompt, required_keys=None: {"approved": True, "reason": "ok", "requested_changes": []},
+        lambda agent, prompt, required_keys=None: {
+            "approved": True,
+            "reason": "ok",
+            "requested_changes": [],
+        },
     )
     tl = tl_mod.TechLeadAgent(model=object())
     out = tl.run_code_review("t", "d", [], "evidence")
@@ -2703,3 +2709,397 @@ def test_quality_gate_review_receives_user_decisions(tmp_path):
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
     assert captured["user_decisions"] == ["Which DB? → Postgres", "Use TLS? → Yes"]
+
+
+# ----------------------------------------------------- concurrent review fan-out
+
+
+def _seed_in_review(graph, workers) -> None:
+    """Add one IN_REVIEW task per worker (title 'T{n}', assigned to the worker)."""
+    for i, w in enumerate(workers, start=1):
+        tid = f"t{i}"
+        graph.add_task(tid, title=f"T{i}")
+        graph.assign_task_to_agent(tid, w.agent_id)
+        graph.set_task_in_review(tid)
+
+
+class _PerTaskTechLead(StubTechLead):
+    """Tech Lead returning a per-task-title review verdict; thread-safe call recording."""
+
+    def __init__(self, verdicts: Dict[str, Dict[str, Any]]) -> None:
+        super().__init__(approved=True)
+        self._verdicts = verdicts
+        self._lock = __import__("threading").Lock()
+        self.progress_seen: List[Any] = []
+
+    def run_code_review(
+        self,
+        task_title,
+        task_description,
+        acceptance_criteria,
+        changes_summary,
+        user_decisions=None,
+        progress_callback=None,
+    ):
+        with self._lock:
+            self.review_calls.append(task_title)
+            self.progress_seen.append(progress_callback)
+        return dict(self._verdicts[task_title])
+
+
+def test_review_fanout_applies_mixed_verdicts(tmp_path, monkeypatch):
+    """A multi-task review round fans out concurrently, then applies each verdict serially:
+    approved → MERGED, substantive rejection → IN_PROGRESS (revision), infra error → FAILED."""
+    _patch_git(monkeypatch)
+    workers = [StubWorker("a1"), StubWorker("a2"), StubWorker("a3")]
+    tech_lead = _PerTaskTechLead(
+        {
+            "T1": {"approved": True, "reason": "", "requested_changes": []},
+            "T2": {"approved": False, "reason": "needs tests", "requested_changes": ["add tests"]},
+            "T3": {"approved": False, "error": True, "reason": "context overflow"},
+        }
+    )
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    _seed_in_review(graph, workers)
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.MERGED
+    assert graph.get_task("t2").status == TaskStatus.IN_PROGRESS  # sent back for revision
+    assert graph.get_task("t2").revision_feedback[-1]["reason"] == "needs tests"
+    assert graph.get_task("t3").status == TaskStatus.FAILED  # infra error fails once
+    assert sorted(tech_lead.review_calls) == ["T1", "T2", "T3"]  # each reviewed exactly once
+
+
+def test_review_fanout_runs_concurrently(tmp_path, monkeypatch):
+    """Reviews in a round overlap: a barrier that only releases when all N run at once must be
+    crossed. A serial loop would break the barrier (timeout) and fail the tasks instead of merging."""
+    import threading
+
+    _patch_git(monkeypatch)
+    workers = [StubWorker("a1"), StubWorker("a2"), StubWorker("a3")]
+    barrier = threading.Barrier(len(workers), timeout=10)
+
+    class _BarrierTechLead(StubTechLead):
+        def run_code_review(
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            user_decisions=None,
+            progress_callback=None,
+        ):
+            # Blocks until every concurrent review reaches here; serial execution never releases it.
+            barrier.wait()
+            return {"approved": True, "reason": "", "requested_changes": []}
+
+    swarm, graph = _make_swarm(tmp_path, _BarrierTechLead(approved=True), workers)
+    _seed_in_review(graph, workers)
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    # All merged ⇒ every review crossed the barrier ⇒ the reviews genuinely ran concurrently.
+    assert all(graph.get_task(f"t{i}").status == TaskStatus.MERGED for i in (1, 2, 3))
+
+
+def test_review_fanout_suppresses_per_task_progress_bridge(tmp_path, monkeypatch):
+    """In the concurrent path per-task progress bridges are suppressed (they would race the single
+    job-record sub-bar); one aggregate status is emitted and run_code_review gets progress=None."""
+    _patch_git(monkeypatch)
+    workers = [StubWorker("a1"), StubWorker("a2")]
+    tech_lead = _PerTaskTechLead(
+        {
+            "T1": {"approved": True, "reason": "", "requested_changes": []},
+            "T2": {"approved": True, "reason": "", "requested_changes": []},
+        }
+    )
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    _seed_in_review(graph, workers)
+
+    updates: List[Dict[str, Any]] = []
+    swarm._review_and_merge(lambda **kw: updates.append(kw))
+
+    assert all(cb is None for cb in tech_lead.progress_seen)  # no per-task bridge in fan-out
+    assert any("reviewing 2 task(s)" in (u.get("status_text") or "") for u in updates)
+
+
+def test_single_review_keeps_live_progress_bridge(tmp_path, monkeypatch):
+    """The sole-review path still drives a live per-task ActivityBridge (progress callback present)."""
+    _patch_git(monkeypatch)
+    worker = StubWorker("a1")
+    tech_lead = _PerTaskTechLead({"T1": {"approved": True, "reason": "", "requested_changes": []}})
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [worker])
+    _seed_in_review(graph, [worker])
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.MERGED
+    assert tech_lead.progress_seen == [tech_lead.progress_seen[0]]
+    assert tech_lead.progress_seen[0] is not None  # live bridge passed through
+
+
+def test_review_fanout_exception_fails_only_that_task_once(tmp_path, monkeypatch):
+    """An exception raised while reviewing one task is contained: that task fails once (error verdict)
+    and the other tasks in the round still review and merge normally."""
+    _patch_git(monkeypatch)
+    workers = [StubWorker("a1"), StubWorker("a2")]
+
+    class _BoomOnT2TechLead(StubTechLead):
+        def __init__(self):
+            super().__init__(approved=True)
+            self.calls = __import__("collections").Counter()
+            self._lock = __import__("threading").Lock()
+
+        def run_code_review(
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            user_decisions=None,
+            progress_callback=None,
+        ):
+            with self._lock:
+                self.calls[task_title] += 1
+            if task_title == "T2":
+                raise RuntimeError("reviewer blew up")
+            return {"approved": True, "reason": "", "requested_changes": []}
+
+    tech_lead = _BoomOnT2TechLead()
+    swarm, graph = _make_swarm(tmp_path, tech_lead, workers)
+    _seed_in_review(graph, workers)
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.MERGED
+    assert graph.get_task("t2").status == TaskStatus.FAILED  # failed once, not looped
+    assert tech_lead.calls["T2"] == 1
+
+
+def test_review_concurrency_env_parsing(monkeypatch):
+    """CODING_TEAM_REVIEW_CONCURRENCY: default when unset/garbage, floored at 1, honored otherwise."""
+    monkeypatch.delenv("CODING_TEAM_REVIEW_CONCURRENCY", raising=False)
+    assert orch_mod._review_concurrency() == orch_mod.REVIEW_CONCURRENCY
+    monkeypatch.setenv("CODING_TEAM_REVIEW_CONCURRENCY", "not-a-number")
+    assert orch_mod._review_concurrency() == orch_mod.REVIEW_CONCURRENCY
+    monkeypatch.setenv("CODING_TEAM_REVIEW_CONCURRENCY", "0")
+    assert orch_mod._review_concurrency() == 1  # floored so review always progresses
+    monkeypatch.setenv("CODING_TEAM_REVIEW_CONCURRENCY", "7")
+    assert orch_mod._review_concurrency() == 7
+
+
+# ----------------------------------------------------- repo-context incremental cache
+
+
+def test_repo_context_cache_matches_read_repo_context(tmp_path):
+    """The cache renders the same briefing string as the full-read function for the same state."""
+    (tmp_path / "a.py").write_text("A = 1")
+    (tmp_path / "b.md").write_text("# doc")
+    cache = orch_mod._RepoContextCache()
+    assert cache.read(tmp_path) == orch_mod._read_repo_context(tmp_path)
+
+
+def test_repo_context_cache_empty_repo(tmp_path):
+    """An empty repo yields the sentinel, identical to _read_repo_context."""
+    cache = orch_mod._RepoContextCache()
+    assert cache.read(tmp_path) == "No files found"
+
+
+def test_repo_context_cache_reuses_unchanged_rereads_changed(tmp_path, monkeypatch):
+    """A second read re-renders only files whose (mtime, size) changed; unchanged files are reused."""
+    (tmp_path / "a.py").write_text("A = 1")
+    (tmp_path / "b.py").write_text("B = 1")
+    cache = orch_mod._RepoContextCache()
+    first = cache.read(tmp_path)  # populates the cache (renders both)
+
+    # Instrument renders that happen AFTER the cache is warm.
+    rendered: List[str] = []
+    real_render = orch_mod._render_context_file
+
+    def _counting_render(f, repo_path):
+        rendered.append(f.name)
+        return real_render(f, repo_path)
+
+    monkeypatch.setattr(orch_mod, "_render_context_file", _counting_render)
+
+    second = cache.read(tmp_path)
+    assert second == first
+    assert rendered == []  # nothing changed → no file re-read
+
+    # Change one file's content (and size) → only it is re-rendered on the next read.
+    (tmp_path / "a.py").write_text("A = 222  # changed and longer")
+    third = cache.read(tmp_path)
+    assert rendered == ["a.py"]
+    assert "A = 222" in third
+    assert "B = 1" in third  # unchanged file still present, served from cache
+
+
+def test_repo_context_cache_drops_removed_files(tmp_path):
+    """A file removed between reads leaves the briefing and the internal cache."""
+    (tmp_path / "a.py").write_text("A = 1")
+    (tmp_path / "b.py").write_text("B = 1")
+    cache = orch_mod._RepoContextCache()
+    cache.read(tmp_path)
+
+    (tmp_path / "b.py").unlink()
+    out = cache.read(tmp_path)
+
+    assert "A = 1" in out
+    assert "B = 1" not in out
+    assert all(p.name != "b.py" for p in cache._entries)
+
+
+def test_repo_context_cache_reflects_new_files(tmp_path):
+    """A file added between reads appears in the next briefing (mirrors the round-refresh contract)."""
+    (tmp_path / "a.py").write_text("A = 1")
+    cache = orch_mod._RepoContextCache()
+    cache.read(tmp_path)
+
+    (tmp_path / "notes.md").write_text("fresh notes")
+    out = cache.read(tmp_path)
+
+    assert "notes.md" in out
+    assert "fresh notes" in out
+
+
+def test_render_context_file_returns_none_on_read_error(tmp_path, monkeypatch):
+    """A file that cannot be read renders to None (the caller then skips it)."""
+    f = tmp_path / "a.py"
+    f.write_text("A = 1")
+
+    def _boom(self, *a, **k):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    assert orch_mod._render_context_file(f, tmp_path) is None
+
+
+def test_enumerate_context_files_survives_walk_error(tmp_path, monkeypatch):
+    """An os.walk failure is best-effort: it yields no files rather than raising."""
+    monkeypatch.setattr(
+        orch_mod.os, "walk", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope"))
+    )
+    assert orch_mod._enumerate_context_files(tmp_path) == []
+
+
+def test_repo_context_cache_skips_unstattable_file(tmp_path, monkeypatch):
+    """A file that cannot be stat-ed between walk and read is skipped (best-effort)."""
+    monkeypatch.setattr(orch_mod, "_enumerate_context_files", lambda p: [tmp_path / "ghost.py"])
+    cache = orch_mod._RepoContextCache()
+    assert cache.read(tmp_path) == "No files found"  # ghost stat raises → skipped
+    assert cache._entries == {}
+
+
+def test_repo_context_cache_skips_unrenderable_file(tmp_path, monkeypatch):
+    """A file whose render fails is skipped and not cached, even when its stat succeeds."""
+    (tmp_path / "a.py").write_text("A = 1")
+    monkeypatch.setattr(orch_mod, "_render_context_file", lambda f, root: None)
+    cache = orch_mod._RepoContextCache()
+    assert cache.read(tmp_path) == "No files found"
+    assert cache._entries == {}
+
+
+def test_review_uses_fresh_agent_per_call_not_shared(monkeypatch):
+    """run_code_review must build a fresh review Agent per call (never reuse a shared instance), so
+    concurrent reviews don't race on a Strands Agent's mutable conversation history."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    built = []
+
+    class _FakeAgent:
+        def __init__(self, **kw):
+            built.append(self)
+
+    monkeypatch.setattr(tl_mod, "Agent", _FakeAgent)
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt, required_keys=None: {
+            "approved": True,
+            "reason": "",
+            "requested_changes": [],
+        },
+    )
+    tl = tl_mod.TechLeadAgent(model=object())
+    built.clear()  # ignore the agents built in __init__; count only per-review construction
+
+    used = []
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt, required_keys=None: (
+            used.append(agent) or {"approved": True, "reason": "", "requested_changes": []}
+        ),
+    )
+
+    tl.run_code_review("t", "d", [], "e1")
+    tl.run_code_review("t", "d", [], "e2")
+
+    assert len(built) == 2  # one fresh review agent per call
+    assert used[0] is not used[1]  # the two reviews used distinct agent instances
+    assert not hasattr(tl, "_review_agent")  # no shared review agent kept on the instance
+
+
+def test_review_fanout_propagates_llm_attribution(tmp_path, monkeypatch):
+    """The concurrent review workers must see the caller's LLM-attribution contextvar (parallel_map
+    copies context into each worker); a raw thread pool would drop it and misattribute cost."""
+    from llm_service import llm_attribution
+    from llm_service.attribution import current_attribution
+
+    _patch_git(monkeypatch)
+    workers = [StubWorker("a1"), StubWorker("a2")]
+    seen_team: List[str] = []
+    lock = __import__("threading").Lock()
+
+    class _AttrTechLead(StubTechLead):
+        def run_code_review(
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            user_decisions=None,
+            progress_callback=None,
+        ):
+            with lock:
+                seen_team.append(current_attribution().team)
+            return {"approved": True, "reason": "", "requested_changes": []}
+
+    swarm, graph = _make_swarm(tmp_path, _AttrTechLead(approved=True), workers)
+    _seed_in_review(graph, workers)
+
+    with llm_attribution(team="coding_team_review"):
+        swarm._review_and_merge(lambda **kw: None)
+
+    assert seen_team == [
+        "coding_team_review",
+        "coding_team_review",
+    ]  # attribution visible in workers
+
+
+def test_single_review_exception_is_contained_and_fails_task_once(tmp_path, monkeypatch):
+    """A sole review whose Tech Lead call raises is contained (converted to an error verdict) and
+    fails just that task once, rather than propagating out of _review_and_merge and aborting."""
+    _patch_git(monkeypatch)
+    worker = StubWorker("a1")
+
+    class _BoomTechLead(StubTechLead):
+        def run_code_review(
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            user_decisions=None,
+            progress_callback=None,
+        ):
+            raise RuntimeError("reviewer blew up")
+
+    swarm, graph = _make_swarm(tmp_path, _BoomTechLead(approved=True), [worker])
+    _seed_in_review(graph, [worker])
+
+    swarm._review_and_merge(lambda **kw: None)  # must not raise
+
+    assert graph.get_task("t1").status == TaskStatus.FAILED
