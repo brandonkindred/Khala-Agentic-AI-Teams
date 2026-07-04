@@ -18,6 +18,9 @@ export class UserProfileApiService {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = environment.userProfileApiUrl;
 
+  /** Request options that suppress the global error toast (the profile page renders its own). */
+  private readonly SKIP_NOTIFY = { context: skipErrorNotify() };
+
   /**
    * GET /api/user-profile — current (default) profile.
    *
@@ -48,7 +51,7 @@ export class UserProfileApiService {
    * the profile page renders its own inline save error.
    */
   updateProfile(body: UserProfileUpdate): Observable<UserProfile> {
-    return this.http.put<UserProfile>(this.baseUrl, body, { context: skipErrorNotify() });
+    return this.http.put<UserProfile>(this.baseUrl, body, this.SKIP_NOTIFY);
   }
 
   /**
@@ -62,6 +65,6 @@ export class UserProfileApiService {
    * renders its own inline load error.
    */
   getOverview(): Observable<ProfileOverview> {
-    return this.http.get<ProfileOverview>(`${this.baseUrl}/overview`, { context: skipErrorNotify() });
+    return this.http.get<ProfileOverview>(`${this.baseUrl}/overview`, this.SKIP_NOTIFY);
   }
 }

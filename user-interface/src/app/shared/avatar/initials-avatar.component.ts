@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { AvatarColorOption, resolveAvatarColor } from './avatar-colors';
 
@@ -49,38 +49,36 @@ export function computeInitials(name: string): string {
     <span
       class="ia-circle"
       aria-hidden="true"
-      [style.width.px]="size"
-      [style.height.px]="size"
-      [style.fontSize.px]="size * 0.4"
-      [style.background]="'var(' + color.cssVar + ')'"
+      [style.width.px]="size()"
+      [style.height.px]="size()"
+      [style.fontSize.px]="size() * 0.4"
+      [style.background]="color().fill"
     >
-      @if (initials) {
-        {{ initials }}
+      @if (initials()) {
+        {{ initials() }}
       } @else {
-        <mat-icon [style.fontSize.px]="size * 0.6" [style.width.px]="size * 0.6" [style.height.px]="size * 0.6"
+        <mat-icon [style.fontSize.px]="size() * 0.6" [style.width.px]="size() * 0.6" [style.height.px]="size() * 0.6"
           >person</mat-icon
         >
       }
     </span>
   `,
   styleUrl: './initials-avatar.component.scss',
-  // Inputs are plain values, so OnPush limits the template getters to ticks
-  // where name/colorKey/size actually changed instead of every parent tick.
+  // Signal inputs + computed derivations: `initials`/`color` recompute only when
+  // name/colorKey change (not every render), and OnPush skips unrelated ticks.
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class InitialsAvatarComponent {
   /** Name the initials are derived from; blank renders the icon fallback. */
-  @Input() name = '';
+  readonly name = input('');
   /** Palette color key from `preferences` (untrusted; unknown → default). */
-  @Input() colorKey: string | null = null;
+  readonly colorKey = input<string | null>(null);
   /** Diameter of the circle in pixels. */
-  @Input() size = 40;
+  readonly size = input(40);
 
-  get initials(): string {
-    return computeInitials(this.name);
-  }
+  /** Initials derived from `name`, memoized until it changes. */
+  readonly initials = computed(() => computeInitials(this.name()));
 
-  get color(): AvatarColorOption {
-    return resolveAvatarColor(this.colorKey);
-  }
+  /** Palette option resolved from `colorKey`, memoized until it changes. */
+  readonly color = computed<AvatarColorOption>(() => resolveAvatarColor(this.colorKey()));
 }

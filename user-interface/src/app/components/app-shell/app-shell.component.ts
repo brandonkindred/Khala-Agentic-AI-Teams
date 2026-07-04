@@ -7,6 +7,7 @@ import {
   QueryList,
   ViewChild,
   ViewChildren,
+  computed,
   inject,
   signal,
 } from '@angular/core';
@@ -90,7 +91,10 @@ export class AppShellComponent implements OnInit {
         filter((e): e is NavigationEnd => e instanceof NavigationEnd),
         takeUntilDestroyed(this.destroyRef),
       )
-      .subscribe(() => this.closeDrawerAfterHandsetNav());
+      .subscribe(() => {
+        this.currentUrl.set(this.router.url);
+        this.closeDrawerAfterHandsetNav();
+      });
   }
 
   /**
@@ -171,14 +175,21 @@ export class AppShellComponent implements OnInit {
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
   private lastOrigin: HTMLElement | null = null;
 
+  /** Current route URL, updated once per navigation (avoids re-serializing
+   * `router.url` on every template active-state check). */
+  private readonly currentUrl = signal(this.router.url);
+
+  /** Nav group owning the current route, recomputed only when the URL changes. */
+  private readonly activeGroupKey = computed(() => findGroupForRoute(this.currentUrl())?.key ?? null);
+
   /** Returns true if the given path is the current route (for aria-current). */
   isActive(path: string): boolean {
-    return this.router.url.startsWith(path);
+    return this.currentUrl().startsWith(path);
   }
 
   /** Returns true if the current route lives inside the given nav group. */
   isGroupActive(group: NavGroup): boolean {
-    return findGroupForRoute(this.router.url)?.key === group.key;
+    return this.activeGroupKey() === group.key;
   }
 
   /** Reveal the flyout for `group`, anchored to `origin`, and cancel any pending close. */

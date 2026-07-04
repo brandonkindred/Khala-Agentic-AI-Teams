@@ -14,7 +14,7 @@ import type {
  * provider list is the sole source of LLM configuration. Base URL from
  * `environment.llmConfigApiUrl`.
  *
- * Every call opts out of the global error toast (`skipErrorNotify`): the only
+ * Every call opts out of the global error toast (`SKIP_NOTIFY`): the only
  * consumers are the settings dashboard, which renders its own inline error
  * banner, and the passive "LLM configured?" guard, which must fail silently.
  */
@@ -23,38 +23,31 @@ export class LlmConfigApiService {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = environment.llmConfigApiUrl;
 
+  /** Request options that suppress the global error toast (the interceptor only reads this). */
+  private readonly SKIP_NOTIFY = { context: skipErrorNotify() };
+
   /** GET /api/llm-config/providers — the ordered fallback list (keys masked). */
   listProviders(): Observable<LlmProviderListResponse> {
-    return this.http.get<LlmProviderListResponse>(`${this.baseUrl}/providers`, {
-      context: skipErrorNotify(),
-    });
+    return this.http.get<LlmProviderListResponse>(`${this.baseUrl}/providers`, this.SKIP_NOTIFY);
   }
 
   /** POST /api/llm-config/providers — append a provider to the list. */
   createProvider(body: LlmProviderCreate): Observable<LlmProviderListResponse> {
-    return this.http.post<LlmProviderListResponse>(`${this.baseUrl}/providers`, body, {
-      context: skipErrorNotify(),
-    });
+    return this.http.post<LlmProviderListResponse>(`${this.baseUrl}/providers`, body, this.SKIP_NOTIFY);
   }
 
   /** PUT /api/llm-config/providers/{id} — edit a provider (empty fields unchanged). */
   updateProvider(id: number, body: LlmProviderUpdate): Observable<LlmProviderListResponse> {
-    return this.http.put<LlmProviderListResponse>(`${this.baseUrl}/providers/${id}`, body, {
-      context: skipErrorNotify(),
-    });
+    return this.http.put<LlmProviderListResponse>(`${this.baseUrl}/providers/${id}`, body, this.SKIP_NOTIFY);
   }
 
   /** DELETE /api/llm-config/providers/{id} — remove a provider from the list. */
   deleteProvider(id: number): Observable<LlmProviderListResponse> {
-    return this.http.delete<LlmProviderListResponse>(`${this.baseUrl}/providers/${id}`, {
-      context: skipErrorNotify(),
-    });
+    return this.http.delete<LlmProviderListResponse>(`${this.baseUrl}/providers/${id}`, this.SKIP_NOTIFY);
   }
 
   /** PUT /api/llm-config/providers/order — reorder the list (ids, most→least preferred). */
   reorderProviders(ids: number[]): Observable<LlmProviderListResponse> {
-    return this.http.put<LlmProviderListResponse>(`${this.baseUrl}/providers/order`, { ids }, {
-      context: skipErrorNotify(),
-    });
+    return this.http.put<LlmProviderListResponse>(`${this.baseUrl}/providers/order`, { ids }, this.SKIP_NOTIFY);
   }
 }

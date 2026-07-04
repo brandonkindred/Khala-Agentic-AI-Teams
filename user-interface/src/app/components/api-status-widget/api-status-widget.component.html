@@ -1,6 +1,6 @@
-<div class="widget" role="status" tabindex="0" [attr.aria-label]="summary" [matTooltip]="summary">
+<div class="widget" role="status" tabindex="0" [attr.aria-label]="summary()" [matTooltip]="summary()">
   <span class="label" aria-hidden="true">APIs:</span>
-  @for (s of statuses; track s.name) {
+  @for (s of statuses(); track s.name) {
     <!-- aria-hidden: the container summary is the single announced name; each
          icon keeps a tooltip for sighted/mouse users only. -->
     <span

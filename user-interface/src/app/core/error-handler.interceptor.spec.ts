@@ -6,7 +6,7 @@ import {
 } from '@angular/common/http/testing';
 import { HttpClient, HttpContext } from '@angular/common/http';
 import { vi } from 'vitest';
-import { errorHandlerInterceptor, SKIP_ERROR_NOTIFY } from './error-handler.interceptor';
+import { errorHandlerInterceptor, extractErrorDetail, SKIP_ERROR_NOTIFY } from './error-handler.interceptor';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { provideAnimations } from '@angular/platform-browser/animations';
 
@@ -139,5 +139,29 @@ describe('errorHandlerInterceptor SKIP_ERROR_NOTIFY', () => {
     http.get('/loud').subscribe({ error: () => undefined });
     httpMock.expectOne('/loud').flush('x', { status: 500, statusText: 'Server Error' });
     expect(snackBar.open).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('extractErrorDetail', () => {
+  it('returns the FastAPI detail string when present', () => {
+    expect(extractErrorDetail({ error: { detail: 'boom' } }, 'fallback')).toBe('boom');
+  });
+
+  it('joins the msg fields of a validation-error detail array', () => {
+    const err = { error: { detail: [{ msg: 'field x' }, { msg: 'field y' }, {}] } };
+    expect(extractErrorDetail(err, 'fallback')).toBe('field x; field y');
+  });
+
+  it('falls back to the fallback when the detail array has no messages', () => {
+    expect(extractErrorDetail({ error: { detail: [{}, {}] } }, 'fallback')).toBe('fallback');
+  });
+
+  it('falls back to the error message when there is no detail', () => {
+    expect(extractErrorDetail({ message: 'net down' }, 'fallback')).toBe('net down');
+  });
+
+  it('returns the fallback for an empty/undefined error', () => {
+    expect(extractErrorDetail(undefined, 'fallback')).toBe('fallback');
+    expect(extractErrorDetail({ error: { detail: '' } }, 'fallback')).toBe('fallback');
   });
 });

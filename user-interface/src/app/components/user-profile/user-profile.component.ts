@@ -318,12 +318,7 @@ export class UserProfileComponent implements OnInit, HasUnsavedChanges {
    * keys are left untouched.
    */
   onSwatchKeydown(event: KeyboardEvent): void {
-    const delta =
-      event.key === 'ArrowRight' || event.key === 'ArrowDown'
-        ? 1
-        : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
-          ? -1
-          : 0;
+    const delta = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key] ?? 0;
     if (delta === 0) return;
     event.preventDefault();
     // Normalize first so a programmatically-set unknown key still has a

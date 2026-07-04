@@ -28,14 +28,16 @@
 
       <!-- Favorite pin/unpin toggle, shared by the favorites list and flyouts. -->
       <ng-template #favoriteStar let-item>
+        @let fav = navState.isFavorite(item.id);
+        @let starLabel = favoriteLabel(item);
         <button type="button"
                 mat-icon-button
                 class="nav-link-star"
-                [class.favorited]="navState.isFavorite(item.id)"
-                [attr.aria-label]="favoriteLabel(item)"
-                [matTooltip]="favoriteLabel(item)"
+                [class.favorited]="fav"
+                [attr.aria-label]="starLabel"
+                [matTooltip]="starLabel"
                 (click)="toggleFavorite(item.id)">
-          <mat-icon>{{ navState.isFavorite(item.id) ? 'star' : 'star_border' }}</mat-icon>
+          <mat-icon>{{ fav ? 'star' : 'star_border' }}</mat-icon>
         </button>
       </ng-template>
 

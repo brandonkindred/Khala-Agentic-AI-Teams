@@ -71,7 +71,7 @@
                   <mat-label>Model</mat-label>
                   <input matInput name="editModel" [(ngModel)]="editForm.model" placeholder="Model id (optional)" />
                 </mat-form-field>
-                @if (editForm.provider === 'ollama') {
+                @if (usesBaseUrl(editForm.provider)) {
                   <mat-form-field appearance="outline">
                     <mat-label>Base URL</mat-label>
                     <input matInput name="editBaseUrl" [(ngModel)]="editForm.base_url" placeholder="http://localhost:11434" />
@@ -159,7 +159,7 @@
             <mat-label>Model</mat-label>
             <input matInput name="addModel" [(ngModel)]="addForm.model" placeholder="Model id (optional)" />
           </mat-form-field>
-          @if (addForm.provider === 'ollama') {
+          @if (usesBaseUrl(addForm.provider)) {
             <mat-form-field appearance="outline">
               <mat-label>Base URL</mat-label>
               <input matInput name="addBaseUrl" [(ngModel)]="addForm.base_url" placeholder="http://localhost:11434" />

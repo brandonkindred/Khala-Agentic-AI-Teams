@@ -14,6 +14,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import { NotificationService } from '../../core/notification.service';
+import { extractErrorDetail } from '../../core/error-handler.interceptor';
 import type {
   GitHubConfigResponse,
   GitHubConfigUpdate,
@@ -59,11 +60,6 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
   connecting = false;
   disconnecting = false;
   error: string | null = null;
-
-  /** Transient success confirmation (the app's convention for saved actions). */
-  private notify(message: string): void {
-    this.notifications.saved(message);
-  }
 
   /**
    * Whether an unsaved secret has been typed into any credential field (drives
@@ -146,7 +142,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.route.queryParams.subscribe((params) => {
       if (params['slack_connected']) {
         const team = params['team'] ? decodeURIComponent(params['team']) : null;
-        this.notify(
+        this.notifications.saved(
           team ? `Connected to "${team}" workspace successfully.` : 'Slack connected successfully.',
         );
         this.expanded = 'slack';
@@ -157,7 +153,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.expanded = 'slack';
       }
       if (params['medium_google_connected']) {
-        this.notify('Google account linked for Medium workflow.');
+        this.notifications.saved('Google account linked for Medium workflow.');
         this.expanded = 'medium';
         this.loadMediumConfig();
       }
@@ -216,7 +212,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.googleBrowserError =
-          err?.error?.detail || err?.message || 'Failed to load Google browser-login status.';
+          extractErrorDetail(err, 'Failed to load Google browser-login status.');
         this.googleBrowserLoading = false;
       },
     });
@@ -234,12 +230,12 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.googleBrowserLoginConfigured = r.configured;
         this.googleBrowserStorageAvailable = r.storage_available !== false;
         this.googleAccountPassword = '';
-        this.notify('Gmail / Google credentials saved (encrypted on the server).');
+        this.notifications.saved('Gmail / Google credentials saved (encrypted on the server).');
         this.savingGoogleBrowserCredentials = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.googleBrowserError =
-          err?.error?.detail || err?.message || 'Failed to save Google credentials.';
+          extractErrorDetail(err, 'Failed to save Google credentials.');
         this.savingGoogleBrowserCredentials = false;
       },
     });
@@ -254,12 +250,12 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.googleBrowserStorageAvailable = r.storage_available !== false;
         this.googleAccountEmail = '';
         this.googleAccountPassword = '';
-        this.notify('Shared Google credentials removed.');
+        this.notifications.saved('Shared Google credentials removed.');
         this.clearingGoogleBrowserCredentials = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.googleBrowserError =
-          err?.error?.detail || err?.message || 'Failed to clear Google credentials.';
+          extractErrorDetail(err, 'Failed to clear Google credentials.');
         this.clearingGoogleBrowserCredentials = false;
       },
     });
@@ -313,7 +309,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.mediumLoading = false;
       },
       error: (err) => {
-        this.mediumError = err?.error?.detail || err?.message || 'Failed to load Medium config';
+        this.mediumError = extractErrorDetail(err, 'Failed to load Medium config');
         this.mediumLoading = false;
       },
     });
@@ -337,11 +333,11 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.api.updateMediumConfig(body).subscribe({
       next: (res) => {
         this.applyMediumConfig(res);
-        this.notify('Medium integration saved.');
+        this.notifications.saved('Medium integration saved.');
         this.mediumSaving = false;
       },
       error: (err) => {
-        this.mediumError = err?.error?.detail || err?.message || 'Failed to save Medium settings.';
+        this.mediumError = extractErrorDetail(err, 'Failed to save Medium settings.');
         this.mediumSaving = false;
       },
     });
@@ -353,12 +349,12 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.api.mediumBrowserLoginSession().subscribe({
       next: (res: MediumConfigResponse) => {
         this.applyMediumConfig(res);
-        this.notify('Medium browser session saved using shared Google credentials from Integrations.');
+        this.notifications.saved('Medium browser session saved using shared Google credentials from Integrations.');
         this.mediumBrowserLoginRunning = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.mediumError =
-          err?.error?.detail || err?.message || 'Automated Medium browser login failed.';
+          extractErrorDetail(err, 'Automated Medium browser login failed.');
         this.mediumBrowserLoginRunning = false;
       },
     });
@@ -372,7 +368,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.loadingSlack = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail || err?.message || 'Failed to load Slack config';
+        this.error = extractErrorDetail(err, 'Failed to load Slack config');
         this.loadingSlack = false;
       },
     });
@@ -415,7 +411,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
           window.location.href = res.url;
         },
         error: (err) => {
-          this.error = err?.error?.detail || err?.message || 'Failed to start Slack OAuth.';
+          this.error = extractErrorDetail(err, 'Failed to start Slack OAuth.');
           this.connecting = false;
         },
       });
@@ -441,7 +437,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
           doConnect();
         },
         error: (err) => {
-          this.error = err?.error?.detail || err?.message || 'Failed to save credentials.';
+          this.error = extractErrorDetail(err, 'Failed to save credentials.');
           this.connecting = false;
         },
       });
@@ -456,11 +452,11 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.api.disconnectSlack().subscribe({
       next: (res) => {
         this.applyConfig(res);
-        this.notify('Slack disconnected.');
+        this.notifications.saved('Slack disconnected.');
         this.disconnecting = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail || err?.message || 'Failed to disconnect Slack.';
+        this.error = extractErrorDetail(err, 'Failed to disconnect Slack.');
         this.disconnecting = false;
       },
     });
@@ -492,11 +488,11 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.api.updateSlackConfig(body).subscribe({
       next: (res) => {
         this.applyConfig(res);
-        this.notify('Settings saved.');
+        this.notifications.saved('Settings saved.');
         this.saving = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail || err?.message || 'Failed to save settings.';
+        this.error = extractErrorDetail(err, 'Failed to save settings.');
         this.saving = false;
       },
     });
@@ -568,11 +564,11 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.api.updateSlackConfig(body).subscribe({
       next: (res) => {
         this.applyConfig(res);
-        this.notify('Slack integration saved.');
+        this.notifications.saved('Slack integration saved.');
         this.saving = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail || err?.message || 'Failed to save Slack config.';
+        this.error = extractErrorDetail(err, 'Failed to save Slack config.');
         this.saving = false;
       },
     });
@@ -619,7 +615,7 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.githubLoading = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.githubError = err?.error?.detail || err?.message || 'Failed to load GitHub config.';
+        this.githubError = extractErrorDetail(err, 'Failed to load GitHub config.');
         this.githubLoading = false;
         // Current store state is unknown after a failed reload — clear the stale
         // unreachable flag so a banner from a prior load doesn't linger.
@@ -651,11 +647,11 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.githubWebhookSecretConfigured = res.webhook_secret_configured ?? false;
         this.githubPat = '';
         this.githubWebhookSecret = '';
-        this.notify('GitHub integration saved.');
+        this.notifications.saved('GitHub integration saved.');
         this.githubSaving = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.githubError = err?.error?.detail || err?.message || 'Failed to save GitHub config.';
+        this.githubError = extractErrorDetail(err, 'Failed to save GitHub config.');
         this.githubSaving = false;
       },
     });
@@ -674,11 +670,11 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
         this.githubWebhookSecretConfigured = res.webhook_secret_configured ?? false;
         this.githubPat = '';
         this.githubWebhookSecret = '';
-        this.notify('GitHub disconnected.');
+        this.notifications.saved('GitHub disconnected.');
         this.githubDisconnecting = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.githubError = err?.error?.detail || err?.message || 'Failed to disconnect GitHub.';
+        this.githubError = extractErrorDetail(err, 'Failed to disconnect GitHub.');
         this.githubDisconnecting = false;
       },
     });

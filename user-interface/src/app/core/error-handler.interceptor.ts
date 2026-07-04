@@ -29,6 +29,29 @@ export function skipErrorNotify(): HttpContext {
 }
 
 /**
+ * Extract a human-readable message from an API error for an inline banner —
+ * the component-side counterpart to the global toast's formatter, so screens
+ * that render their own error don't each re-derive the `detail`/`message`
+ * unwrapping.
+ *
+ * Preconditions: `fallback` is a non-empty default message.
+ * Postconditions: returns the FastAPI `detail` (a string, or the joined `msg`
+ * fields of a validation-error array), else the error's `message`, else
+ * `fallback`. Never throws.
+ */
+export function extractErrorDetail(err: unknown, fallback: string): string {
+  const e = err as { error?: { detail?: unknown }; message?: unknown };
+  const detail = e?.error?.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail.map((d: { msg?: string }) => d?.msg).filter(Boolean);
+    if (msgs.length > 0) return msgs.join('; ');
+  }
+  if (typeof e?.message === 'string' && e.message) return e.message;
+  return fallback;
+}
+
+/**
  * HTTP interceptor that catches API errors and displays user-friendly messages via MatSnackBar.
  * Re-throws the error so callers can still handle it. Requests carrying
  * `SKIP_ERROR_NOTIFY` in their context are re-thrown without a toast.

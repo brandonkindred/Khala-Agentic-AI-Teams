@@ -28,14 +28,14 @@ describe('AppShellComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('isActive should return true when router url starts with path', () => {
-    (component as any).router = { url: '/dashboard' };
+  it('isActive should return true when the current url starts with path', () => {
+    (component as any).currentUrl.set('/dashboard');
     expect(component.isActive('/dashboard')).toBe(true);
     expect(component.isActive('/')).toBe(true);
   });
 
-  it('isActive should return false when router url does not start with path', () => {
-    (component as any).router = { url: '/dashboard' };
+  it('isActive should return false when the current url does not start with path', () => {
+    (component as any).currentUrl.set('/dashboard');
     expect(component.isActive('/software-engineering')).toBe(false);
   });
 
@@ -79,7 +79,7 @@ describe('AppShellComponent', () => {
   });
 
   it('marks the footer profile link as current when on /user-profile', () => {
-    (component as any).router = { url: '/user-profile' };
+    (component as any).currentUrl.set('/user-profile');
     fixture.detectChanges();
     const link = (fixture.nativeElement as HTMLElement).querySelector(
       '.footer-profile-link',

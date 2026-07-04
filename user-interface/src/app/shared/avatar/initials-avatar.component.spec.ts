@@ -85,14 +85,12 @@ describe('resolveAvatarColor', () => {
 
 describe('InitialsAvatarComponent', () => {
   let fixture: ComponentFixture<InitialsAvatarComponent>;
-  let component: InitialsAvatarComponent;
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [InitialsAvatarComponent, NoopAnimationsModule],
     }).compileComponents();
     fixture = TestBed.createComponent(InitialsAvatarComponent);
-    component = fixture.componentInstance;
   });
 
   afterEach(() => {
@@ -104,9 +102,9 @@ describe('InitialsAvatarComponent', () => {
   }
 
   it('renders the initials with the requested size and a theme-token fill', () => {
-    component.name = 'Brandon Kindred';
-    component.colorKey = 'green';
-    component.size = 64;
+    fixture.componentRef.setInput('name', 'Brandon Kindred');
+    fixture.componentRef.setInput('colorKey', 'green');
+    fixture.componentRef.setInput('size', 64);
     fixture.detectChanges();
     const el = circle();
     expect(el.textContent?.trim()).toBe('BK');
@@ -121,7 +119,7 @@ describe('InitialsAvatarComponent', () => {
   });
 
   it('renders a person icon fallback when the name is blank', () => {
-    component.name = '   ';
+    fixture.componentRef.setInput('name', '   ');
     fixture.detectChanges();
     const icon = circle().querySelector('mat-icon');
     expect(icon).toBeTruthy();
@@ -129,8 +127,8 @@ describe('InitialsAvatarComponent', () => {
   });
 
   it('falls back to the default color for an unknown key', () => {
-    component.name = 'X';
-    component.colorKey = 'not-a-color';
+    fixture.componentRef.setInput('name', 'X');
+    fixture.componentRef.setInput('colorKey', 'not-a-color');
     fixture.detectChanges();
     expect(circle().style.background).toContain('var(--kh-accent)');
   });

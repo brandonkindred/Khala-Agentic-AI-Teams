@@ -15,6 +15,7 @@ import { MatCheckboxModule } from '@angular/material/checkbox';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import { NotificationService } from '../../core/notification.service';
+import { extractErrorDetail } from '../../core/error-handler.interceptor';
 import {
   providerRequiresApiKey,
   type LlmProvider,
@@ -99,6 +100,28 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     return providerRequiresApiKey(provider);
   }
 
+  /** True for providers configured with a local base URL (Ollama), not a key. */
+  usesBaseUrl(provider: LlmProvider): boolean {
+    return !providerRequiresApiKey(provider);
+  }
+
+  /**
+   * Whether a key-requiring provider would be saved with no usable API key.
+   *
+   * Preconditions: none.
+   * Postconditions: true iff `provider` requires a key, none was `typed`, no key
+   * is `alreadyStored`, and the stored one isn't being `clearing`-ed; false for
+   * keyless providers (Ollama) or whenever a key would remain. Unifies the
+   * add-form and edit-form required-key checks (add passes neither optional).
+   */
+  private apiKeyMissing(
+    provider: LlmProvider,
+    opts: { typed: string; clearing?: boolean; alreadyStored?: boolean },
+  ): boolean {
+    if (!this.requiresApiKey(provider) || opts.typed.trim()) return false;
+    return !opts.clearing && !opts.alreadyStored;
+  }
+
   /**
    * Whether an open add/edit form holds unsaved input (drives the CanDeactivate
    * guard). API keys here are write-only and hard to reproduce, so losing a
@@ -163,7 +186,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
           this.providersLoading = false;
         },
         error: (err) => {
-          this.providersError = this.friendlyError(err, 'Failed to load provider list.');
+          this.providersError = extractErrorDetail(err, 'Failed to load provider list.');
           this.providersLoading = false;
         },
       });
@@ -229,7 +252,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       this.providersError = 'Please enter a label for the provider.';
       return;
     }
-    if (this.requiresApiKey(form.provider) && !form.api_key.trim()) {
+    if (this.apiKeyMissing(form.provider, { typed: form.api_key })) {
       this.providersError = 'An API key is required for Claude.';
       return;
     }
@@ -237,7 +260,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       label: form.label.trim(),
       provider: form.provider,
       model: form.model.trim(),
-      base_url: form.provider === 'ollama' ? form.base_url.trim() : '',
+      base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: form.api_key.trim(),
     };
     this.persistProviders(this.api.createProvider(body), 'Provider added.', {
@@ -288,10 +311,16 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     }
     const newKey = form.api_key.trim();
     const entry = this.providers.find((p) => p.id === this.editingId);
-    // Block saving a key-requiring provider (e.g. switching Ollama→Claude) with
-    // no key at all: no key typed, none already stored, and not an intentional
-    // clear. Keeping an existing key (blank field) or clearing one are allowed.
-    if (this.requiresApiKey(form.provider) && !newKey && !form.clear_api_key && !entry?.api_key_configured) {
+    // Block switching to a key-requiring provider (e.g. Ollama→Claude) with no
+    // key at all. Keeping an existing key (blank field) or clearing one are
+    // allowed — see apiKeyMissing.
+    if (
+      this.apiKeyMissing(form.provider, {
+        typed: form.api_key,
+        clearing: form.clear_api_key,
+        alreadyStored: entry?.api_key_configured,
+      })
+    ) {
       this.providersError = 'An API key is required for Claude.';
       return;
     }
@@ -299,7 +328,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       label: form.label.trim(),
       provider: form.provider,
       model: form.model.trim(),
-      base_url: form.provider === 'ollama' ? form.base_url.trim() : '',
+      base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: newKey,
       clear_api_key: form.clear_api_key && !newKey,
     };
@@ -343,7 +372,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       error: (err) => {
         this.providersSaving = false;
         opts?.revert?.();
-        this.providersError = this.friendlyError(err, 'Failed to save the provider list.');
+        this.providersError = extractErrorDetail(err, 'Failed to save the provider list.');
       },
     });
   }
@@ -380,9 +409,4 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
     return `resets in ~${Math.round(hours / 24)}d`;
   }
 
-  /** Extract a human-readable error detail from an API error response, falling back to a default message. */
-  private friendlyError(err: unknown, fallback: string): string {
-    const detail = (err as { error?: { detail?: string } })?.error?.detail;
-    return detail || fallback;
-  }
 }
