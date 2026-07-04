@@ -290,14 +290,18 @@ def _salvage_object(
       caller can recover the tail via continuation instead of a fabricated one.
 
     ``fallback_accept`` (optional): a second, broader predicate tried only when
-    ``accept`` yields nothing. The five strategies run once and their parsed
-    candidates are memoized, so the fallback pass re-selects over the SAME
+    the ``accept`` pass returns ``None``. The five strategies run once and their
+    parsed candidates are memoized, so the fallback pass re-selects over the SAME
     candidates without re-scanning or re-parsing the text — this lets a
     schema-aware caller prefer anchored candidates yet fall back to accept-any in
     a single engine invocation (what the two independent calls used to cost).
 
     Preconditions: ``content`` is a str (may be empty); ``accept`` and
-    ``fallback_accept`` are pure predicates over a parsed dict.
+    ``fallback_accept`` are pure predicates over a parsed dict. When
+    ``fallback_accept`` is given, ``accept`` MUST reject empty dicts (an accepted
+    empty ``{}`` from the first pass suppresses the fallback pass) — the sole
+    caller, ``extract_json_object`` with anchor keys, satisfies this because
+    ``_accept_with_keys`` never accepts a keyless ``{}``.
     Postconditions: returns an accepted dict, or ``None`` when nothing
     salvageable matches either predicate. Never raises on malformed input.
     """
@@ -330,7 +334,13 @@ def _salvage_object(
     memo: Dict[str, Any] = {}
 
     def _fence_candidate() -> Optional[Dict[str, Any]]:
-        """Strategy 3 candidate: a whole payload inside a markdown fence, memoized."""
+        """Strategy 3 candidate: a whole payload inside a markdown fence, memoized.
+
+        Preconditions: none (closes over the enclosing ``stripped``/``repair``).
+        Postconditions: returns the fenced object (strict-then-repaired), or
+        ``None`` when there is no fence or it does not parse. Computed once per
+        ``_salvage_object`` call and cached in ``memo``; never raises.
+        """
         if "fence" not in memo:
             fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", stripped, re.IGNORECASE)
             memo["fence"] = (
@@ -344,6 +354,11 @@ def _salvage_object(
         A pure tolerant-repair strategy: yields ``None`` when repair is off or
         truncation-repair is disabled, so a truncated fragment surfaces as "no
         object" and the caller can continue instead of accepting a fabricated tail.
+
+        Preconditions: none (closes over ``stripped``/``first_unclosed``/``repair``/
+        ``repair_truncated``).
+        Postconditions: returns the repaired truncation object or ``None``.
+        Computed once per ``_salvage_object`` call and cached in ``memo``; never raises.
         """
         if "trunc" not in memo:
             cand: Optional[Dict[str, Any]] = None
@@ -355,7 +370,13 @@ def _salvage_object(
         return memo["trunc"]
 
     def _recall() -> List[Tuple[int, Dict[str, Any]]]:
-        """Strategy 5 candidates: strict objects buried under prose, memoized."""
+        """Strategy 5 candidates: strict objects buried under prose, memoized.
+
+        Preconditions: none (closes over the enclosing ``stripped``).
+        Postconditions: returns the ``(start, obj)`` list from ``_iter_strict_objects``
+        (possibly empty). Computed once per ``_salvage_object`` call and cached in
+        ``memo``; never raises.
+        """
         if "recall" not in memo:
             memo["recall"] = list(_iter_strict_objects(stripped))
         return memo["recall"]
@@ -368,10 +389,22 @@ def _salvage_object(
         leading ``{}`` shadowing a real object the recall scan recovers). Non-empty
         accepted dicts win immediately; an empty one is stashed in this pass's
         ``best_empty`` and returned only if every strategy is exhausted.
+
+        Preconditions: ``acc`` is a pure predicate over a parsed dict.
+        Postconditions: returns the first accepted non-empty dict in strategy
+        order, else an accepted empty ``{}`` if one was seen, else ``None``. Uses
+        the shared memoized candidates; never raises.
         """
         best_empty: Optional[Dict[str, Any]] = None
 
         def _use(pick: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            """Return *pick* if non-empty; stash the first empty ``{}`` and return None.
+
+            Preconditions: ``pick`` is an accepted dict or ``None``.
+            Postconditions: returns ``pick`` when truthy; records the first empty
+            ``{}`` in ``best_empty`` and returns ``None`` so the caller keeps
+            searching; returns ``None`` for ``None``.
+            """
             nonlocal best_empty
             if pick is None:
                 return None
@@ -583,8 +616,10 @@ def _files_from_json_object(stripped: str) -> Dict[str, str]:
     (code payloads routinely carry them) does not balance the object early and
     slice out a partial fragment.
 
+    Preconditions: ``stripped`` is a str (may be empty).
     Postconditions: returns the first top-level object's ``{path: content}`` dict,
     or ``{}`` when there is no parseable leading object with a usable ``files`` key.
+    Never raises on malformed input.
     """
     spans, _ = _balanced_object_spans(stripped)
     if not spans:
