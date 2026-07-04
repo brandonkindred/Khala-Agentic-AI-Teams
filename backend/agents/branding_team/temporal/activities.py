@@ -31,22 +31,22 @@ def run_branding_pipeline_activity(payload: dict[str, Any]) -> None:
         - ``payload['target_phase']`` is ``None`` or a valid ``BrandPhase``
           value string.
     Postconditions:
-        - Delegates to ``_run_branding_background``, which transitions the job
-          row to COMPLETED (with the serialized ``TeamOutput``), FAILED, or
-          leaves it untouched when the run was cancelled.
-        - On a FAILED terminal state the activity re-raises so the failure
-          surfaces as a failed Temporal workflow rather than a silently
-          "completed" one (the job row remains the source of truth for the API
-          poller); returns ``None`` on COMPLETED or cancelled.
+        - Delegates to ``_run_branding_core``, which transitions the job row to
+          COMPLETED (with the serialized ``TeamOutput``) or leaves it as-is when
+          the run was cancelled, and returns ``None``.
+        - On a genuine pipeline failure ``_run_branding_core`` marks the row
+          FAILED and re-raises the original exception, which propagates out of
+          this activity so the failure surfaces as a failed Temporal workflow
+          (carrying the real exception type/traceback) rather than a
+          silently-"completed" one.
     """
-    from branding_team.api.main import _run_branding_background
+    from branding_team.api.main import _run_branding_core
     from branding_team.models import (
         BrandCheckRequest,
         BrandingMission,
         BrandPhase,
         HumanReview,
     )
-    from branding_team.shared.job_store import JOB_STATUS_FAILED, get_job
 
     mission = BrandingMission(**payload["mission"])
     human_review = HumanReview(**payload["human_review"])
@@ -54,9 +54,8 @@ def run_branding_pipeline_activity(payload: dict[str, Any]) -> None:
     tp = payload.get("target_phase")
     target_phase = BrandPhase(tp) if tp else None
 
-    job_id = payload["job_id"]
-    _run_branding_background(
-        job_id,
+    _run_branding_core(
+        payload["job_id"],
         mission,
         human_review,
         brand_checks,
@@ -66,10 +65,3 @@ def run_branding_pipeline_activity(payload: dict[str, Any]) -> None:
         bool(payload.get("include_design_assets")),
         target_phase,
     )
-
-    # _run_branding_background swallows pipeline errors into a FAILED job row.
-    # Re-raise on that terminal state so the Temporal workflow reflects the
-    # failure instead of reporting a green "completed" run.
-    job = get_job(job_id)
-    if job is not None and job.get("status") == JOB_STATUS_FAILED:
-        raise RuntimeError(f"Branding job {job_id} failed: {job.get('error')}")

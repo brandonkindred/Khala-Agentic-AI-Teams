@@ -102,7 +102,9 @@ def test_start_branding_workflow_delegates_to_start_workflow_sync() -> None:
     mock_sync.assert_called_once()
     args, kwargs = mock_sync.call_args
     assert args[0] is BrandingWorkflow.run
-    assert payload in args
+    # payload must be forwarded as the single workflow arg (position 1), not just
+    # present somewhere in the tuple.
+    assert args[1] is payload
     assert kwargs["workflow_id"] == f"{WORKFLOW_ID_PREFIX}job-9"
     assert kwargs["task_queue"] == TASK_QUEUE
 
@@ -144,14 +146,11 @@ def test_activity_reconstructs_models_and_delegates() -> None:
     from branding_team.models import BrandCheckRequest, BrandingMission, HumanReview
     from branding_team.temporal import activities
 
-    with (
-        patch("branding_team.api.main._run_branding_background") as mock_bg,
-        patch("branding_team.shared.job_store.get_job", return_value={"status": "completed"}),
-    ):
+    with patch("branding_team.api.main._run_branding_core") as mock_core:
         activities.run_branding_pipeline_activity(_activity_payload())
 
-    mock_bg.assert_called_once()
-    args, _ = mock_bg.call_args
+    mock_core.assert_called_once()
+    args, _ = mock_core.call_args
     (
         job_id,
         mission,
@@ -180,44 +179,87 @@ def test_activity_handles_none_target_phase_and_empty_checks() -> None:
     payload = _activity_payload()
     payload["target_phase"] = None
     payload["brand_checks"] = []
-    with (
-        patch("branding_team.api.main._run_branding_background") as mock_bg,
-        patch("branding_team.shared.job_store.get_job", return_value={"status": "completed"}),
-    ):
+    with patch("branding_team.api.main._run_branding_core") as mock_core:
         activities.run_branding_pipeline_activity(payload)
 
-    args, _ = mock_bg.call_args
+    args, _ = mock_core.call_args
     assert args[3] == []  # brand_checks
     assert args[8] is None  # target_phase
 
 
-def test_activity_reraises_on_failed_job() -> None:
-    """A pipeline failure is swallowed into a FAILED job row by
-    _run_branding_background; the activity must re-raise so the Temporal
-    workflow reflects the failure instead of reporting a green run."""
+def test_activity_propagates_pipeline_failure() -> None:
+    """_run_branding_core marks the job FAILED and re-raises the original
+    exception; the activity must let it propagate (unchanged type/message) so
+    the Temporal workflow reflects the failure rather than a green run."""
     from branding_team.temporal import activities
 
-    with (
-        patch("branding_team.api.main._run_branding_background"),
-        patch(
-            "branding_team.shared.job_store.get_job",
-            return_value={"status": "failed", "error": "boom"},
-        ),
+    class PipelineError(RuntimeError):
+        pass
+
+    with patch(
+        "branding_team.api.main._run_branding_core",
+        side_effect=PipelineError("boom"),
     ):
-        with pytest.raises(RuntimeError, match="boom"):
+        with pytest.raises(PipelineError, match="boom"):
             activities.run_branding_pipeline_activity(_activity_payload())
 
 
-def test_activity_no_raise_on_cancelled_job() -> None:
-    """A cancelled run is terminal, not a failure — the activity returns
-    normally so Temporal does not mark the workflow failed."""
+def test_activity_returns_normally_on_success_or_cancel() -> None:
+    """When _run_branding_core returns (success or cancelled — both terminal
+    without an exception), the activity returns None and does no extra work."""
     from branding_team.temporal import activities
 
+    with patch("branding_team.api.main._run_branding_core", return_value=None) as mock_core:
+        result = activities.run_branding_pipeline_activity(_activity_payload())
+
+    assert result is None
+    mock_core.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _run_branding_core / _run_branding_background (raising core + swallowing wrapper)
+# ---------------------------------------------------------------------------
+
+
+def _core_args() -> tuple:
+    from branding_team.models import BrandingMission, HumanReview
+
+    mission = BrandingMission(
+        company_name="CoreCo",
+        company_description="Company for core failure test",
+        target_audience="users",
+    )
+    return ("job-core", mission, HumanReview(approved=True), [], None, None, False, False, None)
+
+
+def test_run_branding_core_marks_failed_and_reraises() -> None:
+    """A pipeline exception is recorded as a FAILED job row AND re-raised
+    (original type/message preserved) so the Temporal activity can surface it."""
+    from branding_team.api import main as main_mod
+
+    class Boom(RuntimeError):
+        pass
+
     with (
-        patch("branding_team.api.main._run_branding_background"),
-        patch("branding_team.shared.job_store.get_job", return_value={"status": "cancelled"}),
+        patch.object(main_mod.orchestrator, "run", side_effect=Boom("kaboom")),
+        patch.object(main_mod, "is_job_cancelled", return_value=False),
+        patch.object(main_mod, "update_job") as mock_update,
     ):
-        activities.run_branding_pipeline_activity(_activity_payload())
+        with pytest.raises(Boom, match="kaboom"):
+            main_mod._run_branding_core(*_core_args())
+
+    statuses = [kw.get("status") for _, kw in mock_update.call_args_list]
+    assert main_mod.JOB_STATUS_FAILED in statuses
+
+
+def test_run_branding_background_swallows_core_failure() -> None:
+    """The thread-path wrapper must never raise — the executor Future is never
+    awaited, so a propagating exception would be lost/noisy."""
+    from branding_team.api import main as main_mod
+
+    with patch.object(main_mod, "_run_branding_core", side_effect=RuntimeError("boom")):
+        # Must not raise.
+        main_mod._run_branding_background(*_core_args())
 
 
 # ---------------------------------------------------------------------------
@@ -288,3 +330,9 @@ def test_run_temporal_dispatch_failure_returns_503_and_fails_job() -> None:
         )
 
     assert resp.status_code == 503
+    # The dispatch failure must transition the created job row to FAILED (not
+    # leave it stuck PENDING). Find this brand's job in the list and check it.
+    jobs = client.get("/branding/jobs").json()["jobs"]
+    brand_jobs = [j for j in jobs if j["brand_id"] == bid]
+    assert brand_jobs, "expected a job row created for the brand"
+    assert brand_jobs[0]["status"] == "failed"
