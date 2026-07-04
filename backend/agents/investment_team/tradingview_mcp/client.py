@@ -275,25 +275,37 @@ class TradingViewMcpClient:
         """Interpret a numeric date value as a compact ``YYYYMMDD`` day or an epoch.
 
         Preconditions: ``value`` is an int/float.
-        Postconditions: a non-finite value (NaN/Inf) or a negative value returns ``None``
-            (a bar we can't place in time is dropped, not mis-dated, and never raises). An
-            8-digit integral value in the ``YYYYMMDD`` calendar range is read as that
-            calendar day (financial-feed convention); otherwise the value is treated as an
-            epoch — milliseconds at/above :data:`_EPOCH_MS_THRESHOLD`, else seconds — and
-            converted via the shared UTC helper. ``None`` when neither yields a valid date.
+        Postconditions: a non-finite float (NaN/Inf), a non-positive value, or a value too
+            large to convert to a timestamp returns ``None`` — a bar we can't place in time
+            is dropped, not mis-dated, and the function **never raises** (so one bad row
+            can't abort the whole symbol's fetch). An 8-digit integral value in the
+            ``YYYYMMDD`` calendar range is read as that calendar day (financial-feed
+            convention); otherwise the value is treated as an epoch — milliseconds at/above
+            :data:`_EPOCH_MS_THRESHOLD`, else seconds — and converted via the shared UTC
+            helper. ``None`` when neither yields a valid date.
         """
-        # Guard non-finite (NaN/Inf) and negatives up front: int(nan)/int(inf) raise, and a
-        # negative "epoch" would coerce a sentinel/index field into a bogus pre-1970 date.
-        # Returning None drops just this row instead of aborting the whole symbol's fetch.
-        if not math.isfinite(value) or value < 0:
+        # Guard up front so one malformed row drops instead of aborting the whole fetch.
+        # ``math.isfinite`` is only valid on floats — calling it on a huge Python int
+        # (JSON ints are unbounded) itself raises OverflowError — so gate it on the type.
+        # ``value <= 0`` drops NaN-adjacent sentinels: negatives and 0 (epoch 0 = 1970 is
+        # a sentinel, not a real bar date), consistent with "a bar we can't place is
+        # dropped."
+        if isinstance(value, float) and not math.isfinite(value):
             return None
-        ival = int(value)
+        if value <= 0:
+            return None
+        ival = int(value)  # safe: value is a finite float or an int
         if value == ival and 1900_01_01 <= ival <= 9999_12_31:
             try:
                 return datetime.strptime(str(ival), "%Y%m%d").date().isoformat()
             except ValueError:
                 pass  # not a real calendar day → fall through to epoch handling
-        seconds = value / 1000.0 if value >= _EPOCH_MS_THRESHOLD else float(value)
+        # A value too large to be a real timestamp overflows float conversion — drop it
+        # rather than raise.
+        try:
+            seconds = value / 1000.0 if value >= _EPOCH_MS_THRESHOLD else float(value)
+        except OverflowError:
+            return None
         return epoch_to_utc_date(seconds)
 
     @classmethod

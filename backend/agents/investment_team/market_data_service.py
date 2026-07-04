@@ -81,6 +81,7 @@ def _max_universe_symbols() -> int:
 def _resolve_tradingview_client() -> Optional[object]:
     """Best-effort build of the TradingView MCP client from configuration.
 
+    Preconditions: none.
     Postconditions: returns a ``TradingViewMcpClient`` when the integration is enabled
         and has a server URL, else ``None``. Any import/resolution failure degrades to
         ``None`` (the service runs on its public free-tier chain) — market-data fetching

@@ -289,12 +289,25 @@ def test_client_drops_nonfinite_and_negative_dates_without_aborting(monkeypatch)
 def test_numeric_to_date_guards():
     from investment_team.tradingview_mcp.client import TradingViewMcpClient as _C
 
+    # Must never raise — each of these drops the row (returns None) instead.
     assert _C._numeric_to_date(float("nan")) is None
     assert _C._numeric_to_date(float("inf")) is None
     assert _C._numeric_to_date(-1) is None
+    assert _C._numeric_to_date(0) is None  # epoch-0 sentinel dropped, like negatives
+    assert _C._numeric_to_date(10**400) is None  # unbounded int: no OverflowError
+    assert _C._numeric_to_date(1e300) is None  # huge finite float: no raise
     assert _C._numeric_to_date(20240102) == "2024-01-02"  # compact
     assert _C._numeric_to_date(1704153600) == "2024-01-02"  # epoch seconds
     assert _C._numeric_to_date(1704153600000) == "2024-01-02"  # epoch millis
+
+
+def test_client_drops_huge_int_date_without_aborting(monkeypatch):
+    # A huge integer date literal must drop only that row, never abort the symbol fetch.
+    rows = [{"date": 10**400, "close": 1}, {"date": "2024-01-02", "close": 2}]
+    _patch_httpx(monkeypatch, _FakeResponse(_tool_result(rows)))
+    c = TradingViewMcpClient("https://tv/mcp")
+    out = c.fetch_ohlcv("AAPL", "stocks", "2024-01-01", "2024-01-31")
+    assert [r["date"] for r in out] == ["2024-01-02"]
 
 
 def test_client_drops_row_without_date_or_close(monkeypatch):
