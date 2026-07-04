@@ -137,6 +137,7 @@
                         class="persona__item"
                         [class.is-selected]="selectedPersonaId() === p.id"
                         [attr.aria-pressed]="selectedPersonaId() === p.id"
+                        [disabled]="runInProgress()"
                         (click)="selectPersona(p.id)"
                       >
                         <mat-icon aria-hidden="true">{{ p.icon || 'person' }}</mat-icon>
@@ -158,6 +159,7 @@
                   #processSelect
                   id="persona-process-select"
                   [value]="selectedProcessId() ?? ''"
+                  [disabled]="runInProgress()"
                   (change)="selectProcess(processSelect.value)"
                 >
                   <option value="" disabled>Select a process…</option>
@@ -166,35 +168,113 @@
                   }
                 </select>
               </label>
-              <button
-                mat-flat-button
-                color="primary"
-                type="button"
-                class="persona__run-btn"
-                [disabled]="
-                  !selectedPersonaId() || !selectedProcessId() || launching() || !team() || teamError()
-                "
-                (click)="launch()"
+              <!-- Tooltip on the wrapping span (Material tooltips don't fire on a
+                   disabled button): while a run is live the launcher is disabled so
+                   it can't silently supersede the in-flight run — Stop it first. -->
+              <span
+                class="persona__run-btn-wrap"
+                [matTooltip]="'A run is in progress — stop it to start another.'"
+                [matTooltipDisabled]="!runInProgress()"
               >
-                <mat-icon aria-hidden="true">play_arrow</mat-icon>
-                {{ launching() ? 'Starting…' : 'Run persona test' }}
-              </button>
+                <button
+                  mat-flat-button
+                  color="primary"
+                  type="button"
+                  class="persona__run-btn"
+                  [disabled]="
+                    !selectedPersonaId() ||
+                    !selectedProcessId() ||
+                    launching() ||
+                    runInProgress() ||
+                    !team() ||
+                    teamError()
+                  "
+                  (click)="launch()"
+                >
+                  <mat-icon aria-hidden="true">play_arrow</mat-icon>
+                  {{ launching() ? 'Starting…' : 'Run persona test' }}
+                </button>
+              </span>
               @if (error()) {
                 <p class="persona__error" role="alert">{{ error() }}</p>
               }
             </div>
           </div>
 
+          <!-- SR-only live region: announces run-state transitions (started /
+               answering / completed / failed / cancelled) so an assistive-tech
+               user driving an unattended run hears changes. Rendered
+               unconditionally (outside the run panel below) and empty until a run
+               exists, so it pre-exists in the DOM — a live region inserted
+               already-populated is commonly NOT announced, which would drop the
+               first ("started") transition. aria-live speaks only on text change,
+               so a steady status isn't re-announced. -->
+          <p class="visually-hidden" role="status" aria-live="polite">{{ runAnnouncement() }}</p>
+
           @if (run(); as r) {
-            <div class="persona__run">
+            <section class="persona__run" aria-labelledby="persona-run-title">
               <div class="persona__run-head">
-                <span class="persona__run-id">run {{ r.run_id }}</span>
-                <span class="persona__run-status">status: {{ r.status }}</span>
-                <span class="persona__run-elapsed">{{ elapsedSec() }}s</span>
-                @if (!runTerminal()) {
-                  <span class="persona__thinking" aria-live="polite">persona is thinking…</span>
+                <h3 id="persona-run-title" class="persona__run-title">Live run</h3>
+                <span class="persona__run-status">{{ statusLabel(r.status) }}</span>
+                <span class="persona__run-elapsed" aria-label="elapsed time">{{ elapsedSec() }}s</span>
+                @if (runLive()) {
+                  <!-- Animated liveness cue so a slow-but-healthy run never reads
+                       as stalled; during a WAIT step the persona is formulating
+                       its free-text answer, so we say so explicitly. `runLive`
+                       (not just the founder status) also hides this once the
+                       pipeline itself is terminal, so a failed run doesn't keep
+                       "thinking" during the founder-status lag. -->
+                  <span class="persona__thinking" aria-live="polite"
+                    >persona is thinking…@if (isWaiting()) {
+                      <span class="persona__waiting">(answering a question)</span>
+                    }</span
+                  >
+                }
+                <!-- Stop gates on `runInProgress` (founder job live), NOT `runLive`
+                     (which also requires the pipeline live): the founder job stays
+                     cancellable during the ~poll-interval lag after the pipeline
+                     ends, so Stop must remain available then. -->
+                @if (runInProgress()) {
+                  <button
+                    mat-stroked-button
+                    type="button"
+                    class="persona__stop"
+                    [disabled]="cancelling()"
+                    (click)="stopRun()"
+                  >
+                    <mat-icon aria-hidden="true">stop</mat-icon>
+                    {{ cancelling() ? 'Stopping…' : 'Stop run' }}
+                  </button>
                 }
               </div>
+              @if (runLive()) {
+                <!-- Step progress bar (spec Stage 4): a determinate "step N of M"
+                     when the process DAG length is known, otherwise the
+                     indeterminate fallback. The visible label carries the live
+                     "step N of M" text; the bar itself is not a duplicate live
+                     region (no aria-label) to avoid double screen-reader
+                     announcements every poll tick. -->
+                <div class="persona__progress">
+                  @if (stepProgressKnown()) {
+                    <span class="persona__step-label" aria-live="polite">
+                      step {{ currentStepNumber() }} of {{ totalSteps() }}@if (currentStepName()) {
+                        <span class="persona__step-name"> · {{ currentStepName() }}</span>
+                      }
+                    </span>
+                    <!-- Determinate once at least one step has finished; until then
+                         a moving indeterminate bar (a determinate bar frozen at 0%
+                         reads as stalled). The visible label is the live region,
+                         so the bar is aria-hidden to avoid double announcements. -->
+                    @if (completedStepCount() > 0) {
+                      <mat-progress-bar mode="determinate" [value]="stepPercent()" aria-hidden="true" />
+                    } @else {
+                      <mat-progress-bar mode="indeterminate" aria-hidden="true" />
+                    }
+                  } @else {
+                    <mat-progress-bar mode="indeterminate" aria-label="persona run in progress" />
+                  }
+                </div>
+              }
               @if (r.decisions.length > 0) {
                 <ul class="persona__decisions">
                   @for (d of r.decisions; track d.decision_id) {
@@ -212,7 +292,7 @@
               } @else {
                 <p class="persona__loading">Waiting for the first decision…</p>
               }
-            </div>
+            </section>
           }
         }
       }
