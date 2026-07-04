@@ -299,34 +299,42 @@ sequenceDiagram
 
 ## 9. Temporal workflow wrapping
 
-When `TEMPORAL_ADDRESS` is set, `temporal/__init__.py:37-40` registers
-`BrandingWorkflow` on the `"branding-queue"` task queue via
-`shared_temporal.start_team_worker`. This provides durable execution for
-long-running brand builds.
+When `TEMPORAL_ADDRESS` is set, the async brand-run dispatch
+(`_submit_brand_run`) starts a durable `BrandingWorkflow` on the
+`"branding-queue"` task queue instead of submitting to the in-process thread
+pool. The worker is booted by `shared_temporal.start_team_worker` (Pattern A on
+import and via the `team_service` entrypoint worker vars). This provides durable
+execution for long-running brand builds. The client still polls
+`GET /branding/status/{job_id}` — the activity performs the same job-store
+transitions on both paths.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Client
+    participant API as _submit_brand_run
     participant TClient as Temporal Client
     participant Worker as Temporal Worker<br/>("branding-queue")
     participant Workflow as BrandingWorkflow
-    participant Activity as run_pipeline_activity
-    participant Orch as BrandingTeamOrchestrator
+    participant Activity as run_branding_pipeline_activity
+    participant BG as _run_branding_background
 
-    Client->>TClient: Start BrandingWorkflow(request dict)
-    TClient->>Worker: Schedule workflow
-    Worker->>Workflow: run(request)
-    Workflow->>Activity: execute_activity(<br/>run_pipeline_activity,<br/>start_to_close_timeout=2h)
-    Activity->>Orch: BrandingTeamOrchestrator().run(...)<br/>(temporal/__init__.py:11-20)
-    Orch-->>Activity: TeamOutput
-    Activity-->>Workflow: result.model_dump()
-    Workflow-->>Worker: dict
-    Worker-->>TClient: Workflow completed
-    TClient-->>Client: result
+    Client->>API: POST /clients/{cid}/brands/{bid}/run
+    API->>API: create_job(job_id)  (status=pending)
+    API->>TClient: start_branding_workflow(job_id, payload dict)
+    TClient->>Worker: Schedule BrandingWorkflow id=branding-{job_id}
+    API-->>Client: {job_id, status: pending}
+    Worker->>Workflow: run(payload)
+    Workflow->>Activity: execute_activity(<br/>run_branding_pipeline_activity,<br/>start_to_close_timeout=2h)
+    Activity->>BG: _run_branding_background(job_id, mission, ...)
+    BG->>BG: orchestrator.run(...) + update_job(COMPLETED/FAILED)
+    BG-->>Activity: None
+    Activity-->>Workflow: None
+    Workflow-->>Worker: Workflow completed
+    Client->>API: GET /branding/status/{job_id} (poll) -> completed
 ```
 
 The 2-hour `start_to_close_timeout` is generous enough that any plausible
 brand run — including slow sibling team calls — stays well within the
-budget. Durable execution means a worker crash mid-run does not lose
-state: Temporal reschedules the activity.
+budget. Durable execution means a worker crash mid-run does not lose state:
+Temporal re-delivers the not-yet-completed activity after restart.

@@ -694,6 +694,42 @@ def _submit_brand_run(
         brand_id=brand_id,
         current_phase=target_phase.value if target_phase else None,
     )
+
+    # When Temporal is enabled, dispatch the job as a durable workflow so it
+    # survives a worker/process restart; otherwise fall back to the in-process
+    # thread pool. Lazy import keeps main.py's import cost low and defers the
+    # Pattern A worker boot in branding_team.temporal until the first dispatch.
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        temporal_on = is_temporal_enabled()
+    except ImportError:
+        temporal_on = False
+
+    if temporal_on:
+        from branding_team.temporal.start_workflow import start_branding_workflow
+
+        wf_payload = {
+            "job_id": job_id,
+            "mission": brand.mission.model_dump(),
+            "human_review": human_review.model_dump(),
+            "brand_checks": [c.model_dump() for c in payload.brand_checks],
+            "client_id": client_id,
+            "brand_id": brand_id,
+            "include_market_research": payload.include_market_research,
+            "include_design_assets": payload.include_design_assets,
+            "target_phase": target_phase.value if target_phase else None,
+        }
+        try:
+            start_branding_workflow(job_id, wf_payload)
+        except Exception:
+            # Temporal client/worker not ready — fail the job row and return 503
+            # rather than surfacing the dispatch error as a 500.
+            logger.exception("Branding job %s Temporal dispatch failed", job_id)
+            update_job(job_id, status=JOB_STATUS_FAILED, error="temporal dispatch failed")
+            raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+        return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
+
     try:
         _run_executor.submit(
             _run_branding_background,
