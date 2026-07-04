@@ -35,6 +35,23 @@ class HumanReview(BaseModel):
     feedback: str = ""
 
 
+class RunMarketResearchRequest(BaseModel):
+    """Inbound payload for a market-research run.
+
+    Lives here (not in the API module) so the Temporal activity and the
+    pipeline helpers can reconstruct it without importing the FastAPI app.
+    """
+
+    product_concept: str = Field(..., min_length=3, max_length=50_000)
+    target_users: str = Field(..., min_length=3, max_length=10_000)
+    business_goal: str = Field(..., min_length=3, max_length=10_000)
+    topology: TeamTopology = TeamTopology.UNIFIED
+    transcript_folder_path: Optional[str] = None
+    transcripts: List[str] = Field(default_factory=list)
+    human_approved: bool = False
+    human_feedback: str = ""
+
+
 class InterviewInsight(BaseModel):
     source: str
     user_jobs: List[str] = Field(default_factory=list)
