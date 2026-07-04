@@ -324,6 +324,14 @@ def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
         tags and ``expertise`` from the home ``team`` (always present). So a tagged
         manifest with no cognition tools — the common catalog shape — still passes.
         ``tools`` carries ``cognition.tools`` when present.
+
+    v1 scope boundary: the manifest's typed ``inputs`` / ``outputs`` schema_refs are intentionally
+    **not** projected here. In v1 a registry roster entry runs as a free-text LLM persona (built from
+    the projected ``role`` / ``skills`` / ``tools`` fields), so its declared typed IO is dropped at
+    this boundary rather than marshalled through the DAG. Executing a registry agent through its typed
+    contract is deferred — see
+    ``system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md``. Do not add a
+    schema-preserving branch here without first resolving that spike.
     """
     # Enforce the precondition with explicit validation rather than ``assert`` (which
     # ``python -O`` strips): ``AgentManifest.id``/``name`` are required but not
