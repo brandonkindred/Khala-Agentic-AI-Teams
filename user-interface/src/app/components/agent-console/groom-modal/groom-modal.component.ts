@@ -16,6 +16,7 @@ import {
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { ProductDeliveryService } from '../../../services/product-delivery.service';
+import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
 import type {
   GroomMethod,
   GroomResult,
@@ -50,6 +51,7 @@ export interface GroomModalResult {
     MatDialogModule,
     MatIconModule,
     MatProgressSpinnerModule,
+    InlineBannerComponent,
   ],
   templateUrl: './groom-modal.component.html',
   styleUrl: './groom-modal.component.scss',

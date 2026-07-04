@@ -22,6 +22,7 @@ import { UserProfileStore } from '../../services/user-profile-store.service';
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import { NotificationService } from '../../core/notification.service';
 import type { Association, ProfileIntegration } from '../../models/user-profile.model';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 
 /** A display group of associations sharing one artifact type. */
 interface AssociationGroup {
@@ -67,6 +68,7 @@ const ARTIFACT_GROUPS: Omit<AssociationGroup, 'items'>[] = [
     DashboardShellComponent,
     InitialsAvatarComponent,
     EmptyStateComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './user-profile.component.html',
   styleUrl: './user-profile.component.scss',

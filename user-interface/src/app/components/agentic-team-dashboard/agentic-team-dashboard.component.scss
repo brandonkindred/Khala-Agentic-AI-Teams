@@ -5,20 +5,6 @@
   margin: 0 auto;
 }
 
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--kh-error-subtle);
-  border: 1px solid var(--kh-error);
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
-  color: var(--kh-error);
-
-  span { flex: 1; }
-}
-
 .page-header {
   display: flex;
   align-items: center;

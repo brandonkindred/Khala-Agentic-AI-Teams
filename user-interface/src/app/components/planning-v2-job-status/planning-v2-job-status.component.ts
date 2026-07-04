@@ -7,6 +7,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatBadgeModule } from '@angular/material/badge';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { PlanningV2StatusResponse } from '../../models';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 
 @Component({
   selector: 'app-planning-v2-job-status',
@@ -18,6 +19,7 @@ import type { PlanningV2StatusResponse } from '../../models';
     MatChipsModule,
     MatIconModule,
     MatBadgeModule,
+    InlineBannerComponent,
   ],
   templateUrl: './planning-v2-job-status.component.html',
   styleUrl: './planning-v2-job-status.component.scss',

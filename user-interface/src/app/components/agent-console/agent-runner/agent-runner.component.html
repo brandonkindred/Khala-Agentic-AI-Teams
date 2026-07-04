@@ -61,17 +61,13 @@
 
   @if (selectedAgent(); as detail) {
     @if (requiresLiveIntegration()) {
-      <div class="agent-runner__banner" role="alert">
-        <mat-icon>warning</mat-icon>
-        <div>
-          <strong>Not runnable in sandbox</strong>
-          <p>
-            {{ detail.manifest.name }} requires live integrations (e.g. OAuth sessions,
-            third-party APIs) and can only run in its team's production service.
-            Use its dedicated team dashboard instead.
-          </p>
-        </div>
-      </div>
+      <app-inline-banner variant="warning" icon="warning" title="Not runnable in sandbox">
+        <p banner-message>
+          {{ detail.manifest.name }} requires live integrations (e.g. OAuth sessions,
+          third-party APIs) and can only run in its team's production service.
+          Use its dedicated team dashboard instead.
+        </p>
+      </app-inline-banner>
     }
 
     <div class="agent-runner__body">
@@ -200,10 +196,9 @@
           </button>
         </header>
         @if (env.error) {
-          <div class="agent-runner__error-banner" role="alert">
-            <mat-icon>error</mat-icon>
-            <pre>{{ env.error }}</pre>
-          </div>
+          <app-inline-banner variant="error">
+            <pre banner-message class="agent-runner__error-pre">{{ env.error }}</pre>
+          </app-inline-banner>
         }
         <pre class="agent-runner__output-body">{{ prettyOutput() }}</pre>
         @if (env.logs_tail.length) {
@@ -216,10 +211,7 @@
     }
 
     @if (lastError() && !lastResponse()) {
-      <div class="agent-runner__error-banner" role="alert">
-        <mat-icon>error</mat-icon>
-        <span>{{ lastError() }}</span>
-      </div>
+      <app-inline-banner variant="error" [message]="lastError() ?? ''" />
     }
 
     <app-agent-run-history

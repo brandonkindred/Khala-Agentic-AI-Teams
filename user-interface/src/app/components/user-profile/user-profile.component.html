@@ -10,10 +10,7 @@
     </div>
   } @else {
     @if (error) {
-      <!-- role="alert" wraps only the message: interactive controls don't
-           belong inside an assertive live region (some AT won't expose them). -->
-      <div class="up-banner up-error">
-        <span role="alert">{{ error }}</span>
+      <app-inline-banner variant="error" [message]="error">
         <!-- Retry only before the first successful load (the dead-end case);
              after a failed SAVE, reloading here would discard unsaved edits. -->
         @if (!profileLoaded) {
@@ -22,7 +19,7 @@
             Retry
           </button>
         }
-      </div>
+      </app-inline-banner>
     }
     <!-- Editable profile -->
     <mat-card class="up-card">

@@ -12,12 +12,11 @@
     </mat-card-header>
     <mat-card-content>
       @if (status.waiting_for_answers && status.pending_questions?.length) {
-        <div class="waiting-notice">
-          <mat-icon>help_outline</mat-icon>
-          <span>
+        <app-inline-banner variant="warning" icon="help_outline" live="polite">
+          <span banner-message>
             {{ status.pending_questions?.length ?? 0 }} question(s) require your response before the job can continue.
           </span>
-        </div>
+        </app-inline-banner>
       }
       @if (status.current_task) {
         <p><strong>Current task:</strong> {{ status.current_task }}</p>

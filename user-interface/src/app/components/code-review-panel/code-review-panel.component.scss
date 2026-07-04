@@ -59,20 +59,6 @@
   }
 }
 
-.cr-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  border-radius: 8px;
-  margin: 0.75rem 0;
-
-  &--error {
-    background: var(--mat-sys-error-container, #fdeaea);
-    color: var(--mat-sys-on-error-container, #8c1d18);
-  }
-}
-
 .cr-empty {
   display: flex;
   align-items: center;

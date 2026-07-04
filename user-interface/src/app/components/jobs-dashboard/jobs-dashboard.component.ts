@@ -34,6 +34,7 @@ import type {
   TeamProgressEntry,
 } from '../../models';
 import { ALREADY_COMPLETE, COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import {
   type DashboardRow,
   type JobSource,
@@ -150,6 +151,7 @@ interface PersistedFilters {
     MatButtonModule,
     MatTooltipModule,
     MatMenuModule,
+    InlineBannerComponent,
   ],
   templateUrl: './jobs-dashboard.component.html',
   styleUrl: './jobs-dashboard.component.scss',

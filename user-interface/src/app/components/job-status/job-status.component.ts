@@ -9,11 +9,12 @@ import type { JobStatusResponse } from '../../models';
 import { markStatusReceived } from '../../shared/staleness.util';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 
 @Component({
   selector: 'app-job-status',
   standalone: true,
-  imports: [MatCardModule, MatProgressBarModule, MatExpansionModule, MatIconModule, StallWarningComponent],
+  imports: [MatCardModule, MatProgressBarModule, MatExpansionModule, MatIconModule, StallWarningComponent, InlineBannerComponent],
   templateUrl: './job-status.component.html',
   styleUrl: './job-status.component.scss',
 })
