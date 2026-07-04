@@ -28,6 +28,9 @@ import {
 
 const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434';
 
+/** Shared validation message for the add/edit required-key check. */
+const API_KEY_REQUIRED_MSG = 'An API key is required for Claude.';
+
 /** Editable form fields for a provider list entry (add or edit). */
 interface ProviderForm {
   label: string;
@@ -253,7 +256,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       return;
     }
     if (this.apiKeyMissing(form.provider, { typed: form.api_key })) {
-      this.providersError = 'An API key is required for Claude.';
+      this.providersError = API_KEY_REQUIRED_MSG;
       return;
     }
     const body: LlmProviderCreate = {
@@ -321,7 +324,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
         alreadyStored: entry?.api_key_configured,
       })
     ) {
-      this.providersError = 'An API key is required for Claude.';
+      this.providersError = API_KEY_REQUIRED_MSG;
       return;
     }
     const body: LlmProviderUpdate = {

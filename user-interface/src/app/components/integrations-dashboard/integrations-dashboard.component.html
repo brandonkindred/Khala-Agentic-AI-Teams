@@ -6,13 +6,14 @@
       <p>Connect external services so your agents can sign in, post updates, and pull metrics on your behalf.</p>
     </div>
 
+    @let connected = connectedCount;
     <div class="integrations-hero__stats" role="status" aria-live="polite">
       <div class="stat-pill">
-        <span class="stat-pill__value">{{ connectedCount }}<span class="stat-pill__divider">/</span>{{ totalIntegrations }}</span>
+        <span class="stat-pill__value">{{ connected }}<span class="stat-pill__divider">/</span>{{ totalIntegrations }}</span>
         <span class="stat-pill__label">Connected</span>
       </div>
       <div class="stat-pill stat-pill--muted">
-        <span class="stat-pill__value">{{ totalIntegrations - connectedCount }}</span>
+        <span class="stat-pill__value">{{ totalIntegrations - connected }}</span>
         <span class="stat-pill__label">Pending setup</span>
       </div>
     </div>
