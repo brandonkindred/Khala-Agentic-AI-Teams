@@ -4,6 +4,7 @@ import {
   HttpTestingController,
 } from '@angular/common/http/testing';
 import { UserProfileApiService } from './user-profile-api.service';
+import { SKIP_ERROR_NOTIFY } from '../core/error-handler.interceptor';
 import { environment } from '../../environments/environment';
 
 describe('UserProfileApiService', () => {
@@ -35,7 +36,16 @@ describe('UserProfileApiService', () => {
     });
     const req = httpMock.expectOne(baseUrl);
     expect(req.request.method).toBe('GET');
+    // Default request does not opt out of the error toast.
+    expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(false);
     req.flush(mock);
+  });
+
+  it('should mark a silent getProfile to skip the error toast', () => {
+    service.getProfile({ silent: true }).subscribe();
+    const req = httpMock.expectOne(baseUrl);
+    expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(true);
+    req.flush({ user_id: 'default', display_name: '', email: '', bio: '', preferences: {}, created_at: '', updated_at: '' });
   });
 
   it('should PUT a profile update with body', () => {

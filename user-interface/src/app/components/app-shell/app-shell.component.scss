@@ -298,7 +298,7 @@
   }
 
   // When pinned, always fully visible with accent color
-  &[aria-pressed="true"] {
+  &.favorited {
     opacity: 1;
 
     mat-icon {
@@ -322,9 +322,38 @@
 .footer-content {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   gap: 6px;
   padding: 10px 14px;
+}
+
+.footer-profile-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px; // WCAG 2.5.8 target size
+  min-height: 44px;
+  border-radius: var(--kh-radius-md);
+  color: var(--kh-text-muted);
+  transition:
+    background var(--kh-transition),
+    color var(--kh-transition);
+
+  mat-icon {
+    font-size: 22px;
+    width: 22px;
+    height: 22px;
+  }
+
+  &:hover {
+    background: var(--kh-glass-hover);
+    color: var(--kh-text-secondary);
+  }
+
+  &.active {
+    background: var(--kh-accent-muted);
+    color: var(--kh-accent);
+  }
 }
 
 // ============================================================================
@@ -466,6 +495,16 @@
   padding-left: 18px;
   border-left: 1px solid var(--kh-border-subtle);
   border-radius: 0 var(--kh-radius-md) var(--kh-radius-md) 0;
+}
+
+// Flyout item row: link fills the width, favorite star sits at the end.
+.nav-flyout-row {
+  gap: 2px;
+
+  .nav-flyout-link {
+    flex: 1;
+    min-width: 0;
+  }
 }
 
 // ============================================================================

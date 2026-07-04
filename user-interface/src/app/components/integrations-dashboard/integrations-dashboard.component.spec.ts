@@ -2,6 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of, throwError } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { vi } from 'vitest';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { IntegrationsDashboardComponent } from './integrations-dashboard.component';
@@ -27,8 +28,10 @@ describe('IntegrationsDashboardComponent', () => {
     updateTradingViewConfig: ReturnType<typeof vi.fn>;
     deleteTradingViewConfig: ReturnType<typeof vi.fn>;
   };
+  let snackBar: { open: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
+    snackBar = { open: vi.fn() };
     apiSpy = {
       getSlackConfig: vi.fn(),
       updateSlackConfig: vi.fn(),
@@ -65,7 +68,11 @@ describe('IntegrationsDashboardComponent', () => {
 
     await TestBed.configureTestingModule({
       imports: [IntegrationsDashboardComponent, NoopAnimationsModule],
-      providers: [provideRouter([]), { provide: IntegrationsApiService, useValue: apiSpy }],
+      providers: [
+        provideRouter([]),
+        { provide: IntegrationsApiService, useValue: apiSpy },
+        { provide: MatSnackBar, useValue: snackBar },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(IntegrationsDashboardComponent);
@@ -178,7 +185,7 @@ describe('IntegrationsDashboardComponent', () => {
       enabled: true,
       channel_display_name: '#eng',
     }));
-    expect(component.success).toBe('Slack integration saved.');
+    expect(snackBar.open).toHaveBeenCalledWith('Slack integration saved.', 'Dismiss', { duration: 3000 });
     expect(component.saving).toBe(false);
   });
 

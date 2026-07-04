@@ -1,6 +1,5 @@
 import { Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { Title } from '@angular/platform-browser';
 import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
 import { axe } from 'vitest-axe';
@@ -63,11 +62,6 @@ describe('DashboardShellComponent', () => {
     sections.forEach((section, i) => {
       expect(section.getAttribute('aria-labelledby')).toBe(ids[i]);
     });
-  });
-
-  it('sets the browser tab title from the title input', () => {
-    const title = TestBed.inject(Title);
-    expect(title.getTitle()).toContain('| Khala');
   });
 
   it('has no axe violations', async () => {

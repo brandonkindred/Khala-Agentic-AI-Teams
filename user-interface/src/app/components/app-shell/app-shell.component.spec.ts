@@ -44,6 +44,35 @@ describe('AppShellComponent', () => {
     expect(component.isActive('/software-engineering')).toBe(false);
   });
 
+  it('renders a footer profile link that navigates to the profile page', () => {
+    const link = (fixture.nativeElement as HTMLElement).querySelector(
+      '.footer-profile-link',
+    ) as HTMLAnchorElement;
+    expect(link).toBeTruthy();
+    // Route/label derive from the 'user-profile' NavItem in navigation.model.ts.
+    expect(link.getAttribute('href')).toBe('/user-profile');
+    expect(link.getAttribute('aria-label')).toBe('User Profile');
+    // Not the current page by default, so no aria-current.
+    expect(link.getAttribute('aria-current')).toBeNull();
+  });
+
+  it('marks the footer profile link as current when on /user-profile', () => {
+    (component as any).router = { url: '/user-profile' };
+    fixture.detectChanges();
+    const link = (fixture.nativeElement as HTMLElement).querySelector(
+      '.footer-profile-link',
+    ) as HTMLAnchorElement;
+    expect(link.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('requireNavItem throws when the nav model is missing a required item', () => {
+    // Real fail-fast: a removed 'user-profile' NavItem must be an explicit
+    // construction error, not an undefined that crashes template rendering.
+    expect(() => (AppShellComponent as any).requireNavItem('does-not-exist')).toThrowError(
+      /does-not-exist/,
+    );
+  });
+
   it('openFlyout activates a group and scheduleClose clears it after the delay', () => {
     vi.useFakeTimers();
     const [firstGroup] = component.navGroups;

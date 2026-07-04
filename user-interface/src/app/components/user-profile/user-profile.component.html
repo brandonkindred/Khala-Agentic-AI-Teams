@@ -10,27 +10,70 @@
     </div>
   } @else {
     @if (error) {
-      <div class="up-banner up-error" role="alert">{{ error }}</div>
+      <!-- role="alert" wraps only the message: interactive controls don't
+           belong inside an assertive live region (some AT won't expose them). -->
+      <div class="up-banner up-error">
+        <span role="alert">{{ error }}</span>
+        <!-- Retry only before the first successful load (the dead-end case);
+             after a failed SAVE, reloading here would discard unsaved edits. -->
+        @if (!profileLoaded) {
+          <button mat-stroked-button type="button" class="up-retry" (click)="retryLoad()">
+            <mat-icon aria-hidden="true">refresh</mat-icon>
+            Retry
+          </button>
+        }
+      </div>
     }
-    @if (success) {
-      <div class="up-banner up-success" role="status">{{ success }}</div>
-    }
-
     <!-- Editable profile -->
     <mat-card class="up-card">
       <mat-card-header>
-        <mat-card-title>Profile details</mat-card-title>
+        <h2 mat-card-title class="up-card-title">Profile details</h2>
       </mat-card-header>
       <mat-card-content>
         <form [formGroup]="form" (ngSubmit)="save()" class="up-form">
+          <div class="up-identity">
+            <app-initials-avatar
+              [name]="form.controls.display_name.value ?? ''"
+              [colorKey]="form.controls.avatar_color.value"
+              [size]="64"
+            />
+            <div class="up-identity-meta">
+              <span class="up-identity-hint">Avatar initials come from your display name.</span>
+              <div class="up-swatches" role="radiogroup" aria-label="Avatar color">
+                @for (option of avatarColors; track option.key) {
+                  @let checked = form.controls.avatar_color.value === option.key;
+                  <button
+                    type="button"
+                    class="up-swatch"
+                    role="radio"
+                    [attr.aria-checked]="checked"
+                    [class.selected]="checked"
+                    [attr.aria-label]="option.label"
+                    [matTooltip]="option.label"
+                    [tabindex]="checked ? 0 : -1"
+                    [style.backgroundColor]="option.fill"
+                    (click)="selectAvatarColor(option.key)"
+                    (keydown)="onSwatchKeydown($event)"
+                  >
+                    @if (checked) {
+                      <mat-icon aria-hidden="true">check</mat-icon>
+                    }
+                  </button>
+                }
+              </div>
+            </div>
+          </div>
+
           <mat-form-field appearance="outline">
             <mat-label>Display name</mat-label>
-            <input matInput formControlName="display_name" autocomplete="name" />
+            <input #displayNameInput matInput formControlName="display_name" autocomplete="name" />
+            <mat-hint>Shown on your avatar and wherever your profile appears.</mat-hint>
           </mat-form-field>
 
           <mat-form-field appearance="outline">
             <mat-label>Email</mat-label>
             <input matInput formControlName="email" type="email" autocomplete="email" />
+            <mat-hint>Optional.</mat-hint>
             @if (form.controls.email.touched && form.controls.email.errors?.['email']) {
               <mat-error>Enter a valid email address.</mat-error>
             }
@@ -42,9 +85,18 @@
           </mat-form-field>
 
           <div class="up-actions">
-            <button mat-flat-button color="primary" type="submit" [disabled]="saving">
-              <mat-icon>save</mat-icon>
-              {{ saving ? 'Saving…' : 'Save profile' }}
+            <button
+              mat-flat-button
+              color="primary"
+              type="submit"
+              [disabled]="saving || !profileLoaded"
+            >
+              @if (saving) {
+                <mat-spinner class="up-save-spinner" diameter="18" aria-hidden="true" />
+              } @else {
+                <mat-icon>save</mat-icon>
+              }
+              <span>{{ saving ? 'Saving…' : 'Save profile' }}</span>
             </button>
           </div>
         </form>
@@ -54,7 +106,7 @@
     <!-- Linked artifacts -->
     <mat-card class="up-card">
       <mat-card-header class="up-card-header">
-        <mat-card-title>Linked work ({{ totalAssociations }})</mat-card-title>
+        <h2 mat-card-title class="up-card-title">Linked work ({{ totalAssociations }})</h2>
         <button
           mat-icon-button
           type="button"
@@ -62,20 +114,26 @@
           (click)="load()"
           [disabled]="loading"
           aria-label="Refresh linked work"
+          matTooltip="Refresh linked work"
         >
           <mat-icon>refresh</mat-icon>
         </button>
       </mat-card-header>
       <mat-card-content>
         @if (totalAssociations === 0) {
-          <p class="up-empty">
-            Nothing linked yet. Create a brand, blog post, project, or agentic team and it will
-            appear here — or
-            <a routerLink="/job-matching" [queryParams]="{ tab: 'profile' }"
-              >set up your career profile</a
-            >
-            to start matching jobs.
-          </p>
+          <app-empty-state
+            icon="hub"
+            title="Nothing linked yet"
+            description="Create a brand, blog post, project, or agentic team and it will appear here."
+          >
+            <p class="up-empty-cta">
+              Or
+              <a routerLink="/job-matching" [queryParams]="{ tab: 'profile' }"
+                >set up your career profile</a
+              >
+              to start matching jobs.
+            </p>
+          </app-empty-state>
         } @else {
           @for (group of groups; track group.type) {
             <section class="up-group">
@@ -119,11 +177,15 @@
     <!-- Integrations -->
     <mat-card class="up-card">
       <mat-card-header>
-        <mat-card-title>Integrations</mat-card-title>
+        <h2 mat-card-title class="up-card-title">Integrations</h2>
       </mat-card-header>
       <mat-card-content>
         @if (integrations.length === 0) {
-          <p class="up-empty">No integrations reported.</p>
+          <app-empty-state
+            icon="extension"
+            title="No integrations connected"
+            description="Connect Slack, GitHub, and more to see their status here."
+          />
         } @else {
           <ul class="up-list">
             @for (integration of integrations; track integration.id) {
@@ -143,7 +205,10 @@
             }
           </ul>
         }
-        <a routerLink="/integrations" class="up-link">Manage integrations</a>
+        <a mat-stroked-button routerLink="/integrations" class="up-link">
+          <mat-icon>tune</mat-icon>
+          Manage integrations
+        </a>
       </mat-card-content>
     </mat-card>
   }

@@ -6,13 +6,14 @@
       <p>Connect external services so your agents can sign in, post updates, and pull metrics on your behalf.</p>
     </div>
 
+    @let connected = connectedCount;
     <div class="integrations-hero__stats" role="status" aria-live="polite">
       <div class="stat-pill">
-        <span class="stat-pill__value">{{ connectedCount }}<span class="stat-pill__divider">/</span>{{ totalIntegrations }}</span>
+        <span class="stat-pill__value">{{ connected }}<span class="stat-pill__divider">/</span>{{ totalIntegrations }}</span>
         <span class="stat-pill__label">Connected</span>
       </div>
       <div class="stat-pill stat-pill--muted">
-        <span class="stat-pill__value">{{ totalIntegrations - connectedCount }}</span>
+        <span class="stat-pill__value">{{ totalIntegrations - connected }}</span>
         <span class="stat-pill__label">Pending setup</span>
       </div>
     </div>
@@ -103,12 +104,6 @@
                 The API is not running with PostgreSQL. Start the stack via Docker (or set
                 <code>POSTGRES_HOST</code>) to save encrypted Google credentials.
               </span>
-            </div>
-          }
-          @if (googleBrowserSuccess) {
-            <div class="status-banner status-banner--success">
-              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-              <span>{{ googleBrowserSuccess }}</span>
             </div>
           }
 
@@ -238,12 +233,6 @@
             <div class="status-banner status-banner--error">
               <mat-icon aria-hidden="true">error_outline</mat-icon>
               <span>{{ error }}</span>
-            </div>
-          }
-          @if (success) {
-            <div class="status-banner status-banner--success">
-              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-              <span>{{ success }}</span>
             </div>
           }
 
@@ -485,12 +474,6 @@
               <span>{{ mediumError }}</span>
             </div>
           }
-          @if (mediumSuccess) {
-            <div class="status-banner status-banner--success">
-              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-              <span>{{ mediumSuccess }}</span>
-            </div>
-          }
 
           <div class="setting-row">
             <mat-slide-toggle [(ngModel)]="mediumEnabled" color="primary">
@@ -667,12 +650,6 @@
               <span>{{ githubError }}</span>
             </div>
           }
-          @if (githubSuccess) {
-            <div class="status-banner status-banner--success">
-              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-              <span>{{ githubSuccess }}</span>
-            </div>
-          }
 
           <p class="form-hint">
             Enter a <strong>Personal Access Token</strong> with <code>repo</code> scope, along with the repository owner and name.
@@ -825,12 +802,6 @@
             <div class="status-banner status-banner--error">
               <mat-icon aria-hidden="true">error_outline</mat-icon>
               <span>{{ tradingViewError }}</span>
-            </div>
-          }
-          @if (tradingViewSuccess) {
-            <div class="status-banner status-banner--success">
-              <mat-icon aria-hidden="true">check_circle_outline</mat-icon>
-              <span>{{ tradingViewSuccess }}</span>
             </div>
           }
 

@@ -2,6 +2,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of, Subject, throwError } from 'rxjs';
 import { ActivatedRoute, provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { vi, beforeEach, afterEach } from 'vitest';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { IntegrationsDashboardComponent } from './integrations-dashboard.component';
@@ -29,9 +30,11 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
   let component: IntegrationsDashboardComponent;
   let queryParams$: Subject<Record<string, string>>;
   let originalLocation: Location;
+  let snackBar: { open: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
     queryParams$ = new Subject();
+    snackBar = { open: vi.fn() };
     api = {
       getSlackConfig: vi.fn().mockReturnValue(of({
         enabled: false,
@@ -86,6 +89,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
         provideRouter([]),
         { provide: IntegrationsApiService, useValue: api },
         { provide: ActivatedRoute, useValue: { queryParams: queryParams$.asObservable() } },
+        { provide: MatSnackBar, useValue: snackBar },
       ],
     }).compileComponents();
 
@@ -131,14 +135,14 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
   it('handles slack_connected with team name', () => {
     fixture.detectChanges();
     queryParams$.next({ slack_connected: '1', team: encodeURIComponent('Foo Team') });
-    expect(component.success).toContain('"Foo Team"');
+    expect(snackBar.open).toHaveBeenCalledWith(expect.stringContaining('"Foo Team"'), 'Dismiss', { duration: 3000 });
     expect(component.expanded).toBe('slack');
   });
 
   it('handles slack_connected without team', () => {
     fixture.detectChanges();
     queryParams$.next({ slack_connected: '1' });
-    expect(component.success).toBe('Slack connected successfully.');
+    expect(snackBar.open).toHaveBeenCalledWith('Slack connected successfully.', 'Dismiss', { duration: 3000 });
   });
 
   it('handles slack_error with known and unknown codes', () => {
@@ -160,7 +164,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
   it('handles medium_google_connected and medium_error', () => {
     fixture.detectChanges();
     queryParams$.next({ medium_google_connected: '1' });
-    expect(component.mediumSuccess).toContain('linked');
+    expect(snackBar.open).toHaveBeenCalledWith(expect.stringContaining('linked'), 'Dismiss', { duration: 3000 });
     expect(component.expanded).toBe('medium');
 
     queryParams$.next({ medium_error: 'access_denied' });
@@ -198,7 +202,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     component.saveGoogleBrowserLoginCredentials();
     expect(api.putGoogleBrowserLoginCredentials).toHaveBeenCalledWith({ email: 'me@example.com', password: 'secret' });
     expect(component.googleAccountPassword).toBe('');
-    expect(component.googleBrowserSuccess).toContain('saved');
+    expect(snackBar.open).toHaveBeenCalledWith(expect.stringContaining('saved'), 'Dismiss', { duration: 3000 });
   });
 
   it('saveGoogleBrowserLoginCredentials sets error on failure', () => {
@@ -216,7 +220,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     expect(api.deleteGoogleBrowserLoginCredentials).toHaveBeenCalled();
     expect(component.googleAccountEmail).toBe('');
     expect(component.googleAccountPassword).toBe('');
-    expect(component.googleBrowserSuccess).toContain('removed');
+    expect(snackBar.open).toHaveBeenCalledWith(expect.stringContaining('removed'), 'Dismiss', { duration: 3000 });
   });
 
   it('clearGoogleBrowserLoginCredentials handles error', () => {
@@ -281,7 +285,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     component.mediumProvider = 'google';
     component.saveMediumSettings();
     expect(api.updateMediumConfig).toHaveBeenCalled();
-    expect(component.mediumSuccess).toContain('saved');
+    expect(snackBar.open).toHaveBeenCalledWith(expect.stringContaining('saved'), 'Dismiss', { duration: 3000 });
 
     api.updateMediumConfig.mockReturnValue(throwError(() => ({ message: 'medium-save-fail' })));
     component.saveMediumSettings();
@@ -292,7 +296,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.runMediumBrowserLogin();
     expect(api.mediumBrowserLoginSession).toHaveBeenCalled();
-    expect(component.mediumSuccess).toContain('browser session');
+    expect(snackBar.open).toHaveBeenCalledWith(expect.stringContaining('browser session'), 'Dismiss', { duration: 3000 });
 
     api.mediumBrowserLoginSession.mockReturnValue(throwError(() => ({ message: 'browser-fail' })));
     component.runMediumBrowserLogin();
@@ -312,7 +316,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
       enabled: true,
       default_channel: '#ops',
     }));
-    expect(component.success).toBe('Settings saved.');
+    expect(snackBar.open).toHaveBeenCalledWith('Settings saved.', 'Dismiss', { duration: 3000 });
 
     api.updateSlackConfig.mockReturnValue(throwError(() => ({ message: 'oops' })));
     component.saveSettings();
@@ -424,7 +428,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.disconnectSlack();
     expect(api.disconnectSlack).toHaveBeenCalled();
-    expect(component.success).toBe('Slack disconnected.');
+    expect(snackBar.open).toHaveBeenCalledWith('Slack disconnected.', 'Dismiss', { duration: 3000 });
 
     api.disconnectSlack.mockReturnValue(throwError(() => ({ message: 'disconnect fail' })));
     component.disconnectSlack();
@@ -493,7 +497,9 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
       tool_name: '',
       auth_token: 'secret',
     });
-    expect(component.tradingViewSuccess).toBe('TradingView integration saved.');
+    expect(snackBar.open).toHaveBeenCalledWith('TradingView integration saved.', 'Dismiss', {
+      duration: 3000,
+    });
     expect(component.tradingViewTokenConfigured).toBe(true);
     expect(component.tradingViewToken).toBe('');
   });
@@ -510,11 +516,49 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     fixture.detectChanges();
     component.disconnectTradingView();
     expect(api.deleteTradingViewConfig).toHaveBeenCalled();
-    expect(component.tradingViewSuccess).toBe('TradingView disconnected.');
+    expect(snackBar.open).toHaveBeenCalledWith('TradingView disconnected.', 'Dismiss', {
+      duration: 3000,
+    });
     expect(component.tradingViewEnabled).toBe(false);
 
     api.deleteTradingViewConfig.mockReturnValue(throwError(() => ({ message: 'disc fail' })));
     component.disconnectTradingView();
     expect(component.tradingViewError).toBe('disc fail');
+  });
+
+  // ---------------------------------------------------------------------
+  // Unsaved-changes guard
+  // ---------------------------------------------------------------------
+
+  it('hasUnsavedChanges is false with a pristine form', () => {
+    fixture.detectChanges();
+    expect(component.hasUnsavedChanges()).toBe(false);
+  });
+
+  it('hasUnsavedChanges is true while a save is in flight', () => {
+    fixture.detectChanges();
+    component.saving = true;
+    expect(component.hasUnsavedChanges()).toBe(true);
+  });
+
+  it('hasUnsavedChanges is true when a secret field holds unsaved input', () => {
+    fixture.detectChanges();
+    component.clientSecret = 'sk-unsaved';
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.clientSecret = '';
+    component.githubPat = 'ghp_unsaved';
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.githubPat = '';
+    component.googleAccountPassword = 'pw';
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.googleAccountPassword = '';
+    component.tradingViewToken = 'tv-secret';
+    expect(component.hasUnsavedChanges()).toBe(true);
+  });
+
+  it('hasUnsavedChanges is true when a Slack webhook URL (a secret) is typed', () => {
+    fixture.detectChanges();
+    component.webhookUrl = 'https://hooks.slack.com/services/T0/B0/' + 'x'.repeat(40);
+    expect(component.hasUnsavedChanges()).toBe(true);
   });
 });

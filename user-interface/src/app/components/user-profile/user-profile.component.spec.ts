@@ -3,6 +3,7 @@ import { of, throwError } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { vi } from 'vitest';
 import { UserProfileApiService } from '../../services/user-profile-api.service';
 import { UserProfileComponent } from './user-profile.component';
@@ -32,7 +33,9 @@ describe('UserProfileComponent', () => {
   let apiSpy: {
     getOverview: ReturnType<typeof vi.fn>;
     updateProfile: ReturnType<typeof vi.fn>;
+    getProfile: ReturnType<typeof vi.fn>;
   };
+  let snackBar: { open: ReturnType<typeof vi.fn> };
 
   async function setup(): Promise<void> {
     await TestBed.configureTestingModule({
@@ -41,6 +44,7 @@ describe('UserProfileComponent', () => {
         provideHttpClient(),
         provideRouter([]),
         { provide: UserProfileApiService, useValue: apiSpy },
+        { provide: MatSnackBar, useValue: snackBar },
       ],
     }).compileComponents();
 
@@ -53,7 +57,9 @@ describe('UserProfileComponent', () => {
     apiSpy = {
       getOverview: vi.fn().mockReturnValue(of(OVERVIEW)),
       updateProfile: vi.fn().mockReturnValue(of(PROFILE)),
+      getProfile: vi.fn().mockReturnValue(of(PROFILE)),
     };
+    snackBar = { open: vi.fn() };
   });
 
   afterEach(() => {
@@ -157,12 +163,14 @@ describe('UserProfileComponent', () => {
     expect(component.loading).toBe(false);
   });
 
-  it('should render the empty integrations message when none are reported', async () => {
+  it('should render the empty integrations state when none are reported', async () => {
     apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, integrations: [] }));
     await setup();
     expect(component.integrations).toEqual([]);
     const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
-    expect(text).toContain('No integrations reported.');
+    expect(text).toContain('No integrations connected');
+    // Uses the shared empty-state component, not an inline paragraph.
+    expect((fixture.nativeElement as HTMLElement).querySelector('app-empty-state')).toBeTruthy();
   });
 
   it('should fall back to artifact_id when an association has no label', async () => {
@@ -197,14 +205,7 @@ describe('UserProfileComponent', () => {
     expect(component.loading).toBe(false);
   });
 
-  it('should clear a stale success banner on reload', async () => {
-    await setup();
-    component.success = 'Profile saved.';
-    component.load();
-    expect(component.success).toBeNull();
-  });
-
-  it('should save valid profile edits', async () => {
+  it('should save valid profile edits and confirm via a snackbar', async () => {
     await setup();
     component.form.patchValue({ display_name: 'New Name' });
     component.form.markAsDirty(); // simulate a user edit dirtying the form
@@ -213,9 +214,55 @@ describe('UserProfileComponent', () => {
     expect(apiSpy.updateProfile).toHaveBeenCalledWith(
       expect.objectContaining({ display_name: 'New Name' }),
     );
-    expect(component.success).toBe('Profile saved.');
+    // Transient confirmation, not a persistent banner.
+    expect(snackBar.open).toHaveBeenCalledWith('Profile saved.', 'Dismiss', { duration: 3000 });
     // The form matches the persisted state after a successful save.
     expect(component.form.pristine).toBe(true);
+  });
+
+  it('should report unsaved changes while the form is dirty, clearing after a successful save', async () => {
+    await setup();
+    expect(component.hasUnsavedChanges()).toBe(false);
+    component.form.patchValue({ bio: 'edit' });
+    component.form.markAsDirty();
+    expect(component.hasUnsavedChanges()).toBe(true);
+    component.save(); // success path marks pristine
+    expect(component.hasUnsavedChanges()).toBe(false);
+  });
+
+  it('should still report unsaved changes DURING an in-flight save', async () => {
+    // Navigating away mid-save cancels the request (takeUntilDestroyed), so the
+    // guard must keep prompting until the save actually completes.
+    const { Subject } = await import('rxjs');
+    const pending = new Subject<typeof PROFILE>();
+    apiSpy.updateProfile.mockReturnValue(pending);
+    await setup();
+    component.form.patchValue({ bio: 'edit' });
+    component.form.markAsDirty();
+    component.save();
+    expect(component.saving).toBe(true);
+    expect(component.hasUnsavedChanges()).toBe(true); // still dirty, save not yet landed
+    pending.next(PROFILE);
+    pending.complete();
+    expect(component.saving).toBe(false);
+    expect(component.hasUnsavedChanges()).toBe(false);
+  });
+
+  it('should prompt the browser on unload while there are unsaved changes', async () => {
+    await setup();
+    component.form.patchValue({ bio: 'edit' });
+    component.form.markAsDirty();
+    const event = { preventDefault: vi.fn(), returnValue: undefined } as unknown as BeforeUnloadEvent;
+    component.onBeforeUnload(event);
+    expect(event.preventDefault).toHaveBeenCalled();
+    // Legacy engines only prompt when returnValue is also assigned.
+    expect(event.returnValue).toBe('');
+    // A pristine form leaves the event untouched.
+    component.form.markAsPristine();
+    const clean = { preventDefault: vi.fn(), returnValue: undefined } as unknown as BeforeUnloadEvent;
+    component.onBeforeUnload(clean);
+    expect(clean.preventDefault).not.toHaveBeenCalled();
+    expect(clean.returnValue).toBeUndefined();
   });
 
   it('should not save when the email is invalid', async () => {
@@ -304,5 +351,221 @@ describe('UserProfileComponent', () => {
     // With a zero total the page shows the empty-state copy (which links to the
     // career editor) rather than the group list.
     expect((fixture.nativeElement as HTMLElement).textContent).toContain('set up your career profile');
+  });
+
+  it('should load a stored avatar color into the form', async () => {
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark', avatar_color: 'blue' } } }),
+    );
+    await setup();
+    expect(component.form.value.avatar_color).toBe('blue');
+  });
+
+  it('should default the avatar color when preferences are missing or garbage', async () => {
+    // Two component-level cases cover the two load paths: a null container
+    // (the optional chain yields undefined) and an unknown stored key
+    // (resolveAvatarColor falls back). Value-level garbage shapes are
+    // unit-tested on resolveAvatarColor in the avatar spec.
+    for (const preferences of [null, { avatar_color: 'magenta' }]) {
+      apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, profile: { ...PROFILE, preferences } }));
+      await setup();
+      expect(component.form.value.avatar_color).toBe('amber');
+      fixture.destroy();
+      TestBed.resetTestingModule();
+    }
+  });
+
+  it('should mark the form dirty and check the matching swatch when a color is selected', async () => {
+    await setup();
+    expect(component.form.dirty).toBe(false);
+    component.selectAvatarColor('green');
+    fixture.detectChanges();
+    expect(component.form.value.avatar_color).toBe('green');
+    expect(component.form.dirty).toBe(true);
+    const checked = (fixture.nativeElement as HTMLElement).querySelector(
+      '.up-swatch[aria-checked="true"]',
+    ) as HTMLButtonElement;
+    expect(checked).toBeTruthy();
+    expect(checked.getAttribute('aria-label')).toBe('Green');
+  });
+
+  it('should send only the avatar_color preference key on save (server merges)', async () => {
+    // Clobber-prevention regression: unrelated preference keys survive because
+    // the backend merges key-by-key — the client must NOT send a snapshot of
+    // other features' keys (a stale snapshot is what caused lost updates).
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark', avatar_color: 'blue' } } }),
+    );
+    await setup();
+    component.selectAvatarColor('green');
+    component.save();
+    expect(apiSpy.updateProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ preferences: { avatar_color: 'green' } }),
+    );
+  });
+
+  it('should block saving until a load has succeeded', async () => {
+    // A save after a failed load would PUT constructor defaults + empty
+    // preferences, which the backend applies wholesale — wiping the profile.
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    expect(component.profileLoaded).toBe(false);
+    const btn = (fixture.nativeElement as HTMLElement).querySelector(
+      'button[type="submit"]',
+    ) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    component.save();
+    expect(apiSpy.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('should re-enable saving once a retry load succeeds', async () => {
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    apiSpy.getOverview.mockReturnValue(of(OVERVIEW));
+    component.load();
+    expect(component.profileLoaded).toBe(true);
+    component.save();
+    expect(apiSpy.updateProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it('should offer a Retry button in the error banner before the first successful load', async () => {
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    const retry = (fixture.nativeElement as HTMLElement).querySelector('.up-retry') as HTMLButtonElement;
+    expect(retry).toBeTruthy();
+    apiSpy.getOverview.mockReturnValue(of(OVERVIEW));
+    retry.click();
+    fixture.detectChanges();
+    expect(component.profileLoaded).toBe(true);
+    expect((fixture.nativeElement as HTMLElement).querySelector('.up-retry')).toBeNull();
+  });
+
+  it('should not offer Retry on a save error (reloading would discard unsaved edits)', async () => {
+    apiSpy.updateProfile.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    component.save();
+    fixture.detectChanges();
+    expect(component.error).toBeTruthy();
+    expect((fixture.nativeElement as HTMLElement).querySelector('.up-retry')).toBeNull();
+  });
+
+  it('should rove tabindex so only the checked swatch is a tab stop', async () => {
+    await setup();
+    const radios = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll<HTMLButtonElement>('.up-swatch'),
+    );
+    expect(radios.length).toBe(4);
+    expect(radios.filter((r) => r.tabIndex === 0).length).toBe(1);
+    expect(radios.filter((r) => r.tabIndex === -1).length).toBe(3);
+    const checked = radios.find((r) => r.tabIndex === 0);
+    expect(checked?.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('should move the selection with arrow keys, wrapping at the ends', async () => {
+    await setup();
+    expect(component.form.value.avatar_color).toBe('amber');
+    // Roving tabindex: each keydown targets the currently checked radio.
+    const checkedRadio = () =>
+      (fixture.nativeElement as HTMLElement).querySelector(
+        '.up-swatch[aria-checked="true"]',
+      ) as HTMLButtonElement;
+    const press = (key: string) => {
+      checkedRadio().dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+      fixture.detectChanges();
+    };
+    press('ArrowRight');
+    expect(component.form.value.avatar_color).toBe('green');
+    press('ArrowLeft');
+    expect(component.form.value.avatar_color).toBe('amber');
+    // Left from the first entry wraps to the last.
+    press('ArrowUp');
+    expect(component.form.value.avatar_color).toBe('red');
+    press('ArrowDown');
+    expect(component.form.value.avatar_color).toBe('amber');
+    expect(component.form.dirty).toBe(true);
+  });
+
+  it('should leave non-arrow keys alone in the swatch radiogroup', async () => {
+    await setup();
+    const radio = (fixture.nativeElement as HTMLElement).querySelector('.up-swatch') as HTMLButtonElement;
+    const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    radio.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(component.form.value.avatar_color).toBe('amber');
+  });
+
+  it('should omit preferences entirely on a save when no swatch was picked', async () => {
+    // A bio-only save must not write avatar_color at all: it would stamp the
+    // default onto never-chose profiles and could overwrite a concurrent
+    // tab's newer choice with this tab's stale loaded value. The key must be
+    // ABSENT — not present-with-null/undefined — so the backend merge is
+    // never entered (hence toHaveProperty, not a loose objectContaining).
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, preferences: { theme: 'dark', avatar_color: 'blue' } } }),
+    );
+    await setup();
+    component.form.patchValue({ bio: 'updated' });
+    component.save();
+    expect(apiSpy.updateProfile.mock.calls[0][0]).not.toHaveProperty('preferences');
+  });
+
+  it('should stop sending the color on later saves once it is persisted', async () => {
+    // After a successful save the control is pristine again; the stored color
+    // survives server-side via the merge, so later saves omit the key.
+    await setup(); // PROFILE.preferences is {} — nothing stored initially
+    component.selectAvatarColor('green');
+    component.save();
+    expect(apiSpy.updateProfile.mock.calls[0][0]).toHaveProperty('preferences', {
+      avatar_color: 'green',
+    });
+    component.save(); // pristine again after success; no swatch touched
+    expect(apiSpy.updateProfile.mock.calls[1][0]).not.toHaveProperty('preferences');
+  });
+
+  it('should preserve unsaved edits when a reload happens mid-edit', async () => {
+    // The "Refresh linked work" button re-runs load(); a dirty form must keep
+    // the user's edits instead of being overwritten by server state.
+    await setup();
+    component.form.patchValue({ bio: 'work in progress' });
+    component.form.markAsDirty();
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, bio: 'server bio' } }),
+    );
+    component.load();
+    expect(component.form.value.bio).toBe('work in progress');
+    // The non-form view state still refreshes (brand + project + always-on Career).
+    expect(component.groups.length).toBe(3);
+  });
+
+  it('should patch the form from a reload when it is pristine', async () => {
+    await setup();
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, profile: { ...PROFILE, bio: 'server bio' } }),
+    );
+    component.load();
+    expect(component.form.value.bio).toBe('server bio');
+  });
+
+  it('should move focus to the first field after a successful banner retry', async () => {
+    vi.useFakeTimers();
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
+    await setup();
+    apiSpy.getOverview.mockReturnValue(of(OVERVIEW));
+    component.retryLoad();
+    fixture.detectChanges(); // form renders now that loading finished
+    vi.advanceTimersByTime(0); // flush the deferred focus
+    const input = (fixture.nativeElement as HTMLElement).querySelector(
+      'input[formcontrolname="display_name"]',
+    );
+    expect(document.activeElement).toBe(input);
+    vi.useRealTimers();
+  });
+
+  it('should live-update the avatar initials from the display name control', async () => {
+    await setup();
+    component.form.patchValue({ display_name: 'Grace Hopper' });
+    fixture.detectChanges();
+    const circle = (fixture.nativeElement as HTMLElement).querySelector('.ia-circle');
+    expect(circle?.textContent?.trim()).toBe('GH');
   });
 });
