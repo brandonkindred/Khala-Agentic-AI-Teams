@@ -58,7 +58,7 @@ from coding_team.api.git_ops import (  # noqa: F401
 )
 
 # --- Moved sub-module symbols (re-exported for the public/import + patch surface) ---
-from coding_team.api.lifecycle import _warn_if_no_engine_provider  # noqa: F401
+from coding_team.api.lifecycle import _startup, _warn_if_no_engine_provider  # noqa: F401
 from coding_team.api.models import (  # noqa: F401
     AnswerSubmission,
     JobListItem,
@@ -192,7 +192,7 @@ app = create_team_app(
     "POST /run to start a job; poll GET /status/{job_id}.",
     version="0.1.0",
     postgres_schema=CODE_REVIEW_SCHEMA,
-    on_startup=_warn_if_no_engine_provider,
+    on_startup=_startup,
 )
 
 # Mount the concern-grouped routers. Imported last so the route modules'
