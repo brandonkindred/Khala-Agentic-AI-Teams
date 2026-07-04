@@ -207,6 +207,14 @@ export interface TradingViewConfigUpdate {
   auth_token: string;
 }
 
+/** Result of POST /api/integrations/tradingview/test (a live reachability probe). */
+export interface TradingViewTestResponse {
+  /** True when the stored MCP server answered the OHLCV probe without error. */
+  ok: boolean;
+  /** Human-readable outcome — the reason for a failure, or a success note. */
+  detail: string;
+}
+
 /**
  * One persisted code-review run for a pull request
  * (GET /api/integrations/github/reviews). Backed by the coding team's

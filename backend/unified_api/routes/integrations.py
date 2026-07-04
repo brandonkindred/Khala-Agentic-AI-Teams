@@ -245,6 +245,13 @@ class TradingViewConfigResponse(BaseModel):
     auth_token_configured: bool = Field(False, description="True when an encrypted auth token is stored.")
 
 
+class TradingViewTestResponse(BaseModel):
+    """Result of POST /api/integrations/tradingview/test (a live reachability probe)."""
+
+    ok: bool = Field(description="True when the stored MCP server answered the OHLCV probe without error.")
+    detail: str = Field(description="Human-readable outcome — the reason for a failure, or a success note.")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -901,6 +908,62 @@ async def delete_tradingview() -> TradingViewConfigResponse:
     """Disconnect the TradingView integration (removes the token and resets config)."""
     clear_tradingview_config()
     return _build_tradingview_config_response(get_tradingview_config())
+
+
+@router.post("/tradingview/test", response_model=TradingViewTestResponse)
+async def test_tradingview() -> TradingViewTestResponse:
+    """Probe the stored TradingView MCP server to verify the URL/token actually work.
+
+    Runs a small OHLCV request against the configured endpoint so the user can confirm
+    connectivity before (or independent of) enabling the data source. The stored config
+    is used even when ``enabled`` is false — you test before you switch it on.
+
+    Preconditions: a non-empty ``mcp_server_url`` is stored (else ``HTTPException(400)``).
+    Postconditions: returns HTTP 200 with ``ok=True`` when the server answered the probe
+        without a protocol/tool error, or ``ok=False`` with a friendly ``detail`` when the
+        server was unreachable or returned an MCP error. A missing endpoint is the only
+        input error surfaced as a non-200 (400); reachability failures are reported in-band
+        so the UI can render a red result rather than trapping an exception.
+    """
+    from datetime import date, timedelta
+
+    from fastapi.concurrency import run_in_threadpool
+
+    from investment_team.tradingview_mcp.client import TradingViewMcpClient
+
+    cfg = get_tradingview_config()
+    server_url = str(cfg.get("mcp_server_url", "")).strip()
+    if not server_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Configure and save a TradingView MCP server URL before testing the connection.",
+        )
+
+    client = TradingViewMcpClient(
+        server_url,
+        auth_token=str(cfg.get("auth_token", "")).strip(),
+        tool_name=str(cfg.get("tool_name", "")).strip() or "get_ohlcv",
+        timeout=10.0,
+    )
+    end = date.today()
+    start = end - timedelta(days=7)
+
+    try:
+        rows = await run_in_threadpool(
+            client.fetch_ohlcv,
+            "AAPL",
+            "stock",
+            start.isoformat(),
+            end.isoformat(),
+        )
+    except Exception as exc:  # noqa: BLE001 - any reachability/parse failure is a failed test, not a 500
+        # Mirrors MarketDataService._fetch_tradingview_mcp: a non-JSON 200 response raises
+        # json.JSONDecodeError (not TradingViewMcpError), and the probe must still report
+        # it in-band as an unreachable result rather than surfacing an HTTP 500.
+        return TradingViewTestResponse(ok=False, detail=f"TradingView MCP server unreachable: {exc}")
+
+    note = f"Connected — the MCP server returned {len(rows)} price bar(s) for the probe request."
+    return TradingViewTestResponse(ok=True, detail=note)
 
 
 # ---------------------------------------------------------------------------

@@ -195,4 +195,15 @@ describe('IntegrationsApiService', () => {
     expect(req.request.method).toBe('DELETE');
     req.flush({ enabled: false, mcp_server_url: '', tool_name: '', auth_token_configured: false });
   });
+
+  it('testTradingViewConnection POST', () => {
+    let result: { ok: boolean; detail: string } | undefined;
+    service.testTradingViewConnection().subscribe((res) => {
+      result = res;
+    });
+    const req = httpMock.expectOne(`${baseUrl}/tradingview/test`);
+    expect(req.request.method).toBe('POST');
+    req.flush({ ok: true, detail: 'Connected — 5 bars.' });
+    expect(result).toEqual({ ok: true, detail: 'Connected — 5 bars.' });
+  });
 });
