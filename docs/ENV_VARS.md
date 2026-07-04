@@ -740,6 +740,16 @@ review is flagged as an infrastructure error (default `2` → 3 attempts; floore
 exhaustion the orchestrator fails the task once with a clear
 diagnostic rather than re-sending the same failing prompt through the revision loop.
 
+### CODING_TEAM_REVIEW_CONCURRENCY
+Maximum number of Tech Lead `run_code_review` LLM calls the coding-team orchestrator dispatches
+concurrently within a single review round (default `4`; garbage/empty → default; floored at `1`).
+Each round's reviews are independent (a read-only branch diff plus an LLM call), so a round with `k`
+tasks in review fans the reviews out on a thread pool and costs roughly one review latency instead of
+`k`; the effective pool width is `min(this, number of tasks in review)`. A round with a single task
+in review runs inline (keeping its live per-task progress bar). The merge/revision decisions are
+always applied serially in the original order, so git writes and task-graph mutations stay
+single-threaded (deterministic merge ordering and branch isolation preserved).
+
 ### CODING_TEAM_NO_CHANGE_REVISIT_CAP
 Number of consecutive **no-change** revision rounds the coding team tolerates on a single task
 before handing it to the Tech Lead for direction (default `3`; garbage/empty → default; floored at
