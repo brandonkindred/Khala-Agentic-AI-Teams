@@ -13,6 +13,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { interval, Subscription } from 'rxjs';
 import { startWith, switchMap } from 'rxjs/operators';
 
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import {
   WorkflowStatusResponse,
@@ -37,6 +38,7 @@ import {
     MatExpansionModule,
     MatListModule,
     MatTooltipModule,
+    InlineBannerComponent,
   ],
   templateUrl: './investment-workflow.component.html',
   styleUrl: './investment-workflow.component.scss',

@@ -38,6 +38,7 @@ import {
   SIZING_KINDS,
 } from '../../models';
 
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { EntryRuleEditorComponent } from './editors/entry-rule-editor.component';
 import { ExitRuleEditorComponent } from './editors/exit-rule-editor.component';
 import { SizingEditorComponent } from './editors/sizing-editor.component';
@@ -70,6 +71,7 @@ const BAR_FIELDS: ReadonlySet<string> = new Set(['bar.close', 'bar.high', 'bar.l
     EntryRuleEditorComponent,
     ExitRuleEditorComponent,
     SizingEditorComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './investment-strategy.component.html',
   styleUrl: './investment-strategy.component.scss',
