@@ -119,6 +119,25 @@
 
     <div class="sidenav-footer">
       <div class="footer-content">
+        <a
+          #navFocusable
+          [routerLink]="profileNavItem.route"
+          routerLinkActive="active"
+          class="footer-profile-link"
+          [attr.aria-label]="profileNavItem.label"
+          [matTooltip]="profileNavItem.label"
+          [attr.aria-current]="isActive(profileNavItem.route) ? 'page' : null"
+        >
+          @if (profileStore.hasIdentity()) {
+            <app-initials-avatar
+              [name]="profileStore.displayName()"
+              [colorKey]="profileStore.avatarColorKey()"
+              [size]="28"
+            />
+          } @else {
+            <mat-icon aria-hidden="true">{{ profileNavItem.icon }}</mat-icon>
+          }
+        </a>
         <app-api-status-widget />
       </div>
     </div>

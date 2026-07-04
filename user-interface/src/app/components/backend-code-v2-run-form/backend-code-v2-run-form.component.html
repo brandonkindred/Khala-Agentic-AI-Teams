@@ -27,7 +27,7 @@
     <mat-form-field appearance="outline" class="full-width">
       <mat-label>Add Acceptance Criterion</mat-label>
       <input matInput [(ngModel)]="criterionInput" placeholder="e.g. POST /api/users returns 201" (keyup.enter)="addCriterion()" />
-      <button mat-icon-button matSuffix (click)="addCriterion()" [disabled]="!criterionInput.trim()">
+      <button mat-icon-button matSuffix (click)="addCriterion()" [disabled]="!criterionInput.trim()" aria-label="Add criterion">
         <mat-icon>add</mat-icon>
       </button>
     </mat-form-field>

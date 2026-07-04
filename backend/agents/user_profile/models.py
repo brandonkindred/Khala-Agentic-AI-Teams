@@ -36,7 +36,11 @@ class UserProfileUpdate(BaseModel):
     Preconditions:
         - Every field is optional; ``None`` means "leave unchanged".
     Postconditions:
-        - Only the provided (non-``None``) fields are written.
+        - Provided (non-``None``) scalar fields are written verbatim.
+        - A provided ``preferences`` dict is MERGED key-by-key into the stored
+          object (top-level keys overwrite; keys absent from the update
+          survive) — it does not replace the stored preferences, and there is
+          no key-deletion path.
     """
 
     display_name: Optional[str] = None

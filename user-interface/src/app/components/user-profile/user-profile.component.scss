@@ -6,24 +6,42 @@
 }
 
 .up-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
   border-radius: 6px;
   padding: 0.75rem 1rem;
   margin-bottom: 1rem;
-  font-size: 0.9rem;
+  font-size: var(--kh-text-base);
+}
+
+.up-retry {
+  flex-shrink: 0;
+
+  mat-icon {
+    margin-right: 0.25rem;
+  }
 }
 
 .up-error {
-  background: #fdecea;
-  color: #8a1c12;
-}
-
-.up-success {
-  background: #e8f5e9;
-  color: #1b5e20;
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
 }
 
 .up-card {
   margin-bottom: 1.25rem;
+}
+
+// mat-card-title styling on a real <h2> heading — reset UA heading margins so
+// the card header lays out as before while keeping the element in the outline.
+.up-card-title {
+  margin: 0;
+}
+
+// Center the button spinner with its label.
+.up-save-spinner {
+  display: inline-block;
 }
 
 // Lay out the card title and its refresh action on one row.
@@ -42,6 +60,58 @@
 
   mat-form-field {
     width: 100%;
+  }
+}
+
+.up-identity {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.up-identity-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.up-identity-hint {
+  color: var(--kh-text-muted);
+  font-size: var(--kh-text-sm);
+}
+
+.up-swatches {
+  display: flex;
+  gap: 0.25rem;
+}
+
+// A 28px visible circle centered inside a 44px hit target (WCAG 2.5.8).
+// The fill is bound as background-color (not the shorthand) so this
+// content-box clip survives; the transparent padding hides the rest.
+.up-swatch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 44px;
+  height: 44px;
+  padding: 8px; // (44 − 28) / 2 leaves a 28px painted circle
+  border: none;
+  border-radius: 50%;
+  background-clip: content-box;
+  cursor: pointer;
+
+  &.selected {
+    border: 2px solid var(--kh-text-primary);
+    padding: 6px; // keep the painted circle at 28px despite the ring
+  }
+
+  mat-icon {
+    color: var(--kh-text-on-accent);
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
   }
 }
 
@@ -64,7 +134,7 @@
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  font-size: 1rem;
+  font-size: var(--kh-text-md);
   margin: 0 0 0.5rem;
 }
 
@@ -79,7 +149,7 @@
   align-items: center;
   gap: 0.75rem;
   padding: 0.5rem 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  border-bottom: 1px solid var(--kh-border-subtle);
 }
 
 .up-item-label {
@@ -88,31 +158,26 @@
 
 .up-item-meta {
   color: var(--kh-text-secondary);
-  font-size: 0.85rem;
+  font-size: var(--kh-text-sm);
 }
 
 .up-pill {
   border-radius: 999px;
   padding: 0.1rem 0.6rem;
-  font-size: 0.75rem;
+  font-size: var(--kh-text-xs);
   font-weight: 600;
 }
 
 .up-pill-on {
-  background: #e8f5e9;
-  color: #1b5e20;
+  background: var(--kh-success-subtle);
+  color: var(--kh-success);
 }
 
 .up-pill-off {
-  background: #eceff1;
-  color: #546e7a;
-}
-
-.up-empty {
-  color: var(--kh-text-muted);
+  background: var(--kh-glass);
+  color: var(--kh-text-tertiary);
 }
 
 .up-link {
-  display: inline-block;
   margin-top: 0.75rem;
 }

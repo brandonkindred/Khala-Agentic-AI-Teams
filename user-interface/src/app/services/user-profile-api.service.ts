@@ -1,7 +1,8 @@
 import { Injectable, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpContext } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
+import { SKIP_ERROR_NOTIFY, skipErrorNotify } from '../core/error-handler.interceptor';
 import type {
   ProfileOverview,
   UserProfile,
@@ -17,27 +18,40 @@ export class UserProfileApiService {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = environment.userProfileApiUrl;
 
+  /** Request options that suppress the global error toast (the profile page renders its own). */
+  private readonly SKIP_NOTIFY = { context: skipErrorNotify() };
+
   /**
    * GET /api/user-profile — current (default) profile.
    *
    * Preconditions: none (the backend auto-creates the default profile on first read).
    * Postconditions: the observable emits the current `UserProfile`, or errors with
-   * the `HttpErrorResponse` (e.g. 503 when profile storage is unavailable).
+   * the `HttpErrorResponse` (e.g. 503 when profile storage is unavailable). When
+   * `options.silent` is true the global error toast is suppressed for this
+   * request (the caller handles failure itself — e.g. the footer avatar fetch).
    */
-  getProfile(): Observable<UserProfile> {
-    return this.http.get<UserProfile>(this.baseUrl);
+  getProfile(options?: { silent?: boolean }): Observable<UserProfile> {
+    const context = new HttpContext();
+    if (options?.silent) context.set(SKIP_ERROR_NOTIFY, true);
+    return this.http.get<UserProfile>(this.baseUrl, { context });
   }
 
   /**
    * PUT /api/user-profile — update profile fields.
    *
-   * Preconditions: `body` conforms to `UserProfileUpdate` (omitted fields are left
-   * unchanged server-side).
+   * Preconditions: `body` conforms to `UserProfileUpdate`. Omitted fields are left
+   * unchanged server-side. A present scalar field (display_name/email/bio) is
+   * written verbatim, so send the full desired value, not a fragment.
    * Postconditions: the observable emits the updated `UserProfile`, or errors with
-   * the `HttpErrorResponse`.
+   * the `HttpErrorResponse`. A present `preferences` dict is MERGED key-by-key
+   * into the stored object server-side (top-level keys overwrite; keys absent
+   * from the update survive) — send only the keys you own. There is no
+   * key-deletion path, but a `null` value is stored and read as absent (the
+   * sanctioned way to reset a preference). The global error toast is suppressed;
+   * the profile page renders its own inline save error.
    */
   updateProfile(body: UserProfileUpdate): Observable<UserProfile> {
-    return this.http.put<UserProfile>(this.baseUrl, body);
+    return this.http.put<UserProfile>(this.baseUrl, body, this.SKIP_NOTIFY);
   }
 
   /**
@@ -47,9 +61,10 @@ export class UserProfileApiService {
    * Preconditions: none.
    * Postconditions: the observable emits a `ProfileOverview` whose `profile`,
    * `associations`, and `integrations` are all present, or errors with the
-   * `HttpErrorResponse`.
+   * `HttpErrorResponse`. The global error toast is suppressed; the profile page
+   * renders its own inline load error.
    */
   getOverview(): Observable<ProfileOverview> {
-    return this.http.get<ProfileOverview>(`${this.baseUrl}/overview`);
+    return this.http.get<ProfileOverview>(`${this.baseUrl}/overview`, this.SKIP_NOTIFY);
   }
 }

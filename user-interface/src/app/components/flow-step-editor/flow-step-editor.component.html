@@ -5,7 +5,7 @@
       Edit Step
     </h3>
     <span class="spacer"></span>
-    <button mat-icon-button (click)="onClose()" matTooltip="Close editor">
+    <button mat-icon-button (click)="onClose()" matTooltip="Close editor" aria-label="Close editor">
       <mat-icon>close</mat-icon>
     </button>
   </div>
@@ -62,7 +62,7 @@
               <span class="agent-name">{{ agent.agent_name }}</span>
               <span class="agent-role">{{ agent.role }}</span>
             </div>
-            <button mat-icon-button (click)="removeAgent(agent.agent_name)" matTooltip="Remove agent" class="remove-btn">
+            <button mat-icon-button (click)="removeAgent(agent.agent_name)" matTooltip="Remove agent" [attr.aria-label]="'Remove ' + agent.agent_name" class="remove-btn">
               <mat-icon>close</mat-icon>
             </button>
           </div>

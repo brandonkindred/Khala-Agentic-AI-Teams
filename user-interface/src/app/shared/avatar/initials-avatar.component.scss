@@ -1,0 +1,15 @@
+.ia-circle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-weight: 700;
+  // Bright palette fills need the dark on-accent foreground for contrast.
+  color: var(--kh-text-on-accent);
+  user-select: none;
+  flex-shrink: 0;
+
+  mat-icon {
+    color: var(--kh-text-on-accent);
+  }
+}

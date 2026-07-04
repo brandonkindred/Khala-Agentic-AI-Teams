@@ -5,7 +5,7 @@ import { provideAnimations } from '@angular/platform-browser/animations';
 
 import { routes } from './app.routes';
 import { errorHandlerInterceptor } from './core/error-handler.interceptor';
-import { KhalaTitleStrategy } from './core/khala-title.strategy';
+import { AppTitleStrategy } from './core/app-title-strategy';
 
 export const appConfig: ApplicationConfig = {
   providers: [
@@ -16,7 +16,7 @@ export const appConfig: ApplicationConfig = {
     provideRouter(routes),
     provideHttpClient(withInterceptors([errorHandlerInterceptor])),
     provideAnimations(),
-    // Every route carries data.title; announce it in the tab title globally.
-    { provide: TitleStrategy, useClass: KhalaTitleStrategy },
+    // Sync the browser tab title from each route's `title` (WCAG 2.4.2).
+    { provide: TitleStrategy, useClass: AppTitleStrategy },
   ],
 };

@@ -7,7 +7,7 @@
   <div class="error-banner">
     <mat-icon>error_outline</mat-icon>
     <span>{{ error() }}</span>
-    <button mat-icon-button (click)="error.set(null)"><mat-icon>close</mat-icon></button>
+    <button mat-icon-button (click)="error.set(null)" aria-label="Dismiss error"><mat-icon>close</mat-icon></button>
   </div>
 }
 

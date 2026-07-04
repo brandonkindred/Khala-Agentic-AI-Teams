@@ -22,11 +22,14 @@ import { MatSidenavContent, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
 import { ApiStatusWidgetComponent } from '../api-status-widget/api-status-widget.component';
 import { BreadcrumbComponent } from '../../shared/breadcrumb/breadcrumb.component';
+import { InitialsAvatarComponent } from '../../shared/avatar/initials-avatar.component';
 import { NavStateService } from '../../services/nav-state.service';
-import { NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from '../../models/navigation.model';
+import { UserProfileStore } from '../../services/user-profile-store.service';
+import { ALL_NAV_ITEMS, NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from '../../models/navigation.model';
 
 /**
  * Application shell with sidebar navigation and main content area.
@@ -49,9 +52,11 @@ import { NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from '../../models/n
     MatToolbarModule,
     MatButtonModule,
     MatIconModule,
+    MatTooltipModule,
     OverlayModule,
     ApiStatusWidgetComponent,
     BreadcrumbComponent,
+    InitialsAvatarComponent,
   ],
   templateUrl: './app-shell.component.html',
   styleUrl: './app-shell.component.scss',
@@ -60,7 +65,24 @@ export class AppShellComponent {
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
   readonly navState = inject(NavStateService);
+  readonly profileStore = inject(UserProfileStore);
   readonly navGroups = NAV_GROUPS;
+
+  /**
+   * The footer profile link's route/icon/label come from the nav model so the
+   * Settings-flyout entry and the footer can never drift apart. `requireNavItem`
+   * throws at construction if the 'user-profile' item is ever removed, so the
+   * breakage is an explicit error instead of a silently broken footer link.
+   */
+  readonly profileNavItem: NavItem = AppShellComponent.requireNavItem('user-profile');
+
+  private static requireNavItem(id: string): NavItem {
+    const item = ALL_NAV_ITEMS.find((navItem) => navItem.id === id);
+    if (!item) {
+      throw new Error(`AppShellComponent: required nav item '${id}' is missing from the nav model.`);
+    }
+    return item;
+  }
 
   /** All focusable elements in the nav for arrow-key navigation. */
   @ViewChildren('navFocusable') navFocusableElements!: QueryList<ElementRef<HTMLElement>>;
@@ -87,6 +109,8 @@ export class AppShellComponent {
   private navigationTrigger: NavigationStart['navigationTrigger'] = 'imperative';
 
   constructor() {
+    // Populate the footer avatar's identity once the shell mounts.
+    this.profileStore.refresh();
     this.router.events.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((event) => {
       if (event instanceof NavigationStart) {
         this.onNavigationStart(event);

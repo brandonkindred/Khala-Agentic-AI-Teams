@@ -1,5 +1,4 @@
-import { Component, inject, Input, OnChanges, OnInit } from '@angular/core';
-import { Title } from '@angular/platform-browser';
+import { Component, Input } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { MatIconModule } from '@angular/material/icon';
 import { Observable } from 'rxjs';
@@ -12,8 +11,11 @@ import { HealthIndicatorComponent } from '../../components/health-indicator/heal
  * - Page title (h1) + subtitle
  * - Health indicator slot
  * - Sub-team navigation links
- * - Browser tab title management (WCAG 2.4.2)
  * - Semantic landmark structure
+ *
+ * The browser tab title is set globally by `AppTitleStrategy` from each
+ * route's `data.title` (WCAG 2.4.2) — this component no longer sets it, so the
+ * tab title has a single authoritative source.
  *
  * Content projection slots:
  * - `[dashboardActions]` → header action buttons
@@ -29,7 +31,7 @@ let nextShellId = 0;
   templateUrl: './dashboard-shell.component.html',
   styleUrl: './dashboard-shell.component.scss',
 })
-export class DashboardShellComponent implements OnInit, OnChanges {
+export class DashboardShellComponent {
   /** Unique heading id so aria-labelledby stays unambiguous with multiple shells. */
   readonly titleId = `dash-title-${nextShellId++}`;
 
@@ -42,20 +44,4 @@ export class DashboardShellComponent implements OnInit, OnChanges {
   @Input() healthLabel = 'API';
   /** Sub-team links shown below the header. */
   @Input() subTeams: { label: string; route: string }[] = [];
-
-  private titleService = inject(Title);
-
-  ngOnInit(): void {
-    this.updatePageTitle();
-  }
-
-  ngOnChanges(): void {
-    this.updatePageTitle();
-  }
-
-  private updatePageTitle(): void {
-    if (this.title) {
-      this.titleService.setTitle(`${this.title} | Khala`);
-    }
-  }
 }
