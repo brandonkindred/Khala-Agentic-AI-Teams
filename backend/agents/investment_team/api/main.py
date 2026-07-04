@@ -966,12 +966,7 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
     # When Temporal is enabled, dispatch the backtest as a durable workflow; on
     # any dispatch failure (or when Temporal is unavailable) fall back to the
     # in-process daemon thread so the job still runs and behavior is unchanged.
-    def _start_temporal() -> None:
-        from investment_team.temporal.start_workflow import start_backtest_workflow
-
-        start_backtest_workflow(job_id, strategy, config, request.submitted_by, request.notes)
-
-    if _dispatch_via_temporal(_start_temporal):
+    if _dispatch_backtest_run(job_id, strategy, config, request.submitted_by, request.notes):
         return BacktestJobSubmission(job_id=job_id, status=_BT_JOB_STATUS_PENDING)
 
     thread = threading.Thread(
@@ -1626,6 +1621,72 @@ def _dispatch_via_temporal(starter: Callable[[], None]) -> bool:
         return False
 
 
+def _dispatch_strategy_lab_run(run_id: str, request: RunStrategyLabRequest) -> bool:
+    """Dispatch a strategy-lab run (initial / resume / restart) through Temporal.
+
+    Preconditions:
+        - ``run_id``'s state is already registered in ``_active_runs`` and
+          persisted (the activity reads its resume offset from that state).
+
+    Postconditions:
+        - Returns ``True`` iff the durable workflow was started; ``False`` (with
+          the failure logged) when Temporal is disabled/unavailable, so the
+          caller falls back to its daemon-thread path. Never raises.
+    """
+
+    def _start() -> None:
+        from investment_team.temporal.start_workflow import start_strategy_lab_workflow
+
+        start_strategy_lab_workflow(run_id, request)
+
+    return _dispatch_via_temporal(_start)
+
+
+def _dispatch_backtest_run(
+    job_id: str,
+    strategy: StrategySpec,
+    config: BacktestConfig,
+    submitted_by: str,
+    notes: List[str],
+) -> bool:
+    """Dispatch a backtest job through Temporal (else report failure).
+
+    Preconditions:
+        - ``job_id`` names a backtest job already created in the job store.
+
+    Postconditions:
+        - Returns ``True`` iff the durable workflow was started; ``False`` (with
+          the failure logged) otherwise, so the caller falls back to its
+          daemon-thread path. Never raises.
+    """
+
+    def _start() -> None:
+        from investment_team.temporal.start_workflow import start_backtest_workflow
+
+        start_backtest_workflow(job_id, strategy, config, submitted_by, notes)
+
+    return _dispatch_via_temporal(_start)
+
+
+def _get_run_state(run_id: str) -> Optional[Dict[str, Any]]:
+    """Return a strategy-lab run's state from ``_active_runs``, else the job store.
+
+    Centralizes the "live in-memory entry, else durable fallback" read shared by
+    the resume/restart endpoints and the Temporal-activity helpers.
+
+    Preconditions:
+        - ``run_id`` names a strategy-lab run (may not exist).
+
+    Postconditions:
+        - Returns the in-memory state when present, otherwise the persisted state
+          from the job store, or ``None`` when neither exists. Does not mutate
+          ``_active_runs``.
+    """
+    with _lock:
+        state = _active_runs.get(run_id)
+    return state if state is not None else _load_run_from_job_service(run_id)
+
+
 def _rehydrate_active_run_offset(run_id: str) -> int:
     """Ensure ``_active_runs[run_id]`` exists and return the resume cycle offset.
 
@@ -1646,13 +1707,11 @@ def _rehydrate_active_run_offset(run_id: str) -> int:
           ``start_cycle_offset`` (``0`` for a fresh or restarted run, or when no
           durable state is found).
     """
-    with _lock:
-        state = _active_runs.get(run_id)
-    if state is None:
-        state = _load_run_from_job_service(run_id)
-        if state is not None:
-            with _lock:
-                _active_runs[run_id] = state
+    state = _get_run_state(run_id)
+    if state is not None:
+        # setdefault: never clobber a live in-memory entry with the durable copy.
+        with _lock:
+            _active_runs.setdefault(run_id, state)
     if not state:
         return 0
     try:
@@ -1677,10 +1736,7 @@ def _strategy_lab_run_failure(run_id: str) -> Optional[str]:
         - Returns the run's ``error`` string (or a generic message) when its
           terminal status is ``"failed"``; otherwise returns ``None``.
     """
-    with _lock:
-        state = _active_runs.get(run_id)
-    if state is None:
-        state = _load_run_from_job_service(run_id)
+    state = _get_run_state(run_id)
     if state and state.get("status") == "failed":
         return str(state.get("error") or "strategy lab run failed")
     return None
@@ -2251,12 +2307,7 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     # When Temporal is enabled, dispatch the run as a durable workflow so it
     # survives a worker/process restart and is visible in the Temporal UI; on
     # any dispatch failure fall back to the in-process daemon thread.
-    def _start_temporal() -> None:
-        from investment_team.temporal.start_workflow import start_strategy_lab_workflow
-
-        start_strategy_lab_workflow(run_id, request)
-
-    if _dispatch_via_temporal(_start_temporal):
+    if _dispatch_strategy_lab_run(run_id, request):
         return StrategyLabRunStartResponse(run_id=run_id, total_cycles=total_cycles)
 
     thread = threading.Thread(
@@ -2446,12 +2497,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     # The Temporal activity derives its resume offset from the persisted
     # contiguous-cycle count (set above), so a durable resume picks up where the
     # run left off. Fall back to the daemon thread with an explicit offset.
-    def _start_temporal() -> None:
-        from investment_team.temporal.start_workflow import start_strategy_lab_workflow
-
-        start_strategy_lab_workflow(run_id, request)
-
-    if not _dispatch_via_temporal(_start_temporal):
+    if not _dispatch_strategy_lab_run(run_id, request):
         thread = threading.Thread(
             target=_strategy_lab_worker,
             args=(run_id, request),
@@ -2532,12 +2578,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
     # Restart from scratch through Temporal when enabled (offset 0, per the
     # reset persisted state above); else fall back to the daemon thread.
-    def _start_temporal() -> None:
-        from investment_team.temporal.start_workflow import start_strategy_lab_workflow
-
-        start_strategy_lab_workflow(run_id, request)
-
-    if not _dispatch_via_temporal(_start_temporal):
+    if not _dispatch_strategy_lab_run(run_id, request):
         thread = threading.Thread(
             target=_strategy_lab_worker,
             args=(run_id, request),
