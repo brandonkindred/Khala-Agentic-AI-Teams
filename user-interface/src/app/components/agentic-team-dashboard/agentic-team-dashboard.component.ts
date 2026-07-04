@@ -14,6 +14,7 @@ import { ProcessDesignerChatComponent } from '../process-designer-chat/process-d
 import { AgenticTeamTestPanelComponent } from '../agentic-team-test-panel/agentic-team-test-panel.component';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import type { AgenticTeamSummary, AgenticTeam, TeamMode } from '../../models';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 
 @Component({
   selector: 'app-agentic-team-dashboard',
@@ -32,6 +33,7 @@ import type { AgenticTeamSummary, AgenticTeam, TeamMode } from '../../models';
     ProcessDesignerChatComponent,
     AgenticTeamTestPanelComponent,
     DashboardShellComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './agentic-team-dashboard.component.html',
   styleUrl: './agentic-team-dashboard.component.scss',

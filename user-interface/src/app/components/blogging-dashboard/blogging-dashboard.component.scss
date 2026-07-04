@@ -264,27 +264,6 @@
   }
 }
 
-// ── Brand Configured Notice ─────────────────────────────────────────────────
-
-.brand-configured-notice {
-  display: flex;
-  align-items: center;
-  gap: var(--kh-space-2);
-  padding: var(--kh-space-3) var(--kh-space-4);
-  margin-bottom: var(--kh-space-4);
-  background: var(--kh-success-subtle);
-  border: 1px solid var(--kh-success);
-  border-radius: var(--kh-radius-md);
-  font-size: var(--kh-text-sm);
-  color: var(--kh-success);
-
-  mat-icon {
-    font-size: 20px;
-    width: 20px;
-    height: 20px;
-  }
-}
-
 // ── Job Detail Panel ───────────────────────────────────────────────────────
 
 .job-detail-panel {

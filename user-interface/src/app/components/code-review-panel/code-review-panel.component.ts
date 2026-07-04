@@ -19,6 +19,7 @@ import type {
 } from '../../models/integrations.model';
 import type { CodeReviewSummary, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 
 /**
  * One code-review run on a pull request. Held in memory and kept live by a
@@ -55,6 +56,7 @@ export interface PrReviewRecord {
     MatPaginatorModule,
     RouterLink,
     HealthIndicatorComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './code-review-panel.component.html',
   styleUrl: './code-review-panel.component.scss',

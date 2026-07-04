@@ -20,6 +20,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { TeamAssistantApiService } from '../../services/team-assistant-api.service';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import type {
   TeamAssistantMessage,
   TeamAssistantConversationState,
@@ -38,6 +39,7 @@ import type {
     MatButtonModule,
     MatIconModule,
     MatTooltipModule,
+    InlineBannerComponent,
   ],
   templateUrl: './team-assistant-chat.component.html',
   styleUrl: './team-assistant-chat.component.scss',

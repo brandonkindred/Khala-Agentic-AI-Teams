@@ -15,6 +15,8 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { NutritionApiService } from '../../services/nutrition-api.service';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { NotificationService } from '../../core/notification.service';
 import type {
   ClientProfile,
   MealRecommendation,
@@ -41,6 +43,7 @@ import type {
     MatProgressSpinnerModule,
     MatSlideToggleModule,
     MatTooltipModule,
+    InlineBannerComponent,
   ],
   templateUrl: './nutrition-forms.component.html',
   styleUrl: './nutrition-forms.component.scss',
@@ -50,11 +53,14 @@ export class NutritionFormsComponent {
 
   private readonly api = inject(NutritionApiService);
   private readonly fb = inject(FormBuilder);
+  private readonly notifications = inject(NotificationService);
 
   selectedTabIndex = 0;
   loading = false;
-  statusMessage = '';
-  statusType: 'success' | 'error' | '' = '';
+  /** Persistent failure message rendered as an inline error banner (empty = hidden). */
+  errorMessage = '';
+  /** Persistent guidance message rendered as an inline info banner (empty = hidden). */
+  noticeMessage = '';
 
   // Profile state
   profile: ClientProfile | null = null;
@@ -123,7 +129,7 @@ export class NutritionFormsComponent {
       },
       error: (err) => {
         if (err.status === 404) {
-          this.showStatus('No existing profile found. Fill out the form to create one.', 'success');
+          this.showStatus('No existing profile found. Fill out the form to create one.', 'info');
         } else {
           this.showStatus(`Failed to load profile: ${err?.error?.detail || err?.message || 'Unknown error'}`, 'error');
         }
@@ -306,13 +312,43 @@ export class NutritionFormsComponent {
       .filter((s) => s.length > 0);
   }
 
-  private showStatus(message: string, type: 'success' | 'error'): void {
-    this.statusMessage = message;
-    this.statusType = type;
+  /**
+   * Surface an operation result using the app-wide feedback convention:
+   * transient success confirmations go to a snackbar; failures become a
+   * persistent inline error banner.
+   *
+   * Preconditions: `message` is a non-empty, user-facing string.
+   * Postconditions: `'success'` opens a transient snackbar and clears both
+   * banners; `'error'` sets the persistent error banner; `'info'` sets the
+   * persistent guidance banner. `'error'` and `'info'` are mutually exclusive
+   * (setting one clears the other).
+   */
+  private showStatus(message: string, type: 'success' | 'error' | 'info'): void {
+    switch (type) {
+      case 'success':
+        this.notifications.saved(message);
+        this.errorMessage = '';
+        this.noticeMessage = '';
+        break;
+      case 'error':
+        this.errorMessage = message;
+        this.noticeMessage = '';
+        break;
+      case 'info':
+        this.noticeMessage = message;
+        this.errorMessage = '';
+        break;
+    }
   }
 
+  /**
+   * Dismiss any visible banner before a new operation starts.
+   *
+   * Preconditions: none.
+   * Postconditions: both the error and guidance banners are hidden.
+   */
   private clearStatus(): void {
-    this.statusMessage = '';
-    this.statusType = '';
+    this.errorMessage = '';
+    this.noticeMessage = '';
   }
 }

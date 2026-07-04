@@ -1,8 +1,7 @@
 @if (error) {
-  <div class="error-banner">
-    <p class="error-text">{{ error }}</p>
+  <app-inline-banner variant="error" [message]="error">
     <button mat-stroked-button (click)="retryLoad()" [disabled]="loading">Retry</button>
-  </div>
+  </app-inline-banner>
 }
 
 <div class="chat-layout">

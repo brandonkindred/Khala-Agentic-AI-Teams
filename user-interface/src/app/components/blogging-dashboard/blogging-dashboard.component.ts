@@ -24,6 +24,7 @@ import { MatInputModule } from '@angular/material/input';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import { Router } from '@angular/router';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import type {
   BlogJobListItem,
   BlogJobStatusResponse,
@@ -90,6 +91,7 @@ export function artifactLabel(name: string): string {
     ErrorMessageComponent,
     TeamAssistantChatComponent,
     DashboardShellComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './blogging-dashboard.component.html',
   styleUrl: './blogging-dashboard.component.scss',
