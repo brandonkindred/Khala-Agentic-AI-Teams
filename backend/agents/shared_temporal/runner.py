@@ -1,12 +1,13 @@
-"""Shared job-backed workflow runner.
+"""Shared workflow-dispatch helpers for teams' sync HTTP handlers.
 
-``run_team_job`` is the one entrypoint teams use from their sync HTTP
-handlers. It:
+Two entrypoints, both bridging a sync handler into the worker's asyncio loop:
 
-1. Ensures a row exists in the team's job store (via ``JobServiceClient``).
-2. Starts the given workflow on the Temporal client with a deterministic
-   ID ``{team}-{job_id}`` so re-submits are idempotent and mid-flight
-   failures resume from the last completed activity.
+- ``start_workflow_sync`` — waits for the worker's connected client + loop, then
+  starts a workflow with a caller-supplied id/queue. Does NOT touch the job
+  store; use it when the caller owns its own job-status bookkeeping.
+- ``run_team_job`` — the job-store-backed flow: ensures a ``JobServiceClient``
+  row exists, then dispatches via ``start_workflow_sync`` with a deterministic
+  ``{team}-{job_id}`` id (so re-submits are idempotent) and marks it running.
 
 Temporal is required. The system will fail fast if TEMPORAL_ADDRESS is not set.
 """
@@ -35,7 +36,7 @@ CLIENT_READY_POLL_S = 0.05
 START_WORKFLOW_TIMEOUT_S = 30
 
 
-def _await_client(timeout_s: float = CLIENT_READY_TIMEOUT_S) -> tuple[Any, Any]:
+def _await_client(timeout_s: float | None = None) -> tuple[Any, Any]:
     """Block briefly until the shared Temporal client + loop are populated.
 
     The team_service entrypoint normally starts the worker before uvicorn
@@ -44,13 +45,17 @@ def _await_client(timeout_s: float = CLIENT_READY_TIMEOUT_S) -> tuple[Any, Any]:
     milliseconds. Polling turns that race into a short wait instead of a 500.
 
     Preconditions:
-        - ``timeout_s`` >= 0.
+        - ``timeout_s`` is ``None`` (use ``CLIENT_READY_TIMEOUT_S``) or >= 0.
 
     Postconditions:
         - Returns ``(client, loop)`` once both are connected, or raises
           ``RuntimeError`` after ``timeout_s`` seconds if they never become
           available.
     """
+    # Resolve at call time (not as a bound default) so monkeypatching the
+    # module constant in tests takes effect.
+    if timeout_s is None:
+        timeout_s = CLIENT_READY_TIMEOUT_S
     deadline = time.monotonic() + timeout_s
     while True:
         client = get_temporal_client()
@@ -67,7 +72,7 @@ def start_workflow_sync(
     *args: Any,
     workflow_id: str,
     task_queue: str,
-    client_ready_timeout_s: float = CLIENT_READY_TIMEOUT_S,
+    client_ready_timeout_s: float | None = None,
     start_timeout_s: float = START_WORKFLOW_TIMEOUT_S,
 ) -> None:
     """Start a Temporal workflow from synchronous code.
@@ -83,7 +88,8 @@ def start_workflow_sync(
 
     Postconditions:
         - The workflow is started (raises ``RuntimeError`` if the worker client
-          never becomes available within ``client_ready_timeout_s``).
+          never becomes available within ``client_ready_timeout_s``, defaulting
+          to ``CLIENT_READY_TIMEOUT_S``).
     """
     client, loop = _await_client(client_ready_timeout_s)
     coro = client.start_workflow(
@@ -133,21 +139,12 @@ def run_team_job(
         init_fields.update(metadata)
     manager.create_job(job_id, **init_fields)
 
-    client = get_temporal_client()
-    loop = get_temporal_loop()
-    if client is None or loop is None:
-        raise RuntimeError(
-            "Temporal is enabled but client is not connected; ensure the team's "
-            "worker started during app lifespan."
-        )
-    queue = task_queue or get_default_task_queue()
     workflow_id = f"{team}-{job_id}"
-    coro = client.start_workflow(
+    start_workflow_sync(
         workflow,
         *(workflow_args or []),
-        id=workflow_id,
-        task_queue=queue,
+        workflow_id=workflow_id,
+        task_queue=task_queue or get_default_task_queue(),
     )
-    asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30)
     manager.update_job(job_id, status="running", workflow_id=workflow_id)
     return {"job_id": job_id, "team": team, "status": "running", "mode": "temporal"}
