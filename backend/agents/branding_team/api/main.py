@@ -695,10 +695,12 @@ def _submit_brand_run(
         current_phase=target_phase.value if target_phase else None,
     )
 
-    # When Temporal is enabled, dispatch the job as a durable workflow so it
-    # survives a worker/process restart; otherwise fall back to the in-process
-    # thread pool. Lazy import keeps main.py's import cost low and defers the
-    # Pattern A worker boot in branding_team.temporal until the first dispatch.
+    # When Temporal is enabled, dispatch the job as a durable workflow (visible
+    # in the Temporal UI; an orphaned run after a restart is reconciled to
+    # ``interrupted`` by the team_service startup recovery rather than lost);
+    # otherwise fall back to the in-process thread pool. Lazy import keeps
+    # main.py's import cost low and defers the Pattern A worker boot in
+    # branding_team.temporal until the first dispatch.
     try:
         from shared_temporal import is_temporal_enabled
 

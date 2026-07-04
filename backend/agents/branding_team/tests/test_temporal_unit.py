@@ -11,7 +11,6 @@ These tests do not need a live Temporal server. They mock at the
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -88,54 +87,34 @@ def test_start_worker_thread_delegates_to_start_team_worker() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_run_async_raises_without_client() -> None:
-    from branding_team.temporal import start_workflow as sw
-
-    with (
-        patch.object(sw, "get_temporal_loop", return_value=None),
-        patch.object(sw, "get_temporal_client", return_value=None),
-    ):
-        coro = asyncio.sleep(0)
-        try:
-            with pytest.raises(RuntimeError, match="Temporal client not available"):
-                sw._run_async(coro)
-        finally:
-            coro.close()
-
-
-def test_start_branding_workflow_raises_without_client() -> None:
-    from branding_team.temporal import start_workflow as sw
-
-    with patch.object(sw, "get_temporal_client", return_value=None):
-        with pytest.raises(RuntimeError, match="Temporal client not available"):
-            sw.start_branding_workflow("job-1", {"job_id": "job-1"})
-
-
-def test_start_branding_workflow_passes_args() -> None:
+def test_start_branding_workflow_delegates_to_start_workflow_sync() -> None:
+    """The dispatcher is a thin wrapper over shared_temporal.start_workflow_sync
+    (which owns the client-ready wait), forwarding the payload and a
+    deterministic workflow id on the branding task queue."""
     from branding_team.temporal import start_workflow as sw
     from branding_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
+    from branding_team.temporal.workflows import BrandingWorkflow
 
-    fake_client = MagicMock()
-    fake_client.start_workflow = MagicMock(return_value="coro-sentinel")
-    captured: dict = {}
-
-    def fake_run_async(coro):
-        captured["ran"] = True
-
-    with (
-        patch.object(sw, "get_temporal_client", return_value=fake_client),
-        patch.object(sw, "_run_async", side_effect=fake_run_async),
-    ):
+    with patch.object(sw, "start_workflow_sync") as mock_sync:
         payload = {"job_id": "job-9"}
         sw.start_branding_workflow("job-9", payload)
 
-    assert captured["ran"] is True
-    _, kwargs = fake_client.start_workflow.call_args
-    assert kwargs["id"] == f"{WORKFLOW_ID_PREFIX}job-9"
-    assert kwargs["task_queue"] == TASK_QUEUE
-    # The payload dict is forwarded positionally as the workflow arg.
-    args, _ = fake_client.start_workflow.call_args
+    mock_sync.assert_called_once()
+    args, kwargs = mock_sync.call_args
+    assert args[0] is BrandingWorkflow.run
     assert payload in args
+    assert kwargs["workflow_id"] == f"{WORKFLOW_ID_PREFIX}job-9"
+    assert kwargs["task_queue"] == TASK_QUEUE
+
+
+def test_start_branding_workflow_propagates_client_error() -> None:
+    """start_workflow_sync raises RuntimeError when the worker client never
+    becomes available; the dispatcher must let that surface."""
+    from branding_team.temporal import start_workflow as sw
+
+    with patch.object(sw, "start_workflow_sync", side_effect=RuntimeError("no client")):
+        with pytest.raises(RuntimeError, match="no client"):
+            sw.start_branding_workflow("job-1", {"job_id": "job-1"})
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +144,10 @@ def test_activity_reconstructs_models_and_delegates() -> None:
     from branding_team.models import BrandCheckRequest, BrandingMission, HumanReview
     from branding_team.temporal import activities
 
-    with patch("branding_team.api.main._run_branding_background") as mock_bg:
+    with (
+        patch("branding_team.api.main._run_branding_background") as mock_bg,
+        patch("branding_team.shared.job_store.get_job", return_value={"status": "completed"}),
+    ):
         activities.run_branding_pipeline_activity(_activity_payload())
 
     mock_bg.assert_called_once()
@@ -198,12 +180,44 @@ def test_activity_handles_none_target_phase_and_empty_checks() -> None:
     payload = _activity_payload()
     payload["target_phase"] = None
     payload["brand_checks"] = []
-    with patch("branding_team.api.main._run_branding_background") as mock_bg:
+    with (
+        patch("branding_team.api.main._run_branding_background") as mock_bg,
+        patch("branding_team.shared.job_store.get_job", return_value={"status": "completed"}),
+    ):
         activities.run_branding_pipeline_activity(payload)
 
     args, _ = mock_bg.call_args
     assert args[3] == []  # brand_checks
     assert args[8] is None  # target_phase
+
+
+def test_activity_reraises_on_failed_job() -> None:
+    """A pipeline failure is swallowed into a FAILED job row by
+    _run_branding_background; the activity must re-raise so the Temporal
+    workflow reflects the failure instead of reporting a green run."""
+    from branding_team.temporal import activities
+
+    with (
+        patch("branding_team.api.main._run_branding_background"),
+        patch(
+            "branding_team.shared.job_store.get_job",
+            return_value={"status": "failed", "error": "boom"},
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="boom"):
+            activities.run_branding_pipeline_activity(_activity_payload())
+
+
+def test_activity_no_raise_on_cancelled_job() -> None:
+    """A cancelled run is terminal, not a failure — the activity returns
+    normally so Temporal does not mark the workflow failed."""
+    from branding_team.temporal import activities
+
+    with (
+        patch("branding_team.api.main._run_branding_background"),
+        patch("branding_team.shared.job_store.get_job", return_value={"status": "cancelled"}),
+    ):
+        activities.run_branding_pipeline_activity(_activity_payload())
 
 
 # ---------------------------------------------------------------------------

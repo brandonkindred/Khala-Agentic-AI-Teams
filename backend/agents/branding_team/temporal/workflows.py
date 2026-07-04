@@ -19,19 +19,44 @@ with workflow.unsafe.imports_passed_through():
 
 PIPELINE_TIMEOUT = timedelta(hours=2)
 
-# maximum_attempts=1: _run_branding_background already captures pipeline errors
-# into a FAILED job row, so an app-level retry would re-run an
-# already-finalized job. Durability against a hard process/worker restart comes
-# from Temporal re-delivering the not-yet-completed activity, not from retries.
+# The branding orchestrator is a long, non-idempotent pipeline (LLM/sibling-team
+# calls), and llm_service already fails over on transient provider errors. A
+# workflow-level retry would therefore mostly re-run expensive deterministic
+# failures, so cap at a single attempt: a failure surfaces as a failed workflow
+# plus a FAILED job-store row for explicit resubmission.
+#
+# Trade-off: because the single attempt is consumed, a worker crash mid-activity
+# is NOT auto-re-dispatched either. Such an orphaned RUNNING job is reconciled to
+# ``interrupted`` by the team_service startup recovery (not resumed) so the
+# expensive non-idempotent pipeline is deliberately not silently re-run.
 NO_RETRY = RetryPolicy(maximum_attempts=1)
 
 
 @workflow.defn(name="BrandingWorkflow")
 class BrandingWorkflow:
-    """Runs one branding job as a single durable activity."""
+    """Runs one branding job as a single durable activity.
+
+    Invariants:
+        - Job-store status bookkeeping (RUNNING → COMPLETED/FAILED) is owned by
+          the activity, not the workflow; the workflow only dispatches and
+          propagates the activity's failure.
+    """
 
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> None:
+        """Durable entrypoint: run the branding pipeline for ``payload``.
+
+        Preconditions:
+            - ``payload`` is the serialized job dict built by
+              ``_submit_brand_run`` (``job_id`` plus serialized
+              mission/human_review/brand_checks/target_phase).
+            - ``payload['job_id']`` refers to a job already created in the store.
+        Postconditions:
+            - Delegates to ``run_branding_pipeline_activity`` (which owns the
+              job-store transitions). Returns ``None`` on success; a pipeline
+              failure re-raised by the activity fails the workflow (no retry, by
+              ``NO_RETRY``).
+        """
         await workflow.execute_activity(
             _activities.run_branding_pipeline_activity,
             payload,
