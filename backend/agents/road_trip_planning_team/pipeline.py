@@ -86,6 +86,15 @@ def _translate_itinerary_keys(data: dict) -> dict:
     ``date_label``, flat ``activities``) while the Pydantic model expects
     ``overview``, ``date``, and split ``morning_activities`` /
     ``afternoon_activities`` / ``evening_activities``.
+
+    Preconditions:
+        - ``data`` is a ``dict`` parsed from the itinerary-composer node's JSON
+          output (arbitrary shape — every rename below is guarded).
+
+    Postconditions:
+        - Returns the same ``dict`` (mutated in place) with graph-native keys
+          renamed to ``TripItinerary`` field names. Existing model-native keys
+          are never overwritten, and unknown keys are left untouched.
     """
     # Top-level key renames
     if "summary" in data and "overview" not in data:

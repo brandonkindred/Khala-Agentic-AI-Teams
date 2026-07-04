@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from shared_app import create_team_app
 
 from ..models import PlanTripRequest
-from ..pipeline import run_pipeline, run_plan_background
+from ..pipeline import run_plan_background
 from ..shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
@@ -24,10 +24,6 @@ from ..shared.job_store import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Re-exported for callers/tests that reference the pipeline entrypoint on this
-# module (e.g. ``api.main.run_pipeline``); the canonical home is ``..pipeline``.
-__all__ = ["app", "run_pipeline"]
-
 
 def _startup() -> None:
     """Start the Temporal worker backstop (best-effort).
@@ -35,6 +31,9 @@ def _startup() -> None:
     The team_service entrypoint normally starts the worker via
     ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
     backstop covers running the app standalone (``uvicorn ...:app``).
+
+    Preconditions:
+        - None (safe to call once at app startup).
 
     Postconditions:
         - Starts the worker thread when Temporal is enabled; a no-op when
