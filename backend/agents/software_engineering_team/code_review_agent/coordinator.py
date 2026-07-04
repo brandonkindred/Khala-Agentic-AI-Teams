@@ -42,6 +42,18 @@ next cycle. The cache is best-effort: a miss simply recomputes, so correctness
 never depends on a hit, and any change to code, context, or model invalidates
 the key.
 
+Submission-level short-circuit: the map-phase cache still re-runs the reduce and
+the false-positive *verification* pass on every cycle, so re-reviewing a
+byte-identical submission that was already approved is not free. A second,
+coarser process-global LRU (``CODE_REVIEW_SUBMISSION_CACHE_SIZE``) keyed on the
+whole raw ``CodeReviewInput`` (files/code + task/spec/architecture context +
+profile + resolved model) records the approved
+``CodeReviewOutput`` of each submission, and ``run_coordinator`` returns a deep
+clone of it before touching the LLM when the same submission comes back — zero
+LLM calls (map, verification, and merge all skipped). Only approved outcomes are
+stored: a rejection is left to re-run through the (cheap, mostly cached) map
+phase so a fix that reappears identical still gets its findings.
+
 Cross-file surface: each chunk reviewer is also given the *sibling surface* —
 the top-level symbols (Python ``def``/``class``, TS/JS ``export``s) defined by
 the other changed files in the submission that are not in this chunk — so it can
@@ -56,6 +68,8 @@ invalidating the whole submission on every fix.
 from __future__ import annotations
 
 import logging
+import threading
+from collections import OrderedDict
 from typing import List, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
@@ -64,6 +78,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_existing_codebase_chars,
     compute_code_review_map_chunk_chars,
     compute_code_review_spec_excerpt_chars,
+    parse_env_int,
 )
 
 from .chunk_reviewer import ChunkReviewAgent
@@ -93,6 +108,8 @@ from .mapping import (
     _review_chunk_with_recovery,
     _review_model_fingerprint,
     _sibling_surface,
+    _stable_json_digest,
+    _submission_fingerprint,
     _surface_by_path,
     _symbol_surface,
     clear_chunk_outcome_cache,
@@ -115,6 +132,8 @@ logger = logging.getLogger(__name__)
 # re-exports (so linters don't flag them).
 __all__ = [
     "run_coordinator",
+    "clear_submission_outcome_cache",
+    "_submission_fingerprint",
     "MIN_SPLIT_SEGMENT_CHARS",
     "parse_code_into_file_blocks",
     "split_block_into_segments",
@@ -138,9 +157,47 @@ __all__ = [
     "_review_chunk_with_recovery",
     "_review_model_fingerprint",
     "_sibling_surface",
+    "_stable_json_digest",
     "_surface_by_path",
     "_symbol_surface",
 ]
+
+
+# Process-global submission-level short-circuit cache (see module docstring).
+# Bounded LRU mapping a whole-submission fingerprint -> the approved
+# ``CodeReviewOutput`` it produced, so an identical, previously-approved
+# submission returns without any LLM call. Guarded by a lock because reviews run
+# concurrently across jobs in one process. ``0`` disables it (every run is a
+# guaranteed miss). Coarser and independent of the per-chunk cache in ``mapping``.
+DEFAULT_SUBMISSION_CACHE_SIZE = 256  # CODE_REVIEW_SUBMISSION_CACHE_SIZE, floor 0
+
+_SUBMISSION_OUTCOME_CACHE: "OrderedDict[str, CodeReviewOutput]" = OrderedDict()
+_SUBMISSION_OUTCOME_CACHE_LOCK = threading.Lock()
+
+
+def _submission_cache_size() -> int:
+    """Resolve the submission cache capacity from the environment.
+
+    Postconditions:
+        - Returns ``CODE_REVIEW_SUBMISSION_CACHE_SIZE`` parsed as an int, clamped
+          to a floor of 0 (a negative or garbage value becomes the default, an
+          explicit 0 disables the short-circuit). ``0`` is load-bearing: callers
+          treat it as "no submission cache", so every review runs in full.
+    """
+    return parse_env_int("CODE_REVIEW_SUBMISSION_CACHE_SIZE", DEFAULT_SUBMISSION_CACHE_SIZE, 0)
+
+
+def clear_submission_outcome_cache() -> None:
+    """Drop every cached approved submission outcome.
+
+    Postconditions:
+        - The process-global submission cache is empty; the next review of any
+          submission is a guaranteed miss. Intended for tests (the cache persists
+          across ``run_coordinator`` calls by design) and for callers that must
+          force a cold review.
+    """
+    with _SUBMISSION_OUTCOME_CACHE_LOCK:
+        _SUBMISSION_OUTCOME_CACHE.clear()
 
 
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
@@ -281,6 +338,9 @@ def run_coordinator(
           never touches the not-reviewed coverage findings.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
+        - A submission byte-identical to one this process already approved (same
+          code + context + model) returns the recorded approved output with no
+          LLM call at all.
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
@@ -294,6 +354,32 @@ def run_coordinator(
             failure) propagates unchanged, failing closed so the bug surfaces
             instead of being masked as a not-reviewed finding.
     """
+    # Resolve the review model once for the whole run: it feeds both the
+    # submission fingerprint here and the map-phase context fingerprint below, and
+    # is identical throughout (best-effort identity, never raises).
+    model_fingerprint = _review_model_fingerprint(llm)
+
+    # Submission-level short-circuit: an identical submission that was already
+    # approved reproduces the same verdict, so return its cached output before any
+    # LLM work (map, false-positive verification, and merge all skipped). Keyed on
+    # the raw input + model only — no compaction — so the check itself costs no
+    # model call. Skipped entirely when disabled (size 0); on a miss the run
+    # proceeds and stores its verdict below if approved.
+    submission_size = _submission_cache_size()
+    submission_key: Optional[str] = None
+    if submission_size > 0:
+        submission_key = _submission_fingerprint(input_data, model_fingerprint)
+        with _SUBMISSION_OUTCOME_CACHE_LOCK:
+            cached = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
+            if cached is not None:
+                _SUBMISSION_OUTCOME_CACHE.move_to_end(submission_key)
+        if cached is not None:
+            logger.info("CodeReviewCoordinator: submission cache hit; skipping review (approved)")
+            notify_review_progress(
+                progress_callback, "done", "identical approved submission; review skipped", 1.0
+            )
+            return cached.model_copy(deep=True)
+
     notify_review_progress(progress_callback, "preparing", "preparing review input", 0.05)
     blocks, skipped_empty = _blocks_from_input(input_data)
     skipped_issues = [
@@ -359,7 +445,7 @@ def run_coordinator(
     # Fingerprint the shared context + resolved model once per run so unchanged
     # chunks reuse their prior map-phase outcome (see module docstring). Computed
     # here (not per chunk) because it is identical for every chunk in this run.
-    context_fp = _context_fingerprint(base_input, _review_model_fingerprint(llm))
+    context_fp = _context_fingerprint(base_input, model_fingerprint)
 
     # Top-level symbol surface of every changed file, so each chunk's reviewer can
     # see what its *siblings* define/export and flag references to a symbol a
@@ -437,10 +523,23 @@ def run_coordinator(
     notify_review_progress(
         progress_callback, "done", f"approved={approved}, issues={len(deduped)}", 1.0
     )
-    return CodeReviewOutput(
+    result = CodeReviewOutput(
         approved=approved,
         issues=deduped,
         summary=merged_summary,
         spec_compliance_notes=spec_notes,
         suggested_commit_message=commit_message,
     )
+    # Record only approved verdicts for the submission-level short-circuit: an
+    # identical resubmission returns this output with no LLM work. A rejection is
+    # not stored — the fix that follows changes the submission, and if the same
+    # rejected bytes reappear the (mostly cached) map phase still surfaces the
+    # findings the coding agent needs. Store a clone so a later hit can be mutated
+    # freely without corrupting the cached entry.
+    if submission_key is not None and result.approved:
+        with _SUBMISSION_OUTCOME_CACHE_LOCK:
+            _SUBMISSION_OUTCOME_CACHE[submission_key] = result.model_copy(deep=True)
+            _SUBMISSION_OUTCOME_CACHE.move_to_end(submission_key)
+            while len(_SUBMISSION_OUTCOME_CACHE) > submission_size:
+                _SUBMISSION_OUTCOME_CACHE.popitem(last=False)
+    return result
