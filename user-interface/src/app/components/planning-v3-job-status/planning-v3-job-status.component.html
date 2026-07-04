@@ -41,7 +41,7 @@
       }
 
       @if (isWaitingForAnswers) {
-        <app-inline-banner variant="warning" icon="help_outline">
+        <app-inline-banner variant="warning" icon="help_outline" live="polite">
           <span banner-message>Workflow paused — {{ pendingQuestionsCount }} question(s) need your input</span>
         </app-inline-banner>
       }

@@ -1,6 +1,9 @@
-<!-- Persistent failure banner (transient successes go to a snackbar). -->
+<!-- Persistent banners (transient success confirmations go to a snackbar). -->
 @if (errorMessage) {
   <app-inline-banner variant="error" [message]="errorMessage" />
+}
+@if (noticeMessage) {
+  <app-inline-banner variant="info" [message]="noticeMessage" />
 }
 
 <!-- Client ID Required -->

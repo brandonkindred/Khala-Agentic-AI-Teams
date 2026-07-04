@@ -59,6 +59,8 @@ export class NutritionFormsComponent {
   loading = false;
   /** Persistent failure message rendered as an inline error banner (empty = hidden). */
   errorMessage = '';
+  /** Persistent guidance message rendered as an inline info banner (empty = hidden). */
+  noticeMessage = '';
 
   // Profile state
   profile: ClientProfile | null = null;
@@ -127,7 +129,7 @@ export class NutritionFormsComponent {
       },
       error: (err) => {
         if (err.status === 404) {
-          this.showStatus('No existing profile found. Fill out the form to create one.', 'success');
+          this.showStatus('No existing profile found. Fill out the form to create one.', 'info');
         } else {
           this.showStatus(`Failed to load profile: ${err?.error?.detail || err?.message || 'Unknown error'}`, 'error');
         }
@@ -316,19 +318,37 @@ export class NutritionFormsComponent {
    * persistent inline error banner.
    *
    * Preconditions: `message` is a non-empty, user-facing string.
-   * Postconditions: for `type === 'success'` opens a snackbar and clears any
-   * error banner; for `type === 'error'` sets the persistent error banner.
+   * Postconditions: `'success'` opens a transient snackbar and clears both
+   * banners; `'error'` sets the persistent error banner; `'info'` sets the
+   * persistent guidance banner. `'error'` and `'info'` are mutually exclusive
+   * (setting one clears the other).
    */
-  private showStatus(message: string, type: 'success' | 'error'): void {
-    if (type === 'success') {
-      this.notifications.saved(message);
-      this.errorMessage = '';
-    } else {
-      this.errorMessage = message;
+  private showStatus(message: string, type: 'success' | 'error' | 'info'): void {
+    switch (type) {
+      case 'success':
+        this.notifications.saved(message);
+        this.errorMessage = '';
+        this.noticeMessage = '';
+        break;
+      case 'error':
+        this.errorMessage = message;
+        this.noticeMessage = '';
+        break;
+      case 'info':
+        this.noticeMessage = message;
+        this.errorMessage = '';
+        break;
     }
   }
 
+  /**
+   * Dismiss any visible banner before a new operation starts.
+   *
+   * Preconditions: none.
+   * Postconditions: both the error and guidance banners are hidden.
+   */
   private clearStatus(): void {
     this.errorMessage = '';
+    this.noticeMessage = '';
   }
 }
