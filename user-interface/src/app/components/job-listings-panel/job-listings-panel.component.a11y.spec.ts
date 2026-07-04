@@ -2,10 +2,10 @@ import { TestBed } from '@angular/core/testing';
 import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
 import { JobListingsPanelComponent } from './job-listings-panel.component';
 import type { Listing } from '../../models';
+import { expectNoAxeViolations } from '../../testing/a11y';
 
 const LISTING: Listing = {
   fingerprint: 'fp1',
@@ -37,10 +37,6 @@ const LISTING: Listing = {
   status: 'new',
 };
 
-// `color-contrast` is disabled because jsdom can't paint; contrast is
-// enforced by the --kh-* token system + the SCSS contrast guard spec.
-const axeOptions = { rules: { 'color-contrast': { enabled: false } } };
-
 describe('JobListingsPanelComponent a11y', () => {
   async function createFixture(listings: Listing[]) {
     const apiSpy = {
@@ -66,14 +62,12 @@ describe('JobListingsPanelComponent a11y', () => {
     expect(list).toBeTruthy();
     expect(list.querySelectorAll('[role="listitem"]').length).toBe(2);
     expect(fixture.nativeElement.querySelector('[role="radiogroup"]')).toBeTruthy();
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
   it('has no axe violations in the empty state', async () => {
     const fixture = await createFixture([]);
     expect(fixture.nativeElement.textContent).toContain('No listings yet');
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 });

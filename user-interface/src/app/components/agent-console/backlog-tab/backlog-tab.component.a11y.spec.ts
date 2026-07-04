@@ -2,18 +2,10 @@ import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { MatDialog } from '@angular/material/dialog';
 import { ProductDeliveryService } from '../../../services/product-delivery.service';
 import { BacklogTabComponent } from './backlog-tab.component';
-
-// `color-contrast` disabled — jsdom can't compute composited colours. Contrast
-// is enforced by src/styles/scss-contrast-guard.spec.ts + browser axe DevTools.
-const axeOptions = {
-  rules: {
-    'color-contrast': { enabled: false },
-  },
-};
+import { expectNoAxeViolations } from '../../../testing/a11y';
 
 describe('BacklogTabComponent a11y', () => {
   it('has no axe violations in the empty (no products) state', async () => {
@@ -38,8 +30,7 @@ describe('BacklogTabComponent a11y', () => {
     // Guard: the tab shell rendered, so axe audits the real toolbar.
     expect(fixture.nativeElement.querySelector('.backlog-tab')).toBeTruthy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 
   it('has no axe violations with products and a backlog tree rendered', async () => {
@@ -82,7 +73,6 @@ describe('BacklogTabComponent a11y', () => {
     // Guard: the product auto-selected and its initiative tree rendered.
     expect(fixture.nativeElement.querySelector('.initiative')).toBeTruthy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 });

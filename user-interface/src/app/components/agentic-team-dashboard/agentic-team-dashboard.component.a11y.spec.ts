@@ -2,17 +2,9 @@ import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { AgenticTeamDashboardComponent } from './agentic-team-dashboard.component';
-
-// `color-contrast` disabled — jsdom can't compute composited colours. Contrast
-// is enforced by src/styles/scss-contrast-guard.spec.ts + browser axe DevTools.
-const axeOptions = {
-  rules: {
-    'color-contrast': { enabled: false },
-  },
-};
+import { expectNoAxeViolations } from '../../testing/a11y';
 
 describe('AgenticTeamDashboardComponent a11y', () => {
   const summary = {
@@ -41,8 +33,7 @@ describe('AgenticTeamDashboardComponent a11y', () => {
     // Guard: a team card rendered, so axe audits the populated grid.
     expect(fixture.nativeElement.querySelector('.team-card')).toBeTruthy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 
   it('has no axe violations in the empty state', async () => {
@@ -51,7 +42,6 @@ describe('AgenticTeamDashboardComponent a11y', () => {
     const fixture = TestBed.createComponent(AgenticTeamDashboardComponent);
     fixture.detectChanges();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   });
 });

@@ -1,11 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
+import { expectNoAxeViolations } from '../../testing/a11y';
 import { EmptyStateComponent } from './empty-state.component';
-
-// `color-contrast` is disabled because jsdom can't paint; contrast is
-// enforced by the --kh-* token system + the SCSS contrast guard spec.
-const axeOptions = { rules: { 'color-contrast': { enabled: false } } };
 
 describe('EmptyStateComponent', () => {
   let fixture: ComponentFixture<EmptyStateComponent>;
@@ -57,7 +53,6 @@ describe('EmptyStateComponent', () => {
     component.examples = ['Example one'];
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('h2')).toBeTruthy();
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 });
