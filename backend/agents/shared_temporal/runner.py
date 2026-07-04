@@ -1,12 +1,13 @@
-"""Shared job-backed workflow runner.
+"""Shared workflow-dispatch helpers for teams' sync HTTP handlers.
 
-``run_team_job`` is the one entrypoint teams use from their sync HTTP
-handlers. It:
+Two entrypoints, both bridging a sync handler into the worker's asyncio loop:
 
-1. Ensures a row exists in the team's job store (via ``JobServiceClient``).
-2. Starts the given workflow on the Temporal client with a deterministic
-   ID ``{team}-{job_id}`` so re-submits are idempotent and mid-flight
-   failures resume from the last completed activity.
+- ``start_workflow_sync`` — waits for the worker's connected client + loop, then
+  starts a workflow with a caller-supplied id/queue. Does NOT touch the job
+  store; use it when the caller owns its own job-status bookkeeping.
+- ``run_team_job`` — the job-store-backed flow: ensures a ``JobServiceClient``
+  row exists, then dispatches via ``start_workflow_sync`` with a deterministic
+  ``{team}-{job_id}`` id (so re-submits are idempotent) and marks it running.
 
 Temporal is required. The system will fail fast if TEMPORAL_ADDRESS is not set.
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 
 from shared_temporal.client import (
@@ -25,6 +27,75 @@ from shared_temporal.client import (
 )
 
 logger = logging.getLogger(__name__)
+
+# How long to wait for the worker thread to connect its client before giving
+# up, and the sync-start dispatch timeout. The worker connects in a daemon
+# thread, so the very first request after a cold start can race the connect.
+CLIENT_READY_TIMEOUT_S = 10.0
+CLIENT_READY_POLL_S = 0.05
+START_WORKFLOW_TIMEOUT_S = 30
+
+
+def _await_client(timeout_s: float | None = None) -> tuple[Any, Any]:
+    """Block briefly until the shared Temporal client + loop are populated.
+
+    The team_service entrypoint normally starts the worker before uvicorn
+    accepts requests, but when the worker is started from an app lifespan
+    (local dev) the daemon thread can lag the first request by tens of
+    milliseconds. Polling turns that race into a short wait instead of a 500.
+
+    Preconditions:
+        - ``timeout_s`` is ``None`` (use ``CLIENT_READY_TIMEOUT_S``) or >= 0.
+
+    Postconditions:
+        - Returns ``(client, loop)`` once both are connected, or raises
+          ``RuntimeError`` after ``timeout_s`` seconds if they never become
+          available.
+    """
+    # Resolve at call time (not as a bound default) so monkeypatching the
+    # module constant in tests takes effect.
+    if timeout_s is None:
+        timeout_s = CLIENT_READY_TIMEOUT_S
+    deadline = time.monotonic() + timeout_s
+    while True:
+        client = get_temporal_client()
+        loop = get_temporal_loop()
+        if client is not None and loop is not None:
+            return client, loop
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Temporal client not available; is the team's worker running?")
+        time.sleep(CLIENT_READY_POLL_S)
+
+
+def start_workflow_sync(
+    workflow_run: Any,
+    *args: Any,
+    workflow_id: str,
+    task_queue: str,
+    client_ready_timeout_s: float | None = None,
+    start_timeout_s: float = START_WORKFLOW_TIMEOUT_S,
+) -> None:
+    """Start a Temporal workflow from synchronous code.
+
+    The shared sync→async bridge every team's ``start_*_workflow`` helper wraps:
+    wait (briefly, polling) for the worker's connected client + loop, then
+    schedule ``client.start_workflow`` on the worker loop and block until it is
+    accepted. Unlike :func:`run_team_job`, this does NOT touch the job store —
+    callers that own their own job-status bookkeeping use this instead.
+
+    Preconditions:
+        - ``workflow_id`` and ``task_queue`` are non-empty.
+
+    Postconditions:
+        - The workflow is started (raises ``RuntimeError`` if the worker client
+          never becomes available within ``client_ready_timeout_s``, defaulting
+          to ``CLIENT_READY_TIMEOUT_S``).
+    """
+    client, loop = _await_client(client_ready_timeout_s)
+    coro = client.start_workflow(
+        workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
+    )
+    asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=start_timeout_s)
 
 
 def _get_job_manager(team: str) -> Any:
@@ -68,21 +139,12 @@ def run_team_job(
         init_fields.update(metadata)
     manager.create_job(job_id, **init_fields)
 
-    client = get_temporal_client()
-    loop = get_temporal_loop()
-    if client is None or loop is None:
-        raise RuntimeError(
-            "Temporal is enabled but client is not connected; ensure the team's "
-            "worker started during app lifespan."
-        )
-    queue = task_queue or get_default_task_queue()
     workflow_id = f"{team}-{job_id}"
-    coro = client.start_workflow(
+    start_workflow_sync(
         workflow,
         *(workflow_args or []),
-        id=workflow_id,
-        task_queue=queue,
+        workflow_id=workflow_id,
+        task_queue=task_queue or get_default_task_queue(),
     )
-    asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30)
     manager.update_job(job_id, status="running", workflow_id=workflow_id)
     return {"job_id": job_id, "team": team, "status": "running", "mode": "temporal"}
