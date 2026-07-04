@@ -300,8 +300,9 @@ class AgenticTeamAdapter:
         Preconditions: ``answers`` is the orchestrator's single-question batch for
             a WAIT step (``poll_build`` only ever raises one question at a time).
         Postconditions: the first answer's free text is submitted to resume the
-            run. Raises ``httpx.HTTPStatusError`` on a non-2xx response (the
-            orchestrator retries with backoff).
+            run. Raises ``httpx.HTTPStatusError`` on a non-2xx response; the
+            orchestrator retries every failure with backoff except a 409, which it
+            treats as terminal (the run is no longer resumable).
         """
         first = answers[0] if answers else {}
         # The WAIT question carries empty options, so ``selected_option_id`` is

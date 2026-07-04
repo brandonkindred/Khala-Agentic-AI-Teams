@@ -113,6 +113,13 @@ SCHEMA = TeamSchema(
             finished_at     TIMESTAMPTZ
         )""",
         "CREATE INDEX IF NOT EXISTS idx_agentic_test_pipeline_runs_team ON agentic_test_pipeline_runs(team_id, started_at DESC)",
+        # WAIT-state restart reliability: the submitted human input is persisted so a
+        # waiting run can be resumed from any worker (or the DB) rather than an in-memory
+        # dict, and heartbeat_at is a liveness signal that lets the reaper tell a live
+        # sibling-worker run apart from an orphan. Added via ALTER (not the CREATE above)
+        # so existing databases pick up the new columns.
+        "ALTER TABLE agentic_test_pipeline_runs ADD COLUMN IF NOT EXISTS human_input TEXT",
+        "ALTER TABLE agentic_test_pipeline_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
     ],
     table_names=[
         "agentic_teams",

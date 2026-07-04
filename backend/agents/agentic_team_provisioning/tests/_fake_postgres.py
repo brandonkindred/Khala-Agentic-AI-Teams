@@ -30,6 +30,7 @@ def _default_db() -> dict[str, Any]:
         "team_agents": {},  # keyed by (team_id, agent_name)
         "env_provisions": {},  # keyed by (team_id, stable_key)
         "form_data": {},  # keyed by record_id
+        "pipeline_runs": {},  # keyed by run_id
     }
 
 
@@ -484,6 +485,193 @@ class _FakeCursor:
             self._last_fetch_all = [(k,) for k in keys]
             return
 
+        # -- pipeline runs ------------------------------------------------
+        # Advisory lock (reap): a no-op that always "acquires" in the single-process
+        # fake. Matches the session, xact, and unlock variants. Must precede the
+        # generic UPDATE fallthrough below.
+        if "advisory" in norm:
+            self._last_fetch_one = (True,)
+            return
+
+        if norm.startswith("insert into agentic_test_pipeline_runs"):
+            (
+                run_id,
+                team_id,
+                process_id,
+                status,
+                initial_input,
+                step_results,
+                started_at,
+                heartbeat_at,
+            ) = params
+            self._db["pipeline_runs"][run_id] = {
+                "run_id": run_id,
+                "team_id": team_id,
+                "process_id": process_id,
+                "status": status,
+                "current_step_id": None,
+                "initial_input": initial_input,
+                "step_results": _unwrap_json(step_results),
+                "human_prompt": None,
+                "human_input": None,
+                "error": None,
+                "started_at": started_at,
+                "finished_at": None,
+                "heartbeat_at": heartbeat_at,
+            }
+            self.rowcount = 1
+            return
+
+        # get_pipeline_status (lightweight status + pending answer read).
+        if norm.startswith("select status, human_input from agentic_test_pipeline_runs"):
+            (run_id,) = params
+            row = self._db["pipeline_runs"].get(run_id)
+            self._last_fetch_one = (
+                {"status": row["status"], "human_input": row["human_input"]} if row else None
+            )
+            return
+
+        # advance_pipeline_step (cursor UPDATE gated on status='running'). Must precede
+        # the generic update handler, which would otherwise write unconditionally.
+        if norm.startswith("update agentic_test_pipeline_runs set current_step_id"):
+            step_id, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] == "running":
+                row["current_step_id"] = step_id
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # get_pipeline_run (WHERE run_id) vs list_pipeline_runs (WHERE team_id) share
+        # the same column list; distinguish on the predicate.
+        if norm.startswith("select run_id, team_id, process_id, status, current_step_id"):
+            if "where run_id" in norm:
+                (run_id,) = params
+                self._last_fetch_one = self._db["pipeline_runs"].get(run_id)
+            else:  # WHERE team_id ... ORDER BY started_at DESC LIMIT
+                team_id, limit = params
+                rows = sorted(
+                    (r for r in self._db["pipeline_runs"].values() if r["team_id"] == team_id),
+                    key=lambda r: r["started_at"],
+                    reverse=True,
+                )
+                self._last_fetch_all = rows[:limit]
+            return
+
+        # try_resume_pipeline_run (compare-and-swap into 'running', fresh-heartbeat).
+        if norm.startswith("update agentic_test_pipeline_runs set status = 'running'"):
+            human_input, heartbeat_at, run_id, cutoff = params
+            row = self._db["pipeline_runs"].get(run_id)
+            hb = row["heartbeat_at"] if row else None
+            if row and row["status"] == "waiting_for_input" and hb is not None and hb >= cutoff:
+                row.update(
+                    status="running",
+                    human_prompt=None,
+                    human_input=human_input,
+                    heartbeat_at=heartbeat_at,
+                )
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # try_complete_pipeline_run (CAS to 'completed', WHERE status='running').
+        if norm.startswith("update agentic_test_pipeline_runs set status = 'completed'"):
+            step_results, finished_at, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] == "running":
+                row.update(
+                    status="completed",
+                    step_results=_unwrap_json(step_results),
+                    finished_at=finished_at,
+                )
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # try_cancel_pipeline_run (CAS to 'cancelled', WHERE status active).
+        if norm.startswith("update agentic_test_pipeline_runs set status = 'cancelled'"):
+            finished_at, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] in ("running", "waiting_for_input"):
+                row.update(status="cancelled", finished_at=finished_at)
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # try_fail_pipeline_run (CAS to 'failed', single row, WHERE status active).
+        # Must precede try_expire: both SET status='failed' WHERE run_id, but this one
+        # is gated on `status IN (...)` (an active run) rather than 'waiting_for_input'.
+        if (
+            norm.startswith("update agentic_test_pipeline_runs set status = 'failed'")
+            and "where run_id" in norm
+            and "status in (" in norm
+        ):
+            error, finished_at, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] in ("running", "waiting_for_input"):
+                row.update(status="failed", error=error, finished_at=finished_at)
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # try_expire_pipeline_run (CAS to 'failed', single row, WHERE waiting_for_input).
+        if (
+            norm.startswith("update agentic_test_pipeline_runs set status = 'failed'")
+            and "where run_id" in norm
+        ):
+            error, finished_at, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] == "waiting_for_input":
+                row.update(status="failed", error=error, finished_at=finished_at)
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # reap_orphaned_pipeline_runs (bulk, staleness-filtered).
+        if (
+            norm.startswith("update agentic_test_pipeline_runs set status = 'failed'")
+            and "where status in" in norm
+        ):
+            error, finished_at, cutoff = params
+            n = 0
+            for row in self._db["pipeline_runs"].values():
+                if row["status"] not in ("running", "waiting_for_input"):
+                    continue
+                hb = row["heartbeat_at"]
+                if hb is None or hb < cutoff:
+                    row.update(status="failed", error=error, finished_at=finished_at)
+                    n += 1
+            self.rowcount = n
+            return
+
+        # heartbeat_pipeline_run.
+        if norm.startswith("update agentic_test_pipeline_runs set heartbeat_at"):
+            heartbeat_at, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] in ("running", "waiting_for_input"):
+                row["heartbeat_at"] = heartbeat_at
+            return
+
+        # update_pipeline_run: dynamic SET of arbitrary columns, WHERE run_id last.
+        if norm.startswith("update agentic_test_pipeline_runs set"):
+            set_clause = norm.split(" set ", 1)[1].split(" where run_id", 1)[0]
+            cols = [c.split("=")[0].strip() for c in set_clause.split(",")]
+            run_id = params[-1]
+            row = self._db["pipeline_runs"].get(run_id)
+            if row:
+                for col, val in zip(cols, params[:-1]):
+                    row[col] = _unwrap_json(val) if col == "step_results" else val
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
         raise AssertionError(f"unexpected SQL in fake cursor: {sql!r}")
 
     def fetchone(self):
@@ -513,9 +701,11 @@ def install_fake_postgres(monkeypatch) -> dict[str, Any]:
 
     import agentic_team_provisioning.assistant.store as store_mod
     import agentic_team_provisioning.infrastructure as infra_mod
+    import agentic_team_provisioning.testing.store as testing_store_mod
 
     monkeypatch.setattr(store_mod, "get_conn", _fake_get_conn)
     monkeypatch.setattr(infra_mod, "get_conn", _fake_get_conn)
+    monkeypatch.setattr(testing_store_mod, "get_conn", _fake_get_conn)
     return db
 
 
