@@ -337,6 +337,31 @@ def test_build_client_when_usable():
     assert c.tool_name == "x"
 
 
+def test_resolve_timeout_default(monkeypatch):
+    from investment_team.tradingview_mcp.provider import _resolve_timeout
+
+    monkeypatch.delenv("TRADINGVIEW_MCP_TIMEOUT_SEC", raising=False)
+    assert _resolve_timeout() == 30.0
+
+
+def test_resolve_timeout_env_and_clamp(monkeypatch):
+    from investment_team.tradingview_mcp.provider import _MIN_TIMEOUT, _resolve_timeout
+
+    monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "7.5")
+    assert _resolve_timeout() == 7.5
+    monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "0")  # clamps up to the floor
+    assert _resolve_timeout() == _MIN_TIMEOUT
+    monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "garbage")  # falls back to default
+    assert _resolve_timeout() == 30.0
+
+
+def test_build_client_applies_timeout(monkeypatch):
+    monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "12.5")
+    cfg = TradingViewMcpConfig(enabled=True, server_url="https://tv/mcp", auth_token="")
+    c = build_tradingview_client(cfg)
+    assert c.timeout == 12.5
+
+
 # ---------------------------------------------------------------------------
 # MarketDataService wiring
 # ---------------------------------------------------------------------------

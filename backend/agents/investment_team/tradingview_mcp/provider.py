@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-import os
+
+from shared_env_config import env_float
 
 from .client import TradingViewMcpClient
 from .config import TradingViewMcpConfig, resolve_tradingview_mcp_config
@@ -11,23 +12,19 @@ from .config import TradingViewMcpConfig, resolve_tradingview_mcp_config
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 30.0
+# Floor so a garbled/zero/negative value clamps to a usable minimum rather than
+# hanging on a 0s timeout — matches how every other numeric knob is parsed.
+_MIN_TIMEOUT = 0.001
 
 
 def _resolve_timeout() -> float:
     """Read the MCP request timeout (seconds) from the environment.
 
-    Postconditions: returns ``TRADINGVIEW_MCP_TIMEOUT_SEC`` as a positive float, or
-        ``30.0`` when unset/garbled/non-positive. Never raises.
+    Postconditions: returns ``TRADINGVIEW_MCP_TIMEOUT_SEC`` as a float via the shared
+        :func:`shared_env_config.env_float` parser — ``30.0`` when unset/garbled, and any
+        value below ``_MIN_TIMEOUT`` clamped up to it. Never raises.
     """
-    raw = os.environ.get("TRADINGVIEW_MCP_TIMEOUT_SEC")
-    if not raw:
-        return _DEFAULT_TIMEOUT
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("Invalid TRADINGVIEW_MCP_TIMEOUT_SEC=%r; using %.1f", raw, _DEFAULT_TIMEOUT)
-        return _DEFAULT_TIMEOUT
-    return value if value > 0 else _DEFAULT_TIMEOUT
+    return env_float("TRADINGVIEW_MCP_TIMEOUT_SEC", _DEFAULT_TIMEOUT, floor=_MIN_TIMEOUT)
 
 
 def build_tradingview_client(
