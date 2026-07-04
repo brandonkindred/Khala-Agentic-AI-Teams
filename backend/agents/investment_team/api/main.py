@@ -962,6 +962,23 @@ def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
 
     job_id = str(uuid.uuid4())
     _bt_create_job(job_id, strategy_id=strategy.strategy_id)
+
+    # When Temporal is enabled, dispatch the backtest as a durable workflow
+    # instead of a daemon thread. Behavior is unchanged when TEMPORAL_ADDRESS
+    # is unset.
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        if is_temporal_enabled():
+            from investment_team.temporal.start_workflow import start_backtest_workflow
+
+            start_backtest_workflow(
+                job_id, strategy, config, request.submitted_by, request.notes
+            )
+            return BacktestJobSubmission(job_id=job_id, status=_BT_JOB_STATUS_PENDING)
+    except ImportError:
+        pass
+
     thread = threading.Thread(
         target=_run_backtest_background,
         args=(job_id, strategy, config, request.submitted_by, request.notes),
@@ -2126,6 +2143,20 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     with _lock:
         _active_runs[run_id] = initial_state
     _persist_run_state(run_id, initial_state, create=True)
+
+    # When Temporal is enabled, dispatch the run as a durable workflow instead
+    # of a daemon thread so it survives a worker/process restart and is visible
+    # in the Temporal UI. Behavior is unchanged when TEMPORAL_ADDRESS is unset.
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        if is_temporal_enabled():
+            from investment_team.temporal.start_workflow import start_strategy_lab_workflow
+
+            start_strategy_lab_workflow(run_id, request)
+            return StrategyLabRunStartResponse(run_id=run_id, total_cycles=total_cycles)
+    except ImportError:
+        pass
 
     thread = threading.Thread(
         target=_strategy_lab_worker,
