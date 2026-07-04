@@ -583,7 +583,7 @@ sequenceDiagram
 
 8. Explicit `process_id` column on `user_agent_founder_runs` instead of overloading `repo_path` to carry the chosen process id. **Persisting `process_id` on the run is required** (item 1 — without it the adapter can't target the chosen process); what's *recommended‑but‑deferrable* here is only the **storage choice** — a dedicated column vs. overloading `repo_path`. The UX works either way, but doing the column with this work avoids cementing the overload. (Tracked as an open decision in §7.)
 
-**Nice‑to‑have (UX works without; flag as follow‑ups):** real registry‑agent invocation inside `pipeline_runner.py` (`source=="registry"` branch — Phase 1 runs them as LLM personas, acceptable for v1); surfacing not‑yet‑rostered registry agents in `recommend_agents_for_step`; faster persona poll interval for agentic runs.
+**Nice‑to‑have (UX works without; flag as follow‑ups):** real registry‑agent invocation inside `pipeline_runner.py` (`source=="registry"` branch — Phase 1 runs them as LLM personas, acceptable for v1; **out of scope for v1 and gated on the ADR‑008 spike** — see §6 and `system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md`); surfacing not‑yet‑rostered registry agents in `recommend_agents_for_step`; faster persona poll interval for agentic runs.
 
 ---
 
@@ -597,7 +597,9 @@ sequenceDiagram
   unproven.
 - **In‑memory, unbounded WAIT state** in `pipeline_runner.py` (`resume_event.wait()` with no timeout, state held in
   the provisioning process) — a reliability risk for autonomous no‑human persona runs across service restarts.
-- **Typed‑IO registry agents in a free‑text DAG** — deepest unknown; scope v1 to Phase‑1 LLM‑persona execution.
+- **Typed‑IO registry agents in a free‑text DAG** — deepest unknown; **scope v1 to Phase‑1
+  LLM‑persona execution — typed‑IO registry‑agent DAG execution is out of scope for v1.** The scope
+  boundary and the deferred follow‑up spike are recorded in `system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md`.
 - **Persona run timing** — 15–30s founder poll intervals make autonomous runs feel slow; the UI must set
   expectations (progress, "persona is thinking…", elapsed time).
 
@@ -616,6 +618,7 @@ sequenceDiagram
 |---|---|---|---|---|
 | 1 | **`process_id` column vs `repo_path` overload** on `user_agent_founder_runs` | Deferred with a standing recommendation: **add the column.** Captured as Recommended item 8 in §5. | Backend lead | The first implementation PR that touches `user_agent_founder_runs` |
 | 2 | **Cross‑process persistence of authored agents** — registration via `manifest_generation` is **in‑process** only (same as generated team agents). Should saved Studio agents also write durable on‑disk manifests so they survive restarts and are visible cross‑process? | Deferred — in‑process registration is enough for the build → test → compose loop within a session; durable persistence is the same tracked follow‑up generated team agents already carry (§5 item 7). | Backend lead | First implementation PR that registers an authored agent |
+| 3 | **Typed‑IO registry‑agent DAG execution** — the §6 "deepest unknown." Should the DAG execute a registry agent through its declared typed input/output schema instead of the free‑text persona projection? | **Out of scope for v1** — registry roster entries run as Phase‑1 LLM personas via the free‑text projection; typed IO is not marshalled through the DAG. Decision + deferred follow‑up spike recorded in `ADR‑008`. | Agentic Team Provisioning | The first phase that attempts registry‑agent invocation in `pipeline_runner.py` (ADR‑008 revisit trigger) |
 
 Both are tracked here so approval of this spec is not gated on them; each has a named role‑owner and a concrete
 point at which it must be decided.
