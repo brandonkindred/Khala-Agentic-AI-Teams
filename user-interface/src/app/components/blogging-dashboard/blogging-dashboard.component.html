@@ -37,10 +37,11 @@
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 @if (activeView === 'new-post') {
   @if (blogBrandSpecConfigured) {
-    <div class="brand-configured-notice">
-      <mat-icon>check_circle</mat-icon>
-      <span>Brand and writing guidelines are configured. Audience and tone will be applied automatically.</span>
-    </div>
+    <app-inline-banner
+      variant="success"
+      live="off"
+      message="Brand and writing guidelines are configured. Audience and tone will be applied automatically."
+    />
   }
   <app-team-assistant-chat
     [teamApiUrl]="'/api/blogging/assistant'"

@@ -5,6 +5,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatIconModule } from '@angular/material/icon';
 import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
 import type { PlanningV3StatusResponse, PlanningV3ResultResponse } from '../../models';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 
 const PHASES = ['intake', 'discovery', 'requirements', 'synthesis', 'document_production', 'sub_agent_provisioning'];
 
@@ -16,6 +17,7 @@ const PHASES = ['intake', 'discovery', 'requirements', 'synthesis', 'document_pr
     MatCardModule,
     MatProgressBarModule,
     MatIconModule,
+    InlineBannerComponent,
   ],
   templateUrl: './planning-v3-job-status.component.html',
   styleUrl: './planning-v3-job-status.component.scss',

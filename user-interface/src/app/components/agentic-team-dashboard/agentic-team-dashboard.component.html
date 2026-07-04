@@ -4,11 +4,9 @@
   icon="groups"
 >
 @if (error()) {
-  <div class="error-banner">
-    <mat-icon>error_outline</mat-icon>
-    <span>{{ error() }}</span>
+  <app-inline-banner variant="error" [message]="error() ?? ''">
     <button mat-icon-button (click)="error.set(null)" aria-label="Dismiss error"><mat-icon>close</mat-icon></button>
-  </div>
+  </app-inline-banner>
 }
 
 <!-- Team detail / process designer view -->

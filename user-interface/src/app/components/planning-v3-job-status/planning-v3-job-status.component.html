@@ -41,10 +41,9 @@
       }
 
       @if (isWaitingForAnswers) {
-        <div class="waiting-banner">
-          <mat-icon color="warn">help_outline</mat-icon>
-          <span>Workflow paused — {{ pendingQuestionsCount }} question(s) need your input</span>
-        </div>
+        <app-inline-banner variant="warning" icon="help_outline" live="polite">
+          <span banner-message>Workflow paused — {{ pendingQuestionsCount }} question(s) need your input</span>
+        </app-inline-banner>
       }
 
       @if (status.summary) {

@@ -63,34 +63,6 @@
   }
 }
 
-// ── Error Banners ───────────────────────────────────────────────────────────
-
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: var(--kh-space-3);
-  padding: var(--kh-space-3) var(--kh-space-4);
-  background: var(--kh-error-subtle);
-  color: var(--kh-error);
-  border: 1px solid rgba(239, 68, 68, 0.2);
-  border-radius: var(--kh-radius-md);
-  margin-bottom: var(--kh-space-6);
-  font-size: var(--kh-text-sm);
-
-  mat-icon {
-    font-size: 18px;
-    width: 18px;
-    height: 18px;
-    flex-shrink: 0;
-  }
-
-  &.se-fetch-warning {
-    background: var(--kh-warning-subtle);
-    color: var(--kh-warning);
-    border-color: rgba(251, 191, 36, 0.3);
-  }
-}
-
 // ── Filter Toolbar ──────────────────────────────────────────────────────────
 
 .jobs-filters {

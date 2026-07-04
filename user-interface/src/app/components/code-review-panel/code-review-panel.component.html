@@ -47,10 +47,7 @@
     </div>
 
     @if (pullError) {
-      <div class="cr-banner cr-banner--error">
-        <mat-icon>error_outline</mat-icon>
-        <span>{{ pullError }}</span>
-      </div>
+      <app-inline-banner variant="error" [message]="pullError" />
     }
 
     <!-- PR list (always visible); each row expands inline -->
@@ -138,10 +135,7 @@
                   </div>
 
                   @if (reviewErrorFor(pull.number); as reviewError) {
-                    <div class="cr-banner cr-banner--error">
-                      <mat-icon>error_outline</mat-icon>
-                      <span>{{ reviewError }}</span>
-                    </div>
+                    <app-inline-banner variant="error" [message]="reviewError" />
                   }
 
                   <!-- All review runs for this PR -->

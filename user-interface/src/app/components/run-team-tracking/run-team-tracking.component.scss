@@ -195,24 +195,6 @@
   }
 }
 
-// Waiting notice
-.waiting-notice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  margin-bottom: 16px;
-  background-color: var(--kh-warning-subtle);
-  color: var(--kh-warning);
-  border-radius: 8px;
-  border: 1px solid var(--kh-warning-subtle);
-
-  mat-icon {
-    color: var(--kh-warning);
-    flex-shrink: 0;
-  }
-}
-
 // Error message
 .error-message {
   color: var(--kh-error);

@@ -2,25 +2,6 @@
 // Deepthought Dashboard — Professional Chat + Agent Hierarchy UI
 // ============================================================================
 
-// --- Error banner ---
-.error-banner {
-  padding: 8px 16px;
-  margin-bottom: 12px;
-  background: var(--kh-error-subtle, rgba(248, 113, 113, 0.12));
-  border: 1px solid rgba(248, 113, 113, 0.3);
-  border-radius: var(--kh-radius-md, 8px);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-
-  .error-text {
-    color: var(--kh-error, #f87171);
-    font-size: var(--kh-text-base, 0.875rem);
-    margin: 0;
-    flex: 1;
-  }
-}
-
 // --- Two-panel layout ---
 .deepthought-layout {
   display: flex;
