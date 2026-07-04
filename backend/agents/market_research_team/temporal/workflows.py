@@ -79,6 +79,17 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
 class MarketResearchWorkflow:
     @workflow.run
     async def run(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Durable entrypoint: run the market-research pipeline for ``job_id``.
+
+        Preconditions:
+            - ``job_id`` refers to a job already created in the job store.
+            - ``request`` is the serialized ``RunMarketResearchRequest``
+              (``payload.model_dump()``).
+
+        Postconditions:
+            - Delegates to ``run_pipeline_activity`` (which owns job-store
+              status bookkeeping) and returns its ``{"job_id": job_id}`` result.
+        """
         return await workflow.execute_activity(
             run_pipeline_activity,
             args=[job_id, request],

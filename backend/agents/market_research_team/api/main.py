@@ -175,7 +175,16 @@ def run_market_research(payload: RunMarketResearchRequest) -> RunMarketResearchJ
         product_concept=payload.product_concept,
     )
 
-    _dispatch_market_research_run(job_id, payload, mission, human_review)
+    try:
+        _dispatch_market_research_run(job_id, payload, mission, human_review)
+    except Exception as exc:
+        # A dispatch failure (e.g. the Temporal worker client never connected)
+        # must not leave the freshly-created job orphaned in PENDING — mark it
+        # FAILED so callers polling /status see a terminal state. The full
+        # exception is logged; the client gets a generic 500 detail.
+        logger.exception("Failed to dispatch market research job %s", job_id)
+        update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to start market research run.") from exc
 
     return RunMarketResearchJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 

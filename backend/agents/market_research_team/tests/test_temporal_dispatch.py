@@ -52,6 +52,27 @@ def test_run_dispatches_to_temporal_when_enabled(monkeypatch):
     assert captured["request"]["product_concept"] == _PAYLOAD["product_concept"]
 
 
+def test_run_marks_job_failed_when_dispatch_raises(monkeypatch, fake_job_client):
+    """A dispatch failure (e.g. Temporal worker client never connected) must
+    leave the job in a terminal FAILED state, not orphaned in PENDING."""
+    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: True)
+
+    def _boom(job_id, request):
+        raise RuntimeError("worker client not available")
+
+    monkeypatch.setattr(
+        "market_research_team.temporal.start_workflow.start_market_research_workflow", _boom
+    )
+
+    response = client.post("/market-research/run", json=_PAYLOAD)
+
+    assert response.status_code == 500
+    jobs = fake_job_client.list_jobs()
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "failed"
+    assert "Dispatch failed" in (jobs[0].get("error") or "")
+
+
 def test_dispatch_helper_returns_thread_label_when_disabled(monkeypatch):
     """Direct unit check of the helper's thread fallback and its label."""
     monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: False)
