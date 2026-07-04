@@ -109,6 +109,7 @@ from .mapping import (
     _review_model_fingerprint,
     _sibling_surface,
     _stable_json_digest,
+    _submission_fingerprint,
     _surface_by_path,
     _symbol_surface,
     clear_chunk_outcome_cache,
@@ -197,30 +198,6 @@ def clear_submission_outcome_cache() -> None:
     """
     with _SUBMISSION_OUTCOME_CACHE_LOCK:
         _SUBMISSION_OUTCOME_CACHE.clear()
-
-
-def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str) -> str:
-    """Hash the whole raw submission plus the resolved model.
-
-    Preconditions:
-        - ``input_data`` is a valid ``CodeReviewInput``.
-        - ``model_fingerprint`` is ``_review_model_fingerprint(llm)`` for the
-          client that would run the review.
-
-    Postconditions:
-        - Returns a hex digest that changes whenever any field that could change
-          the review verdict changes (the code under review, task/spec/
-          architecture context, profile, false-positive toggle, or the model),
-          so a cache hit means the review would be byte-for-byte the same work.
-          Derived from ``model_dump`` so a new ``CodeReviewInput`` field is
-          hashed automatically — the key can never silently drop a field.
-        - Computed from raw fields only (no compaction/LLM), so the short-circuit
-          it guards fires before any model call. Deterministic (``sort_keys``),
-          so a stored approval survives across coordinator calls in a process.
-    """
-    payload = input_data.model_dump(mode="json")
-    payload["__model__"] = model_fingerprint
-    return _stable_json_digest(payload)
 
 
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
@@ -377,10 +354,11 @@ def run_coordinator(
             failure) propagates unchanged, failing closed so the bug surfaces
             instead of being masked as a not-reviewed finding.
     """
-    # Resolve the review model once: it feeds both the submission fingerprint here
-    # and the map-phase context fingerprint below, and is identical for the whole
-    # run (never raises — best-effort identity).
-    model_fingerprint = _review_model_fingerprint(llm)
+    # Resolve the review model at most once for the whole run: it feeds both the
+    # submission fingerprint here and the map-phase context fingerprint below, and
+    # is identical throughout (best-effort identity, never raises). Resolved lazily
+    # so the disabled-cache / no-code paths that never fingerprint pay nothing.
+    model_fingerprint: Optional[str] = None
 
     # Submission-level short-circuit: an identical submission that was already
     # approved reproduces the same verdict, so return its cached output before any
@@ -391,6 +369,7 @@ def run_coordinator(
     submission_size = _submission_cache_size()
     submission_key: Optional[str] = None
     if submission_size > 0:
+        model_fingerprint = _review_model_fingerprint(llm)
         submission_key = _submission_fingerprint(input_data, model_fingerprint)
         with _SUBMISSION_OUTCOME_CACHE_LOCK:
             cached = _SUBMISSION_OUTCOME_CACHE.get(submission_key)
@@ -468,6 +447,10 @@ def run_coordinator(
     # Fingerprint the shared context + resolved model once per run so unchanged
     # chunks reuse their prior map-phase outcome (see module docstring). Computed
     # here (not per chunk) because it is identical for every chunk in this run.
+    # Reuse the fingerprint the submission short-circuit already resolved, or
+    # resolve it now on the disabled-cache path (still at most once per run).
+    if model_fingerprint is None:
+        model_fingerprint = _review_model_fingerprint(llm)
     context_fp = _context_fingerprint(base_input, model_fingerprint)
 
     # Top-level symbol surface of every changed file, so each chunk's reviewer can

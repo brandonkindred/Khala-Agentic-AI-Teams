@@ -74,6 +74,7 @@ from .chunking import (
 from .model_resolution import resolve_code_review_model
 from .models import (
     ChunkReviewInput,
+    CodeReviewInput,
     CodeReviewIssue,
     CodeReviewUnavailableError,
     ReviewChunk,
@@ -672,6 +673,37 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     normalized["profile"] = getattr(profile, "value", profile)
     normalized["__model__"] = model_fingerprint
     return _stable_json_digest(normalized)
+
+
+def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str) -> str:
+    """Hash the whole raw submission plus the resolved model.
+
+    The submission-level analogue of ``_context_fingerprint`` (which keys only the
+    shared context); it keys the *entire* input so the coordinator's
+    submission-level short-circuit can recognise a byte-identical resubmission.
+
+    Preconditions:
+        - ``input_data`` is a valid ``CodeReviewInput``.
+        - ``model_fingerprint`` is ``_review_model_fingerprint(llm)`` for the
+          client that would run the review.
+
+    Postconditions:
+        - Returns a hex digest that changes whenever **any** input field (or the
+          resolved model) changes. It is derived from ``input_data.model_dump()``,
+          so it keys on the whole input, not a hand-picked subset: a new
+          ``CodeReviewInput`` field is hashed automatically and can never be
+          silently dropped. Two submissions collide only when their full inputs
+          are identical, so a hit means the review would be the same work.
+          (Every current field is verdict-affecting, so this is exactly the
+          submission identity; a future non-verdict field would only cause extra
+          misses — full re-reviews — never a stale hit.)
+        - Computed from raw fields only (no compaction/LLM), so the short-circuit
+          it guards fires before any model call. Deterministic (``sort_keys``),
+          so a stored approval survives across coordinator calls in a process.
+    """
+    payload = input_data.model_dump(mode="json")
+    payload["__model__"] = model_fingerprint
+    return _stable_json_digest(payload)
 
 
 def _chunk_cache_key(chunk: ReviewChunk, context_fp: str, sibling_surface: str) -> str:
