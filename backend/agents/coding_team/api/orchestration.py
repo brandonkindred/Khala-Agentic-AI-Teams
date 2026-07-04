@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # Ensure backend/agents is on path for coding_team and job_service_client
 from coding_team import hitl
@@ -79,15 +79,32 @@ def run_orchestrator_wired(job_id: str, repo_path: str, plan: CodingTeamPlanInpu
     )
 
 
-def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
-    """Spawn the daemon orchestrator thread for a job whose run-thread claim is held.
+def _spawn_run_thread(
+    job_id: str,
+    run_body: Callable[[], None],
+    on_failure: Callable[[Exception], None],
+) -> None:
+    """Spawn a claim-lifecycle-managed daemon run-thread that executes *run_body*.
+
+    The shared skeleton behind ``_start_orchestrator_thread`` and
+    ``_start_github_resume_thread``: run-thread registration lives inside the
+    thread's ``try`` so the ``finally`` always releases the claim (even if
+    registration itself raises), and a thread-start failure releases the claim
+    here — the thread's ``finally`` never ran — before re-raising so the job
+    stays resumable. The two callers differ only in *run_body* (the work) and
+    *on_failure* (the log line + failed-status write), which are passed in.
 
     Preconditions:
-        - The caller holds the run-thread claim for ``job_id`` (via ``_claim_run_thread``).
+        - The caller holds the run-thread claim for *job_id*.
+        - *run_body* performs the job's work and may raise; *on_failure* records
+          the failure (log + ``update_job(status="failed", ...)``) and must not
+          itself raise.
     Postconditions:
-        - A daemon thread is running the orchestrator; the claim is released by the thread's
-          ``finally`` (or here, if the thread never started — in which case the exception
-          propagates so the job stays resumable).
+        - A daemon thread is running *run_body*. The claim is released by the
+          thread's ``finally`` on completion or *run_body* failure, or here on
+          thread-start failure (in which case the exception propagates).
+        - A *run_body* exception is routed to *on_failure*; a thread-start
+          failure is not (the work never began) and propagates to the caller.
     """
 
     def run() -> None:
@@ -95,10 +112,9 @@ def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlan
             # Registration is inside the try so the finally always releases the claim — even if
             # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
             _main._register_run_thread(job_id)
-            _main.run_orchestrator_wired(job_id, repo_path, plan)
+            run_body()
         except Exception as e:
-            logger.exception("Coding team orchestrator resume failed: %s", e)
-            _main.update_job(job_id, status="failed", error=str(e), current_activity=None)
+            on_failure(e)
         finally:
             _main._clear_run_thread(job_id)
 
@@ -116,6 +132,27 @@ def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlan
         # here so the job stays resumable instead of being wedged in _starting_run_jobs.
         _main._clear_run_thread(job_id)
         raise
+
+
+def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
+    """Spawn the daemon orchestrator thread for a job whose run-thread claim is held.
+
+    Preconditions:
+        - The caller holds the run-thread claim for ``job_id`` (via ``_claim_run_thread``).
+    Postconditions:
+        - A daemon thread is running the orchestrator; the claim is released by the thread's
+          ``finally`` (or here, if the thread never started — in which case the exception
+          propagates so the job stays resumable).
+    """
+
+    def _run_body() -> None:
+        _main.run_orchestrator_wired(job_id, repo_path, plan)
+
+    def _on_failure(e: Exception) -> None:
+        logger.exception("Coding team orchestrator resume failed: %s", e)
+        _main.update_job(job_id, status="failed", error=str(e), current_activity=None)
+
+    _spawn_run_thread(job_id, _run_body, _on_failure)
 
 
 def _start_github_resume_thread(
@@ -152,38 +189,23 @@ def _start_github_resume_thread(
         cleanup_checkout_on_success=ctx.get("cleanup_checkout_on_success") is True,
     )
 
-    def run() -> None:
-        try:
-            # Registration is inside the try so the finally always releases the claim — even if
-            # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
-            _main._register_run_thread(job_id)
-            # Advance the job out of waiting_for_user BEFORE the GitHub network I/O. The
-            # cross-worker resume claim (claim_resume) has a TTL of RESUME_CLAIM_TTL_S; if the
-            # issue fetch or branch prep takes longer than that, another worker could treat the
-            # expired claim as abandoned and spawn a second hook path. Moving the status to
-            # "running" here makes _try_auto_resume and resume_job decline (they only proceed for
-            # waiting_for_user), so the re-claiming window closes before the slow I/O begins.
-            _main.update_job(job_id, status="running", status_text="Resuming via GitHub hook…")
-            with _main.GitHubClient(token=token) as client:
-                issue = client.get_issue(request.owner, request.repo, int(ctx["issue_number"]))
-            _main._run_with_github_hooks(job_id, request, plan, issue, token)
-        except Exception as e:
-            logger.exception("GitHub-path resume failed for job %s: %s", job_id, e)
-            _main.update_job(job_id, status="failed", error=f"resume failed: {e}")
-        finally:
-            _main._clear_run_thread(job_id)
+    def _run_body() -> None:
+        # Advance the job out of waiting_for_user BEFORE the GitHub network I/O. The
+        # cross-worker resume claim (claim_resume) has a TTL of RESUME_CLAIM_TTL_S; if the
+        # issue fetch or branch prep takes longer than that, another worker could treat the
+        # expired claim as abandoned and spawn a second hook path. Moving the status to
+        # "running" here makes _try_auto_resume and resume_job decline (they only proceed for
+        # waiting_for_user), so the re-claiming window closes before the slow I/O begins.
+        _main.update_job(job_id, status="running", status_text="Resuming via GitHub hook…")
+        with _main.GitHubClient(token=token) as client:
+            issue = client.get_issue(request.owner, request.repo, int(ctx["issue_number"]))
+        _main._run_with_github_hooks(job_id, request, plan, issue, token)
 
-    try:
-        # Mirror _start_orchestrator_thread: a dead prior attempt may have left a mid-review
-        # current_activity behind (its finally never ran), which would render a frozen sub-bar
-        # through the resumed run's early phases. Wipe it first. This is the first job-service
-        # write after the claim, inside the claim-releasing try, so a store-outage raise here is
-        # handled by the except below rather than wedging the job.
-        _main.update_job(job_id, current_activity=None)
-        threading.Thread(target=run, daemon=True).start()
-    except Exception:
-        _main._clear_run_thread(job_id)
-        raise
+    def _on_failure(e: Exception) -> None:
+        logger.exception("GitHub-path resume failed for job %s: %s", job_id, e)
+        _main.update_job(job_id, status="failed", error=f"resume failed: {e}")
+
+    _spawn_run_thread(job_id, _run_body, _on_failure)
 
 
 # How long after deferring to a fresh heartbeat we re-check that the deferred-to wait loop really
