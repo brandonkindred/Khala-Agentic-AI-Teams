@@ -641,7 +641,7 @@ class BrandJobListResponse(BaseModel):
     jobs: List[BrandJobListItem]
 
 
-def _run_branding_background(
+def _run_branding_core(
     job_id: str,
     mission: BrandingMission,
     human_review: HumanReview,
@@ -652,6 +652,23 @@ def _run_branding_background(
     include_design_assets: bool,
     target_phase: Optional[BrandPhase],
 ) -> None:
+    """Run the branding pipeline for ``job_id`` and record job status.
+
+    Shared by the thread path (via ``_run_branding_background``) and the
+    Temporal activity so the RUNNING → COMPLETED/FAILED bookkeeping and cancel
+    guards live in exactly one place.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+    Postconditions:
+        - On success the job row ends COMPLETED with the serialized
+          ``TeamOutput``.
+        - If the job was cancelled, leaves the row as-is and returns (a
+          cancelled run is terminal, not a failure).
+        - On a genuine failure, marks the row FAILED and **re-raises the
+          original exception** so callers (the Temporal activity) can surface it
+          as a failed workflow rather than a silently-"completed" one.
+    """
     try:
         if is_job_cancelled(job_id):
             return
@@ -675,6 +692,45 @@ def _run_branding_background(
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+        raise
+
+
+def _run_branding_background(
+    job_id: str,
+    mission: BrandingMission,
+    human_review: HumanReview,
+    brand_checks: List[BrandCheckRequest],
+    client_id: Optional[str],
+    brand_id: Optional[str],
+    include_market_research: bool,
+    include_design_assets: bool,
+    target_phase: Optional[BrandPhase],
+) -> None:
+    """Thread-path wrapper around ``_run_branding_core`` that swallows failures.
+
+    The core already logs and writes the FAILED job row; this wrapper is what
+    the ``_run_executor`` submits, so it must not let the exception escape into
+    an unretrieved ``Future`` (the caller never awaits it).
+
+    Postconditions:
+        - Never raises. Job status is written by ``_run_branding_core``.
+    """
+    try:
+        _run_branding_core(
+            job_id,
+            mission,
+            human_review,
+            brand_checks,
+            client_id,
+            brand_id,
+            include_market_research,
+            include_design_assets,
+            target_phase,
+        )
+    except Exception:
+        # Already logged + FAILED row written by the core; the thread path is
+        # fire-and-forget, so absorb it here.
+        pass
 
 
 def _submit_brand_run(
@@ -694,6 +750,44 @@ def _submit_brand_run(
         brand_id=brand_id,
         current_phase=target_phase.value if target_phase else None,
     )
+
+    # When Temporal is enabled, dispatch the job as a durable workflow (visible
+    # in the Temporal UI; an orphaned run after a restart is reconciled to
+    # ``interrupted`` by the team_service startup recovery rather than lost);
+    # otherwise fall back to the in-process thread pool. Lazy import keeps
+    # main.py's import cost low and defers the Pattern A worker boot in
+    # branding_team.temporal until the first dispatch.
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        temporal_on = is_temporal_enabled()
+    except ImportError:
+        temporal_on = False
+
+    if temporal_on:
+        from branding_team.temporal.start_workflow import start_branding_workflow
+
+        wf_payload = {
+            "job_id": job_id,
+            "mission": brand.mission.model_dump(),
+            "human_review": human_review.model_dump(),
+            "brand_checks": [c.model_dump() for c in payload.brand_checks],
+            "client_id": client_id,
+            "brand_id": brand_id,
+            "include_market_research": payload.include_market_research,
+            "include_design_assets": payload.include_design_assets,
+            "target_phase": target_phase.value if target_phase else None,
+        }
+        try:
+            start_branding_workflow(job_id, wf_payload)
+        except Exception:
+            # Temporal client/worker not ready — fail the job row and return 503
+            # rather than surfacing the dispatch error as a 500.
+            logger.exception("Branding job %s Temporal dispatch failed", job_id)
+            update_job(job_id, status=JOB_STATUS_FAILED, error="temporal dispatch failed")
+            raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+        return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
+
     try:
         _run_executor.submit(
             _run_branding_background,

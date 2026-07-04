@@ -31,7 +31,12 @@ backend/agents/branding_team/
 ├── postgres/
 │   └── __init__.py          # SCHEMA = TeamSchema(...) for shared_postgres
 ├── temporal/
-│   └── __init__.py          # BrandingWorkflow + run_pipeline_activity
+│   ├── __init__.py          # WORKFLOWS/ACTIVITIES exports + Pattern A auto-boot
+│   ├── constants.py         # TASK_QUEUE, WORKFLOW_ID_PREFIX
+│   ├── activities.py        # run_branding_pipeline_activity
+│   ├── workflows.py         # BrandingWorkflow
+│   ├── worker.py            # start_branding_temporal_worker_thread
+│   └── start_workflow.py    # start_branding_workflow (sync -> async dispatch)
 └── tests/
     ├── test_api.py
     ├── test_assistant.py
@@ -444,18 +449,30 @@ template expansion, not LLM calls.
 
 ### Temporal mode (optional)
 
-`temporal/__init__.py:11-40` defines:
+When `TEMPORAL_ADDRESS` is set, the async branding-run dispatch path
+(`_submit_brand_run` in `api/main.py`) routes through Temporal instead of
+the in-process thread pool. The `temporal/` package defines:
 
-- `run_pipeline_activity(request: dict)` — a Temporal activity that
-  rehydrates a `RunBrandingTeamRequest` and invokes the orchestrator.
-- `BrandingWorkflow` — a Temporal workflow whose single
-  `run()` method calls the activity with a 2-hour
-  `start_to_close_timeout`.
+- `run_branding_pipeline_activity(payload: dict)` — a Temporal activity that
+  rehydrates the job's `BrandingMission` / `HumanReview` / brand checks from a
+  JSON-safe payload and delegates to the existing `_run_branding_background`
+  job function, so the Temporal path and the thread path run the identical
+  pipeline body and share the same job-store bookkeeping.
+- `BrandingWorkflow` — a single-activity Temporal workflow (id
+  `branding-{job_id}`) whose `run()` forwards the payload to the activity with
+  a 2-hour `start_to_close_timeout` and no app-level retries.
+- `start_branding_workflow(job_id, payload)` — the sync -> async bridge the API
+  handler calls to start the workflow (fire-and-forget; the client polls
+  `GET /branding/status/{job_id}`).
 
-Registration happens on import when `is_temporal_enabled()` returns
-true: `start_team_worker("branding", WORKFLOWS, ACTIVITIES,
-task_queue="branding-queue")`. This follows the team-wide Pattern A
-described in the platform CLAUDE.md.
+The worker boots two idempotent ways (Pattern A): on import when
+`is_temporal_enabled()` returns true
+(`start_team_worker("branding", WORKFLOWS, ACTIVITIES, task_queue="branding-queue")`),
+and via the `team_service` entrypoint through
+`TEAM_TEMPORAL_WORKER_MODULE=branding_team.temporal.worker` /
+`TEAM_TEMPORAL_WORKER_FUNC=start_branding_temporal_worker_thread`. When
+`TEMPORAL_ADDRESS` is unset, the thread-pool path is used and behavior is
+unchanged.
 
 ## Configuration reference
 

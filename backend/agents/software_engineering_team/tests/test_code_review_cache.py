@@ -22,6 +22,7 @@ The process-global cache is cleared around every test by the autouse
 from __future__ import annotations
 
 import threading
+from concurrent.futures import Future
 from typing import Any, Dict, List
 
 import pytest
@@ -29,9 +30,15 @@ from code_review_agent import coordinator as coord
 from code_review_agent import mapping
 from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 from code_review_agent.coordinator import run_coordinator
-from code_review_agent.models import CodeReviewInput, ReviewProfile
+from code_review_agent.models import (
+    CodeReviewInput,
+    CodeReviewUnavailableError,
+    FileSegment,
+    ReviewChunk,
+    ReviewProfile,
+)
 
-from llm_service import LLMSemanticExhaustionError
+from llm_service import LLMRateLimitError, LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
@@ -540,6 +547,101 @@ def test_sibling_body_only_edit_keeps_dependent_cached() -> None:
     # B's body changes but its surface (def foo) does not: B misses, A stays cached.
     run_coordinator(client, _two_file_input(a, _defined_file("foo", body="2")))
     assert client.map_calls == 3
+
+
+# ---------------------------------------------------------------------------
+# Single-flight de-duplication of concurrent identical chunks
+# ---------------------------------------------------------------------------
+#
+# The waiter/leader branches are covered deterministically without real thread
+# races: pre-seeding a resolved ``Future`` in the in-flight registry exercises the
+# waiter path (``future.result()``), and a reviewer that raises drives the leader
+# failure path. The leader create-resolve-release path is covered by every solo
+# ``run_coordinator`` test above. Mutual exclusion of two real leaders is
+# guaranteed by the cache lock, so it needs no timing-dependent test.
+
+
+class _NeverRuns:
+    """Reviewer stand-in that must never be invoked — the waiter path must not review."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, chunk_input: Any) -> Any:
+        self.calls += 1
+        raise AssertionError("reviewer.run must not be called on the waiter path")
+
+
+class _RaisingReviewer:
+    """Reviewer whose ``run`` raises, to drive the leader failure path."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.calls = 0
+
+    def run(self, chunk_input: Any) -> Any:
+        self.calls += 1
+        raise self._error
+
+
+def _single_chunk() -> ReviewChunk:
+    return ReviewChunk(segments=[FileSegment(path="app/a.py", content="def f():\n    return 1\n")])
+
+
+def _simple_outcome() -> mapping._ChunkOutcome:
+    return mapping._ChunkOutcome(approved_flags=[True], summaries=["ok"])
+
+
+def test_leader_review_failure_releases_slot_and_reraises() -> None:
+    """A leader whose review fails re-raises, caches nothing, and frees the slot."""
+    reviewer = _RaisingReviewer(LLMRateLimitError("rate limited"))
+    chunk = _single_chunk()
+    base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
+    context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
+
+    # An infra failure surfaces as CodeReviewUnavailableError from the reviewer.
+    with pytest.raises(CodeReviewUnavailableError):
+        mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+
+    assert reviewer.calls == 1
+    assert mapping._CHUNK_INFLIGHT == {}  # slot released on the failure path
+    assert key not in mapping._CHUNK_OUTCOME_CACHE  # failure is never cached
+
+
+def test_waiter_reuses_resolved_inflight_result() -> None:
+    """A waiter reads a resolved in-flight future's outcome without reviewing."""
+    chunk = _single_chunk()
+    base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
+    context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
+    published = _simple_outcome()
+    fut: Future = Future()
+    fut.set_result(published)
+    mapping._CHUNK_INFLIGHT[key] = fut  # simulate a leader already in flight
+
+    reviewer = _NeverRuns()
+    got = mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+
+    assert reviewer.calls == 0  # the waiter never fires its own review
+    assert got.approved_flags == published.approved_flags
+    assert got is not published  # each caller owns an independent clone
+
+
+def test_waiter_reraises_resolved_inflight_exception() -> None:
+    """A waiter re-raises the leader's stored exception without reviewing."""
+    chunk = _single_chunk()
+    base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
+    context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
+    fut: Future = Future()
+    fut.set_exception(CodeReviewUnavailableError("leader failed"))
+    mapping._CHUNK_INFLIGHT[key] = fut
+
+    reviewer = _NeverRuns()
+    with pytest.raises(CodeReviewUnavailableError):
+        mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
+    assert reviewer.calls == 0
 
 
 def test_lru_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -> None:
