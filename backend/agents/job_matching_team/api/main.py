@@ -175,13 +175,39 @@ def _run_scan_background(job_id: str, request: JobMatchRequest) -> None:
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
 
 
+def _dispatch_scan_via_temporal(job_id: str, payload: JobMatchRequest) -> bool:
+    """Dispatch a scan to Temporal when enabled. Returns True if dispatched.
+
+    Falls back to the daemon-thread path (returns False) when Temporal is
+    disabled or the Temporal package can't be imported, so behavior is
+    unchanged whenever ``TEMPORAL_ADDRESS`` is unset.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        if not is_temporal_enabled():
+            return False
+        from job_matching_team.temporal.start_workflow import start_job_matching_workflow
+    except ImportError:
+        return False
+    start_job_matching_workflow(job_id, payload.model_dump(mode="json"))
+    logger.info("Job matching scan %s dispatched via Temporal", job_id)
+    return True
+
+
 @app.post("/scan", response_model=ScanJobResponse)
 def start_scan(payload: JobMatchRequest) -> ScanJobResponse:
-    """Start an async scan. Poll ``GET /scan/status/{job_id}`` for the result."""
+    """Start an async scan. Poll ``GET /scan/status/{job_id}`` for the result.
+
+    Runs the scan on a durable Temporal workflow when ``TEMPORAL_ADDRESS`` is
+    set, else on a daemon thread. Both paths track status through the same job
+    store, so ``GET /scan/status/{job_id}`` is identical either way.
+    """
     job_id = str(uuid4())
     create_job(job_id)
-    thread = threading.Thread(target=_run_scan_background, args=(job_id, payload), daemon=True)
-    thread.start()
+    if not _dispatch_scan_via_temporal(job_id, payload):
+        thread = threading.Thread(target=_run_scan_background, args=(job_id, payload), daemon=True)
+        thread.start()
     return ScanJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
 

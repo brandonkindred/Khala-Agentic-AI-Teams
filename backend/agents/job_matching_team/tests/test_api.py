@@ -133,6 +133,41 @@ def test_scan_lifecycle(client):
     assert data["result"]["ranked_jobs"][0]["posting"]["company"] == "Acme"
 
 
+def test_scan_dispatches_via_temporal_when_enabled(client, monkeypatch):
+    """With Temporal enabled the scan is handed to the workflow, not a thread."""
+    import shared_temporal
+    from job_matching_team.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    dispatched: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        sw,
+        "start_job_matching_workflow",
+        lambda job_id, request: dispatched.append((job_id, request)),
+    )
+
+    resp = client.post("/scan", json={"top_n": 3})
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+    # Temporal path is fire-and-forget: the worker (not the API thread) advances
+    # the job, so with the stub in place the job stays PENDING.
+    assert client.get(f"/scan/status/{job_id}").json()["status"] == "pending"
+    assert len(dispatched) == 1
+    assert dispatched[0][0] == job_id
+    assert dispatched[0][1]["top_n"] == 3
+
+
+def test_scan_falls_back_to_thread_when_temporal_disabled(client, monkeypatch):
+    """When Temporal is disabled the dispatch helper reports no-dispatch and the
+    thread path runs the scan to completion."""
+    import shared_temporal
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    job_id = client.post("/scan", json={}).json()["job_id"]
+    data = _wait_for_completion(client, job_id)
+    assert data["status"] == "completed"
+
+
 def test_scan_status_not_found(client):
     assert client.get("/scan/status/missing").status_code == 404
 
