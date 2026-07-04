@@ -281,58 +281,6 @@
   }
 }
 
-// ── Status banners (inside expanded body) ───────────────────────────────────
-.status-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--kh-space-2);
-  padding: var(--kh-space-3) var(--kh-space-4);
-  border-radius: var(--kh-radius-md);
-  font-size: var(--kh-text-sm);
-  background: var(--kh-glass);
-  border: 1px solid var(--kh-border-subtle);
-  color: var(--kh-text-secondary);
-
-  mat-icon {
-    flex-shrink: 0;
-    font-size: 18px;
-    width: 18px;
-    height: 18px;
-    margin-top: 1px;
-  }
-
-  &--error {
-    background: var(--kh-error-subtle);
-    border-color: var(--kh-border-subtle);
-    color: var(--kh-error);
-  }
-
-  &--success {
-    background: var(--kh-success-subtle);
-    border-color: var(--kh-border-subtle);
-    color: var(--kh-success);
-  }
-
-  &--info {
-    background: var(--kh-info-subtle);
-    border-color: var(--kh-border-subtle);
-    color: var(--kh-info);
-  }
-
-  &--warn {
-    background: var(--kh-warning-subtle);
-    border-color: var(--kh-border-subtle);
-    color: var(--kh-warning);
-  }
-
-  code {
-    background: var(--kh-surface-3);
-    padding: 0.05em 0.35em;
-    border-radius: 4px;
-    font-size: 0.85em;
-  }
-}
-
 // ── Connected summary (Slack connected card body) ──────────────────────────
 .connected-summary {
   display: flex;

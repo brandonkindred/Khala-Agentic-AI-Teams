@@ -20,6 +20,7 @@ import { MatTabsModule } from '@angular/material/tabs';
 import { Subject, takeUntil } from 'rxjs';
 
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { RoadTripPlanningApiService } from '../../services/road-trip-planning-api.service';
 import type {
   ChatMessage,
@@ -69,6 +70,7 @@ const STORAGE_KEY = 'khala.roadTripPlanning.session.v1';
     MatSnackBarModule,
     MatTabsModule,
     DashboardShellComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './road-trip-planning-dashboard.component.html',
   styleUrl: './road-trip-planning-dashboard.component.scss',

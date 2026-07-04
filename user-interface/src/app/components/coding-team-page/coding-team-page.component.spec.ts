@@ -8,6 +8,7 @@ import { provideRouter } from '@angular/router';
 import { vi } from 'vitest';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
+import { NotificationService } from '../../core/notification.service';
 import { CodingTeamPageComponent } from './coding-team-page.component';
 import type { GitHubConfigResponse, GitHubIssueItem } from '../../models/integrations.model';
 
@@ -81,6 +82,7 @@ describe('CodingTeamPageComponent', () => {
     getGitHubIssues: ReturnType<typeof vi.fn>;
     runGitHubIssue: ReturnType<typeof vi.fn>;
   };
+  let notificationsSpy: { saved: ReturnType<typeof vi.fn> };
 
   async function setup(): Promise<void> {
     await TestBed.configureTestingModule({
@@ -91,6 +93,7 @@ describe('CodingTeamPageComponent', () => {
         provideRouter([]),
         { provide: CodingTeamApiService, useValue: apiSpy },
         { provide: IntegrationsApiService, useValue: integrationsSpy },
+        { provide: NotificationService, useValue: notificationsSpy },
       ],
     }).compileComponents();
 
@@ -112,6 +115,7 @@ describe('CodingTeamPageComponent', () => {
       getGitHubIssues: vi.fn().mockReturnValue(of(makeIssues(3))),
       runGitHubIssue: vi.fn(),
     };
+    notificationsSpy = { saved: vi.fn() };
   });
 
   afterEach(() => {
@@ -281,10 +285,16 @@ describe('CodingTeamPageComponent', () => {
     expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
   });
 
-  it('records the latest job id when a workflow is launched', async () => {
+  it('confirms a launched workflow with a transient snackbar', async () => {
     await setup();
     component.onWorkflowLaunched({ job_id: 'wf-1', conversation_id: 'c1' });
-    expect(component.latestJobId).toBe('wf-1');
+    expect(notificationsSpy.saved).toHaveBeenCalledWith('Coding job queued — id wf-1.');
+  });
+
+  it('does not confirm when no job id is returned', async () => {
+    await setup();
+    component.onWorkflowLaunched({ job_id: null, conversation_id: 'c1' });
+    expect(notificationsSpy.saved).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
@@ -576,7 +586,7 @@ describe('CodingTeamPageComponent', () => {
       showView('github');
 
       const el: HTMLElement = fixture.nativeElement;
-      const warning = el.querySelector('.github-confirm-panel__warning');
+      const warning = el.querySelector('app-inline-banner[variant="warning"]');
       expect(warning).not.toBeNull();
       expect(warning?.textContent).toContain('#3');
 
@@ -635,7 +645,7 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       showRun({ waiting_for_answers: true, pending_questions: [QUESTION] });
       const el: HTMLElement = fixture.nativeElement;
-      expect(el.querySelector('.github-banner--waiting')).not.toBeNull();
+      expect(el.querySelector('app-inline-banner[variant="info"]')).not.toBeNull();
       expect(el.querySelector('app-pending-questions')).not.toBeNull();
       expect(el.textContent).toContain('Which auth flow?');
     });

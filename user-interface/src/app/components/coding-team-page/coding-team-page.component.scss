@@ -96,25 +96,6 @@
   }
 }
 
-.github-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  border-radius: var(--kh-radius-md);
-  margin-bottom: 1rem;
-
-  &--error {
-    background: var(--kh-error-subtle);
-    color: var(--kh-error);
-  }
-
-  &--waiting {
-    background: var(--kh-warning-subtle);
-    color: var(--kh-warning);
-  }
-}
-
 // Issue list
 .github-issues-list {
   display: flex;
@@ -277,34 +258,6 @@
     font-size: var(--kh-text-sm);
     color: var(--kh-text-tertiary);
     margin: 0.75rem 0;
-  }
-
-  &__warning {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.5rem;
-    padding: 0.75rem 1rem;
-    margin: 0.75rem 0;
-    border-radius: var(--kh-radius-md);
-    background: var(--kh-error-subtle);
-    color: var(--kh-error);
-
-    mat-icon {
-      color: var(--kh-error);
-      flex-shrink: 0;
-    }
-
-    strong {
-      display: block;
-      margin-bottom: 0.15rem;
-    }
-
-    p {
-      margin: 0;
-      font-size: var(--kh-text-sm);
-      line-height: 1.4;
-      color: var(--kh-error);
-    }
   }
 
   &__actions {
@@ -613,11 +566,6 @@
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--kh-text-secondary);
-}
-
-.launched-banner {
-  margin-top: 1rem;
-  color: var(--kh-text-tertiary);
 }
 
 // ---------------------------------------------------------------------------

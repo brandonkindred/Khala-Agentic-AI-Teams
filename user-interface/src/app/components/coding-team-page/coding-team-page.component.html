@@ -48,9 +48,6 @@
     [fields]="chatFields"
     (workflowLaunched)="onWorkflowLaunched($event)"
   />
-  @if (latestJobId) {
-    <p class="launched-banner">Coding job queued — id <code>{{ latestJobId }}</code>.</p>
-  }
 }
 
 <!-- ────────────────────────────────────────────────────────────────── -->
@@ -90,10 +87,7 @@
       </div>
 
       @if (issueError) {
-        <div class="github-banner github-banner--error" role="alert">
-          <mat-icon aria-hidden="true">error_outline</mat-icon>
-          <span>{{ issueError }}</span>
-        </div>
+        <app-inline-banner variant="error" [message]="issueError" />
       }
 
       @if (issuesLoaded) {
@@ -160,9 +154,8 @@
                     <p class="github-confirm-panel__preview">{{ vm.issue.body_preview }}</p>
                   }
                   @if (vm.blocked) {
-                    <div class="github-confirm-panel__warning" role="alert">
-                      <mat-icon aria-hidden="true">block</mat-icon>
-                      <div>
+                    <app-inline-banner variant="warning" icon="block">
+                      <div banner-message>
                         <strong>Blocked by open dependencies</strong>
                         <p>
                           This issue depends on {{ selectedIssueOpenDepsText }}, which are still open.
@@ -170,7 +163,7 @@
                           issues are closed.
                         </p>
                       </div>
-                    </div>
+                    </app-inline-banner>
                   }
                   <p class="github-confirm-panel__hint">
                     The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.
@@ -233,10 +226,7 @@
     </div>
 
     @if (runsError) {
-      <div class="github-banner github-banner--error" role="alert">
-        <mat-icon aria-hidden="true">error_outline</mat-icon>
-        <span>{{ runsError }}</span>
-      </div>
+      <app-inline-banner variant="error" [message]="runsError" />
     }
 
     @if (runs.length === 0) {
@@ -374,10 +364,11 @@
               </div>
             }
             @if (jobStatusHasPendingQuestions) {
-              <div class="github-banner github-banner--waiting" role="status">
-                <mat-icon aria-hidden="true">help_outline</mat-icon>
-                <span>The coding team is paused and needs your decisions before it can continue.</span>
-              </div>
+              <app-inline-banner
+                variant="info"
+                icon="help_outline"
+                message="The coding team is paused and needs your decisions before it can continue."
+              />
               <app-pending-questions
                 [jobId]="selectedRunId!"
                 [questions]="jobStatus.pending_questions!"
@@ -386,9 +377,11 @@
               />
             }
             @if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers) {
-              <div class="github-banner github-banner--waiting" role="status">
-                <mat-icon aria-hidden="true">play_circle_outline</mat-icon>
-                <span>Answers were received but the run could not restart automatically.</span>
+              <app-inline-banner
+                variant="info"
+                icon="play_circle_outline"
+                message="Answers were received but the run could not restart automatically."
+              >
                 <button
                   mat-flat-button
                   color="accent"
@@ -406,7 +399,7 @@
                     </ng-container>
                   }
                 </button>
-              </div>
+              </app-inline-banner>
             }
             @if (jobStatus.thinking) {
               <mat-expansion-panel class="thinking-panel">
@@ -443,19 +436,13 @@
               </div>
             }
             @if (jobStatus.error) {
-              <div class="github-banner github-banner--error" role="alert">
-                <mat-icon aria-hidden="true">error_outline</mat-icon>
-                <span>{{ jobStatus.error }}</span>
-              </div>
+              <app-inline-banner variant="error" [message]="jobStatus.error" />
             }
           </div>
         </div>
       } @else if (jobStatusError) {
         <div class="run-detail run-detail--error">
-          <div class="github-banner github-banner--error" role="alert">
-            <mat-icon aria-hidden="true">error_outline</mat-icon>
-            <span>{{ jobStatusError }}</span>
-          </div>
+          <app-inline-banner variant="error" [message]="jobStatusError" />
         </div>
       } @else {
         <div class="run-detail run-detail--pending">

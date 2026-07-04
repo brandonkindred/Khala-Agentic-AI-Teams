@@ -35,37 +35,6 @@
   padding: 24px 0;
 }
 
-.banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-radius: 8px;
-  margin-bottom: 12px;
-  font-size: 0.9rem;
-
-  mat-icon {
-    flex: 0 0 auto;
-  }
-}
-
-.banner-error {
-  // Material system theme colors; hex fallbacks keep the banner readable if the
-  // app's theme does not define these CSS variables.
-  background: var(--mat-sys-error-container, #fdecea);
-  color: var(--mat-sys-on-error-container, #b71c1c);
-}
-
-.banner-success {
-  background: #e8f5e9;
-  color: #1b5e20;
-}
-
-.banner-warn {
-  background: #fff8e1;
-  color: #8d6e00;
-}
-
 .config-card {
   .field-group {
     margin-bottom: 20px;
