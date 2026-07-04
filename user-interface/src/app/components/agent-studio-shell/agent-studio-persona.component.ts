@@ -565,11 +565,10 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.personaApi
       .cancelJob(r.run_id)
       .pipe(takeUntilDestroyed(this.destroyRef))
+      // No `next` handler: on success leave `cancelling` true so the button reads
+      // "Stopping…" until the poll reports the terminal state and the control
+      // disappears (runLive → false); startPolling resets the flag for the next run.
       .subscribe({
-        // Leave `cancelling` true on success so the button reads "Stopping…"
-        // until the poll reports the terminal state and the control disappears
-        // (runLive → false); startPolling resets the flag for the next run.
-        next: () => {},
         error: () => {
           this.cancelling.set(false);
           this.error.set('Could not stop the run.');
