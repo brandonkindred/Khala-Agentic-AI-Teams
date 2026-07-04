@@ -20,6 +20,7 @@ if str(_agents_dir) not in __import__("sys").path:
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from road_trip_planning_team import pipeline as rtp_pipeline  # noqa: E402
 from road_trip_planning_team.api import main as api_main  # noqa: E402
 from road_trip_planning_team.models import TripItinerary  # noqa: E402
 
@@ -74,7 +75,7 @@ def test_health(client: TestClient):
 
 def test_plan_async_submit_returns_job_id(client: TestClient, monkeypatch: pytest.MonkeyPatch):
     canned = TripItinerary(title="Test Trip", overview="ok", total_days=3)
-    monkeypatch.setattr(api_main, "_run_pipeline", lambda body: canned)
+    monkeypatch.setattr(rtp_pipeline, "run_pipeline", lambda body: canned)
 
     r = client.post("/plan", json=_sample_body())
     assert r.status_code == 200, r.text
@@ -107,7 +108,7 @@ def test_plan_failure_captured_in_job(client: TestClient, monkeypatch: pytest.Mo
     def boom(_body):
         raise RuntimeError("pipeline exploded")
 
-    monkeypatch.setattr(api_main, "_run_pipeline", boom)
+    monkeypatch.setattr(rtp_pipeline, "run_pipeline", boom)
 
     r = client.post("/plan", json=_sample_body())
     assert r.status_code == 200
