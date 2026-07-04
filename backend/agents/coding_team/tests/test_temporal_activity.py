@@ -59,6 +59,34 @@ def test_activity_runs_orchestrator_with_job_wiring(monkeypatch) -> None:
     assert out == {"job_id": job_id, "status": "completed"}
 
 
+def test_activity_reuses_supplied_job_id_and_skips_create_job(monkeypatch) -> None:
+    """When the dispatcher (the API) already created the row and passes its
+    job_id, the activity must reuse it — so the client polls the row the
+    orchestrator writes — and must NOT create a second row."""
+    import coding_team.api.main as main
+    import coding_team.engine_provider as ep
+
+    monkeypatch.setattr(ep, "get_engine_provider", lambda: object())
+    create_calls: list = []
+    monkeypatch.setattr(main, "create_job", lambda **kw: create_calls.append(kw), raising=True)
+    monkeypatch.setattr(main, "get_job", lambda jid: {"job_id": jid, "status": "completed"})
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        main,
+        "run_orchestrator_wired",
+        lambda job_id, repo_path, plan: captured.update(args=(job_id, repo_path, plan)),
+    )
+
+    out = run_pipeline_activity(
+        {"job_id": "api-job-1", "repo_path": "/repo", "plan_input": {"objective": "ship it"}}
+    )
+
+    assert captured["args"][0] == "api-job-1"  # reused, not re-minted
+    assert create_calls == []  # API owns creation; activity must not duplicate it
+    assert out == {"job_id": "api-job-1", "status": "completed"}
+
+
 def test_plan_from_input_binds_request_repo_path_over_embedded() -> None:
     """The shared plan builder makes the request's repo_path authoritative — a
     repo_path embedded in the plan payload must not win."""

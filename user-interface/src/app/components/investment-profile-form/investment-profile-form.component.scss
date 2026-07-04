@@ -96,21 +96,6 @@
   padding: 16px;
 }
 
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  background: var(--kh-error-subtle);
-  color: var(--kh-error);
-  border-radius: 4px;
-  margin-bottom: 16px;
-
-  mat-icon {
-    color: var(--kh-error);
-  }
-}
-
 .mode-hint {
   font-size: 0.85em;
   color: var(--kh-text-tertiary);

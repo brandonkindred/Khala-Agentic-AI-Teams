@@ -12,17 +12,13 @@
       }
 
       @if (error) {
-        <div class="error-banner">
-          <mat-icon>error</mat-icon>
-          <span>{{ error }}</span>
-        </div>
+        <app-inline-banner variant="error" [message]="error" />
       }
 
       @if (hasPrefillErrors) {
-        <div class="error-banner" data-testid="prefill-errors-banner">
-          <mat-icon>error</mat-icon>
-          <span>Cannot edit this strategy — unsupported rule shape: {{ prefillErrors.join(', ') }}</span>
-        </div>
+        <app-inline-banner variant="error" data-testid="prefill-errors-banner">
+          <span banner-message>Cannot edit this strategy — unsupported rule shape: {{ prefillErrors.join(', ') }}</span>
+        </app-inline-banner>
       }
 
       <form [formGroup]="form">

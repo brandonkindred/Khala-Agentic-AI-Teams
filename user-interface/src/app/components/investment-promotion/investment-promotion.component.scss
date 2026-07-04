@@ -126,21 +126,6 @@
   }
 }
 
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  background: var(--mat-sys-error-container, var(--kh-error-subtle));
-  color: var(--mat-sys-on-error-container, var(--kh-error));
-  border-radius: 4px;
-  margin-bottom: 16px;
-
-  mat-icon {
-    color: var(--mat-sys-error, var(--kh-error));
-  }
-}
-
 .decision-section {
   background: var(--mat-sys-surface-container, var(--kh-surface-2));
   border: 1px solid var(--mat-sys-outline-variant, var(--kh-border));
