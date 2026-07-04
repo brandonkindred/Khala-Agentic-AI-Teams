@@ -51,8 +51,17 @@ def _wait_for_client(timeout_s: float = CLIENT_READY_TIMEOUT_S) -> tuple[Any, An
         time.sleep(CLIENT_READY_POLL_S)
 
 
-def _run_async(coro: Any) -> Any:
-    _, loop = _wait_for_client()
+def _run_async(coro: Any, loop: Any) -> Any:
+    """Run ``coro`` on the worker's event ``loop`` and block for the result.
+
+    Preconditions:
+        - ``loop`` is the running Temporal worker event loop
+          (from ``_wait_for_client``).
+
+    Postconditions:
+        - Returns the coroutine result, or raises if it does not complete
+          within ``START_WORKFLOW_TIMEOUT`` seconds.
+    """
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=START_WORKFLOW_TIMEOUT)
 
@@ -70,7 +79,7 @@ def start_market_research_workflow(job_id: str, request: dict[str, Any]) -> None
           market_research task queue (raises ``RuntimeError`` if the worker
           client never becomes available within the wait window).
     """
-    client, _ = _wait_for_client()
+    client, loop = _wait_for_client()
     workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
     _run_async(
         client.start_workflow(
@@ -78,6 +87,7 @@ def start_market_research_workflow(job_id: str, request: dict[str, Any]) -> None
             args=[job_id, request],
             id=workflow_id,
             task_queue=TASK_QUEUE,
-        )
+        ),
+        loop,
     )
     logger.info("Started MarketResearchWorkflow id=%s", workflow_id)

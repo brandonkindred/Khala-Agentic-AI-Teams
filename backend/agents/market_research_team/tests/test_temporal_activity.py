@@ -13,6 +13,8 @@ import asyncio
 import inspect
 from unittest.mock import MagicMock
 
+import pytest
+
 from market_research_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
@@ -53,19 +55,24 @@ def test_activity_marks_job_completed_with_result():
     assert job["result"]["topology"] == "unified"
 
 
-def test_activity_marks_job_failed_on_exception(monkeypatch):
+def test_activity_marks_job_failed_and_reraises_on_exception(monkeypatch):
+    """A genuine failure marks the job FAILED and re-raises so Temporal sees a
+    failed workflow (not a silently-completed one)."""
+
     class _BoomOrchestrator:
         def run(self, *_args, **_kwargs):
             raise RuntimeError("orchestrator exploded")
 
+    # The activity runs the orchestrator via api.main._run_pipeline_core, so
+    # patch the symbol that module resolves.
     monkeypatch.setattr(
-        "market_research_team.orchestrator.MarketResearchOrchestrator", _BoomOrchestrator
+        "market_research_team.api.main.MarketResearchOrchestrator", _BoomOrchestrator
     )
     create_job("job-boom", request=_REQUEST)
 
-    result = wf.run_pipeline_activity("job-boom", _REQUEST)
+    with pytest.raises(RuntimeError, match="orchestrator exploded"):
+        wf.run_pipeline_activity("job-boom", _REQUEST)
 
-    assert result == {"job_id": "job-boom"}
     job = get_job("job-boom")
     assert job["status"] == JOB_STATUS_FAILED
     assert "orchestrator exploded" in (job.get("error") or "")
@@ -80,7 +87,7 @@ def test_activity_short_circuits_when_cancelled_before_run(monkeypatch):
             return MagicMock()
 
     monkeypatch.setattr(
-        "market_research_team.orchestrator.MarketResearchOrchestrator", _TrackingOrchestrator
+        "market_research_team.api.main.MarketResearchOrchestrator", _TrackingOrchestrator
     )
     create_job("job-cancel", request=_REQUEST)
     update_job("job-cancel", status=JOB_STATUS_CANCELLED)
@@ -94,7 +101,7 @@ def test_activity_short_circuits_when_cancelled_before_run(monkeypatch):
 
 def test_activity_does_not_overwrite_when_cancelled_mid_run(monkeypatch):
     """A cancel that lands while the orchestrator is running must not be
-    clobbered by a COMPLETED write."""
+    clobbered by a COMPLETED write, and must not be re-raised as a failure."""
 
     class _CancellingOrchestrator:
         def run(self, *_args, **_kwargs):
@@ -102,7 +109,7 @@ def test_activity_does_not_overwrite_when_cancelled_mid_run(monkeypatch):
             return MagicMock()
 
     monkeypatch.setattr(
-        "market_research_team.orchestrator.MarketResearchOrchestrator", _CancellingOrchestrator
+        "market_research_team.api.main.MarketResearchOrchestrator", _CancellingOrchestrator
     )
     create_job("job-midcancel", request=_REQUEST)
 
@@ -114,14 +121,36 @@ def test_activity_does_not_overwrite_when_cancelled_mid_run(monkeypatch):
     assert "result" not in job
 
 
+def test_activity_swallows_when_cancelled_and_orchestrator_raises(monkeypatch):
+    """If the job is cancelled AND the orchestrator raises, the activity must
+    NOT re-raise (a cancelled run is terminal, not a retryable failure) and
+    must not overwrite the CANCELLED status with FAILED."""
+
+    class _CancellingBoomOrchestrator:
+        def run(self, *_args, **_kwargs):
+            update_job("job-cancelboom", status=JOB_STATUS_CANCELLED)
+            raise RuntimeError("boom after cancel")
+
+    monkeypatch.setattr(
+        "market_research_team.api.main.MarketResearchOrchestrator", _CancellingBoomOrchestrator
+    )
+    create_job("job-cancelboom", request=_REQUEST)
+
+    result = wf.run_pipeline_activity("job-cancelboom", _REQUEST)
+
+    assert result == {"job_id": "job-cancelboom"}
+    assert get_job("job-cancelboom")["status"] == JOB_STATUS_CANCELLED
+
+
 def test_workflow_run_delegates_to_activity(monkeypatch):
     """``MarketResearchWorkflow.run`` forwards (job_id, request) to the
-    activity via ``execute_activity``."""
+    activity via ``execute_activity`` with a bounded retry policy."""
     captured: dict = {}
 
     async def _fake_execute_activity(fn, *args, **kwargs):
         captured["fn"] = fn
         captured["args"] = kwargs.get("args")
+        captured["retry_policy"] = kwargs.get("retry_policy")
         return {"job_id": "job-wf"}
 
     monkeypatch.setattr(wf.workflow, "execute_activity", _fake_execute_activity)
@@ -131,3 +160,6 @@ def test_workflow_run_delegates_to_activity(monkeypatch):
     assert out == {"job_id": "job-wf"}
     assert captured["fn"] is wf.run_pipeline_activity
     assert captured["args"] == ["job-wf", {"product_concept": "x"}]
+    # Retries are explicitly capped at a single attempt (non-idempotent LLM
+    # pipeline; the llm_service layer already handles transient failover).
+    assert captured["retry_policy"].maximum_attempts == 1

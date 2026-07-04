@@ -100,22 +100,67 @@ class JobListResponse(BaseModel):
     jobs: List[JobListItem]
 
 
+def _build_mission(req: RunMarketResearchRequest) -> ResearchMission:
+    """Map a ``RunMarketResearchRequest`` onto a ``ResearchMission``.
+
+    Preconditions:
+        - ``req`` is a validated ``RunMarketResearchRequest``.
+
+    Postconditions:
+        - Returns a ``ResearchMission`` carrying every mission field from
+          ``req`` (single source of truth for both the thread dispatch path
+          and the Temporal activity, which reconstructs ``req`` from a dict).
+    """
+    return ResearchMission(
+        product_concept=req.product_concept,
+        target_users=req.target_users,
+        business_goal=req.business_goal,
+        topology=req.topology,
+        transcript_folder_path=req.transcript_folder_path,
+        transcripts=req.transcripts,
+    )
+
+
+def _run_pipeline_core(job_id: str, mission: ResearchMission, human_review: HumanReview) -> None:
+    """Run the orchestrator with cancel guards + RUNNING/COMPLETED bookkeeping.
+
+    Shared by the thread dispatch path and the Temporal activity so the
+    status-write order and cancel semantics live in one place.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Writes RUNNING then COMPLETED (with the orchestrator result) on
+          success; writes nothing and returns early if the job is cancelled
+          before or after the run.
+        - Propagates any orchestrator exception unchanged — the caller owns
+          the failure policy (swallow vs. re-raise).
+    """
+    if is_job_cancelled(job_id):
+        return
+    update_job(job_id, status=JOB_STATUS_RUNNING)
+    result = MarketResearchOrchestrator().run(mission, human_review)
+    if is_job_cancelled(job_id):
+        return
+    update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
+
+
 def _run_market_research_background(
     job_id: str, mission: ResearchMission, human_review: HumanReview
 ) -> None:
+    """Thread-path runner: execute the pipeline and swallow failures as FAILED.
+
+    Postconditions:
+        - On orchestrator failure, marks the job FAILED (unless it was
+          cancelled) and returns — a daemon thread has no caller to raise to.
+    """
     try:
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = MarketResearchOrchestrator().run(mission, human_review)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
+        _run_pipeline_core(job_id, mission, human_review)
     except Exception as e:
         logger.exception("Market research job %s failed", job_id)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+        if not is_job_cancelled(job_id):
+            update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
 
 
 def _dispatch_market_research_run(
@@ -159,14 +204,7 @@ def _dispatch_market_research_run(
 def run_market_research(payload: RunMarketResearchRequest) -> RunMarketResearchJobResponse:
     """Submit a market-research run. Returns a ``job_id`` to poll for results."""
     job_id = str(uuid4())
-    mission = ResearchMission(
-        product_concept=payload.product_concept,
-        target_users=payload.target_users,
-        business_goal=payload.business_goal,
-        topology=payload.topology,
-        transcript_folder_path=payload.transcript_folder_path,
-        transcripts=payload.transcripts,
-    )
+    mission = _build_mission(payload)
     human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
 
     create_job(
