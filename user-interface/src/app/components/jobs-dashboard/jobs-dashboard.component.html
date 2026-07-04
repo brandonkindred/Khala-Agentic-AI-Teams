@@ -18,17 +18,13 @@
   </header>
 
   @if (error) {
-    <div class="error-banner">
-      <mat-icon>error_outline</mat-icon>
-      <span>{{ error }}</span>
-    </div>
+    <app-inline-banner variant="error" [message]="error" />
   }
 
   @if (seFetchError) {
-    <div class="error-banner se-fetch-warning">
-      <mat-icon>warning</mat-icon>
-      <span>Software Engineering jobs could not be loaded. {{ seFetchError }}</span>
-    </div>
+    <app-inline-banner variant="warning" icon="warning">
+      <span banner-message>Software Engineering jobs could not be loaded. {{ seFetchError }}</span>
+    </app-inline-banner>
   }
 
   <div class="jobs-filters" role="toolbar" aria-label="Filter jobs">

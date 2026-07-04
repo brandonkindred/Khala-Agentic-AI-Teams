@@ -28,6 +28,7 @@ import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { Subscription, timer, switchMap, takeWhile } from 'rxjs';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import type {
   PaperTradingSession,
   PaperTradingComparison,
@@ -136,6 +137,7 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
     MatTableModule,
     MatSortModule,
     MatPaginatorModule,
+    InlineBannerComponent,
   ],
   templateUrl: './strategy-lab.component.html',
   styleUrl: './strategy-lab.component.scss',

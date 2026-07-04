@@ -1,9 +1,6 @@
-<!-- Status Banner -->
-@if (statusMessage) {
-  <div class="status-banner" [class.success]="statusType === 'success'" [class.error]="statusType === 'error'">
-    <mat-icon>{{ statusType === 'success' ? 'check_circle' : 'error' }}</mat-icon>
-    <span>{{ statusMessage }}</span>
-  </div>
+<!-- Persistent failure banner (transient successes go to a snackbar). -->
+@if (errorMessage) {
+  <app-inline-banner variant="error" [message]="errorMessage" />
 }
 
 <!-- Client ID Required -->

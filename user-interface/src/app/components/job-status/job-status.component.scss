@@ -17,23 +17,6 @@
   font-weight: 500;
 }
 
-.waiting-notice {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  margin-bottom: 1rem;
-  background-color: var(--kh-warning-subtle);
-  color: var(--kh-warning);
-  border-radius: 4px;
-  border: 1px solid var(--kh-warning);
-
-  mat-icon {
-    color: var(--kh-warning);
-    flex-shrink: 0;
-  }
-}
-
 .status-text {
   color: var(--kh-text-secondary);
   font-size: 0.875rem;

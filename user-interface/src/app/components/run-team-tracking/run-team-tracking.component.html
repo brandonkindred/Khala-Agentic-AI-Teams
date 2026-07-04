@@ -194,12 +194,11 @@
 
       <!-- Waiting for answers notice -->
       @if (status.waiting_for_answers && status.pending_questions?.length) {
-        <div class="waiting-notice">
-          <mat-icon>help_outline</mat-icon>
-          <span>
+        <app-inline-banner variant="warning" icon="help_outline">
+          <span banner-message>
             {{ status.pending_questions?.length ?? 0 }} question(s) require your response before the job can continue.
           </span>
-        </div>
+        </app-inline-banner>
       }
 
       <!-- Error message -->

@@ -1,29 +1,3 @@
-.status-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
-  border-radius: 8px;
-  margin-bottom: 1rem;
-  font-size: 0.875rem;
-
-  &.success {
-    background: rgba(76, 175, 80, 0.12);
-    color: #a5d6a7;
-    border: 1px solid rgba(129, 199, 132, 0.3);
-
-    mat-icon { color: #81c784; }
-  }
-
-  &.error {
-    background: rgba(244, 67, 54, 0.1);
-    color: #ef9a9a;
-    border: 1px solid rgba(239, 154, 154, 0.3);
-
-    mat-icon { color: #ef9a9a; }
-  }
-}
-
 .notice-card {
   mat-card-content {
     display: flex;

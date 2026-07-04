@@ -43,6 +43,7 @@ import type {
 } from '../../../models/agent-history.model';
 import { AgentRunHistoryComponent } from '../agent-run-history/agent-run-history.component';
 import { AgentSchemaFormComponent } from '../agent-schema-form/agent-schema-form.component';
+import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
 import {
   AgentDiffDialogComponent,
   type AgentDiffDialogData,
@@ -83,6 +84,7 @@ import {
     MatTooltipModule,
     AgentRunHistoryComponent,
     AgentSchemaFormComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './agent-runner.component.html',
   styleUrl: './agent-runner.component.scss',

@@ -15,6 +15,8 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { NutritionApiService } from '../../services/nutrition-api.service';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { NotificationService } from '../../core/notification.service';
 import type {
   ClientProfile,
   MealRecommendation,
@@ -41,6 +43,7 @@ import type {
     MatProgressSpinnerModule,
     MatSlideToggleModule,
     MatTooltipModule,
+    InlineBannerComponent,
   ],
   templateUrl: './nutrition-forms.component.html',
   styleUrl: './nutrition-forms.component.scss',
@@ -50,11 +53,12 @@ export class NutritionFormsComponent {
 
   private readonly api = inject(NutritionApiService);
   private readonly fb = inject(FormBuilder);
+  private readonly notifications = inject(NotificationService);
 
   selectedTabIndex = 0;
   loading = false;
-  statusMessage = '';
-  statusType: 'success' | 'error' | '' = '';
+  /** Persistent failure message rendered as an inline error banner (empty = hidden). */
+  errorMessage = '';
 
   // Profile state
   profile: ClientProfile | null = null;
@@ -306,13 +310,25 @@ export class NutritionFormsComponent {
       .filter((s) => s.length > 0);
   }
 
+  /**
+   * Surface an operation result using the app-wide feedback convention:
+   * transient success confirmations go to a snackbar; failures become a
+   * persistent inline error banner.
+   *
+   * Preconditions: `message` is a non-empty, user-facing string.
+   * Postconditions: for `type === 'success'` opens a snackbar and clears any
+   * error banner; for `type === 'error'` sets the persistent error banner.
+   */
   private showStatus(message: string, type: 'success' | 'error'): void {
-    this.statusMessage = message;
-    this.statusType = type;
+    if (type === 'success') {
+      this.notifications.saved(message);
+      this.errorMessage = '';
+    } else {
+      this.errorMessage = message;
+    }
   }
 
   private clearStatus(): void {
-    this.statusMessage = '';
-    this.statusType = '';
+    this.errorMessage = '';
   }
 }

@@ -4,12 +4,11 @@
   icon="psychology"
 >
 @if (error) {
-  <div class="error-banner">
-    <p class="error-text">{{ error }}</p>
+  <app-inline-banner variant="error" [message]="error">
     @if (lastFailedMessage) {
       <button mat-stroked-button (click)="retryLastMessage()" [disabled]="isProcessing">Retry</button>
     }
-  </div>
+  </app-inline-banner>
 }
 
 <div class="deepthought-layout"

@@ -116,52 +116,6 @@
   margin-right: 0.25rem;
 }
 
-// ── Error banner ─────────────────────────────────────────────────────────────
-
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  background: var(--kh-error-subtle);
-  color: var(--kh-error);
-  border-radius: var(--kh-radius-md);
-  margin-bottom: 1.25rem;
-  font-size: 0.9rem;
-
-  mat-icon {
-    flex-shrink: 0;
-    font-size: 1.2rem;
-    width: 1.2rem;
-    height: 1.2rem;
-  }
-}
-
-// ── Non-fatal warning banner (completed_with_errors, batch warnings) ────────
-
-.warning-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  background: var(--kh-warning-subtle);
-  color: var(--kh-warning);
-  border-radius: var(--kh-radius-md);
-  margin-bottom: 1.25rem;
-  font-size: 0.9rem;
-
-  mat-icon {
-    flex-shrink: 0;
-    font-size: 1.2rem;
-    width: 1.2rem;
-    height: 1.2rem;
-  }
-
-  button {
-    margin-left: auto;
-  }
-}
-
 // ── Summary chips ─────────────────────────────────────────────────────────────
 
 .summary-row {
