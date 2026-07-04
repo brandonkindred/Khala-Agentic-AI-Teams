@@ -3,13 +3,9 @@ import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
 import { JobScanPanelComponent } from './job-scan-panel.component';
-
-// `color-contrast` is disabled because jsdom can't paint; contrast is
-// enforced by the --kh-* token system + the SCSS contrast guard spec.
-const axeOptions = { rules: { 'color-contrast': { enabled: false } } };
+import { expectNoAxeViolations } from '../../testing/a11y';
 
 describe('JobScanPanelComponent a11y', () => {
   async function createFixture(runs: unknown[], jobs: unknown[] = []) {
@@ -44,14 +40,12 @@ describe('JobScanPanelComponent a11y', () => {
     expect(fixture.nativeElement.querySelector('form')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('.scan-job-row')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('.runs-table tbody tr')).toBeTruthy();
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
   it('has no axe violations with no runs yet', async () => {
     const fixture = await createFixture([]);
     expect(fixture.nativeElement.textContent).toContain('No runs yet');
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 });

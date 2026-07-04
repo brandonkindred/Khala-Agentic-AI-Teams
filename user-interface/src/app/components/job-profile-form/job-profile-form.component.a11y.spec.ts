@@ -3,22 +3,16 @@ import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
 import { JobProfileFormComponent } from './job-profile-form.component';
+import { expectNoAxeViolations } from '../../testing/a11y';
 
-// `color-contrast` is disabled because jsdom can't paint; contrast is
-// enforced by the --kh-* token system + the SCSS contrast guard spec.
-// `aria-required-children` is disabled because Angular Material's chip grid
-// puts the `matChipInput` inside the `role="grid"` element (its documented
-// API) and renders the grid role even with zero rows — both flagged by axe
-// but not fixable in component markup without abandoning MatChipGrid.
-const axeOptions = {
-  rules: {
-    'color-contrast': { enabled: false },
-    'aria-required-children': { enabled: false },
-  },
-};
+// `aria-required-children` is disabled (on top of the shared color-contrast
+// exception) because Angular Material's chip grid puts the `matChipInput`
+// inside the `role="grid"` element (its documented API) and renders the grid
+// role even with zero rows — flagged by axe but not fixable in component
+// markup without abandoning MatChipGrid.
+const formExtraRules = { 'aria-required-children': { enabled: false } };
 
 describe('JobProfileFormComponent a11y', () => {
   it('has no axe violations with the populated form', async () => {
@@ -68,7 +62,6 @@ describe('JobProfileFormComponent a11y', () => {
     expect(fixture.nativeElement.querySelectorAll('mat-chip-grid').length).toBeGreaterThan(0);
     expect(fixture.nativeElement.querySelectorAll('mat-slider').length).toBe(6);
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement, formExtraRules);
   }, 15000);
 });

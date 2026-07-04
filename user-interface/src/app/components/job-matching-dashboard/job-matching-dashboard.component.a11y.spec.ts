@@ -3,13 +3,9 @@ import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { JobMatchingApiService } from '../../services/job-matching-api.service';
 import { JobMatchingDashboardComponent } from './job-matching-dashboard.component';
-
-// `color-contrast` is disabled because jsdom can't paint; contrast is
-// enforced by the --kh-* token system + the SCSS contrast guard spec.
-const axeOptions = { rules: { 'color-contrast': { enabled: false } } };
+import { expectNoAxeViolations } from '../../testing/a11y';
 
 describe('JobMatchingDashboardComponent a11y', () => {
   it('has no axe violations with the shell and tabs rendered', async () => {
@@ -34,7 +30,6 @@ describe('JobMatchingDashboardComponent a11y', () => {
     // Guard: the tab bar is actually in the DOM so axe audits it.
     expect(fixture.nativeElement.querySelectorAll('[role="tab"]').length).toBe(3);
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 });

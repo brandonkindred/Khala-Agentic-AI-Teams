@@ -4,7 +4,6 @@ import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { Router } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { axe } from 'vitest-axe';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { BloggingApiService } from '../../services/blogging-api.service';
 import { AISystemsApiService } from '../../services/ai-systems-api.service';
@@ -17,6 +16,7 @@ import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { GenericJobsApiService } from '../../services/generic-jobs-api.service';
 import { JobsDashboardComponent } from './jobs-dashboard.component';
+import { expectNoAxeViolations } from '../../testing/a11y';
 
 describe('JobsDashboardComponent a11y', () => {
   // Shape matches BlogJobListItem (snake_case) — the component's
@@ -80,16 +80,6 @@ describe('JobsDashboardComponent a11y', () => {
     }).compileComponents();
   };
 
-  // `color-contrast` is disabled because jsdom can't paint, so axe can't
-  // compute real composited colors and hangs on HTMLCanvasElement.getContext.
-  // Contrast is verified via math in the PR description + browser axe
-  // DevTools, not in this unit spec.
-  const axeOptions = {
-    rules: {
-      'color-contrast': { enabled: false },
-    },
-  };
-
   it('has no axe violations with rendered jobs', async () => {
     const cancelledJob = buildBlogJob({ job_id: 'j-cancel', status: 'cancelled', brief: 'Cancelled Job' });
     const completedJob = buildBlogJob({ job_id: 'j-done', status: 'completed', brief: 'Completed Job' });
@@ -108,8 +98,7 @@ describe('JobsDashboardComponent a11y', () => {
     // Guard: filter toolbar is in the DOM so axe actually audits it.
     expect(fixture.nativeElement.querySelector('.jobs-filters [role="radiogroup"]')).toBeTruthy();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 
   it('has no axe violations in the empty state', async () => {
@@ -122,7 +111,6 @@ describe('JobsDashboardComponent a11y', () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     fixture.detectChanges();
 
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 });

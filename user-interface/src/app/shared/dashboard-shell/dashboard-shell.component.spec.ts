@@ -2,7 +2,7 @@ import { Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
-import { axe } from 'vitest-axe';
+import { expectNoAxeViolations } from '../../testing/a11y';
 import { DashboardShellComponent } from './dashboard-shell.component';
 
 @Component({
@@ -26,9 +26,6 @@ class HostComponent {
   health = () => of({ status: 'ok' });
 }
 
-// `color-contrast` is disabled because jsdom can't paint; contrast is
-// enforced by the --kh-* token system + the SCSS contrast guard spec.
-const axeOptions = { rules: { 'color-contrast': { enabled: false } } };
 
 describe('DashboardShellComponent', () => {
   let fixture: ComponentFixture<HostComponent>;
@@ -67,7 +64,6 @@ describe('DashboardShellComponent', () => {
   it('has no axe violations', async () => {
     // Guard: real content rendered before auditing.
     expect(fixture.nativeElement.querySelector('h1')).toBeTruthy();
-    const results = await axe(fixture.nativeElement, axeOptions);
-    expect(results).toHaveNoViolations();
+    await expectNoAxeViolations(fixture.nativeElement);
   }, 15000);
 });
