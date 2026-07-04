@@ -30,12 +30,36 @@ from shared_app import create_team_app
 
 logger = logging.getLogger(__name__)
 
+
+def _startup() -> None:
+    """Start the Temporal worker backstop (best-effort).
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
+    backstop covers running the app standalone (``uvicorn ...:app``). The
+    start helper is idempotent and a no-op when ``TEMPORAL_ADDRESS`` is
+    unset.
+    """
+    try:
+        from market_research_team.temporal.worker import (
+            start_market_research_temporal_worker_thread,
+        )
+
+        start_market_research_temporal_worker_thread()
+    except Exception:
+        logger.warning(
+            "market_research Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
+
 app = create_team_app(
     service_name="market-research-team",
     team_key="market_research",
     title="Market Research Team API",
     version="1.0.0",
     description="Market research team API for competitive analysis and market insights.",
+    on_startup=_startup,
 )
 
 
@@ -94,6 +118,43 @@ def _run_market_research_background(
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
 
 
+def _dispatch_market_research_run(
+    job_id: str,
+    payload: RunMarketResearchRequest,
+    mission: ResearchMission,
+    human_review: HumanReview,
+) -> str:
+    """Dispatch a run via Temporal when enabled, else a daemon thread.
+
+    Returns a short label ("Temporal" or "thread") describing which
+    execution mode was used. With ``TEMPORAL_ADDRESS`` set the run is
+    started as a durable ``MarketResearchWorkflow`` (which performs the same
+    job-store bookkeeping ``_run_market_research_background`` does); with it
+    unset the legacy thread path runs unchanged.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        if is_temporal_enabled():
+            from market_research_team.temporal.start_workflow import (
+                start_market_research_workflow,
+            )
+
+            start_market_research_workflow(job_id, payload.model_dump())
+            logger.info("Market research run dispatched via Temporal: job_id=%s", job_id)
+            return "Temporal"
+    except ImportError:
+        pass
+
+    thread = threading.Thread(
+        target=_run_market_research_background,
+        args=(job_id, mission, human_review),
+        daemon=True,
+    )
+    thread.start()
+    return "thread"
+
+
 @app.post("/market-research/run", response_model=RunMarketResearchJobResponse)
 def run_market_research(payload: RunMarketResearchRequest) -> RunMarketResearchJobResponse:
     """Submit a market-research run. Returns a ``job_id`` to poll for results."""
@@ -114,12 +175,7 @@ def run_market_research(payload: RunMarketResearchRequest) -> RunMarketResearchJ
         product_concept=payload.product_concept,
     )
 
-    thread = threading.Thread(
-        target=_run_market_research_background,
-        args=(job_id, mission, human_review),
-        daemon=True,
-    )
-    thread.start()
+    _dispatch_market_research_run(job_id, payload, mission, human_review)
 
     return RunMarketResearchJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
