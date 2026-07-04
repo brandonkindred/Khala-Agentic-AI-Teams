@@ -909,6 +909,28 @@ describe('AgentStudioPersonaComponent', () => {
     expect(text).not.toContain('step 5 of 4');
   });
 
+  it('keeps the bar below 100% while the final step is still running', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    // 4 declared steps; 3 finished, the 4th (current) still running.
+    const results = [
+      { step_id: 's1', step_name: '', agent_name: '', input: '', output: '', status: 'completed' },
+      { step_id: 's2', step_name: '', agent_name: '', input: '', output: '', status: 'completed' },
+      { step_id: 's3', step_name: '', agent_name: '', input: '', output: '', status: 'completed' },
+      { step_id: 's4', step_name: '', agent_name: '', input: '', output: '', status: 'running' },
+    ];
+    agenticApi.getPipelineRun.mockReturnValue(
+      of(pipelineRun(4, { step_results: results, current_step_id: 's4' })),
+    );
+    component.launch();
+    fixture.detectChanges();
+    expect(component.currentStepCount()).toBe(4); // on step 4 of 4…
+    expect(component.completedStepCount()).toBe(3); // …but only 3 finished
+    expect(component.stepPercent()).toBe(75); // bar reflects work done, not started
+    expect(fixture.nativeElement.textContent).toContain('step 4 of 4');
+  });
+
   it('does not read the pipeline once the run is terminal (no wasted GET)', () => {
     build({ team: TEAM_WITH_STEPS });
     fixture.detectChanges();

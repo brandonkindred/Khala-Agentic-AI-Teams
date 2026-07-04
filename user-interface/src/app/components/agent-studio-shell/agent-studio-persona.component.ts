@@ -211,13 +211,29 @@ export class AgentStudioPersonaComponent implements OnInit {
     () => !this.runTerminal() && this.totalSteps() > 0 && this.currentStepCount() > 0,
   );
 
-  /** Determinate bar value; clamped so a branching over-count can't exceed 100%. */
+  /**
+   * Count of steps the pipeline has actually *finished* (status `completed`),
+   * excluding the one currently running/waiting. Drives the bar so it reflects
+   * work done rather than work started.
+   */
+  readonly completedStepCount = computed(
+    () => this.pipelineRun()?.step_results?.filter((r) => r.status === 'completed').length ?? 0,
+  );
+
+  /**
+   * Determinate bar value = fraction of steps *completed*, not started. Using
+   * completed (not `currentStepCount`, which counts the in-progress/waiting step)
+   * keeps the bar off 100% until the run is actually done — otherwise it would
+   * pin at full while the final step is still executing/waiting, reading as
+   * "finished" on a run that hasn't finished. Clamped against a branching
+   * over-count.
+   */
   readonly stepPercent = computed(() => {
     const total = this.totalSteps();
     if (total <= 0) {
       return 0;
     }
-    return Math.min(100, Math.round((this.currentStepCount() / total) * 100));
+    return Math.min(100, Math.round((this.completedStepCount() / total) * 100));
   });
 
   /** Name of the current pipeline step, for a "step 2 of 4 · Write" label. */
