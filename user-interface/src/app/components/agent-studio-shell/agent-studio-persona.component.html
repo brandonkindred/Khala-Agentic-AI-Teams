@@ -193,27 +193,30 @@
                 <span class="persona__run-elapsed">{{ elapsedSec() }}s</span>
                 @if (!runTerminal()) {
                   <!-- Animated liveness cue so a slow-but-healthy run never reads
-                       as stalled; especially apt during a WAIT step, when the
-                       persona is formulating its free-text answer. -->
-                  <span class="persona__thinking" aria-live="polite">persona is thinking…</span>
+                       as stalled; during a WAIT step the persona is formulating
+                       its free-text answer, so we say so explicitly. -->
+                  <span class="persona__thinking" aria-live="polite"
+                    >persona is thinking…@if (isWaiting()) {
+                      <span class="persona__waiting">(answering a question)</span>
+                    }</span
+                  >
                 }
               </div>
               @if (!runTerminal()) {
                 <!-- Step progress bar (spec Stage 4): a determinate "step N of M"
                      when the process DAG length is known, otherwise the
-                     indeterminate fallback. -->
+                     indeterminate fallback. The visible label carries the live
+                     "step N of M" text; the bar itself is not a duplicate live
+                     region (no aria-label) to avoid double screen-reader
+                     announcements every poll tick. -->
                 <div class="persona__progress">
                   @if (stepProgressKnown()) {
                     <span class="persona__step-label" aria-live="polite">
-                      step {{ currentStepCount() }} of {{ totalSteps() }}@if (currentStepName()) {
+                      step {{ displayStepCount() }} of {{ totalSteps() }}@if (currentStepName()) {
                         <span class="persona__step-name"> · {{ currentStepName() }}</span>
                       }
                     </span>
-                    <mat-progress-bar
-                      mode="determinate"
-                      [value]="stepPercent()"
-                      [attr.aria-label]="'step ' + currentStepCount() + ' of ' + totalSteps()"
-                    />
+                    <mat-progress-bar mode="determinate" [value]="stepPercent()" aria-hidden="true" />
                   } @else {
                     <mat-progress-bar mode="indeterminate" aria-label="persona run in progress" />
                   }

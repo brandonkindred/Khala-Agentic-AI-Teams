@@ -115,7 +115,8 @@ export class AgentStudioPersonaComponent implements OnInit {
    * founder `/status` endpoint collapses away. Populated once the founder run
    * carries an `se_job_id` (which, for `agentic_team:*` targets, IS the pipeline
    * run id — see the orchestrator's build-phase `_on_started`). Null until then,
-   * and left intact at terminal so the finished run keeps its last step state.
+   * and not refreshed once the run is terminal (the progress UI is hidden then,
+   * so a terminal read would be wasted).
    */
   readonly pipelineRun = signal<TestPipelineRun | null>(null);
   private pollSub: Subscription | null = null;
@@ -171,10 +172,17 @@ export class AgentStudioPersonaComponent implements OnInit {
   // bar otherwise. Step/WAIT data comes from `pipelineRun` (the real pipeline
   // run), not the founder `/status` payload, which omits it.
 
-  /** The process being driven (the run's, else the launcher selection). */
-  readonly selectedProcess = computed<ProcessDefinition | undefined>(() =>
-    (this.team()?.processes ?? []).find((p) => p.process_id === this.selectedProcessId()),
-  );
+  /**
+   * The process being driven. Prefers the **live run's own** `process_id` and
+   * only falls back to the launcher selection before a run exists — the launcher
+   * `<select>` stays interactive during a run, so keying off it would let a
+   * mid-run dropdown change desync the "step N of M" denominator and step-name
+   * lookup from the numerator (which comes from `pipelineRun.step_results`).
+   */
+  readonly selectedProcess = computed<ProcessDefinition | undefined>(() => {
+    const procId = this.pipelineRun()?.process_id ?? this.selectedProcessId();
+    return (this.team()?.processes ?? []).find((p) => p.process_id === procId);
+  });
 
   /**
    * DAG length (the "of M" denominator). For a branching DAG this is an upper
@@ -190,6 +198,13 @@ export class AgentStudioPersonaComponent implements OnInit {
    * over indexing `current_step_id` into the declared (possibly reordered) list.
    */
   readonly currentStepCount = computed(() => this.pipelineRun()?.step_results?.length ?? 0);
+
+  /**
+   * The step position shown in the label, clamped to the DAG length so a
+   * looped/revisited step (more `step_results` than declared steps) can never
+   * read a nonsensical "step 5 of 4" — mirrors the same clamp on `stepPercent`.
+   */
+  readonly displayStepCount = computed(() => Math.min(this.currentStepCount(), this.totalSteps()));
 
   /** True once a real "step N of M" can be shown (else the bar is indeterminate). */
   readonly stepProgressKnown = computed(
@@ -462,14 +477,15 @@ export class AgentStudioPersonaComponent implements OnInit {
       this.error.set(null);
     }
     this.run.set(detail);
+    const terminal = TERMINAL_STATUSES.has(detail.status);
     // Piggyback a pipeline-run read on the founder poll (same 10s cadence, no
-    // second poller to manage) to refresh the real step/WAIT progress. Fires on
-    // the terminal status too, so the finished run captures its final step state.
+    // second poller to manage) to refresh the real step/WAIT progress. Skipped
+    // once terminal: the progress UI is hidden then, so the read would be wasted.
     const teamId = this.teamId();
-    if (detail.se_job_id && teamId) {
+    if (detail.se_job_id && teamId && !terminal) {
       this.fetchPipelineRun(teamId, detail.se_job_id);
     }
-    if (TERMINAL_STATUSES.has(detail.status)) {
+    if (terminal) {
       this.stopPolling();
     }
   }
@@ -481,7 +497,7 @@ export class AgentStudioPersonaComponent implements OnInit {
    * simply degrades to the indeterminate "thinking…" bar — it never surfaces an
    * error or throws. Guarded against a superseded run by matching the response's
    * `run_id` to the current run's `se_job_id` (a newer run has a different one),
-   * which also lets a post-terminal read apply after `activeRunId` is cleared.
+   * so a slow read from a prior run can't clobber the current one.
    */
   private fetchPipelineRun(teamId: string, pipelineRunId: string): void {
     this.agenticApi

@@ -841,7 +841,7 @@ describe('AgentStudioPersonaComponent', () => {
     expect(bar?.getAttribute('mode')).toBe('indeterminate');
   });
 
-  it('flags isWaiting during a waiting_for_input WAIT step', () => {
+  it('flags isWaiting and shows the WAIT note during a waiting_for_input step', () => {
     build({ team: TEAM_WITH_STEPS });
     fixture.detectChanges();
     personaApi.getRunStatus.mockReturnValue(of(statusWithJob({ status: 'answering_build_questions' })));
@@ -849,8 +849,75 @@ describe('AgentStudioPersonaComponent', () => {
     component.launch();
     fixture.detectChanges();
     expect(component.isWaiting()).toBe(true);
-    // The animated thinking indicator is shown while the run is live.
+    // The animated thinking indicator is shown, with a WAIT-specific note wired
+    // off isWaiting() (not dead code).
     expect(fixture.nativeElement.textContent).toContain('persona is thinking…');
+    expect(fixture.nativeElement.textContent).toContain('answering a question');
+  });
+
+  it('does not show the WAIT note when the pipeline is not waiting', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2, { status: 'running' })));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.isWaiting()).toBe(false);
+    expect(fixture.nativeElement.textContent).not.toContain('answering a question');
+  });
+
+  it('keeps the step denominator on the live run process when the launcher selection changes', () => {
+    // Two complete processes with different step counts. A mid-run change of the
+    // Target-process dropdown must NOT repoint the "of M" denominator: it stays
+    // on the process the run is actually executing (keyed off pipelineRun.process_id).
+    const twoComplete = {
+      ...TEAM,
+      processes: [
+        { process_id: 'p1', name: 'A', description: '', steps: STEPS, status: 'complete' },
+        { process_id: 'pB', name: 'B', description: '', steps: STEPS.slice(0, 2), status: 'complete' },
+      ],
+    };
+    build({ team: twoComplete });
+    state.setProcessId('p1'); // handoff seeds p1 (two complete → no auto-select)
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2, { process_id: 'p1' })));
+    component.launch();
+    expect(component.totalSteps()).toBe(4);
+
+    // User switches the dropdown mid-run to the 2-step process pB.
+    component.selectProcess('pB');
+    expect(component.selectedProcessId()).toBe('pB');
+    // Denominator + step name still follow the running p1 (4 steps · Write), not pB.
+    expect(component.totalSteps()).toBe(4);
+    expect(component.currentStepName()).toBe('Write');
+  });
+
+  it('clamps the step label so an over-count never reads "5 of 4"', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    // A looped/revisited step can append more step_results than declared steps.
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(5)));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.currentStepCount()).toBe(5);
+    expect(component.totalSteps()).toBe(4);
+    expect(component.displayStepCount()).toBe(4);
+    const text = fixture.nativeElement.textContent;
+    expect(text).toContain('step 4 of 4');
+    expect(text).not.toContain('step 5 of 4');
+  });
+
+  it('does not read the pipeline once the run is terminal (no wasted GET)', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob({ status: 'completed' })));
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(4)));
+    component.launch();
+    expect(component.runTerminal()).toBe(true);
+    expect(agenticApi.getPipelineRun).not.toHaveBeenCalled();
+    expect(component.pipelineRun()).toBeNull();
   });
 
   it('ignores a stale pipeline response whose run_id is not the current se_job_id', () => {

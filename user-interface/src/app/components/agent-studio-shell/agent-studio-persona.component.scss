@@ -175,6 +175,11 @@
     color: var(--kh-text-secondary);
   }
 
+  &__waiting {
+    margin-inline-start: var(--kh-space-1);
+    color: var(--kh-text-muted);
+  }
+
   &__decisions {
     list-style: none;
     margin: var(--kh-space-3) 0 0;
