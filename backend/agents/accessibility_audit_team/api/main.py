@@ -154,6 +154,110 @@ class DesignSystemContractRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Audit dispatch helpers (shared by the direct background-task path and the
+# Temporal activity, so job-store bookkeeping and request conversion live in
+# exactly one place).
+# ---------------------------------------------------------------------------
+
+
+def _build_audit_request(request: CreateAuditRequest, audit_id: str) -> AuditRequest:
+    """Convert the public ``CreateAuditRequest`` into the internal ``AuditRequest``.
+
+    Preconditions:
+        - ``audit_id`` is a non-empty audit identifier.
+        - ``request.wcag_levels`` entries are WCAG level strings (invalid ones are dropped).
+    Postconditions:
+        - Returns an ``AuditRequest`` whose ``audit_id`` equals ``audit_id`` and whose
+          ``wcag_levels`` defaults to ``[A, AA]`` when none of the inputs are valid.
+    """
+    if not audit_id:
+        raise ValueError("audit_id must be a non-empty audit identifier")
+
+    mobile_app_targets = [
+        MobileAppTarget(
+            platform=app.get("platform", "ios"),
+            name=app.get("name", ""),
+            version=app.get("version", ""),
+            build=app.get("build", ""),
+        )
+        for app in request.mobile_apps
+    ]
+
+    wcag_levels = [WCAGLevel(level) for level in request.wcag_levels if level in ["A", "AA", "AAA"]]
+
+    return AuditRequest(
+        audit_id=audit_id,
+        name=request.name,
+        web_urls=request.web_urls,
+        mobile_apps=mobile_app_targets,
+        critical_journeys=request.critical_journeys,
+        timebox_hours=request.timebox_hours,
+        auth_required=request.auth_required,
+        max_pages=request.max_pages,
+        sampling_strategy=request.sampling_strategy,
+        wcag_levels=wcag_levels or [WCAGLevel.A, WCAGLevel.AA],
+    )
+
+
+async def _execute_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest) -> None:
+    """Run a full audit and persist its lifecycle to the shared job store.
+
+    This is the single execution core for an audit-create job. It is invoked
+    either directly (FastAPI background task, when Temporal is disabled) or from
+    the Temporal activity (in the worker process); both write to the same
+    ``JobServiceClient`` so ``GET /audit/status/{job_id}`` reflects progress
+    regardless of where the work ran.
+
+    Preconditions:
+        - ``job_id``/``audit_id`` are non-empty and a job row already exists for ``job_id``.
+    Postconditions:
+        - The job ends in ``completed`` or ``failed``; any exception is captured onto
+          the job record rather than propagated.
+    """
+    try:
+        _job_manager.update_job(
+            job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20
+        )
+        orchestrator = get_orchestrator()
+        audit_request = _build_audit_request(request, audit_id)
+        result = await orchestrator.run_audit(audit_request, request.tech_stack)
+        _job_manager.update_job(
+            job_id,
+            status="completed" if result.success else JOB_STATUS_FAILED,
+            progress=100,
+            current_phase=result.current_phase.value if result else "report_packaging",
+            completed_phases=[p.value for p in result.completed_phases] if result else [],
+            findings_count=result.total_findings if result else 0,
+            result=result.model_dump() if result else None,
+            error=result.failure_reason if result and not result.success else None,
+        )
+        if not result.success:
+            _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=result.failure_reason)
+    except Exception as e:
+        _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+
+
+def _temporal_dispatch():
+    """Return the Temporal ``start_*_workflow`` dispatcher when Temporal is enabled.
+
+    Postconditions:
+        - Returns the ``start_accessibility_audit_workflow`` callable when
+          ``TEMPORAL_ADDRESS`` is set and the Temporal stack imports cleanly, else
+          ``None`` so callers fall back to the in-process background-task path.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        if not is_temporal_enabled():
+            return None
+        from ..temporal.start_workflow import start_accessibility_audit_workflow
+
+        return start_accessibility_audit_workflow
+    except ImportError:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Audit Endpoints
 # ---------------------------------------------------------------------------
 
@@ -171,34 +275,6 @@ async def create_audit(
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     audit_id = f"audit_{uuid.uuid4().hex[:8]}"
 
-    # Convert mobile apps
-    mobile_app_targets = [
-        MobileAppTarget(
-            platform=app.get("platform", "ios"),
-            name=app.get("name", ""),
-            version=app.get("version", ""),
-            build=app.get("build", ""),
-        )
-        for app in request.mobile_apps
-    ]
-
-    # Convert WCAG levels
-    wcag_levels = [WCAGLevel(level) for level in request.wcag_levels if level in ["A", "AA", "AAA"]]
-
-    # Create audit request
-    audit_request = AuditRequest(
-        audit_id=audit_id,
-        name=request.name,
-        web_urls=request.web_urls,
-        mobile_apps=mobile_app_targets,
-        critical_journeys=request.critical_journeys,
-        timebox_hours=request.timebox_hours,
-        auth_required=request.auth_required,
-        max_pages=request.max_pages,
-        sampling_strategy=request.sampling_strategy,
-        wcag_levels=wcag_levels or [WCAGLevel.A, WCAGLevel.AA],
-    )
-
     _job_manager.create_job(
         job_id,
         job_type="accessibility_audit_create",
@@ -213,38 +289,19 @@ async def create_audit(
         request_payload=request.model_dump(),
     )
 
-    # Run audit in background
-    async def run_audit_task():
-        try:
-            _job_manager.update_job(
-                job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20
-            )
-            orchestrator = get_orchestrator()
-            result = await orchestrator.run_audit(audit_request, request.tech_stack)
-            _job_manager.update_job(
-                job_id,
-                status="completed" if result.success else JOB_STATUS_FAILED,
-                progress=100,
-                current_phase=result.current_phase.value if result else "report_packaging",
-                completed_phases=[p.value for p in result.completed_phases] if result else [],
-                findings_count=result.total_findings if result else 0,
-                result=result.model_dump() if result else None,
-                error=result.failure_reason if result and not result.success else None,
-            )
-            if not result.success:
-                _job_manager.update_job(
-                    job_id, status=JOB_STATUS_FAILED, error=result.failure_reason
-                )
-        except Exception as e:
-            _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-
-    background_tasks.add_task(run_audit_task)
+    dispatch = _temporal_dispatch()
+    if dispatch is not None:
+        dispatch(job_id, audit_id, request.model_dump())
+        message = "Audit started (Temporal). Poll /audit/status/{job_id} for progress."
+    else:
+        background_tasks.add_task(_execute_audit_job, job_id, audit_id, request)
+        message = "Audit started. Poll /audit/status/{job_id} for progress."
 
     return AuditJobResponse(
         job_id=job_id,
         audit_id=audit_id,
         status="running",
-        message="Audit started. Poll /audit/status/{job_id} for progress.",
+        message=message,
     )
 
 
