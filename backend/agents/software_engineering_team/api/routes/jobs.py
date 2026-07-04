@@ -4,6 +4,7 @@ import logging
 import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -55,6 +56,49 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _resolve_repo_path(repo_path: str | Path, sprint_id: Any) -> Path:
+    """Validate a work folder, selecting the spec-gated or spec-free validator by sprint mode.
+
+    Single source of the run/resume/restart path-validation contract. Sprint-mode
+    runs synthesize the spec from product_delivery rather than reading it from
+    disk, so the on-disk spec gate in ``validate_work_path`` would be a false 400
+    on a code-only repo; ``validate_workspace_path_no_spec`` keeps the
+    workspace-containment and directory-existence checks without the spec gate.
+
+    Preconditions:
+        - ``repo_path`` is a non-empty path-like naming a work folder.
+        - ``sprint_id`` is ``None`` (spec-gated) or a sprint identifier (spec-free).
+    Postconditions:
+        - Returns the resolved, containment-checked ``Path``.
+        - Raises ``HTTPException(400)`` if the path is invalid (wrapping the
+          validator's ``ValueError``). No other exception type is swallowed.
+    """
+    try:
+        if sprint_id is not None:
+            return validate_workspace_path_no_spec(repo_path)
+        return validate_work_path(repo_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+def _reject_sprint_under_temporal(temporal_enabled: bool, sprint_id: Any, *, detail: str) -> None:
+    """Reject a sprint-mode job under Temporal with a 400 before any state mutation.
+
+    sprint_id under Temporal is not yet plumbed; this is a client-input error, not
+    infrastructure, so callers invoke it *before* create_job / the launch
+    try-except (whose broad ``except`` would otherwise re-wrap the 400 as a 503).
+
+    Preconditions:
+        - ``temporal_enabled`` reflects ``is_temporal_enabled()``; ``detail`` is the
+          caller-specific 400 message.
+    Postconditions:
+        - Raises ``HTTPException(400, detail)`` when Temporal is enabled and
+          ``sprint_id`` is not ``None``; returns ``None`` otherwise.
+    """
+    if temporal_enabled and sprint_id is not None:
+        raise HTTPException(status_code=400, detail=detail)
+
+
 @router.post(
     "/run-team",
     response_model=RunTeamResponse,
@@ -64,35 +108,24 @@ router = APIRouter()
 )
 def run_team(request: RunTeamRequest) -> RunTeamResponse:
     """Start the software engineering team on a work folder."""
-    # Sprint-mode runs synthesize the spec from product_delivery rather
-    # than reading from disk, so the on-disk spec gate from
-    # `validate_work_path` would be a false 400 on repos that only
-    # carry code (Codex review on PR #396). Workspace containment +
-    # directory existence still apply.
-    try:
-        if request.sprint_id is not None:
-            repo_path = validate_workspace_path_no_spec(request.repo_path)
-        else:
-            repo_path = validate_work_path(request.repo_path)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    repo_path = _resolve_repo_path(request.repo_path, request.sprint_id)
 
     # Reject sprint_id under Temporal *before* create_job and *outside*
     # the launch try/except — otherwise the broad `except Exception`
     # below catches the 400 and re-wraps it as a 503 "Failed to start
-    # workflow" (Codex review on PR #396). Temporal-mode plumbing for
-    # sprint_id is a follow-up; this is a client-input error, not infra.
+    # workflow". Temporal-mode plumbing for sprint_id is a follow-up;
+    # this is a client-input error, not infra.
     from software_engineering_team.temporal.client import is_temporal_enabled
 
     temporal_enabled = is_temporal_enabled()
-    if temporal_enabled and request.sprint_id is not None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
-                "run without Temporal or omit sprint_id."
-            ),
-        )
+    _reject_sprint_under_temporal(
+        temporal_enabled,
+        request.sprint_id,
+        detail=(
+            "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
+            "run without Temporal or omit sprint_id."
+        ),
+    )
 
     # Validate `sprint_id` exists *and has planned scope* before
     # enqueuing the job — otherwise a typo, a deleted sprint, or a
@@ -460,34 +493,24 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
     if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no repo_path; cannot resume.")
 
-    # Sprint-mode jobs synthesize the spec from product_delivery, so the
-    # on-disk spec gate from `validate_work_path` would falsely reject
-    # repos that only carry code (Codex review on PR #396).
     sprint_id = data.get("sprint_id")
-    try:
-        if sprint_id is not None:
-            validate_workspace_path_no_spec(repo_path)
-        else:
-            validate_work_path(repo_path)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    repo_path = _resolve_repo_path(repo_path, sprint_id)
 
     # Same Temporal+sprint_id guard as POST /run-team: validate BEFORE
-    # flipping the job to running. Codex flagged that running the
-    # update first leaves the job stuck in `running` with no
-    # workflow/thread when the guard fires, recoverable only via the
-    # stale-job monitor.
+    # flipping the job to running, so the guard firing can't leave the
+    # job stuck in `running` with no workflow/thread (recoverable only
+    # via the stale-job monitor).
     from software_engineering_team.temporal.client import is_temporal_enabled
 
     temporal_enabled = is_temporal_enabled()
-    if temporal_enabled and sprint_id is not None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
-                "this job was created with sprint_id and cannot be resumed under Temporal."
-            ),
-        )
+    _reject_sprint_under_temporal(
+        temporal_enabled,
+        sprint_id,
+        detail=(
+            "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
+            "this job was created with sprint_id and cannot be resumed under Temporal."
+        ),
+    )
 
     # Re-validate the sprint scope on resume — the sprint may have been
     # deleted or unplanned since the job was created. Surfaces synchronously
@@ -576,35 +599,25 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
     if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no repo_path; cannot restart.")
 
-    # Sprint-mode jobs synthesize the spec from product_delivery, so
-    # the on-disk spec gate would falsely reject a code-only repo
-    # (Codex review on PR #396). Capture sprint_id before validation
-    # so we know which check to run.
+    # Capture sprint_id before validation so we know which check to run.
     sprint_id = data.get("sprint_id")
-    try:
-        if sprint_id is not None:
-            validate_workspace_path_no_spec(repo_path)
-        else:
-            validate_work_path(repo_path)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    repo_path = _resolve_repo_path(repo_path, sprint_id)
 
     # Re-persist sprint_id after reset_job clears the payload so a
     # sprint-scoped restart goes back through the synthesized-spec
-    # path instead of silently falling back to repo spec parsing
-    # (Codex review on PR #396).
+    # path instead of silently falling back to repo spec parsing.
 
     from software_engineering_team.temporal.client import is_temporal_enabled
 
     temporal_enabled = is_temporal_enabled()
-    if temporal_enabled and sprint_id is not None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
-                "this job was created with sprint_id and cannot be restarted under Temporal."
-            ),
-        )
+    _reject_sprint_under_temporal(
+        temporal_enabled,
+        sprint_id,
+        detail=(
+            "sprint_id is not yet supported under TEMPORAL_ADDRESS; "
+            "this job was created with sprint_id and cannot be restarted under Temporal."
+        ),
+    )
 
     # Re-validate the sprint scope BEFORE `reset_job` — otherwise a
     # restart with a deleted/unplanned sprint would discard the prior
