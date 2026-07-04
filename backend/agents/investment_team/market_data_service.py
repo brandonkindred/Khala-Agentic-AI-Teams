@@ -13,7 +13,7 @@ import math
 import os
 import sys
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
@@ -24,6 +24,7 @@ from .data_providers.symbol_maps import (
     resolve_alphavantage_stock,
     resolve_twelve_data,
 )
+from .date_utils import epoch_to_utc_date
 from .models import StrategySpec
 from .strategy_lab_context import normalize_asset_class
 from .symbols import (
@@ -46,29 +47,6 @@ _DEFAULT_MAX_UNIVERSE_SYMBOLS = 20
 # Sentinel distinguishing "caller did not specify a TradingView client" (resolve one
 # from configuration) from an explicit ``None`` (no client — skip the integration).
 _UNSET = object()
-
-# Epoch magnitude at/above which a timestamp is milliseconds rather than seconds
-# (13-digit ms ≈ year 2001+; 10-digit seconds stay well below this).
-_EPOCH_MS_THRESHOLD = 1_000_000_000_000
-
-
-def epoch_to_utc_date(epoch_seconds: float) -> Optional[str]:
-    """Convert an epoch time in **seconds** to a ``YYYY-MM-DD`` UTC calendar day.
-
-    Single source of truth for epoch→calendar-day conversion shared by the CoinGecko
-    provider and the TradingView MCP client. UTC is explicit (not ``date.fromtimestamp``,
-    which uses the process-local timezone) so ticks near midnight bucket onto the same day
-    on every host / CI runner — the determinism the forward-fill relies on.
-
-    Preconditions: ``epoch_seconds`` is a POSIX timestamp in seconds (callers convert
-        milliseconds themselves).
-    Postconditions: returns the UTC date as ``YYYY-MM-DD``, or ``None`` when the value is
-        out of the representable range (so the caller drops the row rather than raising).
-    """
-    try:
-        return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).date().isoformat()
-    except (OverflowError, OSError, ValueError):
-        return None
 
 
 def _max_universe_symbols() -> int:
@@ -278,6 +256,7 @@ class MarketDataService:
     def _tradingview_client(self) -> Optional[object]:
         """Return the (lazily resolved, memoized) TradingView MCP client, or ``None``.
 
+        Preconditions: none.
         Postconditions: on first access with an unspecified client (``_UNSET``), resolves
             config from env + the Unified API store exactly once and caches the result
             (client or ``None``); subsequent accesses reuse it. An injected client or an
@@ -644,7 +623,11 @@ class MarketDataService:
 
         normalized: List[Tuple[str, Optional[OHLCVBar], bool]] = []
         for row in rows:
-            bar_date = row.get("date", "")
+            # Defensive: the production client already yields a bare ``YYYY-MM-DD`` string,
+            # but coerce here too so an alternate/injected client returning a datetime-
+            # shaped or non-string date can't key a mis-bucketed bar or raise a TypeError
+            # in the string range comparison below.
+            bar_date = str(row.get("date", ""))[:10]
             if not bar_date or bar_date < start_date or bar_date > end_date:
                 continue
             bar, repaired = self._normalize_ohlc_bar(

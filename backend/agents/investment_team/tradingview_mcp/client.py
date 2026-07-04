@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import date, datetime
 from typing import Any, Dict, List
 
 import httpx
+
+from ..date_utils import _EPOCH_MS_THRESHOLD, epoch_to_utc_date
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +170,7 @@ class TradingViewMcpClient:
     def _error_text(result: Dict[str, Any]) -> str:
         """Return the first text content block of an errored tool result.
 
+        Preconditions: ``result`` is the ``result`` object of a JSON-RPC response.
         Postconditions: returns the text of the first ``{"type": "text"}`` content block,
             or ``"unknown error"`` when the result carries no text content.
         """
@@ -220,6 +224,8 @@ class TradingViewMcpClient:
     def _first(item: Dict[str, Any], keys: tuple[str, ...]) -> Any:
         """Return the first present, non-``None`` value among ``keys``.
 
+        Preconditions: ``item`` is a dict; ``keys`` is a tuple of candidate key names in
+            priority order.
         Postconditions: returns ``item[k]`` for the first ``k`` in ``keys`` that is present
             with a non-``None`` value (so a legitimate ``0`` is preserved), else ``None``.
         """
@@ -250,13 +256,15 @@ class TradingViewMcpClient:
         text = str(raw_date).strip()
         if not text:
             return None
-        # ISO first: date.fromisoformat accepts both "2024-01-02" and compact "20240102"
-        # (3.11+), and the [:10] slice trims any trailing time component.
+        # Standard ISO date/datetime first; the [:10] slice trims any trailing time
+        # component. A compact "YYYYMMDD" string is NOT handled here (date.fromisoformat
+        # rejects basic format on the Python 3.10 target) — it falls through to the
+        # numeric branch below, which parses it uniformly on every supported runtime.
         try:
             return date.fromisoformat(text[:10]).isoformat()
         except ValueError:
             pass
-        # Numeric string fallback (e.g. "1700000000" epoch, "1700000000.0").
+        # Numeric fallback: compact "20240102" or an epoch string ("1700000000[.0]").
         try:
             return TradingViewMcpClient._numeric_to_date(float(text))
         except ValueError:
@@ -267,21 +275,25 @@ class TradingViewMcpClient:
         """Interpret a numeric date value as a compact ``YYYYMMDD`` day or an epoch.
 
         Preconditions: ``value`` is an int/float.
-        Postconditions: an 8-digit integral value in the ``YYYYMMDD`` calendar range is
-            read as that calendar day (financial-feed convention); otherwise the value is
-            treated as an epoch — milliseconds at/above :data:`_EPOCH_MS_THRESHOLD`, else
-            seconds — and converted via the shared UTC helper. ``None`` when neither yields
-            a valid date.
+        Postconditions: a non-finite value (NaN/Inf) or a negative value returns ``None``
+            (a bar we can't place in time is dropped, not mis-dated, and never raises). An
+            8-digit integral value in the ``YYYYMMDD`` calendar range is read as that
+            calendar day (financial-feed convention); otherwise the value is treated as an
+            epoch — milliseconds at/above :data:`_EPOCH_MS_THRESHOLD`, else seconds — and
+            converted via the shared UTC helper. ``None`` when neither yields a valid date.
         """
+        # Guard non-finite (NaN/Inf) and negatives up front: int(nan)/int(inf) raise, and a
+        # negative "epoch" would coerce a sentinel/index field into a bogus pre-1970 date.
+        # Returning None drops just this row instead of aborting the whole symbol's fetch.
+        if not math.isfinite(value) or value < 0:
+            return None
         ival = int(value)
         if value == ival and 1900_01_01 <= ival <= 9999_12_31:
             try:
                 return datetime.strptime(str(ival), "%Y%m%d").date().isoformat()
             except ValueError:
                 pass  # not a real calendar day → fall through to epoch handling
-        from ..market_data_service import _EPOCH_MS_THRESHOLD, epoch_to_utc_date
-
-        seconds = value / 1000.0 if abs(value) >= _EPOCH_MS_THRESHOLD else float(value)
+        seconds = value / 1000.0 if value >= _EPOCH_MS_THRESHOLD else float(value)
         return epoch_to_utc_date(seconds)
 
     @classmethod

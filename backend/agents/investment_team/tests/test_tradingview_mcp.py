@@ -267,6 +267,36 @@ def test_client_drops_unparseable_date(monkeypatch):
     assert [r["date"] for r in out] == ["2024-01-02"]
 
 
+def test_client_drops_nonfinite_and_negative_dates_without_aborting(monkeypatch):
+    # A NaN/Inf/negative date field must drop only that row, never raise and lose the
+    # whole symbol's bars. (json.loads accepts NaN/Infinity by default.)
+    import json
+
+    raw = (
+        '{"jsonrpc":"2.0","id":1,"result":{"structuredContent":['
+        '{"date":NaN,"close":1},'
+        '{"date":Infinity,"close":2},'
+        '{"date":-5,"close":3},'
+        '{"date":"2024-01-02","close":4}]}}'
+    )
+    parsed = json.loads(raw)
+    _patch_httpx(monkeypatch, _FakeResponse(parsed))
+    c = TradingViewMcpClient("https://tv/mcp")
+    out = c.fetch_ohlcv("AAPL", "stocks", "2024-01-01", "2024-01-31")
+    assert [r["date"] for r in out] == ["2024-01-02"]
+
+
+def test_numeric_to_date_guards():
+    from investment_team.tradingview_mcp.client import TradingViewMcpClient as _C
+
+    assert _C._numeric_to_date(float("nan")) is None
+    assert _C._numeric_to_date(float("inf")) is None
+    assert _C._numeric_to_date(-1) is None
+    assert _C._numeric_to_date(20240102) == "2024-01-02"  # compact
+    assert _C._numeric_to_date(1704153600) == "2024-01-02"  # epoch seconds
+    assert _C._numeric_to_date(1704153600000) == "2024-01-02"  # epoch millis
+
+
 def test_client_drops_row_without_date_or_close(monkeypatch):
     rows = [{"open": 1, "close": 2}, {"date": "2024-01-02"}, {"date": "2024-01-03", "close": 5}]
     _patch_httpx(monkeypatch, _FakeResponse(_tool_result(rows)))
@@ -344,14 +374,18 @@ def test_resolve_timeout_default(monkeypatch):
     assert _resolve_timeout() == 30.0
 
 
-def test_resolve_timeout_env_and_clamp(monkeypatch):
-    from investment_team.tradingview_mcp.provider import _MIN_TIMEOUT, _resolve_timeout
+def test_resolve_timeout_env_and_fallback(monkeypatch):
+    from investment_team.tradingview_mcp.provider import _resolve_timeout
 
     monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "7.5")
     assert _resolve_timeout() == 7.5
-    monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "0")  # clamps up to the floor
-    assert _resolve_timeout() == _MIN_TIMEOUT
-    monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "garbage")  # falls back to default
+    # Non-positive values fall back to the default (NOT a near-zero timeout that would
+    # make every request time out immediately).
+    monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "0")
+    assert _resolve_timeout() == 30.0
+    monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "-5")
+    assert _resolve_timeout() == 30.0
+    monkeypatch.setenv("TRADINGVIEW_MCP_TIMEOUT_SEC", "garbage")
     assert _resolve_timeout() == 30.0
 
 

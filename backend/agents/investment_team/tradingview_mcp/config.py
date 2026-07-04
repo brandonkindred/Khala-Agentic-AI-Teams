@@ -88,6 +88,7 @@ def _ensure_backend_on_path() -> None:
 def _store_accessors():
     """Return the Unified API ``(get_meta, get_token)`` accessors, or ``(None, None)``.
 
+    Preconditions: none.
     Postconditions: returns the split settings/token accessors when ``unified_api`` is
         importable (mono-process deployment); ``(None, None)`` when it is not (isolated
         team container / CI), so the caller relies solely on environment variables. The
@@ -113,10 +114,9 @@ def resolve_tradingview_mcp_config() -> TradingViewMcpConfig:
     Preconditions: none.
     Postconditions: returns a :class:`TradingViewMcpConfig`. Each field prefers its
         environment override and falls back to the Unified API store value (or a safe
-        default). The store's JSON settings are read only when an env value is missing
-        (so a fully env-configured deployment never touches the store), and the encrypted
-        token is read **only** when the integration resolves to enabled+URL — so the
-        common disabled path costs at most one JSON read and never a credential-store
+        default). The JSON settings are read when the store is available (a cheap local
+        file read); the encrypted token is read **only** when the integration resolves to
+        enabled+URL — so the common disabled path never pays a credential-store (Postgres)
         round-trip. ``enabled`` is ``True`` only when explicitly enabled by env flag or
         store; a missing/garbled value degrades to disabled. Never raises.
     """
@@ -127,9 +127,11 @@ def resolve_tradingview_mcp_config() -> TradingViewMcpConfig:
 
     get_meta, get_token = _store_accessors()
 
-    # Read the JSON settings only when env doesn't fully specify them.
+    # Read the JSON settings whenever the store is available — it's a cheap local file
+    # read, and env values still take precedence field-by-field below. (The expensive
+    # part, the encrypted-token credential-store read, stays gated on enabled+URL.)
     meta: dict = {}
-    if get_meta is not None and (not env_url or not env_tool or env_enabled is None):
+    if get_meta is not None:
         try:
             meta = get_meta() or {}
         except Exception as exc:  # noqa: BLE001 - a store read must not break data fetching
