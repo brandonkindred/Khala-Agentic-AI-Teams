@@ -854,6 +854,36 @@ def test_reasoning_only_logs_info_not_warning(
     assert not any(lvl == "WARNING" and "reasoning only" in msg for lvl, msg in records)
 
 
+def test_extract_json_implicit_truncation_raises_for_continuation() -> None:
+    """A bare-JSON reply cut off mid-value must raise (not be repaired) so the
+    caller's implicit-truncation handler triggers multi-turn continuation."""
+    from llm_service.interface import LLMJsonParseError
+
+    client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+    truncated = '{"files": {"app/main.py": "def main():\\n    pass  # incomplete'
+    with pytest.raises(LLMJsonParseError):
+        client._extract_json(truncated)
+
+
+def test_extract_json_passes_tool_call_envelope_through() -> None:
+    """A ``__tool_calls__`` envelope carries no _EXPECTED_KEYS anchor, so it must
+    be returned verbatim rather than dropped by the anchored salvage tier."""
+    client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+    envelope = json.dumps(
+        {"__tool_calls__": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}]}
+    )
+    parsed = client._extract_json(envelope)
+    assert "__tool_calls__" in parsed
+    assert parsed["__tool_calls__"][0]["function"]["name"] == "f"
+
+
+def test_extract_json_off_schema_object_still_parses() -> None:
+    """A clean lone object whose key is not in _EXPECTED_KEYS still parses via
+    the accept-any fallback tier (regression guard for the two-tier routing)."""
+    client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+    assert client._extract_json('{"answer": 42}') == {"answer": 42}
+
+
 def test_extract_json_json_repair_unescaped_quotes_in_strings() -> None:
     """Models often cite JSON/code with unescaped \" inside JSON string values."""
     client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)

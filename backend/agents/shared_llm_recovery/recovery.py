@@ -129,8 +129,13 @@ def _repair_object(fragment: str) -> Optional[Dict[str, Any]]:
     return parsed if isinstance(parsed, dict) and parsed else None
 
 
-def _parse_or_repair(fragment: str) -> Optional[Dict[str, Any]]:
-    """Strict-parse *fragment*, then object-shaped repair. For fence/tail paths.
+def _parse_or_repair(fragment: str, *, repair: bool = True) -> Optional[Dict[str, Any]]:
+    """Strict-parse *fragment*, then (when ``repair``) object-shaped repair.
+
+    For fence/tail paths. With ``repair=False`` the tolerant ``json-repair`` leg
+    is skipped and only a strict ``json.loads`` can succeed — callers that must
+    reject anything not strictly valid (the strategy-lab re-prompt contract) pass
+    ``repair=False``.
 
     Preconditions: ``fragment`` is a str.
     Postconditions: a ``dict`` (possibly empty, when strict JSON) or ``None``;
@@ -142,7 +147,7 @@ def _parse_or_repair(fragment: str) -> Optional[Dict[str, Any]]:
             return parsed
     except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
         pass
-    if _looks_like_json_object(fragment):
+    if repair and _looks_like_json_object(fragment):
         return _repair_object(fragment)
     return None
 
@@ -235,7 +240,7 @@ def _descend_envelope(
 
 
 def _salvage_object(
-    content: str, accept: Callable[[Dict[str, Any]], bool]
+    content: str, accept: Callable[[Dict[str, Any]], bool], *, repair: bool = True
 ) -> Optional[Dict[str, Any]]:
     """Salvage the authoritative JSON object matching ``accept`` from raw output.
 
@@ -257,6 +262,14 @@ def _salvage_object(
     5. Recall fallback: ``raw_decode`` from every ``{`` (strict only), which
        finds a real object buried under prose braces/quotes that derail the span
        scan. Last so it never hijacks a case strategies 1-4 already resolved.
+
+    ``repair`` (default ``True``) gates the tolerant ``json-repair`` legs: with
+    ``repair=False`` the object-shaped repair in strategy 1, the repair leg of
+    strategy 3, and strategy 4 in its entirety are skipped, so only strictly
+    valid JSON can be recovered (the strict spans of 1/3 plus the ``raw_decode``
+    recall of 5). Callers that must reject anything not strictly parseable — so a
+    downstream re-prompt / continuation fires instead of accepting a repaired
+    guess — pass ``repair=False``.
 
     Preconditions: ``content`` is a str (may be empty); ``accept`` is a pure
     predicate over a parsed dict.
@@ -304,7 +317,7 @@ def _salvage_object(
                 continue
         except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
             pass
-        if repairs < _MAX_REPAIR_ATTEMPTS and _looks_like_json_object(fragment):
+        if repair and repairs < _MAX_REPAIR_ATTEMPTS and _looks_like_json_object(fragment):
             repairs += 1
             repaired = _repair_object(fragment)
             if repaired is not None:
@@ -321,14 +334,16 @@ def _salvage_object(
     # Strategy 3: whole payload inside a markdown fence (on STRIPPED text).
     fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", stripped, re.IGNORECASE)
     if fence:
-        parsed = _parse_or_repair(fence.group(1).strip())
+        parsed = _parse_or_repair(fence.group(1).strip(), repair=repair)
         if parsed is not None and accept(parsed):
             result = _use(parsed)
             if result is not None:
                 return result
 
-    # Strategy 4: max-tokens truncation — the first object never closed.
-    if first_unclosed != -1:
+    # Strategy 4: max-tokens truncation — the first object never closed. This is
+    # a pure tolerant-repair strategy, so it is skipped entirely when repair is
+    # off (a truncated fragment must surface as "no object" for the caller).
+    if repair and first_unclosed != -1:
         fragment = stripped[first_unclosed:]
         if _looks_like_json_object(fragment):
             repaired = _repair_object(fragment)
@@ -405,7 +420,10 @@ def extract_task_assignment_from_content(content: str) -> Optional[Dict[str, Any
 
 
 def extract_json_object(
-    content: str, required_keys: Optional[Collection[str]] = None
+    content: str,
+    required_keys: Optional[Collection[str]] = None,
+    *,
+    repair: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Recover the authoritative JSON *object* from raw LLM content.
 
@@ -420,6 +438,12 @@ def extract_json_object(
     out usage echoes and envelope wrappers that would otherwise win the
     positional tiebreak. Without it, any dict is accepted.
 
+    ``repair`` (default ``True``) gates the tolerant ``json-repair`` legs. Pass
+    ``repair=False`` for a strict recovery that only returns strictly valid JSON
+    and yields ``None`` for anything malformed or truncated — so a caller whose
+    contract is to re-prompt / continue on unparseable output gets its signal
+    instead of a repaired guess.
+
     Preconditions:
         - ``content`` is a ``str`` (may be empty).
         - ``required_keys`` is ``None`` or a collection of str anchor keys.
@@ -427,7 +451,40 @@ def extract_json_object(
         - Returns a ``dict`` on success, or ``None`` when nothing parses (or no
           candidate carries an anchor key). Never raises on malformed input.
     """
-    return _salvage_object(content, _accept_with_keys(required_keys))
+    return _salvage_object(content, _accept_with_keys(required_keys), repair=repair)
+
+
+def looks_truncated(text: str) -> bool:
+    """True when *text* appears truncated: unbalanced brackets or an unclosed string.
+
+    A cheap structural heuristic (not a parser): unequal ``{``/``}`` or ``[``/``]``
+    counts, or an odd number of unescaped double-quotes leaving a string open at
+    EOF. Brace/bracket counts are deliberately NOT string-aware — a lone brace
+    inside a string value can trip a false positive — matching the historical
+    behaviour of the caller that used to own this check, so routing through the
+    shared engine preserves it exactly. Used to decide whether a bare-JSON reply
+    was cut off (recover the rest via continuation) versus merely malformed.
+
+    Preconditions: ``text`` is a str (may be empty).
+    Postconditions: returns a bool; never raises.
+    """
+    t = (text or "").strip()
+    if t.count("{") != t.count("}"):
+        return True
+    if t.count("[") != t.count("]"):
+        return True
+    in_str = False
+    i = 0
+    n = len(t)
+    while i < n:
+        c = t[i]
+        if c == "\\" and in_str:
+            i += 2
+            continue
+        if c == '"':
+            in_str = not in_str
+        i += 1
+    return in_str
 
 
 # Extensions we treat as file paths (backend + frontend)

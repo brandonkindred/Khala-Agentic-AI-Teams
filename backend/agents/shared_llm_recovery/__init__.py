@@ -16,6 +16,7 @@ Public API:
     - ``extract_files_from_content`` / ``heuristic_extract_files_from_content``
       — ``{path: content}`` from JSON or fenced blocks
     - ``extract_single_python_block``    — a lone ```` ```python ```` body
+    - ``looks_truncated``                — cheap "was this reply cut off?" heuristic
 
 Preconditions:
     - ``backend/agents`` is on ``sys.path`` (the ``shared_*`` convention).
@@ -31,6 +32,7 @@ from shared_llm_recovery.recovery import (
     extract_single_python_block,
     extract_task_assignment_from_content,
     heuristic_extract_files_from_content,
+    looks_truncated,
 )
 
 __all__ = [
@@ -39,4 +41,5 @@ __all__ = [
     "extract_files_from_content",
     "heuristic_extract_files_from_content",
     "extract_single_python_block",
+    "looks_truncated",
 ]

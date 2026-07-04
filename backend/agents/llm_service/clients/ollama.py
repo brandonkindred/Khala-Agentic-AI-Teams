@@ -19,6 +19,13 @@ from typing import Any, Callable, Dict, Optional
 
 import httpx
 
+from shared_llm_recovery import (
+    extract_json_object as _shared_extract_json_object,
+)
+from shared_llm_recovery import (
+    looks_truncated,
+)
+
 from .. import config as llm_config
 from ..attribution import (
     bind_request_id,
@@ -699,110 +706,6 @@ class OllamaLLMClient(LLMClient):
             body,
         )
 
-    def _repair_json(self, s: str) -> str:
-        """Attempt tolerant JSON repair for common LLM output issues."""
-        s = re.sub(r",\s*([}\]])", r"\1", s)
-        return s
-
-    def _escape_unescaped_quotes(self, s: str) -> str:
-        """Escape unescaped double quotes inside JSON string values.
-
-        Uses a state machine that tracks whether we are inside a string.
-        Quotes that appear mid-string and are not followed by a structural
-        JSON character (:, ,, }, ]) are treated as unescaped inner quotes
-        and get a backslash prepended.
-        """
-        result: list[str] = []
-        in_string = False
-        i = 0
-        n = len(s)
-        while i < n:
-            c = s[i]
-            if c == "\\" and in_string:
-                # Consume escape sequence as-is
-                result.append(c)
-                i += 1
-                if i < n:
-                    result.append(s[i])
-                    i += 1
-                continue
-            if c == '"':
-                if not in_string:
-                    in_string = True
-                    result.append(c)
-                else:
-                    # Determine if this closes the string by checking the
-                    # next non-whitespace character.
-                    j = i + 1
-                    while j < n and s[j] in " \t\n\r":
-                        j += 1
-                    if j >= n or s[j] in ":,}]":
-                        in_string = False
-                        result.append(c)
-                    else:
-                        # Mid-string quote: escape it
-                        result.append("\\")
-                        result.append(c)
-            else:
-                result.append(c)
-            i += 1
-        return "".join(result)
-
-    def _is_truncated_json(self, s: str) -> bool:
-        """Return True if ``s`` appears to be truncated (unclosed brackets or string)."""
-        t = s.strip()
-        if t.count("{") != t.count("}"):
-            return True
-        if t.count("[") != t.count("]"):
-            return True
-        # Check for unclosed string (odd number of unescaped quotes)
-        in_str = False
-        i = 0
-        while i < len(t):
-            c = t[i]
-            if c == "\\" and in_str:
-                i += 2
-                continue
-            if c == '"':
-                in_str = not in_str
-            i += 1
-        return in_str
-
-    def _parse_with_json_repair(self, s: str) -> Optional[Dict[str, Any]]:
-        """Parse broken LLM JSON (e.g. unescaped quotes inside strings).
-
-        Skips repair entirely for truncated JSON (unclosed brackets/strings)
-        so that truncated responses surface as parse errors rather than being
-        silently completed with invented content.
-
-        For syntactically broken but complete JSON (e.g. unescaped inner
-        quotes), first tries the built-in ``_escape_unescaped_quotes``
-        heuristic, then falls back to the optional *json-repair* library.
-        """
-        if not (s or "").strip():
-            return None
-        # Do not repair truncated JSON — return None so the caller raises.
-        if self._is_truncated_json(s.strip()):
-            return None
-        # Built-in heuristic: escape unescaped inner quotes
-        try:
-            repaired = self._escape_unescaped_quotes(s.strip())
-            out = json.loads(repaired)
-            if isinstance(out, dict) and out:
-                return out
-        except Exception:
-            pass
-        # Optional external library
-        try:
-            from json_repair import loads as json_repair_loads
-
-            out = json_repair_loads(s.strip())
-            return out if isinstance(out, dict) and out else None
-        except ImportError:
-            return None
-        except Exception:
-            return None
-
     def _strip_json_noise(self, s: str) -> str:
         """Drop transport artifacts (BOM/replacement chars/control bytes) from JSON-ish text."""
         if not s:
@@ -811,97 +714,53 @@ class OllamaLLMClient(LLMClient):
         return _JSON_NOISE_RE.sub("", s)
 
     def _extract_json(self, text: str) -> Dict[str, Any]:
-        """Extract a single JSON object from model output. Raises LLMJsonParseError on failure."""
+        """Extract a single JSON object from model output. Raises LLMJsonParseError on failure.
+
+        The salvage core is the shared ``shared_llm_recovery`` engine (one
+        string-aware brace scanner + one ``json-repair`` site for the whole
+        codebase); this method keeps only the two Ollama-specific pre-checks the
+        shared engine can't know about, plus the truncation-vs-repair policy that
+        drives the continuation path:
+
+        - ``---DRAFT---`` marker → the trailing draft is returned as ``content``.
+        - A ``__tool_calls__`` envelope is passed through verbatim (it carries no
+          ``_EXPECTED_KEYS`` anchor, so tier-1 salvage would otherwise drop it).
+        - Salvage runs anchored on ``_EXPECTED_KEYS`` first (filters usage echoes
+          / format recaps in multi-candidate output), then falls back to
+          accept-any so a clean lone object with an off-schema key still parses.
+        - Tolerant repair is disabled for a bare-JSON reply that ``looks_truncated``
+          so implicit truncation surfaces as ``LLMJsonParseError`` and the caller
+          recovers the rest via multi-turn continuation, rather than accepting a
+          repaired (fabricated-tail) object.
+
+        Postconditions: returns a parsed ``dict`` on success; raises
+        ``LLMJsonParseError`` when nothing salvageable is found.
+        """
         text = self._strip_json_noise(text)
         if "---DRAFT---" in text:
             parts = text.split("---DRAFT---", 1)
             if len(parts) == 2 and parts[1].strip():
                 return {"content": parts[1].strip()}
-        json_block_match = re.search(r"```json\s*([\s\S]*?)```", text, re.IGNORECASE)
-        if json_block_match:
-            text = json_block_match.group(1).strip()
-        else:
-            fenced_match = re.search(
-                r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE
-            )
-            if fenced_match:
-                block_content = fenced_match.group(1).strip()
-                if block_content.lstrip().startswith(("{", "[")):
-                    text = block_content
-        try:
-            return json.loads(text)
-        except (json.JSONDecodeError, ValueError):
-            pass
-        repaired = self._repair_json(text)
-        try:
-            return json.loads(repaired)
-        except (json.JSONDecodeError, ValueError):
-            pass
-        obj_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if obj_match:
-            raw = obj_match.group(0)
-            try:
-                return json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                try:
-                    return json.loads(self._repair_json(raw))
-                except (json.JSONDecodeError, ValueError):
-                    pass
         stripped = text.strip()
-        for pattern in (
-            r"^(?:Here(?:'s| is) (?:the )?JSON:?)\s*",
-            r"^(?:The (?:response|output|result) is:?)\s*",
-            r"^(?:JSON:?)\s*",
-            r"^\s*```(?:json)?\s*",
-            r"\s*```\s*$",
-        ):
-            stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE).strip()
-        if stripped != text.strip():
-            obj_match2 = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-            if obj_match2:
-                try:
-                    return json.loads(obj_match2.group(0))
-                except (json.JSONDecodeError, ValueError):
-                    pass
-        for block_match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE):
-            block = block_match.group(1).strip()
-            if not block:
-                continue
+        # Tool-call envelope: not an _EXPECTED_KEYS anchor, so route it around
+        # salvage and return it as-is (chat() relies on this pass-through).
+        if stripped.startswith("{") and "__tool_calls__" in stripped:
             try:
-                parsed = json.loads(block)
-                if isinstance(parsed, dict) and _EXPECTED_KEYS & set(parsed.keys()):
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict) and "__tool_calls__" in parsed:
                     return parsed
-            except (json.JSONDecodeError, ValueError):
-                try:
-                    parsed = json.loads(self._repair_json(block))
-                    if isinstance(parsed, dict) and _EXPECTED_KEYS & set(parsed.keys()):
-                        return parsed
-                except (json.JSONDecodeError, ValueError):
-                    jr = self._parse_with_json_repair(block)
-                    if jr and _EXPECTED_KEYS & set(jr.keys()):
-                        logger.info(
-                            "LLM JSON parsed via json-repair (fenced block, keys=%s)",
-                            list(jr.keys())[:8],
-                        )
-                        return jr
-                    continue
-        # Last resort: json-repair on full text or outermost {...} (fixes unescaped " in string values)
-        candidates: list[str] = []
-        t = text.strip()
-        if t:
-            candidates.append(t)
-        lo, hi = t.find("{"), t.rfind("}")
-        if lo >= 0 and hi > lo:
-            brace_slice = t[lo : hi + 1]
-            if brace_slice not in candidates:
-                candidates.append(brace_slice)
-        for cand in candidates:
-            jr_dict = self._parse_with_json_repair(cand)
-            if jr_dict is not None:
-                logger.info(
-                    "LLM JSON parsed via json-repair fallback (%d top-level keys)", len(jr_dict)
-                )
-                return jr_dict
+            except json.JSONDecodeError:
+                pass
+        # Skip tolerant repair only for a bare-JSON reply that looks cut off, so
+        # implicit truncation triggers continuation instead of a fabricated tail.
+        allow_repair = not (stripped.startswith(("{", "[")) and looks_truncated(stripped))
+        result = _shared_extract_json_object(
+            text, required_keys=_EXPECTED_KEYS, repair=allow_repair
+        )
+        if result is None:
+            result = _shared_extract_json_object(text, required_keys=None, repair=allow_repair)
+        if result is not None:
+            return result
         logger.error(
             "LLM JSON parse failed. rid=%s %s model=%s base_url=%s. Raw content (truncated): %s",
             current_request_id() or "-",
