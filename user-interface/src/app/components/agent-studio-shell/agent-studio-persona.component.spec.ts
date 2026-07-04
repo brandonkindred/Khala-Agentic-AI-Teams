@@ -1181,11 +1181,30 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.cancelling()).toBe(true);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.persona__stop').textContent).toContain('Stopping…');
-    // finalize clears the in-flight flag when the request ends, so a best-effort
-    // cancel can't leave the button stuck disabled on "Stopping…".
+    // On success the cancel synchronously marks the run terminal, so the button
+    // stays disabled ("Stopping…") until the poll hides it — cancelling stays true
+    // (not reset), preventing a re-click firing a redundant, error-prone cancel.
     cancel.next({});
     cancel.complete();
-    expect(component.cancelling()).toBe(false);
+    expect(component.cancelling()).toBe(true);
+  });
+
+  it('does not fire a redundant cancel on a re-click while a stop is pending', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
+    component.launch();
+    const cancel = new Subject<unknown>();
+    personaApi.cancelJob.mockReturnValue(cancel);
+    component.stopRun();
+    cancel.next({});
+    cancel.complete(); // cancel succeeded; cancelling stays true (run not yet polled terminal)
+    expect(component.cancelling()).toBe(true);
+    // A re-click during the pre-poll window must NOT fire a second cancel (which
+    // would 409 on the already-cancelled job and banner a spurious error).
+    component.stopRun();
+    expect(personaApi.cancelJob).toHaveBeenCalledTimes(1);
+    expect(component.error()).toBeNull();
   });
 
   it('surfaces an error and re-enables Stop when the cancel request fails', () => {
@@ -1273,6 +1292,18 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.runLive()).toBe(true);
     expect(runBtn.disabled).toBe(true);
     expect(select.disabled).toBe(true);
+  });
+
+  it('renders the announcement live region before any run so the first transition is announced', () => {
+    build();
+    fixture.detectChanges(); // team + personas loaded; NO run launched yet
+    expect(component.run()).toBeNull();
+    // The aria-live region must pre-exist (empty) in the DOM before a run — a live
+    // region inserted already-populated is commonly not announced, dropping the
+    // first "started" transition.
+    const region = fixture.nativeElement.querySelector('p.visually-hidden[role="status"][aria-live="polite"]');
+    expect(region).toBeTruthy();
+    expect(region.textContent.trim()).toBe('');
   });
 
   it('labels the live-run region and announces run-state transitions to assistive tech', () => {

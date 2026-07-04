@@ -13,7 +13,7 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { EMPTY, Subscription, catchError, finalize, interval, switchMap, timeout } from 'rxjs';
+import { EMPTY, Subscription, catchError, interval, switchMap, timeout } from 'rxjs';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
@@ -527,8 +527,8 @@ export class AgentStudioPersonaComponent implements OnInit {
     // Also require the team to have loaded: a programmatic call (or a stale
     // handoff-seeded processId after a failed load) must not fire a request that
     // would certainly fail. (Superseding a live run is prevented at the UI — the
-    // launcher is disabled while `runLive()` — not here, so tests can still drive
-    // status transitions through launch().)
+    // launcher is disabled while `runInProgress()` — not here, so tests can still
+    // drive status transitions through launch().)
     if (!teamId || !personaId || !processId || this.launching() || !this.team()) {
       return;
     }
@@ -563,15 +563,20 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   /**
    * Cancel the in-flight founder run via the cancel endpoint. No-ops unless the
-   * founder job is in progress and no stop is already pending. The run's own poll
-   * then reports the terminal (cancelled) state and hides the control.
+   * founder job is in progress and no stop is already pending.
    *
-   * Both handlers are scoped to the run that was stopped (`run_id` guard): a late
-   * response from a superseded run's cancel — e.g. a 404/409 from cancelling an
-   * already-finished job after the user launched a new run — must not banner or
-   * reset the *current* run. `finalize` clears `cancelling` when the request ends
-   * (success or failure), so a best-effort/no-op cancel can never leave the Stop
-   * button stuck disabled on "Stopping…".
+   * The cancel endpoint marks the founder run terminal ("failed", "Cancelled by
+   * user") synchronously, so `cancelling` is intentionally kept **true on
+   * success**: the Stop button stays disabled ("Stopping…") until the run's next
+   * poll flips `runInProgress()` false and hides the control (≤ one poll). That
+   * prevents a re-click firing a *redundant* cancel that 409s and banners a
+   * spurious error over a run that was in fact cancelled. Only a genuine failure
+   * or a timed-out request re-enables Stop for a retry.
+   *
+   * The error handler is scoped to the run that was stopped (`run_id` guard): a
+   * late failure from a *superseded* run's cancel (e.g. a 404/409 after the user
+   * launched a new run) must not banner or reset the current run. `timeout` bounds
+   * a hung request so it can't leave the button stuck disabled with no response.
    */
   stopRun(): void {
     const r = this.run();
@@ -583,17 +588,11 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.error.set(null);
     this.personaApi
       .cancelJob(runId)
-      .pipe(
-        finalize(() => {
-          if (this.run()?.run_id === runId) {
-            this.cancelling.set(false);
-          }
-        }),
-        takeUntilDestroyed(this.destroyRef),
-      )
+      .pipe(timeout(LAUNCH_TIMEOUT_MS), takeUntilDestroyed(this.destroyRef))
       .subscribe({
         error: () => {
           if (this.run()?.run_id === runId) {
+            this.cancelling.set(false);
             this.error.set('Could not stop the run.');
           }
         },
