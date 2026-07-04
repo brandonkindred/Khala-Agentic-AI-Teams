@@ -2711,7 +2711,7 @@ def test_quality_gate_review_receives_user_decisions(tmp_path):
     assert captured["user_decisions"] == ["Which DB? → Postgres", "Use TLS? → Yes"]
 
 
-# ----------------------------------------------------- concurrent review fan-out (#2)
+# ----------------------------------------------------- concurrent review fan-out
 
 
 def _seed_in_review(graph, workers) -> None:
@@ -2889,7 +2889,7 @@ def test_review_concurrency_env_parsing(monkeypatch):
     assert orch_mod._review_concurrency() == 7
 
 
-# ----------------------------------------------------- repo-context incremental cache (#3)
+# ----------------------------------------------------- repo-context incremental cache
 
 
 def test_repo_context_cache_matches_read_repo_context(tmp_path):
@@ -2998,3 +2998,82 @@ def test_repo_context_cache_skips_unrenderable_file(tmp_path, monkeypatch):
     cache = orch_mod._RepoContextCache()
     assert cache.read(tmp_path) == "No files found"
     assert cache._entries == {}
+
+
+def test_review_uses_fresh_agent_per_call_not_shared(monkeypatch):
+    """run_code_review must build a fresh review Agent per call (never reuse a shared instance), so
+    concurrent reviews don't race on a Strands Agent's mutable conversation history."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    built = []
+
+    class _FakeAgent:
+        def __init__(self, **kw):
+            built.append(self)
+
+    monkeypatch.setattr(tl_mod, "Agent", _FakeAgent)
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt, required_keys=None: {
+            "approved": True,
+            "reason": "",
+            "requested_changes": [],
+        },
+    )
+    tl = tl_mod.TechLeadAgent(model=object())
+    built.clear()  # ignore the agents built in __init__; count only per-review construction
+
+    used = []
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt, required_keys=None: (
+            used.append(agent) or {"approved": True, "reason": "", "requested_changes": []}
+        ),
+    )
+
+    tl.run_code_review("t", "d", [], "e1")
+    tl.run_code_review("t", "d", [], "e2")
+
+    assert len(built) == 2  # one fresh review agent per call
+    assert used[0] is not used[1]  # the two reviews used distinct agent instances
+    assert not hasattr(tl, "_review_agent")  # no shared review agent kept on the instance
+
+
+def test_review_fanout_propagates_llm_attribution(tmp_path, monkeypatch):
+    """The concurrent review workers must see the caller's LLM-attribution contextvar (parallel_map
+    copies context into each worker); a raw thread pool would drop it and misattribute cost."""
+    from llm_service import llm_attribution
+    from llm_service.attribution import current_attribution
+
+    _patch_git(monkeypatch)
+    workers = [StubWorker("a1"), StubWorker("a2")]
+    seen_team: List[str] = []
+    lock = __import__("threading").Lock()
+
+    class _AttrTechLead(StubTechLead):
+        def run_code_review(
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            user_decisions=None,
+            progress_callback=None,
+        ):
+            with lock:
+                seen_team.append(current_attribution().team)
+            return {"approved": True, "reason": "", "requested_changes": []}
+
+    swarm, graph = _make_swarm(tmp_path, _AttrTechLead(approved=True), workers)
+    _seed_in_review(graph, workers)
+
+    with llm_attribution(team="coding_team_review"):
+        swarm._review_and_merge(lambda **kw: None)
+
+    assert seen_team == [
+        "coding_team_review",
+        "coding_team_review",
+    ]  # attribution visible in workers

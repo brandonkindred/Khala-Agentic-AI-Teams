@@ -14,7 +14,6 @@ import math
 import os
 import re
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -894,7 +893,7 @@ class _RepoContextCache:
                 # as _render_context_file would drop an unreadable file; it also leaves the cache.
                 continue
             cached = self._entries.get(f)
-            if cached is not None and (cached[0], cached[1]) == key:
+            if cached is not None and cached[:2] == key:
                 part = cached[2]
             else:
                 rendered = _render_context_file(f, repo_path)
@@ -902,7 +901,7 @@ class _RepoContextCache:
                     # Unreadable: drop from cache and skip, mirroring _read_repo_context.
                     continue
                 part = rendered
-            fresh[f] = (key[0], key[1], part)
+            fresh[f] = (*key, part)
             parts.append(part)
         # Replace wholesale so entries for now-ineligible/removed files are evicted.
         self._entries = fresh
@@ -2218,12 +2217,12 @@ class CodingTeamSwarm:
               diff) so it fails just this task once rather than aborting the whole round; no graph or
               git state is changed here.
         """
-        from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
-
-        branch = task.feature_branch or f"feature/{task.id}"
-        summary = task.changes_summary or "(no summary recorded)"
 
         def _run(progress_callback: Any) -> Tuple[str, Dict[str, Any]]:
+            from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
+
+            branch = task.feature_branch or f"feature/{task.id}"
+            summary = task.changes_summary or "(no summary recorded)"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
             evidence = _build_review_evidence(summary, diff)
             review = self.tech_lead.run_code_review(
@@ -2258,8 +2257,9 @@ class CodingTeamSwarm:
 
         # Concurrent fan-out: suppress the per-task progress bridge (concurrent bridges would race the
         # single job-record sub-progress bar). run_code_review's result is identical with or without a
-        # callback. Contain exceptions here so one task's failure never aborts the round's other
-        # reviews; a converted error review fails this task once in _apply_review_decision.
+        # callback. Contain every exception (the whole body, including the git import and branch/diff
+        # prep) so a worker never raises out of the fan-out and aborts the round's other reviews; a
+        # converted error review fails this task once in _apply_review_decision.
         try:
             return _run(None)
         except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
@@ -2310,15 +2310,24 @@ class CodingTeamSwarm:
         """Coordinator reviews completed tasks: merge approved ones, send rejected ones back.
 
         Reviews are independent (a read-only branch diff plus an LLM call), so a round with several
-        tasks in review fans the reviews out concurrently and then applies the merge/revision
+        tasks in review fans the reviews out concurrently (via ``parallel_map``, which propagates the
+        caller's LLM-attribution contextvars into each worker) and then applies the merge/revision
         decisions serially in the original order. This keeps every git write and graph mutation
         single-threaded (deterministic merge ordering, branch isolation preserved) while collapsing k
         serial review latencies into roughly one.
 
+        Preconditions:
+            - ``update_fn`` is the job progress callback (or a no-op); it is only invoked from this
+              (main) thread, never from the review workers.
         Postconditions:
             - Every task that was IN_REVIEW is left MERGED, IN_PROGRESS (revision pending), or FAILED
-              — never IN_REVIEW with no state change — identically to the prior serial loop.
+              — never IN_REVIEW with no state change. Each task's verdict matches the prior serial
+              loop except that, because all branch diffs are collected up front against the
+              start-of-round development tree, a task's review no longer reflects an earlier
+              same-round merge (only relevant for two independent IN_REVIEW tasks touching the same
+              files — a non-dependent overlap the swarm does not otherwise order).
         """
+        from shared_concurrency import parallel_map
         from shared_git.git_utils import DEVELOPMENT_BRANCH, merge_branch
 
         in_review = [t for t in self.graph.get_tasks() if t.status == TaskStatus.IN_REVIEW]
@@ -2333,22 +2342,18 @@ class CodingTeamSwarm:
             return
 
         # Fan the reviews out concurrently, then apply decisions serially in original order.
+        # parallel_map preserves input order and copies each worker's contextvars from this thread, so
+        # the review LLM calls keep their job/team/task attribution (a raw ThreadPoolExecutor would
+        # drop it). _compute_review contains its own exceptions, so no worker raises out of the pool.
         update_fn(status_text=f"Tech Lead reviewing {len(in_review)} task(s)")
         max_workers = min(_review_concurrency(), len(in_review))
-        reviews: Dict[str, Tuple[str, Dict[str, Any]]] = {}
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ct_review") as pool:
-            future_to_task = {
-                pool.submit(
-                    self._compute_review, task, live_progress=False, update_fn=update_fn
-                ): task
-                for task in in_review
-            }
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
-                reviews[task.id] = future.result()
-
-        for task in in_review:
-            diff, review = reviews[task.id]
+        results = parallel_map(
+            in_review,
+            lambda task: self._compute_review(task, live_progress=False, update_fn=update_fn),
+            max_workers=max_workers,
+            skip_none=False,
+        )
+        for task, (diff, review) in zip(in_review, results):
             self._apply_review_decision(task, diff, review, merge_branch, DEVELOPMENT_BRANCH)
 
     def _request_revision(
