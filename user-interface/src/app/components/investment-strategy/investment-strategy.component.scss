@@ -55,21 +55,6 @@
   }
 }
 
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  background: var(--kh-error-subtle);
-  color: var(--kh-error);
-  border-radius: 4px;
-  margin-bottom: 16px;
-
-  mat-icon {
-    color: var(--kh-error);
-  }
-}
-
 .strategy-summary {
   display: flex;
   flex-wrap: wrap;

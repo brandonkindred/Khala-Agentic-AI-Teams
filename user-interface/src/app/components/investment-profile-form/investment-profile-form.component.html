@@ -12,10 +12,7 @@
       }
 
       @if (error) {
-        <div class="error-banner">
-          <mat-icon>error</mat-icon>
-          <span>{{ error }}</span>
-        </div>
+        <app-inline-banner variant="error" [message]="error" />
       }
 
       <form [formGroup]="form" (ngSubmit)="submit()">

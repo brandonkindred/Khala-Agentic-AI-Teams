@@ -14,6 +14,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatExpansionModule } from '@angular/material/expansion';
 
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import {
   IPS,
@@ -42,6 +43,7 @@ import {
     MatProgressBarModule,
     MatTooltipModule,
     MatExpansionModule,
+    InlineBannerComponent,
   ],
   templateUrl: './investment-proposal.component.html',
   styleUrl: './investment-proposal.component.scss',
