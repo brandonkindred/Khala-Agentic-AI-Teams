@@ -19,8 +19,12 @@ from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
 
 from .models import (
+    LISTING_FILTERS,
     JobMatchRequest,
     JobPosting,
+    Listing,
+    ListingsResponse,
+    ListingStateUpdate,
     RankedJob,
     RunDetail,
     RunSummary,
@@ -40,6 +44,70 @@ RUN_STATUS_FAILED = "failed"
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+#: Aggregated-listing SELECT: latest ranked snapshot per fingerprint (DISTINCT ON,
+#: newest first), how often the posting was ranked, and the user's triage state
+#: (implicit ``new`` when no state row exists). Callers append a WHERE/ORDER
+#: BY/LIMIT tail. Trusted literal only — never interpolate untrusted input.
+_LISTING_SELECT = (
+    "WITH latest AS ("
+    " SELECT DISTINCT ON (fingerprint) fingerprint, run_id, score, sub_scores,"
+    "  posting, recommendation, rationale, concerns, created_at"
+    " FROM job_matching_ranked_jobs WHERE fingerprint <> ''"
+    " ORDER BY fingerprint, created_at DESC, id DESC"
+    "), seen AS ("
+    " SELECT fingerprint, COUNT(*) AS times_seen"
+    " FROM job_matching_ranked_jobs WHERE fingerprint <> '' GROUP BY fingerprint"
+    ") "
+    "SELECT l.fingerprint, l.run_id, l.score, l.sub_scores, l.posting,"
+    " l.recommendation, l.rationale, l.concerns, l.created_at, seen.times_seen,"
+    " COALESCE(s.status, 'new') AS status, s.notes, s.updated_at AS status_updated_at "
+    "FROM latest l "
+    "JOIN seen USING (fingerprint) "
+    "LEFT JOIN job_matching_listing_states s USING (fingerprint)"
+)
+
+
+def _listing_filter_clause(status: str) -> tuple[str, tuple]:
+    """Return the WHERE tail + params for a validated listing filter.
+
+    Preconditions:
+        * ``status`` is one of :data:`LISTING_FILTERS` (caller-asserted).
+    Postconditions:
+        * ``all`` → no filtering; ``active`` → hides ``archived`` and
+          ``not_interested``; any single status → exact match.
+    """
+    if status == "all":
+        return "", ()
+    if status == "active":
+        return " WHERE COALESCE(s.status, 'new') NOT IN ('archived', 'not_interested')", ()
+    return " WHERE COALESCE(s.status, 'new') = %s", (status,)
+
+
+def _listing_from_row(row: dict) -> Listing:
+    """Build a :class:`Listing` from an aggregated-listing row dict.
+
+    Preconditions:
+        * ``row`` contains every column selected by :data:`_LISTING_SELECT`.
+    Postconditions:
+        * Timestamps are ISO-rendered; JSON columns are model-validated.
+    """
+    return Listing(
+        fingerprint=row["fingerprint"],
+        posting=JobPosting.model_validate(row["posting"]),
+        score=float(row["score"]),
+        sub_scores=SubScores.model_validate(row["sub_scores"]),
+        recommendation=row["recommendation"],
+        rationale=row["rationale"],
+        concerns=list(row["concerns"] or []),
+        run_id=row["run_id"],
+        last_seen_at=_iso(row["created_at"]),
+        times_seen=int(row["times_seen"] or 1),
+        status=row["status"],
+        notes=row["notes"],
+        status_updated_at=_iso(row["status_updated_at"]),
+    )
 
 
 def _iso(value: object) -> Optional[str]:
@@ -142,11 +210,17 @@ class JobMatchingStore:
 
     @timed_query(store=_STORE, op="mark_failed")
     def mark_failed(self, run_id: str, error: str) -> None:
+        """Mark a run failed.
+
+        Postconditions:
+            * The stored ``error`` is capped at 2000 characters so an unbounded
+              exception dump cannot bloat the run row.
+        """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE job_matching_runs SET status = %s, error = %s, completed_at = %s "
                 "WHERE run_id = %s",
-                (RUN_STATUS_FAILED, error, _now(), run_id),
+                (RUN_STATUS_FAILED, (error or "")[:2000], _now(), run_id),
             )
 
     @timed_query(store=_STORE, op="list_runs")
@@ -208,6 +282,80 @@ class JobMatchingStore:
             completed_at=_iso(row["completed_at"]),
             ranked_jobs=ranked,
         )
+
+    @timed_query(store=_STORE, op="list_listings")
+    def list_listings(self, *, status: str = "active", limit: int = 200) -> ListingsResponse:
+        """Return aggregated listings (latest snapshot per fingerprint) plus counts.
+
+        Preconditions:
+            * ``status`` is one of :data:`LISTING_FILTERS` (API validates; a
+              violation here is a caller bug).
+            * ``limit`` is a positive int.
+        Postconditions:
+            * Each fingerprint appears at most once, carrying its most recent
+              ranked snapshot; results are ordered ``score DESC``.
+            * ``counts`` maps every present status (incl. implicit ``new``) to
+              its fingerprint count, regardless of the active filter.
+        """
+        assert status in LISTING_FILTERS, f"invalid listing filter: {status!r}"
+        assert limit >= 1, "limit must be positive"
+        where, params = _listing_filter_clause(status)
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                _LISTING_SELECT + where + " ORDER BY l.score DESC LIMIT %s",
+                (*params, limit),
+            )
+            listings = [_listing_from_row(r) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT COALESCE(s.status, 'new') AS status, COUNT(*) AS n "
+                "FROM (SELECT DISTINCT fingerprint FROM job_matching_ranked_jobs "
+                "      WHERE fingerprint <> '') f "
+                "LEFT JOIN job_matching_listing_states s USING (fingerprint) "
+                "GROUP BY 1"
+            )
+            counts = {r["status"]: int(r["n"]) for r in cur.fetchall()}
+        return ListingsResponse(listings=listings, total=len(listings), counts=counts)
+
+    @timed_query(store=_STORE, op="update_listing_state")
+    def update_listing_state(
+        self, fingerprint: str, update: ListingStateUpdate
+    ) -> Optional[Listing]:
+        """Upsert the user state for ``fingerprint`` and return the fresh listing.
+
+        Preconditions:
+            * ``fingerprint`` is a non-empty string; ``update`` is validated.
+        Postconditions:
+            * Returns ``None`` (and writes nothing) when no ranked posting with
+              that fingerprint exists — the API maps this to 404.
+            * Otherwise exactly one ``job_matching_listing_states`` row exists
+              for the fingerprint with the new ``status``; ``notes=None`` on
+              the update leaves previously stored notes unchanged.
+        """
+        assert fingerprint, "fingerprint must be non-empty"
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT 1 FROM job_matching_ranked_jobs WHERE fingerprint = %s LIMIT 1",
+                (fingerprint,),
+            )
+            if cur.fetchone() is None:
+                return None
+            cur.execute(
+                "INSERT INTO job_matching_listing_states (fingerprint, status, notes, updated_at) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (fingerprint) DO UPDATE SET "
+                "status = EXCLUDED.status, "
+                "notes = COALESCE(EXCLUDED.notes, job_matching_listing_states.notes), "
+                "updated_at = EXCLUDED.updated_at",
+                (fingerprint, update.status, update.notes, _now()),
+            )
+            cur.execute(
+                _LISTING_SELECT + " WHERE l.fingerprint = %s",
+                (fingerprint,),
+            )
+            row = cur.fetchone()
+        # Postcondition: the existence check passed, so the snapshot row exists.
+        assert row is not None, f"listing snapshot missing for fingerprint {fingerprint!r}"
+        return _listing_from_row(row)
 
     @timed_query(store=_STORE, op="seen_fingerprints")
     def seen_fingerprints(self) -> set[str]:

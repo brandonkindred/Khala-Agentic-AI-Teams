@@ -31,4 +31,5 @@ export const environment = {
   productDeliveryApiUrl: `${apiBase}/api/product-delivery`,
   agentCognitionApiUrl: `${apiBase}/api/cognition`,
   userProfileApiUrl: `${apiBase}/api/user-profile`,
+  jobMatchingApiUrl: `${apiBase}/api/job-matching`,
 };

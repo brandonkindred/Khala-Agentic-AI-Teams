@@ -1,8 +1,8 @@
-<div class="error-container" role="alert" [attr.aria-live]="'polite'">
+<div class="error-container" role="alert">
   <mat-card appearance="outlined" class="error-card">
     <mat-card-content>
       <div class="error-content">
-        <mat-icon color="warn">error</mat-icon>
+        <mat-icon color="warn" aria-hidden="true">error</mat-icon>
         <div>
           <strong>{{ title }}</strong>
           <p>{{ message }}</p>

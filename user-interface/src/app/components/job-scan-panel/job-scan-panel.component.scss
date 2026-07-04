@@ -1,0 +1,177 @@
+.scan-card {
+  margin-bottom: var(--kh-space-4);
+
+  mat-card-header {
+    margin-bottom: var(--kh-space-2);
+  }
+}
+
+.scan-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--kh-space-3);
+  align-items: center;
+}
+
+.exclude-seen {
+  padding-bottom: 18px;
+}
+
+.scan-primary {
+  margin-bottom: var(--kh-space-2);
+}
+
+.advanced-panel,
+.overrides-panel {
+  margin: var(--kh-space-1) 0 var(--kh-space-4);
+  box-shadow: none;
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-lg);
+}
+
+.scan-submit {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-4);
+
+  mat-progress-bar {
+    max-width: 280px;
+  }
+}
+
+.scan-error {
+  margin: var(--kh-space-3) 0 0;
+  color: var(--kh-error);
+}
+
+.scan-job-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-3);
+  padding: var(--kh-space-2) 0;
+  border-bottom: 1px solid var(--kh-border-subtle);
+
+  &:last-child {
+    border-bottom: none;
+  }
+
+  .job-label {
+    color: var(--kh-text-secondary);
+    font-size: var(--kh-text-sm);
+  }
+
+  .spacer {
+    flex: 1;
+  }
+}
+
+.status-chip {
+  display: inline-block;
+  border-radius: var(--kh-radius-full);
+  padding: 2px 10px;
+  font-size: var(--kh-text-xs);
+  font-weight: 600;
+
+  &.completed {
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
+  }
+  &.running,
+  &.pending {
+    background: var(--kh-warning-subtle);
+    color: var(--kh-warning);
+  }
+  &.failed {
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
+  }
+  &.cancelled {
+    background: var(--kh-glass);
+    color: var(--kh-text-tertiary);
+  }
+}
+
+.no-runs {
+  color: var(--kh-text-muted);
+  margin: var(--kh-space-2) 0;
+}
+
+.runs-table-wrap {
+  overflow-x: auto;
+}
+
+.runs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--kh-text-base);
+
+  th {
+    text-align: left;
+    padding: var(--kh-space-2) var(--kh-space-3);
+    border-bottom: 1px solid var(--kh-border);
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--kh-text-muted);
+  }
+
+  td {
+    padding: var(--kh-space-2) var(--kh-space-3);
+    border-bottom: 1px solid var(--kh-border-subtle);
+    font-variant-numeric: tabular-nums;
+    color: var(--kh-text-secondary);
+  }
+
+  .run-when {
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-secondary);
+    white-space: nowrap;
+  }
+
+  .run-id-sub {
+    display: block;
+    font-size: var(--kh-text-xs);
+    color: var(--kh-text-muted);
+  }
+}
+
+.run-detail-cell {
+  background: var(--kh-surface-1);
+  padding: var(--kh-space-3);
+}
+
+// Compact read-only recap of a run's ranked roles (triage lives in Listings).
+.run-recap {
+  list-style: none;
+  margin: 0 0 var(--kh-space-2);
+  padding: 0;
+}
+
+.run-recap-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--kh-space-3);
+  padding: var(--kh-space-1) 0;
+
+  .run-recap-score {
+    min-width: 44px;
+    font-variant-numeric: tabular-nums;
+    color: var(--kh-accent-text);
+    font-weight: 600;
+  }
+
+  .run-recap-title {
+    color: var(--kh-text-primary);
+  }
+
+  .run-recap-company {
+    color: var(--kh-text-muted);
+    font-size: var(--kh-text-sm);
+  }
+}
+
+.run-recap-link {
+  display: inline-block;
+  font-size: var(--kh-text-sm);
+}

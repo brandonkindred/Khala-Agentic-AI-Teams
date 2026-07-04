@@ -533,3 +533,18 @@ a {
   background: rgba(251, 191, 36, 0.4);
   color: #fafafa;
 }
+
+// ============================================================================
+// Reduced-motion hover movement (must stay LAST in this file)
+// ============================================================================
+// Transition DURATIONS are neutralized at the token layer (theme.scss
+// redefines --kh-transition* under prefers-reduced-motion, which no cascade
+// trick can defeat). Hover `transform` movement isn't duration-governed, so
+// it is zeroed here. (WCAG 2.3.3)
+@media (prefers-reduced-motion: reduce) {
+  .kh-btn-primary:hover,
+  .kh-btn-ghost:hover,
+  .kh-card:hover {
+    transform: none !important;
+  }
+}

@@ -20,7 +20,7 @@ export interface UserProfileUpdate {
 }
 
 /** Canonical artifact-type strings shared with the backend registry. */
-export type ArtifactType = 'brand' | 'blog_post' | 'project' | 'agentic_team';
+export type ArtifactType = 'brand' | 'blog_post' | 'project' | 'agentic_team' | 'career';
 
 /** A link between the profile and an artifact produced by some team. */
 export interface Association {

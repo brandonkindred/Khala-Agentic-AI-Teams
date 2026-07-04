@@ -130,6 +130,25 @@ def test_upsert_profile_preferences_roundtrip(db):
     assert updated.preferences == {"theme": "dark"}
 
 
+def test_upsert_profile_preferences_merge_preserves_other_sections(db):
+    """A profile-page PUT must never clobber a team-owned section (e.g. career).
+
+    upsert_profile applies ``preferences`` as an atomic shallow merge, so a
+    section written by one caller (here ``career``) survives another caller's
+    update to a different key.
+    """
+    up_store.upsert_profile(UserProfileUpdate(preferences={"career": {"target_titles": ["Eng"]}}))
+
+    updated = up_store.upsert_profile(UserProfileUpdate(preferences={"theme": "dark"}))
+    assert updated.preferences["theme"] == "dark"
+    assert updated.preferences["career"] == {"target_titles": ["Eng"]}
+
+    # A key present in the payload still replaces the stored one.
+    updated2 = up_store.upsert_profile(UserProfileUpdate(preferences={"theme": "light"}))
+    assert updated2.preferences["theme"] == "light"
+    assert updated2.preferences["career"] == {"target_titles": ["Eng"]}
+
+
 def test_record_association_is_idempotent(db):
     a = up_store.record_association("brand", "branding", "brand_1", label="Acme")
     assert a is not None

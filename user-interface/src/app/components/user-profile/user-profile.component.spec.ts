@@ -71,12 +71,60 @@ describe('UserProfileComponent', () => {
 
   it('should group associations by type and count them', async () => {
     await setup();
-    expect(component.groups.length).toBe(2);
-    expect(component.totalAssociations).toBe(2);
-    expect(component.groups[0].type).toBe('brand');
+    // brand + project, plus the always-present Career group (empty here).
+    expect(component.groups.length).toBe(3);
+    expect(component.totalAssociations).toBe(2); // Career (0 items) doesn't inflate the count
+    expect(component.groups.map((g) => g.type)).toEqual(['brand', 'project', 'career']);
     // Each group must carry the icon + label the template renders.
     expect(component.groups[0].icon).toBeTruthy();
     expect(component.groups[0].label).toBeTruthy();
+  });
+
+  it('always surfaces the Career group with a set-up prompt when empty', async () => {
+    await setup();
+    const career = component.groups.find((g) => g.type === 'career');
+    expect(career).toBeDefined();
+    expect(career!.items.length).toBe(0);
+    // The empty group renders a link into the career-profile editor.
+    const link = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll('a')
+    ).find((a) => a.textContent?.includes('Set up your career profile'));
+    expect(link?.getAttribute('href')).toBe('/job-matching?tab=profile');
+  });
+
+  it('should render a Career group linking to the job matching dashboard', async () => {
+    apiSpy.getOverview.mockReturnValue(
+      of({
+        ...OVERVIEW,
+        associations: [
+          ...ASSOCIATIONS,
+          {
+            id: 'a3',
+            user_id: 'default',
+            artifact_type: 'career',
+            team: 'job_matching',
+            artifact_id: 'career:default',
+            label: 'Career profile',
+            role: 'owner',
+            created_at: '',
+          },
+        ],
+      })
+    );
+    await setup();
+    const career = component.groups.find((g) => g.type === 'career');
+    expect(career).toBeDefined();
+    expect(career!.label).toBe('Career');
+    expect(career!.route).toBe('/job-matching');
+    expect(career!.queryParams).toEqual({ tab: 'profile' });
+    expect(career!.items[0].label).toBe('Career profile');
+    const link = (fixture.nativeElement as HTMLElement).querySelector(
+      'a.up-item-label'
+    ) as HTMLAnchorElement;
+    expect(link).toBeTruthy();
+    // Deep-links straight to the career profile editor tab.
+    expect(link.getAttribute('href')).toBe('/job-matching?tab=profile');
+    expect(link.textContent).toContain('Career profile');
   });
 
   it('should reload the overview when the refresh control is clicked', async () => {
@@ -95,8 +143,8 @@ describe('UserProfileComponent', () => {
 
   it('should clear stale data and set an error when a re-load returns a malformed response', async () => {
     await setup();
-    // First load populated groups/integrations.
-    expect(component.groups.length).toBe(2);
+    // First load populated groups/integrations (brand + project + Career).
+    expect(component.groups.length).toBe(3);
     expect(component.integrations.length).toBe(1);
     // A subsequent malformed 2xx response must clear the stale data, not show it.
     apiSpy.getOverview.mockReturnValue(of({ associations: [], integrations: [] }));
@@ -181,15 +229,15 @@ describe('UserProfileComponent', () => {
 
   it('should keep previously loaded data when a reload fails with an HTTP error', async () => {
     await setup();
-    // First load populated groups/integrations.
-    expect(component.groups.length).toBe(2);
+    // First load populated groups/integrations (brand + project + Career).
+    expect(component.groups.length).toBe(3);
     expect(component.integrations.length).toBe(1);
     // A subsequent HTTP error must set the error but leave the last-good view.
     apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
     component.load();
     expect(component.error).toBeTruthy();
     expect(component.loading).toBe(false);
-    expect(component.groups.length).toBe(2);
+    expect(component.groups.length).toBe(3);
     expect(component.integrations.length).toBe(1);
     expect(component.totalAssociations).toBe(2);
   });
@@ -247,10 +295,14 @@ describe('UserProfileComponent', () => {
     expect(component.groups).toEqual([]);
   });
 
-  it('should show no groups when there are no associations', async () => {
+  it('shows only the always-present Career group when there are no associations', async () => {
     apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, associations: [] }));
     await setup();
     expect(component.totalAssociations).toBe(0);
-    expect(component.groups).toEqual([]);
+    // No real artifacts, but the Career group persists so the editor stays discoverable.
+    expect(component.groups.map((g) => g.type)).toEqual(['career']);
+    // With a zero total the page shows the empty-state copy (which links to the
+    // career editor) rather than the group list.
+    expect((fixture.nativeElement as HTMLElement).textContent).toContain('set up your career profile');
   });
 });
