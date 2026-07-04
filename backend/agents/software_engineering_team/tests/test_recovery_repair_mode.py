@@ -10,7 +10,7 @@ still repaired.
 
 from __future__ import annotations
 
-from shared_llm_recovery import extract_json_object
+from shared_llm_recovery import extract_files_from_content, extract_json_object
 
 # ---------------------------------------------------------------------------
 # repair=False (strict): only strictly valid JSON survives; no json-repair.
@@ -130,3 +130,45 @@ def test_repair_truncated_true_default_still_repairs_truncation() -> None:
 def test_repair_false_overrides_repair_truncated() -> None:
     """repair=False disables all repair regardless of repair_truncated."""
     assert extract_json_object('{"a": 1,}', repair=False, repair_truncated=True) is None
+
+
+# ---------------------------------------------------------------------------
+# accept_any_fallback: prefer an anchored candidate, else accept any — resolved
+# in a single engine pass (the Ollama "two-tier" routing).
+# ---------------------------------------------------------------------------
+
+
+def test_accept_any_fallback_returns_off_schema_object() -> None:
+    """No candidate carries an anchor key, so the accept-any fallback returns the
+    lone object; without the fallback the anchored filter yields None."""
+    assert extract_json_object('{"answer": 42}', required_keys={"summary"}) is None
+    assert extract_json_object(
+        '{"answer": 42}', required_keys={"summary"}, accept_any_fallback=True
+    ) == {"answer": 42}
+
+
+def test_accept_any_fallback_still_prefers_anchored_candidate() -> None:
+    """When an anchored candidate exists it wins over a later non-anchored one,
+    even though selection is otherwise last-in-document-order."""
+    raw = '{"summary": "real"} then {"other": 1}'
+    assert extract_json_object(raw, required_keys={"summary"}, accept_any_fallback=True) == {
+        "summary": "real"
+    }
+
+
+def test_accept_any_fallback_noop_without_required_keys() -> None:
+    """With no anchor keys the primary predicate already accepts any dict, so the
+    fallback flag changes nothing."""
+    assert extract_json_object('{"x": 1}', accept_any_fallback=True) == {"x": 1}
+
+
+# ---------------------------------------------------------------------------
+# extract_files_from_content now uses the string-aware span scanner (D1).
+# ---------------------------------------------------------------------------
+
+
+def test_extract_files_handles_brace_inside_file_content() -> None:
+    """A ``{`` inside a file's content string must not truncate the object — the
+    old hand-rolled brace counter sliced a partial fragment here and lost the file."""
+    raw = '{"files": {"app/x.py": "d = {\\n  \\"k\\": 1,\\n}\\n"}}'
+    assert extract_files_from_content(raw) == {"app/x.py": 'd = {\n  "k": 1,\n}\n'}

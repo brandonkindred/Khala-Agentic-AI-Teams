@@ -755,15 +755,17 @@ class OllamaLLMClient(LLMClient):
                     return parsed
             except json.JSONDecodeError:
                 pass
-        # Anchored tier filters usage echoes / recaps; accept-any tier keeps a
-        # clean off-schema object parseable. repair_truncated=False (not a
-        # caller-side heuristic) makes only genuine truncation unsalvageable so
-        # the implicit-truncation continuation path fires.
+        # Prefer an _EXPECTED_KEYS-anchored object (filters usage echoes / recaps)
+        # but fall back to any clean object for off-schema replies — resolved in
+        # one engine pass. repair_truncated=False (not a caller-side heuristic)
+        # makes only genuine truncation unsalvageable so the implicit-truncation
+        # continuation path fires.
         result = _shared_extract_json_object(
-            text, required_keys=_EXPECTED_KEYS, repair_truncated=False
+            text,
+            required_keys=_EXPECTED_KEYS,
+            accept_any_fallback=True,
+            repair_truncated=False,
         )
-        if result is None:
-            result = _shared_extract_json_object(text, required_keys=None, repair_truncated=False)
         if result is not None:
             return result
         logger.error(

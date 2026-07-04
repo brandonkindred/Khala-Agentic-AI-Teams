@@ -107,7 +107,7 @@ def _looks_like_json_object(fragment: str) -> bool:
     return rest.startswith('"') and ":" in rest
 
 
-def _repair_object(fragment: str) -> Optional[Dict[str, Any]]:
+def _repair_object(fragment: str, *, repair: bool = True) -> Optional[Dict[str, Any]]:
     """Repair *fragment* into a non-empty dict via ``json-repair``, or ``None``.
 
     The caller must have already confirmed the fragment is object-shaped (see
@@ -115,11 +115,18 @@ def _repair_object(fragment: str) -> Optional[Dict[str, Any]]:
     so it is only ever run on fragments whose shape already commits them to
     being an object literal.
 
+    This is the SINGLE enforcement point for the ``repair`` master gate: with
+    ``repair=False`` it returns ``None`` without touching ``json-repair``, so a
+    strategy that routes its tolerant leg through here cannot leak repair to a
+    strict-mode caller even if it forgets its own guard.
+
     Preconditions: ``fragment`` is an object-shaped str.
-    Postconditions: a non-empty ``dict`` or ``None``; never raises. A missing
-    ``json-repair`` wheel or any library failure yields ``None`` (repair
-    silently disabled — salvage degrades rather than crashing).
+    Postconditions: a non-empty ``dict`` or ``None``; never raises. ``repair`` is
+    off, a missing ``json-repair`` wheel, or any library failure all yield
+    ``None`` (repair silently disabled — salvage degrades rather than crashing).
     """
+    if not repair:
+        return None
     try:
         import json_repair
 
@@ -147,8 +154,8 @@ def _parse_or_repair(fragment: str, *, repair: bool = True) -> Optional[Dict[str
             return parsed
     except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
         pass
-    if repair and _looks_like_json_object(fragment):
-        return _repair_object(fragment)
+    if _looks_like_json_object(fragment):
+        return _repair_object(fragment, repair=repair)
     return None
 
 
@@ -245,6 +252,7 @@ def _salvage_object(
     *,
     repair: bool = True,
     repair_truncated: bool = True,
+    fallback_accept: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Salvage the authoritative JSON object matching ``accept`` from raw output.
 
@@ -281,41 +289,27 @@ def _salvage_object(
       unescaped quotes) but a genuinely truncated reply yields ``None`` — so a
       caller can recover the tail via continuation instead of a fabricated one.
 
-    Preconditions: ``content`` is a str (may be empty); ``accept`` is a pure
-    predicate over a parsed dict.
+    ``fallback_accept`` (optional): a second, broader predicate tried only when
+    ``accept`` yields nothing. The five strategies run once and their parsed
+    candidates are memoized, so the fallback pass re-selects over the SAME
+    candidates without re-scanning or re-parsing the text — this lets a
+    schema-aware caller prefer anchored candidates yet fall back to accept-any in
+    a single engine invocation (what the two independent calls used to cost).
+
+    Preconditions: ``content`` is a str (may be empty); ``accept`` and
+    ``fallback_accept`` are pure predicates over a parsed dict.
     Postconditions: returns an accepted dict, or ``None`` when nothing
-    salvageable matches. Never raises on malformed input.
+    salvageable matches either predicate. Never raises on malformed input.
     """
     if not content or not content.strip():
         return None
     stripped = _strip_wrappers(content)
     spans, first_unclosed = _balanced_object_spans(stripped)
 
-    # An accepted but EMPTY ``{}`` is only ever a last resort: it must not
-    # short-circuit a later strategy that would find a non-empty payload (e.g. a
-    # leading ``{}`` shadowing a real object the recall scan recovers). Non-empty
-    # accepted dicts win immediately; an empty one is stashed and returned only
-    # if every strategy is exhausted.
-    best_empty: Optional[Dict[str, Any]] = None
-
-    def _use(pick: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Return *pick* if it is a non-empty dict; stash an empty one instead.
-
-        Preconditions: ``pick`` is an accepted dict or ``None``.
-        Postconditions: returns ``pick`` when it is truthy (non-empty); records
-        the first empty ``{}`` in ``best_empty`` and returns ``None`` so the
-        caller keeps searching; returns ``None`` for ``None``.
-        """
-        nonlocal best_empty
-        if pick is None:
-            return None
-        if pick:
-            return pick
-        if best_empty is None:
-            best_empty = pick
-        return None
-
-    # Strategy 1: top-level spans, strict-then-object-shaped-repair.
+    # Strategy 1's candidate pool is built once (strategy 1 always runs). The
+    # strategy 3/4/5 candidates are built lazily and memoized below, so a first-
+    # strategy hit still builds nothing extra (the short-circuit is preserved),
+    # and the optional fallback pass reuses everything instead of re-parsing.
     pool: List[Tuple[int, Dict[str, Any]]] = []
     repairs = 0
     for start, end in spans:
@@ -327,52 +321,100 @@ def _salvage_object(
                 continue
         except (json.JSONDecodeError, TypeError, ValueError, RecursionError):
             pass
-        if repair and repairs < _MAX_REPAIR_ATTEMPTS and _looks_like_json_object(fragment):
+        if repairs < _MAX_REPAIR_ATTEMPTS and _looks_like_json_object(fragment):
             repairs += 1
-            repaired = _repair_object(fragment)
+            repaired = _repair_object(fragment, repair=repair)
             if repaired is not None:
                 pool.append((start, repaired))
-    result = _use(_select_object(pool, accept))
-    if result is not None:
-        return result
 
-    # Strategy 2: envelope descent into rejected top-level objects.
-    result = _use(_descend_envelope(pool, accept))
-    if result is not None:
-        return result
+    memo: Dict[str, Any] = {}
 
-    # Strategy 3: whole payload inside a markdown fence (on STRIPPED text).
-    fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", stripped, re.IGNORECASE)
-    if fence:
-        parsed = _parse_or_repair(fence.group(1).strip(), repair=repair)
-        if parsed is not None and accept(parsed):
-            result = _use(parsed)
+    def _fence_candidate() -> Optional[Dict[str, Any]]:
+        """Strategy 3 candidate: a whole payload inside a markdown fence, memoized."""
+        if "fence" not in memo:
+            fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", stripped, re.IGNORECASE)
+            memo["fence"] = (
+                _parse_or_repair(fence.group(1).strip(), repair=repair) if fence else None
+            )
+        return memo["fence"]
+
+    def _trunc_candidate() -> Optional[Dict[str, Any]]:
+        """Strategy 4 candidate: the first never-closed object, repaired, memoized.
+
+        A pure tolerant-repair strategy: yields ``None`` when repair is off or
+        truncation-repair is disabled, so a truncated fragment surfaces as "no
+        object" and the caller can continue instead of accepting a fabricated tail.
+        """
+        if "trunc" not in memo:
+            cand: Optional[Dict[str, Any]] = None
+            if repair_truncated and first_unclosed != -1:
+                fragment = stripped[first_unclosed:]
+                if _looks_like_json_object(fragment):
+                    cand = _repair_object(fragment, repair=repair)
+            memo["trunc"] = cand
+        return memo["trunc"]
+
+    def _recall() -> List[Tuple[int, Dict[str, Any]]]:
+        """Strategy 5 candidates: strict objects buried under prose, memoized."""
+        if "recall" not in memo:
+            memo["recall"] = list(_iter_strict_objects(stripped))
+        return memo["recall"]
+
+    def _select(acc: Callable[[Dict[str, Any]], bool]) -> Optional[Dict[str, Any]]:
+        """Run the five ordered strategies for one predicate; first accepted wins.
+
+        An accepted but EMPTY ``{}`` is only ever a last resort: it must not
+        short-circuit a later strategy that would find a non-empty payload (e.g. a
+        leading ``{}`` shadowing a real object the recall scan recovers). Non-empty
+        accepted dicts win immediately; an empty one is stashed in this pass's
+        ``best_empty`` and returned only if every strategy is exhausted.
+        """
+        best_empty: Optional[Dict[str, Any]] = None
+
+        def _use(pick: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            nonlocal best_empty
+            if pick is None:
+                return None
+            if pick:
+                return pick
+            if best_empty is None:
+                best_empty = pick
+            return None
+
+        # Strategy 1: top-level spans (strict-then-repaired), selected by position.
+        result = _use(_select_object(pool, acc))
+        if result is not None:
+            return result
+        # Strategy 2: envelope descent into rejected top-level objects.
+        result = _use(_descend_envelope(pool, acc))
+        if result is not None:
+            return result
+        # Strategy 3: whole payload inside a markdown fence.
+        fence_parsed = _fence_candidate()
+        if fence_parsed is not None and acc(fence_parsed):
+            result = _use(fence_parsed)
             if result is not None:
                 return result
+        # Strategy 4: max-tokens truncation — the first object never closed.
+        trunc = _trunc_candidate()
+        if trunc is not None and acc(trunc):
+            result = _use(trunc)
+            if result is not None:
+                return result
+        # Strategy 5: recall fallback — strict objects buried under prose.
+        recall = _recall()
+        result = _use(_select_object(recall, acc))
+        if result is not None:
+            return result
+        result = _use(_descend_envelope(recall, acc))
+        if result is not None:
+            return result
+        return best_empty
 
-    # Strategy 4: max-tokens truncation — the first object never closed. This is
-    # a pure tolerant-repair strategy, so it is skipped when repair is off OR
-    # when truncation-repair specifically is disabled (a truncated fragment must
-    # surface as "no object" so the caller can continue instead of fabricating).
-    if repair and repair_truncated and first_unclosed != -1:
-        fragment = stripped[first_unclosed:]
-        if _looks_like_json_object(fragment):
-            repaired = _repair_object(fragment)
-            if repaired is not None and accept(repaired):
-                result = _use(repaired)
-                if result is not None:
-                    return result
-
-    # Strategy 5: recall fallback — strict objects buried under prose.
-    recall = list(_iter_strict_objects(stripped))
-    result = _use(_select_object(recall, accept))
-    if result is not None:
-        return result
-    result = _use(_descend_envelope(recall, accept))
-    if result is not None:
-        return result
-
-    return best_empty
+    result = _select(accept)
+    if result is None and fallback_accept is not None:
+        result = _select(fallback_accept)
+    return result
 
 
 def _has_tasks(parsed: Dict[str, Any]) -> bool:
@@ -436,6 +478,7 @@ def extract_json_object(
     *,
     repair: bool = True,
     repair_truncated: bool = True,
+    accept_any_fallback: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Recover the authoritative JSON *object* from raw LLM content.
 
@@ -466,18 +509,29 @@ def extract_json_object(
       yield ``None`` — so the caller triggers continuation rather than accepting
       a fabricated tail. Moot when ``repair=False`` (no repair runs at all).
 
+    ``accept_any_fallback`` (default ``False``): when set together with
+    ``required_keys``, the anchored candidate is preferred but, if none is found,
+    any dict is accepted — resolved in a SINGLE engine pass (the strategies run
+    once and the fallback re-selects over the memoized candidates), so a
+    schema-aware caller no longer pays for two full salvage scans to express
+    "prefer anchored, else accept-any". No effect without ``required_keys`` (any
+    dict is already accepted).
+
     Preconditions:
         - ``content`` is a ``str`` (may be empty).
         - ``required_keys`` is ``None`` or a collection of str anchor keys.
     Postconditions:
         - Returns a ``dict`` on success, or ``None`` when nothing parses (or no
-          candidate carries an anchor key). Never raises on malformed input.
+          candidate carries an anchor key and ``accept_any_fallback`` is off).
+          Never raises on malformed input.
     """
+    fallback = _accept_with_keys(None) if (accept_any_fallback and required_keys) else None
     return _salvage_object(
         content,
         _accept_with_keys(required_keys),
         repair=repair,
         repair_truncated=repair_truncated,
+        fallback_accept=fallback,
     )
 
 
@@ -522,24 +576,22 @@ def _clean_files_dict(parsed: object) -> Dict[str, str]:
 
 
 def _files_from_json_object(stripped: str) -> Dict[str, str]:
-    """Strategy 1: the first balanced ``{...}`` carrying a ``files`` dict (model may wrap JSON in text)."""
-    start = stripped.find("{")
-    if start == -1:
+    """Strategy 1: the first balanced top-level ``{...}`` carrying a ``files`` dict.
+
+    Reuses the shared string-aware ``_balanced_object_spans`` scanner rather than a
+    hand-rolled brace counter, so a ``{`` or ``}`` inside a file's content string
+    (code payloads routinely carry them) does not balance the object early and
+    slice out a partial fragment.
+
+    Postconditions: returns the first top-level object's ``{path: content}`` dict,
+    or ``{}`` when there is no parseable leading object with a usable ``files`` key.
+    """
+    spans, _ = _balanced_object_spans(stripped)
+    if not spans:
         return {}
-    depth = 0
-    end = -1
-    for i in range(start, len(stripped)):
-        if stripped[i] == "{":
-            depth += 1
-        elif stripped[i] == "}":
-            depth -= 1
-            if depth == 0:
-                end = i
-                break
-    if end == -1:
-        return {}
+    start, end = spans[0]
     try:
-        return _clean_files_dict(json.loads(stripped[start : end + 1]))
+        return _clean_files_dict(json.loads(stripped[start:end]))
     except (json.JSONDecodeError, TypeError):
         return {}
 
