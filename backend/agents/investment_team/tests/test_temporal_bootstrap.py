@@ -131,14 +131,42 @@ def test_run_strategy_lab_activity_reconstructs_request_and_runs_worker(monkeypa
     calls = []
     monkeypatch.setattr(api_main, "RunStrategyLabRequest", _fake_request)
     monkeypatch.setattr(
-        api_main, "_strategy_lab_worker", lambda run_id, req: calls.append((run_id, req))
+        api_main,
+        "_strategy_lab_worker",
+        lambda run_id, req, start_cycle_offset=0: calls.append((run_id, req, start_cycle_offset)),
     )
+    # No durable state for this run_id → offset 0, no failure.
+    monkeypatch.setattr(api_main, "_rehydrate_active_run_offset", lambda rid: 0)
+    monkeypatch.setattr(api_main, "_strategy_lab_run_failure", lambda rid: None)
 
     result = run_strategy_lab_activity("run-abc", {"batch_size": 3})
 
     assert built == {"batch_size": 3}
-    assert calls == [("run-abc", sentinel_request)]
+    assert calls == [("run-abc", sentinel_request, 0)]
     assert result == {"run_id": "run-abc", "status": "completed"}
+
+
+def test_run_strategy_lab_activity_resumes_from_offset_and_raises_on_failure(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import run_strategy_lab_activity
+
+    monkeypatch.setattr(api_main, "RunStrategyLabRequest", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_rehydrate_active_run_offset", lambda rid: 7)
+    seen = {}
+    monkeypatch.setattr(
+        api_main,
+        "_strategy_lab_worker",
+        lambda run_id, req, start_cycle_offset=0: seen.update(offset=start_cycle_offset),
+    )
+    # Worker ended in a hard-failed state → activity must raise so Temporal sees it.
+    monkeypatch.setattr(api_main, "_strategy_lab_run_failure", lambda rid: "boom")
+
+    from temporalio.exceptions import ApplicationError
+
+    with pytest.raises(ApplicationError, match="boom"):
+        run_strategy_lab_activity("run-z", {})
+
+    assert seen == {"offset": 7}  # resumed from the persisted offset
 
 
 def test_run_backtest_activity_reconstructs_models_and_runs_worker(monkeypatch) -> None:
@@ -150,6 +178,8 @@ def test_run_backtest_activity_reconstructs_models_and_runs_worker(monkeypatch) 
     cfg_sentinel = object()
     monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: strat_sentinel)
     monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: cfg_sentinel)
+    # Job is not yet complete/failed → run, then report completed.
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
 
     calls = []
     monkeypatch.setattr(
@@ -164,6 +194,40 @@ def test_run_backtest_activity_reconstructs_models_and_runs_worker(monkeypatch) 
 
     assert calls == [("job-1", strat_sentinel, cfg_sentinel, "agent-x", ["note"])]
     assert result == {"job_id": "job-1", "status": "completed"}
+
+
+def test_run_backtest_activity_is_idempotent_when_already_completed(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import run_backtest_activity
+
+    monkeypatch.setattr(
+        api_main, "_backtest_job_status", lambda jid: api_main._BT_JOB_STATUS_COMPLETED
+    )
+    bg = mock.Mock()
+    monkeypatch.setattr(api_main, "_run_backtest_background", bg)
+
+    result = run_backtest_activity("job-done", {}, {}, "agent", [])
+
+    bg.assert_not_called()  # already completed → no recompute, no duplicate record
+    assert result == {"job_id": "job-done", "status": "completed"}
+
+
+def test_run_backtest_activity_raises_when_job_failed(monkeypatch) -> None:
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import run_backtest_activity
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    # Not completed at entry, failed after the worker runs.
+    statuses = iter([None, api_main._BT_JOB_STATUS_FAILED])
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: next(statuses))
+    monkeypatch.setattr(api_main, "_run_backtest_background", lambda *a: None)
+
+    from temporalio.exceptions import ApplicationError
+
+    with pytest.raises(ApplicationError, match="failed"):
+        run_backtest_activity("job-x", {}, {}, "agent", [])
 
 
 # ---------------------------------------------------------------------------
@@ -264,3 +328,200 @@ def test_backtest_dispatch_uses_temporal_when_enabled(monkeypatch, api_client) -
     assert len(started) == 1
     thread_ctor.assert_not_called()
     bg.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 4. Graceful degradation on dispatch failure + durability helpers
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_via_temporal_downgrades_starter_error_to_false(monkeypatch) -> None:
+    import shared_temporal
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _boom() -> None:
+        raise RuntimeError("Temporal client not available")
+
+    # A dispatch failure must be swallowed to False (never raise), so the caller
+    # can fall back to its thread path.
+    assert api_main._dispatch_via_temporal(_boom) is False
+
+
+def test_dispatch_via_temporal_false_when_disabled(monkeypatch) -> None:
+    import shared_temporal
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    called = []
+    assert api_main._dispatch_via_temporal(lambda: called.append(1)) is False
+    assert called == []  # starter not invoked when Temporal is disabled
+
+
+def test_strategy_lab_dispatch_falls_back_to_thread_on_dispatch_failure(
+    monkeypatch, api_client
+) -> None:
+    """Finding 1 regression: a RuntimeError from the starter must NOT 500 or
+    leave a stuck 'running' entry — it falls back to the daemon thread."""
+    import shared_temporal
+    from investment_team.api import main as api_main
+    from investment_team.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _boom(run_id, request):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(sw, "start_strategy_lab_workflow", _boom)
+    thread_ctor = mock.Mock()
+    monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
+
+    resp = api_client.post(
+        "/strategy-lab/run",
+        json={"batch_size": 1, "batch_count": 1, "max_parallel": 1, "paper_trading_enabled": False},
+    )
+
+    assert resp.status_code == 200  # not a 500
+    thread_ctor.assert_called_once()  # fell back to the thread path
+
+
+def test_backtest_dispatch_falls_back_to_thread_on_dispatch_failure(
+    monkeypatch, api_client
+) -> None:
+    """Finding 5 regression: a starter RuntimeError falls back to the thread so
+    the created job still runs (not orphaned at 'pending')."""
+    import shared_temporal
+    from investment_team.api import main as api_main
+    from investment_team.models import StrategySpec
+    from investment_team.temporal import start_workflow as sw
+
+    strat = StrategySpec.model_construct(strategy_id="strat-x")
+    monkeypatch.setattr(api_main, "_strategies", {"strat-x": {"strategy_id": "strat-x"}})
+    monkeypatch.setattr(api_main.StrategySpec, "parse_persisted", staticmethod(lambda s: strat))
+    monkeypatch.setattr(api_main, "_bt_create_job", lambda *a, **k: None)
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _boom(*a):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(sw, "start_backtest_workflow", _boom)
+    thread_ctor = mock.Mock()
+    monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
+
+    resp = api_client.post(
+        "/backtests",
+        json={
+            "strategy_id": "strat-x",
+            "submitted_by": "agent-1",
+            "start_date": "2024-01-01",
+            "end_date": "2024-02-01",
+        },
+    )
+
+    assert resp.status_code == 200  # not a 500
+    thread_ctor.assert_called_once()  # fell back to the thread path
+
+
+def test_rehydrate_active_run_offset_repopulates_from_job_store(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_active_runs", {})
+    monkeypatch.setattr(
+        api_main,
+        "_load_run_from_job_service",
+        lambda rid: {"run_id": rid, "status": "running", "contiguous_cycles": 4},
+    )
+
+    offset = api_main._rehydrate_active_run_offset("run-k")
+
+    assert offset == 4
+    # The in-memory entry is rehydrated so _update_run can persist progress.
+    assert api_main._active_runs["run-k"]["contiguous_cycles"] == 4
+
+
+def test_rehydrate_active_run_offset_defaults_to_zero(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_active_runs", {})
+    monkeypatch.setattr(api_main, "_load_run_from_job_service", lambda rid: None)
+
+    assert api_main._rehydrate_active_run_offset("missing") == 0
+
+
+def test_strategy_lab_run_failure_reports_only_hard_failure(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_active_runs", {"r": {"status": "failed", "error": "kaboom"}})
+    assert api_main._strategy_lab_run_failure("r") == "kaboom"
+
+    monkeypatch.setattr(api_main, "_active_runs", {"r": {"status": "completed_with_errors"}})
+    assert api_main._strategy_lab_run_failure("r") is None
+
+
+def test_resume_dispatches_via_temporal_when_enabled(monkeypatch, api_client) -> None:
+    """Finding 6: resume must also route through Temporal when enabled."""
+    import shared_temporal
+    from investment_team.api import main as api_main
+    from investment_team.temporal import start_workflow as sw
+
+    state = {
+        "run_id": "run-r",
+        "status": "interrupted",
+        "request_payload": {
+            "batch_size": 2,
+            "batch_count": 2,
+            "max_parallel": 1,
+            "paper_trading_enabled": False,
+        },
+        "completed_cycles": 2,
+        "contiguous_cycles": 2,
+    }
+    monkeypatch.setattr(api_main, "_load_run_from_job_service", lambda rid: dict(state))
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    started = []
+    monkeypatch.setattr(sw, "start_strategy_lab_workflow", lambda rid, req: started.append(rid))
+    thread_ctor = mock.Mock()
+    monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
+
+    resp = api_client.post("/strategy-lab/runs/run-r/resume")
+
+    assert resp.status_code == 200
+    assert started == ["run-r"]
+    thread_ctor.assert_not_called()
+
+
+def test_restart_dispatches_via_temporal_and_resets_offset(monkeypatch, api_client) -> None:
+    """Finding 6 + restart offset reset: restart routes through Temporal and the
+    persisted state it writes must carry contiguous_cycles=0 so the activity
+    re-runs from scratch."""
+    import shared_temporal
+    from investment_team.api import main as api_main
+    from investment_team.temporal import start_workflow as sw
+
+    state = {
+        "run_id": "run-x",
+        "status": "completed",
+        "request_payload": {
+            "batch_size": 2,
+            "batch_count": 1,
+            "max_parallel": 1,
+            "paper_trading_enabled": False,
+        },
+        "contiguous_cycles": 2,
+    }
+    monkeypatch.setattr(api_main, "_load_run_from_job_service", lambda rid: dict(state))
+    persisted = {}
+    monkeypatch.setattr(api_main, "_persist_run_state", lambda rid, s, **k: persisted.update(s))
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    started = []
+    monkeypatch.setattr(sw, "start_strategy_lab_workflow", lambda rid, req: started.append(rid))
+    thread_ctor = mock.Mock()
+    monkeypatch.setattr(api_main.threading, "Thread", thread_ctor)
+
+    resp = api_client.post("/strategy-lab/runs/run-x/restart")
+
+    assert resp.status_code == 200
+    assert started == ["run-x"]
+    thread_ctor.assert_not_called()
+    assert persisted["contiguous_cycles"] == 0  # reset so the activity restarts from 0
