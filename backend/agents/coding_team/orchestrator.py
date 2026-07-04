@@ -825,6 +825,19 @@ def _render_context_file(f: Path, repo_path: Path) -> Optional[str]:
     return f"--- {rel} ---\n{content}\n"
 
 
+def _join_context_parts(parts: List[str]) -> str:
+    """Join rendered briefing parts, or return the empty-repo sentinel.
+
+    The single source of the "No files found" sentinel and the part separator, so the pure
+    ``_read_repo_context`` and the incremental ``_RepoContextCache`` cannot drift apart (the cache's
+    byte-identical invariant depends on them producing the same joined form).
+
+    Postconditions:
+        - Returns ``"No files found"`` for an empty list, else the parts joined by a blank line.
+    """
+    return "\n".join(parts) if parts else "No files found"
+
+
 def _read_repo_context(repo_path: Path) -> str:
     """Read the repo structure/code briefing for implementation-worker context.
 
@@ -848,7 +861,7 @@ def _read_repo_context(repo_path: Path) -> str:
         part = _render_context_file(f, repo_path)
         if part is not None:
             parts.append(part)
-    return "\n".join(parts) if parts else "No files found"
+    return _join_context_parts(parts)
 
 
 class _RepoContextCache:
@@ -905,7 +918,17 @@ class _RepoContextCache:
             parts.append(part)
         # Replace wholesale so entries for now-ineligible/removed files are evicted.
         self._entries = fresh
-        return "\n".join(parts) if parts else "No files found"
+        return _join_context_parts(parts)
+
+
+def _feature_branch_name(task: Task) -> str:
+    """The task's feature branch name — its recorded branch, or the deterministic default.
+
+    Postconditions:
+        - Returns ``task.feature_branch`` when set, else ``f"feature/{task.id}"``; the single source
+          of this fallback so every git/review path names the same branch for a task.
+    """
+    return task.feature_branch or f"feature/{task.id}"
 
 
 def _format_decisions(resolved: List[Dict[str, Any]]) -> str:
@@ -1690,7 +1713,7 @@ class CodingTeamSwarm:
         if diff is None:
             from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
 
-            branch = task.feature_branch or f"feature/{task.id}"
+            branch = _feature_branch_name(task)
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
         return hashlib.sha256((diff or "").encode("utf-8", "replace")).hexdigest()
 
@@ -1774,7 +1797,7 @@ class CodingTeamSwarm:
                 merge_branch,
             )
 
-            branch = task.feature_branch or f"feature/{task.id}"
+            branch = _feature_branch_name(task)
             has_changes = bool((branch_diff(self.path, DEVELOPMENT_BRANCH, branch) or "").strip())
             if not has_changes:
                 # Genuinely nothing landed — flag it resolved-without-changes so the job-level outcome
@@ -2221,7 +2244,7 @@ class CodingTeamSwarm:
         def _run(progress_callback: Any) -> tuple[str, Dict[str, Any]]:
             from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
 
-            branch = task.feature_branch or f"feature/{task.id}"
+            branch = _feature_branch_name(task)
             summary = task.changes_summary or "(no summary recorded)"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
             evidence = _build_review_evidence(summary, diff)
@@ -2271,9 +2294,7 @@ class CodingTeamSwarm:
                 "requested_changes": [],
             }
 
-    def _apply_review_decision(
-        self, task: Task, diff: str, review: Dict[str, Any], merge_branch: Callable, dev_branch: str
-    ) -> None:
+    def _apply_review_decision(self, task: Task, diff: str, review: Dict[str, Any]) -> None:
         """Apply one precomputed review verdict: fail, merge, or send back for revision.
 
         This is the serial half of review — it performs the git merge and task-graph mutations, so it
@@ -2287,15 +2308,16 @@ class CodingTeamSwarm:
             - ``error`` → task FAILED once (no revision loop); ``approved`` → branch merged and task
               MERGED; otherwise → task sent back to its engineer for revision. Exactly one of these.
         """
-        branch = task.feature_branch or f"feature/{task.id}"
         if review.get("error"):
             # The review itself could not run (e.g. evidence exceeded the model context window). Do
             # NOT route this through the revision loop — re-sending the same failing prompt every
             # round would burn the whole revision budget at max cost. Fail the task once instead.
             self._fail_task(task, review, "Tech Lead review could not be completed")
         elif review.get("approved"):
+            from shared_git.git_utils import DEVELOPMENT_BRANCH, merge_branch
+
             try:
-                ok, _ = merge_branch(self.path, branch, dev_branch)
+                ok, _ = merge_branch(self.path, _feature_branch_name(task), DEVELOPMENT_BRANCH)
                 if ok:
                     self.graph.mark_branch_merged(task.id)
             except Exception as e:
@@ -2327,34 +2349,31 @@ class CodingTeamSwarm:
               the branch's own divergence point, so an earlier same-round merge advancing the
               development tip does not change any other branch's computed diff.
         """
-        from shared_concurrency import parallel_map
-        from shared_git.git_utils import DEVELOPMENT_BRANCH, merge_branch
-
         in_review = [t for t in self.graph.get_tasks() if t.status == TaskStatus.IN_REVIEW]
         if not in_review:
             return
 
+        # Collect every task's (diff, review) first, then apply all decisions through one serial loop
+        # (git writes + graph mutations stay single-threaded, in original order). A sole review runs
+        # inline so it keeps its live per-task progress bar; two or more fan out via parallel_map,
+        # which suppresses that bar (concurrent bridges would race the one sub-progress slot) but
+        # copies each worker's LLM-attribution contextvars and preserves input order. _compute_review
+        # contains its own exceptions, so no worker raises out of the pool.
         if len(in_review) == 1:
-            # Sole review: run inline with live per-task progress (identical to the prior behavior).
-            task = in_review[0]
-            diff, review = self._compute_review(task, live_progress=True, update_fn=update_fn)
-            self._apply_review_decision(task, diff, review, merge_branch, DEVELOPMENT_BRANCH)
-            return
+            results = [self._compute_review(in_review[0], live_progress=True, update_fn=update_fn)]
+        else:
+            from shared_concurrency import parallel_map
 
-        # Fan the reviews out concurrently, then apply decisions serially in original order.
-        # parallel_map preserves input order and copies each worker's contextvars from this thread, so
-        # the review LLM calls keep their job/team/task attribution (a raw ThreadPoolExecutor would
-        # drop it); it also sizes its pool at min(max_workers, len), so no manual clamp is needed.
-        # _compute_review contains its own exceptions, so no worker raises out of the pool.
-        update_fn(status_text=f"Tech Lead reviewing {len(in_review)} task(s)")
-        results = parallel_map(
-            in_review,
-            lambda task: self._compute_review(task, live_progress=False, update_fn=update_fn),
-            max_workers=_review_concurrency(),
-            skip_none=False,
-        )
+            update_fn(status_text=f"Tech Lead reviewing {len(in_review)} task(s)")
+            results = parallel_map(
+                in_review,
+                lambda task: self._compute_review(task, live_progress=False, update_fn=update_fn),
+                max_workers=_review_concurrency(),
+                skip_none=False,
+            )
+
         for task, (diff, review) in zip(in_review, results):
-            self._apply_review_decision(task, diff, review, merge_branch, DEVELOPMENT_BRANCH)
+            self._apply_review_decision(task, diff, review)
 
     def _request_revision(
         self, task: Task, review: Dict[str, Any], diff: Optional[str] = None
