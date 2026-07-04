@@ -33,3 +33,35 @@ def _warn_if_no_engine_provider() -> None:
             "Serve the coding team via coding_team_service.main (TEAM_MODULE) or call "
             "coding_team.engine_provider.set_engine_provider() before serving traffic."
         )
+
+
+def _start_temporal_worker_backstop() -> None:
+    """Start the Temporal worker from the app lifespan (no-op when disabled).
+
+    The docker ``team_service`` entrypoint starts the worker per uvicorn worker
+    via ``TEAM_TEMPORAL_WORKER_MODULE``/``_FUNC``. This backstop covers every
+    other way the app is served — a bare ``uvicorn coding_team.api.main:app``
+    dev/CI run, or embedding — so that with ``TEMPORAL_ADDRESS`` set a ``/run``
+    dispatch always has a worker to reach instead of timing out. ``start_team_worker``
+    is idempotent, so overlapping with the entrypoint boot is harmless.
+
+    Postconditions: attempts to start the worker; logs a warning and never
+    raises if startup fails (a broken worker must not block serving traffic).
+    """
+    try:
+        from coding_team.temporal.worker import start_coding_team_temporal_worker_thread
+
+        start_coding_team_temporal_worker_thread()
+    except Exception:
+        logger.warning(
+            "coding_team Temporal worker start (lifespan backstop) failed", exc_info=True
+        )
+
+
+def _startup() -> None:
+    """Composite ASGI startup hook: engine-provider probe + Temporal worker backstop.
+
+    Postconditions: runs both startup steps; neither raises into app startup.
+    """
+    _warn_if_no_engine_provider()
+    _start_temporal_worker_backstop()
