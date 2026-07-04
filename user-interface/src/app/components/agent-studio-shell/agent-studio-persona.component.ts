@@ -52,6 +52,38 @@ const STEP_STATUS_COMPLETED = 'completed';
 /** Width of the persona create/edit dialog; matches the dashboard's editor dialog. */
 const PERSONA_DIALOG_WIDTH = '560px';
 
+/**
+ * Human-readable labels for the founder run's internal status strings, so the UI
+ * never shows raw wire values (`polling_build`, `answering_build_questions`) to
+ * users or reads them out to a screen reader. Unmapped values fall back to a
+ * prettified form (see {@link humanizeStatus}).
+ */
+const STATUS_LABELS: Record<string, string> = {
+  pending: 'Starting…',
+  generating_spec: 'Preparing…',
+  submitting_analysis: 'Analyzing…',
+  polling_analysis: 'Analyzing…',
+  answering_analysis_questions: 'Answering a question…',
+  submitting_build: 'Running…',
+  polling_build: 'Running…',
+  answering_build_questions: 'Answering a question…',
+  completed: 'Completed',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  canceled: 'Cancelled',
+};
+
+/** Map a raw run status to a user-facing label, prettifying anything unmapped. */
+function humanizeStatus(status: string): string {
+  if (!status) {
+    return 'Unknown';
+  }
+  return (
+    STATUS_LABELS[status] ??
+    status.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())
+  );
+}
+
 // Back-loop destinations as 0-based indices into STUDIO_STAGES
 // (build=0, test=1, compose=2, personas=3). Named so the back-loops don't carry
 // bare magic numbers; keep in sync with the STUDIO_STAGES order.
@@ -111,6 +143,8 @@ export class AgentStudioPersonaComponent implements OnInit {
   readonly creatingPersona = signal(false);
   readonly selectedProcessId = signal<string | null>(null);
   readonly launching = signal(false);
+  /** True while a stop-run (cancel) request is in flight; drives "Stopping…". */
+  readonly cancelling = signal(false);
   readonly error = signal<string | null>(null);
 
   // ── Live run ────────────────────────────────────────────────────────────
@@ -186,8 +220,14 @@ export class AgentStudioPersonaComponent implements OnInit {
     return s ? TERMINAL_STATUSES.has(s) : false;
   });
 
-  /** The run is genuinely still in flight: neither the founder run nor the pipeline is terminal. */
-  readonly runLive = computed(() => !this.runTerminal() && !this.pipelineTerminal());
+  /**
+   * The run is genuinely still in flight: a run exists and neither the founder
+   * run nor the pipeline is terminal. Requires `run()` so it is false before any
+   * launch (otherwise the launcher would be disabled with no run in progress).
+   */
+  readonly runLive = computed(
+    () => this.run() != null && !this.runTerminal() && !this.pipelineTerminal(),
+  );
 
   // ── Live-run progress (spec §Stage 4 "Run progress UI") ───────────────────
   // The header sets expectations for slow autonomous runs: an elapsed counter
@@ -293,6 +333,40 @@ export class AgentStudioPersonaComponent implements OnInit {
 
   /** The pipeline paused on a free-text WAIT step: the persona is formulating an answer. */
   readonly isWaiting = computed(() => this.pipelineRun()?.status === 'waiting_for_input');
+
+  /** User-facing label for the current run status (never the raw wire value). */
+  statusLabel(status: string): string {
+    return humanizeStatus(status);
+  }
+
+  /**
+   * A screen-reader-only sentence announced on meaningful run-state transitions
+   * (started / answering / completed / failed / cancelled), so an assistive-tech
+   * user driving an unattended run hears state changes without polling the DOM.
+   * Kept to run-level transitions — the per-step "step N of M" live region owns
+   * step progress — and, because `aria-live` only speaks on text *change*, a
+   * status that holds steady across polls is not re-announced.
+   */
+  readonly runAnnouncement = computed(() => {
+    const r = this.run();
+    if (!r) {
+      return '';
+    }
+    if (this.isWaiting()) {
+      return 'The persona is answering a question.';
+    }
+    switch (r.status) {
+      case 'completed':
+        return 'Persona test completed.';
+      case 'failed':
+        return 'Persona test failed.';
+      case 'cancelled':
+      case 'canceled':
+        return 'Persona test cancelled.';
+      default:
+        return 'Persona test running.';
+    }
+  });
 
   ngOnInit(): void {
     const teamId = this.teamId();
@@ -440,7 +514,9 @@ export class AgentStudioPersonaComponent implements OnInit {
     const processId = this.selectedProcessId();
     // Also require the team to have loaded: a programmatic call (or a stale
     // handoff-seeded processId after a failed load) must not fire a request that
-    // would certainly fail.
+    // would certainly fail. (Superseding a live run is prevented at the UI — the
+    // launcher is disabled while `runLive()` — not here, so tests can still drive
+    // status transitions through launch().)
     if (!teamId || !personaId || !processId || this.launching() || !this.team()) {
       return;
     }
@@ -473,6 +549,34 @@ export class AgentStudioPersonaComponent implements OnInit {
       });
   }
 
+  /**
+   * Cancel the in-flight run via the founder cancel endpoint. No-ops unless a run
+   * is live and no stop is already in flight. The run's own poll confirms the
+   * terminal (cancelled) state and stops polling; until then the button shows
+   * "Stopping…". A failed cancel re-enables the control and surfaces a banner.
+   */
+  stopRun(): void {
+    const r = this.run();
+    if (!r || !this.runLive() || this.cancelling()) {
+      return;
+    }
+    this.cancelling.set(true);
+    this.error.set(null);
+    this.personaApi
+      .cancelJob(r.run_id)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        // Leave `cancelling` true on success so the button reads "Stopping…"
+        // until the poll reports the terminal state and the control disappears
+        // (runLive → false); startPolling resets the flag for the next run.
+        next: () => {},
+        error: () => {
+          this.cancelling.set(false);
+          this.error.set('Could not stop the run.');
+        },
+      });
+  }
+
   private startPolling(runId: string): void {
     this.stopPolling();
     this.activeRunId = runId;
@@ -480,6 +584,8 @@ export class AgentStudioPersonaComponent implements OnInit {
     // Clear the prior run's pipeline state so a new launch doesn't briefly show
     // the last run's step progress before the first pipeline read lands.
     this.pipelineRun.set(null);
+    // A fresh run can't be mid-stop; clear a stale "Stopping…" from a prior run.
+    this.cancelling.set(false);
     this.elapsedSec.set(0);
     this.elapsedSub = interval(1000)
       .pipe(takeUntilDestroyed(this.destroyRef))

@@ -137,6 +137,7 @@
                         class="persona__item"
                         [class.is-selected]="selectedPersonaId() === p.id"
                         [attr.aria-pressed]="selectedPersonaId() === p.id"
+                        [disabled]="runLive()"
                         (click)="selectPersona(p.id)"
                       >
                         <mat-icon aria-hidden="true">{{ p.icon || 'person' }}</mat-icon>
@@ -158,6 +159,7 @@
                   #processSelect
                   id="persona-process-select"
                   [value]="selectedProcessId() ?? ''"
+                  [disabled]="runLive()"
                   (change)="selectProcess(processSelect.value)"
                 >
                   <option value="" disabled>Select a process…</option>
@@ -166,19 +168,33 @@
                   }
                 </select>
               </label>
-              <button
-                mat-flat-button
-                color="primary"
-                type="button"
-                class="persona__run-btn"
-                [disabled]="
-                  !selectedPersonaId() || !selectedProcessId() || launching() || !team() || teamError()
-                "
-                (click)="launch()"
+              <!-- Tooltip on the wrapping span (Material tooltips don't fire on a
+                   disabled button): while a run is live the launcher is disabled so
+                   it can't silently supersede the in-flight run — Stop it first. -->
+              <span
+                class="persona__run-btn-wrap"
+                [matTooltip]="'A run is in progress — stop it to start another.'"
+                [matTooltipDisabled]="!runLive()"
               >
-                <mat-icon aria-hidden="true">play_arrow</mat-icon>
-                {{ launching() ? 'Starting…' : 'Run persona test' }}
-              </button>
+                <button
+                  mat-flat-button
+                  color="primary"
+                  type="button"
+                  class="persona__run-btn"
+                  [disabled]="
+                    !selectedPersonaId() ||
+                    !selectedProcessId() ||
+                    launching() ||
+                    runLive() ||
+                    !team() ||
+                    teamError()
+                  "
+                  (click)="launch()"
+                >
+                  <mat-icon aria-hidden="true">play_arrow</mat-icon>
+                  {{ launching() ? 'Starting…' : 'Run persona test' }}
+                </button>
+              </span>
               @if (error()) {
                 <p class="persona__error" role="alert">{{ error() }}</p>
               }
@@ -186,11 +202,16 @@
           </div>
 
           @if (run(); as r) {
-            <div class="persona__run">
+            <section class="persona__run" aria-labelledby="persona-run-title">
+              <!-- SR-only live region: announces run-state transitions (started /
+                   answering / completed / failed / cancelled) so an assistive-tech
+                   user driving an unattended run hears changes. aria-live speaks
+                   only on text change, so a steady status isn't re-announced. -->
+              <p class="persona__sr-only" aria-live="polite">{{ runAnnouncement() }}</p>
               <div class="persona__run-head">
-                <span class="persona__run-id">run {{ r.run_id }}</span>
-                <span class="persona__run-status">status: {{ r.status }}</span>
-                <span class="persona__run-elapsed">{{ elapsedSec() }}s</span>
+                <h3 id="persona-run-title" class="persona__run-title">Live run</h3>
+                <span class="persona__run-status">{{ statusLabel(r.status) }}</span>
+                <span class="persona__run-elapsed" aria-label="elapsed time">{{ elapsedSec() }}s</span>
                 @if (runLive()) {
                   <!-- Animated liveness cue so a slow-but-healthy run never reads
                        as stalled; during a WAIT step the persona is formulating
@@ -203,6 +224,16 @@
                       <span class="persona__waiting">(answering a question)</span>
                     }</span
                   >
+                  <button
+                    mat-stroked-button
+                    type="button"
+                    class="persona__stop"
+                    [disabled]="cancelling()"
+                    (click)="stopRun()"
+                  >
+                    <mat-icon aria-hidden="true">stop</mat-icon>
+                    {{ cancelling() ? 'Stopping…' : 'Stop run' }}
+                  </button>
                 }
               </div>
               @if (runLive()) {
@@ -250,7 +281,7 @@
               } @else {
                 <p class="persona__loading">Waiting for the first decision…</p>
               }
-            </div>
+            </section>
           }
         }
       }

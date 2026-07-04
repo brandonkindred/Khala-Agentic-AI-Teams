@@ -107,6 +107,7 @@ describe('AgentStudioPersonaComponent', () => {
     startTest: ReturnType<typeof vi.fn>;
     getRunStatus: ReturnType<typeof vi.fn>;
     createPersona: ReturnType<typeof vi.fn>;
+    cancelJob: ReturnType<typeof vi.fn>;
   };
   let dialog: { open: ReturnType<typeof vi.fn> };
   let dialogClose: ReturnType<typeof vi.fn>;
@@ -131,6 +132,7 @@ describe('AgentStudioPersonaComponent', () => {
       createPersona: vi
         .fn()
         .mockReturnValue(of({ id: 'new-1', name: 'New', description: '', icon: 'person', is_builtin: false })),
+      cancelJob: vi.fn().mockReturnValue(of({})),
     };
     dialogClose = vi.fn();
     dialog = {
@@ -1140,5 +1142,114 @@ describe('AgentStudioPersonaComponent', () => {
     // A dead run must not keep rendering as healthy in-progress.
     expect(text).not.toContain('persona is thinking…');
     expect(text).not.toContain('step 3 of 4');
+  });
+
+  // ── UX/a11y: humanized status, stop control, launcher guard, announcements ──
+
+  it('shows a human-readable run status, not the raw wire value', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.statusLabel('polling_build')).toBe('Running…');
+    expect(component.statusLabel('answering_build_questions')).toBe('Answering a question…');
+    expect(component.statusLabel('completed')).toBe('Completed');
+    // An unmapped status is prettified, never shown raw.
+    expect(component.statusLabel('some_new_phase')).toBe('Some new phase');
+    const text = fixture.nativeElement.textContent;
+    expect(text).toContain('Running…');
+    expect(text).not.toContain('polling_build');
+  });
+
+  it('shows a Stop control during a live run and cancels via the founder endpoint', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
+    component.launch();
+    fixture.detectChanges();
+    expect(component.runLive()).toBe(true);
+    const stop = fixture.nativeElement.querySelector('.persona__stop');
+    expect(stop).toBeTruthy();
+    stop.click();
+    expect(personaApi.cancelJob).toHaveBeenCalledWith('run-1');
+    // Button reflects the in-flight stop until the poll confirms terminal.
+    expect(component.cancelling()).toBe(true);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.persona__stop').textContent).toContain('Stopping…');
+  });
+
+  it('surfaces an error and re-enables Stop when the cancel request fails', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
+    component.launch();
+    personaApi.cancelJob.mockReturnValue(throwError(() => new Error('nope')));
+    component.stopRun();
+    expect(component.cancelling()).toBe(false);
+    expect(component.error()).toContain('Could not stop the run');
+  });
+
+  it('does not show Stop, and cancelJob is a no-op, once the run is terminal', () => {
+    build();
+    fixture.detectChanges();
+    // Default getRunStatus resolves to a completed run.
+    component.launch();
+    fixture.detectChanges();
+    expect(component.runLive()).toBe(false);
+    expect(fixture.nativeElement.querySelector('.persona__stop')).toBeNull();
+    component.stopRun();
+    expect(personaApi.cancelJob).not.toHaveBeenCalled();
+  });
+
+  it('disables the launcher (Run + process select) while a run is live', () => {
+    build();
+    fixture.detectChanges();
+    // Before any run, the launcher is enabled.
+    let runBtn = fixture.nativeElement.querySelector('.persona__run-btn') as HTMLButtonElement;
+    let select = fixture.nativeElement.querySelector('#persona-process-select') as HTMLSelectElement;
+    expect(runBtn.disabled).toBe(false);
+    expect(select.disabled).toBe(false);
+
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
+    component.launch();
+    fixture.detectChanges();
+    // While live, Run + process select are disabled so a new run can't silently
+    // supersede the in-flight one.
+    runBtn = fixture.nativeElement.querySelector('.persona__run-btn');
+    select = fixture.nativeElement.querySelector('#persona-process-select');
+    expect(component.runLive()).toBe(true);
+    expect(runBtn.disabled).toBe(true);
+    expect(select.disabled).toBe(true);
+  });
+
+  it('labels the live-run region and announces run-state transitions to assistive tech', () => {
+    build();
+    fixture.detectChanges();
+    // Running → announces "running".
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
+    component.launch();
+    fixture.detectChanges();
+    const region = fixture.nativeElement.querySelector('section.persona__run');
+    expect(region.getAttribute('aria-labelledby')).toBe('persona-run-title');
+    expect(fixture.nativeElement.querySelector('#persona-run-title').textContent).toContain('Live run');
+    expect(component.runAnnouncement()).toBe('Persona test running.');
+
+    // Completed → announcement changes (aria-live speaks the transition).
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'completed', decisions: [] }));
+    component.launch();
+    expect(component.runAnnouncement()).toBe('Persona test completed.');
+  });
+
+  it('announces the WAIT state distinctly for assistive tech', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob({ status: 'answering_build_questions' })));
+    agenticApi.getPipelineRun.mockReturnValue(
+      of(pipelineRun(2, { status: 'waiting_for_input', current_step_id: 's3' })),
+    );
+    component.launch();
+    fixture.detectChanges();
+    expect(component.runAnnouncement()).toBe('The persona is answering a question.');
   });
 });
