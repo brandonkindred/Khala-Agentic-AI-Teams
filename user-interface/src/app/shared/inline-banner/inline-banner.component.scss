@@ -39,8 +39,9 @@
     }
 
     // A `<strong>` at the start of a banner message is a lead-in heading (same
-    // convention as app-error-message), so lay it out on its own line.
-    strong {
+    // convention as app-error-message), so lay it out on its own line. Scoped to
+    // the first child so inline mid-sentence `<strong>` emphasis stays inline.
+    strong:first-child {
       display: block;
       margin-bottom: var(--kh-space-1);
     }

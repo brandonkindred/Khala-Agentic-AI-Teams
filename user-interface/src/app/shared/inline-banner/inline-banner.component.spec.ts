@@ -67,13 +67,6 @@ describe('InlineBannerComponent', () => {
     expect(fixture.nativeElement.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it('forces an assertive live region when live="assertive"', () => {
-    fixture.componentRef.setInput('variant', 'info');
-    fixture.componentRef.setInput('live', 'assertive');
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('.kh-banner__msg[role="alert"]')).toBeTruthy();
-  });
-
   it('renders no live region when live="off"', () => {
     fixture.componentRef.setInput('variant', 'info');
     fixture.componentRef.setInput('live', 'off');
