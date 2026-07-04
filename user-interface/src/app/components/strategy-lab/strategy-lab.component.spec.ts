@@ -1,8 +1,10 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { NEVER, of } from 'rxjs';
+import { NEVER, of, throwError } from 'rxjs';
+import { provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { InvestmentApiService } from '../../services/investment-api.service';
+import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { StrategyLabComponent } from './strategy-lab.component';
 import type { RunStrategyLabRequest, StrategyLabRunStartResponse } from '../../models';
 
@@ -23,6 +25,7 @@ describe('StrategyLabComponent — asset categories', () => {
     getPaperTradingResults: ReturnType<typeof vi.fn>;
     getActiveRuns: ReturnType<typeof vi.fn>;
   };
+  let integrationsSpy: { getTradingViewConfig: ReturnType<typeof vi.fn> };
 
   const startResponse: StrategyLabRunStartResponse = {
     run_id: 'run-1',
@@ -47,10 +50,19 @@ describe('StrategyLabComponent — asset categories', () => {
       getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
       getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
     };
+    integrationsSpy = {
+      getTradingViewConfig: vi.fn().mockReturnValue(
+        of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
+      ),
+    };
 
     await TestBed.configureTestingModule({
       imports: [StrategyLabComponent, NoopAnimationsModule],
-      providers: [{ provide: InvestmentApiService, useValue: apiSpy }],
+      providers: [
+        provideRouter([]),
+        { provide: InvestmentApiService, useValue: apiSpy },
+        { provide: IntegrationsApiService, useValue: integrationsSpy },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(StrategyLabComponent);
@@ -137,6 +149,33 @@ describe('StrategyLabComponent — asset categories', () => {
     component.ngOnInit();
     component.ngOnDestroy();
   };
+
+  // ---------------------------------------------------------------------
+  // TradingView data-source notice
+  // ---------------------------------------------------------------------
+
+  it('flags the TradingView notice as visible when the source is not configured', () => {
+    initAndDestroy();
+    expect(integrationsSpy.getTradingViewConfig).toHaveBeenCalled();
+    expect(component.tradingViewStatusKnown).toBe(true);
+    expect(component.tradingViewConfigured).toBe(false);
+  });
+
+  it('hides the notice once TradingView is configured and enabled', () => {
+    integrationsSpy.getTradingViewConfig.mockReturnValue(
+      of({ enabled: true, mcp_server_url: 'https://tv/mcp', tool_name: 'get_ohlcv', auth_token_configured: true }),
+    );
+    initAndDestroy();
+    expect(component.tradingViewStatusKnown).toBe(true);
+    expect(component.tradingViewConfigured).toBe(true);
+  });
+
+  it('keeps the notice hidden when the status call fails (never nag on unknown)', () => {
+    integrationsSpy.getTradingViewConfig.mockReturnValue(throwError(() => new Error('offline')));
+    initAndDestroy();
+    expect(component.tradingViewStatusKnown).toBe(false);
+    expect(component.tradingViewConfigured).toBe(false);
+  });
 
   it('adopts the backend category list and resets the selection to all', () => {
     apiSpy.getStrategyLabConfig.mockReturnValue(

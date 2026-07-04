@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>TradingView MCP — integrations mockups</title>
+<style>
+  :root{
+    --kh-surface-0:#000;--kh-surface-1:#0a0a0a;--kh-surface-2:#171717;--kh-surface-3:#262626;--kh-surface-4:#333;
+    --kh-accent:#fbbf24;--kh-accent-hover:#fde68a;--kh-accent-text:#fde68a;
+    --kh-accent-subtle:rgba(251,191,36,.20);--kh-accent-muted:rgba(251,191,36,.12);
+    --kh-glass:rgba(255,255,255,.06);--kh-glass-hover:rgba(255,255,255,.12);
+    --kh-text-primary:#fff;--kh-text-secondary:#d4d4d8;--kh-text-tertiary:#a1a1aa;--kh-text-muted:#909099;
+    --kh-border:rgba(255,255,255,.16);--kh-border-subtle:rgba(255,255,255,.10);--kh-border-strong:rgba(255,255,255,.25);
+    --kh-success:#4ade80;--kh-success-subtle:rgba(74,222,128,.18);
+    --kh-warning:#fbbf24;--kh-warning-subtle:rgba(251,191,36,.18);
+    --kh-error:#f87171;--kh-error-subtle:rgba(248,113,113,.18);
+    --kh-info:#93c5fd;--kh-info-subtle:rgba(147,197,253,.18);
+    --kh-radius-sm:6px;--kh-radius-md:8px;--kh-radius-lg:12px;--kh-radius-full:9999px;
+    --kh-shadow-md:0 4px 12px rgba(0,0,0,.5);--kh-shadow-glow:0 0 24px rgba(251,191,36,.25);
+    --font:'Inter',-apple-system,'Segoe UI',sans-serif;--mono:'JetBrains Mono','SF Mono',monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--kh-surface-0);color:var(--kh-text-primary);font-family:var(--font);font-size:14px;line-height:1.55;padding:40px 24px 72px}
+  .page{max-width:1280px;margin:0 auto}
+
+  /* ── doc header ─────────────────────────────────────────────── */
+  .doc-head{margin-bottom:8px}
+  .doc-head h1{font-size:30px;font-weight:700;letter-spacing:-.5px;margin:0 0 6px}
+  .doc-head p{color:var(--kh-text-tertiary);margin:0;max-width:64rem}
+  .req{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin:20px 0 40px}
+  .req-card{background:var(--kh-surface-2);border:1px solid var(--kh-border-subtle);border-left:3px solid var(--kh-accent);border-radius:var(--kh-radius-md);padding:12px 16px}
+  .req-card b{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--kh-accent-text);margin-bottom:4px}
+  .req-card span{color:var(--kh-text-secondary);font-size:13px}
+
+  /* ── screen scaffold ────────────────────────────────────────── */
+  .screen{margin:0 0 44px}
+  .screen-label{display:flex;align-items:baseline;gap:10px;margin:0 0 12px}
+  .screen-label .n{width:24px;height:24px;flex:0 0 auto;border-radius:var(--kh-radius-full);background:var(--kh-accent);color:#09090b;font-weight:700;font-size:12px;display:grid;place-items:center}
+  .screen-label h2{font-size:16px;font-weight:600;margin:0}
+  .screen-label p{margin:0;color:var(--kh-text-tertiary);font-size:12px}
+
+  /* browser frame = app shell */
+  .frame{border:1px solid var(--kh-border);border-radius:var(--kh-radius-lg);overflow:hidden;background:var(--kh-surface-1);box-shadow:var(--kh-shadow-md)}
+  .frame-bar{display:flex;align-items:center;gap:8px;padding:9px 14px;background:var(--kh-surface-2);border-bottom:1px solid var(--kh-border-subtle)}
+  .frame-bar .tl{display:flex;gap:6px}
+  .frame-bar .tl i{width:11px;height:11px;border-radius:50%;background:var(--kh-surface-4)}
+  .frame-bar .url{flex:1;font-family:var(--mono);font-size:12px;color:var(--kh-text-tertiary);background:var(--kh-surface-1);border:1px solid var(--kh-border-subtle);border-radius:var(--kh-radius-full);padding:4px 12px}
+  .frame-bar .url b{color:var(--kh-accent-text);font-weight:600}
+  .app{display:grid;grid-template-columns:210px 1fr}
+  @media (max-width:860px){.app{grid-template-columns:1fr}.sidebar{display:none}}
+
+  /* sidebar */
+  .sidebar{background:var(--kh-surface-1);border-right:1px solid var(--kh-border-subtle);padding:16px 10px}
+  .brand{display:flex;align-items:center;gap:9px;padding:4px 8px 16px;font-weight:700;font-size:15px}
+  .brand .logo{width:26px;height:26px;border-radius:7px;background:var(--kh-accent-gradient,linear-gradient(135deg,#fbbf24,#f59e0b));display:grid;place-items:center;color:#09090b;font-size:15px}
+  .nav-group{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--kh-text-muted);padding:12px 8px 5px}
+  .nav{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--kh-radius-md);color:var(--kh-text-tertiary);font-size:13px;cursor:pointer;border:1px solid transparent}
+  .nav:hover{background:var(--kh-glass);color:var(--kh-text-secondary)}
+  .nav .ic{width:17px;text-align:center;flex:0 0 auto}
+  .nav.active{background:var(--kh-accent-muted);color:var(--kh-accent-text);border-color:var(--kh-accent-subtle);font-weight:600}
+  .nav.active .ic{color:var(--kh-accent)}
+
+  /* main content */
+  .main{padding:26px 30px 34px;background:var(--kh-surface-1);min-width:0}
+
+  /* integrations hero */
+  .ihero{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;flex-wrap:wrap;padding-bottom:18px;margin-bottom:22px;border-bottom:1px solid var(--kh-border-subtle)}
+  .ihero h1{font-size:26px;font-weight:700;margin:0 0 6px;letter-spacing:-.3px}
+  .ihero p{margin:0;color:var(--kh-text-tertiary);font-size:14px;max-width:56ch}
+  .stats{display:flex;gap:10px}
+  .pill{display:flex;flex-direction:column;gap:2px;padding:9px 18px;border-radius:var(--kh-radius-lg);min-width:120px;background:var(--kh-accent-muted);border:1px solid var(--kh-accent-subtle)}
+  .pill.muted{background:var(--kh-glass);border-color:var(--kh-border-subtle)}
+  .pill .v{font-size:24px;font-weight:700;line-height:1.1;color:var(--kh-accent);font-variant-numeric:tabular-nums}
+  .pill.muted .v{color:var(--kh-text-primary)}
+  .pill .v s{color:var(--kh-text-muted);text-decoration:none;font-weight:500;margin:0 .12em}
+  .pill .l{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--kh-text-tertiary)}
+
+  /* integrations grid + cards */
+  .igrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:18px;align-items:start}
+  .card{display:flex;flex-direction:column;gap:14px;padding:20px;background:var(--kh-surface-2);border:1px solid var(--kh-border-subtle);border-radius:var(--kh-radius-lg)}
+  .card.expanded{grid-column:1/-1;border-color:var(--kh-border);box-shadow:var(--kh-shadow-md)}
+  .card.focus{border-color:var(--kh-accent);box-shadow:var(--kh-shadow-glow);position:relative}
+  .card.focus::before{content:"";position:absolute;inset:-1px;border-radius:var(--kh-radius-lg);box-shadow:0 0 0 1px var(--kh-accent);pointer-events:none}
+  .chead{display:flex;align-items:center;justify-content:space-between;gap:14px}
+  .brandrow{display:flex;align-items:center;gap:12px;min-width:0}
+  .cicon{width:44px;height:44px;flex:0 0 auto;border-radius:var(--kh-radius-md);display:grid;place-items:center;font-size:24px;box-shadow:0 1px 3px rgba(0,0,0,.5)}
+  .cicon.tv{background:var(--kh-accent-muted);color:var(--kh-accent);border:1px solid var(--kh-accent-subtle)}
+  .cicon.gh{background:var(--kh-accent-muted);color:var(--kh-accent-text);border:1px solid var(--kh-border-subtle)}
+  .cicon.sl{background:var(--kh-surface-3);border:1px solid var(--kh-border-subtle)}
+  .cicon.md{background:var(--kh-surface-3);border:1px solid var(--kh-border);color:#fff;font-weight:700;font-size:20px}
+  .cicon.gg{background:var(--kh-info-subtle);color:var(--kh-info);border:1px solid var(--kh-border-subtle)}
+  .ctitle{font-size:17px;font-weight:600;margin:0;line-height:1.2}
+  .ctag{margin:3px 0 0;font-size:12.5px;color:var(--kh-text-tertiary)}
+  .chip{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;border-radius:var(--kh-radius-full);font-size:12px;font-weight:600;border:1px solid var(--kh-border-subtle);white-space:nowrap}
+  .chip.ok{background:var(--kh-success-subtle);color:var(--kh-success)}
+  .chip.neutral{background:var(--kh-glass);color:var(--kh-text-tertiary)}
+  .chip.warn{background:var(--kh-warning-subtle);color:var(--kh-warning)}
+  .summary{margin:0;font-size:13px;line-height:1.55;color:var(--kh-text-secondary)}
+  .summary code,.hint code,.formhint code{font-family:var(--mono);font-size:.85em;background:var(--kh-glass);border:1px solid var(--kh-border-subtle);border-radius:var(--kh-radius-sm);padding:.1em .4em;color:var(--kh-text-primary)}
+  .actions{display:flex;gap:8px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:7px;border-radius:var(--kh-radius-md);border:none;padding:9px 16px;font-weight:600;font-size:13px;font-family:inherit;cursor:pointer}
+  .btn-primary{background:var(--kh-accent);color:#09090b}
+  .btn-primary:hover{background:var(--kh-accent-hover)}
+  .btn-ghost{background:transparent;border:1px solid var(--kh-border);color:var(--kh-text-secondary)}
+  .btn-warn{background:transparent;border:1px solid var(--kh-error-subtle);color:var(--kh-error)}
+  .btn .ic{font-size:15px}
+
+  /* expanded body / form */
+  .cbody{display:flex;flex-direction:column;gap:16px;margin-top:2px;padding-top:18px;border-top:1px solid var(--kh-border-subtle)}
+  .formhint{margin:0;font-size:13px;color:var(--kh-text-tertiary);line-height:1.6}
+  .field{display:flex;flex-direction:column;gap:6px}
+  .field label{font-size:12px;font-weight:600;color:var(--kh-text-secondary)}
+  .input{display:flex;align-items:center;gap:8px;background:var(--kh-surface-1);border:1px solid var(--kh-border);border-radius:var(--kh-radius-md);padding:11px 13px;font-family:var(--mono);font-size:13px;color:var(--kh-text-primary)}
+  .input.ph{color:var(--kh-text-muted)}
+  .input .tail{margin-left:auto;font-family:var(--font);font-size:11px;color:var(--kh-success);font-weight:600}
+  .fnote{font-size:11.5px;color:var(--kh-text-muted)}
+  .toggle-row{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:var(--kh-radius-md);background:var(--kh-glass);border:1px solid var(--kh-border-subtle)}
+  .switch{width:38px;height:22px;flex:0 0 auto;border-radius:var(--kh-radius-full);background:var(--kh-accent);position:relative}
+  .switch::after{content:"";position:absolute;top:2px;right:2px;width:18px;height:18px;border-radius:50%;background:#09090b}
+  .switch.off{background:var(--kh-surface-4)}
+  .switch.off::after{right:auto;left:2px;background:var(--kh-text-tertiary)}
+  .toggle-row span{font-size:13px;color:var(--kh-text-secondary);font-weight:500}
+  .form-actions{display:flex;gap:12px;flex-wrap:wrap}
+  .testresult{padding:10px 13px;border-radius:var(--kh-radius-md);background:var(--kh-success-subtle);border:1px solid var(--kh-success-subtle);color:var(--kh-success);font-size:12.5px;font-weight:600}
+
+  /* context banner (arrived from strategy lab) */
+  .ctxbanner{display:flex;align-items:center;gap:12px;padding:12px 16px;border-radius:var(--kh-radius-md);background:var(--kh-accent-muted);border:1px solid var(--kh-accent-subtle);margin-bottom:20px}
+  .ctxbanner .ic{color:var(--kh-accent);font-size:18px}
+  .ctxbanner span{font-size:13px;color:var(--kh-text-secondary)}
+  .ctxbanner a{color:var(--kh-accent-text);font-weight:600;text-decoration:none;white-space:nowrap;margin-left:auto}
+
+  /* ── strategy lab screen ────────────────────────────────────── */
+  .lab-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:20px}
+  .lab-title{display:flex;gap:12px;align-items:center}
+  .lab-title .sci{font-size:30px;color:var(--kh-accent);line-height:1}
+  .lab-title h1{font-size:22px;font-weight:600;margin:0 0 3px}
+  .lab-title p{margin:0;color:var(--kh-text-tertiary);font-size:13px}
+  .lab-head .run{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .mini{display:flex;flex-direction:column;gap:3px;padding:7px 12px;border:1px solid var(--kh-border);border-radius:var(--kh-radius-md);background:var(--kh-surface-2)}
+  .mini label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--kh-text-muted)}
+  .mini b{font-size:15px;font-family:var(--mono)}
+
+  /* the datasource notice that links to integrations */
+  .ds-notice{display:flex;align-items:center;gap:14px;padding:15px 18px;border-radius:var(--kh-radius-lg);background:var(--kh-warning-subtle);border:1px solid var(--kh-warning-subtle);margin-bottom:20px}
+  .ds-notice.ok{background:var(--kh-success-subtle);border-color:var(--kh-success-subtle)}
+  .ds-notice .ic{font-size:22px;flex:0 0 auto}
+  .ds-notice.warn .ic{color:var(--kh-warning)}
+  .ds-notice.ok .ic{color:var(--kh-success)}
+  .ds-notice .txt{min-width:0}
+  .ds-notice .txt b{display:block;font-size:13.5px;color:var(--kh-text-primary);margin-bottom:2px}
+  .ds-notice .txt span{font-size:12.5px;color:var(--kh-text-secondary)}
+  .ds-notice .cta{margin-left:auto;flex:0 0 auto}
+
+  .catrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+  .catlbl{display:flex;align-items:center;gap:7px;color:var(--kh-text-tertiary);font-size:13px}
+  .tgroup{display:flex;border:1px solid var(--kh-border);border-radius:var(--kh-radius-md);overflow:hidden}
+  .tg{padding:7px 13px;font-size:12.5px;color:var(--kh-text-tertiary);border-right:1px solid var(--kh-border);display:flex;align-items:center;gap:5px}
+  .tg:last-child{border-right:none}
+  .tg.on{background:var(--kh-accent-muted);color:var(--kh-accent-text)}
+  .labcards{display:grid;gap:12px}
+  .labcard{display:flex;align-items:center;gap:16px;padding:16px 18px;border-radius:var(--kh-radius-lg);border:1px solid var(--kh-border-subtle);background:var(--kh-surface-2)}
+  .labcard.win{border-left:3px solid var(--kh-success)}
+  .labcard.lose{border-left:3px solid var(--kh-error)}
+  .lc-av{width:38px;height:38px;flex:0 0 auto;border-radius:50%;display:grid;place-items:center;font-size:18px}
+  .lc-av.win{background:var(--kh-success-subtle);color:var(--kh-success)}
+  .lc-av.lose{background:var(--kh-error-subtle);color:var(--kh-error)}
+  .lc-txt{flex:1;min-width:0}
+  .lc-txt b{font-size:13.5px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lc-txt span{font-size:11.5px;color:var(--kh-text-muted);font-family:var(--mono)}
+  .lc-metrics{display:flex;gap:18px;flex:0 0 auto}
+  .lc-m{display:flex;flex-direction:column;text-align:right}
+  .lc-m b{font-size:14px;font-variant-numeric:tabular-nums}
+  .lc-m b.pos{color:var(--kh-success)}.lc-m b.neg{color:var(--kh-error)}
+  .lc-m span{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--kh-text-muted)}
+  @media (max-width:640px){.lc-metrics{display:none}}
+
+  .caption{color:var(--kh-text-muted);font-size:11.5px;font-style:italic;margin:10px 2px 0}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-head">
+    <h1>TradingView MCP — Integration Mockups</h1>
+    <p>Configuring the TradingView MCP data source, and reaching that panel in focus straight from the Strategy Lab. Rendered against the live Khala design tokens (dark theme, amber accent, Inter).</p>
+  </div>
+
+  <div class="req">
+    <div class="req-card">
+      <b>Requirement 1</b>
+      <span>From the Integrations page, a user can find and configure the TradingView MCP server.</span>
+    </div>
+    <div class="req-card">
+      <b>Requirement 2</b>
+      <span>From the Strategy Lab, a user can jump to Integrations and land with the TradingView Configuration panel in focus.</span>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- SCREEN 1 — Integrations page, TradingView card collapsed     -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div class="screen">
+    <div class="screen-label">
+      <span class="n">1</span>
+      <div>
+        <h2>Integrations page — TradingView discoverable in the grid</h2>
+        <p>Default state. Every service is a card; TradingView sits alongside GitHub, Slack, Medium and Google.</p>
+      </div>
+    </div>
+
+    <div class="frame">
+      <div class="frame-bar">
+        <div class="tl"><i></i><i></i><i></i></div>
+        <div class="url">khala.app<b>/integrations</b></div>
+      </div>
+      <div class="app">
+        <aside class="sidebar">
+          <div class="brand"><span class="logo">◈</span> Khala</div>
+          <div class="nav-group">Workspace</div>
+          <div class="nav"><span class="ic">⚗</span> Strategy Lab</div>
+          <div class="nav"><span class="ic">▦</span> Agent Console</div>
+          <div class="nav"><span class="ic">◷</span> Jobs</div>
+          <div class="nav-group">Account</div>
+          <div class="nav active"><span class="ic">⇄</span> Integrations</div>
+          <div class="nav"><span class="ic">◐</span> LLM Providers</div>
+          <div class="nav"><span class="ic">◔</span> Profile</div>
+        </aside>
+        <main class="main">
+          <div class="ihero">
+            <div>
+              <h1>Integrations</h1>
+              <p>Connect external services so your agents can sign in, post updates, and pull metrics on your behalf.</p>
+            </div>
+            <div class="stats">
+              <div class="pill"><span class="v">3<s>/</s>5</span><span class="l">Connected</span></div>
+              <div class="pill muted"><span class="v">2</span><span class="l">Pending setup</span></div>
+            </div>
+          </div>
+
+          <div class="igrid">
+            <!-- Google -->
+            <article class="card">
+              <div class="chead">
+                <div class="brandrow"><div class="cicon gg">◔</div><div><h3 class="ctitle">Google account</h3><p class="ctag">Shared browser sign-in</p></div></div>
+                <span class="chip ok">✓ Saved</span>
+              </div>
+              <p class="summary">One encrypted Google login every <b>Sign in with Google</b> integration reuses.</p>
+              <div class="actions"><button class="btn btn-primary"><span class="ic">⚙</span> Manage</button></div>
+            </article>
+            <!-- Slack -->
+            <article class="card">
+              <div class="chead">
+                <div class="brandrow"><div class="cicon sl">#</div><div><h3 class="ctitle">Slack</h3><p class="ctag">acme-eng workspace</p></div></div>
+                <span class="chip ok">✓ Connected</span>
+              </div>
+              <p class="summary">Post agent updates, open questions, and assistant replies to your channels.</p>
+              <div class="actions"><button class="btn btn-primary"><span class="ic">⚙</span> Manage</button></div>
+            </article>
+            <!-- GitHub -->
+            <article class="card">
+              <div class="chead">
+                <div class="brandrow"><div class="cicon gh">&lt;/&gt;</div><div><h3 class="ctitle">GitHub</h3><p class="ctag">acme/widgets</p></div></div>
+                <span class="chip ok">✓ Connected</span>
+              </div>
+              <p class="summary">Let the <b>Coding Team</b> pick up issues and deliver draft PRs autonomously.</p>
+              <div class="actions"><button class="btn btn-primary"><span class="ic">⚙</span> Manage</button></div>
+            </article>
+            <!-- TradingView (target, collapsed, not configured) -->
+            <article class="card">
+              <div class="chead">
+                <div class="brandrow"><div class="cicon tv">📈</div><div><h3 class="ctitle">TradingView</h3><p class="ctag">Strategy Lab market data (MCP)</p></div></div>
+                <span class="chip neutral">Not configured</span>
+              </div>
+              <p class="summary">Connect a <b>TradingView MCP</b> server so the <b>Strategy Lab</b> pulls OHLCV price data from TradingView before falling back to the free public providers.</p>
+              <div class="actions"><button class="btn btn-primary"><span class="ic">⚙</span> Configure</button></div>
+            </article>
+          </div>
+          <p class="caption">Clicking <b>Configure</b> expands the card inline (Screen 2) — the grid never navigates away.</p>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- SCREEN 2 — TradingView card expanded with config form        -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div class="screen">
+    <div class="screen-label">
+      <span class="n">2</span>
+      <div>
+        <h2>Configure TradingView MCP — expanded panel <span style="color:var(--kh-accent-text)">(satisfies Requirement 1)</span></h2>
+        <p>The card expands to full width in place, revealing the MCP configuration form.</p>
+      </div>
+    </div>
+
+    <div class="frame">
+      <div class="frame-bar">
+        <div class="tl"><i></i><i></i><i></i></div>
+        <div class="url">khala.app<b>/integrations</b></div>
+      </div>
+      <div class="app">
+        <aside class="sidebar">
+          <div class="brand"><span class="logo">◈</span> Khala</div>
+          <div class="nav-group">Workspace</div>
+          <div class="nav"><span class="ic">⚗</span> Strategy Lab</div>
+          <div class="nav"><span class="ic">▦</span> Agent Console</div>
+          <div class="nav"><span class="ic">◷</span> Jobs</div>
+          <div class="nav-group">Account</div>
+          <div class="nav active"><span class="ic">⇄</span> Integrations</div>
+          <div class="nav"><span class="ic">◐</span> LLM Providers</div>
+          <div class="nav"><span class="ic">◔</span> Profile</div>
+        </aside>
+        <main class="main">
+          <div class="igrid">
+            <article class="card expanded">
+              <div class="chead">
+                <div class="brandrow"><div class="cicon tv">📈</div><div><h3 class="ctitle">TradingView</h3><p class="ctag">Strategy Lab market data (MCP)</p></div></div>
+                <span class="chip neutral">Not configured</span>
+              </div>
+              <p class="summary">Connect a <b>TradingView MCP</b> server so the <b>Strategy Lab</b> pulls OHLCV price data from TradingView before falling back to the free public providers.</p>
+              <div class="actions">
+                <button class="btn btn-primary"><span class="ic">▲</span> Hide settings</button>
+              </div>
+
+              <div class="cbody">
+                <p class="formhint">Enter the URL of your <b>TradingView MCP server</b> and an optional bearer token. The Strategy Lab calls the MCP <code>get_ohlcv</code> tool to fetch price bars.</p>
+
+                <div class="field">
+                  <label>MCP server URL</label>
+                  <div class="input ph">https://your-tradingview-mcp.example.com/mcp</div>
+                  <span class="fnote">Streamable-HTTP JSON-RPC endpoint of the TradingView MCP server.</span>
+                </div>
+
+                <div class="field">
+                  <label>Auth token (optional)</label>
+                  <div class="input ph">••••••••</div>
+                  <span class="fnote">Sent as a Bearer token to the MCP server. Stored encrypted.</span>
+                </div>
+
+                <div class="field">
+                  <label>OHLCV tool name (optional)</label>
+                  <div class="input">get_ohlcv</div>
+                  <span class="fnote">MCP tool the Strategy Lab calls for price bars. Defaults to <code>get_ohlcv</code>.</span>
+                </div>
+
+                <div class="toggle-row"><span class="switch off"></span><span>Enable TradingView data source</span></div>
+
+                <div class="form-actions">
+                  <button class="btn btn-primary"><span class="ic">✓</span> Save TradingView settings</button>
+                  <button class="btn btn-ghost">Test connection</button>
+                </div>
+              </div>
+            </article>
+          </div>
+          <p class="caption">After saving with the toggle on, the status chip flips to <span style="color:var(--kh-success)">✓&nbsp;Connected</span> and a <b>Disconnect</b> button appears (Screen 4).</p>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- SCREEN 3 — Strategy Lab with data-source notice → link       -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div class="screen" id="screen3">
+    <div class="screen-label">
+      <span class="n">3</span>
+      <div>
+        <h2>Strategy Lab — data-source notice links to Integrations</h2>
+        <p>A dismissible banner tells the user their backtests are on free public data and offers a one-click jump to configure TradingView.</p>
+      </div>
+    </div>
+
+    <div class="frame">
+      <div class="frame-bar">
+        <div class="tl"><i></i><i></i><i></i></div>
+        <div class="url">khala.app<b>/strategy-lab</b></div>
+      </div>
+      <div class="app">
+        <aside class="sidebar">
+          <div class="brand"><span class="logo">◈</span> Khala</div>
+          <div class="nav-group">Workspace</div>
+          <div class="nav active"><span class="ic">⚗</span> Strategy Lab</div>
+          <div class="nav"><span class="ic">▦</span> Agent Console</div>
+          <div class="nav"><span class="ic">◷</span> Jobs</div>
+          <div class="nav-group">Account</div>
+          <div class="nav"><span class="ic">⇄</span> Integrations</div>
+          <div class="nav"><span class="ic">◐</span> LLM Providers</div>
+          <div class="nav"><span class="ic">◔</span> Profile</div>
+        </aside>
+        <main class="main">
+          <div class="lab-head">
+            <div class="lab-title">
+              <span class="sci">⚗</span>
+              <div><h1>Strategy Lab</h1><p>Autonomous swing trading strategy ideation, backtesting, and analysis</p></div>
+            </div>
+            <div class="run">
+              <div class="mini"><label>Strategies / batch</label><b>3</b></div>
+              <div class="mini"><label>Batches</label><b>1</b></div>
+              <button class="btn btn-primary"><span class="ic">✦</span> Run New Strategy</button>
+            </div>
+          </div>
+
+          <!-- The load-bearing element for Requirement 2 -->
+          <div class="ds-notice warn">
+            <span class="ic">📈</span>
+            <div class="txt">
+              <b>Backtests are using free public market data</b>
+              <span>Connect a TradingView MCP server for higher-fidelity OHLCV price bars.</span>
+            </div>
+            <a class="btn btn-primary cta" href="#screen4">Configure TradingView →</a>
+          </div>
+
+          <div class="catrow">
+            <span class="catlbl">▤ Categories</span>
+            <div class="tgroup">
+              <span class="tg on">◆ Equities</span>
+              <span class="tg on">₿ Crypto</span>
+              <span class="tg">⛁ Commodities</span>
+              <span class="tg">$ Forex</span>
+            </div>
+          </div>
+
+          <div class="labcards">
+            <div class="labcard win">
+              <div class="lc-av win">▲</div>
+              <div class="lc-txt"><b>Equities — Momentum breakout above 50-day high with volume confirmation</b><span>Jun 28, 2026 · strat_a91f</span></div>
+              <div class="lc-metrics">
+                <div class="lc-m"><b class="pos">+18.4%</b><span>Return pa</span></div>
+                <div class="lc-m"><b>1.62</b><span>Sharpe</span></div>
+                <div class="lc-m"><b class="neg">-9.1%</b><span>Max DD</span></div>
+              </div>
+            </div>
+            <div class="labcard lose">
+              <div class="lc-av lose">▼</div>
+              <div class="lc-txt"><b>Crypto — Mean-reversion on RSI(14) oversold with trailing stop</b><span>Jun 27, 2026 · strat_7c30</span></div>
+              <div class="lc-metrics">
+                <div class="lc-m"><b class="neg">-4.2%</b><span>Return pa</span></div>
+                <div class="lc-m"><b>0.31</b><span>Sharpe</span></div>
+                <div class="lc-m"><b class="neg">-22.7%</b><span>Max DD</span></div>
+              </div>
+            </div>
+          </div>
+          <p class="caption">The notice is the entry point for Requirement 2 — the link carries a <code>?focus=tradingview</code> query param to Integrations.</p>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- SCREEN 4 — Integrations arrived-from-lab, TV panel in focus   -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div class="screen" id="screen4">
+    <div class="screen-label">
+      <span class="n">4</span>
+      <div>
+        <h2>Landed on Integrations — TradingView panel in focus <span style="color:var(--kh-accent-text)">(satisfies Requirement 2)</span></h2>
+        <p>Deep-linked with <code style="font-family:var(--mono)">?focus=tradingview</code>: the page scrolls the card into view, expands it, and rings it with the accent glow. A context banner shows where the user came from.</p>
+      </div>
+    </div>
+
+    <div class="frame">
+      <div class="frame-bar">
+        <div class="tl"><i></i><i></i><i></i></div>
+        <div class="url">khala.app<b>/integrations?focus=tradingview</b></div>
+      </div>
+      <div class="app">
+        <aside class="sidebar">
+          <div class="brand"><span class="logo">◈</span> Khala</div>
+          <div class="nav-group">Workspace</div>
+          <div class="nav"><span class="ic">⚗</span> Strategy Lab</div>
+          <div class="nav"><span class="ic">▦</span> Agent Console</div>
+          <div class="nav"><span class="ic">◷</span> Jobs</div>
+          <div class="nav-group">Account</div>
+          <div class="nav active"><span class="ic">⇄</span> Integrations</div>
+          <div class="nav"><span class="ic">◐</span> LLM Providers</div>
+          <div class="nav"><span class="ic">◔</span> Profile</div>
+        </aside>
+        <main class="main">
+          <div class="ctxbanner">
+            <span class="ic">⚗</span>
+            <span>You came from the <b>Strategy Lab</b> to connect market data. Configure the TradingView MCP server below.</span>
+            <a href="#screen3">← Back to Strategy Lab</a>
+          </div>
+
+          <div class="igrid">
+            <!-- focused + expanded target -->
+            <article class="card expanded focus">
+              <div class="chead">
+                <div class="brandrow"><div class="cicon tv">📈</div><div><h3 class="ctitle">TradingView</h3><p class="ctag">Strategy Lab market data (MCP)</p></div></div>
+                <span class="chip ok">✓ Connected</span>
+              </div>
+              <p class="summary">Connect a <b>TradingView MCP</b> server so the <b>Strategy Lab</b> pulls OHLCV price data from TradingView before falling back to the free public providers.</p>
+              <div class="actions">
+                <button class="btn btn-primary"><span class="ic">▲</span> Hide settings</button>
+                <button class="btn btn-warn">Disconnect</button>
+              </div>
+
+              <div class="cbody">
+                <p class="formhint">Enter the URL of your <b>TradingView MCP server</b> and an optional bearer token. The Strategy Lab calls the MCP <code>get_ohlcv</code> tool to fetch price bars.</p>
+
+                <div class="field">
+                  <label>MCP server URL</label>
+                  <div class="input">https://tv-mcp.acme.internal/mcp</div>
+                  <span class="fnote">Streamable-HTTP JSON-RPC endpoint of the TradingView MCP server.</span>
+                </div>
+
+                <div class="field">
+                  <label>Auth token (optional)</label>
+                  <div class="input">••••••••••••<span class="tail">Saved</span></div>
+                  <span class="fnote">Sent as a Bearer token to the MCP server. Stored encrypted.</span>
+                </div>
+
+                <div class="field">
+                  <label>OHLCV tool name (optional)</label>
+                  <div class="input">get_ohlcv</div>
+                  <span class="fnote">MCP tool the Strategy Lab calls for price bars. Defaults to <code>get_ohlcv</code>.</span>
+                </div>
+
+                <div class="toggle-row"><span class="switch"></span><span>Enable TradingView data source</span></div>
+
+                <div class="testresult">✓ Connected — the MCP server returned 6 price bar(s) for the probe request.</div>
+
+                <div class="form-actions">
+                  <button class="btn btn-primary"><span class="ic">✓</span> Save TradingView settings</button>
+                  <button class="btn btn-ghost">Test connection</button>
+                </div>
+              </div>
+            </article>
+
+            <!-- other cards recede below the focused panel -->
+            <article class="card">
+              <div class="chead">
+                <div class="brandrow"><div class="cicon gh">&lt;/&gt;</div><div><h3 class="ctitle">GitHub</h3><p class="ctag">acme/widgets</p></div></div>
+                <span class="chip ok">✓ Connected</span>
+              </div>
+              <p class="summary">Let the <b>Coding Team</b> pick up issues and deliver draft PRs autonomously.</p>
+              <div class="actions"><button class="btn btn-primary"><span class="ic">⚙</span> Manage</button></div>
+            </article>
+            <article class="card">
+              <div class="chead">
+                <div class="brandrow"><div class="cicon sl">#</div><div><h3 class="ctitle">Slack</h3><p class="ctag">acme-eng workspace</p></div></div>
+                <span class="chip ok">✓ Connected</span>
+              </div>
+              <p class="summary">Post agent updates, open questions, and assistant replies to your channels.</p>
+              <div class="actions"><button class="btn btn-primary"><span class="ic">⚙</span> Manage</button></div>
+            </article>
+          </div>
+          <p class="caption">The amber ring + auto-expand + context banner together make it unmistakable which panel to act on. Removing the query param (or saving) clears the highlight.</p>
+        </main>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
