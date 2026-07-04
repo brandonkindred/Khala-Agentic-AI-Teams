@@ -3077,3 +3077,29 @@ def test_review_fanout_propagates_llm_attribution(tmp_path, monkeypatch):
         "coding_team_review",
         "coding_team_review",
     ]  # attribution visible in workers
+
+
+def test_single_review_exception_is_contained_and_fails_task_once(tmp_path, monkeypatch):
+    """A sole review whose Tech Lead call raises is contained (converted to an error verdict) and
+    fails just that task once, rather than propagating out of _review_and_merge and aborting."""
+    _patch_git(monkeypatch)
+    worker = StubWorker("a1")
+
+    class _BoomTechLead(StubTechLead):
+        def run_code_review(
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            user_decisions=None,
+            progress_callback=None,
+        ):
+            raise RuntimeError("reviewer blew up")
+
+    swarm, graph = _make_swarm(tmp_path, _BoomTechLead(approved=True), [worker])
+    _seed_in_review(graph, [worker])
+
+    swarm._review_and_merge(lambda **kw: None)  # must not raise
+
+    assert graph.get_task("t1").status == TaskStatus.FAILED

@@ -2220,28 +2220,28 @@ class CodingTeamSwarm:
         return [line_by_key[key] for key in order]
 
     def _compute_review(
-        self, task: Task, *, live_progress: bool, update_fn: Callable
+        self, task: Task, progress_callback: Any = None
     ) -> tuple[str, Dict[str, Any]]:
         """Collect the branch diff and run the Tech Lead review for one IN_REVIEW task.
 
-        This is the read-only half of review: it computes the branch diff (git object-DB reads) and
-        makes the review LLM call, mutating neither the working tree nor the task graph — so it is
-        safe to run concurrently across tasks. The merge/revision decision is applied separately and
-        serially by ``_apply_review_decision``.
+        The read-only half of review: it computes the branch diff (git object-DB reads) and makes the
+        review LLM call, mutating neither the working tree nor the task graph — so it is safe to run
+        concurrently across tasks. The merge/revision decision is applied separately and serially by
+        ``_apply_review_decision``; the caller owns any progress-bar lifecycle.
 
         Preconditions:
             - ``task`` is IN_REVIEW with a recorded feature branch (or the default ``feature/{id}``).
-            - When ``live_progress`` is True, ``update_fn`` is the job progress callback; when False
-              (the concurrent fan-out) no per-task progress is emitted, so ``update_fn`` is unused.
+            - ``progress_callback`` is None (the concurrent fan-out, which suppresses per-task
+              progress so concurrent bridges don't race the one sub-progress slot) or a
+              ``(step, detail, fraction)`` sink for the sole-review live bar.
         Postconditions:
             - Returns ``(diff, review)`` where ``review`` has the ``run_code_review`` shape
-              (``approved``/``error``/``reason``/``requested_changes``). In the concurrent path a
-              diff-prep or review exception is converted into an ``error=True`` review (with an empty
-              diff) so it fails just this task once rather than aborting the whole round; no graph or
-              git state is changed here.
+              (``approved``/``error``/``reason``/``requested_changes``). Any diff-prep or review
+              exception is contained and converted into an ``error=True`` review (with an empty diff),
+              so one task's failure fails only that task once (via ``_apply_review_decision``) and
+              never aborts the round; no graph or git state is changed here.
         """
-
-        def _run(progress_callback: Any) -> tuple[str, Dict[str, Any]]:
+        try:
             from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
 
             branch = _feature_branch_name(task)
@@ -2257,34 +2257,6 @@ class CodingTeamSwarm:
                 progress_callback=progress_callback,
             )
             return diff, review
-
-        if live_progress:
-            # Sole review this round: keep the live per-task sub-progress bar. Bridge the Tech Lead's
-            # attempt/retry reports into the job record so the UI shows which attempt is running
-            # (silent retries look like a hang). Everything that can raise sits inside the try so the
-            # finally clear runs on every exit path; an activity entry written before the try would
-            # survive an exception.
-            tl_bridge = ActivityBridge(
-                update_fn,
-                agent="tech_lead_review",
-                label="Tech Lead reviewing",
-                task_id=task.id,
-                task_title=task.title,
-            )
-            try:
-                tl_bridge("preparing", "collecting branch diff", 0.0)
-                return _run(tl_bridge)
-            finally:
-                # Clear on every exit path so a stale sub-progress bar never lingers.
-                tl_bridge.clear()
-
-        # Concurrent fan-out: suppress the per-task progress bridge (concurrent bridges would race the
-        # single job-record sub-progress bar). run_code_review's result is identical with or without a
-        # callback. Contain every exception (the whole body, including the git import and branch/diff
-        # prep) so a worker never raises out of the fan-out and aborts the round's other reviews; a
-        # converted error review fails this task once in _apply_review_decision.
-        try:
-            return _run(None)
         except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
             logger.warning("Tech Lead review preparation failed for %s: %s", task.id, e)
             return "", {
@@ -2355,25 +2327,50 @@ class CodingTeamSwarm:
 
         # Collect every task's (diff, review) first, then apply all decisions through one serial loop
         # (git writes + graph mutations stay single-threaded, in original order). A sole review runs
-        # inline so it keeps its live per-task progress bar; two or more fan out via parallel_map,
-        # which suppresses that bar (concurrent bridges would race the one sub-progress slot) but
-        # copies each worker's LLM-attribution contextvars and preserves input order. _compute_review
-        # contains its own exceptions, so no worker raises out of the pool.
+        # inline with its live per-task progress bar; two or more fan out via parallel_map, which
+        # suppresses that bar (concurrent bridges would race the one sub-progress slot) but copies each
+        # worker's LLM-attribution contextvars and preserves input order. _compute_review contains its
+        # own exceptions, so no worker raises out of the pool.
         if len(in_review) == 1:
-            results = [self._compute_review(in_review[0], live_progress=True, update_fn=update_fn)]
+            results = [self._review_with_live_progress(in_review[0], update_fn)]
         else:
             from shared_concurrency import parallel_map
 
             update_fn(status_text=f"Tech Lead reviewing {len(in_review)} task(s)")
             results = parallel_map(
                 in_review,
-                lambda task: self._compute_review(task, live_progress=False, update_fn=update_fn),
+                self._compute_review,
                 max_workers=_review_concurrency(),
                 skip_none=False,
             )
 
         for task, (diff, review) in zip(in_review, results):
             self._apply_review_decision(task, diff, review)
+
+    def _review_with_live_progress(
+        self, task: Task, update_fn: Callable
+    ) -> tuple[str, Dict[str, Any]]:
+        """Review one task while streaming the Tech Lead's attempt/retry reports to the job record.
+
+        Used for the sole-review case, where a live per-task sub-progress bar is safe (no concurrent
+        writers). Bridging the reports keeps silent LLM retries from looking like a hang.
+
+        Postconditions:
+            - Returns ``_compute_review(task, ...)``; the progress activity is cleared on every exit
+              path (success or failure) so a stale sub-progress bar never lingers into the next round.
+        """
+        tl_bridge = ActivityBridge(
+            update_fn,
+            agent="tech_lead_review",
+            label="Tech Lead reviewing",
+            task_id=task.id,
+            task_title=task.title,
+        )
+        try:
+            tl_bridge("preparing", "collecting branch diff", 0.0)
+            return self._compute_review(task, tl_bridge)
+        finally:
+            tl_bridge.clear()
 
     def _request_revision(
         self, task: Task, review: Dict[str, Any], diff: Optional[str] = None
