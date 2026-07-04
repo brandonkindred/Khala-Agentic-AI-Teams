@@ -4,6 +4,12 @@ import { MatIconModule } from '@angular/material/icon';
 /** Severity of a banner; drives its color, default icon, and live-region role. */
 export type InlineBannerVariant = 'error' | 'warning' | 'success' | 'info';
 
+/**
+ * Visual form: a compact `strip` (left accent only) or a fully-bordered `card`
+ * (the `app-error-message` look). Both share the same colors, icon, and a11y.
+ */
+export type InlineBannerLayout = 'strip' | 'card';
+
 /** Default Material icon shown for each variant when no `icon` override is given. */
 const DEFAULT_ICONS: Record<InlineBannerVariant, string> = {
   error: 'error_outline',
@@ -50,8 +56,27 @@ export class InlineBannerComponent {
   /** Plain-text message rendered inside the live region. */
   readonly message = input('');
 
+  /** Optional lead-in heading rendered above the message (block `<strong>`). */
+  readonly title = input('');
+
+  /** Visual form — compact `strip` (default) or fully-bordered `card`. */
+  readonly layout = input<InlineBannerLayout>('strip');
+
   /** Optional Material icon name; falls back to the per-variant default. */
   readonly icon = input<string | undefined>(undefined);
+
+  /**
+   * Host class list: base + severity modifier, plus the `card` modifier when
+   * that layout is selected.
+   *
+   * Preconditions: `variant()`/`layout()` are documented enum values.
+   * Postconditions: a space-joined class string that always includes
+   * `kh-banner` and `kh-banner--{variant}`.
+   */
+  readonly cssClasses = computed(() => {
+    const base = `kh-banner kh-banner--${this.variant()}`;
+    return this.layout() === 'card' ? `${base} kh-banner--card` : base;
+  });
 
   /**
    * Optional live-region override that downgrades announcement urgency below

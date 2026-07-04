@@ -103,6 +103,32 @@ code, pre {
   font-size: var(--kh-text-sm);
 }
 
+// Rich content inside an app-inline-banner message (`.kh-banner__msg`, which
+// only exists inside that component). Kept in the global sheet — rather than the
+// component's encapsulated styles — so it also reaches Angular-projected
+// `[banner-message]` content without the deprecated `::ng-deep`.
+.kh-banner__msg {
+  code {
+    background: var(--kh-surface-3);
+    padding: 0.05em 0.35em;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+
+  // A lead-in `<strong>` (the component's own `title`, or a projected heading)
+  // is laid out on its own line; `:first-child` leaves mid-sentence emphasis inline.
+  strong:first-child {
+    display: block;
+    margin-bottom: var(--kh-space-1);
+  }
+
+  // Banner paragraphs sit flush — the banner padding provides the spacing.
+  p {
+    margin: 0;
+    line-height: 1.4;
+  }
+}
+
 a {
   color: var(--kh-accent-text);
   text-decoration: none;

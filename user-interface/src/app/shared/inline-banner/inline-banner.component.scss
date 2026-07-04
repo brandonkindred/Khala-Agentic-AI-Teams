@@ -25,34 +25,19 @@
   flex: 1 1 auto;
   min-width: 0;
   color: var(--kh-text-primary);
+  // Rich/projected message content (inline `<code>`, a lead-in `<strong>`
+  // heading, body `<p>`) is styled globally in `styles.scss` under
+  // `.kh-banner__msg` — a global sheet reaches Angular-projected content without
+  // the deprecated `::ng-deep`.
+}
 
-  // Projected `[banner-message]` content is in the host's encapsulation, so
-  // ::ng-deep is required to give inline `<code>` and the lead-in `<strong>` /
-  // body `<p>` message idiom the compact treatment the per-feature banners used
-  // to hand-roll — centralized here once.
-  ::ng-deep {
-    code {
-      background: var(--kh-surface-3);
-      padding: 0.05em 0.35em;
-      border-radius: 4px;
-      font-size: 0.85em;
-    }
-
-    // A `<strong>` at the start of a banner message is a lead-in heading (same
-    // convention as app-error-message), so lay it out on its own line. Scoped to
-    // the first child so inline mid-sentence `<strong>` emphasis stays inline.
-    strong:first-child {
-      display: block;
-      margin-bottom: var(--kh-space-1);
-    }
-
-    // Banner paragraphs sit flush — the banner's own padding provides spacing,
-    // so drop the browser-default paragraph margins.
-    p {
-      margin: 0;
-      line-height: 1.4;
-    }
-  }
+// Card layout: a fully-bordered container (the app-error-message look). The
+// severity left accent from the @each block below is preserved by only setting
+// the other three sides here.
+.kh-banner--card {
+  border-top: 1px solid var(--kh-border-subtle);
+  border-right: 1px solid var(--kh-border-subtle);
+  border-bottom: 1px solid var(--kh-border-subtle);
 }
 
 // Interactive controls (Retry, dismiss, …) projected as siblings of the live

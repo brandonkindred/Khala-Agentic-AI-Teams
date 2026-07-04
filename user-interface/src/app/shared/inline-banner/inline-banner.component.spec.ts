@@ -32,6 +32,23 @@ describe('InlineBannerComponent', () => {
     expect(region.textContent).toContain('Something failed');
   });
 
+  it('renders a lead-in title as a <strong> heading inside the live region', () => {
+    fixture.componentRef.setInput('title', 'Blocked');
+    fixture.componentRef.setInput('message', 'Details here');
+    fixture.detectChanges();
+    const region = fixture.nativeElement.querySelector('.kh-banner__msg') as HTMLElement;
+    expect(region.querySelector('strong')?.textContent).toContain('Blocked');
+    expect(region.textContent).toContain('Details here');
+  });
+
+  it('defaults to the strip layout and adds the card modifier only when requested', () => {
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.kh-banner--card')).toBeNull();
+    fixture.componentRef.setInput('layout', 'card');
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.kh-banner.kh-banner--card')).toBeTruthy();
+  });
+
   // One assertion set per variant: correct modifier class, default icon, and the
   // assertive/polite live-region role the variant maps to.
   const cases: { variant: InlineBannerVariant; icon: string; role: 'alert' | 'status' }[] = [
