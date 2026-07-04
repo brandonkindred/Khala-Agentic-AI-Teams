@@ -517,14 +517,15 @@ services:
     container_name: khala-investment-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
       TEAM_MODULE: investment_team.api.main
       TEAM_NAME: investment_team
       TEAM_PORT: "8100"
-      TEAM_TEMPORAL_WORKER_MODULE: ""
-      TEAM_TEMPORAL_WORKER_FUNC: ""
+      TEAM_TEMPORAL_WORKER_MODULE: investment_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_investment_temporal_worker_thread
       # These two are already inherited from *team-env-base; set explicitly here so
       # the footprint knobs are self-evident on the OOM-prone service this PR
       # targets (and to make the values greppable in the investment block itself).
