@@ -89,8 +89,11 @@ class _StubClient:
         return _Resp(200, self._payload)
 
 
-def _adapter() -> AgenticTeamAdapter:
-    return AgenticTeamAdapter("t1", process_id="p1")
+def _adapter(spec: str = "# SPEC BODY") -> AgenticTeamAdapter:
+    # Seed the spec: start_build sources initial_input from the adapter's own
+    # spec (the repo_path argument is the SE-only Protocol handoff, ignored here),
+    # so a spec must be present for the create-run body to validate.
+    return AgenticTeamAdapter("t1", process_id="p1", spec=spec)
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +213,9 @@ def test_start_build_body_validates_against_real_request_model():
     """The create-run body the adapter POSTs is exactly what
     StartPipelineRunRequest accepts — a rename or new constraint fails here."""
     client = _StubClient({"run_id": "r1"})
-    run_id = _adapter().start_build(client, "# SPEC BODY")
+    # The spec seeded on the adapter (not the ignored repo_path arg) is what the
+    # adapter POSTs as initial_input.
+    run_id = _adapter().start_build(client, "ignored-repo-path")
     assert run_id == "r1"
 
     body = client.posts[0]["json"]

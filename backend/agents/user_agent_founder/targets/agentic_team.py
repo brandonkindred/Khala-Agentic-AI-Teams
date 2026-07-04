@@ -8,11 +8,13 @@ two shapes onto the Protocol so the orchestrator drives an agentic team with no
 orchestrator changes:
 
 * **Analysis is a no-op pass-through.** ``start_from_spec`` records the persona
-  spec; ``poll_analysis`` reports immediate completion and hands the spec
-  forward as the phase's ``repo_path`` output (the value the Protocol threads
-  from analysis into build). This carries the spec through the persisted run row
-  so a resumed run still has it — the orchestrator stores ``repo_path`` and, on
-  resume, feeds it straight to ``start_build``.
+  spec on the adapter; ``poll_analysis`` reports immediate completion carrying no
+  phase output. The spec reaches the build phase via the adapter's ``self._spec``
+  — set live by ``start_from_spec`` or, on a resumed run where that call is
+  skipped, seeded at construction from the persisted ``spec_content`` column. The
+  Protocol's ``repo_path`` analysis→build slot is *not* used here (it stays
+  ``None``/NULL for agentic runs — it means a real filesystem path, which an
+  agentic team has none of).
 * **Build is the test-pipeline run.** ``start_build`` POSTs the spec as the
   pipeline's ``initial_input`` and returns the pipeline ``run_id``. ``poll_build``
   maps the pipeline status onto the founder poll contract — a
@@ -124,27 +126,26 @@ class AgenticTeamAdapter:
     def start_from_spec(self, client: httpx.Client, project_name: str, spec: str) -> str:
         """No-op: an agentic team has no separate analysis phase.
 
-        Postconditions: returns a sentinel job id; performs no HTTP call. The
-            spec is surfaced to the build phase via :meth:`poll_analysis`'s
-            ``repo_path``.
+        Postconditions: captures ``spec`` on ``self._spec`` for the build phase;
+            returns a sentinel job id; performs no HTTP call.
         """
-        # Live path: capture the spec so poll_analysis hands it to the build
-        # phase. (On resume start_from_spec is skipped — the spec instead comes
-        # from the constructor seed, fed from the persisted run row.)
+        # Live path: capture the spec so start_build sends it as the pipeline's
+        # initial_input. (On resume start_from_spec is skipped — the spec instead
+        # comes from the constructor seed, fed from the persisted run row's
+        # spec_content.)
         self._spec = spec
         return _ANALYSIS_NOOP_JOB_ID
 
     def poll_analysis(self, client: httpx.Client, job_id: str) -> dict[str, Any]:
-        """Report immediate completion, passing the spec forward as ``repo_path``.
+        """Report immediate completion with no phase output.
 
-        Postconditions: returns ``{"status": "completed", "repo_path": <spec>}``;
-            performs no HTTP call. The orchestrator persists ``repo_path`` and
-            feeds it to :meth:`start_build`. The spec comes from
-            :meth:`start_from_spec` (live) or the constructor seed (resume), so a
-            run resumed in the window between the sentinel ``analysis_job_id``
-            being stored and ``repo_path`` being written still carries it.
+        Postconditions: returns ``{"status": "completed"}``; performs no HTTP
+            call and carries no ``repo_path`` (the spec reaches build via
+            ``self._spec``, not the Protocol's analysis→build slot). The
+            orchestrator treats the phase as succeeded and leaves ``repo_path``
+            NULL for this run.
         """
-        return {"status": "completed", "repo_path": self._spec}
+        return {"status": "completed"}
 
     def submit_analysis_answers(
         self, client: httpx.Client, job_id: str, answers: list[dict[str, Any]]
@@ -157,24 +158,36 @@ class AgenticTeamAdapter:
     def start_build(self, client: httpx.Client, repo_path: str) -> str:
         """Start a test-pipeline run for the team's process. Returns the run id.
 
-        ``repo_path`` carries the persona spec (see :meth:`poll_analysis`); it is
-        sent as the pipeline ``initial_input``.
+        The persona spec sent as the pipeline ``initial_input`` comes from
+        ``self._spec`` (set live by :meth:`start_from_spec`, or seeded at
+        construction from the persisted ``spec_content`` on resume). The
+        ``repo_path`` argument is the Protocol's analysis→build handoff and is
+        meaningful only to the software-engineering target; it is ``None`` for an
+        agentic run and is intentionally ignored here.
 
-        Preconditions: ``self._process_id`` is set.
+        Preconditions: ``self._process_id`` and ``self._spec`` are both non-empty.
         Postconditions: a pipeline run is created for ``(team, process)`` and its
             non-empty ``run_id`` is returned. Raises :class:`StartFailed` if
-            ``process_id`` is missing, a transport error occurs (connect/timeout/
-            DNS), the create endpoint returns an HTTP error, or the response
-            carries no ``run_id`` (so a malformed response fails fast instead of
-            polling an empty job id to timeout). Never lets a raw transport
-            exception escape — the orchestrator marks the run failed cleanly.
+            ``process_id`` or the spec is missing, a transport error occurs
+            (connect/timeout/DNS), the create endpoint returns an HTTP error, or
+            the response carries no ``run_id`` (so a malformed response fails fast
+            instead of polling an empty job id to timeout). Never lets a raw
+            transport exception escape — the orchestrator marks the run failed
+            cleanly.
         """
         if not self._process_id:
             raise StartFailed(400, "AgenticTeamAdapter: process_id is required to start a run")
+        # Fail fast on an empty spec rather than posting an empty initial_input
+        # that the provisioning endpoint would reject with an opaque 422
+        # (StartPipelineRunRequest enforces min_length=1). In practice the spec is
+        # always populated (Phase 1 writes spec_content before Phase 2), so an
+        # empty value signals a malformed run that should fail with a clear cause.
+        if not self._spec:
+            raise StartFailed(400, "AgenticTeamAdapter: persona spec is required to start a run")
         try:
             resp = client.post(
                 self._url("/test-pipeline/runs"),
-                json={"process_id": self._process_id, "initial_input": repo_path},
+                json={"process_id": self._process_id, "initial_input": self._spec},
                 timeout=HTTP_TIMEOUT,
             )
         except httpx.RequestError as exc:
