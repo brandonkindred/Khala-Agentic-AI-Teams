@@ -110,21 +110,16 @@
 
   <!-- Error banner -->
   @if (error) {
-    <div class="error-banner">
-      <mat-icon>error_outline</mat-icon>
-      <span>{{ error }}</span>
-    </div>
+    <app-inline-banner variant="error" [message]="error" />
   }
 
   <!-- Non-fatal completion warning -->
   @if (completionWarning) {
-    <div class="warning-banner">
-      <mat-icon>warning_amber</mat-icon>
-      <span>{{ completionWarning }}</span>
+    <app-inline-banner variant="warning" [message]="completionWarning">
       <button mat-icon-button (click)="completionWarning = null" aria-label="Dismiss warning">
         <mat-icon>close</mat-icon>
       </button>
-    </div>
+    </app-inline-banner>
   }
 
   <!-- In-progress tracking -->

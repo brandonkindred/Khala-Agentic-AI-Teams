@@ -93,23 +93,6 @@
     }
   }
 
-  &__banner {
-    display: flex;
-    gap: 12px;
-    padding: 12px 16px;
-    background: var(--kh-warning-subtle);
-    color: var(--kh-warning);
-    border-radius: 8px;
-    align-items: flex-start;
-
-    mat-icon {
-      flex-shrink: 0;
-    }
-    p {
-      margin: 4px 0 0;
-    }
-  }
-
   &__body {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -179,20 +162,10 @@
     font-size: 0.85rem;
   }
 
-  &__error-banner {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px 16px;
-    background: var(--kh-error-subtle);
-    color: var(--kh-error);
-    border-radius: 8px;
-
-    pre {
-      margin: 0;
-      font-size: 0.8rem;
-      white-space: pre-wrap;
-    }
+  &__error-pre {
+    margin: 0;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
   }
 
   &__output {

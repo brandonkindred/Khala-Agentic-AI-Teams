@@ -31,6 +31,7 @@ import type {
   AgentNodeStatus,
 } from '../../models/deepthought.model';
 import { DECOMPOSITION_STRATEGIES } from '../../models/deepthought.model';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 
 @Component({
   selector: 'app-deepthought-dashboard',
@@ -48,6 +49,7 @@ import { DECOMPOSITION_STRATEGIES } from '../../models/deepthought.model';
     MatSliderModule,
     MatSelectModule,
     DashboardShellComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './deepthought-dashboard.component.html',
   styleUrl: './deepthought-dashboard.component.scss',

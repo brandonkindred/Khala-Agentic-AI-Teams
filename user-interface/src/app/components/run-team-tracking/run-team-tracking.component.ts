@@ -12,6 +12,7 @@ import { PLANNING_V2_PHASES, CODE_TEAM_PHASES, MICROTASK_PHASES, PRODUCT_ANALYSI
 import { markStatusReceived } from '../../shared/staleness.util';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 
 /** Team display order for swim lanes. */
 const TEAM_ORDER = ['git_setup', 'devops', 'backend-code-v2', 'frontend-code-v2', 'backend', 'frontend'];
@@ -73,6 +74,7 @@ interface FlatWorkTreeNode {
     MatIconModule,
     MatExpansionModule,
     StallWarningComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './run-team-tracking.component.html',
   styleUrl: './run-team-tracking.component.scss',

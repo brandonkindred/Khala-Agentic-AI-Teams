@@ -20,7 +20,7 @@
 
   @if (preview(); as result) {
     @if (result.rationale) {
-      <p class="groom-modal__banner">{{ result.rationale }}</p>
+      <app-inline-banner variant="info" live="off" [message]="result.rationale" />
     }
     @if (result.ranked.length === 0) {
       <p class="groom-modal__empty">No scored items yet for this product.</p>

@@ -151,9 +151,54 @@
     color: var(--kh-text-secondary);
   }
 
+  &__run-title {
+    margin: 0;
+    font-size: var(--kh-text-md);
+    font-weight: 600;
+    color: var(--kh-text-primary);
+  }
+
+  &__run-status {
+    // Status pill: a subtle chip so the humanized state reads as a status, not
+    // body text. Colour still isn't the only signal — the label text carries it.
+    padding: 2px var(--kh-space-2);
+    border-radius: var(--kh-radius-sm);
+    background: var(--kh-surface-2, rgba(0, 0, 0, 0.05));
+    color: var(--kh-text-primary);
+  }
+
+  &__stop {
+    // Push the stop control to the trailing edge of the run-head row.
+    margin-inline-start: auto;
+  }
+
   &__thinking {
     font-style: italic;
     color: var(--kh-accent);
+    // Gentle pulse so the indicator visibly "breathes" during long unattended
+    // runs (perceived-performance cue). Disabled under reduced-motion below.
+    animation: persona-thinking-pulse 1.4s ease-in-out infinite;
+  }
+
+  &__progress {
+    display: flex;
+    flex-direction: column;
+    gap: var(--kh-space-1);
+    margin-top: var(--kh-space-2);
+  }
+
+  &__step-label {
+    font-size: var(--kh-text-xs);
+    color: var(--kh-text-muted);
+  }
+
+  &__step-name {
+    color: var(--kh-text-secondary);
+  }
+
+  &__waiting {
+    margin-inline-start: var(--kh-space-1);
+    color: var(--kh-text-muted);
   }
 
   &__decisions {
@@ -215,5 +260,22 @@
   p {
     margin: 0;
     max-width: 42ch;
+  }
+}
+
+@keyframes persona-thinking-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+// Respect users who prefer reduced motion: keep the indicator legible but still.
+@media (prefers-reduced-motion: reduce) {
+  .persona__thinking {
+    animation: none;
   }
 }
