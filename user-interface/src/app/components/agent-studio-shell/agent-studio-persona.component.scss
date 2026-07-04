@@ -172,19 +172,6 @@
     margin-inline-start: auto;
   }
 
-  // Visually hidden but exposed to assistive tech (SR-only live region).
-  &__sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    margin: -1px;
-    padding: 0;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
-
   &__thinking {
     font-style: italic;
     color: var(--kh-accent);

@@ -137,7 +137,7 @@
                         class="persona__item"
                         [class.is-selected]="selectedPersonaId() === p.id"
                         [attr.aria-pressed]="selectedPersonaId() === p.id"
-                        [disabled]="runLive()"
+                        [disabled]="runInProgress()"
                         (click)="selectPersona(p.id)"
                       >
                         <mat-icon aria-hidden="true">{{ p.icon || 'person' }}</mat-icon>
@@ -159,7 +159,7 @@
                   #processSelect
                   id="persona-process-select"
                   [value]="selectedProcessId() ?? ''"
-                  [disabled]="runLive()"
+                  [disabled]="runInProgress()"
                   (change)="selectProcess(processSelect.value)"
                 >
                   <option value="" disabled>Select a process…</option>
@@ -174,7 +174,7 @@
               <span
                 class="persona__run-btn-wrap"
                 [matTooltip]="'A run is in progress — stop it to start another.'"
-                [matTooltipDisabled]="!runLive()"
+                [matTooltipDisabled]="!runInProgress()"
               >
                 <button
                   mat-flat-button
@@ -185,7 +185,7 @@
                     !selectedPersonaId() ||
                     !selectedProcessId() ||
                     launching() ||
-                    runLive() ||
+                    runInProgress() ||
                     !team() ||
                     teamError()
                   "
@@ -201,13 +201,18 @@
             </div>
           </div>
 
+          <!-- SR-only live region: announces run-state transitions (started /
+               answering / completed / failed / cancelled) so an assistive-tech
+               user driving an unattended run hears changes. Rendered
+               unconditionally (outside the run panel below) and empty until a run
+               exists, so it pre-exists in the DOM — a live region inserted
+               already-populated is commonly NOT announced, which would drop the
+               first ("started") transition. aria-live speaks only on text change,
+               so a steady status isn't re-announced. -->
+          <p class="visually-hidden" role="status" aria-live="polite">{{ runAnnouncement() }}</p>
+
           @if (run(); as r) {
             <section class="persona__run" aria-labelledby="persona-run-title">
-              <!-- SR-only live region: announces run-state transitions (started /
-                   answering / completed / failed / cancelled) so an assistive-tech
-                   user driving an unattended run hears changes. aria-live speaks
-                   only on text change, so a steady status isn't re-announced. -->
-              <p class="persona__sr-only" aria-live="polite">{{ runAnnouncement() }}</p>
               <div class="persona__run-head">
                 <h3 id="persona-run-title" class="persona__run-title">Live run</h3>
                 <span class="persona__run-status">{{ statusLabel(r.status) }}</span>
@@ -224,6 +229,12 @@
                       <span class="persona__waiting">(answering a question)</span>
                     }</span
                   >
+                }
+                <!-- Stop gates on `runInProgress` (founder job live), NOT `runLive`
+                     (which also requires the pipeline live): the founder job stays
+                     cancellable during the ~poll-interval lag after the pipeline
+                     ends, so Stop must remain available then. -->
+                @if (runInProgress()) {
                   <button
                     mat-stroked-button
                     type="button"

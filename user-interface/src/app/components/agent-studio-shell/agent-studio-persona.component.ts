@@ -13,7 +13,7 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { EMPTY, Subscription, catchError, interval, switchMap, timeout } from 'rxjs';
+import { EMPTY, Subscription, catchError, finalize, interval, switchMap, timeout } from 'rxjs';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { AgentStudioStateService } from '../../services/agent-studio-state.service';
@@ -221,9 +221,21 @@ export class AgentStudioPersonaComponent implements OnInit {
   });
 
   /**
-   * The run is genuinely still in flight: a run exists and neither the founder
-   * run nor the pipeline is terminal. Requires `run()` so it is false before any
-   * launch (otherwise the launcher would be disabled with no run in progress).
+   * The **founder job** is still active (a run exists and the founder status is
+   * non-terminal), regardless of the pipeline's state. Gates the *job* controls —
+   * Stop, and the disabled launcher — because the founder run is cancellable and
+   * must not be superseded until it terminates, even during the ~poll-interval
+   * window where the pipeline already ended but the founder status hasn't caught
+   * up. (Contrast `runLive`, which also requires the pipeline to be live and gates
+   * the *progress* display.) Requires `run()` so it is false before any launch.
+   */
+  readonly runInProgress = computed(() => this.run() != null && !this.runTerminal());
+
+  /**
+   * There is live *work to display*: a run exists and neither the founder run nor
+   * the pipeline is terminal. Gates the progress bar + "thinking…" cue, so a
+   * finished/failed pipeline stops rendering as healthy in-progress even while the
+   * founder status lags (see `pipelineTerminal`).
    */
   readonly runLive = computed(
     () => this.run() != null && !this.runTerminal() && !this.pipelineTerminal(),
@@ -550,28 +562,40 @@ export class AgentStudioPersonaComponent implements OnInit {
   }
 
   /**
-   * Cancel the in-flight run via the founder cancel endpoint. No-ops unless a run
-   * is live and no stop is already in flight. The run's own poll confirms the
-   * terminal (cancelled) state and stops polling; until then the button shows
-   * "Stopping…". A failed cancel re-enables the control and surfaces a banner.
+   * Cancel the in-flight founder run via the cancel endpoint. No-ops unless the
+   * founder job is in progress and no stop is already pending. The run's own poll
+   * then reports the terminal (cancelled) state and hides the control.
+   *
+   * Both handlers are scoped to the run that was stopped (`run_id` guard): a late
+   * response from a superseded run's cancel — e.g. a 404/409 from cancelling an
+   * already-finished job after the user launched a new run — must not banner or
+   * reset the *current* run. `finalize` clears `cancelling` when the request ends
+   * (success or failure), so a best-effort/no-op cancel can never leave the Stop
+   * button stuck disabled on "Stopping…".
    */
   stopRun(): void {
     const r = this.run();
-    if (!r || !this.runLive() || this.cancelling()) {
+    if (!r || !this.runInProgress() || this.cancelling()) {
       return;
     }
+    const runId = r.run_id;
     this.cancelling.set(true);
     this.error.set(null);
     this.personaApi
-      .cancelJob(r.run_id)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      // No `next` handler: on success leave `cancelling` true so the button reads
-      // "Stopping…" until the poll reports the terminal state and the control
-      // disappears (runLive → false); startPolling resets the flag for the next run.
+      .cancelJob(runId)
+      .pipe(
+        finalize(() => {
+          if (this.run()?.run_id === runId) {
+            this.cancelling.set(false);
+          }
+        }),
+        takeUntilDestroyed(this.destroyRef),
+      )
       .subscribe({
         error: () => {
-          this.cancelling.set(false);
-          this.error.set('Could not stop the run.');
+          if (this.run()?.run_id === runId) {
+            this.error.set('Could not stop the run.');
+          }
         },
       });
   }

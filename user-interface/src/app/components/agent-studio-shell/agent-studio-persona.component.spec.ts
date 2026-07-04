@@ -1157,6 +1157,8 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.statusLabel('completed')).toBe('Completed');
     // An unmapped status is prettified, never shown raw.
     expect(component.statusLabel('some_new_phase')).toBe('Some new phase');
+    // An empty/absent status degrades to a safe label, never a blank chip.
+    expect(component.statusLabel('')).toBe('Unknown');
     const text = fixture.nativeElement.textContent;
     expect(text).toContain('Running…');
     expect(text).not.toContain('polling_build');
@@ -1168,15 +1170,22 @@ describe('AgentStudioPersonaComponent', () => {
     personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
     component.launch();
     fixture.detectChanges();
-    expect(component.runLive()).toBe(true);
+    expect(component.runInProgress()).toBe(true);
+    // Hold the cancel response pending so the in-flight "Stopping…" is observable.
+    const cancel = new Subject<unknown>();
+    personaApi.cancelJob.mockReturnValue(cancel);
     const stop = fixture.nativeElement.querySelector('.persona__stop');
     expect(stop).toBeTruthy();
     stop.click();
     expect(personaApi.cancelJob).toHaveBeenCalledWith('run-1');
-    // Button reflects the in-flight stop until the poll confirms terminal.
     expect(component.cancelling()).toBe(true);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.persona__stop').textContent).toContain('Stopping…');
+    // finalize clears the in-flight flag when the request ends, so a best-effort
+    // cancel can't leave the button stuck disabled on "Stopping…".
+    cancel.next({});
+    cancel.complete();
+    expect(component.cancelling()).toBe(false);
   });
 
   it('surfaces an error and re-enables Stop when the cancel request fails', () => {
@@ -1188,6 +1197,49 @@ describe('AgentStudioPersonaComponent', () => {
     component.stopRun();
     expect(component.cancelling()).toBe(false);
     expect(component.error()).toContain('Could not stop the run');
+  });
+
+  it('does not banner the current run when a superseded run’s cancel fails late', () => {
+    build();
+    fixture.detectChanges();
+    personaApi.startTest.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-1', status: 'polling_build', decisions: [] }));
+    const cancelA = new Subject<unknown>();
+    personaApi.cancelJob.mockReturnValue(cancelA);
+    component.launch(); // run A
+    component.stopRun(); // cancel A in flight (held pending)
+
+    // Supersede with run B; run() is now run-2.
+    personaApi.startTest.mockReturnValue(of({ job_id: 'run-2', status: 'running', message: '' }));
+    personaApi.getRunStatus.mockReturnValue(of({ run_id: 'run-2', status: 'polling_build', decisions: [] }));
+    component.launch();
+    expect(component.run()?.run_id).toBe('run-2');
+
+    // The stale cancel for run A now fails (e.g. 409 on an already-gone job).
+    cancelA.error(new Error('409'));
+    // It must NOT paint an error over the healthy run B, nor reset its state.
+    expect(component.error()).toBeNull();
+  });
+
+  it('keeps Stop available and the launcher locked during the founder-status lag after the pipeline ends', () => {
+    build({ team: TEAM_WITH_STEPS });
+    fixture.detectChanges();
+    // Founder job still polling…
+    personaApi.getRunStatus.mockReturnValue(of(statusWithJob({ status: 'polling_build' })));
+    // …but the pipeline has already terminated (failed).
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2, { status: 'failed' })));
+    component.launch();
+    fixture.detectChanges();
+    // Progress/thinking hidden (pipeline dead)…
+    expect(component.runLive()).toBe(false);
+    expect(fixture.nativeElement.textContent).not.toContain('persona is thinking…');
+    // …but the founder job is still cancellable: Stop stays, launcher stays locked
+    // (so a new run can't orphan the still-running founder job).
+    expect(component.runInProgress()).toBe(true);
+    expect(fixture.nativeElement.querySelector('.persona__stop')).toBeTruthy();
+    expect((fixture.nativeElement.querySelector('.persona__run-btn') as HTMLButtonElement).disabled).toBe(
+      true,
+    );
   });
 
   it('does not show Stop, and cancelJob is a no-op, once the run is terminal', () => {
