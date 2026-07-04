@@ -78,6 +78,28 @@
     </div>
   </div>
 
+  <!-- Data-source notice: shown only when TradingView is not configured, linking
+       to the Integrations page with the TradingView panel deep-linked in focus. -->
+  @if (tradingViewStatusKnown && !tradingViewConfigured) {
+    <div class="ds-notice">
+      <mat-icon class="ds-notice__icon">insights</mat-icon>
+      <div class="ds-notice__text">
+        <b>Backtests are using free public market data</b>
+        <span>Connect a TradingView MCP server for higher-fidelity OHLCV price bars.</span>
+      </div>
+      <a
+        mat-flat-button
+        color="primary"
+        class="ds-notice__cta"
+        routerLink="/integrations"
+        [queryParams]="{ focus: 'tradingview' }"
+      >
+        Configure TradingView
+        <mat-icon>arrow_forward</mat-icon>
+      </a>
+    </div>
+  }
+
   <!-- Asset-category selector: constrains which categories the design agent
        may generate strategies for. All selected = no constraint. -->
   <div class="category-row">

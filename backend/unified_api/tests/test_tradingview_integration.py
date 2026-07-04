@@ -219,3 +219,59 @@ def test_delete_tradingview_route() -> None:
     assert resp.status_code == 200
     mock_clear.assert_called_once()
     assert resp.json()["enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Test-connection route (live reachability probe)
+# ---------------------------------------------------------------------------
+
+_CLIENT_MODULE = "investment_team.tradingview_mcp.client"
+
+
+def test_post_tradingview_test_requires_url() -> None:
+    # No stored server URL → 400, and no client is ever constructed.
+    with patch(f"{_STORE_MODULE}.get_tradingview_config", return_value=dict(_DEFAULT_TV_CFG)):
+        resp = client.post("/api/integrations/tradingview/test")
+    assert resp.status_code == 400
+    assert "url" in resp.json()["detail"].lower()
+
+
+def test_post_tradingview_test_reachable() -> None:
+    cfg = dict(_DEFAULT_TV_CFG, mcp_server_url="https://tv/mcp", auth_token="tok")
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs) -> None: ...
+
+        def fetch_ohlcv(self, *args, **kwargs):
+            return [{"date": "2024-01-01"}, {"date": "2024-01-02"}]
+
+    with (
+        patch(f"{_STORE_MODULE}.get_tradingview_config", return_value=cfg),
+        patch(f"{_CLIENT_MODULE}.TradingViewMcpClient", _FakeClient),
+    ):
+        resp = client.post("/api/integrations/tradingview/test")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert "2" in body["detail"]  # the probe returned 2 bars
+
+
+def test_post_tradingview_test_unreachable() -> None:
+    cfg = dict(_DEFAULT_TV_CFG, mcp_server_url="https://tv/mcp")
+    from investment_team.tradingview_mcp.client import TradingViewMcpError
+
+    class _FailClient:
+        def __init__(self, *args, **kwargs) -> None: ...
+
+        def fetch_ohlcv(self, *args, **kwargs):
+            raise TradingViewMcpError("connection refused")
+
+    with (
+        patch(f"{_STORE_MODULE}.get_tradingview_config", return_value=cfg),
+        patch(f"{_CLIENT_MODULE}.TradingViewMcpClient", _FailClient),
+    ):
+        resp = client.post("/api/integrations/tradingview/test")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "unreachable" in body["detail"].lower()

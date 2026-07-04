@@ -79,6 +79,42 @@
   }
 }
 
+// ── Context banner (arrived via ?focus= deep link) ──────────────────────────
+.context-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-3);
+  padding: var(--kh-space-3) var(--kh-space-4);
+  margin-bottom: var(--kh-space-6);
+  border-radius: var(--kh-radius-md);
+  background: var(--kh-accent-muted);
+  border: 1px solid var(--kh-accent-subtle);
+  animation: fade-in 0.18s ease;
+
+  mat-icon {
+    color: var(--kh-accent);
+    flex-shrink: 0;
+  }
+
+  span {
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-secondary);
+  }
+
+  &__back {
+    margin-left: auto;
+    white-space: nowrap;
+    font-size: var(--kh-text-sm);
+    font-weight: 600;
+    color: var(--kh-accent-text);
+    text-decoration: none;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+}
+
 // ── Grid ────────────────────────────────────────────────────────────────────
 .integrations-grid {
   display: grid;
@@ -108,6 +144,12 @@
     background: var(--kh-surface-2);
     border-color: var(--kh-border);
     box-shadow: var(--kh-shadow-md);
+  }
+
+  // Deep-linked via ?focus=<key> — ring the card so it's unmistakable.
+  &--focused {
+    border-color: var(--kh-accent);
+    box-shadow: var(--kh-shadow-glow), 0 0 0 1px var(--kh-accent);
   }
 
   &__head {

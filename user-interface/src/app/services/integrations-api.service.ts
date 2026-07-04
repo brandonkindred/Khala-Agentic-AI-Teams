@@ -24,6 +24,7 @@ import type {
   SlackOAuthConnectResponse,
   TradingViewConfigResponse,
   TradingViewConfigUpdate,
+  TradingViewTestResponse,
 } from '../models/integrations.model';
 
 /**
@@ -189,5 +190,10 @@ export class IntegrationsApiService {
   /** DELETE /api/integrations/tradingview */
   deleteTradingViewConfig(): Observable<TradingViewConfigResponse> {
     return this.http.delete<TradingViewConfigResponse>(`${this.baseUrl}/tradingview`, this.SKIP_NOTIFY);
+  }
+
+  /** POST /api/integrations/tradingview/test — probe the stored MCP server for reachability. */
+  testTradingViewConnection(): Observable<TradingViewTestResponse> {
+    return this.http.post<TradingViewTestResponse>(`${this.baseUrl}/tradingview/test`, {}, this.SKIP_NOTIFY);
   }
 }

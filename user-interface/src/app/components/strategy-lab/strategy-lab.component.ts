@@ -25,9 +25,11 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatTableModule } from '@angular/material/table';
 import { MatSortModule } from '@angular/material/sort';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
+import { RouterLink } from '@angular/router';
 import { Subscription, timer, switchMap, takeWhile } from 'rxjs';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
+import { IntegrationsApiService } from '../../services/integrations-api.service';
 import type {
   PaperTradingSession,
   PaperTradingComparison,
@@ -136,13 +138,24 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
     MatTableModule,
     MatSortModule,
     MatPaginatorModule,
+    RouterLink,
   ],
   templateUrl: './strategy-lab.component.html',
   styleUrl: './strategy-lab.component.scss',
 })
 export class StrategyLabComponent implements OnInit, OnDestroy {
   private readonly api = inject(InvestmentApiService);
+  private readonly integrations = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
+
+  /**
+   * TradingView data-source status, used to show/hide the "using free public
+   * data" notice. `tradingViewStatusKnown` gates the banner so it stays hidden
+   * until we've confirmed the status (and stays hidden if the status call fails —
+   * we never nag when we can't tell).
+   */
+  tradingViewStatusKnown = false;
+  tradingViewConfigured = false;
 
   running = false;
   loading = false;
@@ -251,6 +264,31 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.loadResults();
     this.loadPaperTradingResults();
     this.checkForActiveRun();
+    this.loadTradingViewStatus();
+  }
+
+  /**
+   * Read TradingView data-source status to decide whether to show the "using
+   * free public data" notice.
+   *
+   * Postconditions: on success, `tradingViewConfigured` reflects whether an
+   *   enabled server URL is stored and `tradingViewStatusKnown` is true; on
+   *   error, status stays unknown so the notice remains hidden.
+   */
+  private loadTradingViewStatus(): void {
+    this.integrations
+      .getTradingViewConfig()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (cfg) => {
+          this.tradingViewConfigured = cfg.enabled && !!cfg.mcp_server_url;
+          this.tradingViewStatusKnown = true;
+        },
+        error: () => {
+          // Can't determine status → don't nag.
+          this.tradingViewStatusKnown = false;
+        },
+      });
   }
 
   private loadConfig(): void {

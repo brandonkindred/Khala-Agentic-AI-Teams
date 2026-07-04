@@ -22,6 +22,7 @@ interface ApiStub {
   getTradingViewConfig: ReturnType<typeof vi.fn>;
   updateTradingViewConfig: ReturnType<typeof vi.fn>;
   deleteTradingViewConfig: ReturnType<typeof vi.fn>;
+  testTradingViewConnection: ReturnType<typeof vi.fn>;
 }
 
 describe('IntegrationsDashboardComponent (extra coverage)', () => {
@@ -65,6 +66,7 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
       getTradingViewConfig: vi.fn().mockReturnValue(of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false })),
       updateTradingViewConfig: vi.fn().mockReturnValue(of({ enabled: true, mcp_server_url: 'https://tv/mcp', tool_name: 'get_ohlcv', auth_token_configured: true })),
       deleteTradingViewConfig: vi.fn().mockReturnValue(of({ enabled: false, mcp_server_url: '', tool_name: '', auth_token_configured: false })),
+      testTradingViewConnection: vi.fn().mockReturnValue(of({ ok: true, detail: 'Connected — 5 bars.' })),
       disconnectSlack: vi.fn().mockReturnValue(of({
         enabled: false,
         webhook_configured: false,
@@ -116,6 +118,65 @@ describe('IntegrationsDashboardComponent (extra coverage)', () => {
     component.toggleExpanded('slack');
     component.toggleExpanded('medium');
     expect(component.expanded).toBe('medium');
+  });
+
+  // ---------------------------------------------------------------------
+  // deep-link focus (?focus=<key>)
+  // ---------------------------------------------------------------------
+
+  it('focus=tradingview expands, focuses, and scrolls the TradingView card into view', async () => {
+    const el = { scrollIntoView: vi.fn() } as unknown as HTMLElement;
+    const getById = vi.spyOn(document, 'getElementById').mockReturnValue(el);
+    fixture.detectChanges(); // ngOnInit subscribes to queryParams
+    queryParams$.next({ focus: 'tradingview' });
+    expect(component.expanded).toBe('tradingview');
+    expect(component.focusedKey).toBe('tradingview');
+    await new Promise((r) => setTimeout(r)); // flush focusIntegration's setTimeout
+    expect(getById).toHaveBeenCalledWith('integration-tradingview');
+    expect(el.scrollIntoView).toHaveBeenCalled();
+    getById.mockRestore();
+  });
+
+  it('ignores an unknown focus key', () => {
+    fixture.detectChanges();
+    queryParams$.next({ focus: 'not-an-integration' });
+    expect(component.expanded).toBeNull();
+    expect(component.focusedKey).toBeNull();
+  });
+
+  it('toggleExpanded clears the deep-link focus highlight', () => {
+    fixture.detectChanges();
+    queryParams$.next({ focus: 'tradingview' });
+    expect(component.focusedKey).toBe('tradingview');
+    component.toggleExpanded('tradingview');
+    expect(component.focusedKey).toBeNull();
+  });
+
+  it('testTradingView surfaces a reachable result', () => {
+    fixture.detectChanges();
+    component.tradingViewServerUrl = 'https://tv/mcp';
+    component.testTradingView();
+    expect(api.testTradingViewConnection).toHaveBeenCalled();
+    expect(component.tradingViewTestResult).toEqual({ ok: true, detail: 'Connected — 5 bars.' });
+    expect(component.tradingViewTesting).toBe(false);
+  });
+
+  it('testTradingView reports a transport failure as a failed result', () => {
+    api.testTradingViewConnection.mockReturnValueOnce(throwError(() => ({ error: { detail: 'refused' } })));
+    fixture.detectChanges();
+    component.testTradingView();
+    expect(component.tradingViewTestResult?.ok).toBe(false);
+    expect(component.tradingViewTesting).toBe(false);
+  });
+
+  it('canTestTradingView requires a valid saved url', () => {
+    fixture.detectChanges();
+    component.tradingViewServerUrl = '';
+    expect(component.canTestTradingView()).toBe(false);
+    component.tradingViewServerUrl = 'https://tv/mcp';
+    expect(component.canTestTradingView()).toBe(true);
+    component.tradingViewServerUrl = 'ftp://bad';
+    expect(component.canTestTradingView()).toBe(false);
   });
 
   it('connectedCount counts configured integrations', () => {

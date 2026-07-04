@@ -1,7 +1,7 @@
 import { Component, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { ActivatedRoute } from '@angular/router';
+import { ActivatedRoute, RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
@@ -28,11 +28,14 @@ import type {
   SlackMode,
   TradingViewConfigResponse,
   TradingViewConfigUpdate,
+  TradingViewTestResponse,
 } from '../../models/integrations.model';
 
 const SLACK_WEBHOOK_PREFIX = 'https://hooks.slack.com/';
 
 type IntegrationKey = 'google' | 'slack' | 'medium' | 'github' | 'tradingview';
+
+const INTEGRATION_KEYS: readonly IntegrationKey[] = ['google', 'slack', 'medium', 'github', 'tradingview'];
 
 @Component({
   selector: 'app-integrations-dashboard',
@@ -50,6 +53,7 @@ type IntegrationKey = 'google' | 'slack' | 'medium' | 'github' | 'tradingview';
     MatDividerModule,
     MatProgressSpinnerModule,
     InlineBannerComponent,
+    RouterLink,
   ],
   templateUrl: './integrations-dashboard.component.html',
   styleUrl: './integrations-dashboard.component.scss',
@@ -100,8 +104,33 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
   /** Which integration card is currently expanded inline. Only one at a time. */
   expanded: IntegrationKey | null = null;
 
+  /**
+   * Card deep-linked via `?focus=<key>` — highlighted with an accent ring and
+   * accompanied by the "came from…" context banner until the user interacts with it.
+   * Null when the page was opened without a focus param (or after the user acts).
+   */
+  focusedKey: IntegrationKey | null = null;
+
   toggleExpanded(key: IntegrationKey): void {
     this.expanded = this.expanded === key ? null : key;
+    // Any deliberate interaction clears the deep-link highlight/banner.
+    this.focusedKey = null;
+  }
+
+  /**
+   * Expand a card, scroll it into view, and ring it in response to `?focus=<key>`.
+   *
+   * Preconditions: `key` is a valid integration key.
+   * Postconditions: `expanded` and `focusedKey` are set to `key`; the matching
+   *   card is scrolled into view on the next frame (no-op where `scrollIntoView`
+   *   is unavailable, e.g. jsdom).
+   */
+  private focusIntegration(key: IntegrationKey): void {
+    this.expanded = key;
+    this.focusedKey = key;
+    setTimeout(() => {
+      document.getElementById(`integration-${key}`)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    });
   }
 
   readonly totalIntegrations = 5;
@@ -153,6 +182,11 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
   /** Read OAuth return query params from Slack and Medium Google flows. */
   private handleOAuthCallback(): void {
     this.route.queryParams.subscribe((params) => {
+      const focus = params['focus'];
+      if (typeof focus === 'string' && (INTEGRATION_KEYS as readonly string[]).includes(focus)) {
+        // Deep link (e.g. from the Strategy Lab): open the named card in focus.
+        this.focusIntegration(focus as IntegrationKey);
+      }
       if (params['slack_connected']) {
         const team = params['team'] ? decodeURIComponent(params['team']) : null;
         this.notifications.saved(
@@ -710,6 +744,10 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
   tradingViewToken = '';
   tradingViewTokenConfigured = false;
 
+  // Live "test connection" state — the result of the last reachability probe.
+  tradingViewTesting = false;
+  tradingViewTestResult: TradingViewTestResponse | null = null;
+
   serverUrlInvalid(): boolean {
     const u = (this.tradingViewServerUrl || '').trim();
     if (!u) return false;
@@ -723,6 +761,39 @@ export class IntegrationsDashboardComponent implements OnInit, HasUnsavedChanges
     this.tradingViewTokenConfigured = res.auth_token_configured;
     // Never repopulate the secret from a response.
     this.tradingViewToken = '';
+    // A prior probe result no longer describes the freshly-applied config.
+    this.tradingViewTestResult = null;
+  }
+
+  /** True when a saved server URL exists to probe and no save/test is in flight. */
+  canTestTradingView(): boolean {
+    return !!this.tradingViewServerUrl.trim() && !this.serverUrlInvalid() && !this.tradingViewTesting && !this.tradingViewSaving;
+  }
+
+  /**
+   * Probe the stored MCP server and surface a reachable / unreachable result.
+   *
+   * Preconditions: a server URL is saved (`canTestTradingView()` is true).
+   * Postconditions: `tradingViewTestResult` holds the probe outcome; a transport
+   *   failure is reported as `{ ok: false }` rather than thrown.
+   */
+  testTradingView(): void {
+    this.tradingViewTesting = true;
+    this.tradingViewTestResult = null;
+    this.tradingViewError = null;
+    this.api.testTradingViewConnection().subscribe({
+      next: (res: TradingViewTestResponse) => {
+        this.tradingViewTestResult = res;
+        this.tradingViewTesting = false;
+      },
+      error: (err) => {
+        this.tradingViewTestResult = {
+          ok: false,
+          detail: extractErrorDetail(err, 'Connection test failed.'),
+        };
+        this.tradingViewTesting = false;
+      },
+    });
   }
 
   loadTradingViewConfig(): void {

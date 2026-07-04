@@ -116,6 +116,57 @@
   margin-right: 0.25rem;
 }
 
+// ── Data-source notice (TradingView not configured) ──────────────────────────
+
+.ds-notice {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 0.9rem 1.1rem;
+  margin-bottom: 1.25rem;
+  border-radius: var(--kh-radius-lg);
+  background: var(--kh-warning-subtle);
+  border: 1px solid var(--kh-warning-subtle);
+
+  &__icon {
+    flex-shrink: 0;
+    color: var(--kh-warning);
+  }
+
+  &__text {
+    min-width: 0;
+
+    b {
+      display: block;
+      font-size: 0.875rem;
+      color: var(--kh-text-primary);
+      margin-bottom: 0.1rem;
+    }
+
+    span {
+      font-size: 0.8125rem;
+      color: var(--kh-text-secondary);
+    }
+  }
+
+  &__cta {
+    margin-left: auto;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .ds-notice {
+    flex-wrap: wrap;
+
+    &__cta {
+      margin-left: 0;
+      width: 100%;
+    }
+  }
+}
+
 // ── Error banner ─────────────────────────────────────────────────────────────
 
 .error-banner {

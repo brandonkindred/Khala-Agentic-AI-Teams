@@ -19,14 +19,27 @@
     </div>
   </header>
 
+  @if (focusedKey === 'tradingview') {
+    <div class="context-banner" role="status">
+      <mat-icon aria-hidden="true">science</mat-icon>
+      <span>
+        You came from the <strong>Strategy Lab</strong> to connect market data. Configure the
+        TradingView MCP server below to use it as your price-data source.
+      </span>
+      <a routerLink="/investment/strategy-lab" class="context-banner__back">← Back to Strategy Lab</a>
+    </div>
+  }
+
   <div class="integrations-grid">
 
     <!-- ─────────────────────────────────────────────────────────────── -->
     <!-- Google account (browser sign-in)                               -->
     <!-- ─────────────────────────────────────────────────────────────── -->
     <article
+      id="integration-google"
       class="integration-card"
       [class.integration-card--expanded]="expanded === 'google'"
+      [class.integration-card--focused]="focusedKey === 'google'"
       [attr.aria-busy]="googleBrowserLoading || null"
     >
       <header class="integration-card__head">
@@ -150,8 +163,10 @@
     <!-- Slack                                                          -->
     <!-- ─────────────────────────────────────────────────────────────── -->
     <article
+      id="integration-slack"
       class="integration-card"
       [class.integration-card--expanded]="expanded === 'slack'"
+      [class.integration-card--focused]="focusedKey === 'slack'"
       [attr.aria-busy]="loadingSlack || null"
     >
       <header class="integration-card__head">
@@ -409,8 +424,10 @@
     <!-- Medium                                                         -->
     <!-- ─────────────────────────────────────────────────────────────── -->
     <article
+      id="integration-medium"
       class="integration-card"
       [class.integration-card--expanded]="expanded === 'medium'"
+      [class.integration-card--focused]="focusedKey === 'medium'"
       [attr.aria-busy]="mediumLoading || null"
     >
       <header class="integration-card__head">
@@ -561,8 +578,10 @@
     <!-- GitHub                                                         -->
     <!-- ─────────────────────────────────────────────────────────────── -->
     <article
+      id="integration-github"
       class="integration-card"
       [class.integration-card--expanded]="expanded === 'github'"
+      [class.integration-card--focused]="focusedKey === 'github'"
       [attr.aria-busy]="githubLoading || null"
     >
       <header class="integration-card__head">
@@ -723,8 +742,10 @@
     <!-- TradingView                                                    -->
     <!-- ─────────────────────────────────────────────────────────────── -->
     <article
+      id="integration-tradingview"
       class="integration-card"
       [class.integration-card--expanded]="expanded === 'tradingview'"
+      [class.integration-card--focused]="focusedKey === 'tradingview'"
       [attr.aria-busy]="tradingViewLoading || null"
     >
       <header class="integration-card__head">
@@ -840,6 +861,13 @@
             </mat-slide-toggle>
           </div>
 
+          @if (tradingViewTestResult) {
+            <app-inline-banner
+              [variant]="tradingViewTestResult.ok ? 'success' : 'error'"
+              [message]="tradingViewTestResult.detail"
+            />
+          }
+
           <div class="form-actions">
             <button
               mat-flat-button
@@ -849,6 +877,14 @@
               [disabled]="tradingViewSaving || (tradingViewEnabled && !tradingViewServerUrl.trim())"
             >
               @if (tradingViewSaving) { Saving… } @else { Save TradingView settings }
+            </button>
+            <button
+              mat-stroked-button
+              type="button"
+              (click)="testTradingView()"
+              [disabled]="!canTestTradingView()"
+            >
+              @if (tradingViewTesting) { Testing… } @else { Test connection }
             </button>
           </div>
         </div>
