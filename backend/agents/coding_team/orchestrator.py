@@ -15,7 +15,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 from coding_team import hitl
 from coding_team.activity import ActivityBridge
@@ -2198,7 +2198,7 @@ class CodingTeamSwarm:
 
     def _compute_review(
         self, task: Task, *, live_progress: bool, update_fn: Callable
-    ) -> Tuple[str, Dict[str, Any]]:
+    ) -> tuple[str, Dict[str, Any]]:
         """Collect the branch diff and run the Tech Lead review for one IN_REVIEW task.
 
         This is the read-only half of review: it computes the branch diff (git object-DB reads) and
@@ -2218,7 +2218,7 @@ class CodingTeamSwarm:
               git state is changed here.
         """
 
-        def _run(progress_callback: Any) -> Tuple[str, Dict[str, Any]]:
+        def _run(progress_callback: Any) -> tuple[str, Dict[str, Any]]:
             from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
 
             branch = task.feature_branch or f"feature/{task.id}"
@@ -2321,11 +2321,11 @@ class CodingTeamSwarm:
               (main) thread, never from the review workers.
         Postconditions:
             - Every task that was IN_REVIEW is left MERGED, IN_PROGRESS (revision pending), or FAILED
-              — never IN_REVIEW with no state change. Each task's verdict matches the prior serial
-              loop except that, because all branch diffs are collected up front against the
-              start-of-round development tree, a task's review no longer reflects an earlier
-              same-round merge (only relevant for two independent IN_REVIEW tasks touching the same
-              files — a non-dependent overlap the swarm does not otherwise order).
+              — never IN_REVIEW with no state change — with the same verdict the prior serial loop
+              produced. Collecting all diffs up front (before any merge) is behavior-preserving: the
+              reviewer's evidence is ``branch_diff``'s three-dot ``base...branch`` diff, anchored on
+              the branch's own divergence point, so an earlier same-round merge advancing the
+              development tip does not change any other branch's computed diff.
         """
         from shared_concurrency import parallel_map
         from shared_git.git_utils import DEVELOPMENT_BRANCH, merge_branch
@@ -2344,13 +2344,13 @@ class CodingTeamSwarm:
         # Fan the reviews out concurrently, then apply decisions serially in original order.
         # parallel_map preserves input order and copies each worker's contextvars from this thread, so
         # the review LLM calls keep their job/team/task attribution (a raw ThreadPoolExecutor would
-        # drop it). _compute_review contains its own exceptions, so no worker raises out of the pool.
+        # drop it); it also sizes its pool at min(max_workers, len), so no manual clamp is needed.
+        # _compute_review contains its own exceptions, so no worker raises out of the pool.
         update_fn(status_text=f"Tech Lead reviewing {len(in_review)} task(s)")
-        max_workers = min(_review_concurrency(), len(in_review))
         results = parallel_map(
             in_review,
             lambda task: self._compute_review(task, live_progress=False, update_fn=update_fn),
-            max_workers=max_workers,
+            max_workers=_review_concurrency(),
             skip_none=False,
         )
         for task, (diff, review) in zip(in_review, results):
