@@ -929,7 +929,7 @@ async def test_tradingview() -> TradingViewTestResponse:
 
     from fastapi.concurrency import run_in_threadpool
 
-    from investment_team.tradingview_mcp.client import TradingViewMcpClient, TradingViewMcpError
+    from investment_team.tradingview_mcp.client import TradingViewMcpClient
 
     cfg = get_tradingview_config()
     server_url = str(cfg.get("mcp_server_url", "")).strip()
@@ -956,7 +956,10 @@ async def test_tradingview() -> TradingViewTestResponse:
             start.isoformat(),
             end.isoformat(),
         )
-    except TradingViewMcpError as exc:
+    except Exception as exc:  # noqa: BLE001 - any reachability/parse failure is a failed test, not a 500
+        # Mirrors MarketDataService._fetch_tradingview_mcp: a non-JSON 200 response raises
+        # json.JSONDecodeError (not TradingViewMcpError), and the probe must still report
+        # it in-band as an unreachable result rather than surfacing an HTTP 500.
         return TradingViewTestResponse(ok=False, detail=f"TradingView MCP server unreachable: {exc}")
 
     note = f"Connected — the MCP server returned {len(rows)} price bar(s) for the probe request."

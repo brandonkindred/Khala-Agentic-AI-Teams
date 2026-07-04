@@ -275,3 +275,27 @@ def test_post_tradingview_test_unreachable() -> None:
     body = resp.json()
     assert body["ok"] is False
     assert "unreachable" in body["detail"].lower()
+
+
+def test_post_tradingview_test_non_json_response_is_in_band_failure() -> None:
+    # A reachable server returning non-JSON (e.g. an HTML login page) makes the client
+    # raise json.JSONDecodeError — NOT a TradingViewMcpError. The probe must still report
+    # it in-band as {ok: false} rather than surfacing an HTTP 500.
+    import json
+
+    cfg = dict(_DEFAULT_TV_CFG, mcp_server_url="https://tv/mcp")
+
+    class _HtmlClient:
+        def __init__(self, *args, **kwargs) -> None: ...
+
+        def fetch_ohlcv(self, *args, **kwargs):
+            raise json.JSONDecodeError("Expecting value", "<html>...", 0)
+
+    with (
+        patch(f"{_STORE_MODULE}.get_tradingview_config", return_value=cfg),
+        patch(f"{_CLIENT_MODULE}.TradingViewMcpClient", _HtmlClient),
+    ):
+        resp = client.post("/api/integrations/tradingview/test")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
