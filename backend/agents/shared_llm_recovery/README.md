@@ -11,7 +11,7 @@ team gets the same resilience.
 
 | Module | Was | Responsibility |
 |---|---|---|
-| `recovery` | `software_engineering_team/shared/llm_response_utils.py` | `extract_json_object`, `extract_task_assignment_from_content`, `extract_files_from_content`, `heuristic_extract_files_from_content`, `extract_single_python_block`, `looks_truncated`. |
+| `recovery` | `software_engineering_team/shared/llm_response_utils.py` | `extract_json_object`, `extract_task_assignment_from_content`, `extract_files_from_content`, `heuristic_extract_files_from_content`, `extract_single_python_block`. |
 
 ## Usage
 
@@ -39,13 +39,14 @@ except json.JSONDecodeError:
   routinely echo a format example before the final object, so the trailing
   object is authoritative. `extract_task_assignment_from_content` additionally
   requires a non-empty `tasks` list.
-- **Strict mode:** `extract_json_object(..., repair=False)` disables the tolerant
-  `json-repair` legs, so only strictly valid JSON is recovered and anything
-  malformed/truncated yields `None`. Use it when the caller's contract is to
-  re-prompt or continue on unparseable output rather than accept a repaired
-  guess (the strategy-lab spec agents and the Ollama truncation path both do).
-- `looks_truncated(text)` is a cheap structural "was this reply cut off?"
-  heuristic (unbalanced brackets or an unclosed string) — the Ollama client uses
-  it to keep tolerant repair off for a bare-JSON reply that was truncated, so
-  the rest is recovered via continuation instead of a fabricated tail.
+- **Repair gates:** two independent knobs control the tolerant `json-repair` legs.
+  `extract_json_object(..., repair=False)` disables ALL repair, so only strictly
+  valid JSON is recovered and anything malformed/truncated yields `None` (the
+  strategy-lab spec agents use this so a bad payload re-prompts the model).
+  `extract_json_object(..., repair_truncated=False)` (with `repair=True`) keeps
+  repairing complete-but-broken objects (trailing commas, unescaped inner quotes)
+  but lets a genuinely truncated reply yield `None`, so the caller recovers the
+  tail via continuation instead of accepting a fabricated close (the Ollama client
+  uses this — the "don't fabricate a truncated tail" policy lives in the engine,
+  which knows the real payload boundaries, not in a caller-side heuristic).
 - Depends on `backend/agents` being on `sys.path` (the `shared_*` convention).

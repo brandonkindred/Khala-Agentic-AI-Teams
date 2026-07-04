@@ -22,9 +22,6 @@ import httpx
 from shared_llm_recovery import (
     extract_json_object as _shared_extract_json_object,
 )
-from shared_llm_recovery import (
-    looks_truncated,
-)
 
 from .. import config as llm_config
 from ..attribution import (
@@ -719,8 +716,7 @@ class OllamaLLMClient(LLMClient):
         The salvage core is the shared ``shared_llm_recovery`` engine (one
         string-aware brace scanner + one ``json-repair`` site for the whole
         codebase); this method keeps only the two Ollama-specific pre-checks the
-        shared engine can't know about, plus the truncation-vs-repair policy that
-        drives the continuation path:
+        shared engine can't know about:
 
         - ``---DRAFT---`` marker → the trailing draft is returned as ``content``.
         - A ``__tool_calls__`` envelope is passed through verbatim (it carries no
@@ -728,13 +724,21 @@ class OllamaLLMClient(LLMClient):
         - Salvage runs anchored on ``_EXPECTED_KEYS`` first (filters usage echoes
           / format recaps in multi-candidate output), then falls back to
           accept-any so a clean lone object with an off-schema key still parses.
-        - Tolerant repair is disabled for a bare-JSON reply that ``looks_truncated``
-          so implicit truncation surfaces as ``LLMJsonParseError`` and the caller
-          recovers the rest via multi-turn continuation, rather than accepting a
-          repaired (fabricated-tail) object.
+        - ``repair_truncated=False`` keeps complete-but-broken repair (trailing
+          commas, unescaped quotes) but lets a genuinely truncated reply surface
+          as ``LLMJsonParseError``, so the caller recovers the rest via multi-turn
+          continuation instead of accepting a fabricated tail. The engine — which
+          strips wrappers/fences and knows the real payload boundaries — owns this
+          decision, rather than a caller-side "looks truncated" heuristic that
+          misfires on prose/fence prefixes and on braces inside string values.
 
-        Postconditions: returns a parsed ``dict`` on success; raises
-        ``LLMJsonParseError`` when nothing salvageable is found.
+        Preconditions:
+            - ``text`` is a ``str`` (may be empty); it is the raw assistant
+              content, before any structured parsing.
+        Postconditions:
+            - Returns a parsed ``dict`` on success; raises ``LLMJsonParseError``
+              when nothing salvageable is found (a truncated payload is treated
+              as unsalvageable so the caller can continue).
         """
         text = self._strip_json_noise(text)
         if "---DRAFT---" in text:
@@ -751,14 +755,15 @@ class OllamaLLMClient(LLMClient):
                     return parsed
             except json.JSONDecodeError:
                 pass
-        # Skip tolerant repair only for a bare-JSON reply that looks cut off, so
-        # implicit truncation triggers continuation instead of a fabricated tail.
-        allow_repair = not (stripped.startswith(("{", "[")) and looks_truncated(stripped))
+        # Anchored tier filters usage echoes / recaps; accept-any tier keeps a
+        # clean off-schema object parseable. repair_truncated=False (not a
+        # caller-side heuristic) makes only genuine truncation unsalvageable so
+        # the implicit-truncation continuation path fires.
         result = _shared_extract_json_object(
-            text, required_keys=_EXPECTED_KEYS, repair=allow_repair
+            text, required_keys=_EXPECTED_KEYS, repair_truncated=False
         )
         if result is None:
-            result = _shared_extract_json_object(text, required_keys=None, repair=allow_repair)
+            result = _shared_extract_json_object(text, required_keys=None, repair_truncated=False)
         if result is not None:
             return result
         logger.error(

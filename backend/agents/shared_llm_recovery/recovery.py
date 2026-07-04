@@ -240,7 +240,11 @@ def _descend_envelope(
 
 
 def _salvage_object(
-    content: str, accept: Callable[[Dict[str, Any]], bool], *, repair: bool = True
+    content: str,
+    accept: Callable[[Dict[str, Any]], bool],
+    *,
+    repair: bool = True,
+    repair_truncated: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Salvage the authoritative JSON object matching ``accept`` from raw output.
 
@@ -263,13 +267,19 @@ def _salvage_object(
        finds a real object buried under prose braces/quotes that derail the span
        scan. Last so it never hijacks a case strategies 1-4 already resolved.
 
-    ``repair`` (default ``True``) gates the tolerant ``json-repair`` legs: with
-    ``repair=False`` the object-shaped repair in strategy 1, the repair leg of
-    strategy 3, and strategy 4 in its entirety are skipped, so only strictly
-    valid JSON can be recovered (the strict spans of 1/3 plus the ``raw_decode``
-    recall of 5). Callers that must reject anything not strictly parseable — so a
-    downstream re-prompt / continuation fires instead of accepting a repaired
-    guess — pass ``repair=False``.
+    Two repair gates control the tolerant ``json-repair`` legs independently:
+
+    - ``repair`` (default ``True``): with ``repair=False`` the object-shaped
+      repair in strategy 1, the repair leg of strategy 3, and strategy 4 in its
+      entirety are skipped, so only strictly valid JSON can be recovered (the
+      strict spans of 1/3 plus the ``raw_decode`` recall of 5). Callers that must
+      reject anything not strictly parseable pass ``repair=False``.
+    - ``repair_truncated`` (default ``True``): gates ONLY strategy 4 (the
+      max-tokens truncation-repair that fabricates a closing for the first
+      never-closed object). With ``repair=True, repair_truncated=False`` the
+      complete-object repair of strategies 1/3 still runs (trailing commas,
+      unescaped quotes) but a genuinely truncated reply yields ``None`` — so a
+      caller can recover the tail via continuation instead of a fabricated one.
 
     Preconditions: ``content`` is a str (may be empty); ``accept`` is a pure
     predicate over a parsed dict.
@@ -341,9 +351,10 @@ def _salvage_object(
                 return result
 
     # Strategy 4: max-tokens truncation — the first object never closed. This is
-    # a pure tolerant-repair strategy, so it is skipped entirely when repair is
-    # off (a truncated fragment must surface as "no object" for the caller).
-    if repair and first_unclosed != -1:
+    # a pure tolerant-repair strategy, so it is skipped when repair is off OR
+    # when truncation-repair specifically is disabled (a truncated fragment must
+    # surface as "no object" so the caller can continue instead of fabricating).
+    if repair and repair_truncated and first_unclosed != -1:
         fragment = stripped[first_unclosed:]
         if _looks_like_json_object(fragment):
             repaired = _repair_object(fragment)
@@ -424,6 +435,7 @@ def extract_json_object(
     required_keys: Optional[Collection[str]] = None,
     *,
     repair: bool = True,
+    repair_truncated: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Recover the authoritative JSON *object* from raw LLM content.
 
@@ -438,11 +450,21 @@ def extract_json_object(
     out usage echoes and envelope wrappers that would otherwise win the
     positional tiebreak. Without it, any dict is accepted.
 
-    ``repair`` (default ``True``) gates the tolerant ``json-repair`` legs. Pass
-    ``repair=False`` for a strict recovery that only returns strictly valid JSON
-    and yields ``None`` for anything malformed or truncated — so a caller whose
-    contract is to re-prompt / continue on unparseable output gets its signal
-    instead of a repaired guess.
+    Two independent repair gates let a caller pick exactly which tolerant legs
+    run (see ``_salvage_object``):
+
+    - ``repair`` (default ``True``) gates ALL tolerant ``json-repair``. Pass
+      ``repair=False`` for a strict recovery that only returns strictly valid
+      JSON and yields ``None`` for anything malformed or truncated — so a caller
+      whose contract is to re-prompt on unparseable output gets its signal
+      instead of a repaired guess.
+    - ``repair_truncated`` (default ``True``) gates ONLY the max-tokens
+      truncation-repair (strategy 4, which fabricates a closing for a
+      never-closed object). Pass ``repair_truncated=False`` (with
+      ``repair=True``) to keep repairing complete-but-broken objects (trailing
+      commas, unescaped inner quotes) while letting a genuinely truncated reply
+      yield ``None`` — so the caller triggers continuation rather than accepting
+      a fabricated tail. Moot when ``repair=False`` (no repair runs at all).
 
     Preconditions:
         - ``content`` is a ``str`` (may be empty).
@@ -451,40 +473,12 @@ def extract_json_object(
         - Returns a ``dict`` on success, or ``None`` when nothing parses (or no
           candidate carries an anchor key). Never raises on malformed input.
     """
-    return _salvage_object(content, _accept_with_keys(required_keys), repair=repair)
-
-
-def looks_truncated(text: str) -> bool:
-    """True when *text* appears truncated: unbalanced brackets or an unclosed string.
-
-    A cheap structural heuristic (not a parser): unequal ``{``/``}`` or ``[``/``]``
-    counts, or an odd number of unescaped double-quotes leaving a string open at
-    EOF. Brace/bracket counts are deliberately NOT string-aware — a lone brace
-    inside a string value can trip a false positive — matching the historical
-    behaviour of the caller that used to own this check, so routing through the
-    shared engine preserves it exactly. Used to decide whether a bare-JSON reply
-    was cut off (recover the rest via continuation) versus merely malformed.
-
-    Preconditions: ``text`` is a str (may be empty).
-    Postconditions: returns a bool; never raises.
-    """
-    t = (text or "").strip()
-    if t.count("{") != t.count("}"):
-        return True
-    if t.count("[") != t.count("]"):
-        return True
-    in_str = False
-    i = 0
-    n = len(t)
-    while i < n:
-        c = t[i]
-        if c == "\\" and in_str:
-            i += 2
-            continue
-        if c == '"':
-            in_str = not in_str
-        i += 1
-    return in_str
+    return _salvage_object(
+        content,
+        _accept_with_keys(required_keys),
+        repair=repair,
+        repair_truncated=repair_truncated,
+    )
 
 
 # Extensions we treat as file paths (backend + frontend)

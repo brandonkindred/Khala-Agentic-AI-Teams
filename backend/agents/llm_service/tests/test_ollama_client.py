@@ -855,14 +855,45 @@ def test_reasoning_only_logs_info_not_warning(
 
 
 def test_extract_json_implicit_truncation_raises_for_continuation() -> None:
-    """A bare-JSON reply cut off mid-value must raise (not be repaired) so the
-    caller's implicit-truncation handler triggers multi-turn continuation."""
+    """A reply cut off mid-value must raise (not be repaired) so the caller's
+    implicit-truncation handler triggers multi-turn continuation. This holds even
+    behind a prose/fence prefix — the engine-owned truncation gate is not fooled
+    by a leading non-brace character the way a startswith('{') heuristic was."""
     from llm_service.interface import LLMJsonParseError
 
     client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
-    truncated = '{"files": {"app/main.py": "def main():\\n    pass  # incomplete'
-    with pytest.raises(LLMJsonParseError):
-        client._extract_json(truncated)
+    for truncated in (
+        '{"files": {"app/main.py": "def main():\\n    pass  # incomplete',
+        'Here is the result:\n{"files": {"app/main.py": "def main():  # incomplete',
+        '```json\n{"files": {"app/main.py": "def main():  # incomplete',
+    ):
+        with pytest.raises(LLMJsonParseError):
+            client._extract_json(truncated)
+
+
+def test_extract_json_repairs_complete_object_with_in_string_bracket() -> None:
+    """A COMPLETE object needing only trailing-comma repair, whose string value
+    holds an unbalanced bracket, is still repaired — the old caller-side
+    brace-count heuristic wrongly classified this as truncated and refused."""
+    client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+    assert client._extract_json('{"summary": "matches [A-Z", "approved": true,}') == {
+        "summary": "matches [A-Z",
+        "approved": True,
+    }
+
+
+def test_extract_json_malformed_tool_call_envelope_falls_through() -> None:
+    """A `{`-leading string that mentions __tool_calls__ but is not valid JSON
+    must fall through the pre-check (swallowed JSONDecodeError) to normal salvage
+    — exercising the except branch — rather than being returned as an envelope.
+    The trailing anchored object makes the salvage result deterministic."""
+    client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+    # `json.loads` on the whole string raises (the leading pseudo-envelope is
+    # invalid), so the pre-check's `except json.JSONDecodeError` fires; salvage
+    # then returns the well-formed anchored object.
+    assert client._extract_json('{"__tool_calls__" oops} {"summary": "real"}') == {
+        "summary": "real"
+    }
 
 
 def test_extract_json_passes_tool_call_envelope_through() -> None:
