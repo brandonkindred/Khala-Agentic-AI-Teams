@@ -593,16 +593,23 @@ def _single_chunk() -> ReviewChunk:
     return ReviewChunk(segments=[FileSegment(path="app/a.py", content="def f():\n    return 1\n")])
 
 
-def _wait_until(predicate: Any, timeout: float = 1.0) -> None:
-    """Poll ``predicate`` until true or ``timeout`` elapses (early-out helper).
-
-    Used only to shorten the window before releasing a parked leader: it returns
-    the instant a regression makes the waiter fire its own review (so the test
-    catches it fast), and otherwise waits the full timeout for the waiter to park.
-    """
+def _wait_until(predicate: Any, timeout: float = 5.0) -> None:
+    """Poll ``predicate`` until true or ``timeout`` elapses."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline and not predicate():
         time.sleep(0.005)
+
+
+def _registered_waiters(key: str) -> int:
+    """Number of waiters on the in-flight record for ``key`` (-1 if no record).
+
+    Reading the leader's ``waiters`` counter gives the test a deterministic signal
+    that thread B has committed to the waiter path (it was incremented under the
+    cache lock during registration) — so the leader can be released without a
+    wall-clock guess, and B can neither become a fresh leader nor hit the cache.
+    """
+    record = mapping._CHUNK_INFLIGHT.get(key)
+    return record.waiters if record is not None else -1
 
 
 def test_concurrent_duplicate_chunks_share_one_review() -> None:
@@ -616,14 +623,13 @@ def test_concurrent_duplicate_chunks_share_one_review() -> None:
     chunk = _single_chunk()
     base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
     context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
     results: Dict[str, mapping._ChunkOutcome] = {}
-    waiter_started = threading.Event()
 
     def leader() -> None:
         results["a"] = mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
 
     def waiter() -> None:
-        waiter_started.set()
         results["b"] = mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
 
     t_a = threading.Thread(target=leader)
@@ -633,10 +639,11 @@ def test_concurrent_duplicate_chunks_share_one_review() -> None:
 
     t_b = threading.Thread(target=waiter)
     t_b.start()
-    assert waiter_started.wait(5)
-    # Give the waiter time to either park (single-flight) or, on a regression,
-    # fire its own review (calls -> 2); the helper returns early in the latter.
-    _wait_until(lambda: reviewer.calls == 2, timeout=0.5)
+    # Deterministic sync: release the leader only once B has registered as a waiter
+    # on the leader's record (so B is committed to the waiter path, not a fresh
+    # leader or a cache hit).
+    _wait_until(lambda: _registered_waiters(key) == 1)
+    assert _registered_waiters(key) == 1
     reviewer.release.set()
     t_a.join(5)
     t_b.join(5)
@@ -659,8 +666,8 @@ def test_inflight_waiter_reraises_leader_error() -> None:
     chunk = _single_chunk()
     base_input: Dict[str, Any] = {"task_description": "t", "language": "python"}
     context_fp = "fp"
+    key = mapping._chunk_cache_key(chunk, context_fp, "")
     errors: Dict[str, BaseException] = {}
-    waiter_started = threading.Event()
 
     def call(tag: str) -> None:
         try:
@@ -668,18 +675,16 @@ def test_inflight_waiter_reraises_leader_error() -> None:
         except BaseException as exc:  # noqa: BLE001 — record what each thread raised
             errors[tag] = exc
 
-    def waiter() -> None:
-        waiter_started.set()
-        call("b")
-
     t_a = threading.Thread(target=lambda: call("a"))
     t_a.start()
     assert reviewer.entered.wait(5)
 
-    t_b = threading.Thread(target=waiter)
+    t_b = threading.Thread(target=lambda: call("b"))
     t_b.start()
-    assert waiter_started.wait(5)
-    _wait_until(lambda: reviewer.calls == 2, timeout=0.5)
+    # Release the leader only after B is a registered waiter, so B reuses the
+    # leader's failure rather than becoming a fresh leader on the freed slot.
+    _wait_until(lambda: _registered_waiters(key) == 1)
+    assert _registered_waiters(key) == 1
     reviewer.release.set()
     t_a.join(5)
     t_b.join(5)

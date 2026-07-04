@@ -107,21 +107,27 @@ class _InflightReview:
     instead of issuing their own duplicate LLM call.
 
     Invariants:
-        - Exactly one of ``outcome`` / ``error`` is set, and it is assigned
-          *before* ``done`` fires. ``threading.Event`` provides the happens-before
-          edge, so a waiter that returns from ``done.wait()`` reads the published
-          value safely.
-        - The leader owns the ``_CHUNK_INFLIGHT`` slot for this key from
-          registration until it pops the slot; a waiter only ever reads through a
-          record reference it captured under the lock.
+        - The leader ALWAYS fires ``done`` exactly once, on every exit path
+          (success or exception), having first assigned ``error`` — or, when at
+          least one waiter is registered, ``outcome``. ``threading.Event``
+          provides the happens-before edge, so a waiter that returns from
+          ``done.wait()`` reads the published value safely.
+        - ``waiters`` counts the workers that joined this record while the leader
+          held the ``_CHUNK_INFLIGHT`` slot (incremented under the cache lock).
+          The leader snapshots it under the same lock when releasing the slot, so
+          a non-zero count means a waiter will read ``outcome`` and the leader
+          must publish an isolated clone; a zero count lets the solo-leader path
+          skip that clone. Workers arriving after the slot is released never see
+          this record — they start a fresh review — so they are never counted.
     """
 
-    __slots__ = ("done", "outcome", "error")
+    __slots__ = ("done", "outcome", "error", "waiters")
 
     def __init__(self) -> None:
         self.done = threading.Event()
         self.outcome: Optional["_ChunkOutcome"] = None
         self.error: Optional[BaseException] = None
+        self.waiters = 0
 
 
 def _chunk_outcome_cache_size() -> int:
@@ -742,8 +748,6 @@ def _cached_review_chunk(
         hit = _CHUNK_OUTCOME_CACHE.get(key)
         if hit is not None:
             _CHUNK_OUTCOME_CACHE.move_to_end(key)
-            inflight: Optional[_InflightReview] = None
-            is_leader = False
         else:
             inflight = _CHUNK_INFLIGHT.get(key)
             if inflight is None:
@@ -753,6 +757,9 @@ def _cached_review_chunk(
                 _CHUNK_INFLIGHT[key] = inflight
                 is_leader = True
             else:
+                # Join the in-flight review; the count is snapshotted by the
+                # leader (under this same lock) to decide whether to publish.
+                inflight.waiters += 1
                 is_leader = False
     if hit is not None:
         # Clone outside the lock: a stored entry is never mutated in place, so the
@@ -763,7 +770,7 @@ def _cached_review_chunk(
     if not is_leader:
         # Waiter: an identical chunk is already being reviewed. Block for it and
         # reuse its result rather than firing a second LLM call. ``inflight`` was
-        # captured under the lock, so it stays valid even after the leader pops
+        # captured under the lock, so it stays valid even after the leader releases
         # the slot; ``Event.wait`` returns at once if the leader already finished.
         inflight.done.wait()
         if inflight.error is not None:
@@ -771,46 +778,57 @@ def _cached_review_chunk(
         return inflight.outcome.clone()
 
     # Leader: run the single real review for this key, then publish to waiters.
+    # Everything that can raise (the review and the outcome clones) is inside the
+    # ``try`` so the record is ALWAYS resolved and the slot ALWAYS released — a
+    # leader that failed to fire ``done`` would hang every waiter on the untimed
+    # ``wait()`` above and poison the key for the life of the process.
     try:
         outcome = _review_chunk_with_recovery(
             reviewer, chunk, base_input, sibling_surface, surface_by_path
         )
+        # Cache only an outcome produced from the *exact full-chunk* LLM input: no
+        # degraded ("not reviewed") coverage findings, and exactly one sub-review.
+        # A degraded outcome must be retried for real next cycle. Requiring a
+        # single sub-review also excludes a bisected recovery (the full chunk
+        # raised a recoverable content error and only succeeded after splitting):
+        # its aggregate has >= 2 approved_flags and reflects lower-context,
+        # split-across-the-boundary reviews. Freezing that under the full-chunk key
+        # would keep serving the reduced-fidelity result on later identical cycles
+        # instead of retrying the full chunk — so we skip it and let the next cycle
+        # re-attempt full context.
+        if not outcome.not_reviewed_issues and len(outcome.approved_flags) == 1:
+            # Clone before acquiring the lock so the deep copy doesn't serialize
+            # other workers; ``outcome`` is a local not yet shared, so this is
+            # race-free.
+            stored = outcome.clone()
+            with _CHUNK_OUTCOME_CACHE_LOCK:
+                _CHUNK_OUTCOME_CACHE[key] = stored
+                _CHUNK_OUTCOME_CACHE.move_to_end(key)
+                while len(_CHUNK_OUTCOME_CACHE) > capacity:
+                    _CHUNK_OUTCOME_CACHE.popitem(last=False)
+        # Snapshot the waiter count and release the slot atomically: a waiter that
+        # registered before this point is counted (it will read ``outcome``); one
+        # arriving after finds no slot and starts its own review. Publish an
+        # isolated clone only when someone is actually waiting — the common
+        # solo-leader path skips that extra deep copy.
+        with _CHUNK_OUTCOME_CACHE_LOCK:
+            has_waiters = inflight.waiters > 0
+            if _CHUNK_INFLIGHT.get(key) is inflight:
+                del _CHUNK_INFLIGHT[key]
+        inflight.outcome = outcome.clone() if has_waiters else outcome
     except BaseException as exc:
         # Fail closed for the caller and every waiter: hand them the same
-        # exception (so they don't re-run), free the slot so a later cycle can
-        # retry for real, and re-raise unchanged.
+        # exception (so they don't re-run), free the slot (only if it is still
+        # ours — a mid-flight cache clear may have replaced it) so a later cycle
+        # can retry for real, wake the waiters, and re-raise unchanged.
         with _CHUNK_OUTCOME_CACHE_LOCK:
-            _CHUNK_INFLIGHT.pop(key, None)
+            if _CHUNK_INFLIGHT.get(key) is inflight:
+                del _CHUNK_INFLIGHT[key]
         inflight.error = exc
         inflight.done.set()
         raise
 
-    # Cache only an outcome produced from the *exact full-chunk* LLM input: no
-    # degraded ("not reviewed") coverage findings, and exactly one sub-review.
-    # A degraded outcome must be retried for real next cycle. Requiring a single
-    # sub-review also excludes a bisected recovery (the full chunk raised a
-    # recoverable content error and only succeeded after splitting): its aggregate
-    # has >= 2 approved_flags and reflects lower-context, split-across-the-boundary
-    # reviews. Freezing that under the full-chunk key would keep serving the
-    # reduced-fidelity result on later identical cycles instead of retrying the
-    # full chunk — so we skip it and let the next cycle re-attempt full context.
-    if not outcome.not_reviewed_issues and len(outcome.approved_flags) == 1:
-        # Clone before acquiring the lock so the deep copy doesn't serialize other
-        # workers; ``outcome`` is a local not yet shared, so this is race-free.
-        stored = outcome.clone()
-        with _CHUNK_OUTCOME_CACHE_LOCK:
-            _CHUNK_OUTCOME_CACHE[key] = stored
-            _CHUNK_OUTCOME_CACHE.move_to_end(key)
-            while len(_CHUNK_OUTCOME_CACHE) > capacity:
-                _CHUNK_OUTCOME_CACHE.popitem(last=False)
-
-    # Publish an independent clone to any waiters (they clone again per caller),
-    # then release the slot and wake them. Assigning before ``set()`` gives the
-    # waiter a safe read; popping before ``set()`` means new arrivals become the
-    # next leader rather than joining a completed record.
-    inflight.outcome = outcome.clone()
-    with _CHUNK_OUTCOME_CACHE_LOCK:
-        _CHUNK_INFLIGHT.pop(key, None)
+    # Resolved cleanly: nothing below can raise, so ``done`` always fires here.
     inflight.done.set()
     return outcome
 
