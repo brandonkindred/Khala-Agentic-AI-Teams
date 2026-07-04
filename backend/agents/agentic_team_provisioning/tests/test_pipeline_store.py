@@ -70,7 +70,7 @@ def test_try_resume_is_a_compare_and_swap(fake_pg: dict) -> None:
     row = store.get_pipeline_run("r1")
     assert row["status"] == "running"
     assert row["human_prompt"] is None
-    assert store.consume_pipeline_human_input("r1") == "answer"
+    assert store.get_pipeline_status("r1")["human_input"] == "answer"
 
     # Second resume loses (already left waiting_for_input).
     assert store.try_resume_pipeline_run("r1", "again", 3600) is False
@@ -159,12 +159,31 @@ def test_try_fail_only_from_active(fake_pg: dict) -> None:
     assert store.get_pipeline_run("r2")["status"] == "cancelled"
 
 
-def test_consume_human_input_defaults_empty(fake_pg: dict) -> None:
+def test_get_pipeline_status(fake_pg: dict) -> None:
     _seed_team(fake_pg)
     store = AgenticTestStore()
     store.create_pipeline_run("r1", "t1", "p1")
-    assert store.consume_pipeline_human_input("r1") == ""
-    assert store.consume_pipeline_human_input("missing") == ""
+    # Fresh run: running, no answer yet.
+    assert store.get_pipeline_status("r1") == {"status": "running", "human_input": ""}
+    assert store.get_pipeline_status("missing") is None
+
+    store.update_pipeline_run("r1", status="waiting_for_input")
+    assert store.try_resume_pipeline_run("r1", "the answer", 3600) is True
+    # After resume the status read carries the persisted answer (no second SELECT).
+    assert store.get_pipeline_status("r1") == {"status": "running", "human_input": "the answer"}
+
+
+def test_advance_pipeline_step_only_when_running(fake_pg: dict) -> None:
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")  # running
+    assert store.advance_pipeline_step("r1", "s1") is True
+    assert store.get_pipeline_run("r1")["current_step_id"] == "s1"
+
+    # A terminal run is not advanced (signals the executor to stop).
+    store.update_pipeline_run("r1", status="cancelled")
+    assert store.advance_pipeline_step("r1", "s2") is False
+    assert store.get_pipeline_run("r1")["current_step_id"] == "s1"
 
 
 def test_heartbeat_only_touches_active_runs(fake_pg: dict) -> None:

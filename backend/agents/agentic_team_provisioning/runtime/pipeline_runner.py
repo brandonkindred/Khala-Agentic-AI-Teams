@@ -222,17 +222,13 @@ class PipelineRunner:
                 step_results: list[dict[str, Any]] = []
 
                 for step in step_order:
-                    # Stop if the run reached a terminal state out-of-band (cancelled by
-                    # a user, or reaped/expired by another actor). Checking before each
-                    # step — and completing via a CAS below — prevents resurrecting a
-                    # run that has already been finalized.
-                    run_data = self._store.get_pipeline_run(run_id)
-                    if run_data and run_data.get("status") in ("cancelled", "failed", "completed"):
+                    # Advance the cursor iff the run is still 'running' (one round-trip).
+                    # A False return means the run reached a terminal state out-of-band
+                    # (cancelled by a user, or reaped/expired) — stop without
+                    # resurrecting it. Status stays 'running' between steps (set at
+                    # creation and on resume), so this can't revive a cancelled run.
+                    if not self._store.advance_pipeline_step(run_id, step.step_id):
                         return
-
-                    # Only advance the cursor; status stays 'running' (set at creation
-                    # and on resume) so this write can't resurrect a cancelled run.
-                    self._store.update_pipeline_run(run_id, current_step_id=step.step_id)
 
                     if step.step_type == StepType.WAIT:
                         resumed = self._handle_wait_step(
@@ -266,6 +262,34 @@ class PipelineRunner:
             finally:
                 self._resume_events.pop(run_id, None)
 
+    @staticmethod
+    def _resolve_agent(
+        step: ProcessStep, agents_by_name: dict[str, AgenticTeamAgent]
+    ) -> tuple[str, Optional[AgenticTeamAgent]]:
+        """Return ``(agent_name, agent_def)`` for a step's first assigned agent."""
+        agent_name = step.agents[0].agent_name if step.agents else ""
+        return agent_name, agents_by_name.get(agent_name)
+
+    @staticmethod
+    def _run_agent(agent_def: AgenticTeamAgent, prompt: str) -> str:
+        """Build and invoke an agent for a single prompt (blocking LLM call)."""
+        agent_instance = build_agent(
+            agent_def.agent_name,
+            agent_def.role,
+            agent_def.skills,
+            agent_def.capabilities,
+            agent_def.tools,
+            agent_def.expertise,
+        )
+        return call_agent(agent_instance, prompt)
+
+    def _record_step(
+        self, run_id: str, step_results: list[dict[str, Any]], result: dict[str, Any]
+    ) -> None:
+        """Append a finished step's result and persist the updated step_results."""
+        step_results.append(result)
+        self._store.update_pipeline_run(run_id, step_results=step_results)
+
     def _handle_action_step(
         self,
         run_id: str,
@@ -275,34 +299,28 @@ class PipelineRunner:
         agents_by_name: dict[str, AgenticTeamAgent],
     ) -> str:
         """Build the agent, invoke it, store the result."""
-        agent_name = step.agents[0].agent_name if step.agents else ""
-        agent_def = agents_by_name.get(agent_name)
-
-        step_input = f"Task: {step.name}\nDescription: {step.description}\n\nContext from previous step:\n{prev_output}"
-
+        agent_name, agent_def = self._resolve_agent(step, agents_by_name)
+        step_input = (
+            f"Task: {step.name}\nDescription: {step.description}\n\n"
+            f"Context from previous step:\n{prev_output}"
+        )
         if agent_def:
-            agent_instance = build_agent(
-                agent_def.agent_name,
-                agent_def.role,
-                agent_def.skills,
-                agent_def.capabilities,
-                agent_def.tools,
-                agent_def.expertise,
-            )
-            output = call_agent(agent_instance, step_input)
+            output = self._run_agent(agent_def, step_input)
         else:
             output = f"[No agent assigned to step '{step.name}']"
 
-        result = {
-            "step_id": step.step_id,
-            "step_name": step.name,
-            "agent_name": agent_name,
-            "input": prev_output,
-            "output": output,
-            "status": "completed",
-        }
-        step_results.append(result)
-        self._store.update_pipeline_run(run_id, step_results=step_results)
+        self._record_step(
+            run_id,
+            step_results,
+            {
+                "step_id": step.step_id,
+                "step_name": step.name,
+                "agent_name": agent_name,
+                "input": prev_output,
+                "output": output,
+                "status": "completed",
+            },
+        )
         return output
 
     def _handle_wait_step(
@@ -350,10 +368,31 @@ class PipelineRunner:
 
         deadline = time.monotonic() + self._wait_timeout_s
         while True:
+            # Status-first: a cheap read (no step_results marshalling) that also carries
+            # the persisted answer, so a resume needs no second SELECT.
+            row = self._store.get_pipeline_status(run_id)
+            status = row["status"] if row else None
+
+            if status == "running":
+                # Resumed here or on another worker — the answer rode along on the read.
+                human_input = row["human_input"]
+                result["output"] = human_input
+                result["status"] = "completed"
+                self._store.update_pipeline_run(run_id, step_results=step_results)
+                return human_input
+            if status in ("cancelled", "failed", "completed"):
+                # Cancelled, expired, or reaped by another actor. Reconcile the WAIT
+                # step so the audit panel doesn't show a step still "waiting" under a
+                # terminated run, then stop.
+                if status in ("cancelled", "failed"):
+                    result["status"] = status
+                    self._store.update_pipeline_run(run_id, step_results=step_results)
+                return None
+
+            # Still waiting_for_input. Claim the timeout once the deadline elapses; if a
+            # concurrent resume/cancel won the row, the next loop's read observes it.
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                # Deadline elapsed — try to claim the timeout. If another actor won the
-                # row concurrently (resume/cancel), fall through and re-read below.
                 error = (
                     f"wait_timeout: no human input for WAIT step '{step.name}' "
                     f"within {self._wait_timeout_s}s"
@@ -368,29 +407,8 @@ class PipelineRunner:
                         "Pipeline run %s timed out at WAIT step %s", run_id, step.step_id
                     )
                     return None
-
-            wait_slice = min(self._wait_poll_s, remaining) if remaining > 0 else self._wait_poll_s
-            resume_event.wait(timeout=wait_slice)
-
-            run_data = self._store.get_pipeline_run(run_id)
-            status = (run_data or {}).get("status")
-
-            if status == "running":
-                # Resumed here or on another worker — read the persisted answer.
-                human_input = self._store.consume_pipeline_human_input(run_id)
-                result["output"] = human_input
-                result["status"] = "completed"
-                self._store.update_pipeline_run(run_id, step_results=step_results)
-                return human_input
-            if status in ("cancelled", "failed", "completed"):
-                # Cancelled, expired, or reaped by another actor. Reconcile the WAIT
-                # step so the audit panel doesn't show a step still "waiting" under a
-                # terminated run, then stop.
-                if status in ("cancelled", "failed"):
-                    result["status"] = status
-                    self._store.update_pipeline_run(run_id, step_results=step_results)
-                return None
-            # Still waiting_for_input -> loop until resumed or the deadline elapses.
+                continue  # lost the expire race — re-read immediately, no sleep
+            resume_event.wait(timeout=min(self._wait_poll_s, remaining))
 
     def _handle_decision_step(
         self,
@@ -401,9 +419,7 @@ class PipelineRunner:
         agents_by_name: dict[str, AgenticTeamAgent],
     ) -> str:
         """Evaluate condition and record the decision."""
-        agent_name = step.agents[0].agent_name if step.agents else ""
-        agent_def = agents_by_name.get(agent_name)
-
+        agent_name, agent_def = self._resolve_agent(step, agents_by_name)
         condition_prompt = (
             f"Decision step: {step.name}\n"
             f"Condition: {step.condition or 'Choose the best next step'}\n"
@@ -413,28 +429,22 @@ class PipelineRunner:
         )
 
         if agent_def:
-            agent_instance = build_agent(
-                agent_def.agent_name,
-                agent_def.role,
-                agent_def.skills,
-                agent_def.capabilities,
-                agent_def.tools,
-                agent_def.expertise,
-            )
-            decision = call_agent(agent_instance, condition_prompt)
+            decision = self._run_agent(agent_def, condition_prompt)
         else:
             decision = step.next_steps[0] if step.next_steps else "none"
 
-        result = {
-            "step_id": step.step_id,
-            "step_name": step.name,
-            "agent_name": agent_name,
-            "input": prev_output,
-            "output": f"Decision: {decision}",
-            "status": "completed",
-        }
-        step_results.append(result)
-        self._store.update_pipeline_run(run_id, step_results=step_results)
+        self._record_step(
+            run_id,
+            step_results,
+            {
+                "step_id": step.step_id,
+                "step_name": step.name,
+                "agent_name": agent_name,
+                "input": prev_output,
+                "output": f"Decision: {decision}",
+                "status": "completed",
+            },
+        )
         return decision
 
     @staticmethod

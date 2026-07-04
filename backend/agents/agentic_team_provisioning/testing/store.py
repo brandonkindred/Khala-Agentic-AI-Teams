@@ -51,6 +51,24 @@ def _row_ts(value: Any) -> str:
     return str(value or "")
 
 
+# The DTO-shaped column list for a pipeline run, shared by get/list so the two
+# reads can't drift. Deliberately excludes the internal ``human_input`` /
+# ``heartbeat_at`` columns, which the ``TestPipelineRun`` response model omits.
+_PIPELINE_RUN_COLUMNS = (
+    "run_id, team_id, process_id, status, current_step_id, "
+    "initial_input, step_results, human_prompt, error, started_at, finished_at"
+)
+
+
+def _normalize_run_row(row: dict) -> dict:
+    """Normalize a pipeline-run row's timestamps to ISO strings (shared by get/list)."""
+    return {
+        **row,
+        "started_at": _row_ts(row["started_at"]),
+        "finished_at": _row_ts(row["finished_at"]) if row["finished_at"] else None,
+    }
+
+
 class AgenticTestStore:
     """Postgres-backed store for test chat sessions, messages, and pipeline runs."""
 
@@ -278,19 +296,58 @@ class AgenticTestStore:
     def get_pipeline_run(self, run_id: str) -> Optional[dict]:
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT run_id, team_id, process_id, status, current_step_id, "
-                "initial_input, step_results, human_prompt, error, started_at, finished_at "
-                "FROM agentic_test_pipeline_runs WHERE run_id = %s",
+                f"SELECT {_PIPELINE_RUN_COLUMNS} FROM agentic_test_pipeline_runs WHERE run_id = %s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+        return _normalize_run_row(row) if row else None
+
+    @timed_query(store=_STORE, op="get_pipeline_status")
+    def get_pipeline_status(self, run_id: str) -> Optional[dict]:
+        """Lightweight status + pending answer read for the WAIT poll loop.
+
+        Polling a waiting run every few seconds via ``get_pipeline_run`` would
+        re-marshal the (potentially large, ever-growing) ``step_results`` JSON just to
+        read one enum; this reads only what the loop needs. Returning ``human_input``
+        alongside ``status`` also lets the resume path avoid a second SELECT.
+
+        Preconditions: ``run_id`` is a non-empty str.
+        Postconditions: returns ``{"status": str, "human_input": str}`` (``human_input``
+        is ``""`` when NULL) or ``None`` if the run does not exist.
+        """
+        assert run_id, "run_id must be non-empty"
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT status, human_input FROM agentic_test_pipeline_runs WHERE run_id = %s",
                 (run_id,),
             )
             row = cur.fetchone()
         if not row:
             return None
-        return {
-            **row,
-            "started_at": _row_ts(row["started_at"]),
-            "finished_at": _row_ts(row["finished_at"]) if row["finished_at"] else None,
-        }
+        return {"status": row["status"], "human_input": row["human_input"] or ""}
+
+    @timed_query(store=_STORE, op="advance_pipeline_step")
+    def advance_pipeline_step(self, run_id: str, step_id: str) -> bool:
+        """Advance the step cursor iff the run is still ``running`` (one round-trip).
+
+        Merges the per-step terminal check and cursor write: a single conditional
+        UPDATE that both moves ``current_step_id`` forward and reports, via rowcount,
+        whether the run is still live. Race-tight — no read/write gap in which a
+        concurrent cancel/reap could be missed.
+
+        Preconditions: ``run_id`` is a non-empty str; ``step_id`` is a str.
+        Postconditions: returns True and sets ``current_step_id`` iff the run was
+        ``running``; returns False (no write) if the run reached a terminal state
+        out-of-band, signalling the caller to stop.
+        """
+        assert run_id, "run_id must be non-empty"
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE agentic_test_pipeline_runs SET current_step_id = %s "
+                "WHERE run_id = %s AND status = 'running'",
+                (step_id, run_id),
+            )
+            return cur.rowcount > 0
 
     @timed_query(store=_STORE, op="update_pipeline_run")
     def update_pipeline_run(self, run_id: str, **fields: Any) -> bool:
@@ -315,21 +372,12 @@ class AgenticTestStore:
     def list_pipeline_runs(self, team_id: str, limit: int = 20) -> list[dict]:
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT run_id, team_id, process_id, status, current_step_id, "
-                "initial_input, step_results, human_prompt, error, started_at, finished_at "
-                "FROM agentic_test_pipeline_runs WHERE team_id = %s "
-                "ORDER BY started_at DESC LIMIT %s",
+                f"SELECT {_PIPELINE_RUN_COLUMNS} FROM agentic_test_pipeline_runs "
+                "WHERE team_id = %s ORDER BY started_at DESC LIMIT %s",
                 (team_id, limit),
             )
             rows = cur.fetchall()
-        return [
-            {
-                **r,
-                "started_at": _row_ts(r["started_at"]),
-                "finished_at": _row_ts(r["finished_at"]) if r["finished_at"] else None,
-            }
-            for r in rows
-        ]
+        return [_normalize_run_row(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Pipeline run resume/timeout (compare-and-swap) + liveness
@@ -341,6 +389,34 @@ class AgenticTestStore:
     # wins the transition — this is what closes the timeout-vs-submit race without an
     # in-process lock, and what makes resume correct regardless of which uvicorn
     # worker serves the ``/input`` request.
+
+    def _cas_pipeline_run(
+        self,
+        run_id: str,
+        *,
+        set_sql: str,
+        set_params: tuple,
+        where_sql: str,
+        where_params: tuple = (),
+    ) -> bool:
+        """Single-row conditional UPDATE; True iff this caller won the transition.
+
+        The shared core of every ``try_*`` transition: ``UPDATE ... SET {set_sql}
+        WHERE run_id = %s AND {where_sql}``. Postgres serializes concurrent updates to
+        the row, so exactly one caller sees ``rowcount == 1``.
+
+        Preconditions: ``run_id`` is a non-empty str; the ``%s`` count in ``set_sql`` /
+        ``where_sql`` matches ``set_params`` / ``where_params``.
+        Postconditions: returns True iff exactly one row matched and was updated.
+        """
+        assert run_id, "run_id must be non-empty"
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE agentic_test_pipeline_runs SET {set_sql} "
+                f"WHERE run_id = %s AND {where_sql}",
+                (*set_params, run_id, *where_params),
+            )
+            return cur.rowcount > 0
 
     @timed_query(store=_STORE, op="try_resume_pipeline_run")
     def try_resume_pipeline_run(self, run_id: str, human_input: str, stale_seconds: int) -> bool:
@@ -363,18 +439,17 @@ class AgenticTestStore:
             already left ``waiting_for_input`` (timed out, cancelled, completed, reaped)
             or is an orphan with a stale/absent heartbeat.
         """
-        assert run_id, "run_id must be non-empty"
         assert stale_seconds > 0, "stale_seconds must be positive"
         now = _now()
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE agentic_test_pipeline_runs "
-                "SET status = 'running', human_prompt = NULL, human_input = %s, heartbeat_at = %s "
-                "WHERE run_id = %s AND status = 'waiting_for_input' "
-                "AND heartbeat_at IS NOT NULL AND heartbeat_at >= %s",
-                (human_input, now, run_id, _stale_cutoff(now, stale_seconds)),
-            )
-            return cur.rowcount > 0
+        return self._cas_pipeline_run(
+            run_id,
+            set_sql="status = 'running', human_prompt = NULL, human_input = %s, heartbeat_at = %s",
+            set_params=(human_input, now),
+            where_sql=(
+                "status = 'waiting_for_input' AND heartbeat_at IS NOT NULL AND heartbeat_at >= %s"
+            ),
+            where_params=(_stale_cutoff(now, stale_seconds),),
+        )
 
     @timed_query(store=_STORE, op="try_expire_pipeline_run")
     def try_expire_pipeline_run(self, run_id: str, error: str) -> bool:
@@ -388,37 +463,12 @@ class AgenticTestStore:
             row already left ``waiting_for_input`` (i.e. a concurrent resume/cancel
             won the race).
         """
-        assert run_id, "run_id must be non-empty"
-        now = _now()
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE agentic_test_pipeline_runs "
-                "SET status = 'failed', error = %s, finished_at = %s "
-                "WHERE run_id = %s AND status = 'waiting_for_input'",
-                (error, now, run_id),
-            )
-            return cur.rowcount > 0
-
-    @timed_query(store=_STORE, op="consume_pipeline_human_input")
-    def consume_pipeline_human_input(self, run_id: str) -> str:
-        """Read the persisted human input for a run (empty string if none).
-
-        Kept separate from ``get_pipeline_run`` so the DTO-shaped SELECT — and the
-        ``TestPipelineRun`` response model — need not carry the internal column.
-
-        Preconditions: ``run_id`` is a non-empty str.
-        Postconditions: returns the stored ``human_input`` or ``""`` when NULL/absent.
-        """
-        assert run_id, "run_id must be non-empty"
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT human_input FROM agentic_test_pipeline_runs WHERE run_id = %s",
-                (run_id,),
-            )
-            row = cur.fetchone()
-        if not row:
-            return ""
-        return row["human_input"] or ""
+        return self._cas_pipeline_run(
+            run_id,
+            set_sql="status = 'failed', error = %s, finished_at = %s",
+            set_params=(error, _now()),
+            where_sql="status = 'waiting_for_input'",
+        )
 
     @timed_query(store=_STORE, op="heartbeat_pipeline_run")
     def heartbeat_pipeline_run(self, run_id: str) -> None:
@@ -450,16 +500,12 @@ class AgenticTestStore:
         ``completed`` with ``step_results`` and ``finished_at`` set; False (no-op) if
         the run already reached a terminal state.
         """
-        assert run_id, "run_id must be non-empty"
-        now = _now()
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE agentic_test_pipeline_runs "
-                "SET status = 'completed', step_results = %s, finished_at = %s "
-                "WHERE run_id = %s AND status = 'running'",
-                (Json(step_results), now, run_id),
-            )
-            return cur.rowcount > 0
+        return self._cas_pipeline_run(
+            run_id,
+            set_sql="status = 'completed', step_results = %s, finished_at = %s",
+            set_params=(Json(step_results), _now()),
+            where_sql="status = 'running'",
+        )
 
     @timed_query(store=_STORE, op="try_cancel_pipeline_run")
     def try_cancel_pipeline_run(self, run_id: str) -> bool:
@@ -472,16 +518,12 @@ class AgenticTestStore:
         Postconditions: returns True iff the row was active and is now ``cancelled``
         with ``finished_at`` set; False (no-op) if the run was already terminal.
         """
-        assert run_id, "run_id must be non-empty"
-        now = _now()
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE agentic_test_pipeline_runs "
-                "SET status = 'cancelled', finished_at = %s "
-                "WHERE run_id = %s AND status IN ('running', 'waiting_for_input')",
-                (now, run_id),
-            )
-            return cur.rowcount > 0
+        return self._cas_pipeline_run(
+            run_id,
+            set_sql="status = 'cancelled', finished_at = %s",
+            set_params=(_now(),),
+            where_sql="status IN ('running', 'waiting_for_input')",
+        )
 
     @timed_query(store=_STORE, op="try_fail_pipeline_run")
     def try_fail_pipeline_run(self, run_id: str, error: str) -> bool:
@@ -496,16 +538,12 @@ class AgenticTestStore:
         Postconditions: returns True iff the row was active and is now ``failed`` with
         ``error`` and ``finished_at`` set; False (no-op) if the run was already terminal.
         """
-        assert run_id, "run_id must be non-empty"
-        now = _now()
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE agentic_test_pipeline_runs "
-                "SET status = 'failed', error = %s, finished_at = %s "
-                "WHERE run_id = %s AND status IN ('running', 'waiting_for_input')",
-                (error, now, run_id),
-            )
-            return cur.rowcount > 0
+        return self._cas_pipeline_run(
+            run_id,
+            set_sql="status = 'failed', error = %s, finished_at = %s",
+            set_params=(error, _now()),
+            where_sql="status IN ('running', 'waiting_for_input')",
+        )
 
     @timed_query(store=_STORE, op="reap_orphaned_pipeline_runs")
     def reap_orphaned_pipeline_runs(self, error: str, stale_seconds: int) -> int:

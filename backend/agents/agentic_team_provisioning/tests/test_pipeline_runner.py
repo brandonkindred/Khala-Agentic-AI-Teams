@@ -125,11 +125,19 @@ class _FakeStore:
             row.update(status="failed", error=error, finished_at=_now())
             return True
 
-    def consume_pipeline_human_input(self, run_id: str) -> str:
+    def get_pipeline_status(self, run_id: str):
         row = self._rows.get(run_id)
         if not row:
-            return ""
-        return row.get("human_input") or ""
+            return None
+        return {"status": row["status"], "human_input": row.get("human_input") or ""}
+
+    def advance_pipeline_step(self, run_id: str, step_id: str) -> bool:
+        with self._lock:
+            row = self._rows.get(run_id)
+            if not row or row["status"] != "running":
+                return False
+            row["current_step_id"] = step_id
+            return True
 
     def heartbeat_pipeline_run(self, run_id: str) -> None:
         with self._lock:

@@ -522,10 +522,25 @@ class _FakeCursor:
             self.rowcount = 1
             return
 
-        if norm.startswith("select human_input from agentic_test_pipeline_runs"):
+        # get_pipeline_status (lightweight status + pending answer read).
+        if norm.startswith("select status, human_input from agentic_test_pipeline_runs"):
             (run_id,) = params
             row = self._db["pipeline_runs"].get(run_id)
-            self._last_fetch_one = {"human_input": row["human_input"]} if row else None
+            self._last_fetch_one = (
+                {"status": row["status"], "human_input": row["human_input"]} if row else None
+            )
+            return
+
+        # advance_pipeline_step (cursor UPDATE gated on status='running'). Must precede
+        # the generic update handler, which would otherwise write unconditionally.
+        if norm.startswith("update agentic_test_pipeline_runs set current_step_id"):
+            step_id, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] == "running":
+                row["current_step_id"] = step_id
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
             return
 
         # get_pipeline_run (WHERE run_id) vs list_pipeline_runs (WHERE team_id) share
