@@ -30,12 +30,48 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "coding-team"}
 
 
+def _temporal_dispatch(job_id: str, request: RunRequest) -> bool:
+    """Dispatch the job to Temporal when enabled; return True if it was dispatched.
+
+    Preconditions:
+        - ``job_id`` names a job row that already exists (the caller ran
+          ``create_job``); ``request.plan_input`` is non-null.
+    Postconditions:
+        - Returns True and starts ``CodingTeamWorkflow`` when ``TEMPORAL_ADDRESS``
+          is set. Returns False (dispatching nothing) when Temporal is disabled
+          or its modules are unavailable, so the caller runs the thread path.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        if not is_temporal_enabled():
+            return False
+        from coding_team.temporal.start_workflow import start_coding_team_workflow
+
+        start_coding_team_workflow(job_id, request.repo_path, request.plan_input)
+        logger.info("Coding team job dispatched via Temporal: job_id=%s", job_id)
+        return True
+    except ImportError:
+        return False
+
+
 @router.post("/run", response_model=RunResponse)
 def post_run(request: RunRequest) -> RunResponse:
-    """Start a coding_team job. If plan_input is provided, runs orchestrator in background."""
+    """Start a coding_team job. If plan_input is provided, runs orchestrator in background.
+
+    Dispatches through Temporal (durable, restart-survivable) when
+    ``TEMPORAL_ADDRESS`` is set; otherwise runs the orchestrator in a daemon
+    thread. Both paths return the same ``job_id`` for the client to poll.
+    """
     job_id = str(uuid.uuid4())
     _main.create_job(job_id=job_id, repo_path=request.repo_path, plan_input=request.plan_input)
     if request.plan_input:
+        if _temporal_dispatch(job_id, request):
+            return RunResponse(
+                job_id=job_id,
+                status="running",
+                message="Job started (Temporal). Poll GET /status/{job_id} for progress.",
+            )
         plan = _main.plan_from_input(request.plan_input, request.repo_path)
 
         def run() -> None:
