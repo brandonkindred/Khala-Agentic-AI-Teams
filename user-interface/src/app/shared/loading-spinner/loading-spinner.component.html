@@ -1,4 +1,12 @@
-<div class="spinner-container" [attr.aria-busy]="true" [attr.aria-label]="message ?? 'Loading'">
+<!-- role="status" + aria-live so assistive tech announces the loading state
+     (and its resolution) rather than leaving it silent. -->
+<div
+  class="spinner-container"
+  role="status"
+  aria-live="polite"
+  [attr.aria-busy]="true"
+  [attr.aria-label]="message ?? 'Loading'"
+>
   <mat-spinner [diameter]="diameter"></mat-spinner>
   @if (message) {
     <p class="message">{{ message }}</p>

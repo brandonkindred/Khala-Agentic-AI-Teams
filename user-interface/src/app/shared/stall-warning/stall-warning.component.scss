@@ -3,8 +3,8 @@
   align-items: center;
   gap: 0.4rem;
   margin-top: 0.5rem;
-  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
-  font-size: 0.8125rem;
+  color: var(--kh-text-muted);
+  font-size: var(--kh-text-sm);
 
   mat-icon {
     font-size: 1rem;
@@ -19,14 +19,14 @@
   gap: 0.5rem;
   padding: 0.75rem 1rem;
   margin-top: 0.75rem;
-  background: rgba(255, 152, 0, 0.12);
-  color: var(--mat-sys-on-surface, rgba(0, 0, 0, 0.87));
-  border-radius: 8px;
-  border-left: 3px solid var(--mat-sys-tertiary, #ff9800);
-  font-size: 0.875rem;
+  background: var(--kh-warning-subtle);
+  color: var(--kh-text-primary);
+  border-radius: var(--kh-radius-md);
+  border-left: 3px solid var(--kh-warning);
+  font-size: var(--kh-text-base);
 
   mat-icon {
-    color: var(--mat-sys-tertiary, #ff9800);
+    color: var(--kh-warning);
     flex-shrink: 0;
   }
 }

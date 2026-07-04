@@ -120,7 +120,7 @@
                 <ng-container matColumnDef="actions">
                   <th mat-header-cell *matHeaderCellDef></th>
                   <td mat-cell *matCellDef="let pos; let i = index">
-                    <button mat-icon-button color="warn" (click)="removePosition(i)" matTooltip="Remove position">
+                    <button mat-icon-button color="warn" (click)="removePosition(i)" matTooltip="Remove position" aria-label="Remove position">
                       <mat-icon>delete</mat-icon>
                     </button>
                   </td>

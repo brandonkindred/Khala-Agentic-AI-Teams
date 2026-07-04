@@ -1,6 +1,7 @@
 import { Routes } from '@angular/router';
 import { AppShellComponent } from './components/app-shell/app-shell.component';
 import { llmConfiguredGuard } from './core/llm-configured.guard';
+import { unsavedChangesGuard } from './core/unsaved-changes.guard';
 
 // All feature routes are lazily loaded so the initial bundle ships only the app
 // shell; each dashboard (and its Angular Material deps) is fetched on first
@@ -18,13 +19,15 @@ export const routes: Routes = [
         path: 'dashboard',
         loadComponent: () =>
           import('./components/jobs-dashboard/jobs-dashboard.component').then((m) => m.JobsDashboardComponent),
-        data: { breadcrumb: 'Jobs Dashboard', title: 'Jobs Dashboard' },
+        title: 'Jobs Dashboard',
+        data: { breadcrumb: 'Jobs Dashboard' },
       },
       {
         path: 'blogging',
         loadComponent: () =>
           import('./components/blog-landing/blog-landing.component').then((m) => m.BlogLandingComponent),
-        data: { breadcrumb: 'Blogging', title: 'Blogging' },
+        title: 'Blogging',
+        data: { breadcrumb: 'Blogging' },
       },
       {
         path: 'blogging/dashboard',
@@ -32,7 +35,8 @@ export const routes: Routes = [
           import('./components/blogging-dashboard/blogging-dashboard.component').then(
             (m) => m.BloggingDashboardComponent,
           ),
-        data: { breadcrumb: 'Pipeline Dashboard', title: 'Blogging Pipeline' },
+        title: 'Blogging Pipeline',
+        data: { breadcrumb: 'Pipeline Dashboard' },
       },
       {
         path: 'blogging/jobs/:jobId/artifacts/:artifactName',
@@ -40,7 +44,8 @@ export const routes: Routes = [
           import('./components/blog-artifact-viewer/blog-artifact-viewer.component').then(
             (m) => m.BlogArtifactViewerComponent,
           ),
-        data: { breadcrumb: 'Artifact', title: 'Artifact Viewer' },
+        title: 'Artifact Viewer',
+        data: { breadcrumb: 'Artifact' },
       },
       {
         path: 'software-engineering',
@@ -48,25 +53,29 @@ export const routes: Routes = [
           import('./components/software-engineering-dashboard/software-engineering-dashboard.component').then(
             (m) => m.SoftwareEngineeringDashboardComponent,
           ),
-        data: { breadcrumb: 'Software Engineering', title: 'Software Engineering' },
+        title: 'Software Engineering',
+        data: { breadcrumb: 'Software Engineering' },
       },
       {
         path: 'software-engineering/planning-v3',
         loadComponent: () =>
           import('./components/planning-v3-page/planning-v3-page.component').then((m) => m.PlanningV3PageComponent),
-        data: { breadcrumb: 'Planning', title: 'Planning' },
+        title: 'Planning',
+        data: { breadcrumb: 'Planning' },
       },
       {
         path: 'software-engineering/coding-team',
         loadComponent: () =>
           import('./components/coding-team-page/coding-team-page.component').then((m) => m.CodingTeamPageComponent),
-        data: { breadcrumb: 'Coding Team', title: 'Coding Team' },
+        title: 'Coding Team',
+        data: { breadcrumb: 'Coding Team' },
       },
       {
         path: 'software-engineering/code-review',
         loadComponent: () =>
           import('./components/code-review-panel/code-review-panel.component').then((m) => m.CodeReviewPanelComponent),
-        data: { breadcrumb: 'Code Review', title: 'Code Review' },
+        title: 'Code Review',
+        data: { breadcrumb: 'Code Review' },
       },
       {
         path: 'software-engineering/planning-v2/jobs/:jobId/artifacts/:artifactName',
@@ -74,7 +83,8 @@ export const routes: Routes = [
           import('./components/planning-artifact-detail/planning-artifact-detail.component').then(
             (m) => m.PlanningArtifactDetailComponent,
           ),
-        data: { breadcrumb: 'Artifact', title: 'Planning Artifact' },
+        title: 'Planning Artifact',
+        data: { breadcrumb: 'Artifact' },
       },
       {
         path: 'market-research',
@@ -82,7 +92,8 @@ export const routes: Routes = [
           import('./components/market-research-dashboard/market-research-dashboard.component').then(
             (m) => m.MarketResearchDashboardComponent,
           ),
-        data: { breadcrumb: 'Market Research', title: 'Market Research' },
+        title: 'Market Research',
+        data: { breadcrumb: 'Market Research' },
       },
       {
         path: 'soc2-compliance',
@@ -90,7 +101,8 @@ export const routes: Routes = [
           import('./components/soc2-compliance-dashboard/soc2-compliance-dashboard.component').then(
             (m) => m.Soc2ComplianceDashboardComponent,
           ),
-        data: { breadcrumb: 'SOC2 Compliance', title: 'SOC2 Compliance' },
+        title: 'SOC2 Compliance',
+        data: { breadcrumb: 'SOC2 Compliance' },
       },
       {
         path: 'social-marketing',
@@ -98,13 +110,15 @@ export const routes: Routes = [
           import('./components/social-marketing-dashboard/social-marketing-dashboard.component').then(
             (m) => m.SocialMarketingDashboardComponent,
           ),
-        data: { breadcrumb: 'Social Marketing', title: 'Social Marketing' },
+        title: 'Social Marketing',
+        data: { breadcrumb: 'Social Marketing' },
       },
       {
         path: 'branding',
         loadComponent: () =>
           import('./components/branding-dashboard/branding-dashboard.component').then((m) => m.BrandingDashboardComponent),
-        data: { breadcrumb: 'Branding', title: 'Branding' },
+        title: 'Branding',
+        data: { breadcrumb: 'Branding' },
       },
       {
         path: 'personal-assistant',
@@ -112,7 +126,8 @@ export const routes: Routes = [
           import('./components/personal-assistant-dashboard/personal-assistant-dashboard.component').then(
             (m) => m.PersonalAssistantDashboardComponent,
           ),
-        data: { breadcrumb: 'Personal Assistant', title: 'Personal Assistant' },
+        title: 'Personal Assistant',
+        data: { breadcrumb: 'Personal Assistant' },
       },
       {
         path: 'accessibility',
@@ -120,7 +135,8 @@ export const routes: Routes = [
           import('./components/accessibility-dashboard/accessibility-dashboard.component').then(
             (m) => m.AccessibilityDashboardComponent,
           ),
-        data: { breadcrumb: 'Accessibility Audit', title: 'Accessibility Audit' },
+        title: 'Accessibility Audit',
+        data: { breadcrumb: 'Accessibility Audit' },
       },
       {
         path: 'agent-studio',
@@ -128,13 +144,15 @@ export const routes: Routes = [
           import('./components/agent-studio-shell/agent-studio-shell.component').then(
             (m) => m.AgentStudioShellComponent,
           ),
-        data: { breadcrumb: 'Agent Studio', title: 'Agent Studio' },
+        title: 'Agent Studio',
+        data: { breadcrumb: 'Agent Studio' },
       },
       {
         path: 'agent-console',
         loadComponent: () =>
           import('./components/agent-console/agent-console.component').then((m) => m.AgentConsoleComponent),
-        data: { breadcrumb: 'Agent Console', title: 'Agent Console' },
+        title: 'Agent Console',
+        data: { breadcrumb: 'Agent Console' },
       },
       { path: 'agent-provisioning', redirectTo: '/agent-console', pathMatch: 'full' },
       {
@@ -143,7 +161,8 @@ export const routes: Routes = [
           import('./components/ai-systems-dashboard/ai-systems-dashboard.component').then(
             (m) => m.AISystemsDashboardComponent,
           ),
-        data: { breadcrumb: 'AI Systems', title: 'AI Systems' },
+        title: 'AI Systems',
+        data: { breadcrumb: 'AI Systems' },
       },
       {
         path: 'investment',
@@ -151,7 +170,8 @@ export const routes: Routes = [
           import('./components/investment-dashboard/investment-dashboard.component').then(
             (m) => m.InvestmentDashboardComponent,
           ),
-        data: { breadcrumb: 'Investment', title: 'Investment' },
+        title: 'Investment',
+        data: { breadcrumb: 'Investment' },
       },
       {
         path: 'investment/advisor',
@@ -159,7 +179,8 @@ export const routes: Routes = [
           import('./components/investment-dashboard/investment-dashboard.component').then(
             (m) => m.InvestmentDashboardComponent,
           ),
-        data: { investmentFocus: 'advisor', breadcrumb: 'Advisor & IPS', title: 'Investment Advisor' },
+        title: 'Investment Advisor',
+        data: { investmentFocus: 'advisor', breadcrumb: 'Advisor & IPS' },
       },
       {
         path: 'investment/strategy-lab',
@@ -167,7 +188,8 @@ export const routes: Routes = [
           import('./components/investment-strategy-lab-page/investment-strategy-lab-page.component').then(
             (m) => m.InvestmentStrategyLabPageComponent,
           ),
-        data: { breadcrumb: 'Strategy Lab', title: 'Strategy Lab' },
+        title: 'Strategy Lab',
+        data: { breadcrumb: 'Strategy Lab' },
       },
       {
         path: 'integrations',
@@ -175,13 +197,17 @@ export const routes: Routes = [
           import('./components/integrations-dashboard/integrations-dashboard.component').then(
             (m) => m.IntegrationsDashboardComponent,
           ),
-        data: { breadcrumb: 'Integrations', title: 'Integrations' },
+        canDeactivate: [unsavedChangesGuard],
+        title: 'Integrations',
+        data: { breadcrumb: 'Integrations' },
       },
       {
         path: 'user-profile',
         loadComponent: () =>
           import('./components/user-profile/user-profile.component').then((m) => m.UserProfileComponent),
-        data: { breadcrumb: 'User Profile', title: 'User Profile' },
+        canDeactivate: [unsavedChangesGuard],
+        title: 'User Profile',
+        data: { breadcrumb: 'User Profile' },
       },
       {
         path: 'llm-config',
@@ -189,19 +215,23 @@ export const routes: Routes = [
           import('./components/llm-config-dashboard/llm-config-dashboard.component').then(
             (m) => m.LlmConfigDashboardComponent,
           ),
-        data: { breadcrumb: 'LLM Provider', title: 'LLM Provider' },
+        canDeactivate: [unsavedChangesGuard],
+        title: 'LLM Provider',
+        data: { breadcrumb: 'LLM Provider' },
       },
       {
         path: 'sales',
         loadComponent: () =>
           import('./components/sales-dashboard/sales-dashboard.component').then((m) => m.SalesDashboardComponent),
-        data: { breadcrumb: 'Sales', title: 'Sales' },
+        title: 'Sales',
+        data: { breadcrumb: 'Sales' },
       },
       {
         path: 'nutrition',
         loadComponent: () =>
           import('./components/nutrition-dashboard/nutrition-dashboard.component').then((m) => m.NutritionDashboardComponent),
-        data: { breadcrumb: 'Nutritionist', title: 'Nutritionist' },
+        title: 'Nutritionist',
+        data: { breadcrumb: 'Nutritionist' },
       },
       {
         path: 'agentic-teams',
@@ -209,7 +239,8 @@ export const routes: Routes = [
           import('./components/agentic-team-dashboard/agentic-team-dashboard.component').then(
             (m) => m.AgenticTeamDashboardComponent,
           ),
-        data: { breadcrumb: 'Agentic Teams', title: 'Agentic Teams' },
+        title: 'Agentic Teams',
+        data: { breadcrumb: 'Agentic Teams' },
       },
       {
         path: 'startup-advisor',
@@ -217,7 +248,8 @@ export const routes: Routes = [
           import('./components/startup-advisor-dashboard/startup-advisor-dashboard.component').then(
             (m) => m.StartupAdvisorDashboardComponent,
           ),
-        data: { breadcrumb: 'Startup Advisor', title: 'Startup Advisor' },
+        title: 'Startup Advisor',
+        data: { breadcrumb: 'Startup Advisor' },
       },
       {
         path: 'persona-testing',
@@ -225,7 +257,8 @@ export const routes: Routes = [
           import('./components/persona-testing-dashboard/persona-testing-dashboard.component').then(
             (m) => m.PersonaTestingDashboardComponent,
           ),
-        data: { breadcrumb: 'Testing Personas', title: 'Testing Personas' },
+        title: 'Testing Personas',
+        data: { breadcrumb: 'Testing Personas' },
       },
       {
         path: 'persona-testing/audit/:runId',
@@ -233,7 +266,8 @@ export const routes: Routes = [
           import('./components/persona-test-audit-panel/persona-test-audit-panel.component').then(
             (m) => m.PersonaTestAuditPanelComponent,
           ),
-        data: { breadcrumb: 'Audit', title: 'Testing Personas Audit' },
+        title: 'Testing Personas Audit',
+        data: { breadcrumb: 'Audit' },
       },
       {
         path: 'deepthought',
@@ -241,7 +275,8 @@ export const routes: Routes = [
           import('./components/deepthought-dashboard/deepthought-dashboard.component').then(
             (m) => m.DeepthoughtDashboardComponent,
           ),
-        data: { breadcrumb: 'Deepthought', title: 'Deepthought' },
+        title: 'Deepthought',
+        data: { breadcrumb: 'Deepthought' },
       },
       {
         path: 'road-trip-planning',
@@ -249,7 +284,17 @@ export const routes: Routes = [
           import('./components/road-trip-planning-dashboard/road-trip-planning-dashboard.component').then(
             (m) => m.RoadTripPlanningDashboardComponent,
           ),
-        data: { breadcrumb: 'Road Trip Planning', title: 'Road Trip Planning' },
+        title: 'Road Trip Planning',
+        data: { breadcrumb: 'Road Trip Planning' },
+      },
+      {
+        path: 'job-matching',
+        loadComponent: () =>
+          import('./components/job-matching-dashboard/job-matching-dashboard.component').then(
+            (m) => m.JobMatchingDashboardComponent,
+          ),
+        title: 'Job Matching',
+        data: { breadcrumb: 'Job Matching' },
       },
     ],
   },

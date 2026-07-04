@@ -145,3 +145,15 @@ body {
   --kh-transition:        0.15s ease;
   --kh-transition-slow:   0.25s ease;
 }
+
+// Reduced motion, enforced at the token layer: every `var(--kh-transition*)`
+// consumer — including class rules that attach `!important` to beat Material
+// specificity — resolves to a near-zero duration, so the preference cannot be
+// defeated by the cascade the way a universal-selector reset can. (WCAG 2.3.3)
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --kh-transition-fast: 0.01ms;
+    --kh-transition:      0.01ms;
+    --kh-transition-slow: 0.01ms;
+  }
+}

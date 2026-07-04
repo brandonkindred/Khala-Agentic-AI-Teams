@@ -1,9 +1,17 @@
-<div class="kh-empty-state" role="status">
+<div class="kh-empty-state">
   <mat-icon class="kh-empty-icon" aria-hidden="true">{{ icon }}</mat-icon>
-  <h2 class="kh-empty-title">{{ title }}</h2>
-  @if (description) {
-    <p class="kh-empty-message">{{ description }}</p>
-  }
+  <!-- Live region covers the informational text only — interactive content
+       (example buttons, projected CTAs) must not live inside it. -->
+  <div role="status">
+    @if (headingLevel === 3) {
+      <h3 class="kh-empty-title">{{ title }}</h3>
+    } @else {
+      <h2 class="kh-empty-title">{{ title }}</h2>
+    }
+    @if (description) {
+      <p class="kh-empty-message">{{ description }}</p>
+    }
+  </div>
   @if (examples.length) {
     <div class="kh-empty-examples">
       <span class="kh-empty-examples-label">Try one of these:</span>

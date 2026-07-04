@@ -4,22 +4,28 @@ import {
   HttpTestingController,
   provideHttpClientTesting,
 } from '@angular/common/http/testing';
-import { HttpClient } from '@angular/common/http';
-import { errorHandlerInterceptor } from './error-handler.interceptor';
-import { MatSnackBarModule } from '@angular/material/snack-bar';
+import { HttpClient, HttpContext } from '@angular/common/http';
+import { vi } from 'vitest';
+import { errorHandlerInterceptor, extractErrorDetail, SKIP_ERROR_NOTIFY } from './error-handler.interceptor';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { provideAnimations } from '@angular/platform-browser/animations';
 
 describe('errorHandlerInterceptor', () => {
   let httpMock: HttpTestingController;
   let http: HttpClient;
+  let snackSpy: { open: ReturnType<typeof vi.fn> };
+
+  /** Message text of the latest snackbar the interceptor opened. */
+  const lastMessage = () => snackSpy.open.mock.calls.at(-1)?.[0] as string;
 
   beforeEach(() => {
+    snackSpy = { open: vi.fn() };
     TestBed.configureTestingModule({
-      imports: [MatSnackBarModule],
       providers: [
         provideHttpClient(withInterceptors([errorHandlerInterceptor])),
         provideHttpClientTesting(),
         provideAnimations(),
+        { provide: MatSnackBar, useValue: snackSpy },
       ],
     });
     httpMock = TestBed.inject(HttpTestingController);
@@ -90,6 +96,47 @@ describe('errorHandlerInterceptor', () => {
     expect(error).toBeDefined();
   });
 
+  it('formats a 422 detail string (FastAPI validation)', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock
+      .expectOne('/test')
+      .flush({ detail: 'bad payload' }, { status: 422, statusText: 'Unprocessable Entity' });
+    expect(lastMessage()).toBe('bad payload');
+  });
+
+  it('joins a 422 array-of-{msg} detail into a readable message', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock.expectOne('/test').flush(
+      {
+        detail: [
+          { msg: 'Input should be a valid integer', loc: ['body', 'salary_min'] },
+          { msg: 'Extra inputs are not permitted' },
+        ],
+      },
+      { status: 422, statusText: 'Unprocessable Entity' },
+    );
+    expect(lastMessage()).toBe('Input should be a valid integer; Extra inputs are not permitted');
+  });
+
+  it('surfaces a 503 detail string instead of the generic message', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock
+      .expectOne('/test')
+      .flush(
+        { detail: 'Career profile storage requires Postgres (set POSTGRES_HOST).' },
+        { status: 503, statusText: 'Service Unavailable' },
+      );
+    expect(lastMessage()).toBe('Career profile storage requires Postgres (set POSTGRES_HOST).');
+  });
+
+  it('falls back to the generic 503 message without a detail', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock
+      .expectOne('/test')
+      .flush({}, { status: 503, statusText: 'Service Unavailable' });
+    expect(lastMessage()).toBe('Service temporarily unavailable. Please try again later.');
+  });
+
   it('formats 500 with detail string', () => {
     let error: unknown;
     http.get('/test').subscribe({ error: (e) => (error = e) });
@@ -104,5 +151,63 @@ describe('errorHandlerInterceptor', () => {
     const req = httpMock.expectOne('/test');
     req.flush({ message: 'oops' }, { status: 500, statusText: 'Server Error' });
     expect(error).toBeDefined();
+  });
+});
+
+describe('errorHandlerInterceptor SKIP_ERROR_NOTIFY', () => {
+  let httpMock: HttpTestingController;
+  let http: HttpClient;
+  let snackBar: { open: ReturnType<typeof vi.fn> };
+
+  beforeEach(() => {
+    snackBar = { open: vi.fn() };
+    TestBed.configureTestingModule({
+      providers: [
+        provideHttpClient(withInterceptors([errorHandlerInterceptor])),
+        provideHttpClientTesting(),
+        { provide: MatSnackBar, useValue: snackBar },
+      ],
+    });
+    httpMock = TestBed.inject(HttpTestingController);
+    http = TestBed.inject(HttpClient);
+  });
+
+  afterEach(() => httpMock.verify());
+
+  it('suppresses the error toast when the request opts out', () => {
+    const context = new HttpContext().set(SKIP_ERROR_NOTIFY, true);
+    http.get('/silent', { context }).subscribe({ error: () => undefined });
+    httpMock.expectOne('/silent').flush('x', { status: 500, statusText: 'Server Error' });
+    expect(snackBar.open).not.toHaveBeenCalled();
+  });
+
+  it('still toasts for a normal request', () => {
+    http.get('/loud').subscribe({ error: () => undefined });
+    httpMock.expectOne('/loud').flush('x', { status: 500, statusText: 'Server Error' });
+    expect(snackBar.open).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('extractErrorDetail', () => {
+  it('returns the FastAPI detail string when present', () => {
+    expect(extractErrorDetail({ error: { detail: 'boom' } }, 'fallback')).toBe('boom');
+  });
+
+  it('joins the msg fields of a validation-error detail array', () => {
+    const err = { error: { detail: [{ msg: 'field x' }, { msg: 'field y' }, {}] } };
+    expect(extractErrorDetail(err, 'fallback')).toBe('field x; field y');
+  });
+
+  it('falls back to the fallback when the detail array has no messages', () => {
+    expect(extractErrorDetail({ error: { detail: [{}, {}] } }, 'fallback')).toBe('fallback');
+  });
+
+  it('falls back to the error message when there is no detail', () => {
+    expect(extractErrorDetail({ message: 'net down' }, 'fallback')).toBe('net down');
+  });
+
+  it('returns the fallback for an empty/undefined error', () => {
+    expect(extractErrorDetail(undefined, 'fallback')).toBe('fallback');
+    expect(extractErrorDetail({ error: { detail: '' } }, 'fallback')).toBe('fallback');
   });
 });

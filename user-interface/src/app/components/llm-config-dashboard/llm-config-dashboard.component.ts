@@ -13,16 +13,23 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatCheckboxModule } from '@angular/material/checkbox';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
-import type {
-  LlmProvider,
-  LlmProviderCreate,
-  LlmProviderEntry,
-  LlmProviderListResponse,
-  LlmProviderUpdate,
-  LlmStorageStatus,
+import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
+import { NotificationService } from '../../core/notification.service';
+import { extractErrorDetail } from '../../core/error-handler.interceptor';
+import {
+  providerRequiresApiKey,
+  type LlmProvider,
+  type LlmProviderCreate,
+  type LlmProviderEntry,
+  type LlmProviderListResponse,
+  type LlmProviderUpdate,
+  type LlmStorageStatus,
 } from '../../models/llm-config.model';
 
 const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434';
+
+/** Shared validation message for the add/edit required-key check. */
+const API_KEY_REQUIRED_MSG = 'An API key is required for Claude.';
 
 /** Editable form fields for a provider list entry (add or edit). */
 interface ProviderForm {
@@ -65,16 +72,16 @@ function emptyProviderForm(): ProviderForm {
   templateUrl: './llm-config-dashboard.component.html',
   styleUrl: './llm-config-dashboard.component.scss',
 })
-export class LlmConfigDashboardComponent implements OnInit {
+export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
   private readonly api = inject(LlmConfigApiService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly notifications = inject(NotificationService);
 
   /** Ordered providers (most→least preferred). */
   providers: LlmProviderEntry[] = [];
   providersLoading = false;
   providersError: string | null = null;
   providersSaving = false;
-  success: string | null = null;
   /** The add-provider form is shown when this is non-null. */
   addForm: ProviderForm | null = null;
   /** The id of the entry being edited inline, or null. */
@@ -89,6 +96,68 @@ export class LlmConfigDashboardComponent implements OnInit {
   /** Adding/editing is allowed only when the store is configured AND reachable. */
   get storageAvailable(): boolean {
     return this.storageStatus === 'available';
+  }
+
+  /** True for providers that authenticate with an API key (Claude), not a local URL. */
+  requiresApiKey(provider: LlmProvider): boolean {
+    return providerRequiresApiKey(provider);
+  }
+
+  /** True for providers configured with a local base URL (Ollama), not a key. */
+  usesBaseUrl(provider: LlmProvider): boolean {
+    return !providerRequiresApiKey(provider);
+  }
+
+  /**
+   * Whether a key-requiring provider would be saved with no usable API key.
+   *
+   * Preconditions: none.
+   * Postconditions: true iff `provider` requires a key, none was `typed`, no key
+   * is `alreadyStored`, and the stored one isn't being `clearing`-ed; false for
+   * keyless providers (Ollama) or whenever a key would remain. Unifies the
+   * add-form and edit-form required-key checks (add passes neither optional).
+   */
+  private apiKeyMissing(
+    provider: LlmProvider,
+    opts: { typed: string; clearing?: boolean; alreadyStored?: boolean },
+  ): boolean {
+    if (!this.requiresApiKey(provider) || opts.typed.trim()) return false;
+    return !opts.clearing && !opts.alreadyStored;
+  }
+
+  /**
+   * Whether an open add/edit form holds unsaved input (drives the CanDeactivate
+   * guard). API keys here are write-only and hard to reproduce, so losing a
+   * half-typed provider form to a misclick is expensive.
+   *
+   * Preconditions: none.
+   * Postconditions: true while a save is in flight, or while an add/edit form
+   * is open with content that differs from its initial state; false otherwise.
+   */
+  hasUnsavedChanges(): boolean {
+    if (this.providersSaving) return true;
+    if (this.addForm) {
+      const f = this.addForm;
+      if (f.label.trim() || f.model.trim() || f.api_key.trim()) return true;
+      // The dropdown defaults to ollama; picking another provider is an edit too.
+      if (f.provider !== emptyProviderForm().provider) return true;
+      if (f.base_url.trim() && f.base_url.trim() !== OLLAMA_LOCAL_DEFAULT) return true;
+    }
+    if (this.editingId !== null) {
+      const f = this.editForm;
+      if (f.api_key.trim() || f.clear_api_key) return true;
+      const entry = this.providers.find((p) => p.id === this.editingId);
+      if (
+        entry &&
+        (f.label !== entry.label ||
+          f.provider !== entry.provider ||
+          f.model !== entry.model ||
+          f.base_url !== entry.base_url)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Clock tick for the reset-time badges (`resetInfo`); refreshed every 30s so a
@@ -120,7 +189,7 @@ export class LlmConfigDashboardComponent implements OnInit {
           this.providersLoading = false;
         },
         error: (err) => {
-          this.providersError = this.friendlyError(err, 'Failed to load provider list.');
+          this.providersError = extractErrorDetail(err, 'Failed to load provider list.');
           this.providersLoading = false;
         },
       });
@@ -186,11 +255,15 @@ export class LlmConfigDashboardComponent implements OnInit {
       this.providersError = 'Please enter a label for the provider.';
       return;
     }
+    if (this.apiKeyMissing(form.provider, { typed: form.api_key })) {
+      this.providersError = API_KEY_REQUIRED_MSG;
+      return;
+    }
     const body: LlmProviderCreate = {
       label: form.label.trim(),
       provider: form.provider,
       model: form.model.trim(),
-      base_url: form.provider === 'ollama' ? form.base_url.trim() : '',
+      base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: form.api_key.trim(),
     };
     this.persistProviders(this.api.createProvider(body), 'Provider added.', {
@@ -240,11 +313,25 @@ export class LlmConfigDashboardComponent implements OnInit {
       return;
     }
     const newKey = form.api_key.trim();
+    const entry = this.providers.find((p) => p.id === this.editingId);
+    // Block switching to a key-requiring provider (e.g. Ollama→Claude) with no
+    // key at all. Keeping an existing key (blank field) or clearing one are
+    // allowed — see apiKeyMissing.
+    if (
+      this.apiKeyMissing(form.provider, {
+        typed: form.api_key,
+        clearing: form.clear_api_key,
+        alreadyStored: entry?.api_key_configured,
+      })
+    ) {
+      this.providersError = API_KEY_REQUIRED_MSG;
+      return;
+    }
     const body: LlmProviderUpdate = {
       label: form.label.trim(),
       provider: form.provider,
       model: form.model.trim(),
-      base_url: form.provider === 'ollama' ? form.base_url.trim() : '',
+      base_url: this.usesBaseUrl(form.provider) ? form.base_url.trim() : '',
       api_key: newKey,
       clear_api_key: form.clear_api_key && !newKey,
     };
@@ -276,18 +363,19 @@ export class LlmConfigDashboardComponent implements OnInit {
   ): void {
     this.providersError = null;
     this.providersSaving = true;
-    this.success = null;
     call.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (res) => {
         this.applyProviderList(res);
         this.providersSaving = false;
-        this.success = successMsg;
+        // Transient confirmation (matches the app's snackbar convention);
+        // errors remain a persistent banner below the form.
+        this.notifications.saved(successMsg);
         opts?.onSuccess?.();
       },
       error: (err) => {
         this.providersSaving = false;
         opts?.revert?.();
-        this.providersError = this.friendlyError(err, 'Failed to save the provider list.');
+        this.providersError = extractErrorDetail(err, 'Failed to save the provider list.');
       },
     });
   }
@@ -324,9 +412,4 @@ export class LlmConfigDashboardComponent implements OnInit {
     return `resets in ~${Math.round(hours / 24)}d`;
   }
 
-  /** Extract a human-readable error detail from an API error response, falling back to a default message. */
-  private friendlyError(err: unknown, fallback: string): string {
-    const detail = (err as { error?: { detail?: string } })?.error?.detail;
-    return detail || fallback;
-  }
 }

@@ -4,6 +4,8 @@ Endpoints (mounted by the unified API under ``/api/job-matching``):
 
 * ``GET  /health``                       — liveness probe
 * ``GET  /profile``                      — resolved job-seeker profile
+* ``PUT  /profile``                      — save the profile as the career section
+  of the central user profile
 * ``POST /scan``                         — start an async scan, returns a job id
 * ``GET  /scan/status/{job_id}``         — poll a scan; ``result`` holds the response
 * ``GET  /scan/jobs``                    — list scan jobs
@@ -11,6 +13,8 @@ Endpoints (mounted by the unified API under ``/api/job-matching``):
 * ``DELETE /scan/jobs/{job_id}``         — delete a scan job record
 * ``GET  /runs``                         — list persisted run summaries
 * ``GET  /runs/{run_id}``                — a persisted run plus its ranked jobs
+* ``GET  /listings``                     — aggregated listings (latest per fingerprint)
+* ``PATCH /listings/{fingerprint}``      — set a listing's user status/notes
 """
 
 from __future__ import annotations
@@ -24,8 +28,12 @@ from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from job_matching_team.models import (
+    LISTING_FILTERS,
     JobMatchRequest,
     JobMatchResponse,
+    Listing,
+    ListingsResponse,
+    ListingStateUpdate,
     RunDetail,
     RunSummary,
     ScanJobListItem,
@@ -34,6 +42,10 @@ from job_matching_team.models import (
     ScanJobStatus,
 )
 from job_matching_team.postgres import SCHEMA as JOB_MATCHING_SCHEMA
+from job_matching_team.profile.career_store import (
+    CareerProfileUnavailableError,
+    save_career_profile,
+)
 from job_matching_team.profile.loader import load_job_seeker_profile
 from job_matching_team.profile.model import JobSeekerProfile
 from job_matching_team.shared.job_store import (
@@ -54,6 +66,23 @@ from shared_app import create_team_app
 
 logger = logging.getLogger(__name__)
 
+
+def _register_user_profile_schema() -> None:
+    """Ensure the central user-profile tables exist for career-profile writes.
+
+    The unified API registers this schema too, but this service runs in its own
+    container and must not depend on unified-API startup ordering. Registration
+    is idempotent DDL and defensive (logged, never raised into startup).
+    """
+    try:
+        from shared_postgres import register_team_schemas
+        from user_profile import SCHEMA as USER_PROFILE_SCHEMA
+
+        register_team_schemas(USER_PROFILE_SCHEMA)
+    except Exception:  # noqa: BLE001 - startup must not fail on optional DDL
+        logger.warning("Could not register user_profile schema at startup", exc_info=True)
+
+
 app = create_team_app(
     service_name="job-matching",
     team_key="job_matching",
@@ -61,6 +90,7 @@ app = create_team_app(
     description="Scans open roles matching a job-seeker profile and ranks the best to apply for",
     version="1.0.0",
     postgres_schema=JOB_MATCHING_SCHEMA,
+    on_startup=_register_user_profile_schema,
 )
 
 app.add_middleware(
@@ -87,6 +117,46 @@ def health() -> dict[str, str]:
 def get_profile() -> JobSeekerProfile:
     """Return the resolved standing job-seeker profile."""
     return load_job_seeker_profile()
+
+
+@app.put("/profile", response_model=JobSeekerProfile)
+def put_profile(payload: JobSeekerProfile) -> JobSeekerProfile:
+    """Save the profile as the career section of the central user profile.
+
+    Postconditions:
+        * On success the saved profile is returned and subsequent
+          ``GET /profile`` calls resolve to it (career section wins).
+    """
+    try:
+        return save_career_profile(payload)
+    except CareerProfileUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/listings", response_model=ListingsResponse)
+def list_listings(status: str = "active", limit: int = 200) -> ListingsResponse:
+    """Return aggregated listings (latest snapshot per fingerprint) plus counts."""
+    if status not in LISTING_FILTERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status filter {status!r}; expected one of {sorted(LISTING_FILTERS)}",
+        )
+    if limit < 1:
+        raise HTTPException(status_code=422, detail="limit must be a positive integer")
+    from job_matching_team.store import get_store
+
+    return get_store().list_listings(status=status, limit=limit)
+
+
+@app.patch("/listings/{fingerprint}", response_model=Listing)
+def update_listing(fingerprint: str, payload: ListingStateUpdate) -> Listing:
+    """Set a listing's user status (and optionally notes), returning the fresh listing."""
+    from job_matching_team.store import get_store
+
+    listing = get_store().update_listing_state(fingerprint, payload)
+    if listing is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    return listing
 
 
 def _run_scan_background(job_id: str, request: JobMatchRequest) -> None:

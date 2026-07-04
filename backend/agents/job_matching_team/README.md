@@ -29,21 +29,28 @@ profile (+ per-request overrides)
 
 ## Profile
 
-The standing criteria live in a YAML file resolved in this order:
+The standing criteria are the **career section of the central user profile**
+(`user_profiles.profile_json["career"]`, managed by the `user_profile` module
+and edited via `PUT /profile`). Saving records a `career` artifact association
+so the profile surfaces on the User Profile page. Resolution order:
 
-1. `$JOB_SEEKER_PROFILE_PATH`
-2. `$AGENT_CACHE/job_seeker_profile.yaml`
-3. the bundled `profile/job_seeker_profile.example.yaml` (with a WARN log)
+1. `$JOB_SEEKER_PROFILE_PATH` — explicit operator pin, always honored first
+2. Career section of the user profile (Postgres; skipped when unavailable or
+   malformed — corruption is logged at ERROR and repaired by re-saving)
+3. `$AGENT_CACHE/job_seeker_profile.yaml`
+4. the bundled `profile/job_seeker_profile.example.yaml` (with a WARN log)
 
-Set `JOB_SEEKER_PROFILE_STRICT=true` to raise instead of falling back. Each
-scan request may override any profile field via `profile_overrides`.
+Set `JOB_SEEKER_PROFILE_STRICT=true` to raise when the pinned env path is
+missing (and to disable the example fallback). Each scan request may override
+any profile field via `profile_overrides`.
 
 ## HTTP API
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Liveness |
-| GET | `/profile` | Resolved job-seeker profile |
+| GET | `/profile` | Resolved job-seeker profile (career section of the user profile wins) |
+| PUT | `/profile` | Save the profile as the career section of the central user profile |
 | POST | `/scan` | Start an async scan → `{job_id}` |
 | GET | `/scan/status/{job_id}` | Poll; `result` holds the `JobMatchResponse` |
 | GET | `/scan/jobs` | List scan jobs |
@@ -51,13 +58,17 @@ scan request may override any profile field via `profile_overrides`.
 | DELETE | `/scan/jobs/{job_id}` | Delete a scan-job record |
 | GET | `/runs` | Persisted run summaries |
 | GET | `/runs/{run_id}` | A run plus its ranked jobs |
+| GET | `/listings?status=&limit=` | Aggregated listings: latest ranked snapshot per fingerprint + user state |
+| PATCH | `/listings/{fingerprint}` | Set a listing's status (`new`/`favorite`/`not_interested`/`poor_fit`/`archived`) |
 
 ## Persistence
 
-Postgres tables `job_matching_runs` and `job_matching_ranked_jobs` (see
-`postgres/__init__.py`), registered from the FastAPI lifespan via
-`shared_postgres.register_team_schemas`. Requires `POSTGRES_HOST`; there is no
-SQLite fallback.
+Postgres tables `job_matching_runs`, `job_matching_ranked_jobs`, and
+`job_matching_listing_states` (user triage state keyed by posting fingerprint;
+see `postgres/__init__.py`), registered from the FastAPI lifespan via
+`shared_postgres.register_team_schemas`. The lifespan also registers the
+`user_profile` schema so career-profile writes work when this service starts
+first. Requires `POSTGRES_HOST`; there is no SQLite fallback.
 
 ## Configuration
 

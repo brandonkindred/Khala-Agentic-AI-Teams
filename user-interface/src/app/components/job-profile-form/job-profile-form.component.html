@@ -1,0 +1,151 @@
+@if (loading) {
+  <app-loading-spinner message="Loading your career profile…" />
+} @else {
+  <div class="career-note" id="jm-profile-heading" tabindex="-1">
+    <mat-icon>link</mat-icon>
+    <span>
+      This is the <b>career section of your user profile</b> — saving here updates it.
+      <a routerLink="/user-profile">View user profile</a>
+    </span>
+  </div>
+
+  @if (error) {
+    <div class="profile-error" role="alert">
+      <mat-icon>error_outline</mat-icon>
+      <span>{{ error }}</span>
+      <button mat-stroked-button (click)="load()">Retry</button>
+    </div>
+  }
+
+  <form [formGroup]="form" (ngSubmit)="save()">
+    @for (section of chipSections; track section.title) {
+      <mat-card appearance="outlined" class="profile-card">
+        <mat-card-header>
+          <h2 mat-card-title>{{ section.title }}</h2>
+        </mat-card-header>
+        <mat-card-content>
+          <div class="chip-fields">
+            @for (field of section.fields; track field.key) {
+              <div class="chip-field" [class.warn]="field.warn">
+                <label [attr.for]="'chips-' + field.key" class="chip-label">
+                  {{ field.label }}
+                  @if (field.hint) {
+                    <span class="chip-hint">— {{ field.hint }}</span>
+                  }
+                </label>
+                <mat-chip-grid #chipGrid [attr.aria-label]="field.label">
+                  @for (value of chips[field.key]; track value) {
+                    <mat-chip-row (removed)="removeChip(field.key, value)">
+                      {{ value }}
+                      <button matChipRemove [attr.aria-label]="'Remove ' + value">
+                        <mat-icon>cancel</mat-icon>
+                      </button>
+                    </mat-chip-row>
+                  }
+                  <input
+                    [id]="'chips-' + field.key"
+                    placeholder="Add…"
+                    [attr.aria-describedby]="'chips-help-' + field.key"
+                    [matChipInputFor]="chipGrid"
+                    [matChipInputSeparatorKeyCodes]="separatorKeyCodes"
+                    (matChipInputTokenEnd)="addChip(field.key, $event)"
+                  />
+                </mat-chip-grid>
+                <p class="chip-help" [id]="'chips-help-' + field.key">
+                  Type and press Enter to add
+                </p>
+              </div>
+            }
+
+            @if (section.title === 'Location') {
+              <div class="inline-fields">
+                <mat-form-field appearance="outline">
+                  <mat-label>Remote preference</mat-label>
+                  <mat-select formControlName="remote_preference">
+                    <mat-option value="remote">Remote</mat-option>
+                    <mat-option value="hybrid">Hybrid</mat-option>
+                    <mat-option value="onsite">Onsite</mat-option>
+                    <mat-option value="any">Any</mat-option>
+                  </mat-select>
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Minimum base salary</mat-label>
+                  <input
+                    matInput
+                    type="number"
+                    min="0"
+                    step="5000"
+                    formControlName="salary_min"
+                    (blur)="coerceSalary()"
+                  />
+                  <mat-hint>0 = no floor</mat-hint>
+                  @if (form.controls.salary_min.hasError('min')) {
+                    <mat-error>The salary floor can't be negative.</mat-error>
+                  }
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Currency</mat-label>
+                  <input matInput formControlName="currency" />
+                </mat-form-field>
+              </div>
+            }
+
+            @if (section.title === 'Skills & constraints') {
+              <mat-form-field appearance="outline" class="full-width">
+                <mat-label>Work authorization</mat-label>
+                <input matInput formControlName="work_authorization" />
+              </mat-form-field>
+            }
+          </div>
+        </mat-card-content>
+      </mat-card>
+    }
+
+    <mat-expansion-panel class="weights-panel">
+      <mat-expansion-panel-header>
+        <mat-panel-title><h2 class="weights-heading">Ranking weights</h2></mat-panel-title>
+        <mat-panel-description>{{ weightSummary }}</mat-panel-description>
+      </mat-expansion-panel-header>
+      <p class="weights-note">
+        Relative importance of each scoring dimension — they don't need to sum to 1; the ranker
+        normalizes them.
+      </p>
+      <div class="weight-rows">
+        @for (weight of weightFields; track weight.key) {
+          <div class="weight-row">
+            <label class="weight-name" [attr.for]="'weight-' + weight.key">{{
+              weight.label
+            }}</label>
+            <mat-slider min="0" max="1" step="0.05" discrete>
+              <input
+                matSliderThumb
+                [id]="'weight-' + weight.key"
+                [formControlName]="weight.key"
+                [attr.aria-label]="weight.label + ' weight'"
+                [attr.aria-describedby]="'weight-share-' + weight.key"
+                (change)="announceWeights()"
+              />
+            </mat-slider>
+            <span class="weight-share" [id]="'weight-share-' + weight.key"
+              >{{ weightShare(weight.key) }}% of score</span
+            >
+          </div>
+        }
+      </div>
+    </mat-expansion-panel>
+    <!-- One polite region announces the redistributed split after a slider
+         commit — per-slider live regions would be chatty and inconsistent. -->
+    <p class="visually-hidden" role="status" aria-live="polite">{{ weightAnnouncement }}</p>
+
+    <div class="save-row">
+      <button mat-flat-button color="primary" type="submit" [disabled]="form.invalid || saving">
+        {{ saving ? 'Saving…' : dirty ? 'Save changes' : 'Save career profile' }}
+      </button>
+      @if (savedAt && !dirty) {
+        <span class="saved-note">Saved to your user profile at {{ savedAt }}.</span>
+      } @else if (dirty) {
+        <span class="saved-note">Unsaved changes</span>
+      }
+    </div>
+  </form>
+}

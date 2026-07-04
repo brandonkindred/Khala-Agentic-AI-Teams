@@ -28,8 +28,9 @@ describe('AppShellComponent a11y', () => {
     fixture.detectChanges();
 
     // Guard: the nav actually rendered, so axe isn't auditing an empty DOM.
-    expect(fixture.nativeElement.querySelector('nav[aria-label="Agent features"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('nav[aria-label="Main navigation"]')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('.nav-group-trigger')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('.footer-profile-link')).toBeTruthy();
 
     const results = await axe(fixture.nativeElement, axeOptions);
     expect(results).toHaveNoViolations();

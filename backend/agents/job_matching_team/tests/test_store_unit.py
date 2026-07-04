@@ -153,6 +153,95 @@ def test_seen_fingerprints_unions_run_and_ranked(monkeypatch):
     assert JobMatchingStore().seen_fingerprints() == {"scanned1", "scanned2", "fp1", "fp2"}
 
 
+def _listing_row(fingerprint="fp1", status="new"):
+    return {
+        "fingerprint": fingerprint,
+        "run_id": "r1",
+        "score": 0.9,
+        "sub_scores": {"title_fit": 0.8},
+        "posting": {"company": "Acme", "title": "Eng", "fingerprint": fingerprint},
+        "recommendation": "apply",
+        "rationale": "fit",
+        "concerns": ["c1"],
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "times_seen": 2,
+        "status": status,
+        "notes": None,
+        "status_updated_at": None,
+    }
+
+
+def test_list_listings_maps_rows_and_counts(monkeypatch):
+    cur = FakeCursor(
+        fetchall=[[_listing_row()], [{"status": "new", "n": 3}, {"status": "favorite", "n": 1}]]
+    )
+    _patch_conn(monkeypatch, cur)
+    out = JobMatchingStore().list_listings(status="active", limit=50)
+    assert out.total == 1
+    assert out.listings[0].fingerprint == "fp1"
+    assert out.listings[0].times_seen == 2
+    assert out.listings[0].posting.company == "Acme"
+    assert out.counts == {"new": 3, "favorite": 1}
+    listing_sql, listing_params = cur.executed[0]
+    # Latest snapshot per fingerprint + inbox filter + limit.
+    assert "DISTINCT ON (fingerprint)" in listing_sql
+    assert "NOT IN ('archived', 'not_interested')" in listing_sql
+    assert listing_params == (50,)
+
+
+def test_list_listings_specific_status_filters_exactly(monkeypatch):
+    cur = FakeCursor(fetchall=[[_listing_row(status="favorite")], []])
+    _patch_conn(monkeypatch, cur)
+    out = JobMatchingStore().list_listings(status="favorite", limit=10)
+    listing_sql, listing_params = cur.executed[0]
+    assert "COALESCE(s.status, 'new') = %s" in listing_sql
+    assert listing_params == ("favorite", 10)
+    assert out.listings[0].status == "favorite"
+
+
+def test_list_listings_all_disables_filtering(monkeypatch):
+    cur = FakeCursor(fetchall=[[], []])
+    _patch_conn(monkeypatch, cur)
+    JobMatchingStore().list_listings(status="all")
+    listing_sql, _ = cur.executed[0]
+    assert "WHERE COALESCE" not in listing_sql
+
+
+def test_list_listings_rejects_invalid_filter(monkeypatch):
+    _patch_conn(monkeypatch, FakeCursor())
+    try:
+        JobMatchingStore().list_listings(status="bogus")
+    except AssertionError:
+        return
+    raise AssertionError("invalid filter must be rejected")
+
+
+def test_update_listing_state_upserts_and_returns_listing(monkeypatch):
+    from job_matching_team.models import ListingStateUpdate
+
+    cur = FakeCursor(fetchone=[{"ok": 1}, _listing_row(status="archived")])
+    _patch_conn(monkeypatch, cur)
+    out = JobMatchingStore().update_listing_state("fp1", ListingStateUpdate(status="archived"))
+    assert out is not None
+    assert out.status == "archived"
+    sqls = [s for s, _ in cur.executed]
+    assert any("SELECT 1 FROM job_matching_ranked_jobs" in s for s in sqls)
+    upsert = next(s for s in sqls if "INSERT INTO job_matching_listing_states" in s)
+    # notes=None must preserve previously stored notes.
+    assert "COALESCE(EXCLUDED.notes, job_matching_listing_states.notes)" in upsert
+
+
+def test_update_listing_state_unknown_fingerprint_returns_none(monkeypatch):
+    from job_matching_team.models import ListingStateUpdate
+
+    cur = FakeCursor(fetchone=[None])
+    _patch_conn(monkeypatch, cur)
+    out = JobMatchingStore().update_listing_state("nope", ListingStateUpdate(status="favorite"))
+    assert out is None
+    # Nothing was written after the failed existence check.
+    assert not any("INSERT INTO job_matching_listing_states" in s for s, _ in cur.executed)
+
+
 def test_iso_helper_handles_non_datetime():
     assert store_mod._iso(None) is None
     assert store_mod._iso("2026-01-01") == "2026-01-01"

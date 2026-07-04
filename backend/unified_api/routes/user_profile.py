@@ -86,7 +86,13 @@ def read_profile() -> UserProfile:
 
 @router.put("", response_model=UserProfile)
 def update_profile(update: UserProfileUpdate) -> UserProfile:
-    """Apply a partial update to the current profile and return it."""
+    """Apply a partial update to the current profile and return it.
+
+    ``preferences`` is a shallow merge: only its top-level keys are replaced,
+    so team-owned sections of the profile document (e.g. the job matching
+    team's ``career`` section) survive a profile-page save that doesn't
+    include them.
+    """
     with _storage_guard():
         return upsert_profile(update, user_id=DEFAULT_USER_ID)
 

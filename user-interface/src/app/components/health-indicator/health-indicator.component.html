@@ -1,5 +1,7 @@
 <span
   class="health-indicator"
+  role="img"
+  tabindex="0"
   [attr.aria-label]="label + ' status: ' + status"
   [matTooltip]="label + ': ' + (status === 'ok' ? 'Healthy' : status === 'checking' ? 'Checking...' : 'Unavailable')"
 >

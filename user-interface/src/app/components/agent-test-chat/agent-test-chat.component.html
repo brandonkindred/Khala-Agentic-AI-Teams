@@ -65,16 +65,16 @@
                         (keydown.escape)="cancelRename()"
                         class="rename-input"
                       />
-                      <button mat-icon-button type="submit" (click)="$event.stopPropagation()">
+                      <button mat-icon-button type="submit" (click)="$event.stopPropagation()" aria-label="Save session name">
                         <mat-icon>check</mat-icon>
                       </button>
                     </form>
                   } @else {
                     <span class="session-name">{{ session.session_name || formatTime(session.created_at) || 'New Session' }}</span>
-                    <button mat-icon-button (click)="$event.stopPropagation(); startRename(session)" matTooltip="Rename" class="session-action">
+                    <button mat-icon-button (click)="$event.stopPropagation(); startRename(session)" matTooltip="Rename" aria-label="Rename" class="session-action">
                       <mat-icon>edit</mat-icon>
                     </button>
-                    <button mat-icon-button (click)="$event.stopPropagation(); deleteSession(session.session_id)" matTooltip="Delete" class="session-action">
+                    <button mat-icon-button (click)="$event.stopPropagation(); deleteSession(session.session_id)" matTooltip="Delete" aria-label="Delete" class="session-action">
                       <mat-icon>delete</mat-icon>
                     </button>
                   }
