@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 from market_research_team.api import main as api_main
 from market_research_team.api.main import app
+from market_research_team.models import HumanReview, RunMarketResearchRequest
+from market_research_team.pipeline import build_mission, run_market_research_background
 
 client = TestClient(app)
 
@@ -90,18 +92,17 @@ def test_dispatch_helper_returns_thread_label_when_disabled(monkeypatch):
 
     monkeypatch.setattr(api_main.threading, "Thread", _FakeThread)
 
-    payload = api_main.RunMarketResearchRequest(**_PAYLOAD)
-    mission = api_main.ResearchMission(
-        product_concept=payload.product_concept,
-        target_users=payload.target_users,
-        business_goal=payload.business_goal,
-        topology=payload.topology,
-    )
-    human_review = api_main.HumanReview(approved=True, feedback="")
+    payload = RunMarketResearchRequest(**_PAYLOAD)
 
-    label = api_main._dispatch_market_research_run("job-thread", payload, mission, human_review)
+    label = api_main._dispatch_market_research_run("job-thread", payload)
 
     assert label == "thread"
     assert started["started"] is True
     assert started["daemon"] is True
-    assert started["args"] == ("job-thread", mission, human_review)
+    assert started["target"] is run_market_research_background
+    # Mission/human_review are built lazily inside the thread branch (not
+    # eagerly in the endpoint), derived from the payload.
+    job_id, mission, human_review = started["args"]
+    assert job_id == "job-thread"
+    assert mission == build_mission(payload)
+    assert human_review == HumanReview(approved=True, feedback="")

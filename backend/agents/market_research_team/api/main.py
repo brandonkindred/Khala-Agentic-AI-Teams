@@ -8,13 +8,12 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from market_research_team.models import HumanReview, ResearchMission, TeamTopology
-from market_research_team.orchestrator import MarketResearchOrchestrator
+from market_research_team.models import HumanReview, RunMarketResearchRequest
+from market_research_team.pipeline import build_mission, run_market_research_background
 from market_research_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
-    JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
@@ -22,7 +21,6 @@ from market_research_team.shared.job_store import (
     create_job,
     delete_job,
     get_job,
-    is_job_cancelled,
     list_jobs,
     update_job,
 )
@@ -36,9 +34,16 @@ def _startup() -> None:
 
     The team_service entrypoint normally starts the worker via
     ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
-    backstop covers running the app standalone (``uvicorn ...:app``). The
-    start helper is idempotent and a no-op when ``TEMPORAL_ADDRESS`` is
-    unset.
+    backstop covers running the app standalone (``uvicorn ...:app``).
+
+    Preconditions:
+        - None (safe to call once at app startup).
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged
+          as a warning so it cannot abort app boot (this runs as an
+          ``on_startup`` hook).
     """
     try:
         from market_research_team.temporal.worker import (
@@ -61,17 +66,6 @@ app = create_team_app(
     description="Market research team API for competitive analysis and market insights.",
     on_startup=_startup,
 )
-
-
-class RunMarketResearchRequest(BaseModel):
-    product_concept: str = Field(..., min_length=3, max_length=50_000)
-    target_users: str = Field(..., min_length=3, max_length=10_000)
-    business_goal: str = Field(..., min_length=3, max_length=10_000)
-    topology: TeamTopology = TeamTopology.UNIFIED
-    transcript_folder_path: Optional[str] = None
-    transcripts: List[str] = Field(default_factory=list)
-    human_approved: bool = False
-    human_feedback: str = ""
 
 
 class RunMarketResearchJobResponse(BaseModel):
@@ -100,99 +94,39 @@ class JobListResponse(BaseModel):
     jobs: List[JobListItem]
 
 
-def _build_mission(req: RunMarketResearchRequest) -> ResearchMission:
-    """Map a ``RunMarketResearchRequest`` onto a ``ResearchMission``.
-
-    Preconditions:
-        - ``req`` is a validated ``RunMarketResearchRequest``.
-
-    Postconditions:
-        - Returns a ``ResearchMission`` carrying every mission field from
-          ``req`` (single source of truth for both the thread dispatch path
-          and the Temporal activity, which reconstructs ``req`` from a dict).
-    """
-    return ResearchMission(
-        product_concept=req.product_concept,
-        target_users=req.target_users,
-        business_goal=req.business_goal,
-        topology=req.topology,
-        transcript_folder_path=req.transcript_folder_path,
-        transcripts=req.transcripts,
-    )
-
-
-def _run_pipeline_core(job_id: str, mission: ResearchMission, human_review: HumanReview) -> None:
-    """Run the orchestrator with cancel guards + RUNNING/COMPLETED bookkeeping.
-
-    Shared by the thread dispatch path and the Temporal activity so the
-    status-write order and cancel semantics live in one place.
+def _dispatch_market_research_run(job_id: str, payload: RunMarketResearchRequest) -> str:
+    """Dispatch a run via Temporal when enabled, else a daemon thread.
 
     Preconditions:
         - ``job_id`` refers to a job already created in the job store.
 
     Postconditions:
-        - Writes RUNNING then COMPLETED (with the orchestrator result) on
-          success; writes nothing and returns early if the job is cancelled
-          before or after the run.
-        - Propagates any orchestrator exception unchanged — the caller owns
-          the failure policy (swallow vs. re-raise).
-    """
-    if is_job_cancelled(job_id):
-        return
-    update_job(job_id, status=JOB_STATUS_RUNNING)
-    result = MarketResearchOrchestrator().run(mission, human_review)
-    if is_job_cancelled(job_id):
-        return
-    update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
-
-
-def _run_market_research_background(
-    job_id: str, mission: ResearchMission, human_review: HumanReview
-) -> None:
-    """Thread-path runner: execute the pipeline and swallow failures as FAILED.
-
-    Postconditions:
-        - On orchestrator failure, marks the job FAILED (unless it was
-          cancelled) and returns — a daemon thread has no caller to raise to.
-    """
-    try:
-        _run_pipeline_core(job_id, mission, human_review)
-    except Exception as e:
-        logger.exception("Market research job %s failed", job_id)
-        if not is_job_cancelled(job_id):
-            update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-
-
-def _dispatch_market_research_run(
-    job_id: str,
-    payload: RunMarketResearchRequest,
-    mission: ResearchMission,
-    human_review: HumanReview,
-) -> str:
-    """Dispatch a run via Temporal when enabled, else a daemon thread.
-
-    Returns a short label ("Temporal" or "thread") describing which
-    execution mode was used. With ``TEMPORAL_ADDRESS`` set the run is
-    started as a durable ``MarketResearchWorkflow`` (which performs the same
-    job-store bookkeeping ``_run_market_research_background`` does); with it
-    unset the legacy thread path runs unchanged.
+        - Starts exactly one execution path and returns its label
+          ("Temporal" or "thread"). With ``TEMPORAL_ADDRESS`` set the run is
+          started as a durable ``MarketResearchWorkflow``; otherwise the
+          legacy thread path runs unchanged.
+        - A missing ``shared_temporal`` (Temporal not installed) falls through
+          to the thread path; any *other* failure while starting the workflow
+          (broken import in the team's own Temporal stack, or a client that
+          never connected) propagates to the caller, which marks the job
+          FAILED — a Temporal-enabled run is never silently downgraded.
     """
     try:
         from shared_temporal import is_temporal_enabled
-
-        if is_temporal_enabled():
-            from market_research_team.temporal.start_workflow import (
-                start_market_research_workflow,
-            )
-
-            start_market_research_workflow(job_id, payload.model_dump())
-            logger.info("Market research run dispatched via Temporal: job_id=%s", job_id)
-            return "Temporal"
     except ImportError:
-        pass
+        is_temporal_enabled = None
 
+    if is_temporal_enabled is not None and is_temporal_enabled():
+        from market_research_team.temporal.start_workflow import start_market_research_workflow
+
+        start_market_research_workflow(job_id, payload.model_dump())
+        logger.info("Market research run dispatched via Temporal: job_id=%s", job_id)
+        return "Temporal"
+
+    mission = build_mission(payload)
+    human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
     thread = threading.Thread(
-        target=_run_market_research_background,
+        target=run_market_research_background,
         args=(job_id, mission, human_review),
         daemon=True,
     )
@@ -202,10 +136,19 @@ def _dispatch_market_research_run(
 
 @app.post("/market-research/run", response_model=RunMarketResearchJobResponse)
 def run_market_research(payload: RunMarketResearchRequest) -> RunMarketResearchJobResponse:
-    """Submit a market-research run. Returns a ``job_id`` to poll for results."""
+    """Submit a market-research run. Returns a ``job_id`` to poll for results.
+
+    Preconditions:
+        - ``payload`` is a validated ``RunMarketResearchRequest`` (FastAPI
+          validates the body before this handler runs).
+
+    Postconditions:
+        - Creates a PENDING job and dispatches it (Temporal or thread),
+          returning its ``job_id``.
+        - On dispatch failure, marks the job FAILED and raises HTTP 500 — no
+          job is ever left orphaned in PENDING.
+    """
     job_id = str(uuid4())
-    mission = _build_mission(payload)
-    human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
 
     create_job(
         job_id,
@@ -214,7 +157,7 @@ def run_market_research(payload: RunMarketResearchRequest) -> RunMarketResearchJ
     )
 
     try:
-        _dispatch_market_research_run(job_id, payload, mission, human_review)
+        _dispatch_market_research_run(job_id, payload)
     except Exception as exc:
         # A dispatch failure (e.g. the Temporal worker client never connected)
         # must not leave the freshly-created job orphaned in PENDING — mark it

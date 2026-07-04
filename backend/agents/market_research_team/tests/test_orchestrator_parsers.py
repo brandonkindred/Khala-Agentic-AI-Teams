@@ -85,9 +85,7 @@ def test_parse_viability_normalises_invalid_verdict() -> None:
 
 def test_parse_scripts_falls_back_when_payload_is_not_string_list() -> None:
     # Dict payload → fallback path.
-    assert _parse_scripts_from_text(json.dumps({"oops": True})) == list(
-        _DEFAULT_SCRIPTS_FALLBACK
-    )
+    assert _parse_scripts_from_text(json.dumps({"oops": True})) == list(_DEFAULT_SCRIPTS_FALLBACK)
 
     # List with a non-string element → fallback path.
     assert _parse_scripts_from_text(json.dumps(["ok", 7])) == list(_DEFAULT_SCRIPTS_FALLBACK)
@@ -112,9 +110,7 @@ def test_orchestrator_pads_signals_when_graph_returns_none(monkeypatch) -> None:
             return ""
         return ""
 
-    monkeypatch.setattr(
-        "market_research_team.orchestrator.extract_node_text", _empty_extract
-    )
+    monkeypatch.setattr("market_research_team.orchestrator.extract_node_text", _empty_extract)
 
     mission = ResearchMission(
         product_concept="Padding probe",

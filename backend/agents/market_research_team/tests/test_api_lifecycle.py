@@ -14,9 +14,10 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from market_research_team.api import main as api_main
-from market_research_team.api.main import _run_market_research_background, app
+from market_research_team import pipeline as mr_pipeline
+from market_research_team.api.main import app
 from market_research_team.models import HumanReview, ResearchMission, TeamTopology
+from market_research_team.pipeline import run_market_research_background
 from market_research_team.shared import job_store as js
 
 client = TestClient(app)
@@ -87,7 +88,7 @@ def test_background_runner_returns_early_when_cancelled_before_start(
             called["ran"] = True
             raise AssertionError("Orchestrator should not run on cancelled job")
 
-    monkeypatch.setattr(api_main, "MarketResearchOrchestrator", _ShouldNotRun)
+    monkeypatch.setattr(mr_pipeline, "MarketResearchOrchestrator", _ShouldNotRun)
 
     job_id = str(uuid4())
     fake_job_client.create_job(job_id, status=js.JOB_STATUS_CANCELLED)
@@ -98,7 +99,7 @@ def test_background_runner_returns_early_when_cancelled_before_start(
         business_goal="y",
         topology=TeamTopology.UNIFIED,
     )
-    _run_market_research_background(job_id, mission, HumanReview(approved=True))
+    run_market_research_background(job_id, mission, HumanReview(approved=True))
 
     assert called["ran"] is False
     assert fake_job_client.get_job(job_id)["status"] == js.JOB_STATUS_CANCELLED
@@ -123,7 +124,7 @@ def test_background_runner_skips_completion_update_when_cancelled_mid_run(
 
             return _Result()
 
-    monkeypatch.setattr(api_main, "MarketResearchOrchestrator", _CancelDuringRun)
+    monkeypatch.setattr(mr_pipeline, "MarketResearchOrchestrator", _CancelDuringRun)
 
     mission = ResearchMission(
         product_concept="Cancelled mid-run",
@@ -131,7 +132,7 @@ def test_background_runner_skips_completion_update_when_cancelled_mid_run(
         business_goal="y",
         topology=TeamTopology.UNIFIED,
     )
-    _run_market_research_background(job_id, mission, HumanReview(approved=True))
+    run_market_research_background(job_id, mission, HumanReview(approved=True))
 
     job = fake_job_client.get_job(job_id)
     assert job["status"] == js.JOB_STATUS_CANCELLED
@@ -152,7 +153,7 @@ def test_background_runner_skips_failure_update_when_cancelled_during_exception(
             fake_job_client.update_job(job_id, status=js.JOB_STATUS_CANCELLED)
             raise RuntimeError("boom after cancel")
 
-    monkeypatch.setattr(api_main, "MarketResearchOrchestrator", _CancelThenRaise)
+    monkeypatch.setattr(mr_pipeline, "MarketResearchOrchestrator", _CancelThenRaise)
 
     mission = ResearchMission(
         product_concept="Cancelled on exception",
@@ -160,7 +161,7 @@ def test_background_runner_skips_failure_update_when_cancelled_during_exception(
         business_goal="y",
         topology=TeamTopology.UNIFIED,
     )
-    _run_market_research_background(job_id, mission, HumanReview(approved=True))
+    run_market_research_background(job_id, mission, HumanReview(approved=True))
 
     job = fake_job_client.get_job(job_id)
     assert job["status"] == js.JOB_STATUS_CANCELLED

@@ -7,11 +7,12 @@ worker bootstrap). Co-locating ``start_team_worker``/``is_temporal_enabled``
 with the workflow class trips the sandbox with
 ``__call__ on os.getenv restricted`` during workflow registration.
 
-The activity reuses the thread path's shared pipeline core
-(``_run_pipeline_core`` in ``market_research_team.api.main``) so the
-job-store bookkeeping (RUNNING → COMPLETED, cancel guards) lives in exactly
-one place. Status is written to the durable ``JobServiceClient`` store, so a
-completed run survives a worker/process restart.
+The activity reuses the shared pipeline core (``run_pipeline_core`` in
+``market_research_team.pipeline`` — a neutral module, so the worker does not
+import the FastAPI app) so the job-store bookkeeping (RUNNING → COMPLETED,
+cancel guards) lives in exactly one place. Status is written to the durable
+``JobServiceClient`` store, so a completed run survives a worker/process
+restart.
 """
 
 from __future__ import annotations
@@ -43,12 +44,8 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
           silently-"completed" one. Auto-retry is bounded by the workflow's
           ``RetryPolicy`` (see ``MarketResearchWorkflow.run``).
     """
-    from market_research_team.api.main import (
-        RunMarketResearchRequest,
-        _build_mission,
-        _run_pipeline_core,
-    )
-    from market_research_team.models import HumanReview
+    from market_research_team.models import HumanReview, RunMarketResearchRequest
+    from market_research_team.pipeline import build_mission, run_pipeline_core
     from market_research_team.shared.job_store import (
         JOB_STATUS_FAILED,
         is_job_cancelled,
@@ -56,10 +53,10 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
     )
 
     req = RunMarketResearchRequest(**request)
-    mission = _build_mission(req)
+    mission = build_mission(req)
     human_review = HumanReview(approved=req.human_approved, feedback=req.human_feedback)
     try:
-        _run_pipeline_core(job_id, mission, human_review)
+        run_pipeline_core(job_id, mission, human_review)
     except Exception as e:
         activity.logger.exception("Market research job %s failed", job_id)
         if is_job_cancelled(job_id):
@@ -93,8 +90,14 @@ class MarketResearchWorkflow:
             # (429s, etc.). A workflow-level retry would therefore mostly re-run
             # expensive, deterministic failures. Cap at a single attempt: a
             # failure surfaces as a failed workflow + a FAILED job-store row for
-            # explicit resubmission rather than being auto-retried. (Worker or
-            # process crashes are still durably re-dispatched by Temporal — that
-            # is unaffected by this attempt cap.)
+            # explicit resubmission rather than being auto-retried.
+            #
+            # Trade-off: because the single attempt is consumed, a worker crash
+            # mid-activity is NOT auto-re-dispatched either. Such an orphaned
+            # RUNNING job is instead reconciled to ``interrupted`` by the
+            # team_service startup/shutdown recovery
+            # (``team_service.entrypoint._startup_recovery`` /
+            # ``mark_all_active_jobs_interrupted``), not resumed — the expensive
+            # non-idempotent pipeline is deliberately not silently re-run.
             retry_policy=RetryPolicy(maximum_attempts=1),
         )

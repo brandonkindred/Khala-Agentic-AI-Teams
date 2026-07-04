@@ -1,7 +1,7 @@
 """Tests for the market_research Temporal activity + workflow.
 
 The activity owns the same job-store bookkeeping the thread path performs
-in ``api.main._run_market_research_background``: RUNNING → COMPLETED with the
+in ``pipeline.run_market_research_background``: RUNNING → COMPLETED with the
 orchestrator result on success, FAILED on error, and a no-op when the job was
 cancelled. These tests pin that contract against the in-memory
 ``fake_job_client`` (autouse-patched in ``tests/conftest.py``).
@@ -63,10 +63,10 @@ def test_activity_marks_job_failed_and_reraises_on_exception(monkeypatch):
         def run(self, *_args, **_kwargs):
             raise RuntimeError("orchestrator exploded")
 
-    # The activity runs the orchestrator via api.main._run_pipeline_core, so
+    # The activity runs the orchestrator via pipeline.run_pipeline_core, so
     # patch the symbol that module resolves.
     monkeypatch.setattr(
-        "market_research_team.api.main.MarketResearchOrchestrator", _BoomOrchestrator
+        "market_research_team.pipeline.MarketResearchOrchestrator", _BoomOrchestrator
     )
     create_job("job-boom", request=_REQUEST)
 
@@ -87,7 +87,7 @@ def test_activity_short_circuits_when_cancelled_before_run(monkeypatch):
             return MagicMock()
 
     monkeypatch.setattr(
-        "market_research_team.api.main.MarketResearchOrchestrator", _TrackingOrchestrator
+        "market_research_team.pipeline.MarketResearchOrchestrator", _TrackingOrchestrator
     )
     create_job("job-cancel", request=_REQUEST)
     update_job("job-cancel", status=JOB_STATUS_CANCELLED)
@@ -109,7 +109,7 @@ def test_activity_does_not_overwrite_when_cancelled_mid_run(monkeypatch):
             return MagicMock()
 
     monkeypatch.setattr(
-        "market_research_team.api.main.MarketResearchOrchestrator", _CancellingOrchestrator
+        "market_research_team.pipeline.MarketResearchOrchestrator", _CancellingOrchestrator
     )
     create_job("job-midcancel", request=_REQUEST)
 
@@ -132,7 +132,7 @@ def test_activity_swallows_when_cancelled_and_orchestrator_raises(monkeypatch):
             raise RuntimeError("boom after cancel")
 
     monkeypatch.setattr(
-        "market_research_team.api.main.MarketResearchOrchestrator", _CancellingBoomOrchestrator
+        "market_research_team.pipeline.MarketResearchOrchestrator", _CancellingBoomOrchestrator
     )
     create_job("job-cancelboom", request=_REQUEST)
 

@@ -37,6 +37,14 @@ def _wait_for_client(timeout_s: float = CLIENT_READY_TIMEOUT_S) -> tuple[Any, An
     (local dev) the daemon thread can lag behind the first request by tens
     of milliseconds. Polling here turns that race into a short wait instead
     of a 500.
+
+    Preconditions:
+        - ``timeout_s`` >= 0.
+
+    Postconditions:
+        - Returns ``(client, loop)`` once both the shared Temporal client and
+          its event loop are connected, or raises ``RuntimeError`` after
+          ``timeout_s`` seconds if they never become available.
     """
     deadline = time.monotonic() + timeout_s
     while True:
