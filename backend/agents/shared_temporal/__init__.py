@@ -28,7 +28,7 @@ from shared_temporal.client import (
     set_temporal_client,
     set_temporal_loop,
 )
-from shared_temporal.runner import run_team_job
+from shared_temporal.runner import run_team_job, start_workflow_sync
 from shared_temporal.teams_registry import TEAM_TEMPORAL_MODULES, start_all_team_workers
 from shared_temporal.worker import start_team_worker
 
@@ -47,6 +47,7 @@ __all__ = [
     "set_temporal_client",
     "set_temporal_loop",
     "start_team_worker",
+    "start_workflow_sync",
     "submit_input",
     "wait_for_input",
 ]

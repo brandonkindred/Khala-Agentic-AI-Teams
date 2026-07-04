@@ -10,8 +10,8 @@ from uuid import uuid4
 from fastapi import HTTPException
 from pydantic import BaseModel
 
-from market_research_team.models import HumanReview, RunMarketResearchRequest
-from market_research_team.pipeline import build_mission, run_market_research_background
+from market_research_team.models import RunMarketResearchRequest
+from market_research_team.pipeline import prepare, run_market_research_background
 from market_research_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_FAILED,
@@ -123,8 +123,7 @@ def _dispatch_market_research_run(job_id: str, payload: RunMarketResearchRequest
         logger.info("Market research run dispatched via Temporal: job_id=%s", job_id)
         return "Temporal"
 
-    mission = build_mission(payload)
-    human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
+    mission, human_review = prepare(payload)
     thread = threading.Thread(
         target=run_market_research_background,
         args=(job_id, mission, human_review),

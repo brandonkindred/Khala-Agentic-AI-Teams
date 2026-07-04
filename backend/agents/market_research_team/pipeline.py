@@ -44,6 +44,26 @@ def build_mission(req: RunMarketResearchRequest) -> ResearchMission:
     )
 
 
+def prepare(req: RunMarketResearchRequest) -> tuple[ResearchMission, HumanReview]:
+    """Build the ``(mission, human_review)`` orchestrator inputs from a request.
+
+    Single seam used by both dispatch paths (the HTTP thread branch and the
+    Temporal activity, which reconstructs ``req`` from a dict) so the two never
+    derive their inputs independently.
+
+    Preconditions:
+        - ``req`` is a validated ``RunMarketResearchRequest``.
+
+    Postconditions:
+        - Returns ``(ResearchMission, HumanReview)`` derived entirely from
+          ``req``.
+    """
+    return (
+        build_mission(req),
+        HumanReview(approved=req.human_approved, feedback=req.human_feedback),
+    )
+
+
 def run_pipeline_core(job_id: str, mission: ResearchMission, human_review: HumanReview) -> None:
     """Run the orchestrator with cancel guards + RUNNING/COMPLETED bookkeeping.
 

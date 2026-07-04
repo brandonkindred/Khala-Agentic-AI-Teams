@@ -44,17 +44,15 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
           silently-"completed" one. Auto-retry is bounded by the workflow's
           ``RetryPolicy`` (see ``MarketResearchWorkflow.run``).
     """
-    from market_research_team.models import HumanReview, RunMarketResearchRequest
-    from market_research_team.pipeline import build_mission, run_pipeline_core
+    from market_research_team.models import RunMarketResearchRequest
+    from market_research_team.pipeline import prepare, run_pipeline_core
     from market_research_team.shared.job_store import (
         JOB_STATUS_FAILED,
         is_job_cancelled,
         update_job,
     )
 
-    req = RunMarketResearchRequest(**request)
-    mission = build_mission(req)
-    human_review = HumanReview(approved=req.human_approved, feedback=req.human_feedback)
+    mission, human_review = prepare(RunMarketResearchRequest(**request))
     try:
         run_pipeline_core(job_id, mission, human_review)
     except Exception as e:

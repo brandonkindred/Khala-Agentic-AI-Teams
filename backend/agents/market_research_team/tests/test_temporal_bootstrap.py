@@ -124,40 +124,64 @@ def test_worker_start_delegates_to_start_team_worker(monkeypatch):
     assert TASK_QUEUE == "market_research-queue"
 
 
-def test_start_workflow_waits_for_client_then_raises(monkeypatch):
-    """When the worker is genuinely not running, the helper must time out with
-    the original error message — not raise immediately and not wait forever."""
+def test_start_market_research_workflow_delegates_to_shared_bridge(monkeypatch):
+    """The team wrapper forwards to ``shared_temporal.start_workflow_sync`` with
+    the market-research workflow id + task queue. The sync→async bridge itself
+    (client-ready wait, run_coroutine_threadsafe) is exercised by the two
+    ``test_shared_start_workflow_sync_*`` cases below."""
+    from market_research_team.temporal import MarketResearchWorkflow
     from market_research_team.temporal import start_workflow as sw
 
-    monkeypatch.setattr(sw, "get_temporal_client", lambda: None)
-    monkeypatch.setattr(sw, "get_temporal_loop", lambda: None)
-    monkeypatch.setattr(sw, "CLIENT_READY_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(sw, "CLIENT_READY_POLL_S", 0.01)
+    captured: dict = {}
+
+    def _fake_start_workflow_sync(workflow_run, *args, workflow_id, task_queue, **_kw):
+        captured.update(
+            workflow_run=workflow_run, args=args, workflow_id=workflow_id, task_queue=task_queue
+        )
+
+    monkeypatch.setattr(sw, "start_workflow_sync", _fake_start_workflow_sync)
+
+    sw.start_market_research_workflow("job-abc", {"product_concept": "x"})
+
+    assert captured["workflow_run"] is MarketResearchWorkflow.run
+    assert captured["args"] == ("job-abc", {"product_concept": "x"})
+    assert captured["workflow_id"] == "market-research-job-abc"
+    assert captured["task_queue"] == "market_research-queue"
+
+
+def test_shared_start_workflow_sync_raises_when_client_never_connects(monkeypatch):
+    """The shared bridge must time out with the original error message — not
+    raise immediately and not wait forever — when no worker client connects."""
+    from shared_temporal import runner
+
+    monkeypatch.setattr(runner, "get_temporal_client", lambda: None)
+    monkeypatch.setattr(runner, "get_temporal_loop", lambda: None)
+    monkeypatch.setattr(runner, "CLIENT_READY_POLL_S", 0.01)
 
     with pytest.raises(RuntimeError, match="Temporal client not available"):
-        sw._wait_for_client()
+        runner._await_client(timeout_s=0.05)
 
 
-def test_start_workflow_dispatches_when_client_ready(monkeypatch):
-    """Happy path: with a connected client + loop, the helper starts the
-    workflow with the ``market-research-<job_id>`` id on the team queue."""
-    from market_research_team.temporal import start_workflow as sw
+def test_shared_start_workflow_sync_dispatches_when_client_ready(monkeypatch):
+    """Happy path: with a connected client + loop, the bridge starts the
+    workflow with the given id/queue/args on the worker loop."""
+    from shared_temporal import runner
 
     fake_client = mock.MagicMock(name="client")
     fake_client.start_workflow.return_value = mock.MagicMock(name="coro")
     fake_loop = mock.MagicMock(name="loop")
-    monkeypatch.setattr(sw, "get_temporal_client", lambda: fake_client)
-    monkeypatch.setattr(sw, "get_temporal_loop", lambda: fake_loop)
+    monkeypatch.setattr(runner, "get_temporal_client", lambda: fake_client)
+    monkeypatch.setattr(runner, "get_temporal_loop", lambda: fake_loop)
 
     fake_future = mock.MagicMock(name="future")
     fake_future.result.return_value = None
-    monkeypatch.setattr(sw.asyncio, "run_coroutine_threadsafe", lambda coro, loop: fake_future)
+    monkeypatch.setattr(runner.asyncio, "run_coroutine_threadsafe", lambda coro, loop: fake_future)
 
-    sw.start_market_research_workflow("job-abc", {"product_concept": "x"})
+    runner.start_workflow_sync(object(), "a1", {"k": "v"}, workflow_id="wid", task_queue="q")
 
     fake_client.start_workflow.assert_called_once()
     _, kwargs = fake_client.start_workflow.call_args
-    assert kwargs["id"] == "market-research-job-abc"
-    assert kwargs["task_queue"] == "market_research-queue"
-    assert kwargs["args"] == ["job-abc", {"product_concept": "x"}]
+    assert kwargs["id"] == "wid"
+    assert kwargs["task_queue"] == "q"
+    assert kwargs["args"] == ["a1", {"k": "v"}]
     fake_future.result.assert_called_once()
