@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -180,6 +180,64 @@ class RunDetail(BaseModel):
     completed_at: Optional[str] = None
     error: Optional[str] = None
     ranked_jobs: List[RankedJob] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Listing management (user-facing dispositions, keyed by fingerprint)
+# ---------------------------------------------------------------------------
+
+#: Exclusive disposition of a listing. ``new`` is the implicit default when no
+#: state row exists; the other values are the user's triage actions.
+ListingStatus = Literal["new", "favorite", "not_interested", "poor_fit", "archived"]
+
+#: Values accepted by ``GET /listings?status=``: every ListingStatus plus the
+#: two pseudo-filters. ``active`` is the inbox view (everything except
+#: ``archived`` and ``not_interested``); ``all`` disables filtering.
+LISTING_FILTERS = ("active", "all", "new", "favorite", "not_interested", "poor_fit", "archived")
+
+
+class ListingStateUpdate(BaseModel):
+    """PATCH body for a listing's user state.
+
+    Preconditions:
+        * ``status`` is one of :data:`ListingStatus` (enforced by pydantic).
+    Postconditions:
+        * ``notes=None`` means "leave existing notes unchanged".
+    """
+
+    status: ListingStatus
+    notes: Optional[str] = None
+
+
+class Listing(BaseModel):
+    """The latest ranked snapshot of a posting (per fingerprint) plus user state.
+
+    Invariants:
+        * ``fingerprint`` is non-empty and identifies the posting across runs.
+        * ``status`` defaults to ``new`` when the user has never triaged it.
+    """
+
+    fingerprint: str
+    posting: JobPosting
+    score: float = Field(default=0.0, ge=0.0, le=1.0)
+    sub_scores: SubScores = Field(default_factory=SubScores)
+    recommendation: Recommendation = "maybe"
+    rationale: str = ""
+    concerns: List[str] = Field(default_factory=list)
+    run_id: str = ""
+    last_seen_at: Optional[str] = None
+    times_seen: int = Field(default=1, ge=1)
+    status: ListingStatus = "new"
+    notes: Optional[str] = None
+    status_updated_at: Optional[str] = None
+
+
+class ListingsResponse(BaseModel):
+    """Aggregated listings plus per-status counts (drives the UI filter pills)."""
+
+    listings: List[Listing] = Field(default_factory=list)
+    total: int = 0
+    counts: Dict[str, int] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

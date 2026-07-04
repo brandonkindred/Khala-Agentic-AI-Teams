@@ -1,8 +1,9 @@
 """Postgres schema for the job matching team.
 
-Two tables: one row per scan run, and one row per ranked posting within a run.
-Registered from the team's FastAPI lifespan via
-``shared_postgres.register_team_schemas``.
+Three tables: one row per scan run, one row per ranked posting within a run,
+and one row per user-triaged listing (keyed by posting fingerprint so the
+disposition survives re-discovery in later runs). Registered from the team's
+FastAPI lifespan via ``shared_postgres.register_team_schemas``.
 """
 
 from __future__ import annotations
@@ -43,9 +44,16 @@ SCHEMA = TeamSchema(
             ON job_matching_ranked_jobs(run_id)""",
         """CREATE INDEX IF NOT EXISTS idx_job_matching_ranked_jobs_fingerprint
             ON job_matching_ranked_jobs(fingerprint)""",
+        """CREATE TABLE IF NOT EXISTS job_matching_listing_states (
+            fingerprint TEXT PRIMARY KEY,
+            status      TEXT NOT NULL DEFAULT 'new',
+            notes       TEXT,
+            updated_at  TIMESTAMPTZ NOT NULL
+        )""",
     ],
     table_names=[
         "job_matching_runs",
         "job_matching_ranked_jobs",
+        "job_matching_listing_states",
     ],
 )

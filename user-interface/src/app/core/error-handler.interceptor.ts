@@ -21,6 +21,10 @@ export const errorHandlerInterceptor: HttpInterceptorFn = (req, next) => {
         duration: 6000,
         horizontalPosition: 'end',
         verticalPosition: 'top',
+        // Errors must interrupt: polite announcements are routinely missed.
+        politeness: 'assertive',
+        // Severity styling from the design system (red border accent).
+        panelClass: 'kh-snack-error',
       });
       return throwError(() => err);
     })
@@ -38,7 +42,10 @@ function formatErrorMessage(err: unknown): string {
   switch (status) {
     case HttpStatusCode.NotFound:
       return `Not found: ${err.url ?? statusText}`;
+    // FastAPI reports request-validation failures as 422 with an array-of-{msg}
+    // detail; both validation shapes format identically.
     case HttpStatusCode.BadRequest:
+    case HttpStatusCode.UnprocessableEntity:
       return formatValidationError(err) ?? `Bad request: ${statusText}`;
     case HttpStatusCode.Unauthorized:
       return 'Unauthorized. Please check your credentials.';
@@ -46,8 +53,14 @@ function formatErrorMessage(err: unknown): string {
       return 'Access forbidden.';
     case HttpStatusCode.InternalServerError:
       return `Server error: ${formatServerError(err)}`;
-    case HttpStatusCode.ServiceUnavailable:
-      return 'Service temporarily unavailable. Please try again later.';
+    case HttpStatusCode.ServiceUnavailable: {
+      // A 503 detail explains what is unavailable and how to fix it (e.g.
+      // "Career profile storage requires Postgres…") — don't flatten it.
+      const detail = err.error?.detail;
+      return typeof detail === 'string' && detail
+        ? detail
+        : 'Service temporarily unavailable. Please try again later.';
+    }
     case 0:
       return 'Network error. Please check your connection and that the API is running.';
     default:

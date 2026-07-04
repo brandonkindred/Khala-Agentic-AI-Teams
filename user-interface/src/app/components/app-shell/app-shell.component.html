@@ -4,13 +4,12 @@
     #drawer
     class="sidenav"
     fixedInViewport
-    [attr.aria-label]="'Main navigation'"
     [mode]="'side'"
     [opened]="true"
   >
     <div class="sidenav-header">
       <div class="brand-logo">
-        <mat-icon class="brand-icon">hub</mat-icon>
+        <mat-icon class="brand-icon" aria-hidden="true">hub</mat-icon>
       </div>
       <div class="brand-text">
         <span class="brand-title">Khala</span>
@@ -18,11 +17,11 @@
       </div>
     </div>
 
-    <nav class="nav-section" aria-label="Agent features">
+    <nav class="nav-section" aria-label="Main navigation">
       <!-- Jobs Dashboard — always visible at top -->
       <a #navFocusable routerLink="/dashboard" routerLinkActive="active" class="nav-link nav-link-primary"
          [attr.aria-current]="isActive('/dashboard') ? 'page' : null">
-        <mat-icon>dashboard</mat-icon>
+        <mat-icon aria-hidden="true">dashboard</mat-icon>
         <span>Jobs Dashboard</span>
       </a>
 
@@ -30,7 +29,7 @@
       @if (navState.favoriteItems().length > 0) {
         <div class="nav-favorites">
           <h2 class="visually-hidden">Favorites</h2>
-          <div class="nav-group-label">Favorites</div>
+          <div class="nav-group-label" aria-hidden="true">Favorites</div>
           @for (item of navState.favoriteItems(); track item.id) {
             <a #navFocusable
                [routerLink]="item.route"
@@ -38,14 +37,14 @@
                [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
                class="nav-link nav-link-favorite"
                [attr.aria-current]="isActive(item.route) ? 'page' : null">
-              <mat-icon>star</mat-icon>
+              <mat-icon aria-hidden="true">star</mat-icon>
               <span>{{ item.label }}</span>
             </a>
           }
         </div>
       }
 
-      <!-- Nav group triggers (flyout on hover/focus) -->
+      <!-- Nav group triggers (disclosure flyout on hover/click/keyboard) -->
       @for (group of navGroups; track group.key) {
         <button #trigger
                 #navFocusable
@@ -53,12 +52,11 @@
                 class="nav-group-trigger"
                 [class.active]="isGroupActive(group)"
                 [attr.aria-expanded]="activeGroup()?.key === group.key"
-                aria-haspopup="menu"
                 [attr.aria-controls]="'nav-flyout-' + group.key"
                 (mouseenter)="openFlyout(group, trigger)"
-                (focus)="openFlyout(group, trigger)"
                 (mouseleave)="scheduleClose()"
-                (blur)="scheduleClose()"
+                (focusout)="onNavFocusOut($event)"
+                (keydown)="onTriggerKeydown($event, group, trigger)"
                 (click)="openFlyout(group, trigger)">
           <span class="nav-group-label">{{ group.label }}</span>
           <mat-icon class="nav-group-chevron" aria-hidden="true">chevron_right</mat-icon>
@@ -79,25 +77,40 @@
         @if (activeGroup(); as group) {
           <div class="nav-flyout"
                [id]="'nav-flyout-' + group.key"
-               role="menu"
+               role="group"
                tabindex="-1"
                [attr.aria-label]="group.label"
                (mouseenter)="cancelClose()"
                (mouseleave)="scheduleClose()"
+               (focusout)="onNavFocusOut($event)"
+               (keydown)="onFlyoutKeydown($event)"
                (keydown.escape)="closeFlyout(true)">
-            <div class="nav-flyout-title">{{ group.label }}</div>
+            <div class="nav-flyout-title" aria-hidden="true">{{ group.label }}</div>
             @for (item of group.items; track trackByItemId($index, item)) {
-              <a [routerLink]="item.route"
-                 routerLinkActive="active"
-                 [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
-                 class="nav-flyout-link"
-                 [class.nav-flyout-link-nested]="item.nested"
-                 role="menuitem"
-                 [attr.aria-current]="isActive(item.route) ? 'page' : null"
-                 (click)="closeFlyout()">
-                <mat-icon>{{ item.icon }}</mat-icon>
-                <span>{{ item.label }}</span>
-              </a>
+              <div class="nav-link-row">
+                <a [routerLink]="item.route"
+                   routerLinkActive="active"
+                   [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
+                   class="nav-flyout-link"
+                   [class.nav-flyout-link-nested]="item.nested"
+                   [attr.aria-current]="isActive(item.route) ? 'page' : null"
+                   (click)="closeFlyout()">
+                  <mat-icon aria-hidden="true">{{ item.icon }}</mat-icon>
+                  <span>{{ item.label }}</span>
+                </a>
+                <button mat-icon-button
+                        type="button"
+                        class="nav-link-star"
+                        [attr.aria-pressed]="navState.isFavorite(item.id)"
+                        [attr.aria-label]="
+                          navState.isFavorite(item.id)
+                            ? 'Unpin ' + item.label + ' from the sidebar'
+                            : 'Pin ' + item.label + ' to the sidebar'
+                        "
+                        (click)="navState.toggleFavorite(item.id)">
+                  <mat-icon aria-hidden="true">{{ navState.isFavorite(item.id) ? 'star' : 'star_border' }}</mat-icon>
+                </button>
+              </div>
             }
           </div>
         }
@@ -112,9 +125,9 @@
   </mat-sidenav>
 
   <mat-sidenav-content>
-    <mat-toolbar class="main-toolbar">
+    <mat-toolbar class="main-toolbar" role="banner">
       <button mat-icon-button (click)="drawer.toggle()" [attr.aria-label]="'Toggle navigation menu'" class="menu-button">
-        <mat-icon>menu</mat-icon>
+        <mat-icon aria-hidden="true">menu</mat-icon>
       </button>
       <span class="toolbar-title">Khala Agents</span>
       <span class="spacer"></span>

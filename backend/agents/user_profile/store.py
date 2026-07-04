@@ -172,6 +172,12 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
         - ``user_id`` is a non-empty string.
     Postconditions:
         - Only fields set (non-``None``) on ``update`` are written.
+        - ``preferences`` is a shallow *merge*, not a replacement: exactly its
+          top-level keys are replaced in ``profile_json``; every other section
+          (e.g. a team-owned section like job matching's ``career``) is
+          preserved via a single atomic server-side ``profile_json ||
+          EXCLUDED.profile_json``, so concurrent section writers never clobber
+          each other. Removing a section is not expressible through this call.
         - ``updated_at`` is advanced.
     """
     assert user_id, "user_id must be non-empty"
@@ -190,7 +196,9 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
     if update.bio is not None:
         set_clauses.append("bio = EXCLUDED.bio")
     if update.preferences is not None:
-        set_clauses.append("profile_json = EXCLUDED.profile_json")
+        # Merge, never replace: a whole-document assignment would silently drop
+        # sections other writers merged in (career, integrations, ...).
+        set_clauses.append("profile_json = user_profiles.profile_json || EXCLUDED.profile_json")
 
     # `x or default` here only supplies INSERT defaults for a brand-new row; a
     # field is written on conflict *only* if it's non-None (see set_clauses above),

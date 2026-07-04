@@ -40,6 +40,7 @@ class ArtifactType(str, Enum):
     BLOG_POST = "blog_post"
     PROJECT = "project"
     AGENTIC_TEAM = "agentic_team"
+    CAREER = "career"
 
 
 __all__ = [

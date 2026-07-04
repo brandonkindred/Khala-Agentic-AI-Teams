@@ -91,7 +91,9 @@ def test_overview_storage_unavailable_returns_503(monkeypatch):
     app = FastAPI()
     app.include_router(router)
     tc = TestClient(app, raise_server_exceptions=False)
-    monkeypatch.setattr(routes_mod, "get_profile", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(
+        routes_mod, "get_profile", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
+    )
     assert tc.get("/api/user-profile/overview").status_code == 503
 
 
@@ -189,3 +191,16 @@ def test_storage_unavailable_paths_return_503(monkeypatch, symbol, method, path,
     monkeypatch.setattr(routes_mod, symbol, _boom)
     resp = getattr(client, method)(path, **kwargs)
     assert resp.status_code == 503
+
+
+def test_career_is_a_valid_association_filter(client):
+    """The job matching team records career associations; the filter must accept them."""
+    from user_profile import store as up_store
+
+    up_store.record_association("career", "job_matching", "career:default", label="Career profile")
+    resp = client.get("/api/user-profile/associations", params={"artifact_type": "career"})
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) == 1
+    assert items[0]["team"] == "job_matching"
+    assert items[0]["label"] == "Career profile"

@@ -32,6 +32,13 @@ describe('App routes', () => {
     expect(await loadedComponent('llm-config')).toBe(LlmConfigDashboardComponent);
   });
 
+  it('lazily loads JobMatchingDashboardComponent for job-matching', async () => {
+    const { JobMatchingDashboardComponent } = await import(
+      './components/job-matching-dashboard/job-matching-dashboard.component'
+    );
+    expect(await loadedComponent('job-matching')).toBe(JobMatchingDashboardComponent);
+  });
+
   it('redirects empty path to /dashboard', () => {
     const shell = routes[0];
     const children = shell?.children as { path: string; redirectTo: string }[];
