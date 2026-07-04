@@ -1,0 +1,14 @@
+<div [class]="cssClasses()">
+  <mat-icon class="kh-banner__icon" aria-hidden="true">{{ resolvedIcon() }}</mat-icon>
+  <!-- Live region: message only. Interactive controls must NOT nest here — some
+       assistive tech won't expose controls inside an assertive live region. -->
+  <span class="kh-banner__msg" [attr.role]="liveRole()">
+    @if (title()) {
+      <strong>{{ title() }}</strong>
+    }
+    {{ message() }}<ng-content select="[banner-message]" />
+  </span>
+  <!-- Action slot: projected content lives outside the live region. The tag is
+       kept whitespace-free so `:empty` collapses it when nothing is projected. -->
+  <span class="kh-banner__actions"><ng-content /></span>
+</div>

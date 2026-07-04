@@ -15,6 +15,7 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import { NotificationService } from '../../core/notification.service';
 import { extractErrorDetail } from '../../core/error-handler.interceptor';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import type {
   GitHubConfigResponse,
   GitHubConfigUpdate,
@@ -48,6 +49,7 @@ type IntegrationKey = 'google' | 'slack' | 'medium' | 'github' | 'tradingview';
     MatRadioModule,
     MatDividerModule,
     MatProgressSpinnerModule,
+    InlineBannerComponent,
   ],
   templateUrl: './integrations-dashboard.component.html',
   styleUrl: './integrations-dashboard.component.scss',

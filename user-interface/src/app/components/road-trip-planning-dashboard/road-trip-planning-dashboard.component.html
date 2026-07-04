@@ -104,13 +104,11 @@
         }
 
         @if (error) {
-          <div class="error-banner" role="alert">
-            <mat-icon>error_outline</mat-icon>
-            <span>{{ error }}</span>
+          <app-inline-banner variant="error" [message]="error">
             <button mat-stroked-button (click)="generateItinerary()" [disabled]="!readyToPlan() || planning">
               Retry
             </button>
-          </div>
+          </app-inline-banner>
         }
       </mat-card-content>
     </mat-card>

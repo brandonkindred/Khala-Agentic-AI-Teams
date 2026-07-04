@@ -1,0 +1,67 @@
+// Compact inline banner. Consolidates the ad-hoc `.status-banner` / `.error-banner`
+// / `.github-banner` families that features used to hand-roll. Colors come from
+// the shared `--kh-{variant}` design tokens so a single edit re-themes every banner.
+.kh-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kh-space-2);
+  padding: var(--kh-space-3) var(--kh-space-4);
+  border-radius: var(--kh-radius-md);
+  margin-bottom: var(--kh-space-4);
+  font-family: var(--kh-font-sans);
+  font-size: var(--kh-text-sm);
+  line-height: 1.5;
+}
+
+.kh-banner__icon {
+  flex-shrink: 0;
+  font-size: 18px;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+}
+
+.kh-banner__msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--kh-text-primary);
+  // Rich/projected message content (inline `<code>`, a lead-in `<strong>`
+  // heading, body `<p>`) is styled globally in `styles.scss` under
+  // `.kh-banner__msg` — a global sheet reaches Angular-projected content without
+  // the deprecated `::ng-deep`.
+}
+
+// Card layout: a fully-bordered container (the app-error-message look). The
+// severity left accent from the @each block below is preserved by only setting
+// the other three sides here.
+.kh-banner--card {
+  border-top: 1px solid var(--kh-border-subtle);
+  border-right: 1px solid var(--kh-border-subtle);
+  border-bottom: 1px solid var(--kh-border-subtle);
+}
+
+// Interactive controls (Retry, dismiss, …) projected as siblings of the live
+// region. Collapses entirely when nothing is projected.
+.kh-banner__actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-2);
+
+  &:empty {
+    display: none;
+  }
+}
+
+// One base + four severity modifiers. Each maps to its translucent `-subtle`
+// fill and its solid token for the icon and left accent.
+@each $variant in (error, warning, success, info) {
+  .kh-banner--#{$variant} {
+    background: var(--kh-#{$variant}-subtle);
+    border-left: 3px solid var(--kh-#{$variant});
+
+    .kh-banner__icon {
+      color: var(--kh-#{$variant});
+    }
+  }
+}
