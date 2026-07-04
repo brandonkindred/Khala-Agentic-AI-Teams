@@ -272,7 +272,16 @@ class PipelineRunner:
 
     @staticmethod
     def _run_agent(agent_def: AgenticTeamAgent, prompt: str) -> str:
-        """Build and invoke an agent for a single prompt (blocking LLM call)."""
+        """Build and invoke an agent for a single prompt (blocking LLM call).
+
+        v1 scope boundary: every roster agent runs this way — including a
+        ``source == "registry"`` entry, which executes as a free-text LLM persona built from its
+        projected ``role`` / ``skills`` / ``tools`` fields. There is deliberately **no**
+        ``source == "registry"`` branch: a registry agent's declared typed input/output schema is
+        not marshalled through the DAG in v1. Real typed-IO registry-agent invocation is deferred —
+        see ``system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md``. Do not add a
+        registry-execution branch here without first resolving that spike.
+        """
         agent_instance = build_agent(
             agent_def.agent_name,
             agent_def.role,
