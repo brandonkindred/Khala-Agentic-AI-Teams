@@ -40,6 +40,7 @@ import logging
 import re
 import threading
 from collections import OrderedDict
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -90,44 +91,28 @@ DEFAULT_CHUNK_OUTCOME_CACHE_SIZE = 512  # CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE, 
 _CHUNK_OUTCOME_CACHE: "OrderedDict[str, _ChunkOutcome]" = OrderedDict()
 _CHUNK_OUTCOME_CACHE_LOCK = threading.Lock()
 
-# In-flight reviews, keyed by the same chunk cache key. A miss registers one
-# ``_InflightReview`` here so concurrent workers asking for the identical chunk
-# become waiters on the leader rather than each firing the LLM (single-flight).
-# Guarded by ``_CHUNK_OUTCOME_CACHE_LOCK`` — every access is a bare dict
-# get/set/pop, never the review itself, so hold times stay tiny.
-_CHUNK_INFLIGHT: "Dict[str, _InflightReview]" = {}
+# In-flight reviews, keyed by the same chunk cache key. A miss registers a
+# pending ``Future`` here so concurrent workers asking for the identical chunk
+# become waiters on the leader's ``future.result()`` rather than each firing the
+# LLM (single-flight). The leader always resolves the future (result or
+# exception) and releases the slot on every exit path. Guarded by
+# ``_CHUNK_OUTCOME_CACHE_LOCK`` — every access is a bare dict get/set/del, never
+# the review itself, so hold times stay tiny.
+_CHUNK_INFLIGHT: "Dict[str, Future]" = {}
 
 
-class _InflightReview:
-    """One in-progress map-phase review that concurrent workers can wait on.
+def _release_inflight(key: str, fut: "Future") -> None:
+    """Drop this leader's in-flight slot, but only if it still holds ``fut``.
 
-    The first worker to miss the cache for a chunk key becomes the *leader*: it
-    runs the single real review and, when done, publishes the result here and
-    wakes any *waiters* — later workers that found this record and blocked
-    instead of issuing their own duplicate LLM call.
-
-    Invariants:
-        - The leader ALWAYS fires ``done`` exactly once, on every exit path
-          (success or exception), having first assigned ``error`` — or, when at
-          least one waiter is registered, ``outcome``. ``threading.Event``
-          provides the happens-before edge, so a waiter that returns from
-          ``done.wait()`` reads the published value safely.
-        - ``waiters`` counts the workers that joined this record while the leader
-          held the ``_CHUNK_INFLIGHT`` slot (incremented under the cache lock).
-          The leader snapshots it under the same lock when releasing the slot, so
-          a non-zero count means a waiter will read ``outcome`` and the leader
-          must publish an isolated clone; a zero count lets the solo-leader path
-          skip that clone. Workers arriving after the slot is released never see
-          this record — they start a fresh review — so they are never counted.
+    Postconditions:
+        - Removes ``key`` from ``_CHUNK_INFLIGHT`` iff its value is still this
+          leader's future. The identity guard means a mid-flight cache clear that
+          replaced the slot can never make one leader delete another's live
+          registration. Idempotent: a no-op if the slot was already released.
     """
-
-    __slots__ = ("done", "outcome", "error", "waiters")
-
-    def __init__(self) -> None:
-        self.done = threading.Event()
-        self.outcome: Optional["_ChunkOutcome"] = None
-        self.error: Optional[BaseException] = None
-        self.waiters = 0
+    with _CHUNK_OUTCOME_CACHE_LOCK:
+        if _CHUNK_INFLIGHT.get(key) is fut:
+            del _CHUNK_INFLIGHT[key]
 
 
 def _chunk_outcome_cache_size() -> int:
@@ -749,18 +734,12 @@ def _cached_review_chunk(
         if hit is not None:
             _CHUNK_OUTCOME_CACHE.move_to_end(key)
         else:
-            inflight = _CHUNK_INFLIGHT.get(key)
-            if inflight is None:
-                # No cached result and no review under way: take ownership so
-                # concurrent duplicates wait on us instead of re-reviewing.
-                inflight = _InflightReview()
-                _CHUNK_INFLIGHT[key] = inflight
-                is_leader = True
-            else:
-                # Join the in-flight review; the count is snapshotted by the
-                # leader (under this same lock) to decide whether to publish.
-                inflight.waiters += 1
-                is_leader = False
+            fut = _CHUNK_INFLIGHT.get(key)
+            is_leader = fut is None
+            if is_leader:
+                # No cached result and no review under way: register a pending
+                # future so concurrent duplicates wait on us instead of reviewing.
+                fut = _CHUNK_INFLIGHT[key] = Future()
     if hit is not None:
         # Clone outside the lock: a stored entry is never mutated in place, so the
         # captured reference stays valid even if another thread evicts it, and the
@@ -768,20 +747,18 @@ def _cached_review_chunk(
         return hit.clone()
 
     if not is_leader:
-        # Waiter: an identical chunk is already being reviewed. Block for it and
-        # reuse its result rather than firing a second LLM call. ``inflight`` was
-        # captured under the lock, so it stays valid even after the leader releases
-        # the slot; ``Event.wait`` returns at once if the leader already finished.
-        inflight.done.wait()
-        if inflight.error is not None:
-            raise inflight.error
-        return inflight.outcome.clone()
+        # Waiter: an identical chunk is already being reviewed. Block on the
+        # leader's future rather than firing a second LLM call — ``result()``
+        # returns the outcome (or re-raises the leader's exception) with the
+        # right happens-before, and returns at once if the leader already
+        # finished. Clone per caller so each owns an isolated copy.
+        return fut.result().clone()
 
-    # Leader: run the single real review for this key, then publish to waiters.
+    # Leader: run the single real review for this key, then resolve the future.
     # Everything that can raise (the review and the outcome clones) is inside the
-    # ``try`` so the record is ALWAYS resolved and the slot ALWAYS released — a
-    # leader that failed to fire ``done`` would hang every waiter on the untimed
-    # ``wait()`` above and poison the key for the life of the process.
+    # ``try`` so the future is ALWAYS resolved and the slot ALWAYS released — a
+    # leader that failed to resolve it would hang every waiter on the untimed
+    # ``result()`` above and poison the key for the life of the process.
     try:
         outcome = _review_chunk_with_recovery(
             reviewer, chunk, base_input, sibling_surface, surface_by_path
@@ -796,40 +773,34 @@ def _cached_review_chunk(
         # would keep serving the reduced-fidelity result on later identical cycles
         # instead of retrying the full chunk — so we skip it and let the next cycle
         # re-attempt full context.
-        if not outcome.not_reviewed_issues and len(outcome.approved_flags) == 1:
-            # Clone before acquiring the lock so the deep copy doesn't serialize
-            # other workers; ``outcome`` is a local not yet shared, so this is
-            # race-free.
-            stored = outcome.clone()
-            with _CHUNK_OUTCOME_CACHE_LOCK:
+        cacheable = not outcome.not_reviewed_issues and len(outcome.approved_flags) == 1
+        # Clone before taking the lock so the deep copy doesn't serialize other
+        # workers; ``outcome`` is a local not yet shared, so this is race-free.
+        stored = outcome.clone() if cacheable else None
+        # Store (if cacheable) and release the slot under a single lock acquisition.
+        with _CHUNK_OUTCOME_CACHE_LOCK:
+            if stored is not None:
                 _CHUNK_OUTCOME_CACHE[key] = stored
                 _CHUNK_OUTCOME_CACHE.move_to_end(key)
                 while len(_CHUNK_OUTCOME_CACHE) > capacity:
                     _CHUNK_OUTCOME_CACHE.popitem(last=False)
-        # Snapshot the waiter count and release the slot atomically: a waiter that
-        # registered before this point is counted (it will read ``outcome``); one
-        # arriving after finds no slot and starts its own review. Publish an
-        # isolated clone only when someone is actually waiting — the common
-        # solo-leader path skips that extra deep copy.
-        with _CHUNK_OUTCOME_CACHE_LOCK:
-            has_waiters = inflight.waiters > 0
-            if _CHUNK_INFLIGHT.get(key) is inflight:
+            if _CHUNK_INFLIGHT.get(key) is fut:
                 del _CHUNK_INFLIGHT[key]
-        inflight.outcome = outcome.clone() if has_waiters else outcome
+        # An isolated copy for any waiters (they clone again per caller), so a
+        # waiter can never observe the caller mutating the leader's outcome.
+        published = outcome.clone()
     except BaseException as exc:
         # Fail closed for the caller and every waiter: hand them the same
-        # exception (so they don't re-run), free the slot (only if it is still
-        # ours — a mid-flight cache clear may have replaced it) so a later cycle
-        # can retry for real, wake the waiters, and re-raise unchanged.
-        with _CHUNK_OUTCOME_CACHE_LOCK:
-            if _CHUNK_INFLIGHT.get(key) is inflight:
-                del _CHUNK_INFLIGHT[key]
-        inflight.error = exc
-        inflight.done.set()
+        # exception (so they don't re-run rather than re-raise), free the slot
+        # (only if still ours — a mid-flight cache clear may have replaced it) so a
+        # later cycle can retry for real, and re-raise unchanged.
+        _release_inflight(key, fut)
+        fut.set_exception(exc)
         raise
 
-    # Resolved cleanly: nothing below can raise, so ``done`` always fires here.
-    inflight.done.set()
+    # Nothing above the try's end can strand a waiter: the slot is already
+    # released and ``set_result`` cannot raise for a pending future.
+    fut.set_result(published)
     return outcome
 
 
