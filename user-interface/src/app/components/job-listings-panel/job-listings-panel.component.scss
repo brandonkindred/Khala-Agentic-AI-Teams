@@ -1,0 +1,60 @@
+.listings-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-2);
+  margin-bottom: var(--kh-space-4);
+}
+
+// Empty-state CTAs: primary "Start a scan" beside the secondary "Set up your
+// profile first" so a new user sees the recommended step-1 before scanning.
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kh-space-2);
+  justify-content: center;
+}
+
+.filter-pills {
+  display: flex;
+  gap: var(--kh-space-2);
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.filter-pill {
+  border: 1px solid var(--kh-border);
+  background: var(--kh-surface-2);
+  border-radius: var(--kh-radius-full);
+  padding: 5px 13px;
+  color: var(--kh-text-secondary);
+  font: inherit;
+  font-size: var(--kh-text-sm);
+  cursor: pointer;
+  transition: background var(--kh-transition-fast), border-color var(--kh-transition-fast);
+
+  b {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &:hover {
+    background: var(--kh-surface-3);
+  }
+
+  &.selected {
+    background: var(--kh-accent-subtle);
+    border-color: var(--kh-accent);
+    color: var(--kh-accent-text);
+  }
+}
+
+.listings-error {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-3);
+  padding: var(--kh-space-4);
+  border: 1px solid var(--kh-error);
+  border-radius: var(--kh-radius-lg);
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
+}

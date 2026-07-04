@@ -29,6 +29,17 @@ Design strategies as a **mixture of signal types**, not a single indicator. Comb
 - **Mean reversion**: RSI, Bollinger Bands, Stochastic oscillator
 - **Volatility regime**: ATR expansion/contraction, VIX-based filters (if applicable)
 
+## Setup playbook (regime → high-win-rate setup archetypes)
+
+Regime is the single biggest win-rate lever a swing trader has: mean reversion and momentum have **opposite** win-rate profiles depending on whether the market is trending or range-bound. When a `## Market Regime` block is present in the prompt, read the trend direction, trend strength, and volatility regime for your candidate asset class, then pick the archetype that **fits that regime** — do not fade a strong trend, and do not chase breakouts in a chop. Each archetype below names the **confirmation stack** it needs; a setup fired without its stack is a low-win-rate coin flip.
+
+- **Trending (up/down) + low or normal volatility → momentum-continuation pullback.** Enter on a shallow pullback *in the direction of the trend* (e.g. a dip to a rising 20/50 EMA, or a minor RSI dip that stays above 40 in an uptrend). Confirmation stack: trend gate (`close > SMA(50) > SMA(200)` for longs, mirrored for shorts) ∧ `ADX(14) > 25` (trend is real, not noise) ∧ pullback trigger ∧ momentum/volume turning back with the trend. Highest structural win rate when the trend is `strong`.
+- **Range-bound / sideways trend → mean-reversion fade.** Fade the band extremes back toward the mean. Confirmation stack: range/chop gate (flat or crossing MAs, `ADX(14) < 20`) ∧ stretched oscillator at the boundary (`RSI(14) < 30` at/below the lower Bollinger band for longs; `> 70` at/above the upper band for shorts) ∧ a reclaim/rejection trigger. Invalidate quickly if price closes decisively outside the range — a range break is not a fade.
+- **Volatility contraction (volatility regime = `low`, ATR% compressed) → volatility-expansion breakout.** Position ahead of the expansion, not after it. Confirmation stack: a genuine squeeze (contracting ATR / narrowing Bollinger or Keltner bands) ∧ a break beyond a well-defined level (Donchian channel / prior range) ∧ **volume expansion** on the break to reject fakeouts. This is the one archetype that can accept a sub-50% win rate *if* the reward:risk from the expansion move is high enough to keep expectancy positive.
+- **Trending + high volatility → trend, but respect the whipsaw.** Keep the momentum-continuation logic but widen stops (size against ATR so the risk budget is constant), cut position size, and demand a stronger confirmation stack before entry — high-vol trends offer the return but punish tight stops with premature exits.
+
+Justify the archetype you chose against your `expectancy_forecast`: the regime-fit setup should *earn* the forecast win rate its geometry needs (a range fade claiming a 65% win rate must sit in an actual range; a breakout claiming 45% must defend its reward:risk). If the regime block is absent or degraded, design regime-robust rules and say so in `rationale`.
+
 ## Strategy spec output shape — STRUCTURED DSL (mandatory)
 
 `entry_rules`, `exit_rules`, and `sizing` are **structured discriminated objects** — not prose strings. Every rule object MUST carry a `kind` field; the parser rejects bare strings with a pydantic `ValidationError` and the cycle is discarded. `timeframe` is also REQUIRED — declare the bar timeframe your strategy was designed against: one of `"1m"`, `"5m"`, `"15m"`, `"1h"`, `"1d"`.

@@ -130,17 +130,23 @@ def test_upsert_profile_preferences_roundtrip(db):
     assert updated.preferences == {"theme": "dark"}
 
 
-def test_upsert_profile_preferences_merge_preserves_unrelated_keys(db):
-    # The JSONB || merge is the lost-update guard: a writer touching one key
-    # must not clobber keys written by other features/tabs.
-    up_store.get_profile()
-    up_store.upsert_profile(UserProfileUpdate(preferences={"theme": "dark"}))
-    merged = up_store.upsert_profile(UserProfileUpdate(preferences={"avatar_color": "green"}))
-    assert merged.preferences == {"theme": "dark", "avatar_color": "green"}
+def test_upsert_profile_preferences_merge_preserves_other_sections(db):
+    """A profile-page PUT must never clobber a team-owned section (e.g. career).
 
-    # Overwriting an existing key still takes the incoming value.
-    merged2 = up_store.upsert_profile(UserProfileUpdate(preferences={"avatar_color": "red"}))
-    assert merged2.preferences == {"theme": "dark", "avatar_color": "red"}
+    upsert_profile applies ``preferences`` as an atomic shallow merge, so a
+    section written by one caller (here ``career``) survives another caller's
+    update to a different key.
+    """
+    up_store.upsert_profile(UserProfileUpdate(preferences={"career": {"target_titles": ["Eng"]}}))
+
+    updated = up_store.upsert_profile(UserProfileUpdate(preferences={"theme": "dark"}))
+    assert updated.preferences["theme"] == "dark"
+    assert updated.preferences["career"] == {"target_titles": ["Eng"]}
+
+    # A key present in the payload still replaces the stored one.
+    updated2 = up_store.upsert_profile(UserProfileUpdate(preferences={"theme": "light"}))
+    assert updated2.preferences["theme"] == "light"
+    assert updated2.preferences["career"] == {"target_titles": ["Eng"]}
 
 
 def test_record_association_is_idempotent(db):

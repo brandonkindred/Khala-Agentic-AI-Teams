@@ -1,11 +1,11 @@
-<section class="dashboard-shell" [attr.aria-labelledby]="'dash-title'">
+<section class="dashboard-shell" [attr.aria-labelledby]="titleId">
   <header class="dashboard-shell-header">
     <div class="dashboard-shell-title-row">
       @if (icon) {
         <mat-icon class="dashboard-shell-icon" aria-hidden="true">{{ icon }}</mat-icon>
       }
       <div class="dashboard-shell-title-text">
-        <h1 id="dash-title">{{ title }}</h1>
+        <h1 [id]="titleId">{{ title }}</h1>
         @if (subtitle) {
           <p class="dashboard-shell-subtitle">{{ subtitle }}</p>
         }

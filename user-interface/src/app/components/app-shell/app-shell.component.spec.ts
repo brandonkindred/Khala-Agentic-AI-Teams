@@ -1,10 +1,8 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { provideRouter } from '@angular/router';
+import { NavigationEnd, NavigationStart, provideRouter } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
-import { BreakpointObserver } from '@angular/cdk/layout';
-import { of } from 'rxjs';
 import { AppShellComponent } from './app-shell.component';
 
 describe('AppShellComponent', () => {
@@ -28,15 +26,51 @@ describe('AppShellComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('isActive should return true when the current url starts with path', () => {
-    (component as any).currentUrl.set('/dashboard');
+  it('isActive matches whole path segments, ignoring query and fragment', () => {
+    (component as any).router = { url: '/dashboard' };
     expect(component.isActive('/dashboard')).toBe(true);
-    expect(component.isActive('/')).toBe(true);
+    // Not a segment match — '/dash' must not claim '/dashboard'.
+    expect(component.isActive('/dash')).toBe(false);
+
+    (component as any).router = { url: '/job-matching?tab=profile' };
+    expect(component.isActive('/job-matching')).toBe(true);
+
+    (component as any).router = { url: '/agent-console/runs' };
+    expect(component.isActive('/agent-console')).toBe(true);
   });
 
-  it('isActive should return false when the current url does not start with path', () => {
-    (component as any).currentUrl.set('/dashboard');
+  it('isActive should return false when router url does not start with path', () => {
+    (component as any).router = { url: '/dashboard' };
     expect(component.isActive('/software-engineering')).toBe(false);
+  });
+
+  it('renders a footer profile link that navigates to the profile page', () => {
+    const link = (fixture.nativeElement as HTMLElement).querySelector(
+      '.footer-profile-link',
+    ) as HTMLAnchorElement;
+    expect(link).toBeTruthy();
+    // Route/label derive from the 'user-profile' NavItem in navigation.model.ts.
+    expect(link.getAttribute('href')).toBe('/user-profile');
+    expect(link.getAttribute('aria-label')).toBe('User Profile');
+    // Not the current page by default, so no aria-current.
+    expect(link.getAttribute('aria-current')).toBeNull();
+  });
+
+  it('marks the footer profile link as current when on /user-profile', () => {
+    (component as any).router = { url: '/user-profile' };
+    fixture.detectChanges();
+    const link = (fixture.nativeElement as HTMLElement).querySelector(
+      '.footer-profile-link',
+    ) as HTMLAnchorElement;
+    expect(link.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('requireNavItem throws when the nav model is missing a required item', () => {
+    // Real fail-fast: a removed 'user-profile' NavItem must be an explicit
+    // construction error, not an undefined that crashes template rendering.
+    expect(() => (AppShellComponent as any).requireNavItem('does-not-exist')).toThrowError(
+      /does-not-exist/,
+    );
   });
 
   it('openFlyout activates a group and scheduleClose clears it after the delay', () => {
@@ -58,49 +92,6 @@ describe('AppShellComponent', () => {
     vi.useRealTimers();
   });
 
-  it('renders a footer profile link that navigates to the profile page', () => {
-    const link = (fixture.nativeElement as HTMLElement).querySelector(
-      '.footer-profile-link',
-    ) as HTMLAnchorElement;
-    expect(link).toBeTruthy();
-    // Route/label derive from the 'user-profile' NavItem in navigation.model.ts.
-    expect(link.getAttribute('href')).toBe('/user-profile');
-    expect(link.getAttribute('aria-label')).toBe('User Profile');
-    // Not the current page by default, so no aria-current.
-    expect(link.getAttribute('aria-current')).toBeNull();
-  });
-
-  it('requireNavItem throws when the nav model is missing a required item', () => {
-    // Real fail-fast: a removed 'user-profile' NavItem must be an explicit
-    // construction error, not an undefined that crashes template rendering.
-    expect(() => (AppShellComponent as any).requireNavItem('does-not-exist')).toThrowError(
-      /does-not-exist/,
-    );
-  });
-
-  it('marks the footer profile link as current when on /user-profile', () => {
-    (component as any).currentUrl.set('/user-profile');
-    fixture.detectChanges();
-    const link = (fixture.nativeElement as HTMLElement).querySelector(
-      '.footer-profile-link',
-    ) as HTMLAnchorElement;
-    expect(link.getAttribute('aria-current')).toBe('page');
-  });
-
-  it('includes the footer profile link last in the arrow-key focus order', () => {
-    const focusables = component.navFocusableElements.toArray().map((el) => el.nativeElement);
-    expect(focusables.length).toBeGreaterThan(0);
-    const last = focusables[focusables.length - 1];
-    expect(last.classList.contains('footer-profile-link')).toBe(true);
-    // End key jumps focus to the last focusable — the footer profile link.
-    focusables[0].focus();
-    (fixture.nativeElement as HTMLElement).dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'End', bubbles: true }),
-    );
-    fixture.detectChanges();
-    expect(document.activeElement).toBe(last);
-  });
-
   it('cancelClose keeps the flyout open past the delay', () => {
     vi.useFakeTimers();
     const [firstGroup] = component.navGroups;
@@ -112,60 +103,135 @@ describe('AppShellComponent', () => {
     vi.useRealTimers();
   });
 
-  it('phrases the favorite toggle label by pinned state', () => {
-    const item = component.navGroups[0].items[0];
-    expect(component.favoriteLabel(item)).toBe(`Add ${item.label} to favorites`);
-    component.toggleFavorite(item.id);
-    expect(component.favoriteLabel(item)).toBe(`Remove ${item.label} from favorites`);
-    component.toggleFavorite(item.id); // reset shared localStorage state
+  describe('route-change focus and scroll', () => {
+    const nav = (url: string) => new NavigationEnd(1, url, url);
+
+    it('focuses main content and scrolls to top only when the path changes', () => {
+      // The shell's own template renders #main-content; assert against it.
+      const main = document.getElementById('main-content') as HTMLElement;
+      expect(main).toBeTruthy();
+      const scrollTo = vi.fn();
+      component.sidenavContent = {
+        getElementRef: () => ({ nativeElement: { scrollTo } }),
+      } as never;
+
+      component.onNavigationEnd(nav('/dashboard')); // initial load — no focus move
+      expect(document.activeElement).not.toBe(main);
+
+      component.onNavigationEnd(nav('/job-matching')); // path change
+      expect(document.activeElement).toBe(main);
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0 });
+
+      (document.activeElement as HTMLElement).blur();
+      scrollTo.mockClear();
+      // Query-param-only navigation (tab mirroring) must not steal focus.
+      component.onNavigationEnd(nav('/job-matching?tab=profile'));
+      expect(document.activeElement).not.toBe(main);
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
+
+    it('leaves focus and scroll alone on browser back/forward (popstate)', () => {
+      const main = document.getElementById('main-content') as HTMLElement;
+      const scrollTo = vi.fn();
+      component.sidenavContent = {
+        getElementRef: () => ({ nativeElement: { scrollTo } }),
+      } as never;
+
+      component.onNavigationEnd(nav('/dashboard')); // initial load
+      // History traversal returns the user to a known place — do not fight it.
+      component.onNavigationStart(new NavigationStart(2, '/job-matching', 'popstate'));
+      component.onNavigationEnd(nav('/job-matching'));
+      expect(document.activeElement).not.toBe(main);
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      // The next imperative navigation behaves normally again.
+      component.onNavigationStart(new NavigationStart(3, '/dashboard', 'imperative'));
+      component.onNavigationEnd(nav('/dashboard'));
+      expect(document.activeElement).toBe(main);
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0 });
+      (document.activeElement as HTMLElement).blur();
+    });
   });
 
-  it('renders the footer as a generic icon until an identity is known', () => {
-    // Store starts with no name (getProfile request is not flushed here).
-    expect(component.profileStore.hasIdentity()).toBe(false);
-    const link = (fixture.nativeElement as HTMLElement).querySelector('.footer-profile-link');
-    expect(link?.querySelector('app-initials-avatar')).toBeNull();
-    expect(link?.querySelector('mat-icon')).toBeTruthy();
-  });
+  describe('flyout keyboard access', () => {
+    afterEach(() => {
+      document.querySelectorAll('.cdk-overlay-container').forEach((el) => el.remove());
+      vi.useRealTimers();
+    });
 
-  it('shows the initials avatar in the footer once an identity is known', () => {
-    component.profileStore.set('Grace Hopper', 'blue');
-    fixture.detectChanges();
-    const link = (fixture.nativeElement as HTMLElement).querySelector('.footer-profile-link');
-    expect(link?.querySelector('app-initials-avatar')).toBeTruthy();
-  });
+    function openWithKeyboard(): HTMLElement {
+      const trigger = fixture.nativeElement.querySelector('.nav-group-trigger') as HTMLElement;
+      component.onTriggerKeydown(
+        new KeyboardEvent('keydown', { key: 'Enter' }),
+        component.navGroups[0],
+        trigger
+      );
+      fixture.detectChanges();
+      vi.runAllTimers();
+      return trigger;
+    }
 
-  it('defaults to desktop (non-handset) layout', () => {
-    expect(component.isHandset()).toBe(false);
-  });
+    it('Enter on a trigger opens the flyout and focuses its first link', () => {
+      vi.useFakeTimers();
+      openWithKeyboard();
+      const firstLink = document.querySelector<HTMLElement>('.nav-flyout .nav-flyout-link');
+      expect(firstLink).toBeTruthy();
+      expect(document.activeElement).toBe(firstLink);
+    });
 
-  it('leaves the drawer open after navigating on desktop', () => {
-    const drawer = { close: vi.fn() };
-    (component as any).drawer = drawer;
-    (component as any).closeDrawerAfterHandsetNav();
-    expect(drawer.close).not.toHaveBeenCalled();
-  });
-});
+    it('keeps the flyout open when focus moves into it, closes when it leaves', () => {
+      vi.useFakeTimers();
+      openWithKeyboard();
+      const firstLink = document.querySelector<HTMLElement>('.nav-flyout .nav-flyout-link')!;
 
-describe('AppShellComponent responsive drawer', () => {
-  it('closes the overlay drawer after navigating on handset widths', async () => {
-    await TestBed.configureTestingModule({
-      imports: [AppShellComponent, NoopAnimationsModule],
-      providers: [
-        provideRouter([]),
-        provideHttpClient(),
-        provideHttpClientTesting(),
-        { provide: BreakpointObserver, useValue: { observe: () => of({ matches: true, breakpoints: {} }) } },
-      ],
-    }).compileComponents();
-    const fixture = TestBed.createComponent(AppShellComponent);
-    const component = fixture.componentInstance;
-    fixture.detectChanges();
-    expect(component.isHandset()).toBe(true);
-    const drawer = { close: vi.fn() };
-    (component as any).drawer = drawer;
-    (component as any).closeDrawerAfterHandsetNav();
-    expect(drawer.close).toHaveBeenCalledTimes(1);
-    TestBed.resetTestingModule();
+      // Focus moving into the (body-portalled) flyout must NOT close it —
+      // this was the bug that made the nav mouse-only.
+      component.onNavFocusOut({ relatedTarget: firstLink } as unknown as FocusEvent);
+      vi.advanceTimersByTime(500);
+      expect(component.activeGroup()).not.toBeNull();
+
+      // Focus leaving both trigger and flyout closes it.
+      component.onNavFocusOut({ relatedTarget: document.body } as unknown as FocusEvent);
+      vi.advanceTimersByTime(500);
+      expect(component.activeGroup()).toBeNull();
+    });
+
+    it('arrow keys rove across the flyout links; ArrowLeft returns to the trigger', () => {
+      vi.useFakeTimers();
+      const trigger = openWithKeyboard();
+      const links = Array.from(
+        document.querySelectorAll<HTMLElement>('.nav-flyout .nav-flyout-link')
+      );
+      expect(links.length).toBeGreaterThan(0);
+
+      component.onFlyoutKeydown(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+      expect(document.activeElement).toBe(links[Math.min(1, links.length - 1)]);
+
+      component.onFlyoutKeydown(new KeyboardEvent('keydown', { key: 'End' }));
+      expect(document.activeElement).toBe(links[links.length - 1]);
+
+      component.onFlyoutKeydown(new KeyboardEvent('keydown', { key: 'Home' }));
+      expect(document.activeElement).toBe(links[0]);
+
+      component.onFlyoutKeydown(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
+      expect(component.activeGroup()).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    });
+
+    it('renders a pin toggle per flyout item that flips the favorite state', () => {
+      vi.useFakeTimers();
+      localStorage.removeItem('kh-nav-favorites');
+      openWithKeyboard();
+      const star = document.querySelector<HTMLButtonElement>('.nav-flyout .nav-link-star')!;
+      expect(star).toBeTruthy();
+      expect(star.getAttribute('aria-pressed')).toBe('false');
+      const itemId = component.navGroups[0].items[0].id;
+
+      star.click();
+      expect(component.navState.isFavorite(itemId)).toBe(true);
+
+      component.navState.toggleFavorite(itemId); // reset persisted state
+      localStorage.removeItem('kh-nav-favorites');
+    });
   });
 });

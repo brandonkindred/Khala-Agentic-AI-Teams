@@ -9,9 +9,9 @@
       [matTooltip]="s.name + ': ' + (s.ok ? 'Healthy' : 'Unavailable')"
     >
       @if (s.ok) {
-        <mat-icon color="primary" class="icon">check_circle</mat-icon>
+        <mat-icon color="primary" class="icon" aria-hidden="true">check_circle</mat-icon>
       } @else {
-        <mat-icon color="warn" class="icon">error</mat-icon>
+        <mat-icon color="warn" class="icon" aria-hidden="true">error</mat-icon>
       }
     </span>
   }

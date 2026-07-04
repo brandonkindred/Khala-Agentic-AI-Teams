@@ -34,3 +34,32 @@ def scripted_llm() -> Callable[[Callable[[str, str], Dict[str, Any]]], ScriptedL
         return ScriptedLLM(handler)
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_profile_env(monkeypatch):
+    """Keep every job-matching test independent of the developer's environment.
+
+    The profile loader resolves through env-driven sources (``POSTGRES_HOST``
+    career section, ``JOB_SEEKER_PROFILE_PATH``, ``AGENT_CACHE``) and flips
+    fallbacks into raises under ``JOB_SEEKER_PROFILE_STRICT``. Any test that
+    touches the loader — directly or through the API's ``GET /profile`` —
+    would otherwise read the developer's saved career profile (and
+    ``get_profile`` would lazily INSERT rows into the shared dev database as
+    a test side effect). Tests that need one of these sources re-enable it
+    explicitly with ``monkeypatch.setenv``.
+    """
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    monkeypatch.delenv("JOB_SEEKER_PROFILE_PATH", raising=False)
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
+    monkeypatch.delenv("JOB_SEEKER_PROFILE_STRICT", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _clear_profile_cache():
+    """The loader memoizes the resolved profile; isolate tests from each other."""
+    from job_matching_team.profile.loader import clear_cache
+
+    clear_cache()
+    yield
+    clear_cache()

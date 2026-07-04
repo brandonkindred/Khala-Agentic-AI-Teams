@@ -34,6 +34,7 @@ from investment_team.strategy_lab.agents.design import (
     _resolve_diversity_mode,
 )
 from investment_team.strategy_lab.agents.design_review import CritiqueIssue, SpecCritique
+from investment_team.strategy_lab.market_regime import RegimeEntry, RegimeSummary
 from investment_team.strategy_lab.spec_dsl import (
     AllOf,
     EntryRule,
@@ -1576,3 +1577,71 @@ def test_run_threads_resolved_mode_into_mix_hint(
     DesignAgent().run(prior_records=[object()])
 
     assert seen["mode"] == "explore"
+
+
+# ---------------------------------------------------------------------------
+# run() — market-regime section injection
+# ---------------------------------------------------------------------------
+
+
+def _regime_summary() -> RegimeSummary:
+    return RegimeSummary(
+        computed_at="2026-01-01T00:00:00+00:00",
+        entries=[
+            RegimeEntry(
+                asset_class="stocks",
+                benchmark_symbol="SPY",
+                trend_direction="up",
+                trend_strength="strong",
+                volatility_regime="low",
+                close=500.0,
+                sma50=490.0,
+                sma200=470.0,
+                adx=32.0,
+                atr_pct=0.008,
+                atr_pct_percentile=0.15,
+            )
+        ],
+    )
+
+
+def test_run_injects_regime_section_when_summary_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-empty regime summary is rendered into a ``## Market Regime``
+    section of the design prompt so the designer can condition on it."""
+    capture = _patch_design(monkeypatch, _good_payload())
+
+    DesignAgent().run(prior_records=[], regime_summary=_regime_summary())
+
+    prompt = capture.calls[0]
+    assert "## Market Regime" in prompt
+    assert "stocks (SPY)" in prompt
+    assert "trend=up (strong)" in prompt
+    assert "volatility=low" in prompt
+
+
+def test_run_omits_regime_section_when_summary_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backward compatible: no summary → no regime section in the prompt."""
+    capture = _patch_design(monkeypatch, _good_payload())
+
+    DesignAgent().run(prior_records=[])
+
+    assert "## Market Regime" not in capture.calls[0]
+
+
+def test_run_omits_regime_section_for_degraded_empty_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A degraded summary with no classified entries must not inject a
+    placeholder as if it were signal."""
+    capture = _patch_design(monkeypatch, _good_payload())
+    empty = RegimeSummary(
+        computed_at="2026-01-01T00:00:00+00:00", degraded=True, entries=[]
+    )
+
+    DesignAgent().run(prior_records=[], regime_summary=empty)
+
+    assert "## Market Regime" not in capture.calls[0]

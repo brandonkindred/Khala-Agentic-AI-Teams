@@ -1,22 +1,26 @@
-"""Tests for the job-seeker profile model and loader."""
+"""Tests for the job-seeker profile model, loader, and career store."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+from job_matching_team.profile import career_store
+from job_matching_team.profile.career_store import (
+    CAREER_SECTION_KEY,
+    CareerProfileUnavailableError,
+    load_career_profile,
+    save_career_profile,
+)
 from job_matching_team.profile.loader import (
     EXAMPLE_PROFILE_PATH,
-    clear_cache,
     load_job_seeker_profile,
 )
 from job_matching_team.profile.model import JobSeekerProfile, RankingWeights
 
-
-@pytest.fixture(autouse=True)
-def _clear_profile_cache():
-    clear_cache()
-    yield
-    clear_cache()
+# Env scrubbing + loader-cache clearing are autouse fixtures in conftest.py
+# (they must also cover test_api.py, whose GET /profile runs the loader).
 
 
 def test_bundled_example_loads_and_validates():
@@ -49,7 +53,6 @@ def test_env_path_resolution(monkeypatch, tmp_path):
 
 
 def test_agent_cache_resolution(monkeypatch, tmp_path):
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_PATH", raising=False)
     (tmp_path / "job_seeker_profile.yaml").write_text("target_titles: [Platform Eng]\n")
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     profile = load_job_seeker_profile()
@@ -58,8 +61,6 @@ def test_agent_cache_resolution(monkeypatch, tmp_path):
 
 def test_env_path_missing_falls_back_when_not_strict(monkeypatch, tmp_path):
     monkeypatch.setenv("JOB_SEEKER_PROFILE_PATH", str(tmp_path / "absent.yaml"))
-    monkeypatch.delenv("AGENT_CACHE", raising=False)
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_STRICT", raising=False)
     # Missing env path + no cache -> bundled example (no raise).
     profile = load_job_seeker_profile()
     assert isinstance(profile, JobSeekerProfile)
@@ -73,17 +74,12 @@ def test_env_path_missing_raises_when_strict(monkeypatch, tmp_path):
 
 
 def test_strict_mode_raises_when_unresolved(monkeypatch):
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_PATH", raising=False)
-    monkeypatch.delenv("AGENT_CACHE", raising=False)
     monkeypatch.setenv("JOB_SEEKER_PROFILE_STRICT", "true")
     with pytest.raises(FileNotFoundError):
         load_job_seeker_profile()
 
 
 def test_falls_back_to_example_when_unresolved(monkeypatch):
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_PATH", raising=False)
-    monkeypatch.delenv("AGENT_CACHE", raising=False)
-    monkeypatch.delenv("JOB_SEEKER_PROFILE_STRICT", raising=False)
     profile = load_job_seeker_profile()
     # Same content as the bundled example.
     assert profile == JobSeekerProfile.from_yaml_file(EXAMPLE_PROFILE_PATH)
@@ -130,6 +126,163 @@ def test_weights_normalize_to_one():
     w = RankingWeights()
     norm = w.normalized()
     assert pytest.approx(sum(norm.values()), abs=1e-9) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Career store (profile persisted in the central user profile)
+# ---------------------------------------------------------------------------
+
+
+def _enable_postgres(monkeypatch):
+    import shared_postgres
+
+    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+
+
+def test_load_career_profile_none_when_postgres_disabled(monkeypatch):
+    assert load_career_profile() is None
+
+
+def test_load_career_profile_returns_validated_section(monkeypatch):
+    _enable_postgres(monkeypatch)
+    section = {"target_titles": ["Career Eng"], "salary_min": 123000}
+    monkeypatch.setattr(
+        career_store,
+        "get_profile",
+        lambda user_id: SimpleNamespace(preferences={CAREER_SECTION_KEY: section}),
+    )
+    profile = load_career_profile()
+    assert profile.target_titles == ["Career Eng"]
+    assert profile.salary_min == 123000
+
+
+def test_load_career_profile_none_when_section_absent(monkeypatch):
+    _enable_postgres(monkeypatch)
+    monkeypatch.setattr(
+        career_store, "get_profile", lambda user_id: SimpleNamespace(preferences={})
+    )
+    assert load_career_profile() is None
+
+
+def test_load_career_profile_none_on_operational_failure(monkeypatch):
+    _enable_postgres(monkeypatch)
+
+    def boom(user_id):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(career_store, "get_profile", boom)
+    assert load_career_profile() is None
+
+
+def test_load_career_profile_falls_back_on_malformed_section(monkeypatch, caplog):
+    _enable_postgres(monkeypatch)
+    monkeypatch.setattr(
+        career_store,
+        "get_profile",
+        lambda user_id: SimpleNamespace(
+            preferences={CAREER_SECTION_KEY: {"remote_preference": "bogus"}}
+        ),
+    )
+    # A corrupt stored section must not hard-fail every scan/profile read: it
+    # is logged at ERROR and the loader falls back to the YAML chain.
+    with caplog.at_level("ERROR"):
+        assert load_career_profile() is None
+    assert any("invalid" in r.message for r in caplog.records)
+
+
+def test_save_career_profile_raises_when_postgres_disabled(monkeypatch):
+    with pytest.raises(CareerProfileUnavailableError):
+        save_career_profile(JobSeekerProfile())
+
+
+def test_save_career_profile_merges_atomically_and_records_association(monkeypatch):
+    _enable_postgres(monkeypatch)
+    upserts = []
+    associations = []
+
+    def fake_upsert(update, user_id):
+        upserts.append((update, user_id))
+        # upsert_profile shallow-merges `preferences` server-side: other
+        # sections survive untouched.
+        return SimpleNamespace(preferences={"other_section": {"keep": True}, **update.preferences})
+
+    monkeypatch.setattr(career_store, "upsert_profile", fake_upsert)
+    monkeypatch.setattr(
+        career_store,
+        "record_association_safe",
+        lambda *a, **kw: associations.append((a, kw)),
+    )
+
+    result = save_career_profile(JobSeekerProfile(target_titles=["Staff Eng"]))
+
+    assert result.target_titles == ["Staff Eng"]
+    # A single atomic upsert of the career section — no separate ensure-row read,
+    # and the write is a section-scoped patch, never the whole document.
+    update, user_id = upserts[0]
+    assert list(update.preferences.keys()) == [CAREER_SECTION_KEY]
+    assert update.preferences[CAREER_SECTION_KEY]["target_titles"] == ["Staff Eng"]
+    assert user_id == "default"
+    # The Career card association is recorded best-effort.
+    (artifact_type, team, artifact_id), kwargs = associations[0]
+    assert artifact_type == "career"
+    assert team == "job_matching"
+    assert artifact_id == "career:default"
+    assert kwargs["label"] == "Career profile"
+
+
+def test_save_career_profile_wraps_operational_failure(monkeypatch):
+    _enable_postgres(monkeypatch)
+
+    def boom(update, user_id):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(career_store, "upsert_profile", boom)
+    with pytest.raises(CareerProfileUnavailableError):
+        save_career_profile(JobSeekerProfile())
+
+
+def test_loader_prefers_career_section_over_passive_defaults(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        career_store,
+        "load_career_profile",
+        lambda: JobSeekerProfile(target_titles=["From User Profile"]),
+    )
+    # Even with an AGENT_CACHE profile present, the career section wins.
+    (tmp_path / "job_seeker_profile.yaml").write_text("target_titles: [From Cache]\n")
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    profile = load_job_seeker_profile()
+    assert profile.target_titles == ["From User Profile"]
+
+
+def test_env_path_beats_career_section(monkeypatch, tmp_path):
+    def boom():
+        raise AssertionError("career store must not be consulted when the env path resolves")
+
+    monkeypatch.setattr(career_store, "load_career_profile", boom)
+    p = tmp_path / "pinned.yaml"
+    p.write_text("target_titles: [Pinned]\n")
+    monkeypatch.setenv("JOB_SEEKER_PROFILE_PATH", str(p))
+    # The explicit operator pin outranks the stored career section.
+    assert load_job_seeker_profile().target_titles == ["Pinned"]
+
+
+def test_loader_falls_back_to_yaml_when_career_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(career_store, "load_career_profile", lambda: None)
+    p = tmp_path / "env_profile.yaml"
+    p.write_text("target_titles: [From YAML]\n")
+    monkeypatch.setenv("JOB_SEEKER_PROFILE_PATH", str(p))
+    profile = load_job_seeker_profile()
+    assert profile.target_titles == ["From YAML"]
+
+
+def test_loader_explicit_path_skips_career_section(monkeypatch, tmp_path):
+    def boom():
+        raise AssertionError("career store must not be consulted for explicit paths")
+
+    monkeypatch.setattr(career_store, "load_career_profile", boom)
+    p = tmp_path / "prof.yaml"
+    p.write_text("target_titles: [Explicit]\n")
+    assert load_job_seeker_profile(p).target_titles == ["Explicit"]
 
 
 def test_zero_weights_fall_back_to_uniform():

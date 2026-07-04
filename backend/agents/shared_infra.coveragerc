@@ -1,8 +1,29 @@
-# Coverage config for the shared-infra CI job (test-shared-infra in ci.yml): the
-# neutral shared_* packages extracted from software_engineering_team plus the
+# Coverage config for the shared-infra CI job (combine-shared-infra in ci.yml):
+# the neutral shared_* packages extracted from software_engineering_team plus the
 # coding_team_service composition root, gated at the repo's 90% line-coverage
 # floor (see CLAUDE.md).
-[run]
+#
+# The gate no longer re-runs tests. The SE and coding_team matrix entries record
+# shared coverage into per-suite data-file artifacts; combine-shared-infra
+# downloads them, `coverage combine`s, and reports against this config.
+
+# Cross-runner path normalization for `coverage combine`. The SE, coding_team,
+# and combine jobs all checkout to the same absolute prefix today, so combine
+# already merges cleanly; this is a defensive net so a future runner-path change
+# (self-hosted, different checkout dir) still unifies the data files onto the
+# tree present in the combine job. Keep absolute (default) paths — do NOT set
+# relative_files, which would change how the git_utils.py omit below matches.
+[paths]
+source =
+    ${GITHUB_WORKSPACE}/backend/agents
+    */backend/agents
+
+[report]
+show_missing = true
+# omit lives under [report], NOT [run]: this config is applied only at REPORT
+# time (combine-shared-infra never measures), and `coverage report` honors
+# [report] omit but ignores [run] omit. Patterns match the absolute paths stored
+# in the combined data, so each needs a `*/` prefix.
 omit =
     */tests/*
     */__pycache__/*
@@ -11,7 +32,4 @@ omit =
     # shared/git_utils.py before the extraction — its branch/merge/recovery paths
     # drive live git worktrees and are exercised by integration tests, not unit
     # tests. branch_utils (pure helpers) remains gated.
-    shared_git/git_utils.py
-
-[report]
-show_missing = true
+    */shared_git/git_utils.py

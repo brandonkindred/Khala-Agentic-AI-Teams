@@ -1,0 +1,154 @@
+.career-note {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-3);
+  padding: var(--kh-space-3) 14px;
+  margin-bottom: var(--kh-space-4);
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-lg);
+  background: var(--kh-info-subtle);
+  font-size: var(--kh-text-base);
+  color: var(--kh-text-primary);
+
+  mat-icon {
+    color: var(--kh-info);
+  }
+
+  a {
+    color: var(--kh-accent-text);
+  }
+}
+
+.profile-error {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-3);
+  padding: var(--kh-space-3) var(--kh-space-4);
+  margin-bottom: var(--kh-space-4);
+  border: 1px solid var(--kh-error);
+  border-radius: var(--kh-radius-lg);
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
+}
+
+.profile-card {
+  margin-bottom: var(--kh-space-4);
+
+  mat-card-header {
+    margin-bottom: var(--kh-space-2);
+  }
+}
+
+.chip-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--kh-space-4);
+}
+
+.chip-field {
+  &.warn mat-chip-row {
+    --mdc-chip-elevated-container-color: var(--kh-error-subtle);
+    --mdc-chip-label-text-color: var(--kh-error);
+  }
+}
+
+.chip-label {
+  display: block;
+  margin-bottom: var(--kh-space-1);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--kh-text-secondary);
+
+  .chip-hint {
+    font-weight: 400;
+    color: var(--kh-text-muted);
+  }
+}
+
+.chip-help {
+  margin: var(--kh-space-1) 0 0;
+  font-size: var(--kh-text-xs);
+  color: var(--kh-text-muted);
+}
+
+.inline-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--kh-space-3);
+  grid-column: 1 / -1;
+}
+
+.full-width {
+  grid-column: 1 / -1;
+}
+
+.weights-panel {
+  margin-bottom: var(--kh-space-4);
+  box-shadow: none;
+  border: 1px solid var(--kh-border-subtle);
+  border-radius: var(--kh-radius-lg);
+}
+
+.weights-heading {
+  margin: 0;
+  font: inherit;
+  font-weight: 600;
+}
+
+.weights-note {
+  margin: 0 0 var(--kh-space-3);
+  color: var(--kh-text-muted);
+  font-size: var(--kh-text-sm);
+}
+
+.weight-rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--kh-space-3) var(--kh-space-5);
+}
+
+.weight-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 84px;
+  gap: var(--kh-space-3);
+  align-items: center;
+
+  .weight-name {
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-secondary);
+  }
+
+  mat-slider {
+    width: 100%;
+  }
+
+  .weight-share {
+    text-align: right;
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  // On narrow phones the fixed label/share columns starve the slider (~5px per
+  // step); stack to a single column so the slider spans the full width.
+  @media (max-width: 480px) {
+    grid-template-columns: 1fr;
+    gap: var(--kh-space-1);
+
+    .weight-share {
+      text-align: left;
+    }
+  }
+}
+
+.save-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: var(--kh-space-1) 0 var(--kh-space-6);
+
+  .saved-note {
+    color: var(--kh-text-muted);
+    font-size: var(--kh-text-sm);
+  }
+}

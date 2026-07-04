@@ -10,10 +10,13 @@ import { AppTitleStrategy } from './core/app-title-strategy';
 export const appConfig: ApplicationConfig = {
   providers: [
     provideZoneChangeDetection({ eventCoalescing: true }),
+    // No withInMemoryScrolling: the router's ViewportScroller targets the
+    // window, which never overflows in this layout — the shell scrolls its
+    // sidenav content to the top on path changes instead (AppShellComponent).
     provideRouter(routes),
     provideHttpClient(withInterceptors([errorHandlerInterceptor])),
     provideAnimations(),
-    // Sync the browser tab title from each route's `data.title` (WCAG 2.4.2).
+    // Sync the browser tab title from each route's `title` (WCAG 2.4.2).
     { provide: TitleStrategy, useClass: AppTitleStrategy },
   ],
 };

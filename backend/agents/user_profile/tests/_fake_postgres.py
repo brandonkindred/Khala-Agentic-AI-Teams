@@ -74,14 +74,16 @@ class _FakeCursor:
                 # On conflict, apply only the columns named in the SET clause.
                 # Slice the clause text (between "do update set" and "returning")
                 # and read each assignment's left-hand column — robust to the RHS
-                # form (EXCLUDED.col, literal, expression) the store emits.
+                # form (EXCLUDED.col, literal, expression) the store emits. A
+                # `col = table.col || EXCLUDED.col` assignment is the store's
+                # JSONB shallow merge for profile_json — mirror it as a dict
+                # merge instead of a replacement.
                 set_clause = norm.split("do update set", 1)[1].split("returning", 1)[0]
                 for assignment in set_clause.split(","):
                     col = assignment.split("=", 1)[0].strip()
                     if col not in incoming:
                         continue
                     if "||" in assignment:
-                        # JSONB concatenation: merge top-level keys like Postgres.
                         existing[col] = {**existing[col], **incoming[col]}
                     else:
                         existing[col] = incoming[col]

@@ -34,6 +34,7 @@ from ...strategy_lab_context import (
     format_prior_attribution,
     format_prior_results,
 )
+from ..market_regime import RegimeSummary, regime_to_prompt_block
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import (
@@ -108,6 +109,8 @@ Mean win rate and mean annualized return per design-space bucket, across execute
 
 ## Asset-class selection
 {asset_class_mix_hint}
+
+{regime_section}
 
 {signal_section}
 
@@ -201,11 +204,19 @@ class DesignAgent:
         signal_brief: Optional[SignalIntelligenceBriefV1] = None,
         convergence_directives: Optional[List[str]] = None,
         exclude_asset_classes: Optional[List[str]] = None,
+        regime_summary: Optional[RegimeSummary] = None,
     ) -> Tuple[Dict[str, Any], str]:
-        """Design a fresh strategy spec from priors + brief.
+        """Design a fresh strategy spec from priors + brief + regime.
 
         Returns: ``(strategy_dict, rationale)``. ``strategy_dict`` has no
         ``strategy_code`` key.
+
+        ``regime_summary`` (optional) is the current market-regime read for the
+        candidate asset classes (trend direction / strength, volatility regime).
+        When present and non-empty it is injected as a ``## Market Regime``
+        section so the designer can pick a setup archetype that fits the regime
+        (see the "Setup playbook" in the system prompt). When ``None`` / empty
+        the section renders blank — fully backward compatible.
 
         Every underlying LLM call (generation, each parse-retry, and the
         optional self-review / self-revision) charges the active design-phase
@@ -232,6 +243,13 @@ class DesignAgent:
                 f"{', '.join(exclude_asset_classes)}."
             )
 
+        # Only inject the regime block when there is something classified to
+        # inject — a degraded/empty summary renders blank so the designer is
+        # never handed a "no regime available" placeholder as if it were signal.
+        regime_section = ""
+        if regime_summary and regime_summary.entries:
+            regime_section = f"## Market Regime\n{regime_to_prompt_block(regime_summary)}"
+
         signal_section = ""
         if signal_brief:
             block = brief_to_prompt_block(signal_brief)
@@ -246,6 +264,7 @@ class DesignAgent:
             prior_results_text=prior_text,
             prior_attribution=prior_attribution,
             asset_class_mix_hint=mix_hint,
+            regime_section=regime_section,
             signal_section=signal_section,
             convergence_directives=directives_text,
         )

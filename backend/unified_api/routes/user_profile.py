@@ -9,7 +9,7 @@ changing these routes.
 
 Endpoints:
 - GET    /api/user-profile                 -> current profile
-- PUT    /api/user-profile                 -> update profile fields (preferences merge by top-level key)
+- PUT    /api/user-profile                 -> update profile fields
 - GET    /api/user-profile/associations    -> linked artifacts (optional ?artifact_type=)
 - GET    /api/user-profile/integrations    -> integration status (pass-through)
 - GET    /api/user-profile/overview        -> profile + associations + integrations (one round-trip)
@@ -88,11 +88,10 @@ def read_profile() -> UserProfile:
 def update_profile(update: UserProfileUpdate) -> UserProfile:
     """Apply a partial update to the current profile and return it.
 
-    Omitted (``None``) fields are left unchanged. Present scalar fields
-    (display_name/email/bio) are written verbatim; a present ``preferences``
-    dict is merged key-by-key into the stored object (top-level keys
-    overwrite, absent keys survive — no key-deletion path), so callers
-    should send only the keys they own.
+    ``preferences`` is a shallow merge: only its top-level keys are replaced,
+    so team-owned sections of the profile document (e.g. the job matching
+    team's ``career`` section) survive a profile-page save that doesn't
+    include them.
     """
     with _storage_guard():
         return upsert_profile(update, user_id=DEFAULT_USER_ID)

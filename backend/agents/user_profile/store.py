@@ -172,12 +172,12 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
         - ``user_id`` is a non-empty string.
     Postconditions:
         - Only fields set (non-``None``) on ``update`` are written.
-        - ``preferences`` is merged key-by-key into the stored object (top-level
-          keys overwrite; keys absent from the update survive), so concurrent
-          writers of unrelated preference keys cannot clobber each other.
-          There is no key-deletion path: sending ``None`` stores the key with
-          a JSON ``null`` value (it is never removed or swept), so readers
-          must treat ``null`` the same as absent.
+        - ``preferences`` is a shallow *merge*, not a replacement: exactly its
+          top-level keys are replaced in ``profile_json``; every other section
+          (e.g. a team-owned section like job matching's ``career``) is
+          preserved via a single atomic server-side ``profile_json ||
+          EXCLUDED.profile_json``, so concurrent section writers never clobber
+          each other. Removing a section is not expressible through this call.
         - ``updated_at`` is advanced.
     """
     assert user_id, "user_id must be non-empty"
@@ -196,8 +196,8 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
     if update.bio is not None:
         set_clauses.append("bio = EXCLUDED.bio")
     if update.preferences is not None:
-        # JSONB || merges top-level keys server-side, so a client updating one
-        # preference key can never wipe keys written by other features/tabs.
+        # Merge, never replace: a whole-document assignment would silently drop
+        # sections other writers merged in (career, integrations, ...).
         set_clauses.append("profile_json = user_profiles.profile_json || EXCLUDED.profile_json")
 
     # `x or default` here only supplies INSERT defaults for a brand-new row; a

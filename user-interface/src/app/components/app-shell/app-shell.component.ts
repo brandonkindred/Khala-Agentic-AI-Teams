@@ -3,25 +3,27 @@ import {
   DestroyRef,
   ElementRef,
   HostListener,
-  OnInit,
+  inject,
   QueryList,
+  signal,
   ViewChild,
   ViewChildren,
-  computed,
-  inject,
-  signal,
 } from '@angular/core';
-import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
-import { NgTemplateOutlet } from '@angular/common';
-import { NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
-import { MatSidenav, MatSidenavModule } from '@angular/material/sidenav';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import {
+  NavigationEnd,
+  NavigationStart,
+  Router,
+  RouterLink,
+  RouterLinkActive,
+  RouterOutlet,
+} from '@angular/router';
+import { MatSidenavContent, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { BreakpointObserver } from '@angular/cdk/layout';
-import { CdkConnectedOverlay, OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
-import { filter, map } from 'rxjs/operators';
+import { OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
 import { ApiStatusWidgetComponent } from '../api-status-widget/api-status-widget.component';
 import { BreadcrumbComponent } from '../../shared/breadcrumb/breadcrumb.component';
 import { InitialsAvatarComponent } from '../../shared/avatar/initials-avatar.component';
@@ -29,16 +31,15 @@ import { NavStateService } from '../../services/nav-state.service';
 import { UserProfileStore } from '../../services/user-profile-store.service';
 import { ALL_NAV_ITEMS, NAV_GROUPS, NavGroup, NavItem, findGroupForRoute } from '../../models/navigation.model';
 
-/** Viewport below which the sidebar collapses into an overlay drawer. */
-const HANDSET_QUERY = '(max-width: 959.98px)';
-
 /**
  * Application shell with sidebar navigation and main content area.
- * Navigation is data-driven from NAV_GROUPS with flyout panels on hover/focus
- * and favorites. On handset-width viewports the rail becomes an overlay drawer
- * that closes on navigation. The sidenav footer shows the user's initials
- * avatar (linking to /user-profile); it carries the #navFocusable ref, so it
- * participates in the arrow-key nav as the last focusable element (DOM order).
+ * Navigation is data-driven from NAV_GROUPS. Each group opens a flyout panel
+ * following the WAI-ARIA disclosure-navigation pattern: hover or click opens
+ * it for mouse users; Enter/Space/ArrowRight open it and move focus to the
+ * first link for keyboard users; arrows rove within it; Escape/ArrowLeft
+ * close it and return focus to the trigger. Items can be pinned to the
+ * sidebar as favorites. After each navigation, focus moves to the main
+ * content region so keyboard/screen-reader context follows the route.
  */
 @Component({
   selector: 'app-app-shell',
@@ -53,7 +54,6 @@ const HANDSET_QUERY = '(max-width: 959.98px)';
     MatIconModule,
     MatTooltipModule,
     OverlayModule,
-    NgTemplateOutlet,
     ApiStatusWidgetComponent,
     BreadcrumbComponent,
     InitialsAvatarComponent,
@@ -61,105 +61,34 @@ const HANDSET_QUERY = '(max-width: 959.98px)';
   templateUrl: './app-shell.component.html',
   styleUrl: './app-shell.component.scss',
 })
-export class AppShellComponent implements OnInit {
+export class AppShellComponent {
   private readonly router = inject(Router);
-  private readonly breakpoints = inject(BreakpointObserver);
   private readonly destroyRef = inject(DestroyRef);
   readonly navState = inject(NavStateService);
   readonly profileStore = inject(UserProfileStore);
   readonly navGroups = NAV_GROUPS;
 
-  /** True on handset-width viewports (sidebar becomes an overlay drawer). */
-  readonly isHandset = toSignal(
-    this.breakpoints.observe(HANDSET_QUERY).pipe(map((state) => state.matches)),
-    { initialValue: false },
-  );
-
-  /** The sidebar drawer, closed on navigation while in handset overlay mode. */
-  @ViewChild('drawer') private drawer?: MatSidenav;
-
-  /** The open group flyout, if any — repositioned when favorites reflow. */
-  @ViewChild(CdkConnectedOverlay) private flyoutOverlay?: CdkConnectedOverlay;
-
-  ngOnInit(): void {
-    // Populate the footer avatar's identity once the shell mounts.
-    this.profileStore.refresh();
-    // In overlay mode, close the drawer after navigating so it doesn't cover
-    // the page the user just chose.
-    this.router.events
-      .pipe(
-        filter((e): e is NavigationEnd => e instanceof NavigationEnd),
-        takeUntilDestroyed(this.destroyRef),
-      )
-      .subscribe(() => {
-        this.currentUrl.set(this.router.url);
-        this.closeDrawerAfterHandsetNav();
-      });
-  }
-
-  /**
-   * Close the overlay drawer after a navigation on handset widths.
-   *
-   * Preconditions: called on NavigationEnd.
-   * Postconditions: on handset viewports the drawer is closed so it doesn't
-   * cover the just-navigated page; on wider viewports (fixed 'side' mode) it is
-   * a no-op.
-   */
-  private closeDrawerAfterHandsetNav(): void {
-    if (this.isHandset()) this.drawer?.close();
-  }
-
-  /** aria-label for a favorite toggle, phrased by current pinned state. */
-  favoriteLabel(item: NavItem): string {
-    return this.navState.isFavorite(item.id)
-      ? `Remove ${item.label} from favorites`
-      : `Add ${item.label} to favorites`;
-  }
-
-  /**
-   * Pin/unpin a favorite, keeping an open flyout anchored to its trigger.
-   *
-   * Preconditions: `id` is a NavItem id.
-   * Postconditions: the favorite is toggled (persisted by NavStateService).
-   * Toggling changes the Favorites section height above the flyout's anchor,
-   * so the open overlay is repositioned after the resulting layout settles —
-   * otherwise it would stay at its old coordinates, detached from its trigger.
-   */
-  toggleFavorite(id: string): void {
-    this.navState.toggleFavorite(id);
-    // Defer past the change-detection + layout pass the toggle triggers, then
-    // re-anchor the flyout to its (now shifted) trigger.
-    setTimeout(() => this.flyoutOverlay?.overlayRef?.updatePosition());
-  }
-
   /**
    * The footer profile link's route/icon/label come from the nav model so the
-   * Settings-flyout entry and the footer can never drift apart.
-   *
-   * Invariants: the 'user-profile' NavItem exists in NAV_GROUPS (settings
-   * group) — `requireNavItem` throws at construction if it is ever removed,
-   * so the breakage is an explicit error instead of a broken footer link.
+   * Settings-flyout entry and the footer can never drift apart. `requireNavItem`
+   * throws at construction if the 'user-profile' item is ever removed, so the
+   * breakage is an explicit error instead of a silently broken footer link.
    */
   readonly profileNavItem: NavItem = AppShellComponent.requireNavItem('user-profile');
 
-  /**
-   * Look up a NavItem the shell template depends on.
-   *
-   * Preconditions: `id` names an item present in `ALL_NAV_ITEMS`.
-   * Postconditions: returns that item; throws (real runtime check, not a
-   * type-level assertion) when the item is missing, failing fast at shell
-   * construction instead of during template rendering.
-   */
   private static requireNavItem(id: string): NavItem {
     const item = ALL_NAV_ITEMS.find((navItem) => navItem.id === id);
     if (!item) {
-      throw new Error(`NavItem '${id}' is missing from NAV_GROUPS but the app shell requires it`);
+      throw new Error(`AppShellComponent: required nav item '${id}' is missing from the nav model.`);
     }
     return item;
   }
 
   /** All focusable elements in the nav for arrow-key navigation. */
   @ViewChildren('navFocusable') navFocusableElements!: QueryList<ElementRef<HTMLElement>>;
+
+  /** The app's real scroll container (the window never overflows in this layout). */
+  @ViewChild(MatSidenavContent) sidenavContent?: MatSidenavContent;
 
   /** Which nav group is currently revealed in the flyout overlay, if any. */
   readonly activeGroup = signal<NavGroup | null>(null);
@@ -175,21 +104,63 @@ export class AppShellComponent implements OnInit {
   private closeTimer: ReturnType<typeof setTimeout> | null = null;
   private lastOrigin: HTMLElement | null = null;
 
-  /** Current route URL, updated once per navigation (avoids re-serializing
-   * `router.url` on every template active-state check). */
-  private readonly currentUrl = signal(this.router.url);
+  private previousPath: string | null = null;
+  /** Trigger of the navigation currently completing (recorded at NavigationStart). */
+  private navigationTrigger: NavigationStart['navigationTrigger'] = 'imperative';
 
-  /** Nav group owning the current route, recomputed only when the URL changes. */
-  private readonly activeGroupKey = computed(() => findGroupForRoute(this.currentUrl())?.key ?? null);
+  constructor() {
+    // Populate the footer avatar's identity once the shell mounts.
+    this.profileStore.refresh();
+    this.router.events.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((event) => {
+      if (event instanceof NavigationStart) {
+        this.onNavigationStart(event);
+      } else if (event instanceof NavigationEnd) {
+        this.onNavigationEnd(event);
+      }
+    });
+  }
 
-  /** Returns true if the given path is the current route (for aria-current). */
+  /** Record how the navigation was initiated; NavigationEnd carries no trigger. */
+  onNavigationStart(event: NavigationStart): void {
+    this.navigationTrigger = event.navigationTrigger;
+  }
+
+  /**
+   * Keep keyboard/screen-reader context in step with SPA navigation: when the
+   * route PATH changes (not on query-param-only navigations, which dashboards
+   * use to mirror in-page state like the active tab — stealing focus there
+   * would break the very control being operated), move focus to the main
+   * content region and start the new view at the top. The window never
+   * scrolls in this layout, so scroll-to-top targets the sidenav content —
+   * the app's actual scroll container. Browser back/forward (popstate) is a
+   * *return* to a place the user has already been — forcing top-of-page and
+   * stealing focus there would fight history traversal, so it is exempt.
+   */
+  onNavigationEnd(event: NavigationEnd): void {
+    const path = event.urlAfterRedirects.split(/[?#]/)[0];
+    const pathChanged = this.previousPath !== null && this.previousPath !== path;
+    this.previousPath = path;
+    if (!pathChanged || this.navigationTrigger === 'popstate') {
+      return; // initial load, in-page query-param/fragment update, or history traversal
+    }
+    document.getElementById('main-content')?.focus({ preventScroll: true });
+    this.sidenavContent?.getElementRef().nativeElement.scrollTo({ top: 0 });
+  }
+
+  /** Returns true if the given path is the current route (for aria-current).
+   *
+   * Matches whole path segments against the URL stripped of query/fragment,
+   * so `/agent-console` is active for `/agent-console/runs` but never for
+   * `/agent-console-x`, and only one nav item claims `aria-current` at a time.
+   */
   isActive(path: string): boolean {
-    return this.currentUrl().startsWith(path);
+    const url = this.router.url.split(/[?#]/)[0];
+    return url === path || url.startsWith(path + '/');
   }
 
   /** Returns true if the current route lives inside the given nav group. */
   isGroupActive(group: NavGroup): boolean {
-    return this.activeGroupKey() === group.key;
+    return findGroupForRoute(this.router.url)?.key === group.key;
   }
 
   /** Reveal the flyout for `group`, anchored to `origin`, and cancel any pending close. */
@@ -198,6 +169,71 @@ export class AppShellComponent implements OnInit {
     this.lastOrigin = origin;
     this.activeOrigin.set(origin);
     this.activeGroup.set(group);
+  }
+
+  /** Open the flyout and move focus to its first link (keyboard invocation). */
+  openFlyoutAndFocus(group: NavGroup, origin: HTMLElement): void {
+    this.openFlyout(group, origin);
+    // The overlay renders on the next tick; focus the first link once present.
+    setTimeout(() => this.flyoutLinks()[0]?.focus());
+  }
+
+  /** Keyboard handling on a group trigger (disclosure-navigation pattern). */
+  onTriggerKeydown(event: KeyboardEvent, group: NavGroup, origin: HTMLElement): void {
+    if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      this.openFlyoutAndFocus(group, origin);
+    }
+  }
+
+  /**
+   * Close only when focus truly leaves the trigger/flyout pair. Focus moving
+   * from the trigger into the portalled overlay (or between flyout links)
+   * must not close the panel — that was what made the flyout
+   * keyboard-inaccessible before.
+   */
+  onNavFocusOut(event: FocusEvent): void {
+    const next = event.relatedTarget as HTMLElement | null;
+    if (next && (next.closest('.nav-flyout') || next === this.lastOrigin)) {
+      return;
+    }
+    this.scheduleClose();
+  }
+
+  /** Arrow-key roving across the flyout's links; ArrowLeft returns to the trigger. */
+  onFlyoutKeydown(event: KeyboardEvent): void {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      this.closeFlyout(true);
+      return;
+    }
+    const links = this.flyoutLinks();
+    if (!links.length) return;
+    const currentIndex = links.indexOf(document.activeElement as HTMLElement);
+    let nextIndex: number | null = null;
+    switch (event.key) {
+      case 'ArrowDown':
+        nextIndex = currentIndex < 0 ? 0 : Math.min(currentIndex + 1, links.length - 1);
+        break;
+      case 'ArrowUp':
+        nextIndex = currentIndex < 0 ? 0 : Math.max(currentIndex - 1, 0);
+        break;
+      case 'Home':
+        nextIndex = 0;
+        break;
+      case 'End':
+        nextIndex = links.length - 1;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    links[nextIndex]?.focus();
+  }
+
+  private flyoutLinks(): HTMLElement[] {
+    // The overlay is portalled to the document body, not this component's DOM.
+    return Array.from(document.querySelectorAll<HTMLElement>('.nav-flyout .nav-flyout-link'));
   }
 
   /** Schedule the flyout to close after a short delay (tolerates trigger→panel gap). */

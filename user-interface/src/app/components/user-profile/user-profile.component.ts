@@ -28,15 +28,21 @@ interface AssociationGroup {
   type: string;
   label: string;
   icon: string;
+  /** Route the group's items link to, when the owning team has an editor screen. */
+  route?: string;
+  /** Query params for the route link (e.g. deep-linking a dashboard tab). */
+  queryParams?: Record<string, string>;
   items: Association[];
 }
 
 /** Supported artifact types in display order, each with its label and Material icon. */
-const ARTIFACT_GROUPS: { type: string; label: string; icon: string }[] = [
+const ARTIFACT_GROUPS: Omit<AssociationGroup, 'items'>[] = [
   { type: 'brand', label: 'Brands', icon: 'palette' },
   { type: 'blog_post', label: 'Blog Posts', icon: 'article' },
   { type: 'project', label: 'Projects', icon: 'terminal' },
   { type: 'agentic_team', label: 'Agentic Teams', icon: 'groups' },
+  // Deep-link straight to the career profile editor tab.
+  { type: 'career', label: 'Career', icon: 'work', route: '/job-matching', queryParams: { tab: 'profile' } },
 ];
 
 /**
@@ -332,11 +338,16 @@ export class UserProfileComponent implements OnInit, HasUnsavedChanges {
     radios?.[nextIndex]?.focus();
   }
 
-  /** Group flat associations into the fixed display order, dropping empties. */
+  /**
+   * Group flat associations into the fixed display order. Empty groups are
+   * dropped, EXCEPT the Career group: it always renders (as a "set it up"
+   * prompt when empty) so a user who hasn't built a career profile can still
+   * discover the editor from the profile page.
+   */
   private groupAssociations(items: Association[]): AssociationGroup[] {
     return ARTIFACT_GROUPS.map((g) => ({
       ...g,
       items: items.filter((a) => a.artifact_type === g.type),
-    })).filter((g) => g.items.length > 0);
+    })).filter((g) => g.items.length > 0 || g.type === 'career');
   }
 }

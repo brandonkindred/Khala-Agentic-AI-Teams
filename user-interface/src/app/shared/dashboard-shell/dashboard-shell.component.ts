@@ -22,6 +22,8 @@ import { HealthIndicatorComponent } from '../../components/health-indicator/heal
  * - `[dashboardEmpty]`   → empty state content
  * - default              → main body content
  */
+let nextShellId = 0;
+
 @Component({
   selector: 'app-dashboard-shell',
   standalone: true,
@@ -30,6 +32,9 @@ import { HealthIndicatorComponent } from '../../components/health-indicator/heal
   styleUrl: './dashboard-shell.component.scss',
 })
 export class DashboardShellComponent {
+  /** Unique heading id so aria-labelledby stays unambiguous with multiple shells. */
+  readonly titleId = `dash-title-${nextShellId++}`;
+
   @Input() title = '';
   @Input() subtitle = '';
   /** Material icon name for the page header. */

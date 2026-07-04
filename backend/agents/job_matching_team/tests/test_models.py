@@ -28,3 +28,47 @@ def test_ensure_fingerprint_populates_once():
     p.title = "Changed"
     p.ensure_fingerprint()
     assert p.fingerprint == fp
+
+
+def test_listing_defaults_to_new_status():
+    from job_matching_team.models import Listing
+
+    listing = Listing(fingerprint="fp1", posting=JobPosting(company="Acme", title="Eng"))
+    assert listing.status == "new"
+    assert listing.times_seen == 1
+    assert listing.notes is None
+
+
+def test_listing_rejects_invalid_status():
+    import pytest
+
+    from job_matching_team.models import Listing, ListingStateUpdate
+
+    with pytest.raises(Exception):
+        Listing(fingerprint="fp1", posting=JobPosting(), status="starred")
+    with pytest.raises(Exception):
+        ListingStateUpdate(status="starred")
+
+
+def test_listing_state_update_notes_optional():
+    from job_matching_team.models import ListingStateUpdate
+
+    update = ListingStateUpdate(status="favorite")
+    assert update.notes is None
+    update = ListingStateUpdate(status="poor_fit", notes="below salary floor")
+    assert update.notes == "below salary floor"
+
+
+def test_listing_filters_cover_every_status():
+    from job_matching_team.models import LISTING_FILTERS
+
+    # Every ListingStatus value must be filterable, plus the two pseudo-filters.
+    assert set(LISTING_FILTERS) == {
+        "active",
+        "all",
+        "new",
+        "favorite",
+        "not_interested",
+        "poor_fit",
+        "archived",
+    }

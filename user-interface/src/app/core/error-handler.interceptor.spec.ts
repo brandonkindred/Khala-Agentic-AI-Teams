@@ -7,20 +7,25 @@ import {
 import { HttpClient, HttpContext } from '@angular/common/http';
 import { vi } from 'vitest';
 import { errorHandlerInterceptor, extractErrorDetail, SKIP_ERROR_NOTIFY } from './error-handler.interceptor';
-import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { provideAnimations } from '@angular/platform-browser/animations';
 
 describe('errorHandlerInterceptor', () => {
   let httpMock: HttpTestingController;
   let http: HttpClient;
+  let snackSpy: { open: ReturnType<typeof vi.fn> };
+
+  /** Message text of the latest snackbar the interceptor opened. */
+  const lastMessage = () => snackSpy.open.mock.calls.at(-1)?.[0] as string;
 
   beforeEach(() => {
+    snackSpy = { open: vi.fn() };
     TestBed.configureTestingModule({
-      imports: [MatSnackBarModule],
       providers: [
         provideHttpClient(withInterceptors([errorHandlerInterceptor])),
         provideHttpClientTesting(),
         provideAnimations(),
+        { provide: MatSnackBar, useValue: snackSpy },
       ],
     });
     httpMock = TestBed.inject(HttpTestingController);
@@ -89,6 +94,47 @@ describe('errorHandlerInterceptor', () => {
     const req = httpMock.expectOne('/test');
     req.flush({}, { status: 400, statusText: 'Bad Request' });
     expect(error).toBeDefined();
+  });
+
+  it('formats a 422 detail string (FastAPI validation)', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock
+      .expectOne('/test')
+      .flush({ detail: 'bad payload' }, { status: 422, statusText: 'Unprocessable Entity' });
+    expect(lastMessage()).toBe('bad payload');
+  });
+
+  it('joins a 422 array-of-{msg} detail into a readable message', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock.expectOne('/test').flush(
+      {
+        detail: [
+          { msg: 'Input should be a valid integer', loc: ['body', 'salary_min'] },
+          { msg: 'Extra inputs are not permitted' },
+        ],
+      },
+      { status: 422, statusText: 'Unprocessable Entity' },
+    );
+    expect(lastMessage()).toBe('Input should be a valid integer; Extra inputs are not permitted');
+  });
+
+  it('surfaces a 503 detail string instead of the generic message', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock
+      .expectOne('/test')
+      .flush(
+        { detail: 'Career profile storage requires Postgres (set POSTGRES_HOST).' },
+        { status: 503, statusText: 'Service Unavailable' },
+      );
+    expect(lastMessage()).toBe('Career profile storage requires Postgres (set POSTGRES_HOST).');
+  });
+
+  it('falls back to the generic 503 message without a detail', () => {
+    http.get('/test').subscribe({ error: () => undefined });
+    httpMock
+      .expectOne('/test')
+      .flush({}, { status: 503, statusText: 'Service Unavailable' });
+    expect(lastMessage()).toBe('Service temporarily unavailable. Please try again later.');
   });
 
   it('formats 500 with detail string', () => {

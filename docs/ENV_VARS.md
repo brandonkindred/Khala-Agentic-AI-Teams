@@ -756,13 +756,15 @@ When `true`, missing/invalid profile raises instead of falling back to the bundl
 Recommended for production.
 
 ### JOB_SEEKER_PROFILE_PATH
-Path to the job-matching team's job-seeker profile YAML (standing search criteria). Falls back to
-`$AGENT_CACHE/job_seeker_profile.yaml`, then to the bundled example. See
-`backend/agents/job_matching_team/profile/`.
+Path to the job-matching team's job-seeker profile YAML (standing search criteria). This explicit
+pin is the highest-priority source. When unset, resolution falls back to the **career section of
+the central user profile** (`user_profiles.profile_json["career"]`, written by
+`PUT /api/job-matching/profile`), then `$AGENT_CACHE/job_seeker_profile.yaml`, then the bundled
+example. See `backend/agents/job_matching_team/profile/`.
 
 ### JOB_SEEKER_PROFILE_STRICT
-When `true`, a missing/invalid job-seeker profile raises instead of falling back to the bundled
-example.
+When `true`, a missing `JOB_SEEKER_PROFILE_PATH` file raises instead of falling back, and the
+bundled-example fallback is disabled (a stored career section still satisfies resolution).
 
 ### JOB_MATCHING_SERVICE_URL
 Upstream URL the unified API proxies `/api/job-matching/*` to. The job-matching team also reuses
