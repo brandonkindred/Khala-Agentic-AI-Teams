@@ -160,30 +160,6 @@
   }
 }
 
-.error-banner {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-top: 12px;
-  padding: 10px 14px;
-  background: var(--kh-error-subtle);
-  border: 1px solid var(--kh-error-subtle);
-  border-radius: 10px;
-  color: var(--kh-error);
-  font-size: 0.88rem;
-
-  mat-icon {
-    color: var(--kh-error);
-    font-size: 20px;
-    width: 20px;
-    height: 20px;
-  }
-
-  button {
-    margin-left: auto;
-  }
-}
-
 // --------------------------------------------------------------------------
 // Sidebar
 // --------------------------------------------------------------------------

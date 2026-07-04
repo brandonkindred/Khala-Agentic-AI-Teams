@@ -92,19 +92,15 @@
       @if (expanded === 'google') {
         <div class="integration-card__body">
           @if (googleBrowserError) {
-            <div class="status-banner status-banner--error">
-              <mat-icon aria-hidden="true">error_outline</mat-icon>
-              <span>{{ googleBrowserError }}</span>
-            </div>
+            <app-inline-banner variant="error" [message]="googleBrowserError" />
           }
           @if (!googleBrowserStorageAvailable) {
-            <div class="status-banner status-banner--info">
-              <mat-icon aria-hidden="true">info</mat-icon>
-              <span>
+            <app-inline-banner variant="info" live="off">
+              <span banner-message>
                 The API is not running with PostgreSQL. Start the stack via Docker (or set
                 <code>POSTGRES_HOST</code>) to save encrypted Google credentials.
               </span>
-            </div>
+            </app-inline-banner>
           }
 
           <div class="form-grid form-grid--two">
@@ -230,10 +226,7 @@
       @if (expanded === 'slack') {
         <div class="integration-card__body">
           @if (error) {
-            <div class="status-banner status-banner--error">
-              <mat-icon aria-hidden="true">error_outline</mat-icon>
-              <span>{{ error }}</span>
-            </div>
+            <app-inline-banner variant="error" [message]="error" />
           }
 
           @if (oauthConnected) {
@@ -469,10 +462,7 @@
       @if (expanded === 'medium') {
         <div class="integration-card__body">
           @if (mediumError) {
-            <div class="status-banner status-banner--error">
-              <mat-icon aria-hidden="true">error_outline</mat-icon>
-              <span>{{ mediumError }}</span>
-            </div>
+            <app-inline-banner variant="error" [message]="mediumError" />
           }
 
           <div class="setting-row">
@@ -519,13 +509,12 @@
           </div>
 
           @if (mediumProvider !== 'google') {
-            <div class="status-banner status-banner--info">
-              <mat-icon aria-hidden="true">info</mat-icon>
-              <span>
+            <app-inline-banner variant="info" live="off">
+              <span banner-message>
                 {{ mediumProviderLabel }} selected. Browser automation is oriented around Google sign-in —
                 pick Google if you use “Continue with Google” on Medium.
               </span>
-            </div>
+            </app-inline-banner>
           }
 
           @if (mediumEnabled && mediumProvider === 'google') {
@@ -639,16 +628,13 @@
       @if (expanded === 'github') {
         <div class="integration-card__body">
           @if (githubStoreUnreachable) {
-            <div class="status-banner status-banner--warn" role="alert">
-              <mat-icon aria-hidden="true">warning_amber</mat-icon>
-              <span>GitHub credential store (Postgres) is unreachable — the integration is temporarily unavailable. Restore the database connection to use it.</span>
-            </div>
+            <app-inline-banner
+              variant="warning"
+              message="GitHub credential store (Postgres) is unreachable — the integration is temporarily unavailable. Restore the database connection to use it."
+            />
           }
           @if (githubError) {
-            <div class="status-banner status-banner--error">
-              <mat-icon aria-hidden="true">error_outline</mat-icon>
-              <span>{{ githubError }}</span>
-            </div>
+            <app-inline-banner variant="error" [message]="githubError" />
           }
 
           <p class="form-hint">
@@ -799,10 +785,7 @@
       @if (expanded === 'tradingview') {
         <div class="integration-card__body">
           @if (tradingViewError) {
-            <div class="status-banner status-banner--error">
-              <mat-icon aria-hidden="true">error_outline</mat-icon>
-              <span>{{ tradingViewError }}</span>
-            </div>
+            <app-inline-banner variant="error" [message]="tradingViewError" />
           }
 
           <p class="form-hint">

@@ -27,6 +27,8 @@ import type { GitHubIssueItem, RunGitHubIssueResponse } from '../../models/integ
 import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
 import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { NotificationService } from '../../core/notification.service';
 
 /** How often the Runs list is re-fetched while the page is open. */
 const RUNS_POLL_MS = 15000;
@@ -83,6 +85,7 @@ interface IssueRowVm {
     CodingTeamMonitorComponent,
     TeamAssistantChatComponent,
     PendingQuestionsComponent,
+    InlineBannerComponent,
   ],
   templateUrl: './coding-team-page.component.html',
   styleUrl: './coding-team-page.component.scss',
@@ -91,8 +94,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly api = inject(CodingTeamApiService);
   private readonly integrationsApi = inject(IntegrationsApiService);
   private readonly destroyRef = inject(DestroyRef);
-
-  latestJobId: string | null = null;
+  private readonly notifications = inject(NotificationService);
 
   /** Which single view is visible. The page opens on the assistant chat. */
   activeView: 'chat' | 'github' | 'jobs' = 'chat';
@@ -829,8 +831,18 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return isCodingTeamTerminalStatus(this.jobStatus?.status);
   }
 
-  /** Record the job id emitted when the assistant launches a coding workflow (drives the banner). */
+  /**
+   * Confirm a launched coding workflow.
+   *
+   * Preconditions: `event` is emitted by the embedded assistant chat when a run
+   * starts; `job_id` is the queued run id, or null when no run was created.
+   * Postconditions: when a `job_id` is present, shows a transient snackbar
+   * confirmation (the app's convention for successful actions — replacing the
+   * former persistent "queued" banner); a null id is a no-op.
+   */
   onWorkflowLaunched(event: { job_id: string | null; conversation_id: string }): void {
-    this.latestJobId = event.job_id;
+    if (event.job_id) {
+      this.notifications.saved(`Coding job queued — id ${event.job_id}.`);
+    }
   }
 }

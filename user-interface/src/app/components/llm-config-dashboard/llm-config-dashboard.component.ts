@@ -16,6 +16,7 @@ import { LlmConfigApiService } from '../../services/llm-config-api.service';
 import { HasUnsavedChanges } from '../../core/unsaved-changes.guard';
 import { NotificationService } from '../../core/notification.service';
 import { extractErrorDetail } from '../../core/error-handler.interceptor';
+import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 import {
   providerRequiresApiKey,
   type LlmProvider,
@@ -68,6 +69,7 @@ function emptyProviderForm(): ProviderForm {
     MatProgressSpinnerModule,
     MatTooltipModule,
     MatCheckboxModule,
+    InlineBannerComponent,
   ],
   templateUrl: './llm-config-dashboard.component.html',
   styleUrl: './llm-config-dashboard.component.scss',

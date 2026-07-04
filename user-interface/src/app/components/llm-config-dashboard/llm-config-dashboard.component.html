@@ -8,14 +8,13 @@
   </header>
 
   @if (!storageAvailable) {
-    <div class="banner banner-warn" role="alert">
-      <mat-icon>warning_amber</mat-icon>
+    <app-inline-banner variant="warning">
       @if (storageStatus === 'unreachable') {
-        <span>Postgres is configured but currently unreachable — providers can't be saved until the database connection is restored.</span>
+        <span banner-message>Postgres is configured but currently unreachable — providers can't be saved until the database connection is restored.</span>
       } @else {
-        <span>Postgres is not configured — providers can't be saved. Set the Postgres environment variables to configure LLM providers.</span>
+        <span banner-message>Postgres is not configured — providers can't be saved. Set the Postgres environment variables to configure LLM providers.</span>
       }
-    </div>
+    </app-inline-banner>
   }
 
   <mat-card class="config-card providers-card">
@@ -34,9 +33,7 @@
         </div>
       }
       @if (providersError) {
-        <div class="banner banner-error" role="alert">
-          <mat-icon aria-hidden="true">error_outline</mat-icon> <span>{{ providersError }}</span>
-        </div>
+        <app-inline-banner variant="error" [message]="providersError" />
       }
 
       @if (!providersLoading && providers.length === 0) {
