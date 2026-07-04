@@ -61,22 +61,30 @@ const statusWithJob = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-// Build a TestPipelineRun with `count` recorded steps (N) and a given status.
-const pipelineRun = (count: number, over: Record<string, unknown> = {}) => ({
+const stepResult = (id: string, status = 'completed') => ({
+  step_id: id,
+  step_name: '',
+  agent_name: '',
+  input: '',
+  output: '',
+  status,
+});
+
+// Build a TestPipelineRun modeling the real runner: `completed` steps are
+// finished (recorded with status 'completed'), and the cursor has advanced to
+// the next, still-running step `s${completed+1}` — whose result is NOT yet
+// recorded (the runner records an action/decision step only on completion). So
+// the "current step" is completed+1, and step_results holds only the finished
+// ones. Override `step_results`/`current_step_id`/`status` via `over` for WAIT
+// or mixed-status cases.
+const pipelineRun = (completed: number, over: Record<string, unknown> = {}) => ({
   run_id: 'pipe-1',
   team_id: 't1',
   process_id: 'p1',
   status: 'running',
-  current_step_id: count > 0 ? `s${count}` : null,
+  current_step_id: `s${completed + 1}`,
   initial_input: null,
-  step_results: Array.from({ length: count }, (_, i) => ({
-    step_id: `s${i + 1}`,
-    step_name: '',
-    agent_name: '',
-    input: '',
-    output: '',
-    status: 'completed',
-  })),
+  step_results: Array.from({ length: completed }, (_, i) => stepResult(`s${i + 1}`)),
   human_prompt: null,
   error: null,
   started_at: '',
@@ -788,24 +796,28 @@ describe('AgentStudioPersonaComponent', () => {
 
   // ── Run-progress header (step bar + WAIT indicator) ─────────────────────────
 
-  it('renders "step N of M" when the pipeline run and process DAG are known', () => {
+  it('renders "step N of M" aligned with the current (running) step', () => {
     build({ team: TEAM_WITH_STEPS });
     fixture.detectChanges();
     personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
-    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2)));
+    // 1 step finished; the runner has advanced to the 2nd (running) step s2.
+    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(1)));
     component.launch();
     fixture.detectChanges();
     // Pipeline read is piggybacked on the founder poll, keyed on se_job_id.
     expect(agenticApi.getPipelineRun).toHaveBeenCalledWith('t1', 'pipe-1');
     expect(component.totalSteps()).toBe(4);
-    expect(component.currentStepCount()).toBe(2);
-    expect(component.stepProgressKnown()).toBe(true);
-    expect(component.stepPercent()).toBe(50);
+    expect(component.completedStepCount()).toBe(1);
+    // Number = current (running) step, not the finished count — aligned with the
+    // step NAME (both step 2 · Write), which the old length-based count desynced.
+    expect(component.currentStepNumber()).toBe(2);
     expect(component.currentStepName()).toBe('Write');
+    expect(component.stepProgressKnown()).toBe(true);
+    expect(component.stepPercent()).toBe(25);
     const text = fixture.nativeElement.textContent;
     expect(text).toContain('step 2 of 4');
     expect(text).toContain('Write');
-    // Determinate bar is shown (not the indeterminate fallback).
+    // Determinate bar is shown (a step has finished; not the indeterminate fallback).
     const bar = fixture.nativeElement.querySelector('mat-progress-bar');
     expect(bar?.getAttribute('mode')).toBe('determinate');
   });
@@ -835,7 +847,11 @@ describe('AgentStudioPersonaComponent', () => {
     component.launch();
     fixture.detectChanges();
     expect(component.pipelineRun()).toBeNull();
-    expect(component.currentStepCount()).toBe(0);
+    expect(component.completedStepCount()).toBe(0);
+    // The DAG length IS known here (p1 has 4 steps via the launcher fallback),
+    // yet with no pipeline run there is no step position to show, so the bar
+    // stays indeterminate — exercising the "no run yet" gate, not "no DAG".
+    expect(component.totalSteps()).toBe(4);
     expect(component.stepProgressKnown()).toBe(false);
     const bar = fixture.nativeElement.querySelector('mat-progress-bar');
     expect(bar?.getAttribute('mode')).toBe('indeterminate');
@@ -845,14 +861,28 @@ describe('AgentStudioPersonaComponent', () => {
     build({ team: TEAM_WITH_STEPS });
     fixture.detectChanges();
     personaApi.getRunStatus.mockReturnValue(of(statusWithJob({ status: 'answering_build_questions' })));
-    agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2, { status: 'waiting_for_input' })));
+    // Realistic WAIT run: 2 steps finished, the 3rd is a WAIT recorded as
+    // waiting_for_input (the runner appends a WAIT immediately, unlike an action).
+    agenticApi.getPipelineRun.mockReturnValue(
+      of(
+        pipelineRun(2, {
+          status: 'waiting_for_input',
+          current_step_id: 's3',
+          step_results: [stepResult('s1'), stepResult('s2'), stepResult('s3', 'waiting_for_input')],
+        }),
+      ),
+    );
     component.launch();
     fixture.detectChanges();
     expect(component.isWaiting()).toBe(true);
+    // The waiting step is not counted as completed → still "step 3 of 4".
+    expect(component.completedStepCount()).toBe(2);
+    expect(component.currentStepNumber()).toBe(3);
     // The animated thinking indicator is shown, with a WAIT-specific note wired
     // off isWaiting() (not dead code).
     expect(fixture.nativeElement.textContent).toContain('persona is thinking…');
     expect(fixture.nativeElement.textContent).toContain('answering a question');
+    expect(fixture.nativeElement.textContent).toContain('step 3 of 4');
   });
 
   it('does not show the WAIT note when the pipeline is not waiting', () => {
@@ -881,6 +911,8 @@ describe('AgentStudioPersonaComponent', () => {
     state.setProcessId('p1'); // handoff seeds p1 (two complete → no auto-select)
     fixture.detectChanges();
     personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
+    // 2 finished, on step 3 (s3). s3 exists in p1 (Review) but NOT in pB — so the
+    // step name distinguishes the fixed (run-process) logic from the old launcher logic.
     agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(2, { process_id: 'p1' })));
     component.launch();
     expect(component.totalSteps()).toBe(4);
@@ -888,45 +920,49 @@ describe('AgentStudioPersonaComponent', () => {
     // User switches the dropdown mid-run to the 2-step process pB.
     component.selectProcess('pB');
     expect(component.selectedProcessId()).toBe('pB');
-    // Denominator + step name still follow the running p1 (4 steps · Write), not pB.
+    // Denominator + step name still follow the running p1 (4 steps, s3 · Review),
+    // not pB (which has no s3) — proving both key off pipelineRun.process_id.
     expect(component.totalSteps()).toBe(4);
-    expect(component.currentStepName()).toBe('Write');
+    expect(component.currentStepName()).toBe('Review');
   });
 
   it('clamps the step label so an over-count never reads "5 of 4"', () => {
     build({ team: TEAM_WITH_STEPS });
     fixture.detectChanges();
     personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
-    // A looped/revisited step can append more step_results than declared steps.
+    // A looped/revisited run can complete more steps than the DAG declares.
     agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(5)));
     component.launch();
     fixture.detectChanges();
-    expect(component.currentStepCount()).toBe(5);
+    expect(component.completedStepCount()).toBe(5);
     expect(component.totalSteps()).toBe(4);
-    expect(component.displayStepCount()).toBe(4);
+    expect(component.currentStepNumber()).toBe(4); // min(5 + 1, 4)
     const text = fixture.nativeElement.textContent;
     expect(text).toContain('step 4 of 4');
     expect(text).not.toContain('step 5 of 4');
+    expect(text).not.toContain('step 6 of 4');
   });
 
   it('keeps the bar below 100% while the final step is still running', () => {
     build({ team: TEAM_WITH_STEPS });
     fixture.detectChanges();
     personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
-    // 4 declared steps; 3 finished, the 4th (current) still running.
+    // 4 declared steps; 3 finished, the 4th (current) still running (not recorded
+    // as completed). A determinate action step is only recorded on completion, so
+    // this models the in-flight final step.
     const results = [
-      { step_id: 's1', step_name: '', agent_name: '', input: '', output: '', status: 'completed' },
-      { step_id: 's2', step_name: '', agent_name: '', input: '', output: '', status: 'completed' },
-      { step_id: 's3', step_name: '', agent_name: '', input: '', output: '', status: 'completed' },
-      { step_id: 's4', step_name: '', agent_name: '', input: '', output: '', status: 'running' },
+      stepResult('s1'),
+      stepResult('s2'),
+      stepResult('s3'),
+      stepResult('s4', 'running'),
     ];
     agenticApi.getPipelineRun.mockReturnValue(
-      of(pipelineRun(4, { step_results: results, current_step_id: 's4' })),
+      of(pipelineRun(3, { step_results: results, current_step_id: 's4' })),
     );
     component.launch();
     fixture.detectChanges();
-    expect(component.currentStepCount()).toBe(4); // on step 4 of 4…
-    expect(component.completedStepCount()).toBe(3); // …but only 3 finished
+    expect(component.completedStepCount()).toBe(3); // only 3 finished…
+    expect(component.currentStepNumber()).toBe(4); // …on step 4 of 4
     expect(component.stepPercent()).toBe(75); // bar reflects work done, not started
     expect(fixture.nativeElement.textContent).toContain('step 4 of 4');
   });
@@ -984,14 +1020,14 @@ describe('AgentStudioPersonaComponent', () => {
     personaApi.getRunStatus.mockReturnValue(of(statusWithJob()));
     agenticApi.getPipelineRun.mockReturnValue(of(pipelineRun(3)));
     component.launch();
-    expect(component.currentStepCount()).toBe(3);
+    expect(component.completedStepCount()).toBe(3);
 
     // A second launch clears the prior pipeline state before the first read lands.
     personaApi.startTest.mockReturnValue(of({ job_id: 'run-2', status: 'running', message: '' }));
     personaApi.getRunStatus.mockReturnValue(new Subject());
     component.launch();
     expect(component.pipelineRun()).toBeNull();
-    expect(component.currentStepCount()).toBe(0);
+    expect(component.completedStepCount()).toBe(0);
   });
 
   it('hides the progress bar and thinking indicator once the run is terminal', () => {
@@ -1008,5 +1044,31 @@ describe('AgentStudioPersonaComponent', () => {
     expect(component.stepProgressKnown()).toBe(false);
     expect(fixture.nativeElement.querySelector('mat-progress-bar')).toBeNull();
     expect(fixture.nativeElement.textContent).not.toContain('persona is thinking…');
+  });
+
+  it('refreshes step progress on the recurring poll tick, not just the immediate fetch', () => {
+    vi.useFakeTimers();
+    try {
+      build({ team: TEAM_WITH_STEPS });
+      fixture.detectChanges();
+      personaApi.startTest.mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' }));
+      // Non-terminal founder status on every poll; the pipeline advances a step
+      // between the immediate fetch and the next interval tick.
+      personaApi.getRunStatus.mockReturnValue(of(statusWithJob({ status: 'polling_build' })));
+      agenticApi.getPipelineRun
+        .mockReturnValueOnce(of(pipelineRun(1))) // immediate fetch: 1 finished
+        .mockReturnValue(of(pipelineRun(2))); // next tick: 2 finished
+      component.launch();
+      expect(component.completedStepCount()).toBe(1);
+
+      // Advance one poll interval: the recurring switchMap → getRunStatus →
+      // handleStatus → fetchPipelineRun path must refresh progress (not just the
+      // one-shot immediate fetch every other progress test exercises).
+      vi.advanceTimersByTime(10_000);
+      expect(component.completedStepCount()).toBe(2);
+      expect(component.currentStepNumber()).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -212,11 +212,19 @@
                 <div class="persona__progress">
                   @if (stepProgressKnown()) {
                     <span class="persona__step-label" aria-live="polite">
-                      step {{ displayStepCount() }} of {{ totalSteps() }}@if (currentStepName()) {
+                      step {{ currentStepNumber() }} of {{ totalSteps() }}@if (currentStepName()) {
                         <span class="persona__step-name"> · {{ currentStepName() }}</span>
                       }
                     </span>
-                    <mat-progress-bar mode="determinate" [value]="stepPercent()" aria-hidden="true" />
+                    <!-- Determinate once at least one step has finished; until then
+                         a moving indeterminate bar (a determinate bar frozen at 0%
+                         reads as stalled). The visible label is the live region,
+                         so the bar is aria-hidden to avoid double announcements. -->
+                    @if (completedStepCount() > 0) {
+                      <mat-progress-bar mode="determinate" [value]="stepPercent()" aria-hidden="true" />
+                    } @else {
+                      <mat-progress-bar mode="indeterminate" aria-hidden="true" />
+                    }
                   } @else {
                     <mat-progress-bar mode="indeterminate" aria-label="persona run in progress" />
                   }

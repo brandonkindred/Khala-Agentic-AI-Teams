@@ -42,6 +42,13 @@ const POLL_MS = 10_000;
 const LAUNCH_TIMEOUT_MS = 30_000;
 /** Transient banner shown on a failed poll; cleared on the next successful poll. */
 const LOST_CONTACT = 'Lost contact with the run; retrying…';
+/**
+ * The pipeline `step_results[].status` value marking a fully-finished step (an
+ * answered WAIT step also lands here). Named so the coupling to the backend's
+ * step-status vocabulary (`PipelineStepResult.status`, an untyped string) is
+ * explicit and greppable rather than a bare literal in a filter.
+ */
+const STEP_STATUS_COMPLETED = 'completed';
 /** Width of the persona create/edit dialog; matches the dashboard's editor dialog. */
 const PERSONA_DIALOG_WIDTH = '560px';
 
@@ -192,41 +199,47 @@ export class AgentStudioPersonaComponent implements OnInit {
   readonly totalSteps = computed(() => this.selectedProcess()?.steps?.length ?? 0);
 
   /**
-   * Steps executed so far including the in-progress/waiting one (the "N"). The
-   * pipeline runner appends one `step_results` entry per executed step (the WAIT
-   * step included), so this is the honest, monotonic step number — preferred
-   * over indexing `current_step_id` into the declared (possibly reordered) list.
-   */
-  readonly currentStepCount = computed(() => this.pipelineRun()?.step_results?.length ?? 0);
-
-  /**
-   * The step position shown in the label, clamped to the DAG length so a
-   * looped/revisited step (more `step_results` than declared steps) can never
-   * read a nonsensical "step 5 of 4" — mirrors the same clamp on `stepPercent`.
-   */
-  readonly displayStepCount = computed(() => Math.min(this.currentStepCount(), this.totalSteps()));
-
-  /** True once a real "step N of M" can be shown (else the bar is indeterminate). */
-  readonly stepProgressKnown = computed(
-    () => !this.runTerminal() && this.totalSteps() > 0 && this.currentStepCount() > 0,
-  );
-
-  /**
-   * Count of steps the pipeline has actually *finished* (status `completed`),
-   * excluding the one currently running/waiting. Drives the bar so it reflects
-   * work done rather than work started.
+   * Count of steps the pipeline has actually *finished* (status `completed`,
+   * which an answered WAIT step also reaches), excluding the one currently
+   * running/waiting. This is the honest, backend-aligned progress unit: the
+   * runner records an action/decision step's result only *after* it finishes,
+   * so `step_results.length` is unreliable as "current step" (it lags the
+   * running action by one but includes an in-flight WAIT). `completed`-count
+   * sidesteps that — it is the numerator for both the bar and the step number.
    */
   readonly completedStepCount = computed(
-    () => this.pipelineRun()?.step_results?.filter((r) => r.status === 'completed').length ?? 0,
+    () =>
+      this.pipelineRun()?.step_results?.filter((r) => r.status === STEP_STATUS_COMPLETED).length ??
+      0,
   );
 
   /**
-   * Determinate bar value = fraction of steps *completed*, not started. Using
-   * completed (not `currentStepCount`, which counts the in-progress/waiting step)
-   * keeps the bar off 100% until the run is actually done — otherwise it would
-   * pin at full while the final step is still executing/waiting, reading as
-   * "finished" on a run that hasn't finished. Clamped against a branching
-   * over-count.
+   * The step currently being worked on (1-based), for the "step N of M" label.
+   * It is `completedStepCount + 1` — the step in flight after the finished ones —
+   * which keeps the number aligned with `current_step_id` (and thus
+   * `currentStepName`), instead of the `step_results.length` count that lags the
+   * running action step by one. Clamped to the DAG length so a looped/branching
+   * run can never read a nonsensical "step 5 of 4".
+   */
+  readonly currentStepNumber = computed(() =>
+    Math.min(this.completedStepCount() + 1, this.totalSteps()),
+  );
+
+  /**
+   * True once "step N of M" can be shown: a live run with a known DAG length.
+   * (The bar itself switches determinate/indeterminate on whether any step has
+   * finished yet — see the template — so a just-started run shows the moving
+   * indeterminate bar rather than a determinate bar frozen at 0%.)
+   */
+  readonly stepProgressKnown = computed(
+    () => !this.runTerminal() && this.totalSteps() > 0 && this.pipelineRun() != null,
+  );
+
+  /**
+   * Determinate bar value = fraction of steps *completed*, not started, so it
+   * never pins at 100% while the final step is still executing/waiting (which
+   * would read as "finished" on a run that hasn't finished). Clamped against a
+   * branching/looped over-count.
    */
   readonly stepPercent = computed(() => {
     const total = this.totalSteps();
