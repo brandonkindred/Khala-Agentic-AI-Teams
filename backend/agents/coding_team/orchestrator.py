@@ -14,8 +14,9 @@ import math
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from coding_team import hitl
 from coding_team.activity import ActivityBridge
@@ -67,6 +68,28 @@ def _no_change_revisit_cap() -> int:
     from shared_env import parse_int
 
     return parse_int("CODING_TEAM_NO_CHANGE_REVISIT_CAP", NO_CHANGE_REVISIT_CAP, minimum=1)
+
+
+# Max Tech-Lead review LLM calls dispatched concurrently in one review round. Reviews are
+# independent (read-only diff + an LLM call), so a round with k tasks in review costs ~one review
+# latency instead of k. The effective pool is min(this, number of tasks in review).
+REVIEW_CONCURRENCY = 4
+
+
+def _review_concurrency() -> int:
+    """Max concurrent Tech-Lead reviews per round.
+
+    Configurable via CODING_TEAM_REVIEW_CONCURRENCY (default 4; garbage/empty → default; floored at
+    1 so review always makes progress even if the value is set to 0/negative).
+
+    Preconditions:
+        - None (reads only the optional environment variable).
+    Postconditions:
+        - Returns an int >= 1.
+    """
+    from shared_env import parse_int
+
+    return parse_int("CODING_TEAM_REVIEW_CONCURRENCY", REVIEW_CONCURRENCY, minimum=1)
 
 
 class _NoopBridge:
@@ -741,33 +764,29 @@ def _context_file_filters() -> tuple[frozenset[str], frozenset[str]]:
     return _CONTEXT_EXTENSIONS, _CONTEXT_EXCLUDE_DIRS
 
 
-def _read_repo_context(repo_path: Path) -> str:
-    """Read the repo structure/code briefing for implementation-worker context.
+# Ceiling on how many eligible files the repo briefing covers (a cap on breadth,
+# never a truncation of any single file's content — see ``_read_repo_context``).
+_CONTEXT_FILE_CEILING = 80
 
-    Every file the briefing includes is rendered with its FULL contents — the
-    engineer reasons over this to implement a task, and clipping a file would
-    hide code from it (mirroring the team's "inputs are never truncated"
-    contract for the plan text, task description, and review diff). The 80-file
-    ceiling on the eligible-file list is a deliberate cap on how many files the
-    briefing covers, not truncation of any file's content.
+
+def _enumerate_context_files(repo_path: Path) -> List[Path]:
+    """Return the sorted, capped list of context-eligible files under ``repo_path``.
+
+    Walks with ``os.walk`` and prunes excluded dirs in place so the traversal never
+    descends into node_modules/.git/etc. The old ``sorted(repo_path.rglob("*"))``
+    stat-ed the *entire* tree (tens of thousands of files for any frontend repo)
+    and sorted it before slicing — and worse, those excluded entries consumed the
+    file budget, starving real source files. Collecting eligible files first, then
+    sorting and capping, both fixes the stat storm and guarantees the cap covers
+    real files.
 
     Preconditions:
         - ``repo_path`` is an existing directory.
     Postconditions:
-        - Each context-eligible file (matching ``_context_file_filters`` and
-          within the 80-file scan ceiling) appears with its complete contents,
-          never a prefix; no eligible file is dropped to fit a size budget.
-        - Returns ``"No files found"`` when no eligible file is present.
+        - Returns at most ``_CONTEXT_FILE_CEILING`` files, sorted deterministically;
+          every entry matches ``_context_file_filters`` and ``is_file()`` is True.
     """
     extensions, exclude_dirs = _context_file_filters()
-
-    # Walk with os.walk and prune excluded dirs in place so the traversal never
-    # descends into node_modules/.git/etc. The old ``sorted(repo_path.rglob("*"))``
-    # stat-ed the *entire* tree (tens of thousands of files for any frontend repo)
-    # and sorted it before slicing — and worse, those excluded entries consumed the
-    # 80-entry budget, starving real source files. Collecting eligible files first,
-    # then sorting and capping, both fixes the stat storm and guarantees the cap
-    # covers real files.
     eligible: List[Path] = []
     try:
         for dirpath, dirnames, filenames in os.walk(repo_path):
@@ -777,8 +796,8 @@ def _read_repo_context(repo_path: Path) -> str:
                 # is_file() (not just suffix) guards against special files: a FIFO /
                 # socket / device named e.g. ``pipe.py`` would otherwise pass the
                 # suffix check and block read_text() forever (a hang the try/except
-                # below cannot catch). is_file() is False for those and for broken
-                # symlinks, matching the previous rglob path's filter.
+                # in the renderer cannot catch). is_file() is False for those and for
+                # broken symlinks, matching the previous rglob path's filter.
                 if f.suffix in extensions and f.is_file():
                     eligible.append(f)
     except Exception:
@@ -786,16 +805,108 @@ def _read_repo_context(repo_path: Path) -> str:
         # must not abort context-building, but log it at debug so it is diagnosable
         # rather than silently swallowed.
         logger.debug("os.walk failed while building repo context", exc_info=True)
+    return sorted(eligible)[:_CONTEXT_FILE_CEILING]
 
+
+def _render_context_file(f: Path, repo_path: Path) -> Optional[str]:
+    """Render one eligible file as its full-contents briefing part, or None on read failure.
+
+    Preconditions:
+        - ``f`` is a file under ``repo_path``.
+    Postconditions:
+        - Returns ``"--- {rel} ---\\n{content}\\n"`` with the file's COMPLETE contents (never a
+          prefix); returns None when the file cannot be read (the caller skips it), matching the
+          prior behavior where an unreadable file was silently dropped.
+    """
+    try:
+        content = f.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    rel = str(f.relative_to(repo_path))
+    return f"--- {rel} ---\n{content}\n"
+
+
+def _read_repo_context(repo_path: Path) -> str:
+    """Read the repo structure/code briefing for implementation-worker context.
+
+    Every file the briefing includes is rendered with its FULL contents — the
+    engineer reasons over this to implement a task, and clipping a file would
+    hide code from it (mirroring the team's "inputs are never truncated"
+    contract for the plan text, task description, and review diff). The file
+    ceiling on the eligible-file list is a deliberate cap on how many files the
+    briefing covers, not truncation of any file's content.
+
+    Preconditions:
+        - ``repo_path`` is an existing directory.
+    Postconditions:
+        - Each context-eligible file (matching ``_context_file_filters`` and
+          within the file-count ceiling) appears with its complete contents,
+          never a prefix; no eligible file is dropped to fit a size budget.
+        - Returns ``"No files found"`` when no eligible file is present.
+    """
     parts: List[str] = []
-    for f in sorted(eligible)[:80]:
-        try:
-            content = f.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
-        rel = str(f.relative_to(repo_path))
-        parts.append(f"--- {rel} ---\n{content}\n")
+    for f in _enumerate_context_files(repo_path):
+        part = _render_context_file(f, repo_path)
+        if part is not None:
+            parts.append(part)
     return "\n".join(parts) if parts else "No files found"
+
+
+class _RepoContextCache:
+    """Incremental cache over ``_read_repo_context`` that re-reads only changed files.
+
+    The repo briefing is rebuilt whenever merged work lands (see ``run()``), but a merge typically
+    touches only a handful of the (up to ceiling) files. Re-reading every file each time is the cost
+    this cache removes. It keeps the rendered briefing part per file keyed by ``(st_mtime_ns,
+    st_size)``: on ``read`` it re-enumerates eligible files (a cheap ``os.walk`` + ``stat``) and
+    reuses a cached part whenever the key is unchanged, re-rendering (reading the file) only when the
+    key differs or the file is new. Entries for files no longer eligible are dropped so the cache
+    cannot grow without bound or resurrect stale content.
+
+    Invariants:
+        - The string returned by ``read`` is byte-identical to ``_read_repo_context(repo_path)`` for
+          the same on-disk state — the cache changes *when* files are read, never *what* is rendered.
+        - ``st_mtime_ns`` (nanosecond resolution) plus size is the freshness key; a content change
+          that leaves both identical would not be detected, but a merge always rewrites the file
+          (advancing mtime), so this cannot occur in the swarm's usage.
+
+    Preconditions (``read``):
+        - ``repo_path`` is an existing directory.
+    Postconditions (``read``):
+        - Returns the same value ``_read_repo_context(repo_path)`` would; the internal cache holds an
+          entry for exactly the currently-eligible, successfully-rendered files.
+    """
+
+    def __init__(self) -> None:
+        # path -> (mtime_ns, size, rendered_part)
+        self._entries: Dict[Path, tuple[int, int, str]] = {}
+
+    def read(self, repo_path: Path) -> str:
+        files = _enumerate_context_files(repo_path)
+        fresh: Dict[Path, tuple[int, int, str]] = {}
+        parts: List[str] = []
+        for f in files:
+            try:
+                st = f.stat()
+                key = (st.st_mtime_ns, st.st_size)
+            except Exception:
+                # A file that vanished or cannot be stat-ed between walk and stat is skipped, exactly
+                # as _render_context_file would drop an unreadable file; it also leaves the cache.
+                continue
+            cached = self._entries.get(f)
+            if cached is not None and (cached[0], cached[1]) == key:
+                part = cached[2]
+            else:
+                rendered = _render_context_file(f, repo_path)
+                if rendered is None:
+                    # Unreadable: drop from cache and skip, mirroring _read_repo_context.
+                    continue
+                part = rendered
+            fresh[f] = (key[0], key[1], part)
+            parts.append(part)
+        # Replace wholesale so entries for now-ineligible/removed files are evicted.
+        self._entries = fresh
+        return "\n".join(parts) if parts else "No files found"
 
 
 def _format_decisions(resolved: List[Dict[str, Any]]) -> str:
@@ -1397,7 +1508,10 @@ class CodingTeamSwarm:
         # Set True when a pause ended without answers (terminal/timeout); aborts the loop and tells
         # the orchestrator not to overwrite the failure status with "completed".
         self.aborted = False
-        self.repo_context = _read_repo_context(path)
+        # Incremental repo-context cache: re-reads only files whose (mtime, size) changed instead of
+        # re-reading every eligible file on each refresh (see _RepoContextCache and run()).
+        self._repo_context_cache = _RepoContextCache()
+        self.repo_context = self._repo_context_cache.read(path)
         # Repo context only changes when merged work lands new files on the working tree, so cache
         # the merged-task count the context reflects and re-read only when it advances (see run()).
         self._context_merged_count = self._merged_count()
@@ -2083,18 +2197,51 @@ class CodingTeamSwarm:
                 _add_legacy_reason(str(entry["reason"]))
         return [line_by_key[key] for key in order]
 
-    def _review_and_merge(self, update_fn: Callable) -> None:
-        """Coordinator reviews completed tasks: merge approved ones, send rejected ones back."""
-        from shared_git.git_utils import (
-            DEVELOPMENT_BRANCH,
-            branch_diff,
-            merge_branch,
-        )
+    def _compute_review(
+        self, task: Task, *, live_progress: bool, update_fn: Callable
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Collect the branch diff and run the Tech Lead review for one IN_REVIEW task.
 
-        in_review = [t for t in self.graph.get_tasks() if t.status == TaskStatus.IN_REVIEW]
-        for task in in_review:
-            # Bridge the Tech Lead's attempt/retry reports into the job record so the
-            # UI shows which attempt is running (silent retries look like a hang).
+        This is the read-only half of review: it computes the branch diff (git object-DB reads) and
+        makes the review LLM call, mutating neither the working tree nor the task graph — so it is
+        safe to run concurrently across tasks. The merge/revision decision is applied separately and
+        serially by ``_apply_review_decision``.
+
+        Preconditions:
+            - ``task`` is IN_REVIEW with a recorded feature branch (or the default ``feature/{id}``).
+            - When ``live_progress`` is True, ``update_fn`` is the job progress callback; when False
+              (the concurrent fan-out) no per-task progress is emitted, so ``update_fn`` is unused.
+        Postconditions:
+            - Returns ``(diff, review)`` where ``review`` has the ``run_code_review`` shape
+              (``approved``/``error``/``reason``/``requested_changes``). In the concurrent path a
+              diff-prep or review exception is converted into an ``error=True`` review (with an empty
+              diff) so it fails just this task once rather than aborting the whole round; no graph or
+              git state is changed here.
+        """
+        from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
+
+        branch = task.feature_branch or f"feature/{task.id}"
+        summary = task.changes_summary or "(no summary recorded)"
+
+        def _run(progress_callback: Any) -> Tuple[str, Dict[str, Any]]:
+            diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
+            evidence = _build_review_evidence(summary, diff)
+            review = self.tech_lead.run_code_review(
+                task_title=task.title,
+                task_description=task.description,
+                acceptance_criteria=task.acceptance_criteria,
+                changes_summary=evidence,
+                user_decisions=self._user_decisions_for(task),
+                progress_callback=progress_callback,
+            )
+            return diff, review
+
+        if live_progress:
+            # Sole review this round: keep the live per-task sub-progress bar. Bridge the Tech Lead's
+            # attempt/retry reports into the job record so the UI shows which attempt is running
+            # (silent retries look like a hang). Everything that can raise sits inside the try so the
+            # finally clear runs on every exit path; an activity entry written before the try would
+            # survive an exception.
             tl_bridge = ActivityBridge(
                 update_fn,
                 agent="tech_lead_review",
@@ -2102,45 +2249,107 @@ class CodingTeamSwarm:
                 task_id=task.id,
                 task_title=task.title,
             )
-            branch = task.feature_branch or f"feature/{task.id}"
-            summary = task.changes_summary or "(no summary recorded)"
-            # Everything that can raise — including the diff/evidence prep — sits
-            # inside the try so the finally clear runs on every exit path; an
-            # activity entry written before the try would survive an exception.
             try:
                 tl_bridge("preparing", "collecting branch diff", 0.0)
-                diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
-                evidence = _build_review_evidence(summary, diff)
-                review = self.tech_lead.run_code_review(
-                    task_title=task.title,
-                    task_description=task.description,
-                    acceptance_criteria=task.acceptance_criteria,
-                    changes_summary=evidence,
-                    user_decisions=self._user_decisions_for(task),
-                    progress_callback=tl_bridge,
-                )
+                return _run(tl_bridge)
             finally:
-                # Clear on every exit path so a stale sub-progress bar never lingers
-                # into the next task's review.
+                # Clear on every exit path so a stale sub-progress bar never lingers.
                 tl_bridge.clear()
-            if review.get("error"):
-                # The review itself could not run (e.g. evidence exceeded the model context
-                # window). Do NOT route this through the revision loop — re-sending the same
-                # failing prompt every round would burn the whole revision budget at max cost.
-                # Fail the task once with the diagnostic instead.
-                self._fail_task(task, review, "Tech Lead review could not be completed")
-            elif review.get("approved"):
-                try:
-                    ok, _ = merge_branch(self.path, branch, DEVELOPMENT_BRANCH)
-                    if ok:
-                        self.graph.mark_branch_merged(task.id)
-                except Exception as e:
-                    logger.warning("Merge failed for %s: %s; marking merged anyway", task.id, e)
+
+        # Concurrent fan-out: suppress the per-task progress bridge (concurrent bridges would race the
+        # single job-record sub-progress bar). run_code_review's result is identical with or without a
+        # callback. Contain exceptions here so one task's failure never aborts the round's other
+        # reviews; a converted error review fails this task once in _apply_review_decision.
+        try:
+            return _run(None)
+        except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
+            logger.warning("Tech Lead review preparation failed for %s: %s", task.id, e)
+            return "", {
+                "approved": False,
+                "error": True,
+                "reason": f"Review could not be prepared: {e}",
+                "requested_changes": [],
+            }
+
+    def _apply_review_decision(
+        self, task: Task, diff: str, review: Dict[str, Any], merge_branch: Callable, dev_branch: str
+    ) -> None:
+        """Apply one precomputed review verdict: fail, merge, or send back for revision.
+
+        This is the serial half of review — it performs the git merge and task-graph mutations, so it
+        must run one task at a time (the caller invokes it in the original IN_REVIEW order to keep
+        merge ordering deterministic).
+
+        Preconditions:
+            - ``review`` is the value ``_compute_review`` returned for ``task``; ``diff`` is the diff
+              it collected (empty string on an error review).
+        Postconditions:
+            - ``error`` → task FAILED once (no revision loop); ``approved`` → branch merged and task
+              MERGED; otherwise → task sent back to its engineer for revision. Exactly one of these.
+        """
+        branch = task.feature_branch or f"feature/{task.id}"
+        if review.get("error"):
+            # The review itself could not run (e.g. evidence exceeded the model context window). Do
+            # NOT route this through the revision loop — re-sending the same failing prompt every
+            # round would burn the whole revision budget at max cost. Fail the task once instead.
+            self._fail_task(task, review, "Tech Lead review could not be completed")
+        elif review.get("approved"):
+            try:
+                ok, _ = merge_branch(self.path, branch, dev_branch)
+                if ok:
                     self.graph.mark_branch_merged(task.id)
-            else:
-                # Pass the diff already collected for the reviewer so the no-change check reuses it
-                # rather than re-shelling out to git for the same branch.
-                self._request_revision(task, review, diff=diff)
+            except Exception as e:
+                logger.warning("Merge failed for %s: %s; marking merged anyway", task.id, e)
+                self.graph.mark_branch_merged(task.id)
+        else:
+            # Pass the diff already collected for the reviewer so the no-change check reuses it
+            # rather than re-shelling out to git for the same branch.
+            self._request_revision(task, review, diff=diff)
+
+    def _review_and_merge(self, update_fn: Callable) -> None:
+        """Coordinator reviews completed tasks: merge approved ones, send rejected ones back.
+
+        Reviews are independent (a read-only branch diff plus an LLM call), so a round with several
+        tasks in review fans the reviews out concurrently and then applies the merge/revision
+        decisions serially in the original order. This keeps every git write and graph mutation
+        single-threaded (deterministic merge ordering, branch isolation preserved) while collapsing k
+        serial review latencies into roughly one.
+
+        Postconditions:
+            - Every task that was IN_REVIEW is left MERGED, IN_PROGRESS (revision pending), or FAILED
+              — never IN_REVIEW with no state change — identically to the prior serial loop.
+        """
+        from shared_git.git_utils import DEVELOPMENT_BRANCH, merge_branch
+
+        in_review = [t for t in self.graph.get_tasks() if t.status == TaskStatus.IN_REVIEW]
+        if not in_review:
+            return
+
+        if len(in_review) == 1:
+            # Sole review: run inline with live per-task progress (identical to the prior behavior).
+            task = in_review[0]
+            diff, review = self._compute_review(task, live_progress=True, update_fn=update_fn)
+            self._apply_review_decision(task, diff, review, merge_branch, DEVELOPMENT_BRANCH)
+            return
+
+        # Fan the reviews out concurrently, then apply decisions serially in original order.
+        update_fn(status_text=f"Tech Lead reviewing {len(in_review)} task(s)")
+        max_workers = min(_review_concurrency(), len(in_review))
+        reviews: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ct_review") as pool:
+            future_to_task = {
+                pool.submit(
+                    self._compute_review, task, live_progress=False, update_fn=update_fn
+                ): task
+                for task in in_review
+            }
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                reviews[task.id] = future.result()
+
+        for task in in_review:
+            diff, review = reviews[task.id]
+            self._apply_review_decision(task, diff, review, merge_branch, DEVELOPMENT_BRANCH)
 
     def _request_revision(
         self, task: Task, review: Dict[str, Any], diff: Optional[str] = None
@@ -2272,7 +2481,7 @@ class CodingTeamSwarm:
             # worker blind to earlier merged work and recreate it.
             merged_now = self._merged_count()
             if merged_now != self._context_merged_count:
-                self.repo_context = _read_repo_context(self.path)
+                self.repo_context = self._repo_context_cache.read(self.path)
                 self._context_merged_count = merged_now
 
             # Coordinator: assign ready tasks to free workers
