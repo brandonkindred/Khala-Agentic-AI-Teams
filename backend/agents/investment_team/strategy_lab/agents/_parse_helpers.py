@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from typing import Any, Dict, Iterable
 
 from pydantic import ValidationError
+
+from shared_llm_recovery import extract_json_object as _shared_extract_json_object
 
 from ..spec_dsl import EntryRuleAdapter, ExitRuleAdapter, SizingRuleAdapter
 
@@ -28,59 +29,27 @@ from ..spec_dsl import EntryRuleAdapter, ExitRuleAdapter, SizingRuleAdapter
 def extract_json_object(text: str) -> Dict[str, Any]:
     """Extract a JSON object from an LLM response, tolerating markdown fences.
 
-    The outermost ``{...}`` is located by a brace scanner that is **string-
-    aware**: braces (and quotes) appearing inside a JSON string literal do not
-    affect nesting depth. This matters because the refinement agent funnels a
-    full Python program through ``strategy_code`` — that string routinely holds
-    unbalanced ``{`` / ``}`` (comments, string/regex literals, f-string format
-    specs), and a naive counter would balance early and slice a partial object
-    out of otherwise-valid JSON. Escaped quotes (``\\"``) inside a string are
-    handled so the string is not closed prematurely.
+    A thin **strict** wrapper over ``shared_llm_recovery.extract_json_object``
+    (``repair=False``): the shared engine's string-aware brace scanner locates
+    the authoritative balanced ``{...}`` — braces and quotes inside a JSON string
+    literal do not affect nesting depth, which matters because the refinement
+    agent funnels a full Python program through ``strategy_code`` (comments,
+    string/regex literals, f-string format specs routinely carry unbalanced
+    braces). Strict mode is deliberate: tolerant ``json-repair`` is disabled so a
+    malformed or truncated payload surfaces as a ``ValueError`` and the
+    spec-authoring agents re-prompt the model, rather than silently accepting a
+    repaired guess of half-written code.
 
     Preconditions: ``text`` is a string (possibly empty).
-    Postconditions: returns the parsed dict for the outermost balanced
-    ``{...}`` in the response. Raises ``ValueError`` when no JSON object is
-    present or the substring is not valid JSON. Used by every spec-authoring or
-    spec-reviewing agent in this package — keep behaviour stable.
+    Postconditions: returns the parsed dict for the authoritative balanced
+    ``{...}`` in the response. Raises ``ValueError`` when no strictly-valid JSON
+    object can be recovered. Used by every spec-authoring or spec-reviewing agent
+    in this package — keep the raise-on-failure contract stable.
     """
-    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1)
-
-    start = text.find("{")
-    if start == -1:
+    result = _shared_extract_json_object(text, repair=False)
+    if result is None:
         raise ValueError("No JSON object found in LLM response")
-
-    depth = 0
-    end = start
-    in_string = False
-    escaped = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_string:
-            # Inside a JSON string literal: ignore braces; only an unescaped
-            # double-quote closes it. A backslash escapes the next character.
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Failed to parse JSON from LLM response: {exc}") from exc
+    return result
 
 
 def parse_retry_budget(env_name: str, default: int = 2) -> int:
