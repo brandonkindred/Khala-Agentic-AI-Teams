@@ -73,6 +73,23 @@ def test_temporal_init_does_not_call_os_getenv_at_import():
         )
 
 
+def test_audit_execution_import_is_side_effect_free():
+    """The Temporal activity runs the audit by importing ``audit_execution`` (not
+    ``api.main``). Importing that module must not construct a JobServiceClient or
+    start the API's stale-job monitor, so a worker-only process doesn't inherit
+    a second monitor."""
+    import job_service_client
+
+    _purge("accessibility_audit_team.audit_execution")
+    with (
+        mock.patch.object(job_service_client, "JobServiceClient") as jsc,
+        mock.patch.object(job_service_client, "start_stale_job_monitor") as monitor,
+    ):
+        importlib.import_module("accessibility_audit_team.audit_execution")
+        assert jsc.call_count == 0, "audit_execution built a JobServiceClient at import"
+        assert monitor.call_count == 0, "audit_execution started a stale-job monitor at import"
+
+
 # ---------------------------------------------------------------------------
 # 2. Boot + dispatch contract
 # ---------------------------------------------------------------------------
@@ -127,8 +144,12 @@ def test_start_workflow_rejects_blank_ids():
         start_accessibility_audit_workflow("job1", "", {})
 
 
-def test_start_workflow_dispatches_via_start_workflow_sync(monkeypatch):
+def test_start_workflow_dispatches_and_returns_workflow_id(monkeypatch):
     import shared_temporal
+    from accessibility_audit_team.temporal import worker
+
+    # Idempotent worker-start is called first; stub it so no thread spins up.
+    monkeypatch.setattr(worker, "start_accessibility_audit_temporal_worker_thread", lambda: True)
 
     captured = {}
 
@@ -142,7 +163,8 @@ def test_start_workflow_dispatches_via_start_workflow_sync(monkeypatch):
         start_accessibility_audit_workflow,
     )
 
-    start_accessibility_audit_workflow("job1", "audit1", {"name": "x"})
+    result = start_accessibility_audit_workflow("job1", "audit1", {"name": "x"})
+    assert result == "accessibility_audit-job1"
     assert captured["workflow_id"] == "accessibility_audit-job1"
     assert captured["task_queue"] == "accessibility_audit-queue"
     assert captured["args"][0] == {
@@ -155,11 +177,11 @@ def test_start_workflow_dispatches_via_start_workflow_sync(monkeypatch):
 def test_run_pipeline_activity_delegates_to_execute(monkeypatch):
     """The activity rebuilds the request and runs the shared execution core
     (proves the sync/await + CreateAuditRequest->AuditRequest bugs are fixed)."""
+    from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team import temporal as t
-    from accessibility_audit_team.api import main
 
     executed = mock.AsyncMock()
-    monkeypatch.setattr(main, "_execute_audit_job", executed)
+    monkeypatch.setattr(ax, "execute_audit_job", executed)
 
     payload = {"job_id": "j1", "audit_id": "a1", "request": {"web_urls": ["https://e.com"]}}
     out = asyncio.run(t.run_pipeline_activity(payload))
@@ -167,7 +189,7 @@ def test_run_pipeline_activity_delegates_to_execute(monkeypatch):
     executed.assert_awaited_once()
     called = executed.await_args.args
     assert called[0] == "j1" and called[1] == "a1"
-    assert isinstance(called[2], main.CreateAuditRequest)
+    assert isinstance(called[2], ax.CreateAuditRequest)
     assert out["job_id"] == "j1"
 
 
@@ -219,11 +241,27 @@ def test_temporal_dispatch_returns_starter_when_enabled(monkeypatch):
     assert main._temporal_dispatch() is start_accessibility_audit_workflow
 
 
+def test_temporal_dispatch_logs_and_falls_back_on_start_workflow_import_error(monkeypatch):
+    """Temporal enabled but the team's start_workflow module fails to import:
+    log a warning and fall back (return None) rather than raise."""
+    import shared_temporal
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    # sys.modules[name] = None makes `from ..temporal.start_workflow import ...` raise ImportError.
+    monkeypatch.setitem(sys.modules, "accessibility_audit_team.temporal.start_workflow", None)
+    from accessibility_audit_team.api import main
+
+    with mock.patch.object(main.logger, "warning") as warn:
+        assert main._temporal_dispatch() is None
+        warn.assert_called_once()
+
+
 def test_create_audit_uses_temporal_when_dispatch_available(monkeypatch):
     from accessibility_audit_team.api import main
 
-    monkeypatch.setattr(main, "_job_manager", mock.Mock())
-    dispatch = mock.Mock()
+    jm = mock.Mock()
+    monkeypatch.setattr(main, "_job_manager", jm)
+    dispatch = mock.Mock(return_value="accessibility_audit-wf1")
     monkeypatch.setattr(main, "_temporal_dispatch", lambda: dispatch)
 
     resp = client.post("/audit/create", json={"web_urls": ["https://example.com"]})
@@ -236,6 +274,14 @@ def test_create_audit_uses_temporal_when_dispatch_available(monkeypatch):
     assert args[0] == body["job_id"]
     assert args[1] == body["audit_id"]
     assert isinstance(args[2], dict)
+    # job is marked running with the returned workflow_id (not left PENDING)
+    running = [
+        c
+        for c in jm.update_job.call_args_list
+        if c.kwargs.get("status") == main.JOB_STATUS_RUNNING
+        and c.kwargs.get("workflow_id") == "accessibility_audit-wf1"
+    ]
+    assert running
 
 
 def test_create_audit_uses_background_task_when_temporal_disabled(monkeypatch):
@@ -244,7 +290,7 @@ def test_create_audit_uses_background_task_when_temporal_disabled(monkeypatch):
     monkeypatch.setattr(main, "_job_manager", mock.Mock())
     monkeypatch.setattr(main, "_temporal_dispatch", lambda: None)
     executed = mock.AsyncMock()
-    monkeypatch.setattr(main, "_execute_audit_job", executed)
+    monkeypatch.setattr(main, "execute_audit_job", executed)
 
     resp = client.post("/audit/create", json={"web_urls": ["https://example.com"]})
     assert resp.status_code == 200
@@ -253,13 +299,33 @@ def test_create_audit_uses_background_task_when_temporal_disabled(monkeypatch):
     executed.assert_awaited_once()
 
 
+def test_create_audit_falls_back_when_dispatch_raises(monkeypatch):
+    """A dispatch failure must not orphan the job: fall back to the in-process
+    background task rather than 500 and leave the job stuck PENDING."""
+    from accessibility_audit_team.api import main
+
+    monkeypatch.setattr(main, "_job_manager", mock.Mock())
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(main, "_temporal_dispatch", lambda: _boom)
+    executed = mock.AsyncMock()
+    monkeypatch.setattr(main, "execute_audit_job", executed)
+
+    resp = client.post("/audit/create", json={"web_urls": ["https://example.com"]})
+    assert resp.status_code == 200
+    assert "(Temporal)" not in resp.json()["message"]
+    executed.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
-# _build_audit_request / _execute_audit_job core (also proves the fixed bugs)
+# build_audit_request / execute_audit_job core (also proves the fixed bugs)
 # ---------------------------------------------------------------------------
 
 
 def test_build_audit_request_converts_and_defaults():
-    from accessibility_audit_team.api.main import CreateAuditRequest, _build_audit_request
+    from accessibility_audit_team.audit_execution import CreateAuditRequest, build_audit_request
 
     req = CreateAuditRequest(
         name="n",
@@ -267,24 +333,65 @@ def test_build_audit_request_converts_and_defaults():
         mobile_apps=[{"platform": "android", "name": "App"}],
         wcag_levels=["A", "AA", "bogus"],
     )
-    ar = _build_audit_request(req, "audit_x")
+    ar = build_audit_request(req, "audit_x")
     assert ar.audit_id == "audit_x"
     assert len(ar.mobile_apps) == 1
     assert len(ar.wcag_levels) == 2  # "bogus" dropped
 
 
 def test_build_audit_request_defaults_wcag_when_all_invalid():
-    from accessibility_audit_team.api.main import CreateAuditRequest, _build_audit_request
+    from accessibility_audit_team.audit_execution import CreateAuditRequest, build_audit_request
 
-    ar = _build_audit_request(CreateAuditRequest(wcag_levels=["bogus"]), "audit_y")
+    ar = build_audit_request(CreateAuditRequest(wcag_levels=["bogus"]), "audit_y")
     assert len(ar.wcag_levels) == 2
 
 
 def test_build_audit_request_rejects_blank_audit_id():
-    from accessibility_audit_team.api.main import CreateAuditRequest, _build_audit_request
+    from accessibility_audit_team.audit_execution import CreateAuditRequest, build_audit_request
 
     with pytest.raises(ValueError):
-        _build_audit_request(CreateAuditRequest(), "")
+        build_audit_request(CreateAuditRequest(), "")
+
+
+def test_create_audit_request_validates_url_scheme():
+    from accessibility_audit_team.audit_execution import CreateAuditRequest
+
+    with pytest.raises(ValueError):
+        CreateAuditRequest(web_urls=["ftp://bad.example"])
+
+
+def test_get_orchestrator_builds_and_caches(monkeypatch):
+    """Exercise the lazy orchestrator build (with strands/llm_service stubbed)."""
+    import types
+
+    from accessibility_audit_team import audit_execution as ax
+
+    monkeypatch.setattr(ax, "_orchestrator", None)
+    fake_orch = object()
+    monkeypatch.setattr(ax, "AccessibilityAuditOrchestrator", lambda **kw: fake_orch)
+
+    strands_stub = types.ModuleType("strands")
+    strands_stub.Agent = lambda model=None: object()
+    llm_stub = types.ModuleType("llm_service")
+    llm_stub.get_strands_model = lambda key: object()
+    monkeypatch.setitem(sys.modules, "strands", strands_stub)
+    monkeypatch.setitem(sys.modules, "llm_service", llm_stub)
+
+    assert ax.get_orchestrator() is fake_orch
+    assert ax.get_orchestrator() is fake_orch  # cached, not rebuilt
+
+
+def test_get_job_manager_is_cached(monkeypatch):
+    import job_service_client
+    from accessibility_audit_team import audit_execution as ax
+
+    monkeypatch.setattr(ax, "_job_manager", None)
+    sentinel = object()
+    monkeypatch.setattr(job_service_client, "JobServiceClient", lambda team=None: sentinel)
+    monkeypatch.setattr(ax, "JobServiceClient", lambda team=None: sentinel)
+
+    assert ax.get_job_manager() is sentinel
+    assert ax.get_job_manager() is sentinel  # cached
 
 
 def _fake_result(success: bool):
@@ -299,17 +406,17 @@ def _fake_result(success: bool):
 
 
 def _run_execute(monkeypatch, *, run_audit):
-    """Drive ``_execute_audit_job`` with a mocked orchestrator + job manager."""
-    from accessibility_audit_team.api import main
+    """Drive ``execute_audit_job`` with a mocked orchestrator + job manager."""
+    from accessibility_audit_team import audit_execution as ax
 
     jm = mock.Mock()
-    monkeypatch.setattr(main, "_job_manager", jm)
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
     orch = mock.Mock()
     orch.run_audit = run_audit
-    monkeypatch.setattr(main, "get_orchestrator", lambda: orch)
+    monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
 
-    req = main.CreateAuditRequest(web_urls=["https://e.com"])
-    asyncio.run(main._execute_audit_job("job1", "audit1", req))
+    req = ax.CreateAuditRequest(web_urls=["https://e.com"])
+    asyncio.run(ax.execute_audit_job("job1", "audit1", req))
     return jm, orch
 
 
