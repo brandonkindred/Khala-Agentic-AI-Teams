@@ -184,6 +184,29 @@ def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
         _clear_active_issue(repo_path)
 
 
+def _is_deletable_per_issue(target: Path) -> bool:
+    """True iff *target* is an ephemeral per-issue git checkout safe to delete.
+
+    The three content conditions (2–4) shared by the resolve-time gate in
+    ``_ephemeral_checkout_target`` and the under-lock re-validation in
+    ``_cleanup_issue_checkout``: strictly under an ephemeral workspace root, an
+    ``issue-{N}`` per-issue final component, and carrying a ``.git`` entry. It
+    does NOT resolve or re-check the symlink-root condition (1) — callers pass an
+    already-resolved, non-symlink ``Path``.
+
+    Preconditions:
+        - ``target`` is an already-resolved path (symlink-collapsed).
+    Postconditions:
+        - Returns True iff all three content conditions hold. Pure apart from
+          filesystem reads; never raises.
+    """
+    return (
+        is_within_ephemeral_workspace(target)
+        and is_per_issue_dir(target.name)
+        and (target / ".git").exists()
+    )
+
+
 def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     """Resolve ``repo_path`` and return it iff it is a platform-owned per-issue
     git checkout safe to delete; otherwise ``None``.
@@ -232,12 +255,9 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
         return None
     # ``resolve()`` defaults to ``strict=False`` (Python 3.6+), so a not-yet-created
     # path resolves without raising; passing the already-resolved path to is_within
-    # keeps its internal resolve idempotent.
-    if not is_within_ephemeral_workspace(resolved):
-        return None
-    if not is_per_issue_dir(resolved.name):
-        return None
-    if not (resolved / ".git").exists():
+    # keeps its internal resolve idempotent. Conditions 2–4 are the shared
+    # content gate (see ``_is_deletable_per_issue``).
+    if not _is_deletable_per_issue(resolved):
         return None
     return resolved
 
@@ -257,6 +277,85 @@ def _is_ephemeral_checkout_path(repo_path: str) -> bool:
           reads.
     """
     return _ephemeral_checkout_target(repo_path) is not None
+
+
+def _locked_rmtree(target: Path, repo_path: str) -> None:
+    """Delete a resolved per-issue checkout while holding the shared clone flock.
+
+    Holds the SAME sibling ``flock`` that unified_api's ``_ensure_repo_clone``
+    takes around clone/fetch, keyed on the RESOLVED checkout path (not the raw
+    request string) so a symlinked request can't lock a different name and leave
+    the real checkout unguarded. Re-validates under the lock on the fixed
+    resolved ``target`` — never by re-resolving ``repo_path`` — so a symlink
+    swapped between the first resolve and lock acquisition cannot redirect the
+    delete. The lock file is released and closed but never unlinked (unlinking a
+    flock'd file lets a waiter keep the orphaned inode while a later run locks a
+    fresh one, so two runs would each think they hold "the" lock).
+
+    Preconditions:
+        - ``target`` is the resolved, non-symlink per-issue checkout returned by
+          ``_ephemeral_checkout_target``; ``repo_path`` is the original request
+          string (used only for the failure log line).
+    Postconditions:
+        - Best-effort: ``target`` is removed only if the lock is acquired and it
+          still resolves as a deletable per-issue checkout under the lock. Never
+          raises — any lock/rmtree failure is caught and logged so a successful
+          job is not turned into a failure. The success line is logged only after
+          ``rmtree`` returns.
+    """
+    # clone_lock_path would only raise ValueError on an empty-name path, which a
+    # validated per-issue target never is — but guard it anyway so a future change
+    # can't break the "never raises" contract.
+    try:
+        lock_path = clone_lock_path(target)
+    except ValueError as e:
+        logger.warning("Skipping checkout cleanup; invalid lock path for %s: %s", target, e)
+        return
+    try:
+        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in finally
+    except OSError as e:
+        # Can't take the lock (e.g. parent vanished) — skip rather than delete
+        # unsynchronised and risk racing a concurrent clone. Best-effort.
+        logger.warning("Skipping checkout cleanup; could not open clone lock %s: %s", lock_path, e)
+        return
+    try:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        except OSError as e:
+            # flock can fail (e.g. ENOLCK on some network filesystems). Cleanup must
+            # never turn a successful job into a failure, so skip rather than let it
+            # propagate — honouring the "never raises" contract.
+            logger.warning(
+                "Skipping checkout cleanup; could not acquire clone lock %s: %s", lock_path, e
+            )
+            return
+        # Re-validate under the lock on the fixed resolved ``target`` (see the
+        # docstring): rmtree does not follow symlinks *inside* the tree, and the
+        # resolved root is never a symlink, so a symlink planted in the checkout
+        # can't redirect the delete.
+        if not _is_deletable_per_issue(target):
+            logger.warning("Checkout no longer a deletable per-issue path under lock: %s", target)
+            return
+        try:
+            shutil.rmtree(target)
+            logger.info("Removed ephemeral per-issue checkout at %s", target)
+        except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
+            # exc_info so a partial-rmtree failure (the non-atomic case) is
+            # diagnosable from the traceback, not just the message.
+            logger.warning(
+                "Failed to remove ephemeral checkout at %s: %s", repo_path, e, exc_info=True
+            )
+    finally:
+        # Release and close, but do NOT unlink the lock file (see the docstring).
+        # Both are wrapped so a degenerate flock/close can't break "never raises".
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            lock_file.close()
+        except OSError:
+            pass
 
 
 def _cleanup_issue_checkout(repo_path: str) -> None:
@@ -304,74 +403,7 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
         return
 
-    # Hold the clone lock around the delete so a concurrent _ensure_repo_clone
-    # can't interleave a clone/fetch into the directory being removed. Key the lock
-    # on the RESOLVED checkout path (not the raw request string): _ensure_repo_clone
-    # receives the already-resolved checkout path from _resolve_repo_path, so keying
-    # on the raw string would, for a symlinked path, lock a different name and leave
-    # the real checkout unguarded. The lock lives in the checkout's parent, so it
-    # outlives the rmtree. clone_lock_path would only raise ValueError on an
-    # empty-name path, which a validated per-issue target never is — but guard it
-    # anyway so a future change can't break the "never raises" contract.
-    try:
-        lock_path = clone_lock_path(target)
-    except ValueError as e:
-        logger.warning("Skipping checkout cleanup; invalid lock path for %s: %s", target, e)
-        return
-    try:
-        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in finally
-    except OSError as e:
-        # Can't take the lock (e.g. parent vanished) — skip rather than delete
-        # unsynchronised and risk racing a concurrent clone. Best-effort.
-        logger.warning("Skipping checkout cleanup; could not open clone lock %s: %s", lock_path, e)
-        return
-    try:
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-        except OSError as e:
-            # flock can fail (e.g. ENOLCK on some network filesystems). Cleanup must
-            # never turn a successful job into a failure, so skip rather than let it
-            # propagate — honouring the "never raises" contract.
-            logger.warning(
-                "Skipping checkout cleanup; could not acquire clone lock %s: %s", lock_path, e
-            )
-            return
-        # Re-validate under the lock, but on the SAME resolved ``target`` captured
-        # before locking — NOT by re-resolving the raw ``repo_path``. Re-resolving
-        # would let a symlink swapped between the first resolve and lock
-        # acquisition redirect the delete to a different checkout than the one this
-        # lock protects (the lock is keyed on the original ``target``). Operating
-        # on the fixed resolved path closes that window: it is the real directory
-        # (never a symlink), so rmtree hits the intended checkout, and rmtree does
-        # not follow symlinks *inside* the tree (it unlinks the link, never its
-        # target), so a symlink planted in the checkout can't redirect the delete.
-        if not (
-            is_within_ephemeral_workspace(target)
-            and is_per_issue_dir(target.name)
-            and (target / ".git").exists()
-        ):
-            logger.warning("Checkout no longer a deletable per-issue path under lock: %s", target)
-            return
-        try:
-            shutil.rmtree(target)
-            logger.info("Removed ephemeral per-issue checkout at %s", target)
-        except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
-            # exc_info so a partial-rmtree failure (the non-atomic case noted
-            # above) is diagnosable from the traceback, not just the message.
-            logger.warning(
-                "Failed to remove ephemeral checkout at %s: %s", repo_path, e, exc_info=True
-            )
-    finally:
-        # Release and close, but do NOT unlink the lock file (see Concurrency).
-        # Both are wrapped so a degenerate flock/close can't break "never raises".
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            lock_file.close()
-        except OSError:
-            pass
+    _locked_rmtree(target, repo_path)
 
 
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
