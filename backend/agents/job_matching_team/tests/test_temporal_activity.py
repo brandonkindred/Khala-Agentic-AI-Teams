@@ -38,12 +38,20 @@ class _FakeOrchestrator:
 
 
 class _FakeJobStore:
-    """Records status transitions and drives cancellation checks."""
+    """Records status transitions and drives cancellation checks.
 
-    def __init__(self, *, cancelled_after: int | None = None) -> None:
+    ``existing`` is what ``get_job`` returns (default None — job untracked by the
+    fake, so the idempotency guard falls through to a normal run).
+    """
+
+    def __init__(self, *, cancelled_after: int | None = None, existing: dict | None = None) -> None:
         self.updates: list[dict] = []
         self._cancel_checks = 0
         self._cancelled_after = cancelled_after
+        self._existing = existing
+
+    def get_job(self, job_id):
+        return self._existing
 
     def update_job(self, job_id, **fields):
         self.updates.append(fields)
@@ -61,6 +69,7 @@ class _FakeJobStore:
 
 def _patch(monkeypatch, orch, store):
     monkeypatch.setattr("job_matching_team.orchestrator.JobMatchingOrchestrator", lambda: orch)
+    monkeypatch.setattr("job_matching_team.shared.job_store.get_job", store.get_job)
     monkeypatch.setattr("job_matching_team.shared.job_store.update_job", store.update_job)
     monkeypatch.setattr(
         "job_matching_team.shared.job_store.is_job_cancelled", store.is_job_cancelled
@@ -129,6 +138,33 @@ def test_activity_skips_failed_update_when_cancelled(monkeypatch):
 
     assert result == {}
     assert store.statuses == ["running"]  # RUNNING set, FAILED skipped
+
+
+def test_activity_replays_completed_job_without_rerunning(monkeypatch):
+    """A retry landing on an already-COMPLETED job returns the stored result and
+    does not re-run the scan or touch the job store."""
+    orch = _FakeOrchestrator()
+    stored = {"run_id": "run-1", "ranked_jobs": []}
+    store = _FakeJobStore(existing={"status": "completed", "result": stored})
+    _patch(monkeypatch, orch, store)
+
+    result = ActivityEnvironment().run(run_scan_activity, "job-6", {})
+
+    assert result == stored
+    assert orch.calls == []  # scan not re-run
+    assert store.statuses == []  # no status mutation
+
+
+def test_activity_replay_tolerates_missing_result(monkeypatch):
+    """Defensive: a COMPLETED row without a stored result returns an empty dict."""
+    orch = _FakeOrchestrator()
+    store = _FakeJobStore(existing={"status": "completed"})
+    _patch(monkeypatch, orch, store)
+
+    result = ActivityEnvironment().run(run_scan_activity, "job-7", {})
+
+    assert result == {}
+    assert orch.calls == []
 
 
 def test_activity_signature_takes_job_id_first():

@@ -35,8 +35,10 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
     Temporal's retry loop. A genuine worker/process crash leaves the activity
     task unfinished, which Temporal retries (bounded — see the workflow's
     ``RetryPolicy``) — that is what makes an in-flight scan survive a restart.
-    The scan is not idempotent (each attempt starts a fresh run and spends LLM
-    calls), so the bounded retry caps how much duplicate work a crash can cause.
+    A retry that lands on an already-COMPLETED job short-circuits and returns
+    the stored result, so a crash that lost only the activity result never
+    re-runs a finished scan; a crash mid-run (before COMPLETED) re-runs, bounded
+    by the retry policy.
 
     Preconditions:
         * ``job_id`` refers to a job row already created by ``POST /scan``.
@@ -45,6 +47,8 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
         * The job row is COMPLETED (with the serialised response) on success,
           FAILED (with the error) on failure, and left untouched if the job was
           cancelled before or during the run.
+        * Idempotent on retry: when the job is already COMPLETED, returns the
+          stored result without re-running or mutating the job row.
         * The return value is the serialised :class:`JobMatchResponse` on
           success, else an empty dict.
     """
@@ -54,12 +58,20 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
         JOB_STATUS_COMPLETED,
         JOB_STATUS_FAILED,
         JOB_STATUS_RUNNING,
+        get_job,
         is_job_cancelled,
         update_job,
     )
 
     req = JobMatchRequest(**request)
     try:
+        # Idempotent replay: if a prior attempt already COMPLETED this scan (a
+        # crash after update_job(COMPLETED) but before Temporal recorded the
+        # result triggers a retry), return the stored result instead of
+        # re-running — no status flap, no duplicate scan/LLM spend.
+        existing = get_job(job_id)
+        if existing is not None and existing.get("status") == JOB_STATUS_COMPLETED:
+            return existing.get("result") or {}
         if is_job_cancelled(job_id):
             return {}
         update_job(job_id, status=JOB_STATUS_RUNNING)
