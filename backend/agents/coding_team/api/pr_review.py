@@ -391,6 +391,201 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
         _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
 
 
+def _finalize_review(
+    job_id: str,
+    status: str,
+    status_text: Optional[str] = None,
+    *,
+    phase: Optional[str] = None,
+    github_pr_url: Optional[str] = None,
+    review_summary: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Write a terminal review outcome to both the job store and the review row.
+
+    Single source of the paired ``update_job`` + ``update_review`` write that
+    every terminal path of the PR-review hook performs. The review row mirrors
+    the job minus the job-only fields ``phase``/``github_pr_url``, plus its own
+    ``completed=True``. Job is written before review, as at every original site.
+
+    Preconditions:
+        - ``status`` is a terminal status ("completed"/"failed"); each optional
+          field is supplied only when the originating path set it.
+    Postconditions:
+        - ``update_job`` then ``update_review`` are called with exactly the
+          non-``None`` fields supplied; ``update_review`` additionally receives
+          ``completed=True``.
+    """
+    job_kwargs: Dict[str, Any] = {"status": status}
+    review_kwargs: Dict[str, Any] = {"status": status, "completed": True}
+    if status_text is not None:
+        job_kwargs["status_text"] = status_text
+        review_kwargs["status_text"] = status_text
+    if phase is not None:
+        job_kwargs["phase"] = phase
+    if github_pr_url is not None:
+        job_kwargs["github_pr_url"] = github_pr_url
+    if review_summary is not None:
+        job_kwargs["review_summary"] = review_summary
+        review_kwargs["review_summary"] = review_summary
+    if error is not None:
+        job_kwargs["error"] = error
+        review_kwargs["error"] = error
+    _main.update_job(job_id, **job_kwargs)
+    _main.update_review(job_id, **review_kwargs)
+
+
+def _complete_review_noop(
+    client: Any,
+    job_id: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr: Any,
+    *,
+    comment: str,
+    status_text: str,
+) -> None:
+    """Post a no-op review comment and mark the job/review completed.
+
+    The shared shape of the two early exits (no changed files / no reviewable
+    content): a courtesy PR comment plus a ``completed`` terminal write.
+
+    Preconditions:
+        - ``client`` is an open ``GitHubClient``; ``pr`` carries ``html_url``.
+    Postconditions:
+        - A best-effort comment is posted and the job/review are finalized
+          ``completed`` with ``status_text`` and the PR URL.
+    """
+    _main._safe_comment(client, owner, repo, pr_number, comment)
+    _finalize_review(job_id, "completed", status_text, phase="completed", github_pr_url=pr.html_url)
+
+
+def _run_reviewer(
+    provider: Any,
+    client: Any,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    job_id: str,
+    pr: Any,
+    files: List[Any],
+    code: str,
+) -> Optional[Any]:
+    """Run the injected review engine, recording a failure and returning ``None`` on error.
+
+    The PR reviewer is an injected engine (software_engineering_team owns it);
+    coding_team calls it through the CodeEngineProvider so this package imports
+    nothing from SE. Progress is coalesced through an ``ActivityBridge`` (shared
+    schema, swallow-on-failure, clear-on-exit) whose sub-progress entry is always
+    cleared on the way out so it never outlives the review.
+
+    Preconditions:
+        - ``provider`` was resolved before the first GitHub call; ``code`` is the
+          pre-numbered review body.
+    Postconditions:
+        - Returns a truthy reviewer output on success. On any reviewer failure —
+          an exception, OR a reviewer that returns ``None`` without raising —
+          records the failure on the PR/job via ``_record_failure`` and returns
+          ``None``. The caller returns on ``None``, so recording the failure here
+          is what keeps the daemon-thread job from wedging in ``running`` (the
+          pre-decomposition body reached the same terminal-failed state when a
+          ``None`` output hit ``output.issues`` and raised into the outer except).
+    """
+    # last_activity_at is stamped centrally by the job service on every real
+    # update, so these writes count as activity for stall detection.
+    pr_bridge = ActivityBridge(
+        lambda **kw: _main.update_job(job_id, **kw),
+        agent="code_review",
+        label=f"Reviewing PR #{pr_number}",
+    )
+    try:
+        output = provider.run_pr_code_review(
+            code=code,
+            # _build_review_code renders every line with its original line-number
+            # prefix; declaring it here (instead of letting the reviewer sniff the
+            # format) keeps issue lines verbatim.
+            pre_numbered=True,
+            task_description=f"Review pull request #{pr_number}: {pr.title}",
+            task_requirements=pr.body or "",
+            language=_infer_review_language(files),
+            progress_callback=pr_bridge,
+        )
+    except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
+        logger.exception("PR review agent failed: %s", e)
+        _main._record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
+        return None
+    finally:
+        # Clear so a stale sub-progress entry never outlives the review itself.
+        pr_bridge.clear()
+    if output is None:
+        # A reviewer that returns no output (rather than raising) must not slip
+        # through as a silent success — the caller returns on None with no
+        # terminal write, which would wedge the job in "running" forever.
+        logger.error("PR review agent returned no output for PR #%s", pr_number)
+        _main._record_failure(
+            client,
+            owner,
+            repo,
+            pr_number,
+            job_id,
+            "code review failed: reviewer returned no output",
+        )
+        return None
+    return output
+
+
+def _post_file_comments(
+    client: Any,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    entries: List[Dict[str, Any]],
+) -> tuple[int, List[Dict[str, Any]]]:
+    """Post file-level review comments, demoting only 422-rejected anchors to standalone.
+
+    File-level comments (mapped + re-anchored leftovers) and any bisected-out line
+    comments (demoted, keeping the file anchor) each go on the dedicated
+    review-comments endpoint.
+
+    Preconditions:
+        - ``entries`` are comment dicts that may carry ``path``/``body``.
+    Postconditions:
+        - Returns ``(file_comment_count, standalone)``: the count posted as
+          file-level comments, and the entries that must fall back to standalone
+          timeline comments (no path, or a 422 bad-anchor rejection). Any non-422
+          ``GitHubAPIError`` propagates so the job fails loudly.
+    """
+    file_comment_count = 0
+    standalone: List[Dict[str, Any]] = []
+    for comment in entries:
+        path = comment.get("path")
+        if path:
+            try:
+                client.create_review_comment(
+                    owner=owner,
+                    repo=repo,
+                    number=pr_number,
+                    commit_id=head_sha,
+                    path=path,
+                    body=scrub_token_from_text(comment.get("body", "")),
+                    subject_type="file",
+                )
+                file_comment_count += 1
+                continue
+            except GitHubAPIError as e:
+                # Only a 422 (bad anchor) is worth demoting to a standalone
+                # comment; any other status (permission, rate-limit, transport,
+                # server) is a real failure that must propagate so the job fails
+                # loudly instead of silently degrading.
+                if e.status != _HTTP_UNPROCESSABLE:
+                    raise
+                # Last resort: fall through to standalone posting (rare).
+        standalone.append(comment)
+    return file_comment_count, standalone
+
+
 def _run_pr_review_body(
     job_id: str,
     request: ReviewPrRequest,
@@ -414,85 +609,49 @@ def _run_pr_review_body(
             pr = client.get_pull_request(owner, repo, pr_number)
             files = client.get_pull_request_files(owner, repo, pr_number)
             if not files:
-                _main._safe_comment(
-                    client, owner, repo, pr_number, "Code review: no changed files to review."
-                )
-                _main.update_job(
+                _complete_review_noop(
+                    client,
                     job_id,
-                    status="completed",
-                    phase="completed",
+                    owner,
+                    repo,
+                    pr_number,
+                    pr,
+                    comment="Code review: no changed files to review.",
                     status_text="No changed files to review",
-                    github_pr_url=pr.html_url,
-                )
-                _main.update_review(
-                    job_id,
-                    status="completed",
-                    status_text="No changed files to review",
-                    completed=True,
                 )
                 return
 
             valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
             code, files_reviewed = _build_review_code(files)
             if not code:
-                _main._safe_comment(
-                    client, owner, repo, pr_number, "Code review: no reviewable file content."
-                )
-                _main.update_job(
+                _complete_review_noop(
+                    client,
                     job_id,
-                    status="completed",
-                    phase="completed",
+                    owner,
+                    repo,
+                    pr_number,
+                    pr,
+                    comment="Code review: no reviewable file content.",
                     status_text="No reviewable file content",
-                    github_pr_url=pr.html_url,
-                )
-                _main.update_review(
-                    job_id,
-                    status="completed",
-                    status_text="No reviewable file content",
-                    completed=True,
                 )
                 return
 
             try:
                 reviewer_login = client.get_authenticated_login()
-            except GitHubAPIError:
+            except GitHubAPIError as e:
+                # Non-fatal: reviewer_login only feeds choose_event() (the self-PR
+                # REQUEST_CHANGES -> COMMENT downgrade). Log so the degradation is
+                # not silent, then fall back to "" and let the review proceed — a
+                # genuine bad/permission-limited token already surfaces on the PR
+                # fetch above and on review submission below.
+                logger.warning("Could not resolve reviewer login for PR #%s: %s", pr_number, e)
                 reviewer_login = ""
 
-            # The PR reviewer is an injected engine (software_engineering_team owns
-            # it); coding_team calls it through the CodeEngineProvider so this
-            # package imports nothing from SE. The provider was resolved (and its
-            # absence handled) before the first GitHub call above.
-            # Same bridge as the orchestrator's review sites: shared schema,
-            # coalescing, swallow-on-failure, and clear-on-exit in one place.
-            # last_activity_at is stamped centrally by the job service on every
-            # real update, so these writes count as activity for stall detection.
-            pr_bridge = ActivityBridge(
-                lambda **kw: _main.update_job(job_id, **kw),
-                agent="code_review",
-                label=f"Reviewing PR #{pr_number}",
+            output = _run_reviewer(
+                provider, client, owner, repo, pr_number, job_id, pr, files, code
             )
-
-            try:
-                output = provider.run_pr_code_review(
-                    code=code,
-                    # _build_review_code renders every line with its original
-                    # line-number prefix; declaring it here (instead of letting the
-                    # reviewer sniff the format) keeps issue lines verbatim.
-                    pre_numbered=True,
-                    task_description=f"Review pull request #{pr_number}: {pr.title}",
-                    task_requirements=pr.body or "",
-                    language=_infer_review_language(files),
-                    progress_callback=pr_bridge,
-                )
-            except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
-                logger.exception("PR review agent failed: %s", e)
-                _main._record_failure(
-                    client, owner, repo, pr_number, job_id, f"code review failed: {e}"
-                )
+            if output is None:
                 return
-            finally:
-                # Clear so a stale sub-progress entry never outlives the review itself.
-                pr_bridge.clear()
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
 
@@ -544,32 +703,9 @@ def _run_pr_review_body(
             # go on the dedicated endpoint. A rejected line comment falls through
             # as its original entry, so the standalone fallback still names
             # ``path:line``.
-            file_comment_count = 0
-            standalone: list[dict[str, Any]] = []
-            for comment in file_comments + dropped_lines:
-                path = comment.get("path")
-                if path:
-                    try:
-                        client.create_review_comment(
-                            owner=owner,
-                            repo=repo,
-                            number=pr_number,
-                            commit_id=pr.head_sha,
-                            path=path,
-                            body=scrub_token_from_text(comment.get("body", "")),
-                            subject_type="file",
-                        )
-                        file_comment_count += 1
-                        continue
-                    except GitHubAPIError as e:
-                        # Only a 422 (bad anchor) is worth demoting to a standalone
-                        # comment; any other status (permission, rate-limit,
-                        # transport, server) is a real failure that must propagate
-                        # so the job fails loudly instead of silently degrading.
-                        if e.status != _HTTP_UNPROCESSABLE:
-                            raise
-                        # Last resort: fall through to standalone posting (rare).
-                standalone.append(comment)
+            file_comment_count, standalone = _post_file_comments(
+                client, owner, repo, pr_number, pr.head_sha, file_comments + dropped_lines
+            )
 
             # Only truly-unpostable findings fall through to standalone comments.
             standalone_bodies = [inline_comment_to_timeline_body(c) for c in standalone]
@@ -607,21 +743,13 @@ def _run_pr_review_body(
                     pr_number,
                     f"Code review incomplete: {err}. See the coding team job for details.",
                 )
-                _main.update_job(
+                _finalize_review(
                     job_id,
-                    status="failed",
-                    status_text=err,
+                    "failed",
+                    err,
                     github_pr_url=pr.html_url,
                     review_summary=review_summary,
                     error=err,
-                )
-                _main.update_review(
-                    job_id,
-                    status="failed",
-                    status_text=err,
-                    review_summary=review_summary,
-                    error=err,
-                    completed=True,
                 )
                 return
             status_text = (
@@ -629,20 +757,13 @@ def _run_pr_review_body(
                 f"{inline_count} inline, {file_comment_count} file-level, "
                 f"{comment_findings} comment(s), event={event}"
             )
-            _main.update_job(
+            _finalize_review(
                 job_id,
-                status="completed",
+                "completed",
+                status_text,
                 phase="completed",
-                status_text=status_text,
                 github_pr_url=pr.html_url,
                 review_summary=review_summary,
-            )
-            _main.update_review(
-                job_id,
-                status="completed",
-                status_text=status_text,
-                review_summary=review_summary,
-                completed=True,
             )
     except Exception as review_exc:  # noqa: BLE001 - any failure must mark the job, never wedge it
         # The hook runs in a daemon thread; if we let an exception escape, the thread
@@ -663,8 +784,93 @@ def _run_pr_review_body(
             # ``review_exc`` is the original review failure (the inner except has
             # no exception of its own); surface it on both the job and review row.
             safe_err = scrub_token_from_text(str(review_exc))
-            _main.update_job(job_id, status="failed", error=safe_err)
-            _main.update_review(job_id, status="failed", error=safe_err, completed=True)
+            _finalize_review(job_id, "failed", error=safe_err)
+
+
+def _try_review(
+    client: _main.GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    body: str,
+    event: str,
+    comments: List[Dict[str, Any]],
+) -> bool:
+    """Submit one PR review, returning False on a recoverable 422 and re-raising otherwise.
+
+    Only a 422 (validation — a bad diff line, or REQUEST_CHANGES on the bot's own
+    PR) is recoverable by dropping the event/comments; any other status
+    (permission, rate-limit, transport, server) is a real failure re-raised so the
+    caller fails loudly instead of silently degrading.
+
+    Preconditions:
+        - ``comments`` are already token-scrubbed review-comment dicts.
+    Postconditions:
+        - Returns True when GitHub accepted the review; False (after logging) on a
+          422. Raises ``GitHubAPIError`` for any non-422 status.
+    """
+    try:
+        client.create_pull_request_review(
+            owner=owner,
+            repo=repo,
+            number=pr_number,
+            commit_id=head_sha,
+            body=body,
+            event=event,
+            comments=comments,
+        )
+        return True
+    except GitHubAPIError as e:
+        if e.status != _HTTP_UNPROCESSABLE:
+            raise
+        logger.warning(
+            "PR review submit failed (event=%s, comments=%d): %s", event, len(comments), e
+        )
+        return False
+
+
+def _post_summary_only(
+    client: _main.GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    body: str,
+    events: List[str],
+) -> List[Dict[str, Any]]:
+    """Post the summary body alone across candidate events; raise if all attempts fail.
+
+    Used when a review carries no line-anchored findings. Unlike the inline-comment
+    path, EVERY ``GitHubAPIError`` is tolerated per event (not just 422): the caller
+    decides whether a total failure is fatal (a zero-finding review whose only
+    output is this summary) or a best-effort courtesy (file-level findings still
+    posted separately).
+
+    Preconditions:
+        - ``events`` is a non-empty ordered list of candidate review events.
+    Postconditions:
+        - Returns ``[]`` as soon as one event succeeds; raises the last
+          ``GitHubAPIError`` when every event failed.
+    """
+    last_exc: Optional[GitHubAPIError] = None
+    for ev in events:
+        try:
+            client.create_pull_request_review(
+                owner=owner,
+                repo=repo,
+                number=pr_number,
+                commit_id=head_sha,
+                body=body,
+                event=ev,
+                comments=[],
+            )
+            return []
+        except GitHubAPIError as e:
+            logger.warning("PR summary-only review failed (event=%s): %s", ev, e)
+            last_exc = e
+    assert last_exc is not None
+    raise last_exc
 
 
 def _submit_review(
@@ -723,49 +929,16 @@ def _submit_review(
         # endpoint the summary is a best-effort courtesy and its failure is
         # tolerated, but a zero-finding review whose only output is this summary
         # must surface as failed rather than report a hollow success.
-        last_exc: Optional[GitHubAPIError] = None
-        for ev in events:
-            try:
-                client.create_pull_request_review(
-                    owner=owner,
-                    repo=repo,
-                    number=pr_number,
-                    commit_id=head_sha,
-                    body=body,
-                    event=ev,
-                    comments=[],
-                )
-                return []
-            except GitHubAPIError as e:
-                logger.warning("PR summary-only review failed (event=%s): %s", ev, e)
-                last_exc = e
-        assert last_exc is not None
-        raise last_exc
+        return _post_summary_only(client, owner, repo, pr_number, head_sha, body, events)
 
     # Happy path: one review carrying the summary body + every inline comment.
     # REQUEST_CHANGES degrades to COMMENT for the bot's own PR without losing the
-    # comments.
+    # comments. Only a 422 is recoverable (retry as COMMENT, then bisect below);
+    # _try_review re-raises any other status so the job fails loudly.
+    scrubbed = [p[0] for p in pairs]
     for ev in events:
-        try:
-            client.create_pull_request_review(
-                owner=owner,
-                repo=repo,
-                number=pr_number,
-                commit_id=head_sha,
-                body=body,
-                event=ev,
-                comments=[p[0] for p in pairs],
-            )
+        if _try_review(client, owner, repo, pr_number, head_sha, body, ev, scrubbed):
             return []
-        except GitHubAPIError as e:
-            # Only a 422 (validation — a bad diff line) is recoverable by
-            # dropping the event/comments. A 403 (permission/rate-limit), 0
-            # (transport), or 5xx is a real failure: re-raise so the outer
-            # handler marks the job failed instead of silently degrading to
-            # standalone comments and reporting success.
-            if e.status != _HTTP_UNPROCESSABLE:
-                raise
-            logger.warning("PR review submit failed (event=%s, comments=%d): %s", ev, len(pairs), e)
 
     # The full batch was rejected by a bad line. Post the summary on its own so it
     # is not lost, then bisect the comments to drop only the offending ones.
@@ -808,30 +981,25 @@ def _bisect_submit(
           posted inline. Returns the original comments GitHub still rejects when a
           single comment is submitted on its own (``[]`` when all were posted).
     """
-    try:
-        client.create_pull_request_review(
-            owner=owner,
-            repo=repo,
-            number=pr_number,
-            commit_id=head_sha,
-            body=_BISECT_CONTINUATION_BODY,
-            event="COMMENT",
-            comments=[p[0] for p in pairs],
-        )
+    # Only a 422 means a bad diff line worth bisecting out; _try_review re-raises
+    # any other status rather than mistaking it for one stray off-diff comment.
+    if _try_review(
+        client,
+        owner,
+        repo,
+        pr_number,
+        head_sha,
+        _BISECT_CONTINUATION_BODY,
+        "COMMENT",
+        [p[0] for p in pairs],
+    ):
         return []
-    except GitHubAPIError as e:
-        # Only a 422 means a bad diff line worth bisecting out; any other status
-        # (permission, rate-limit, transport, server) is a real failure that must
-        # propagate rather than be mistaken for one stray off-diff comment.
-        if e.status != _HTTP_UNPROCESSABLE:
-            raise
-        logger.warning("PR review submit failed (event=COMMENT, comments=%d): %s", len(pairs), e)
-        if len(pairs) <= 1:
-            return [p[1] for p in pairs]
-        mid = len(pairs) // 2
-        return _bisect_submit(
-            client, owner, repo, pr_number, head_sha, pairs[:mid]
-        ) + _bisect_submit(client, owner, repo, pr_number, head_sha, pairs[mid:])
+    if len(pairs) <= 1:
+        return [p[1] for p in pairs]
+    mid = len(pairs) // 2
+    return _bisect_submit(client, owner, repo, pr_number, head_sha, pairs[:mid]) + _bisect_submit(
+        client, owner, repo, pr_number, head_sha, pairs[mid:]
+    )
 
 
 # ---------------------------------------------------------------------------

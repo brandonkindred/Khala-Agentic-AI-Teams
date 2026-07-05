@@ -590,3 +590,72 @@ def test_get_job_status_non_dict_current_activity_coerced_to_none(
     r = client.get(f"/run-team/{job_id}")
     assert r.status_code == 200
     assert r.json()["current_activity"] is None
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for the shared path-validation / temporal-guard helpers extracted
+# from run_team / resume / restart (single-contract collapse).
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_repo_path_non_sprint_returns_resolved_path(temp_work_path: Path) -> None:
+    """Non-sprint mode applies the spec-gated validator and returns the resolved Path."""
+    from software_engineering_team.api.routes.jobs import _resolve_repo_path
+
+    resolved = _resolve_repo_path(str(temp_work_path), None)
+    assert resolved == temp_work_path.resolve()
+
+
+def test_resolve_repo_path_sprint_mode_skips_spec_gate(tmp_path: Path) -> None:
+    """Sprint mode validates a code-only dir (no initial_spec.md) without a 400."""
+    from software_engineering_team.api.routes.jobs import _resolve_repo_path
+
+    code_only = tmp_path / "code_only"
+    code_only.mkdir()
+    resolved = _resolve_repo_path(str(code_only), "sprint-1")
+    assert resolved == code_only.resolve()
+
+
+def test_resolve_repo_path_non_sprint_missing_spec_is_400(tmp_path: Path) -> None:
+    """Non-sprint mode rejects a code-only dir (missing spec) as a 400."""
+    from fastapi import HTTPException
+
+    from software_engineering_team.api.routes.jobs import _resolve_repo_path
+
+    code_only = tmp_path / "code_only"
+    code_only.mkdir()
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(str(code_only), None)
+    assert exc.value.status_code == 400
+
+
+def test_resolve_repo_path_invalid_path_is_400() -> None:
+    """A non-existent path surfaces as a 400 regardless of sprint mode."""
+    from fastapi import HTTPException
+
+    from software_engineering_team.api.routes.jobs import _resolve_repo_path
+
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path("/nonexistent/xyz", None)
+    assert exc.value.status_code == 400
+
+
+def test_reject_sprint_under_temporal_raises_when_both_set() -> None:
+    """Temporal + sprint_id is a 400 client-input error."""
+    from fastapi import HTTPException
+
+    from software_engineering_team.api.routes.jobs import _reject_sprint_under_temporal
+
+    with pytest.raises(HTTPException) as exc:
+        _reject_sprint_under_temporal(True, "sprint-1", detail="nope")
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "nope"
+
+
+def test_reject_sprint_under_temporal_noop_when_not_both() -> None:
+    """No rejection when Temporal is off, or when sprint_id is absent."""
+    from software_engineering_team.api.routes.jobs import _reject_sprint_under_temporal
+
+    assert _reject_sprint_under_temporal(False, "sprint-1", detail="nope") is None
+    assert _reject_sprint_under_temporal(True, None, detail="nope") is None
+    assert _reject_sprint_under_temporal(False, None, detail="nope") is None
