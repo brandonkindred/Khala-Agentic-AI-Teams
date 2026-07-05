@@ -210,11 +210,15 @@ def test_materialise_project_dir_copies_grafana(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_STACK_TEMPLATE", str(template))
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "cache"))
 
-    path = pm._materialise_project_dir("khala-sbx-test", host_port=12345, postgres_password="pw")
+    path = pm._materialise_project_dir(
+        "khala-sbx-test", host_port=12345, postgres_password="pw", manifest_json='{"id": "x"}'
+    )
     assert (path / "docker-compose.yml").exists()
     assert (path / "grafana-provisioning" / "datasources.yml").exists()
     # Re-run should overwrite (tests the grafana_dst exists rmtree branch).
-    pm._materialise_project_dir("khala-sbx-test", host_port=12345, postgres_password="pw")
+    pm._materialise_project_dir(
+        "khala-sbx-test", host_port=12345, postgres_password="pw", manifest_json='{"id": "x"}'
+    )
 
 
 # ---------------------------------------------------------------------------

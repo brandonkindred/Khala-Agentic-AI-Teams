@@ -711,8 +711,12 @@ async def test_run_container_cleans_up_on_inspect_failure(tmp_path: Path, monkey
 
     monkeypatch.setattr(pm, "_exec", fake_exec)
 
+    # Resolvable agent so run_container reaches the compose-up → inspect-fail path
+    # (the cleanup branch under test) rather than the earlier unknown-agent fail-fast.
     with pytest.raises(pm.DockerError):
-        await pm.run_container(agent_id="a1", container_name="khala-sbx-inspect-fail", team="x")
+        await pm.run_container(
+            agent_id="blogging.planner", container_name="khala-sbx-inspect-fail", team="x"
+        )
 
     # Project dir must be removed on cleanup.
     project_dir = (
@@ -735,7 +739,9 @@ async def test_run_container_cleans_up_on_docker_error_in_exec(tmp_path: Path, m
     monkeypatch.setattr(pm, "_exec", boom)
 
     with pytest.raises(pm.DockerError):
-        await pm.run_container(agent_id="a1", container_name="khala-sbx-boom", team="x")
+        await pm.run_container(
+            agent_id="blogging.planner", container_name="khala-sbx-boom", team="x"
+        )
 
     project_dir = tmp_path / "agent_provisioning" / "sandboxes" / "stacks" / "khala-sbx-boom"
     assert not project_dir.exists()
