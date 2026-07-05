@@ -528,6 +528,200 @@ def _preserve_if_would_orphan(
     return None
 
 
+def _reconcile_remote_issue_ref(
+    repo_path: str,
+    remote: str,
+    integration_branch: str,
+    base_ref: str,
+    remote_issue_ref: str,
+    auth_env: Optional[Dict[str, str]],
+    issue_fetch_msg: str,
+) -> Optional[str]:
+    """Reconcile a failed issue-branch fetch: confirm absence, then drop the stale tracking ref.
+
+    ``fetch`` exit codes do not distinguish "no such remote ref" from a transient
+    transport failure, and only confirmed absence may take the deletion path —
+    dropping the tracking ref on a network blip would hide live remote progress
+    from candidate selection and let the final force-with-lease push race against
+    it. Probe absence explicitly with ``ls-remote --exit-code`` (2 = no matching
+    head, 0 = present, anything else = transport failure).
+
+    Preconditions:
+        - Called only when the issue-branch fetch returned non-zero; the
+          base-branch fetch already succeeded (so the remote is reachable).
+    Postconditions:
+        - Returns an error string on a transient failure, an unverifiable
+          absence, or an undeletable stale ref (callers must fail closed).
+        - Returns ``None`` when the remote branch is confirmed absent and its
+          stale remote-tracking ref (if it was ahead) has been pinned via a
+          rescue ref and then dropped, so it can no longer pose as live state.
+    """
+    rc_probe, probe_out = _main._git(
+        repo_path,
+        "ls-remote",
+        "--exit-code",
+        "--heads",
+        "--",
+        remote,
+        integration_branch,
+        env=auth_env,
+    )
+    if rc_probe == 0:
+        return (
+            f"could not fetch remote issue branch {integration_branch!r} "
+            f"(it exists on the remote — transient failure?): {issue_fetch_msg}"
+        )
+    if rc_probe != 2:
+        return (
+            f"cannot verify whether remote issue branch {integration_branch!r} still "
+            f"exists (fetch failed: {issue_fetch_msg}; probe failed: {probe_out})"
+        )
+    # The remote branch is absent (deleted/pruned — the probe confirmed it). A
+    # stale remote-tracking ref from an earlier fetch would otherwise pose as
+    # live remote state: candidate selection could seed from it and the final
+    # force push would republish commits the remote deliberately no longer has.
+    # Pin its tip first (never-lose-work invariant), then drop the tracking ref.
+    # The rescue is deliberately UNTAGGED: a remote deletion is an explicit
+    # signal not to continue this state, so it is preserved for manual recovery
+    # without becoming an automatic continuation candidate (unlike preserved
+    # local divergence, which the system itself was still carrying).
+    if _is_ahead(repo_path, remote_issue_ref, base_ref):
+        preserve_err = _main._preserve_if_would_orphan(
+            repo_path, remote_issue_ref, base_ref, base_ref, None
+        )
+        if preserve_err:
+            return preserve_err
+    _main._git(repo_path, "update-ref", "-d", f"refs/remotes/{remote_issue_ref}")
+    # Postcondition, not return-code, check: deletion legitimately fails when the
+    # ref never existed (fresh issue), but a ref that SURVIVES (lock, permissions,
+    # concurrent git op) would re-enter candidate selection and re-anchor the
+    # remote floor to a state the remote deliberately deleted — fail closed.
+    rc_gone, _ = _main._git(
+        repo_path, "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote_issue_ref}"
+    )
+    if rc_gone == 0:
+        return (
+            f"could not drop stale remote-tracking ref {remote_issue_ref!r}; "
+            f"refusing to continue while it can pose as live remote state"
+        )
+    return None
+
+
+def _select_seed(
+    repo_path: str,
+    marker: Optional[int],
+    issue_number: Optional[int],
+    wip_tip: Optional[str],
+    integration_branch: str,
+    base_ref: str,
+    remote_issue_ref: str,
+) -> str:
+    """Choose the integration-branch seed from the best eligible prior-progress tip.
+
+    Builds a graph-ordered candidate list (same-issue continuation tips first,
+    then local-vs-remote issue tip, then the latest issue rescue ref) and returns
+    the first candidate that is ahead of ``base_ref`` and — when the remote issue
+    branch is live and ahead (the "remote floor") — already contains it, so the
+    eventual ``--force-with-lease`` push cannot silently drop remote-only commits.
+
+    Preconditions:
+        - ``base_ref`` and ``remote_issue_ref`` are resolvable refs; the remote
+          issue tip has already been reconciled (fetched or its stale ref dropped).
+    Postconditions:
+        - Returns the chosen seed ref, or ``base_ref`` when no candidate is
+          eligible (a fresh issue with no prior progress).
+    """
+    candidates: List[str] = []
+    if marker is not None and issue_number is not None and marker == issue_number:
+        # Same-issue continuation: the interrupted run's progress may live on
+        # BOTH the wip tip (wherever HEAD was at crash time) and development
+        # (merged task work). Order graph-aware — a tip containing the other
+        # goes first; diverged tips put development first (the canonical
+        # integration line; the wip branch is never reset, and a diverged
+        # integration-branch wip is pinned by the orphan-prevention pass).
+        if wip_tip and wip_tip != DEVELOPMENT_BRANCH:
+            if _reachable_from(repo_path, DEVELOPMENT_BRANCH, wip_tip):
+                candidates.extend((wip_tip, DEVELOPMENT_BRANCH))
+            else:
+                candidates.extend((DEVELOPMENT_BRANCH, wip_tip))
+        else:
+            candidates.append(DEVELOPMENT_BRANCH)
+    # Local-vs-remote issue tip: prefer local only when it already contains
+    # the remote tip. The eventual publish is `push --force-with-lease` and
+    # the caller's own fetch refreshes the lease, so seeding from a tip
+    # that lacks remote-only commits would let the push silently drop them.
+    # A diverged local tip is pinned by the orphan-prevention pass below.
+    if _reachable_from(repo_path, remote_issue_ref, integration_branch):
+        candidates.extend((integration_branch, remote_issue_ref))
+    else:
+        candidates.extend((remote_issue_ref, integration_branch))
+    if issue_number is not None:
+        rescue_ref = _latest_issue_rescue_ref(repo_path, issue_number)
+        if rescue_ref:
+            candidates.append(rescue_ref)
+    # Remote floor: when the remote issue branch is live and ahead, no
+    # candidate that lacks its commits may seed — the force-with-lease push
+    # (lease refreshed by the caller's own fetch) would silently drop the
+    # remote-only commits from the published PR. Locally-pinned rescue refs
+    # are no substitute for commits the remote is expected to keep.
+    remote_floor = _is_ahead(repo_path, remote_issue_ref, base_ref)
+
+    def _eligible(candidate: str) -> bool:
+        if not _is_ahead(repo_path, candidate, base_ref):
+            return False
+        if not remote_floor or candidate == remote_issue_ref:
+            return True
+        return _reachable_from(repo_path, remote_issue_ref, candidate)
+
+    return next((c for c in candidates if _eligible(c)), base_ref)
+
+
+def _merge_recovered_wip(
+    repo_path: str, wip_tip: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Merge diverged recovered work-in-progress into the continuation line, if needed.
+
+    Recovery may have reported same-issue WIP that lives on a branch which
+    diverged from the chosen seed; recovery called it continuation state, so it
+    must reach the resumed line rather than being left on a side branch the
+    orchestrator never reads. On conflict the merge is aborted and reported
+    rather than guessing a resolution — the WIP branch itself is never reset, so
+    nothing is lost either way.
+
+    Preconditions:
+        - Called after the seed has been checked out onto ``DEVELOPMENT_BRANCH``.
+    Postconditions:
+        - Returns ``(note, None)`` describing the merge/leave-unmerged outcome
+          (``note`` may be ``None`` when no merge was needed), or ``(None, err)``
+          when a failed merge could not be cleanly aborted (caller fails closed).
+    """
+    if not (
+        wip_tip
+        and _is_safe_ref(wip_tip)
+        and not _reachable_from(repo_path, wip_tip, DEVELOPMENT_BRANCH)
+    ):
+        return None, None
+    rc, msg = _main._git(repo_path, "merge", "--no-edit", wip_tip, env=git_identity_env())
+    if rc == 0:
+        return (
+            f"🔀 Merged recovered work-in-progress from `{wip_tip}` into the continuation line.",
+            None,
+        )
+    _main._git(repo_path, "merge", "--abort")
+    status_ok, still_dirty, _ = _main._working_tree_dirty(repo_path)
+    if not status_ok or still_dirty:
+        return (
+            None,
+            f"merge of recovered work-in-progress `{wip_tip}` failed and could not "
+            f"be cleanly aborted: {msg}",
+        )
+    return (
+        f"⚠️ Recovered work-in-progress on `{wip_tip}` conflicts with the continuation "
+        f"line; left unmerged on that branch for manual integration.",
+        None,
+    )
+
+
 def _prepare_issue_branch(
     repo_path: str,
     remote: str,
@@ -608,114 +802,27 @@ def _prepare_issue_branch(
         repo_path, "fetch", "--", remote, integration_branch, env=auth_env
     )
     if rc_issue_fetch != 0:
-        # `fetch` exit codes do not distinguish "no such remote ref" from a
-        # transient transport failure, and only confirmed absence may take
-        # the deletion path below — dropping the tracking ref on a network
-        # blip would hide live remote progress from candidate selection and
-        # let the final force-with-lease push race against it. Probe absence
-        # explicitly: `ls-remote --exit-code` exits 2 when the remote has no
-        # matching head, 0 when it does, anything else on transport failure.
-        rc_probe, probe_out = _main._git(
+        reconcile_err = _reconcile_remote_issue_ref(
             repo_path,
-            "ls-remote",
-            "--exit-code",
-            "--heads",
-            "--",
             remote,
             integration_branch,
-            env=auth_env,
+            base_ref,
+            remote_issue_ref,
+            auth_env,
+            issue_fetch_msg,
         )
-        if rc_probe == 0:
-            return (
-                False,
-                f"could not fetch remote issue branch {integration_branch!r} "
-                f"(it exists on the remote — transient failure?): {issue_fetch_msg}",
-                notes,
-            )
-        if rc_probe != 2:
-            return (
-                False,
-                f"cannot verify whether remote issue branch {integration_branch!r} still "
-                f"exists (fetch failed: {issue_fetch_msg}; probe failed: {probe_out})",
-                notes,
-            )
-        # The remote branch is absent (deleted/pruned — the probe confirmed
-        # it, and the base-branch fetch succeeded so the remote itself is
-        # reachable). A stale remote-tracking ref from an earlier fetch would
-        # otherwise pose as live remote state: candidate selection could seed
-        # from it and the final force push would republish commits the remote
-        # deliberately no longer has. Pin its tip first (never-lose-work
-        # invariant), then
-        # drop the tracking ref. The rescue is deliberately UNTAGGED: a
-        # remote deletion is an explicit signal not to continue this state,
-        # so it is preserved for manual recovery without becoming an
-        # automatic continuation candidate (unlike preserved local
-        # divergence, which the system itself was still carrying).
-        if _is_ahead(repo_path, remote_issue_ref, base_ref):
-            preserve_err = _main._preserve_if_would_orphan(
-                repo_path, remote_issue_ref, base_ref, base_ref, None
-            )
-            if preserve_err:
-                return False, preserve_err, notes
-        _main._git(repo_path, "update-ref", "-d", f"refs/remotes/{remote_issue_ref}")
-        # Postcondition, not return-code, check: deletion legitimately fails
-        # when the ref never existed (fresh issue), but a ref that SURVIVES
-        # (lock, permissions, concurrent git op) would re-enter candidate
-        # selection and re-anchor the remote floor to a state the remote
-        # deliberately deleted — fail closed instead.
-        rc_gone, _ = _main._git(
-            repo_path, "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote_issue_ref}"
-        )
-        if rc_gone == 0:
-            return (
-                False,
-                f"could not drop stale remote-tracking ref {remote_issue_ref!r}; "
-                f"refusing to continue while it can pose as live remote state",
-                notes,
-            )
-    candidates: List[str] = []
-    if marker is not None and issue_number is not None and marker == issue_number:
-        # Same-issue continuation: the interrupted run's progress may live on
-        # BOTH the wip tip (wherever HEAD was at crash time) and development
-        # (merged task work). Order graph-aware — a tip containing the other
-        # goes first; diverged tips put development first (the canonical
-        # integration line; the wip branch is never reset, and a diverged
-        # integration-branch wip is pinned by the orphan-prevention pass).
-        if wip_tip and wip_tip != DEVELOPMENT_BRANCH:
-            if _reachable_from(repo_path, DEVELOPMENT_BRANCH, wip_tip):
-                candidates.extend((wip_tip, DEVELOPMENT_BRANCH))
-            else:
-                candidates.extend((DEVELOPMENT_BRANCH, wip_tip))
-        else:
-            candidates.append(DEVELOPMENT_BRANCH)
-    # Local-vs-remote issue tip: prefer local only when it already contains
-    # the remote tip. The eventual publish is `push --force-with-lease` and
-    # this function's own fetch refreshes the lease, so seeding from a tip
-    # that lacks remote-only commits would let the push silently drop them.
-    # A diverged local tip is pinned by the orphan-prevention pass below.
-    if _reachable_from(repo_path, remote_issue_ref, integration_branch):
-        candidates.extend((integration_branch, remote_issue_ref))
-    else:
-        candidates.extend((remote_issue_ref, integration_branch))
-    if issue_number is not None:
-        rescue_ref = _latest_issue_rescue_ref(repo_path, issue_number)
-        if rescue_ref:
-            candidates.append(rescue_ref)
-    # Remote floor: when the remote issue branch is live and ahead, no
-    # candidate that lacks its commits may seed — the force-with-lease push
-    # (lease refreshed by this function's own fetch) would silently drop the
-    # remote-only commits from the published PR. Locally-pinned rescue refs
-    # are no substitute for commits the remote is expected to keep.
-    remote_floor = _is_ahead(repo_path, remote_issue_ref, base_ref)
+        if reconcile_err:
+            return False, reconcile_err, notes
 
-    def _eligible(candidate: str) -> bool:
-        if not _is_ahead(repo_path, candidate, base_ref):
-            return False
-        if not remote_floor or candidate == remote_issue_ref:
-            return True
-        return _reachable_from(repo_path, remote_issue_ref, candidate)
-
-    seed = next((c for c in candidates if _eligible(c)), base_ref)
+    seed = _select_seed(
+        repo_path,
+        marker,
+        issue_number,
+        wip_tip,
+        integration_branch,
+        base_ref,
+        remote_issue_ref,
+    )
 
     if seed != base_ref:
         rc, count = _main._git(repo_path, "rev-list", "--count", f"{base_ref}..{seed}")
@@ -744,38 +851,11 @@ def _prepare_issue_branch(
     if rc != 0:
         return False, msg, notes
 
-    if (
-        wip_tip
-        and _is_safe_ref(wip_tip)
-        and not _reachable_from(repo_path, wip_tip, DEVELOPMENT_BRANCH)
-    ):
-        # Same-issue WIP was recovered onto a branch that diverged from the
-        # chosen seed (e.g. a feature branch cut before other work merged
-        # into development). Recovery reported that WIP as continuation
-        # state, so it must reach the resumed line — left only on a side
-        # branch the orchestrator never reads, "recovered" would be a lie.
-        # Merge it in; on conflict, abort and tell the operator rather than
-        # guessing a resolution (the WIP branch itself is never reset, so
-        # nothing is lost either way).
-        rc, msg = _main._git(repo_path, "merge", "--no-edit", wip_tip, env=git_identity_env())
-        if rc == 0:
-            notes.append(
-                f"🔀 Merged recovered work-in-progress from `{wip_tip}` into the continuation line."
-            )
-        else:
-            _main._git(repo_path, "merge", "--abort")
-            status_ok, still_dirty, _ = _main._working_tree_dirty(repo_path)
-            if not status_ok or still_dirty:
-                return (
-                    False,
-                    f"merge of recovered work-in-progress `{wip_tip}` failed and could not "
-                    f"be cleanly aborted: {msg}",
-                    notes,
-                )
-            notes.append(
-                f"⚠️ Recovered work-in-progress on `{wip_tip}` conflicts with the continuation "
-                f"line; left unmerged on that branch for manual integration."
-            )
+    merge_note, merge_err = _merge_recovered_wip(repo_path, wip_tip)
+    if merge_err:
+        return False, merge_err, notes
+    if merge_note:
+        notes.append(merge_note)
 
     rc, msg = _main._git(repo_path, "checkout", "-B", integration_branch, "--")
     if rc != 0:
