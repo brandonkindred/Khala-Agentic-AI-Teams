@@ -73,6 +73,44 @@ class ConversationSummary:
     message_count: int
 
 
+def _parse_conversation_rows(
+    rows: List[dict],
+) -> tuple[BrandingMission, Optional[TeamOutput], List[_StoredMessage]]:
+    """Map joined conversation+message rows to (mission, latest_output, messages).
+
+    Shared by :meth:`BrandingConversationStore.get_state` and
+    :meth:`BrandingConversationStore.get_by_brand_id`, which run the same
+    ``LEFT JOIN`` (differing only in the WHERE key) and parse the result
+    identically.
+
+    Preconditions:
+        ``rows`` is a non-empty list of dict rows; ``rows[0]`` carries
+        ``mission_json`` and ``latest_output_json``; message rows carry
+        ``role``/``content``/``timestamp`` (``role`` is None for the LEFT-JOIN
+        placeholder when a conversation has no messages).
+    Postconditions:
+        Returns the parsed mission, optional latest output, and messages ordered
+        as given (oldest-first), skipping the null-role placeholder row.
+    """
+    head = rows[0]
+    mission = BrandingMission.model_validate(head["mission_json"])
+    latest_output = (
+        TeamOutput.model_validate(head["latest_output_json"])
+        if head["latest_output_json"]
+        else None
+    )
+    messages = [
+        _StoredMessage(
+            role=r["role"],
+            content=r["content"],
+            timestamp=_row_ts(r["timestamp"]),
+        )
+        for r in rows
+        if r["role"] is not None
+    ]
+    return mission, latest_output, messages
+
+
 class BrandingConversationStore:
     """Postgres-backed store for chat conversations and mission state."""
 
@@ -142,23 +180,8 @@ class BrandingConversationStore:
             rows = cur.fetchall()
         if not rows:
             return None
-        head = rows[0]
-        mission = BrandingMission.model_validate(head["mission_json"])
-        latest_output = (
-            TeamOutput.model_validate(head["latest_output_json"])
-            if head["latest_output_json"]
-            else None
-        )
-        brand_id = str(head["brand_id"]) if head["brand_id"] else None
-        messages = [
-            _StoredMessage(
-                role=r["role"],
-                content=r["content"],
-                timestamp=_row_ts(r["timestamp"]),
-            )
-            for r in rows
-            if r["role"] is not None
-        ]
+        mission, latest_output, messages = _parse_conversation_rows(rows)
+        brand_id = str(rows[0]["brand_id"]) if rows[0]["brand_id"] else None
         return ConversationState(
             messages=messages,
             mission=mission,
@@ -261,23 +284,8 @@ class BrandingConversationStore:
             rows = cur.fetchall()
         if not rows:
             return None
-        head = rows[0]
-        cid = str(head["conversation_id"])
-        mission = BrandingMission.model_validate(head["mission_json"])
-        latest_output = (
-            TeamOutput.model_validate(head["latest_output_json"])
-            if head["latest_output_json"]
-            else None
-        )
-        messages = [
-            _StoredMessage(
-                role=r["role"],
-                content=r["content"],
-                timestamp=_row_ts(r["timestamp"]),
-            )
-            for r in rows
-            if r["role"] is not None
-        ]
+        cid = str(rows[0]["conversation_id"])
+        mission, latest_output, messages = _parse_conversation_rows(rows)
         return (cid, messages, mission, latest_output)
 
     @timed_query(store=_STORE, op="list_conversations")

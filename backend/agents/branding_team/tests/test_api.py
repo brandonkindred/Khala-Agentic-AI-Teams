@@ -274,6 +274,15 @@ def test_request_market_research_returns_503_without_service() -> None:
     assert resp.status_code in (200, 503)
 
 
+def test_run_endpoint_builds_mission_and_returns_output() -> None:
+    """`/run` builds a mission via _mission_from_payload and returns a TeamOutput."""
+    resp = client.post("/run", json={**_payload(), "human_approved": True})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "current_phase" in data
+    assert "status" in data
+
+
 def test_request_design_assets_returns_stub() -> None:
     create_c = client.post("/clients", json={"name": "Design Client"})
     client_id = create_c.json()["id"]
@@ -292,6 +301,52 @@ def test_request_design_assets_returns_stub() -> None:
     assert "request_id" in data
     assert data["status"] == "pending"
     assert "artifacts" in data
+
+
+def test_request_design_assets_reuses_cached_strategic_core() -> None:
+    """The endpoint reuses a persisted strategic core instead of re-running Phase 1."""
+    from branding_team.models import (
+        BrandPhase,
+        StrategicCoreOutput,
+        TeamOutput,
+        WorkflowStatus,
+    )
+
+    create_c = client.post("/clients", json={"name": "Cache Client"})
+    client_id = create_c.json()["id"]
+    create_b = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "CacheCo",
+            "company_description": "Company for design assets cache test",
+            "target_audience": "designers",
+        },
+    )
+    brand_id = create_b.json()["id"]
+
+    # Persist a strategic core so the endpoint can reuse it.
+    cached_output = TeamOutput(
+        status=WorkflowStatus.READY_FOR_ROLLOUT,
+        mission_summary="cached",
+        current_phase=BrandPhase.STRATEGIC_CORE,
+        strategic_core=StrategicCoreOutput(positioning_statement="CACHED-POSITIONING"),
+    )
+    branding_store.append_brand_version(client_id, brand_id, cached_output)
+
+    # Phase 1 must NOT run when a cached core exists.
+    with patch("branding_team.api.main.orchestrator.run_phase") as mock_run_phase:
+        resp = client.post(f"/clients/{client_id}/brands/{brand_id}/request-design-assets")
+        assert resp.status_code == 200
+        mock_run_phase.assert_not_called()
+    # The stub echoes the (cached) positioning into its artifacts.
+    assert any("CACHED-POSITIONING" in a for a in resp.json()["artifacts"])
+
+
+def test_request_design_assets_unknown_brand_404() -> None:
+    create_c = client.post("/clients", json={"name": "DA 404 Client"})
+    client_id = create_c.json()["id"]
+    resp = client.post(f"/clients/{client_id}/brands/does-not-exist/request-design-assets")
+    assert resp.status_code == 404
 
 
 # --- Conversation (chat) API tests ---
