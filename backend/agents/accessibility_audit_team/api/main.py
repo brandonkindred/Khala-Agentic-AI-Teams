@@ -5,7 +5,7 @@ FastAPI endpoints for the Digital Accessibility Audit Team.
 import asyncio
 import logging
 import uuid
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
@@ -119,11 +119,12 @@ class DesignSystemContractRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _temporal_dispatch():
+def _temporal_dispatch() -> Optional[Callable[[str, str, dict], str]]:
     """Return the Temporal ``start_*_workflow`` dispatcher when Temporal is enabled.
 
     Preconditions:
-        - None.
+        - None from the caller. Temporal enablement (``TEMPORAL_ADDRESS`` set) is
+          checked internally via ``shared_temporal.is_temporal_enabled()``.
     Postconditions:
         - Returns the ``start_accessibility_audit_workflow`` callable when
           ``TEMPORAL_ADDRESS`` is set and the Temporal stack imports cleanly, else
@@ -184,8 +185,10 @@ async def create_audit(
     dispatch = _temporal_dispatch()
     if dispatch is not None:
         try:
-            # start_workflow_sync blocks (waits for the worker client, then a sync
-            # round-trip to Temporal), so run it off the event loop.
+            # The dispatcher is synchronous and blocking: it polls for the worker's
+            # Temporal client to connect, then makes a blocking round-trip to start
+            # the workflow. Calling it directly on the async event loop would freeze
+            # every other in-flight request, so offload it to a worker thread.
             workflow_id = await asyncio.to_thread(dispatch, job_id, audit_id, payload)
         except Exception as e:
             # Fail fast rather than re-running in-process: the workflow may have

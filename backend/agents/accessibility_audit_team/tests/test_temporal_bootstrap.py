@@ -414,7 +414,9 @@ def test_get_job_manager_is_cached(monkeypatch):
     assert ax.get_job_manager() is sentinel  # cached
 
 
-def _fake_result(success: bool):
+def _fake_result(success: bool) -> SimpleNamespace:
+    """Build a stand-in ``AccessibilityAuditResult`` with the attributes the
+    execution core reads (``success``, phases, findings count, ``model_dump``)."""
     return SimpleNamespace(
         success=success,
         total_findings=2,
@@ -425,8 +427,12 @@ def _fake_result(success: bool):
     )
 
 
-def _run_execute(monkeypatch, *, run_audit):
-    """Drive ``execute_audit_job`` with a mocked orchestrator + job manager."""
+def _run_execute(monkeypatch, *, run_audit) -> tuple[mock.Mock, mock.Mock]:
+    """Drive ``execute_audit_job`` with a mocked orchestrator + job manager.
+
+    Returns ``(job_manager_mock, orchestrator_mock)`` so callers can assert on
+    the recorded ``update_job`` calls and that ``run_audit`` was awaited.
+    """
     from accessibility_audit_team import audit_execution as ax
 
     jm = mock.Mock()
@@ -466,20 +472,29 @@ def test_execute_audit_job_captures_exception(monkeypatch):
     assert any("kaboom" in str(c.kwargs.get("error")) for c in failed)
 
 
-def test_run_audit_job_propagates_infra_exception(monkeypatch):
+@pytest.mark.parametrize(
+    "exc",
+    [
+        RuntimeError("kaboom"),
+        ConnectionError("temporal unreachable"),
+        TimeoutError("job-service timed out"),
+    ],
+)
+def test_run_audit_job_propagates_infra_exception(monkeypatch, exc):
     """The core (used by the Temporal activity) must NOT swallow infra
     exceptions — it records running, then lets the exception propagate so
-    Temporal can retry. It does not write a terminal 'failed' itself."""
+    Temporal can retry. It does not write a terminal 'failed' itself. Covers
+    connection/timeout errors, not just a generic RuntimeError."""
     from accessibility_audit_team import audit_execution as ax
 
     jm = mock.Mock()
     monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
     orch = mock.Mock()
-    orch.run_audit = mock.AsyncMock(side_effect=RuntimeError("kaboom"))
+    orch.run_audit = mock.AsyncMock(side_effect=exc)
     monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
 
     req = ax.CreateAuditRequest(web_urls=["https://e.com"])
-    with pytest.raises(RuntimeError, match="kaboom"):
+    with pytest.raises(type(exc)):
         asyncio.run(ax.run_audit_job("job1", "audit1", req))
 
     statuses = [c.kwargs.get("status") for c in jm.update_job.call_args_list]
