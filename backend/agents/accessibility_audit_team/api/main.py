@@ -159,10 +159,21 @@ async def create_audit(
     request: CreateAuditRequest,
     background_tasks: BackgroundTasks,
 ) -> AuditJobResponse:
-    """
-    Create and start a new accessibility audit.
+    """Create and start a new accessibility audit.
 
-    Returns a job ID that can be used to poll for status.
+    Dispatch path: when Temporal is enabled (``TEMPORAL_ADDRESS`` set) the audit
+    runs as a durable ``AccessibilityAuditWorkflow`` on the
+    ``accessibility_audit-queue`` task queue and the response's ``workflow_id`` is
+    populated for Temporal-UI correlation. Otherwise it runs in-process via a
+    FastAPI background task and ``workflow_id`` is ``None`` (never an empty
+    string). Either way the job row is created ``pending`` up front and its
+    status transitions (``running`` -> terminal) are owned by whichever path
+    executes it, so clients poll ``GET /audit/status/{job_id}`` regardless of
+    whether ``workflow_id`` is present.
+
+    Postconditions:
+        - A ``pending`` job row exists; the response returns its ``job_id`` /
+          ``audit_id`` (and ``workflow_id`` on the Temporal path) for polling.
     """
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     audit_id = f"audit_{uuid.uuid4().hex[:8]}"
@@ -182,6 +193,8 @@ async def create_audit(
         request_payload=payload,
     )
 
+    # None => the in-process (non-Temporal) path ran; set to the workflow id on a
+    # successful Temporal dispatch. It is never an empty string.
     workflow_id: Optional[str] = None
     dispatch = _temporal_dispatch()
     if dispatch is not None:
