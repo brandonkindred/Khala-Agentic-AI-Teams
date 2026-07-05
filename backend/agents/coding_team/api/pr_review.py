@@ -638,7 +638,13 @@ def _run_pr_review_body(
 
             try:
                 reviewer_login = client.get_authenticated_login()
-            except GitHubAPIError:
+            except GitHubAPIError as e:
+                # Non-fatal: reviewer_login only feeds choose_event() (the self-PR
+                # REQUEST_CHANGES -> COMMENT downgrade). Log so the degradation is
+                # not silent, then fall back to "" and let the review proceed — a
+                # genuine bad/permission-limited token already surfaces on the PR
+                # fetch above and on review submission below.
+                logger.warning("Could not resolve reviewer login for PR #%s: %s", pr_number, e)
                 reviewer_login = ""
 
             output = _run_reviewer(
