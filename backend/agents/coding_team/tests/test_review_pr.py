@@ -647,6 +647,20 @@ class TestReviewEndpoint:
         assert job["review_summary"]["file_comments"] >= 1
         assert job["review_summary"]["comment_findings"] == 0
 
+    def test_reviewer_none_output_fails_job(self, review_app) -> None:
+        # A provider that returns None WITHOUT raising must fail the job (and post
+        # a PR notice), never leave it wedged in "running" with no terminal write.
+        # The pre-decomposition body reached the same failed state by dereferencing
+        # `output.issues` into the outer except; _run_reviewer must preserve it.
+        review_app["github"]["agent_output"] = None
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        # The reviewer watches the PR, so the failure is surfaced there too.
+        gh = review_app["github"]["client"]
+        assert any("reviewer returned no output" in body for _n, body in gh.comments)
+
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
         resp = review_app["client"].post(
