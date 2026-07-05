@@ -702,8 +702,8 @@ services:
       TEAM_MODULE: road_trip_planning_team.api.main
       TEAM_NAME: road_trip_planning_team
       TEAM_PORT: "8106"
-      TEAM_TEMPORAL_WORKER_MODULE: ""
-      TEAM_TEMPORAL_WORKER_FUNC: ""
+      TEAM_TEMPORAL_WORKER_MODULE: road_trip_planning_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_road_trip_temporal_worker_thread
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
     ports: ["8106:8106"]
