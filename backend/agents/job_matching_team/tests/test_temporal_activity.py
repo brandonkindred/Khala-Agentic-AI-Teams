@@ -1,10 +1,16 @@
-"""Contract tests for the job_matching Temporal activity.
+"""Contract tests for the job_matching Temporal activity + workflow.
 
-``run_scan_activity(job_id, request)`` must drive the shared job store through
-the same PENDING -> RUNNING -> COMPLETED/FAILED transitions as the API's
-``_run_scan_background``, honour cooperative cancellation, and swallow business
+This file validates the *activity* contract: ``run_scan_activity(job_id,
+request)`` must drive the shared job store through the same PENDING -> RUNNING ->
+COMPLETED/FAILED transitions as the API's ``_run_scan_background``, honour
+cooperative cancellation, be idempotent on retry, and swallow business
 exceptions (record FAILED, do not re-raise) so a deterministic failure does not
-trigger a Temporal retry storm.
+trigger a Temporal retry storm. It also pins that ``JobMatchingWorkflow.run``
+delegates to the activity with the expected timeout + retry policy.
+
+Package bootstrap and the sync->async dispatch bridge (sandbox-safety, worker
+start, ``start_job_matching_workflow``) are covered separately in
+``test_temporal_bootstrap.py``.
 """
 
 from __future__ import annotations
