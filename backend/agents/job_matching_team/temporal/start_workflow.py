@@ -21,6 +21,8 @@ from shared_temporal import get_temporal_client, get_temporal_loop
 
 logger = logging.getLogger(__name__)
 
+# Max seconds to wait for the client.start_workflow coroutine (marshalled onto
+# the worker's loop) to return — i.e. for Temporal to accept the workflow start.
 START_WORKFLOW_TIMEOUT = 30
 # How long to wait for the Temporal worker thread to connect its client before
 # giving up. The worker connects in a daemon thread, so the very first request

@@ -19,6 +19,12 @@ from job_matching_team.temporal.workflows import run_scan_activity
 
 
 class _FakeOrchestrator:
+    """Test double for JobMatchingOrchestrator — no LLM/web calls.
+
+    Records the ``job_id`` of each ``run`` call in ``calls``; with ``boom=True``
+    it raises to exercise the activity's failure path.
+    """
+
     def __init__(self, *, boom: bool = False) -> None:
         self._boom = boom
         self.calls: list[str | None] = []
@@ -67,6 +73,9 @@ class _FakeJobStore:
 
 
 def _patch(monkeypatch, orch, store):
+    """Redirect the activity's lazily-imported orchestrator + job-store calls to
+    the supplied test doubles, so the activity runs offline with no LLM or job
+    service."""
     monkeypatch.setattr("job_matching_team.orchestrator.JobMatchingOrchestrator", lambda: orch)
     monkeypatch.setattr("job_matching_team.shared.job_store.get_job", store.get_job)
     monkeypatch.setattr("job_matching_team.shared.job_store.update_job", store.update_job)
