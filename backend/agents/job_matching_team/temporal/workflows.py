@@ -55,6 +55,7 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
     from job_matching_team.models import JobMatchRequest
     from job_matching_team.orchestrator import JobMatchingOrchestrator
     from job_matching_team.shared.job_store import (
+        JOB_STATUS_CANCELLED,
         JOB_STATUS_COMPLETED,
         JOB_STATUS_FAILED,
         JOB_STATUS_RUNNING,
@@ -70,10 +71,15 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
         # result triggers a retry), return the stored result instead of
         # re-running — no status flap, no duplicate scan/LLM spend.
         existing = get_job(job_id)
-        if existing is not None and existing.get("status") == JOB_STATUS_COMPLETED:
-            return existing.get("result") or {}
-        if is_job_cancelled(job_id):
-            return {}
+        if existing is not None:
+            status = existing.get("status")
+            if status == JOB_STATUS_COMPLETED:
+                return existing.get("result") or {}
+            # Derive the pre-run cancellation check from the row we just read
+            # instead of a second job-service round-trip. The post-run check
+            # below still needs a fresh read (cancellation can happen mid-scan).
+            if status == JOB_STATUS_CANCELLED:
+                return {}
         update_job(job_id, status=JOB_STATUS_RUNNING)
         result = JobMatchingOrchestrator().run(req, job_id=job_id)
         if is_job_cancelled(job_id):

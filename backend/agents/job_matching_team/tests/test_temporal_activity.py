@@ -40,15 +40,17 @@ class _FakeOrchestrator:
 class _FakeJobStore:
     """Records status transitions and drives cancellation checks.
 
-    ``existing`` is what ``get_job`` returns (default None — job untracked by the
-    fake, so the idempotency guard falls through to a normal run).
+    ``existing`` is what ``get_job`` returns at activity entry (drives the
+    idempotency short-circuit and the pre-run cancellation check; default None =
+    job untracked so the activity proceeds to a normal run). ``cancelled`` is
+    what ``is_job_cancelled`` returns for the post-run / except-branch checks
+    (cancellation that lands *during* the scan).
     """
 
-    def __init__(self, *, cancelled_after: int | None = None, existing: dict | None = None) -> None:
+    def __init__(self, *, existing: dict | None = None, cancelled: bool = False) -> None:
         self.updates: list[dict] = []
-        self._cancel_checks = 0
-        self._cancelled_after = cancelled_after
         self._existing = existing
+        self._cancelled = cancelled
 
     def get_job(self, job_id):
         return self._existing
@@ -57,10 +59,7 @@ class _FakeJobStore:
         self.updates.append(fields)
 
     def is_job_cancelled(self, job_id):
-        self._cancel_checks += 1
-        if self._cancelled_after is None:
-            return False
-        return self._cancel_checks > self._cancelled_after
+        return self._cancelled
 
     @property
     def statuses(self) -> list[str]:
@@ -104,8 +103,8 @@ def test_activity_records_failed_and_swallows(monkeypatch):
 
 def test_activity_skips_when_cancelled_before_start(monkeypatch):
     orch = _FakeOrchestrator()
-    # Cancelled on the very first check (cancelled_after=0 => check #1 is True).
-    store = _FakeJobStore(cancelled_after=0)
+    # Already CANCELLED at entry: the pre-run guard reads it from get_job.
+    store = _FakeJobStore(existing={"status": "cancelled"})
     _patch(monkeypatch, orch, store)
 
     result = ActivityEnvironment().run(run_scan_activity, "job-3", {})
@@ -117,8 +116,8 @@ def test_activity_skips_when_cancelled_before_start(monkeypatch):
 
 def test_activity_skips_completion_when_cancelled_mid_run(monkeypatch):
     orch = _FakeOrchestrator()
-    # First check (before start) False, second check (after run) True.
-    store = _FakeJobStore(cancelled_after=1)
+    # Running at entry (proceeds), then cancelled during the scan (post-run check).
+    store = _FakeJobStore(existing={"status": "pending"}, cancelled=True)
     _patch(monkeypatch, orch, store)
 
     result = ActivityEnvironment().run(run_scan_activity, "job-4", {})
@@ -130,8 +129,9 @@ def test_activity_skips_completion_when_cancelled_mid_run(monkeypatch):
 
 def test_activity_skips_failed_update_when_cancelled(monkeypatch):
     orch = _FakeOrchestrator(boom=True)
-    # First check False (proceed + run), except-branch check True (skip FAILED).
-    store = _FakeJobStore(cancelled_after=1)
+    # Proceeds (pending at entry), orchestrator throws, but the except-branch
+    # check sees it cancelled and skips the FAILED write.
+    store = _FakeJobStore(existing={"status": "pending"}, cancelled=True)
     _patch(monkeypatch, orch, store)
 
     result = ActivityEnvironment().run(run_scan_activity, "job-5", {})
