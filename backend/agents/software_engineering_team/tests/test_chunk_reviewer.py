@@ -145,7 +145,11 @@ def test_no_segment_note_means_no_segment_section() -> None:
 def test_review_guardrails_note_is_in_every_prompt() -> None:
     """The anti-false-positive guardrails (no phantom truncation, don't flag
     existing files as missing, relative imports are conventional) are injected
-    into the per-chunk user prompt (not the byte-locked system prompt)."""
+    into the per-chunk user prompt (not the byte-locked system prompt).
+
+    Precondition: a ChunkReviewAgent is instantiated and run once, so exactly one
+    prompt is recorded for inspection.
+    """
     client = _RecorderClient()
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input())

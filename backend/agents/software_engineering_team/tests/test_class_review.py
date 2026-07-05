@@ -110,7 +110,9 @@ def test_emits_advisory_finding_per_class() -> None:
     # Severity is capped to the advisory ceiling even though the LLM said critical.
     assert issue.severity == "medium"
     assert issue.category == "structure"
-    # Anchored somewhere inside the class range.
+    # A cohesion finding anchors to the class: _issues_from_class_output sets
+    # issue.line to the class's start line, so it must equal
+    # extract_classes(...)[0].start_line exactly (not merely fall within the range).
     assert issue.line == extract_classes("report.py", _CLASS_SRC)[0].start_line
 
 
@@ -143,7 +145,7 @@ def test_per_class_failure_is_swallowed() -> None:
 
 
 def test_multiple_classes_fan_out_in_parallel() -> None:
-    """Two classes → the pass fans out (ThreadPoolExecutor) and each yields a finding."""
+    """Two classes cause the pass to fan out (ThreadPoolExecutor), each yielding a finding."""
     two = (
         "class A:\n"
         '    """A."""\n'

@@ -1747,7 +1747,12 @@ def test_empty_input_still_reports_done() -> None:
 
 def test_coordinator_merges_class_cohesion_findings(monkeypatch) -> None:
     """A class cohesion finding is merged into the coordinator's output, anchored
-    to its file, and capped to an advisory (non-blocking) severity."""
+    to its file, and capped to an advisory (non-blocking) severity.
+
+    Precondition: the class-cohesion pass is active. The test clears
+    CODE_REVIEW_CLASS_COHESION and CODE_REVIEW_CLASS_COHESION_MAX_CLASSES below,
+    so the scenario never depends on the ambient environment.
+    """
     monkeypatch.delenv("CODE_REVIEW_CLASS_COHESION", raising=False)
     monkeypatch.delenv("CODE_REVIEW_CLASS_COHESION_MAX_CLASSES", raising=False)
     src = (

@@ -49,7 +49,8 @@ def test_extracts_top_level_class_with_methods() -> None:
     assert isinstance(cache, ClassUnit)
     assert cache.name == "Cache"
     assert cache.docstring.startswith("A small in-memory cache.")
-    # start_line accounts for the decorator (line 4, 1-based).
+    # start_line is the earliest decorator line: in _SAMPLE, `@decorator` is on
+    # line 4 and `class Cache:` on line 5, so the class unit starts at line 4.
     assert cache.start_line == 4
     assert cache.end_line > cache.start_line
     # Only directly-defined methods; the inner class's ``nested`` is not hoisted.
