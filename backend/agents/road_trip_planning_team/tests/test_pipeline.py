@@ -1,7 +1,7 @@
 """Unit tests for the neutral pipeline core.
 
 Covers the graph-output translation (`_translate_itinerary_keys`) and the
-`run_pipeline` parse + fallback paths directly — the rest of the suite cans
+`run_pipeline` parse + fallback paths directly — the rest of the suite stubs
 `run_pipeline`, so this is where the key-translation logic (the most bug-prone
 part of the module) is exercised. Pure functions + a mocked graph, so no job
 service or Postgres is needed.
@@ -10,29 +10,9 @@ service or Postgres is needed.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-_agents_dir = Path(__file__).resolve().parent.parent.parent
-if str(_agents_dir) not in __import__("sys").path:
-    __import__("sys").path.insert(0, str(_agents_dir))
-
-from road_trip_planning_team import pipeline as rtp_pipeline  # noqa: E402
-from road_trip_planning_team.models import PlanTripRequest, TripItinerary  # noqa: E402
-
-
-def _sample_request() -> PlanTripRequest:
-    return PlanTripRequest(
-        trip={
-            "start_location": "San Francisco, CA",
-            "required_stops": ["Yosemite"],
-            "end_location": "Los Angeles, CA",
-            "travelers": [{"name": "Alice", "age_group": "adult", "interests": ["hiking"]}],
-            "trip_duration_days": 2,
-            "budget_level": "moderate",
-            "vehicle_type": "car",
-            "preferences": [],
-        }
-    )
+from road_trip_planning_team import pipeline as rtp_pipeline
+from road_trip_planning_team.models import TripItinerary
 
 
 def test_translate_top_level_and_route_summary_renames():
@@ -91,7 +71,7 @@ def test_translate_per_day_driving_activities_meals_accommodation():
     assert day["accommodation"]["booking_tips"] == "book early"
 
 
-def test_run_pipeline_parses_translated_graph_output(monkeypatch):
+def test_run_pipeline_parses_translated_graph_output(monkeypatch, sample_plan_request):
     composer_json = json.dumps(
         {
             "title": "SF to LA",
@@ -108,7 +88,7 @@ def test_run_pipeline_parses_translated_graph_output(monkeypatch):
         rtp_pipeline, "extract_node_text", lambda result, node_id: f"prose... {composer_json}"
     )
 
-    itinerary = rtp_pipeline.run_pipeline(_sample_request())
+    itinerary = rtp_pipeline.run_pipeline(sample_plan_request)
 
     assert isinstance(itinerary, TripItinerary)
     assert itinerary.title == "SF to LA"
@@ -117,12 +97,12 @@ def test_run_pipeline_parses_translated_graph_output(monkeypatch):
     assert itinerary.days[0].morning_activities[0].name == "Coffee"
 
 
-def test_run_pipeline_falls_back_when_output_unparseable(monkeypatch):
+def test_run_pipeline_falls_back_when_output_unparseable(monkeypatch, sample_plan_request):
     monkeypatch.setattr(rtp_pipeline, "build_trip_graph", lambda: object())
     monkeypatch.setattr(rtp_pipeline, "invoke_graph_sync", lambda graph, task: object())
     monkeypatch.setattr(rtp_pipeline, "extract_node_text", lambda result, node_id: "no json here")
 
-    itinerary = rtp_pipeline.run_pipeline(_sample_request())
+    itinerary = rtp_pipeline.run_pipeline(sample_plan_request)
 
     assert isinstance(itinerary, TripItinerary)
     assert itinerary.title == "Road Trip: San Francisco, CA to Los Angeles, CA"

@@ -9,13 +9,8 @@ importing ``road_trip_planning_team.temporal`` has no worker side-effect, and
 from __future__ import annotations
 
 import importlib
-from pathlib import Path
 
 import pytest
-
-_agents_dir = Path(__file__).resolve().parent.parent.parent
-if str(_agents_dir) not in __import__("sys").path:
-    __import__("sys").path.insert(0, str(_agents_dir))
 
 
 def test_temporal_package_exports_workflows_and_activities():
