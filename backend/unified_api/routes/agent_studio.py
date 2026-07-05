@@ -51,12 +51,15 @@ def _build_service() -> AgentStudioService:
     tests — the in-memory store is used, exactly as before.
 
     The store is stateless with a lazily-opened pool, so this selection does no I/O:
-    it only decides *which* store class to instantiate. The ``try/except`` guards
-    the import/construction path (e.g. psycopg missing), NOT request-time
-    connectivity — a configured-but-unreachable Postgres is deliberately **not**
-    downgraded to in-memory at request time, because a silent per-worker fallback
-    would fork state across workers and lose durability; such a request surfaces
-    the Postgres error instead.
+    it only decides *which* store class to instantiate. The ``except`` is narrowed
+    to :class:`ImportError` / :class:`ModuleNotFoundError` on purpose — the only
+    non-connectivity failure possible here is a missing optional dependency (e.g.
+    psycopg absent), which legitimately degrades to in-memory. A configured-but-
+    unreachable Postgres is deliberately **not** downgraded: construction opens no
+    connection, so a connectivity error can only surface later inside a request,
+    where it propagates rather than silently forking per-worker state. Any other
+    unexpected error at construction likewise propagates (fail loud) instead of
+    being swallowed into a silent fallback.
     """
     try:
         from shared_postgres import is_postgres_enabled
@@ -65,8 +68,11 @@ def _build_service() -> AgentStudioService:
             from agent_studio.pg_store import PostgresAgentStudioConversationStore
 
             return AgentStudioService(store=PostgresAgentStudioConversationStore())
-    except Exception:  # pragma: no cover - defensive: fall back to in-memory
-        logger.warning("Could not build Postgres Agent Studio store; using in-memory store", exc_info=True)
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover - only a missing dep degrades
+        logger.warning(
+            "Postgres Agent Studio store unavailable (missing dependency); using in-memory store",
+            exc_info=True,
+        )
     return AgentStudioService()
 
 
