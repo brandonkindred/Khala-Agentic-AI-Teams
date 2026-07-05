@@ -248,7 +248,11 @@ that as a "successful" empty string, which the parser then rejected with
 `max_tokens`, and adds rate-limit / JSON-repair handling. Agents that recover their result with
 `extract_json_object` (design, design-review, refinement, zero-trade-repair, alignment, analysis) use
 `response_format="json"` (forces a JSON object on the wire); `CodeSynthesisAgent`, which emits a raw
-Python file, uses `response_format="text"`. The **Bedrock** path is unchanged (native `BedrockModel`).
+Python file, uses `response_format="text"`. `_parse_helpers.extract_json_object` is a thin **strict**
+wrapper over `shared_llm_recovery.extract_json_object(..., repair=False)`: it reuses the shared
+string-aware brace scanner but keeps tolerant `json-repair` off, so a malformed or truncated payload
+raises `ValueError` and the spec-authoring agents re-prompt the model instead of accepting a repaired
+guess of half-written code. The **Bedrock** path is unchanged (native `BedrockModel`).
 
 The JSON *shape* contract on the Ollama path is enforced by `json_object` wire mode plus pydantic
 validation downstream (and, for `RefinementAgent`, a schema embedded verbatim in its prompt). This
