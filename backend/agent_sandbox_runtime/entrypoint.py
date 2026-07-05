@@ -17,6 +17,7 @@ Invariants:
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import sys
@@ -79,6 +80,40 @@ def _load_sandbox_secrets() -> None:
         path.unlink()
 
 
+def _maybe_register_injected_manifest(registry) -> None:
+    """Register the provision-time injected manifest into the in-container registry.
+
+    The sandbox boots from its own on-disk registry, which does NOT contain
+    dynamically-registered agents (Agent Studio saves / generated team agents).
+    The provisioner writes the bound agent's platform-authored manifest to
+    ``SANDBOX_AGENT_MANIFEST_FILE`` and bind-mounts it read-only; registering it
+    here — before the unknown-agent gate — lets such an agent boot and be invoked
+    (the invoke shim resolves from this same ``get_registry()`` singleton).
+
+    Best-effort by design: a missing env var, missing file, or malformed JSON logs
+    a warning and returns without raising. The subsequent ``registry.get(agent_id)
+    is None`` gate remains the single authority on whether the agent can boot, so a
+    static agent (already in the image) is unaffected, and re-registering a static
+    id is a harmless idempotent overwrite.
+    """
+    path_str = os.environ.get("SANDBOX_AGENT_MANIFEST_FILE")
+    if not path_str:
+        return
+    path = Path(path_str)
+    if not path.exists():
+        log.info("no injected manifest at %s; using on-disk registry only", path_str)
+        return
+    try:
+        from agent_registry.models import AgentManifest
+
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        manifest = AgentManifest.model_validate(raw)
+        registry.register(manifest)
+        log.info("registered injected manifest: agent_id=%s", manifest.id)
+    except Exception as exc:  # noqa: BLE001 - best-effort; the None-gate stays authoritative
+        log.warning("could not register injected manifest from %s: %s", path_str, exc)
+
+
 def _build_app() -> FastAPI:
     _load_sandbox_secrets()
     agent_id = os.environ.get("SANDBOX_AGENT_ID")
@@ -97,6 +132,10 @@ def _build_app() -> FastAPI:
     except Exception as exc:
         log.exception("FATAL: agent_registry load failed: %s", exc)
         sys.exit(EXIT_REGISTRY_LOAD_ERROR)
+
+    # Register the provision-time injected manifest (if any) so a dynamically
+    # registered agent — absent from this image's on-disk registry — can boot.
+    _maybe_register_injected_manifest(registry)
 
     # AgentRegistry.get() returns None for unknown ids; it does not raise.
     manifest = registry.get(agent_id)

@@ -35,9 +35,48 @@ import os
 import threading
 import uuid
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from typing import Callable, Iterator
 
 from .models import AgentDefinition, ConversationMessage, StudioMode
+
+
+class ConversationTurn:
+    """One serialized authoring turn: history + definition read at turn start,
+    plus buffered write ops applied within the turn's held lock.
+
+    The store's :meth:`turn` yields one of these while holding the
+    per-conversation lock (in-memory) or a ``SELECT … FOR UPDATE`` row lock
+    (Postgres), so the whole read→LLM→write sequence of
+    :meth:`AgentStudioService._handle_message` is serialized against a concurrent
+    send on the same conversation. ``history`` / ``definition`` are a snapshot from
+    the start of the turn; ``append_message`` / ``set_definition`` perform the
+    writes bound to the locked context.
+
+    Invariants:
+        * The bound write callables are only valid for the lifetime of the
+          ``with store.turn(...)`` block that produced this object.
+    """
+
+    def __init__(
+        self,
+        *,
+        history: list[tuple[str, str]],
+        definition: AgentDefinition,
+        on_message: Callable[[str, str], None],
+        on_definition: Callable[[AgentDefinition], None],
+    ) -> None:
+        self.history = history
+        self.definition = definition
+        self._on_message = on_message
+        self._on_definition = on_definition
+
+    def append_message(self, role: str, content: str) -> None:
+        self._on_message(role, content)
+
+    def set_definition(self, definition: AgentDefinition) -> None:
+        self._on_definition(definition)
 
 
 def _default_max_conversations() -> int:
@@ -61,6 +100,12 @@ class ConversationRecord:
     source_agent_id: str | None
     definition: AgentDefinition
     messages: list[ConversationMessage] = field(default_factory=list)
+    # Serializes whole turns for this conversation (held across the LLM call by
+    # :meth:`AgentStudioConversationStore.turn`). Lives on the record so its
+    # lifetime follows the record's — evicting/discarding the record drops it too.
+    # Excluded from equality (a lock is identity, not value) so ``==`` on records
+    # still compares data fields; a fresh lock is minted for every record.
+    turn_lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
 
 
 class AgentStudioConversationStore:
@@ -159,6 +204,52 @@ class AgentStudioConversationStore:
                 raise LookupError(f"Unknown conversation: {conversation_id}")
             record.definition = definition
             self._records.move_to_end(conversation_id)
+
+    @contextmanager
+    def turn(self, conversation_id: str) -> Iterator[ConversationTurn]:
+        """Serialize a whole authoring turn for one conversation.
+
+        Acquires the conversation's ``turn_lock`` and holds it for the duration of
+        the ``with`` block — including the caller's LLM round trip — so a second
+        concurrent ``send_message`` on the same conversation **blocks** until this
+        turn commits, then proceeds against fresh state (no lost definition update
+        / interleaved messages). Different conversations never contend (the lock is
+        per-conversation, not the store-wide lock).
+
+        Yields a :class:`ConversationTurn` snapshotting the history + definition at
+        turn start; its ``append_message`` / ``set_definition`` delegate to the
+        store's own thread-safe methods.
+
+        Preconditions:
+            * ``conversation_id`` exists (raises :class:`LookupError` → 404 if not).
+        """
+        with self._lock:
+            record = self._records.get(conversation_id)
+            if record is None:
+                raise LookupError(f"Unknown conversation: {conversation_id}")
+            self._records.move_to_end(conversation_id)
+            lock = record.turn_lock
+        lock.acquire()
+        try:
+            # Re-read under the store lock now that we hold the turn lock: the
+            # record must still exist (ids are never reused, so a miss means it was
+            # evicted/discarded mid-wait — a genuine 404).
+            with self._lock:
+                record = self._records.get(conversation_id)
+                if record is None:
+                    raise LookupError(f"Unknown conversation: {conversation_id}")
+                history = [(m.role, m.content) for m in record.messages]
+                definition = record.definition.model_copy(deep=True)
+            yield ConversationTurn(
+                history=history,
+                definition=definition,
+                on_message=lambda role, content: self.append_message(
+                    conversation_id, role, content
+                ),
+                on_definition=lambda d: self.set_definition(conversation_id, d),
+            )
+        finally:
+            lock.release()
 
     def discard(self, conversation_id: str) -> None:
         """Remove a conversation if present; a no-op when the id is unknown.

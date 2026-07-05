@@ -62,6 +62,13 @@ class AgentRegistry:
         source_paths: dict[str, Path] | None = None,
     ) -> None:
         self._by_id: dict[str, AgentManifest] = {m.id: m for m in manifests}
+        # Ids present at construction are the **disk/static** manifests: never
+        # written to the dynamic Postgres store (they're already on every worker's
+        # disk and in every sandbox image) and always resolved locally, so the
+        # built-in-agent invoke hot path never touches Postgres. Runtime
+        # ``register()`` of a *new* id does NOT add to this set — that's a dynamic
+        # manifest, and it is what gets persisted / read cross-worker.
+        self._static_ids: frozenset[str] = frozenset(self._by_id)
         self._team_display_names = team_display_names
         # Map agent_id → the YAML file it was loaded from. Used to locate
         # per-agent ``samples/`` directories without assuming that the team
@@ -116,8 +123,47 @@ class AgentRegistry:
     # Queries
     # ---------------------------------------------------------------
 
+    def _dynamic_store(self):
+        """Return the ``dynamic_store`` module iff it should back this process.
+
+        Postconditions:
+            * Returns the module when Postgres is configured and we are not inside
+              a per-invoke sandbox; otherwise ``None`` (in-memory-only, as before).
+              Any import failure degrades to ``None`` — a Postgres-less environment
+              must never break registry resolution.
+        """
+        try:
+            from . import dynamic_store  # noqa: PLC0415
+
+            if dynamic_store._store_active():
+                return dynamic_store
+        except Exception:  # pragma: no cover - defensive: never break disk resolution
+            logger.debug("dynamic manifest store unavailable", exc_info=True)
+        return None
+
+    def _merged_manifests(self) -> list[AgentManifest]:
+        """All manifests visible to this worker: cross-worker dynamic + local static.
+
+        Overlays the dynamic Postgres rows with the static disk manifests (static
+        wins on id collision). Degrades to the local ``_by_id`` view on any store
+        error, so the catalog never breaks when Postgres is down.
+        """
+        store = self._dynamic_store()
+        if store is None:
+            return list(self._by_id.values())
+        try:
+            merged: dict[str, AgentManifest] = {m.id: m for m in store.all()}
+        except Exception:
+            logger.warning("dynamic store all() failed; serving local registry", exc_info=True)
+            return list(self._by_id.values())
+        for static_id in self._static_ids:
+            local = self._by_id.get(static_id)
+            if local is not None:
+                merged[static_id] = local
+        return list(merged.values())
+
     def all(self) -> list[AgentManifest]:
-        return list(self._by_id.values())
+        return self._merged_manifests()
 
     def manifests_with_id_prefix(self, prefix: str) -> list[AgentManifest]:
         """Return registered manifests whose ``id`` starts with ``prefix``.
@@ -125,16 +171,52 @@ class AgentRegistry:
         Materializes only the matching subset in one pass, unlike :meth:`all`, which
         copies the whole registry before the caller filters — useful for a caller that
         wants just one namespace's entries (e.g. a single team's generated wrappers)
-        and runs the scan while holding a lock.
+        and runs the scan while holding a lock. When a dynamic store is active the
+        scan spans **all workers'** dynamic entries (not just this process's), so a
+        roster-replacement cleanup drops stale generated agents everywhere.
 
         Preconditions: ``prefix`` is a string.
         Postconditions: returns every registered manifest ``m`` with
             ``m.id.startswith(prefix)`` (empty list when none match); read-only.
         """
-        return [m for m in self._by_id.values() if m.id.startswith(prefix)]
+        local = [m for m in self._by_id.values() if m.id.startswith(prefix)]
+        store = self._dynamic_store()
+        if store is None:
+            return local
+        try:
+            dynamic = store.manifests_with_prefix(prefix)
+        except Exception:
+            logger.warning(
+                "dynamic store prefix scan failed for %r; serving local", prefix, exc_info=True
+            )
+            return local
+        merged = {m.id: m for m in dynamic}
+        # Static (disk) ids win; other local entries are already represented by the
+        # authoritative dynamic rows.
+        for m in local:
+            if m.id in self._static_ids:
+                merged[m.id] = m
+        return list(merged.values())
 
     def get(self, agent_id: str) -> AgentManifest | None:
-        return self._by_id.get(agent_id)
+        # Disk/static ids resolve locally with zero Postgres cost — the built-in
+        # agent invoke hot path.
+        if agent_id in self._static_ids:
+            return self._by_id.get(agent_id)
+        store = self._dynamic_store()
+        if store is None:
+            return self._by_id.get(agent_id)
+        try:
+            # Postgres is authoritative for dynamic ids: a ``None`` here means the
+            # manifest was deleted/never-persisted cross-worker, so we do NOT fall
+            # back to a possibly-stale local copy. We degrade to local only on a
+            # store *error*.
+            return store.get(agent_id)
+        except Exception:
+            logger.warning(
+                "dynamic store get failed for %s; using local registry", agent_id, exc_info=True
+            )
+            return self._by_id.get(agent_id)
 
     def register(self, manifest: AgentManifest, source_path: Path | None = None) -> None:
         """Install a manifest into the live registry (for dynamically generated agents).
@@ -147,13 +229,28 @@ class AgentRegistry:
             * ``manifest.id`` is non-empty.
         Postconditions:
             * ``get(manifest.id)`` returns ``manifest`` (re-registering the same id
-              overwrites the prior entry). Registration is in-memory only and does
-              not persist across process restarts.
+              overwrites the prior entry). Always updates this process's in-memory
+              view; when a dynamic store is active and ``manifest.id`` is not a
+              static/disk id, it is also persisted to Postgres so other workers and
+              the per-invoke sandbox resolve it. The write-through is best-effort —
+              a Postgres error is logged, never raised (callers like the generated
+              roster path hold a lock and swallow registry errors).
         """
         assert manifest.id, "register: manifest.id must be non-empty"
         self._by_id[manifest.id] = manifest
         if source_path is not None:
             self._source_paths[manifest.id] = source_path
+        if manifest.id not in self._static_ids:
+            store = self._dynamic_store()
+            if store is not None:
+                try:
+                    store.upsert(manifest)
+                except Exception:
+                    logger.warning(
+                        "dynamic store upsert failed for %s; registered locally only",
+                        manifest.id,
+                        exc_info=True,
+                    )
 
     def unregister(self, agent_id: str) -> bool:
         """Remove a (dynamically registered) manifest from the live registry.
@@ -162,12 +259,27 @@ class AgentRegistry:
         removed/renamed agents.
 
         Postconditions:
-            * ``get(agent_id)`` returns ``None`` afterwards. Returns ``True`` when
-              an entry was present and removed, ``False`` when the id was unknown
-              (a no-op).
+            * ``get(agent_id)`` returns ``None`` afterwards. Removes the entry from
+              this process's in-memory view and, when a dynamic store is active for
+              a non-static id, from Postgres too (best-effort). Returns ``True`` when
+              a local entry was present and removed, ``False`` otherwise — the
+              cross-worker Postgres delete is issued regardless (it's a no-op when
+              the row is absent).
         """
         self._source_paths.pop(agent_id, None)
-        return self._by_id.pop(agent_id, None) is not None
+        removed = self._by_id.pop(agent_id, None) is not None
+        if agent_id not in self._static_ids:
+            store = self._dynamic_store()
+            if store is not None:
+                try:
+                    store.delete(agent_id)
+                except Exception:
+                    logger.warning(
+                        "dynamic store delete failed for %s; removed locally only",
+                        agent_id,
+                        exc_info=True,
+                    )
+        return removed
 
     def search(
         self,
@@ -178,7 +290,7 @@ class AgentRegistry:
     ) -> list[AgentSummary]:
         needle = q.strip().lower() if q else None
         results: list[AgentSummary] = []
-        for m in self._by_id.values():
+        for m in self._merged_manifests():
             if team and m.team != team:
                 continue
             if tag and tag not in m.tags:
@@ -192,7 +304,7 @@ class AgentRegistry:
     def teams(self) -> list[TeamGroup]:
         counts: dict[str, int] = {}
         tags: dict[str, set[str]] = {}
-        for m in self._by_id.values():
+        for m in self._merged_manifests():
             counts[m.team] = counts.get(m.team, 0) + 1
             tags.setdefault(m.team, set()).update(m.tags)
         groups = [
@@ -274,8 +386,8 @@ class AgentRegistry:
             name=m.name,
             summary=m.summary,
             tags=list(m.tags),
-            has_input_schema=bool(m.inputs and m.inputs.schema_ref),
-            has_output_schema=bool(m.outputs and m.outputs.schema_ref),
+            has_input_schema=bool(m.inputs and (m.inputs.schema_ref or m.inputs.inline_schema)),
+            has_output_schema=bool(m.outputs and (m.outputs.schema_ref or m.outputs.inline_schema)),
             has_invoke=m.invoke is not None,
             has_sandbox=m.sandbox is not None,
             has_cognition=m.cognition is not None,

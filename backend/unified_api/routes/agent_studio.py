@@ -22,6 +22,7 @@ abuse/prompt-injection scanner, **not** an authn/authz layer.
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -36,13 +37,37 @@ from agent_studio.models import (
 )
 from agent_studio.service import AgentStudioService
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/agent-studio", tags=["agent-studio"])
 
-# Process-wide default service (in-memory conversation store). It is resolved
-# through the ``get_agent_studio_service`` dependency below so tests inject an
-# isolated instance via ``app.dependency_overrides`` rather than mutating module
-# state — the idiomatic FastAPI seam.
-_service = AgentStudioService()
+
+def _build_service() -> AgentStudioService:
+    """Build the process-wide service with a durable store when Postgres is on.
+
+    With ``POSTGRES_HOST`` set the conversation store is Postgres-backed so state
+    is coherent across the 4 uvicorn workers (a conversation created on one worker
+    resolves on another; turns serialize via a row lock). Without it — local dev /
+    tests — the in-memory store is used, exactly as before. A failure building the
+    Postgres store degrades to in-memory rather than breaking the routes.
+    """
+    try:
+        from shared_postgres import is_postgres_enabled
+
+        if is_postgres_enabled():
+            from agent_studio.pg_store import PostgresAgentStudioConversationStore
+
+            return AgentStudioService(store=PostgresAgentStudioConversationStore())
+    except Exception:  # pragma: no cover - defensive: fall back to in-memory
+        logger.warning("Could not build Postgres Agent Studio store; using in-memory store", exc_info=True)
+    return AgentStudioService()
+
+
+# Process-wide default service. Resolved through the ``get_agent_studio_service``
+# dependency below so tests inject an isolated instance via
+# ``app.dependency_overrides`` rather than mutating module state — the idiomatic
+# FastAPI seam.
+_service = _build_service()
 
 
 def get_agent_studio_service() -> AgentStudioService:

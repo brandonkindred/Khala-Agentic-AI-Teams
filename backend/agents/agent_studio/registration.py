@@ -61,6 +61,28 @@ def studio_agent_id(name: str) -> str:
     return f"{STUDIO_TEAM}.{slug}-{digest}"
 
 
+def _io_schema(
+    inline: dict | None,
+    *,
+    schema_ref: str,
+    ref_description: str,
+    inline_description: str,
+) -> IOSchema:
+    """Build an :class:`IOSchema` advertising an authored inline schema when present.
+
+    Preconditions:
+        * ``schema_ref`` is a non-empty dotted ref (the shared-entrypoint fallback).
+    Postconditions:
+        * Returns ``IOSchema(inline_schema=inline, ...)`` when ``inline`` is a
+          non-empty dict, else ``IOSchema(schema_ref=schema_ref, ...)``. An empty
+          dict is treated as "no authored schema" and falls back to the ref, so a
+          blank authored field never shadows the runnable generic schema.
+    """
+    if inline:
+        return IOSchema(inline_schema=inline, description=inline_description)
+    return IOSchema(schema_ref=schema_ref, description=ref_description)
+
+
 def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
     """Build a validated, invokable ``agent_registry`` manifest for a definition.
 
@@ -68,9 +90,15 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
         * ``definition.name`` is non-empty.
     Postconditions:
         * Returns a fully validated :class:`AgentManifest` filed under
-          ``team == STUDIO_TEAM`` whose ``source.entrypoint`` and invoke schemas
-          are the shared generated-agent runtime, and whose ``cognition`` carries
-          the ``default_guardrails`` seed pack.
+          ``team == STUDIO_TEAM`` whose ``source.entrypoint`` is the shared
+          generated-agent runtime, and whose ``cognition`` carries the
+          ``default_guardrails`` seed pack.
+        * When the definition carries an authored ``input_schema`` /
+          ``output_schema`` (inline JSON), it is advertised verbatim on the
+          manifest via ``IOSchema.inline_schema``; otherwise the generic
+          shared-entrypoint ``schema_ref`` is advertised. (Invoke still runs
+          through the shared generated-agent entrypoint regardless — runtime
+          binding of the authored schema is the separate deferred follow-up.)
         * The definition's operating ``states`` are persisted onto ``manifest.states``
           (inert metadata — see :class:`AgentStateSpec`).
     """
@@ -83,11 +111,18 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
         summary=definition.role or f"Studio agent {definition.name}",
         description=definition.description,
         tags=sorted({"studio", *definition.tags}),
-        inputs=IOSchema(
+        inputs=_io_schema(
+            definition.input_schema,
             schema_ref=_GEN_INPUT_REF,
-            description="Roster metadata + user message (shared generated-agent entrypoint).",
+            ref_description="Roster metadata + user message (shared generated-agent entrypoint).",
+            inline_description="Authored input schema.",
         ),
-        outputs=IOSchema(schema_ref=_GEN_OUTPUT_REF, description="The agent's response text."),
+        outputs=_io_schema(
+            definition.output_schema,
+            schema_ref=_GEN_OUTPUT_REF,
+            ref_description="The agent's response text.",
+            inline_description="Authored output schema.",
+        ),
         cognition=CognitionSpec(rule_packs=["default_guardrails"], tools=list(definition.tools)),
         states=[
             AgentStateSpec(key=s.key, label=s.label, system_prompt=s.system_prompt)
@@ -105,11 +140,13 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     The source manifest is never mutated — this returns a *new* definition.
 
     Only the fields the manifest carries are cloned (name → ``<name>.copy``,
-    ``summary`` → role, description, tags, cognition tools, operating states).
-    ``system_prompt``, ``input_schema``, and ``output_schema`` are **not**
-    transferred because the registry manifest does not store them (inputs/outputs
-    are dotted ``schema_ref``s, not inline schemas) — consistent with the deferred
-    "authored inline schemas" follow-up. The refine conversation re-elicits them.
+    ``summary`` → role, description, tags, cognition tools, operating states, and
+    authored inline I/O schemas). An authored ``input_schema`` / ``output_schema``
+    is transferred back from ``IOSchema.inline_schema`` when the source manifest
+    carries one (the generic shared-entrypoint ``schema_ref`` is not — it describes
+    the runtime envelope, not an authored contract). ``system_prompt`` is still not
+    transferred (the manifest does not store it) — the refine conversation
+    re-elicits it.
 
     The operating ``states`` ARE transferred (the manifest persists them). Cloning
     a legacy manifest saved before states existed (empty ``states``), or one whose
@@ -135,12 +172,16 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     # Per-team disambiguation (".copy-2", …) is the frontend's job — it knows the
     # team's existing names; the backend only avoids the doubled suffix here.
     name = manifest.name if manifest.name.endswith(".copy") else f"{manifest.name}.copy"
+    input_schema = manifest.inputs.inline_schema if manifest.inputs else None
+    output_schema = manifest.outputs.inline_schema if manifest.outputs else None
     return AgentDefinition(
         name=name,
         role=manifest.summary,
         description=manifest.description,
         tags=tags,
         tools=tools,
+        input_schema=input_schema,
+        output_schema=output_schema,
         states=states,
         mode="refine",
         cloned_from=manifest.id,

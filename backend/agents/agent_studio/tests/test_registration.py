@@ -162,3 +162,54 @@ def test_clone_of_already_copy_name_does_not_double_suffix() -> None:
     # Cloning an already-cloned name must not produce "X.copy.copy".
     draft = clone_from_manifest(_manifest(name="Planner.copy"))
     assert draft.name == "Planner.copy"
+
+
+# ---------------------------------------------------------------------------
+# P2 — authored inline I/O schemas
+# ---------------------------------------------------------------------------
+
+
+def test_build_manifest_advertises_generic_ref_without_authored_schema() -> None:
+    manifest = build_studio_agent_manifest(AgentDefinition(name="Planner", role="r"))
+    assert manifest.inputs is not None and manifest.inputs.inline_schema is None
+    assert manifest.inputs.schema_ref is not None
+    assert manifest.outputs is not None and manifest.outputs.schema_ref is not None
+
+
+def test_build_manifest_carries_authored_inline_schemas() -> None:
+    in_schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    out_schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    definition = AgentDefinition(
+        name="Planner", role="r", input_schema=in_schema, output_schema=out_schema
+    )
+    manifest = build_studio_agent_manifest(definition)
+    assert manifest.inputs.inline_schema == in_schema
+    assert manifest.inputs.schema_ref is None
+    assert manifest.outputs.inline_schema == out_schema
+    # Round-trips through validation (no import needed to advertise the schema).
+    reloaded = AgentManifest.model_validate(manifest.model_dump(mode="json"))
+    assert reloaded.inputs.inline_schema == in_schema
+
+
+def test_build_manifest_empty_authored_schema_falls_back_to_ref() -> None:
+    # A blank authored dict must not shadow the runnable generic schema_ref.
+    definition = AgentDefinition(name="Planner", role="r", input_schema={})
+    manifest = build_studio_agent_manifest(definition)
+    assert manifest.inputs.inline_schema is None
+    assert manifest.inputs.schema_ref is not None
+
+
+def test_clone_round_trips_inline_schemas() -> None:
+    in_schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    manifest = _manifest(inputs=IOSchema(inline_schema=in_schema), outputs=None)
+    draft = clone_from_manifest(manifest)
+    assert draft.input_schema == in_schema
+    assert draft.output_schema is None
+
+
+def test_clone_drops_generic_ref_schemas() -> None:
+    # A manifest that only carries a dotted schema_ref (the runtime envelope, not an
+    # authored contract) yields a draft with no authored input/output schema.
+    draft = clone_from_manifest(_manifest())  # inputs/outputs are schema_ref only
+    assert draft.input_schema is None
+    assert draft.output_schema is None

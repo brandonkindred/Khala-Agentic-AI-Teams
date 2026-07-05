@@ -96,8 +96,10 @@ def get_input_schema(agent_id: str) -> dict[str, Any]:
     manifest = get_registry().get(agent_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    if manifest.inputs and manifest.inputs.inline_schema is not None:
+        return manifest.inputs.inline_schema
     if not (manifest.inputs and manifest.inputs.schema_ref):
-        raise HTTPException(status_code=404, detail="Agent has no input schema_ref configured.")
+        raise HTTPException(status_code=404, detail="Agent has no input schema configured.")
     return _resolve_or_404(manifest.inputs.schema_ref, kind="input")
 
 
@@ -106,8 +108,10 @@ def get_output_schema(agent_id: str) -> dict[str, Any]:
     manifest = get_registry().get(agent_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    if manifest.outputs and manifest.outputs.inline_schema is not None:
+        return manifest.outputs.inline_schema
     if not (manifest.outputs and manifest.outputs.schema_ref):
-        raise HTTPException(status_code=404, detail="Agent has no output schema_ref configured.")
+        raise HTTPException(status_code=404, detail="Agent has no output schema configured.")
     return _resolve_or_404(manifest.outputs.schema_ref, kind="output")
 
 

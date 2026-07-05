@@ -166,3 +166,96 @@ def test_secrets_loader_noop_when_file_missing(monkeypatch: pytest.MonkeyPatch, 
 
     monkeypatch.setenv("SANDBOX_SECRETS_FILE", str(tmp_path / "does-not-exist"))
     _load_sandbox_secrets()
+
+
+# ---------------------------------------------------------------------------
+# Provision-time manifest injection
+# ---------------------------------------------------------------------------
+
+
+def _injectable_manifest(agent_id: str):
+    from agent_registry.models import AgentManifest, SourceInfo
+
+    return AgentManifest(
+        id=agent_id,
+        team="agent_studio",
+        name="Injected",
+        summary="An injected dynamic agent.",
+        source=SourceInfo(entrypoint="m:f"),
+    )
+
+
+def test_injected_manifest_lets_unknown_agent_boot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A dynamically-registered agent absent from the sandbox's on-disk registry
+    boots when its manifest is injected via ``SANDBOX_AGENT_MANIFEST_FILE``."""
+    import json
+
+    from agent_registry import get_registry
+    from agent_sandbox_runtime.entrypoint import _build_app
+
+    agent_id = "agent_studio.injected-xyz"
+    manifest_file = tmp_path / "agent-manifest.json"
+    manifest_file.write_text(json.dumps(_injectable_manifest(agent_id).model_dump(mode="json")), encoding="utf-8")
+    monkeypatch.setenv("SANDBOX_AGENT_ID", agent_id)
+    monkeypatch.setenv("SANDBOX_AGENT_MANIFEST_FILE", str(manifest_file))
+    try:
+        _build_app()  # must NOT SystemExit
+        assert get_registry().get(agent_id) is not None
+    finally:
+        get_registry().unregister(agent_id)
+        get_registry.cache_clear()
+
+
+def test_malformed_injected_manifest_falls_through_to_unknown_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Malformed injected JSON is best-effort ignored; the unknown-agent gate stays
+    authoritative and still exits ``EXIT_UNKNOWN_AGENT``."""
+    from agent_sandbox_runtime.entrypoint import EXIT_UNKNOWN_AGENT, _build_app
+
+    manifest_file = tmp_path / "agent-manifest.json"
+    manifest_file.write_text("{ not valid json", encoding="utf-8")
+    monkeypatch.setenv("SANDBOX_AGENT_ID", "agent_studio.bad-xyz")
+    monkeypatch.setenv("SANDBOX_AGENT_MANIFEST_FILE", str(manifest_file))
+    with pytest.raises(SystemExit) as exc_info:
+        _build_app()
+    assert exc_info.value.code == EXIT_UNKNOWN_AGENT
+
+
+def test_maybe_register_injected_manifest_registers_valid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import json
+
+    from agent_sandbox_runtime.entrypoint import _maybe_register_injected_manifest
+
+    manifest_file = tmp_path / "agent-manifest.json"
+    manifest_file.write_text(
+        json.dumps(_injectable_manifest("agent_studio.u-1").model_dump(mode="json")),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SANDBOX_AGENT_MANIFEST_FILE", str(manifest_file))
+    registered: list = []
+    fake_registry = type("R", (), {"register": lambda self, m: registered.append(m)})()
+    _maybe_register_injected_manifest(fake_registry)
+    assert [m.id for m in registered] == ["agent_studio.u-1"]
+
+
+def test_maybe_register_injected_manifest_noop_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_sandbox_runtime.entrypoint import _maybe_register_injected_manifest
+
+    monkeypatch.delenv("SANDBOX_AGENT_MANIFEST_FILE", raising=False)
+    called: list = []
+    fake_registry = type("R", (), {"register": lambda self, m: called.append(m)})()
+    _maybe_register_injected_manifest(fake_registry)  # no-op, no raise
+    assert called == []
+
+
+def test_maybe_register_injected_manifest_noop_when_file_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from agent_sandbox_runtime.entrypoint import _maybe_register_injected_manifest
+
+    monkeypatch.setenv("SANDBOX_AGENT_MANIFEST_FILE", str(tmp_path / "nope.json"))
+    called: list = []
+    fake_registry = type("R", (), {"register": lambda self, m: called.append(m)})()
+    _maybe_register_injected_manifest(fake_registry)  # no-op, no raise
+    assert called == []

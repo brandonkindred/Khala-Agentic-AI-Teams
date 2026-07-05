@@ -13,6 +13,7 @@
 #   {agent_image}       — fully qualified khala-agent-sandbox image tag
 #   {pg_password}       — randomly generated per-sandbox Postgres password
 #   {agent_secrets_file}— host path of the 0400 sandbox secrets bind-mount
+#   {agent_manifest_file}— host path of the injected agent-manifest JSON bind-mount
 #   {agent_host_port}   — host port (loopback) the agent shim binds to
 #
 # Resource caps are intentionally modest; the agent service keeps the
@@ -132,12 +133,21 @@ services:
       PROMETHEUS_URL: http://prometheus:9090
       GRAFANA_URL: http://grafana:3000
       SANDBOX_SECRETS_FILE: /run/secrets/sandbox-env
+      SANDBOX_AGENT_MANIFEST_FILE: /run/agent-manifest.json
     ports:
       - "127.0.0.1:{agent_host_port}:8090"
     volumes:
       - type: bind
         source: "{agent_secrets_file}"
         target: /run/secrets/sandbox-env
+        read_only: true
+      # Platform-authored manifest for the bound agent, injected at provision
+      # time so a dynamically-registered agent (Agent Studio save / generated
+      # team agent) — absent from this image's on-disk registry — can still
+      # boot. Read-only, carries no secrets.
+      - type: bind
+        source: "{agent_manifest_file}"
+        target: /run/agent-manifest.json
         read_only: true
     tmpfs:
       - /tmp

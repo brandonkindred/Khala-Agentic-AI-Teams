@@ -81,6 +81,19 @@ async def test_run_container_renders_compose_and_mounts_secrets(
     assert "khala-sbx-blog-prometheus" in rendered
     assert "khala-sbx-blog-grafana" in rendered
 
+    # The injected agent manifest is written (0644, so the container's non-root
+    # user can read the bind mount) and the compose file mounts it read-only.
+    import json as _json
+
+    manifest_file = project_dir / "agent-manifest.json"
+    assert manifest_file.exists()
+    assert (manifest_file.stat().st_mode & 0o777) == 0o644
+    injected = _json.loads(manifest_file.read_text(encoding="utf-8"))
+    assert injected["id"] == "blogging.planner"
+    assert "SANDBOX_AGENT_MANIFEST_FILE: /run/agent-manifest.json" in rendered
+    assert "/run/agent-manifest.json" in rendered
+    assert str(manifest_file) in rendered
+
 
 @pytest.mark.asyncio
 async def test_run_container_cleans_up_when_compose_up_fails(
@@ -96,13 +109,44 @@ async def test_run_container_cleans_up_when_compose_up_fails(
     monkeypatch.setattr(provisioner_mod, "_exec", fake_exec)
 
     with pytest.raises(provisioner_mod.DockerError):
+        # A resolvable agent so we exercise the compose-up-fails cleanup path
+        # rather than the earlier unknown-agent fail-fast.
         await provisioner_mod.run_container(
-            agent_id="agent-1",
+            agent_id="blogging.planner",
             container_name="khala-sbx-fail",
             team="blogging",
         )
 
     project_dir = sandbox_cache / "agent_provisioning" / "sandboxes" / "stacks" / "khala-sbx-fail"
+    assert not project_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_run_container_fails_fast_for_unresolvable_agent(
+    sandbox_cache: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent id with no registry manifest raises before ``docker compose up``
+    (no stack is created), rather than letting the sandbox boot and exit 3."""
+    called: list[list[str]] = []
+
+    async def fake_exec(cmd: list[str], *, timeout_s: int = 30):
+        called.append(cmd)
+        return 0, "", ""
+
+    monkeypatch.setattr(provisioner_mod, "_exec", fake_exec)
+
+    with pytest.raises(provisioner_mod.DockerError):
+        await provisioner_mod.run_container(
+            agent_id="does.not.exist.anywhere",
+            container_name="khala-sbx-missing",
+            team="blogging",
+        )
+
+    # No docker command ran and no project dir was materialised.
+    assert called == []
+    project_dir = (
+        sandbox_cache / "agent_provisioning" / "sandboxes" / "stacks" / "khala-sbx-missing"
+    )
     assert not project_dir.exists()
 
 

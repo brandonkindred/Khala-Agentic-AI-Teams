@@ -312,6 +312,22 @@ async def lifespan(app: FastAPI):
         logger.exception("agent_console postgres schema registration failed")
 
     try:
+        from agent_registry.postgres import SCHEMA as AGENT_REGISTRY_SCHEMA
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(AGENT_REGISTRY_SCHEMA)
+    except Exception:
+        logger.exception("agent_registry postgres schema registration failed")
+
+    try:
+        from agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(AGENT_STUDIO_SCHEMA)
+    except Exception:
+        logger.exception("agent_studio postgres schema registration failed")
+
+    try:
         from shared_postgres import register_team_schemas
         from user_profile.postgres import SCHEMA as USER_PROFILE_SCHEMA
 

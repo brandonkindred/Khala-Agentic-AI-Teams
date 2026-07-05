@@ -13,6 +13,18 @@ from agent_registry.loader import AgentRegistry
 from agent_registry.models import AgentManifest
 
 
+@pytest.fixture(autouse=True)
+def _no_dynamic_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep these hermetic tests off the dynamic Postgres overlay.
+
+    They construct throwaway registries and assert exact contents, so they must
+    behave as the Postgres-less path regardless of whether ``POSTGRES_HOST`` is
+    set in the dev environment. The overlay's own behavior is covered in
+    ``test_loader_dynamic.py`` (fake store) and ``test_dynamic_store.py`` (live PG).
+    """
+    monkeypatch.setattr(AgentRegistry, "_dynamic_store", lambda self: None)
+
+
 def _write_manifest(root: Path, team: str, filename: str, body: str) -> Path:
     directory = root / team / "agent_console" / "manifests"
     directory.mkdir(parents=True, exist_ok=True)
