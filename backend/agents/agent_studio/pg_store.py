@@ -34,6 +34,11 @@ from .store import ConversationRecord, ConversationTurn
 
 logger = logging.getLogger(__name__)
 
+# ``_STORE`` is the @timed_query metrics label; ``_CONV`` / ``_MSG`` are table
+# names. They are all module-level constants (never external input), so
+# interpolating ``_CONV`` / ``_MSG`` into SQL is safe — every value is passed as a
+# bound ``%s`` parameter. ``_STORE`` coincides with ``_CONV`` today but is a
+# separate logical label.
 _STORE = "agent_studio_conversations"
 _CONV = "agent_studio_conversations"
 _MSG = "agent_studio_conv_messages"
@@ -42,9 +47,11 @@ _MSG = "agent_studio_conv_messages"
 class PostgresAgentStudioConversationStore:
     """Postgres-backed store for Agent Studio authoring conversations.
 
-    Stateless; the connection pool lives inside ``shared_postgres``. Invariants
-    mirror the in-memory store's: a ``conversation_id`` returned by :meth:`create`
-    resolves via :meth:`get` until discarded, and ids are never reused.
+    Stateless with respect to connections — each method acquires its own from the
+    pool managed by ``shared_postgres`` and returns it on exit; nothing is held on
+    the instance. Invariants mirror the in-memory store's: a ``conversation_id``
+    returned by :meth:`create` resolves via :meth:`get` until discarded, and ids
+    are never reused.
     """
 
     @timed_query(store=_STORE, op="create")
@@ -119,6 +126,12 @@ class PostgresAgentStudioConversationStore:
               contract rather than silently inserting an orphan.
         """
         with get_conn() as conn, conn.cursor() as cur:
+            # One statement, atomic: the CTE bumps the parent's ``updated_at`` and
+            # the INSERT sources its row from that CTE. If the conversation doesn't
+            # exist the UPDATE matches nothing → the CTE is empty → the INSERT
+            # SELECT gets no source row → ``RETURNING id`` yields nothing, so the
+            # ``fetchone() is None`` check below raises rather than orphaning a
+            # message.
             cur.execute(
                 f"WITH conv AS ("
                 f"UPDATE {_CONV} SET updated_at = NOW() "
@@ -145,6 +158,12 @@ class PostgresAgentStudioConversationStore:
 
     @timed_query(store=_STORE, op="len")
     def __len__(self) -> int:
+        """Return the number of live conversations in the store.
+
+        Preconditions: none.
+        Postconditions: returns a non-negative ``COUNT(*)`` of
+        ``agent_studio_conversations``.
+        """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {_CONV}")
             row = cur.fetchone()
@@ -168,7 +187,14 @@ class PostgresAgentStudioConversationStore:
         defaults to 10 per worker); the frontend already prevents concurrent sends.
 
         Preconditions:
-            * ``conversation_id`` exists (raises :class:`LookupError` → 404 if not).
+            * ``conversation_id`` names an existing conversation.
+        Postconditions / Exceptions:
+            * Yields a :class:`ConversationTurn` snapshotting the current history +
+              definition; its ``append_message`` / ``set_definition`` run on the
+              locked transaction and commit atomically on clean block exit.
+            * Raises :class:`LookupError` (→ 404) if the conversation is unknown.
+            * A Postgres error (raised through the ``@timed_query``-wrapped inner
+              ops) propagates and rolls the transaction back — nothing is persisted.
         """
         with get_conn() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -187,6 +213,12 @@ class PostgresAgentStudioConversationStore:
                 history = [(r["role"], r["content"]) for r in cur.fetchall()]
 
             def _on_message(role: str, content: str) -> None:
+                """Append one message on the turn's locked transaction (bumps updated_at).
+
+                Precondition: called only within the enclosing ``turn`` block, while
+                its row lock is held. A Postgres error propagates and rolls the whole
+                turn back.
+                """
                 with conn.cursor() as wcur:
                     wcur.execute(
                         f"UPDATE {_CONV} SET updated_at = NOW() WHERE conversation_id = %s",
@@ -198,6 +230,11 @@ class PostgresAgentStudioConversationStore:
                     )
 
             def _on_definition(new_definition: AgentDefinition) -> None:
+                """Replace the draft definition on the turn's locked transaction.
+
+                Precondition: called only within the enclosing ``turn`` block. A
+                Postgres error propagates and rolls the whole turn back.
+                """
                 with conn.cursor() as wcur:
                     wcur.execute(
                         f"UPDATE {_CONV} SET definition_json = %s, updated_at = NOW() "

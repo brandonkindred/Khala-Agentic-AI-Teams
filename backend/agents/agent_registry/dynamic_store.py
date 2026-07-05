@@ -148,8 +148,16 @@ def all() -> list[AgentManifest]:  # noqa: A001 - mirrors AgentRegistry.all()
     Postconditions:
         * Returns all persisted dynamic manifests, id-ordered. Result is micro-cached
           for ``_ALL_CACHE_TTL_S`` (~2s) to shield the catalog list/search/teams
-          reads; the cache is invalidated on every :func:`upsert` / :func:`delete`
-          in this process (cross-worker writes are visible within the TTL).
+          reads.
+
+    Cross-worker consistency: the cache is **process-local**. It is cleared eagerly
+    only on this worker's own :func:`upsert` / :func:`delete` (via
+    :func:`clear_cache`) — there is no cross-worker invalidation. A write on another
+    worker is therefore reflected here only after this worker's cache entry expires,
+    i.e. within ``_ALL_CACHE_TTL_S``. (This is TTL staleness, not Postgres
+    replication lag — all workers read the same primary.) The point-lookup
+    :func:`get` is uncached, so cross-worker save→resolve is immediate; only the
+    catalog *list* is eventually-consistent within the TTL window.
     """
     global _all_cache, _all_cache_at
     now = time.monotonic()
