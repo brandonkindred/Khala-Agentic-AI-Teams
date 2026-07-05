@@ -284,6 +284,8 @@ def test_create_audit_uses_temporal_when_dispatch_available(monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert "(Temporal)" in body["message"]
+    # the workflow id is surfaced in the response for Temporal-UI correlation
+    assert body["workflow_id"] == "accessibility_audit-wf1"
     dispatch.assert_called_once()
     # dispatched with (job_id, audit_id, request_payload)
     args = dispatch.call_args.args
@@ -308,7 +310,10 @@ def test_create_audit_uses_background_task_when_temporal_disabled(monkeypatch):
 
     resp = client.post("/audit/create", json={"web_urls": ["https://example.com"]})
     assert resp.status_code == 200
-    assert "(Temporal)" not in resp.json()["message"]
+    body = resp.json()
+    assert "(Temporal)" not in body["message"]
+    # no Temporal workflow on the in-process path
+    assert body["workflow_id"] is None
     # background task ran the (patched) execution core
     executed.assert_awaited_once()
 

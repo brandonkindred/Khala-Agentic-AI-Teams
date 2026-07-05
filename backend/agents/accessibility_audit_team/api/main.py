@@ -182,6 +182,7 @@ async def create_audit(
         request_payload=payload,
     )
 
+    workflow_id: Optional[str] = None
     dispatch = _temporal_dispatch()
     if dispatch is not None:
         try:
@@ -193,8 +194,16 @@ async def create_audit(
         except Exception as e:
             # Fail fast rather than re-running in-process: the workflow may have
             # been accepted server-side, so an in-process fallback could execute
-            # the same audit twice. Mark the job failed and surface a 500.
-            logger.warning("Temporal dispatch failed for job %s.", job_id, exc_info=True)
+            # the same audit twice. Mark the job failed and surface a 500. The
+            # exception type/message (e.g. connection refused vs. client-not-ready
+            # timeout) is included so operators can tell the failures apart.
+            logger.warning(
+                "Temporal dispatch failed for job %s: %s: %s",
+                job_id,
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
             _job_manager.update_job(
                 job_id, status=JOB_STATUS_FAILED, error=f"Temporal dispatch failed: {e}"
             )
@@ -215,6 +224,7 @@ async def create_audit(
         audit_id=audit_id,
         status="running",
         message=message,
+        workflow_id=workflow_id,
     )
 
 
