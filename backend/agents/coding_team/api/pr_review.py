@@ -761,6 +761,92 @@ def _run_pr_review_body(
             _finalize_review(job_id, "failed", error=safe_err)
 
 
+def _try_review(
+    client: _main.GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    body: str,
+    event: str,
+    comments: List[Dict[str, Any]],
+) -> bool:
+    """Submit one PR review, returning False on a recoverable 422 and re-raising otherwise.
+
+    Only a 422 (validation — a bad diff line, or REQUEST_CHANGES on the bot's own
+    PR) is recoverable by dropping the event/comments; any other status
+    (permission, rate-limit, transport, server) is a real failure re-raised so the
+    caller fails loudly instead of silently degrading.
+
+    Preconditions:
+        - ``comments`` are already token-scrubbed review-comment dicts.
+    Postconditions:
+        - Returns True when GitHub accepted the review; False (after logging) on a
+          422. Raises ``GitHubAPIError`` for any non-422 status.
+    """
+    try:
+        client.create_pull_request_review(
+            owner=owner,
+            repo=repo,
+            number=pr_number,
+            commit_id=head_sha,
+            body=body,
+            event=event,
+            comments=comments,
+        )
+        return True
+    except GitHubAPIError as e:
+        if e.status != _HTTP_UNPROCESSABLE:
+            raise
+        logger.warning(
+            "PR review submit failed (event=%s, comments=%d): %s", event, len(comments), e
+        )
+        return False
+
+
+def _post_summary_only(
+    client: _main.GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    body: str,
+    events: List[str],
+) -> List[Dict[str, Any]]:
+    """Post the summary body alone across candidate events; raise if all attempts fail.
+
+    Used when a review carries no line-anchored findings. Unlike the inline-comment
+    path, EVERY ``GitHubAPIError`` is tolerated per event (not just 422): the caller
+    decides whether a total failure is fatal (a zero-finding review whose only
+    output is this summary) or a best-effort courtesy (file-level findings still
+    posted separately).
+
+    Preconditions:
+        - ``events`` is a non-empty ordered list of candidate review events.
+    Postconditions:
+        - Returns ``[]`` as soon as one event succeeds; raises the last
+          ``GitHubAPIError`` when every event failed.
+    """
+    last_exc: Optional[GitHubAPIError] = None
+    for ev in events:
+        try:
+            client.create_pull_request_review(
+                owner=owner,
+                repo=repo,
+                number=pr_number,
+                commit_id=head_sha,
+                body=body,
+                event=ev,
+                comments=[],
+            )
+            return []
+        except GitHubAPIError as e:
+            logger.warning("PR summary-only review failed (event=%s): %s", ev, e)
+            last_exc = e
+    assert last_exc is not None
+    raise last_exc
+
+
 def _submit_review(
     client: _main.GitHubClient,
     owner: str,
@@ -817,49 +903,16 @@ def _submit_review(
         # endpoint the summary is a best-effort courtesy and its failure is
         # tolerated, but a zero-finding review whose only output is this summary
         # must surface as failed rather than report a hollow success.
-        last_exc: Optional[GitHubAPIError] = None
-        for ev in events:
-            try:
-                client.create_pull_request_review(
-                    owner=owner,
-                    repo=repo,
-                    number=pr_number,
-                    commit_id=head_sha,
-                    body=body,
-                    event=ev,
-                    comments=[],
-                )
-                return []
-            except GitHubAPIError as e:
-                logger.warning("PR summary-only review failed (event=%s): %s", ev, e)
-                last_exc = e
-        assert last_exc is not None
-        raise last_exc
+        return _post_summary_only(client, owner, repo, pr_number, head_sha, body, events)
 
     # Happy path: one review carrying the summary body + every inline comment.
     # REQUEST_CHANGES degrades to COMMENT for the bot's own PR without losing the
-    # comments.
+    # comments. Only a 422 is recoverable (retry as COMMENT, then bisect below);
+    # _try_review re-raises any other status so the job fails loudly.
+    scrubbed = [p[0] for p in pairs]
     for ev in events:
-        try:
-            client.create_pull_request_review(
-                owner=owner,
-                repo=repo,
-                number=pr_number,
-                commit_id=head_sha,
-                body=body,
-                event=ev,
-                comments=[p[0] for p in pairs],
-            )
+        if _try_review(client, owner, repo, pr_number, head_sha, body, ev, scrubbed):
             return []
-        except GitHubAPIError as e:
-            # Only a 422 (validation — a bad diff line) is recoverable by
-            # dropping the event/comments. A 403 (permission/rate-limit), 0
-            # (transport), or 5xx is a real failure: re-raise so the outer
-            # handler marks the job failed instead of silently degrading to
-            # standalone comments and reporting success.
-            if e.status != _HTTP_UNPROCESSABLE:
-                raise
-            logger.warning("PR review submit failed (event=%s, comments=%d): %s", ev, len(pairs), e)
 
     # The full batch was rejected by a bad line. Post the summary on its own so it
     # is not lost, then bisect the comments to drop only the offending ones.
@@ -902,30 +955,25 @@ def _bisect_submit(
           posted inline. Returns the original comments GitHub still rejects when a
           single comment is submitted on its own (``[]`` when all were posted).
     """
-    try:
-        client.create_pull_request_review(
-            owner=owner,
-            repo=repo,
-            number=pr_number,
-            commit_id=head_sha,
-            body=_BISECT_CONTINUATION_BODY,
-            event="COMMENT",
-            comments=[p[0] for p in pairs],
-        )
+    # Only a 422 means a bad diff line worth bisecting out; _try_review re-raises
+    # any other status rather than mistaking it for one stray off-diff comment.
+    if _try_review(
+        client,
+        owner,
+        repo,
+        pr_number,
+        head_sha,
+        _BISECT_CONTINUATION_BODY,
+        "COMMENT",
+        [p[0] for p in pairs],
+    ):
         return []
-    except GitHubAPIError as e:
-        # Only a 422 means a bad diff line worth bisecting out; any other status
-        # (permission, rate-limit, transport, server) is a real failure that must
-        # propagate rather than be mistaken for one stray off-diff comment.
-        if e.status != _HTTP_UNPROCESSABLE:
-            raise
-        logger.warning("PR review submit failed (event=COMMENT, comments=%d): %s", len(pairs), e)
-        if len(pairs) <= 1:
-            return [p[1] for p in pairs]
-        mid = len(pairs) // 2
-        return _bisect_submit(
-            client, owner, repo, pr_number, head_sha, pairs[:mid]
-        ) + _bisect_submit(client, owner, repo, pr_number, head_sha, pairs[mid:])
+    if len(pairs) <= 1:
+        return [p[1] for p in pairs]
+    mid = len(pairs) // 2
+    return _bisect_submit(client, owner, repo, pr_number, head_sha, pairs[:mid]) + _bisect_submit(
+        client, owner, repo, pr_number, head_sha, pairs[mid:]
+    )
 
 
 # ---------------------------------------------------------------------------
