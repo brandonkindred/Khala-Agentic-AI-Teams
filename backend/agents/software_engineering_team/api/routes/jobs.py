@@ -494,7 +494,11 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
         raise HTTPException(status_code=400, detail="Job has no repo_path; cannot resume.")
 
     sprint_id = data.get("sprint_id")
-    repo_path = _resolve_repo_path(repo_path, sprint_id)
+    # Validate for its raise side-effect only; keep the raw stored string
+    # unchanged. The resolved Path is deliberately discarded here (unlike
+    # run_team, which assigns it) so a resume never rewrites the path handed
+    # to the orchestrator/workflow from the value persisted at creation.
+    _resolve_repo_path(repo_path, sprint_id)
 
     # Same Temporal+sprint_id guard as POST /run-team: validate BEFORE
     # flipping the job to running, so the guard firing can't leave the
@@ -601,7 +605,10 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
 
     # Capture sprint_id before validation so we know which check to run.
     sprint_id = data.get("sprint_id")
-    repo_path = _resolve_repo_path(repo_path, sprint_id)
+    # Validate for its raise side-effect only; keep the raw stored string.
+    # The resolved Path is discarded here (unlike run_team) so reset_job below
+    # re-persists the original repo_path rather than a canonicalized rewrite.
+    _resolve_repo_path(repo_path, sprint_id)
 
     # Re-persist sprint_id after reset_job clears the payload so a
     # sprint-scoped restart goes back through the synthesized-spec

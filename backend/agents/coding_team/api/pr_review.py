@@ -484,8 +484,13 @@ def _run_reviewer(
         - ``provider`` was resolved before the first GitHub call; ``code`` is the
           pre-numbered review body.
     Postconditions:
-        - Returns the reviewer output on success; on any reviewer failure records
-          the failure on the PR/job via ``_record_failure`` and returns ``None``.
+        - Returns a truthy reviewer output on success. On any reviewer failure —
+          an exception, OR a reviewer that returns ``None`` without raising —
+          records the failure on the PR/job via ``_record_failure`` and returns
+          ``None``. The caller returns on ``None``, so recording the failure here
+          is what keeps the daemon-thread job from wedging in ``running`` (the
+          pre-decomposition body reached the same terminal-failed state when a
+          ``None`` output hit ``output.issues`` and raised into the outer except).
     """
     # last_activity_at is stamped centrally by the job service on every real
     # update, so these writes count as activity for stall detection.
@@ -495,7 +500,7 @@ def _run_reviewer(
         label=f"Reviewing PR #{pr_number}",
     )
     try:
-        return provider.run_pr_code_review(
+        output = provider.run_pr_code_review(
             code=code,
             # _build_review_code renders every line with its original line-number
             # prefix; declaring it here (instead of letting the reviewer sniff the
@@ -513,6 +518,21 @@ def _run_reviewer(
     finally:
         # Clear so a stale sub-progress entry never outlives the review itself.
         pr_bridge.clear()
+    if output is None:
+        # A reviewer that returns no output (rather than raising) must not slip
+        # through as a silent success — the caller returns on None with no
+        # terminal write, which would wedge the job in "running" forever.
+        logger.error("PR review agent returned no output for PR #%s", pr_number)
+        _main._record_failure(
+            client,
+            owner,
+            repo,
+            pr_number,
+            job_id,
+            "code review failed: reviewer returned no output",
+        )
+        return None
+    return output
 
 
 def _post_file_comments(
