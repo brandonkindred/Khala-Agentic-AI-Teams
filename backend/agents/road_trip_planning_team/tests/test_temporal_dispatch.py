@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from road_trip_planning_team import pipeline as rtp_pipeline
 from road_trip_planning_team.api import main as api_main
+from road_trip_planning_team.shared.job_store import JOB_STATUS_FAILED
 
 
 @pytest.fixture
@@ -46,7 +47,9 @@ def test_plan_dispatches_to_temporal_when_enabled(client, monkeypatch, sample_tr
     assert captured["request"]["trip"]["start_location"] == "San Francisco, CA"
 
 
-def test_plan_marks_job_failed_when_dispatch_raises(client, monkeypatch, sample_trip_body):
+def test_plan_marks_job_failed_when_dispatch_raises(
+    client, monkeypatch, sample_trip_body, fake_job_client
+):
     """A dispatch failure (e.g. Temporal worker client never connected) must
     leave the job in a terminal FAILED state, not orphaned in PENDING."""
     monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: True)
@@ -62,6 +65,12 @@ def test_plan_marks_job_failed_when_dispatch_raises(client, monkeypatch, sample_
 
     assert response.status_code == 500
     assert "Failed to start road trip planning run" in response.json().get("detail", "")
+    # The freshly-created job must reach a terminal FAILED state, not stay
+    # orphaned in PENDING — assert the store row, not just the HTTP body.
+    jobs = fake_job_client.list_jobs()
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == JOB_STATUS_FAILED
+    assert "Dispatch failed" in (jobs[0].get("error") or "")
 
 
 def test_dispatch_helper_returns_thread_label_when_disabled(monkeypatch, sample_plan_request):

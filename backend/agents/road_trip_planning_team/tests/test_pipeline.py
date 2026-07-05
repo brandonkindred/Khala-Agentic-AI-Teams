@@ -72,6 +72,13 @@ def test_translate_per_day_driving_activities_meals_accommodation():
 
 
 def test_run_pipeline_parses_translated_graph_output(monkeypatch, sample_plan_request):
+    """run_pipeline extracts + translates a successful graph run into a TripItinerary.
+
+    Mock contract: build_trip_graph/invoke_graph_sync are stubbed to opaque
+    objects (their identity is irrelevant), and extract_node_text returns the
+    composer node's text — prose wrapping a valid itinerary JSON object — which
+    run_pipeline must slice, json.loads, key-translate, and validate.
+    """
     composer_json = json.dumps(
         {
             "title": "SF to LA",
@@ -98,6 +105,13 @@ def test_run_pipeline_parses_translated_graph_output(monkeypatch, sample_plan_re
 
 
 def test_run_pipeline_falls_back_when_output_unparseable(monkeypatch, sample_plan_request):
+    """run_pipeline returns a minimal fallback itinerary when the graph output
+    has no parseable JSON.
+
+    Mock contract: extract_node_text returns text with no ``{`` so the parse
+    branch is skipped and the fallback (title/overview/total_days derived from
+    the request) is returned instead of raising.
+    """
     monkeypatch.setattr(rtp_pipeline, "build_trip_graph", lambda: object())
     monkeypatch.setattr(rtp_pipeline, "invoke_graph_sync", lambda graph, task: object())
     monkeypatch.setattr(rtp_pipeline, "extract_node_text", lambda result, node_id: "no json here")
