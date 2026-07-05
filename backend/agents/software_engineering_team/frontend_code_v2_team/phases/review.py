@@ -47,6 +47,27 @@ from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT, REVIEW_PROMPT
 logger = logging.getLogger(__name__)
 
 
+def _disk_repo_reader(repo_path: Path) -> Any:
+    """Build a whole-repo reader for the false-positive verifier, or None.
+
+    The review runs inside the materialized task workspace, so the verifier can
+    read existing (unchanged) repository files to confirm a file/module a finding
+    claims is missing actually exists.
+
+    Postconditions:
+        - Returns a ``DiskRepoReader`` rooted at ``repo_path``; returns ``None``
+          (best-effort) if the reader cannot be constructed, so review never
+          breaks on reader setup.
+    """
+    try:
+        from code_review_agent.repo_reader import DiskRepoReader
+
+        return DiskRepoReader(str(repo_path))
+    except Exception as exc:  # noqa: BLE001 - the reader is an optional enhancement
+        logger.debug("Could not build DiskRepoReader for %s: %s", repo_path, exc)
+        return None
+
+
 def _run_llm_review(
     *,
     llm: LLMClient,
@@ -240,7 +261,9 @@ def run_review(
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
             )
-            cr_result = call_code_review_agent(code_review_agent, cr_input, None)
+            cr_result = call_code_review_agent(
+                code_review_agent, cr_input, None, repo_reader=_disk_repo_reader(repo_path)
+            )
             for item in getattr(cr_result, "issues", []):
                 issues.append(
                     ReviewIssue(
@@ -418,7 +441,12 @@ def run_microtask_review(
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
             )
-            cr_result = call_code_review_agent(code_review_agent, cr_input, detail_callback)
+            cr_result = call_code_review_agent(
+                code_review_agent,
+                cr_input,
+                detail_callback,
+                repo_reader=_disk_repo_reader(repo_path),
+            )
             for item in getattr(cr_result, "issues", []):
                 issues.append(
                     ReviewIssue(

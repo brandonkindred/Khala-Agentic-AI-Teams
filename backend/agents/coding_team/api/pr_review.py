@@ -27,6 +27,7 @@ from coding_team.api.state import (
 )
 from coding_team.github_source import (
     GitHubAPIError,
+    GitHubRepoReader,
     anchor_to_first_file,
     build_review_body,
     choose_event,
@@ -186,6 +187,45 @@ class ReviewCode(NamedTuple):
 
     code: str
     files_reviewed: int
+
+
+def _fetch_head_files(
+    client: Any, owner: str, repo: str, files: List[Any], head_sha: str
+) -> Dict[str, str]:
+    """Fetch whole head-commit content for each reviewable changed file.
+
+    Reviewing whole files (instead of only the diff hunks ``_build_review_code``
+    renders) removes the "truncated at line N" false positive — a file no longer
+    appears to end at its last hunk line — and gives the false-positive filter
+    complete files to check findings against.
+
+    Reviews the same set of files ``_build_review_code`` does (changed, not
+    removed, with a non-empty patch — i.e. not binary/oversized), so review scope
+    is unchanged; only the content shape (whole file vs. hunk) differs.
+
+    Postconditions:
+        - Returns ``{filename: full_content}`` for every changed, non-removed
+          file with a patch whose head content fetched as non-blank text. A file
+          whose content cannot be fetched (404, API error, blank, or a client
+          without the capability) is simply omitted — the caller falls back to
+          hunk rendering when the whole map is empty. Never raises: whole-file
+          review is an enhancement over hunk rendering, so any fetch failure
+          degrades to hunks rather than failing the review.
+    """
+    head_files: Dict[str, str] = {}
+    for f in files:
+        if f.status == "removed" or not f.patch:
+            continue
+        try:
+            content = client.get_file_contents(owner, repo, f.filename, head_sha)
+        except Exception as e:  # noqa: BLE001 - a fetch failure degrades to hunk rendering, never fails review
+            logger.warning(
+                "PR review: could not fetch head content for %s@%s: %s", f.filename, head_sha, e
+            )
+            content = None
+        if content and content.strip():
+            head_files[f.filename] = content
+    return head_files
 
 
 def _build_review_code(files: List[Any]) -> ReviewCode:
@@ -471,6 +511,8 @@ def _run_reviewer(
     pr: Any,
     files: List[Any],
     code: str,
+    head_files: Optional[Dict[str, str]] = None,
+    repo_reader: Any = None,
 ) -> Optional[Any]:
     """Run the injected review engine, recording a failure and returning ``None`` on error.
 
@@ -481,8 +523,12 @@ def _run_reviewer(
     cleared on the way out so it never outlives the review.
 
     Preconditions:
-        - ``provider`` was resolved before the first GitHub call; ``code`` is the
-          pre-numbered review body.
+        - ``provider`` was resolved before the first GitHub call.
+        - When ``head_files`` is a non-empty ``{path: whole-file}`` mapping the
+          review runs in whole-file mode (``pre_numbered=False``); otherwise it
+          falls back to the pre-numbered diff-hunk ``code`` blob.
+        - ``repo_reader`` is None or a ``RepoReader`` handed to the false-positive
+          verifier so it can confirm existing repository files outside the diff.
     Postconditions:
         - Returns a truthy reviewer output on success. On any reviewer failure —
           an exception, OR a reviewer that returns ``None`` without raising —
@@ -500,17 +546,32 @@ def _run_reviewer(
         label=f"Reviewing PR #{pr_number}",
     )
     try:
-        output = provider.run_pr_code_review(
-            code=code,
-            # _build_review_code renders every line with its original line-number
-            # prefix; declaring it here (instead of letting the reviewer sniff the
-            # format) keeps issue lines verbatim.
-            pre_numbered=True,
-            task_description=f"Review pull request #{pr_number}: {pr.title}",
-            task_requirements=pr.body or "",
-            language=_infer_review_language(files),
-            progress_callback=pr_bridge,
-        )
+        if head_files:
+            # Whole-file review: the reviewer sees complete files (no hunk-end
+            # "truncation"), and the false-positive filter (via repo_reader) can
+            # confirm existing files a finding claims are missing.
+            output = provider.run_pr_code_review(
+                files=head_files,
+                pre_numbered=False,
+                repo_reader=repo_reader,
+                task_description=f"Review pull request #{pr_number}: {pr.title}",
+                task_requirements=pr.body or "",
+                language=_infer_review_language(files),
+                progress_callback=pr_bridge,
+            )
+        else:
+            output = provider.run_pr_code_review(
+                code=code,
+                # _build_review_code renders every line with its original
+                # line-number prefix; declaring it here (instead of letting the
+                # reviewer sniff the format) keeps issue lines verbatim.
+                pre_numbered=True,
+                repo_reader=repo_reader,
+                task_description=f"Review pull request #{pr_number}: {pr.title}",
+                task_requirements=pr.body or "",
+                language=_infer_review_language(files),
+                progress_callback=pr_bridge,
+            )
     except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
         logger.exception("PR review agent failed: %s", e)
         _main._record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
@@ -636,6 +697,16 @@ def _run_pr_review_body(
                 )
                 return
 
+            # Prefer whole-file review over diff hunks: complete files remove the
+            # hunk-boundary "truncation" false positive, and the repo reader lets
+            # the false-positive filter confirm existing (unchanged) repo files a
+            # finding claims are missing. Falls back to the hunk ``code`` blob when
+            # no whole file could be fetched.
+            head_files = _fetch_head_files(client, owner, repo, files, pr.head_sha)
+            if head_files:
+                files_reviewed = len(head_files)
+            repo_reader = GitHubRepoReader(client, owner, repo, pr.head_sha)
+
             try:
                 reviewer_login = client.get_authenticated_login()
             except GitHubAPIError as e:
@@ -648,7 +719,17 @@ def _run_pr_review_body(
                 reviewer_login = ""
 
             output = _run_reviewer(
-                provider, client, owner, repo, pr_number, job_id, pr, files, code
+                provider,
+                client,
+                owner,
+                repo,
+                pr_number,
+                job_id,
+                pr,
+                files,
+                code,
+                head_files=head_files,
+                repo_reader=repo_reader,
             )
             if output is None:
                 return

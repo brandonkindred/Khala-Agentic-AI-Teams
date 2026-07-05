@@ -40,6 +40,28 @@ CODE_REVIEW_EXISTING_ABS_CHARS = 8_000  # CODE_REVIEW_EXISTING_CHARS, floor 500
 # (the sibling surface carries only symbol names, so a small cap suffices).
 CODE_REVIEW_SIBLING_SURFACE_ABS_CHARS = 2_000  # CODE_REVIEW_SIBLING_SURFACE_CHARS, floor 0
 
+# Cap on the number of classes the class-cohesion pass reviews per submission
+# (one bounded LLM call each). Bounds the pass's fan-out so a submission with
+# hundreds of classes cannot balloon into hundreds of extra review calls; the
+# most cohesion-relevant classes are those the change touched, and the cap is
+# generous enough to cover a normal change. ``0`` disables the pass entirely.
+CODE_REVIEW_CLASS_COHESION_MAX_CLASSES = 40  # CODE_REVIEW_CLASS_COHESION_MAX_CLASSES, floor 0
+
+
+def compute_code_review_class_cohesion_max_classes() -> int:
+    """Max number of classes the class-cohesion pass reviews per submission.
+
+    Postconditions:
+        - Reads ``CODE_REVIEW_CLASS_COHESION_MAX_CLASSES`` (default
+          ``CODE_REVIEW_CLASS_COHESION_MAX_CLASSES`` constant, floor ``0``).
+          ``0`` is load-bearing: it disables the cohesion fan-out entirely (no
+          class is reviewed), independent of the ``CODE_REVIEW_CLASS_COHESION``
+          on/off flag.
+    """
+    return parse_env_int(
+        "CODE_REVIEW_CLASS_COHESION_MAX_CLASSES", CODE_REVIEW_CLASS_COHESION_MAX_CLASSES, 0
+    )
+
 
 def compute_code_review_sibling_surface_chars() -> int:
     """Max chars of the sibling-surface block per map prompt.

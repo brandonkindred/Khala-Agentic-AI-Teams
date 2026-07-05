@@ -2275,3 +2275,79 @@ class TestFixedRunPrReview:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
         assert job["review_summary"]["comment_findings"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Whole-file review path (_fetch_head_files + files-mode dispatch)
+# ---------------------------------------------------------------------------
+
+
+class TestWholeFileReview:
+    def test_fetch_head_files_returns_whole_files_and_skips_binary(self, review_app) -> None:
+        from coding_team.api.pr_review import _fetch_head_files
+
+        files = [
+            PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None),
+            PullRequestFile("gone.py", "removed", "@@ -1 +0 @@\n-x", 0, 1, None),
+            PullRequestFile("img.png", "added", "", 0, 0, None),  # binary: no patch
+        ]
+
+        class _C:
+            def get_file_contents(self, o, r, path, ref):
+                assert ref == "sha1"
+                return "WHOLE\n" if path == "a.py" else None
+
+        out = _fetch_head_files(_C(), "o", "r", files, "sha1")
+        assert out == {"a.py": "WHOLE\n"}  # removed + binary skipped
+
+    def test_fetch_head_files_degrades_on_client_without_method(self, review_app) -> None:
+        from coding_team.api.pr_review import _fetch_head_files
+
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+x", 1, 0, None)]
+        # A client missing get_file_contents must degrade to {} (hunk fallback),
+        # not raise.
+        assert _fetch_head_files(object(), "o", "r", files, "sha1") == {}
+
+    def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
+        from coding_team.github_source import GitHubRepoReader
+
+        gh = review_app["github"]["client"]
+        gh.get_file_contents = lambda o, r, path, ref: "def a():\n    return 1\n"
+        gh.get_repository_tree = lambda o, r, ref, recursive=True: ["a.py"]
+
+        captured: dict[str, Any] = {}
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                captured.update(kw)
+                return _FakeOutput(issues=[])
+
+        monkeypatch.setattr("coding_team.engine_provider._provider", _CapProvider())
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        # Whole-file mode: files mapping passed, pre_numbered off, reader supplied.
+        assert captured["files"] == {"a.py": "def a():\n    return 1\n"}
+        assert captured["pre_numbered"] is False
+        assert isinstance(captured["repo_reader"], GitHubRepoReader)
+        assert "code" not in captured or not captured.get("code")
+
+    def test_endpoint_falls_back_to_hunks_when_no_head_files(self, review_app, monkeypatch) -> None:
+        gh = review_app["github"]["client"]
+        # Head fetch yields nothing -> hunk fallback (pre_numbered code blob).
+        gh.get_file_contents = lambda o, r, path, ref: None
+
+        captured: dict[str, Any] = {}
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                captured.update(kw)
+                return _FakeOutput(issues=[])
+
+        monkeypatch.setattr("coding_team.engine_provider._provider", _CapProvider())
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        assert captured.get("files") is None
+        assert captured["pre_numbered"] is True
+        assert captured["code"]  # the hunk-rendered blob

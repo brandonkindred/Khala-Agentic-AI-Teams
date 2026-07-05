@@ -420,6 +420,32 @@ verdict; any ambiguity or verifier error keeps the finding, and the not-reviewed
 coverage findings are never removed. Set to `false`/`0`/`no` to disable the pass
 (any other value, or unset, leaves it enabled).
 
+When the review is invoked with a repository reader (the GitHub PR-review path
+fetches whole files at the PR head and supplies a reader; the software-engineering
+pipeline supplies one rooted at the job workspace), the verifier can additionally
+read existing repository files *outside* the diff. This lets it confirm that a
+file/module a finding claims is missing ("add X" / "X does not exist") already
+exists, and drop that false positive. The reader is read-only, bounded, and
+fail-safe (a read failure only ever keeps a finding).
+
+### CODE_REVIEW_CLASS_COHESION
+Default-on toggle for the class-cohesion review pass. After the per-function
+map-reduce review, one bounded LLM review runs per class, evaluating the class's
+stated purpose (its name + docstring) against a body-free summary of its methods
+(signatures + docstrings) to flag single-responsibility violations, misfit
+methods, missing responsibilities, and purpose/behavior mismatches. Findings are
+**advisory** — severity is capped at `medium`, so a cohesion concern never blocks
+a merge — and flow through the false-positive filter and merge like any other
+finding. Only Python classes are analyzed. Set to `false`/`0`/`no` to disable the
+pass (any other value, or unset, leaves it enabled).
+
+### CODE_REVIEW_CLASS_COHESION_MAX_CLASSES
+Cap on the number of classes the cohesion pass reviews per submission (one bounded
+LLM call each), so the fan-out cannot balloon on a large submission. Default `40`,
+floor `0`. `0` disables the pass entirely (no class is reviewed), independent of
+the `CODE_REVIEW_CLASS_COHESION` on/off flag; a negative or non-numeric value
+falls back to the default.
+
 ---
 
 ## Shared Infrastructure and Storage

@@ -46,6 +46,7 @@ class CodeReviewAgent:
         self,
         input_data: CodeReviewInput,
         progress_callback: ReviewProgressCallback | None = None,
+        repo_reader: object | None = None,
     ) -> CodeReviewOutput:
         """Review code and return approval or issues.
 
@@ -54,6 +55,9 @@ class CodeReviewAgent:
             - ``progress_callback`` is None or satisfies the
               ``ReviewProgressCallback`` contract (non-raising, accepts
               ``(step, detail, fraction)``).
+            - ``repo_reader`` is None or a ``repo_reader.RepoReader`` giving the
+              false-positive verifier whole-repo read access (so it can confirm a
+              file/module a finding calls missing already exists outside the diff).
 
         Postconditions:
             - Returns the coordinator's merged verdict covering every submitted
@@ -89,4 +93,6 @@ class CodeReviewAgent:
             input_data.architecture is not None,
             len(input_data.acceptance_criteria),
         )
-        return run_coordinator(self.llm, input_data, progress_callback=progress_callback)
+        return run_coordinator(
+            self.llm, input_data, progress_callback=progress_callback, repo_reader=repo_reader
+        )

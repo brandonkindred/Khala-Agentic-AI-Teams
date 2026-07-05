@@ -2106,3 +2106,118 @@ class TestEphemeralCheckoutCleanup:
         # Ephemeral + cleanup flag set, yet kept → the partial-failure status
         # overrode cleanup (a retry can seed from the preserved checkout).
         assert checkout.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# get_file_contents / get_repository_tree + GitHubRepoReader
+# ---------------------------------------------------------------------------
+
+
+class TestFileContentsAndTree:
+    def test_get_file_contents_decodes_base64(self) -> None:
+        import base64
+
+        body = "class Model:\n    pass\n"
+        encoded = base64.b64encode(body.encode()).decode()
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert "/contents/pkg/models.py" in req.url.path
+            assert req.url.params.get("ref") == "sha1"
+            return httpx.Response(
+                200, json={"type": "file", "encoding": "base64", "content": encoded}
+            )
+
+        assert _client_with(handler).get_file_contents("o", "r", "pkg/models.py", "sha1") == body
+
+    def test_get_file_contents_404_returns_none(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "Not Found"})
+
+        assert _client_with(handler).get_file_contents("o", "r", "missing.py", "sha1") is None
+
+    def test_get_file_contents_directory_returns_none(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[{"type": "file", "name": "a.py"}])
+
+        # A directory listing is a JSON array (not a file dict) -> None.
+        assert _client_with(handler).get_file_contents("o", "r", "pkg", "sha1") is None
+
+    def test_get_file_contents_non_404_error_raises(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json={"message": "Forbidden"})
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).get_file_contents("o", "r", "a.py", "sha1")
+
+    def test_get_repository_tree_returns_blob_paths(self) -> None:
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert "/git/trees/sha1" in req.url.path
+            return httpx.Response(
+                200,
+                json={
+                    "truncated": False,
+                    "tree": [
+                        {"type": "blob", "path": "pkg/a.py"},
+                        {"type": "tree", "path": "pkg"},
+                        {"type": "blob", "path": "pkg/b.py"},
+                    ],
+                },
+            )
+
+        paths = _client_with(handler).get_repository_tree("o", "r", "sha1")
+        assert paths == ["pkg/a.py", "pkg/b.py"]  # trees (directories) excluded
+
+    def test_get_repository_tree_truncated_returns_partial(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"truncated": True, "tree": [{"type": "blob", "path": "a.py"}]}
+            )
+
+        assert _client_with(handler).get_repository_tree("o", "r", "sha1") == ["a.py"]
+
+
+class TestGitHubRepoReader:
+    def test_reads_and_caches_and_lists(self) -> None:
+        import base64
+
+        from coding_team.github_source import GitHubRepoReader
+
+        calls = {"contents": 0, "tree": 0}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "/git/trees/" in req.url.path:
+                calls["tree"] += 1
+                return httpx.Response(
+                    200, json={"tree": [{"type": "blob", "path": "pkg/models.py"}]}
+                )
+            calls["contents"] += 1
+            enc = base64.b64encode(b"class M: ...").decode()
+            return httpx.Response(200, json={"type": "file", "encoding": "base64", "content": enc})
+
+        reader = GitHubRepoReader(_client_with(handler), "o", "r", "sha1")
+        assert reader.list_files() == ["pkg/models.py"]
+        assert reader.list_files() == ["pkg/models.py"]  # cached, no 2nd tree call
+        assert calls["tree"] == 1
+        assert reader.read_file("pkg/models.py") == "class M: ..."
+        assert reader.read_file("pkg/models.py") == "class M: ..."  # cached
+        assert calls["contents"] == 1
+
+    def test_read_failure_and_cap_return_none(self) -> None:
+        from coding_team.github_source import GitHubRepoReader
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "Not Found"})
+
+        reader = GitHubRepoReader(_client_with(handler), "o", "r", "sha1", max_fetches=1)
+        assert reader.read_file("") is None  # blank never fetches
+        assert reader.read_file("a.py") is None  # 404 -> None (1 fetch used)
+        assert reader.read_file("b.py") is None  # cap reached -> None
+
+    def test_tree_error_is_failsafe(self) -> None:
+        from coding_team.github_source import GitHubRepoReader
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, text="boom")
+
+        reader = GitHubRepoReader(_client_with(handler), "o", "r", "sha1")
+        assert reader.list_files() == []

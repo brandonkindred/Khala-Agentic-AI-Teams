@@ -142,6 +142,20 @@ def test_no_segment_note_means_no_segment_section() -> None:
     assert "**Segment notes:**" not in client.prompts[0]
 
 
+def test_review_guardrails_note_is_in_every_prompt() -> None:
+    """The anti-false-positive guardrails (no phantom truncation, don't flag
+    existing files as missing, relative imports are conventional) are injected
+    into the per-chunk user prompt (not the byte-locked system prompt)."""
+    client = _RecorderClient()
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(_chunk_input())
+    prompt = client.prompts[0]
+    assert "**Review guardrails" in prompt
+    assert "COMPLETE" in prompt  # units shown are complete -> no phantom truncation
+    assert "does not exist" in prompt  # don't flag existing files as missing
+    assert "from .models import" in prompt  # relative imports are conventional
+
+
 def test_user_decisions_rendered_as_settled_in_prompt() -> None:
     """A resolved user decision is surfaced to the reviewer as settled so it is never flagged
     as an open/unanswered question."""

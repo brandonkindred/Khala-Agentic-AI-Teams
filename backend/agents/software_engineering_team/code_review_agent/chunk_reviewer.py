@@ -51,6 +51,27 @@ logger = logging.getLogger(__name__)
 
 CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review only the code below. Report issues with file_path set to the path provided for this chunk.\n"
 
+# Guardrails that keep the reviewer from filing the false positives this engine
+# was seeing. Injected into the per-chunk user prompt (NOT the system prompt) so
+# the byte-locked CODE_REVIEW system prompt stays unchanged. Covers the three
+# recurring bad-comment patterns: phantom truncation, "add a file that exists",
+# and flagging conventional intra-package relative imports.
+REVIEW_GUARDRAILS_NOTE = (
+    "\n**Review guardrails (avoid these false positives):**\n"
+    "- The code shown below is COMPLETE. Each function, method, class, and test is presented in "
+    "full. Never report a function, test, or block as 'truncated', 'cut off', or 'missing its "
+    "body' based on where the shown code ends — the end of the shown code is not evidence of an "
+    "incomplete implementation.\n"
+    "- You are shown only the file(s) this change touched, not the whole repository. Do NOT claim "
+    "that a file, module, or symbol referenced here 'does not exist', 'must be created', or 'needs "
+    "to be added' merely because it is not shown in this chunk — an unchanged file that already "
+    "exists in the repo is simply not shown. Only flag a genuinely broken reference you can "
+    "substantiate from the code in front of you.\n"
+    "- Intra-package relative imports (e.g. `from .models import X`, `from .store import Y`) are "
+    "the established convention in this codebase and resolve to sibling modules in the same "
+    "package. Do NOT flag them as unclear or ask to convert them to absolute imports.\n"
+)
+
 # Header that precedes the code block in every chunk-review prompt. Exposed as a
 # named constant so callers/tests can identify a map-phase review prompt without
 # duplicating the literal (it is unique to this prompt template).
@@ -159,7 +180,7 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         # Fallback guess for legacy callers that did not declare a language.
         language = "python" if "def " in code_chunk else "typescript"
 
-    context_parts = [CHUNK_REVIEW_NOTE]
+    context_parts = [CHUNK_REVIEW_NOTE, REVIEW_GUARDRAILS_NOTE]
     if input_data.segment_note:
         context_parts.extend(["**Segment notes:**", input_data.segment_note, ""])
     context_parts += [
