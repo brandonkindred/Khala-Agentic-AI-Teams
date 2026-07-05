@@ -85,12 +85,20 @@ def test_get_resolves_dynamic_id_from_store(fake_store: _FakeStore) -> None:
     assert got is not None and got.id == "agent_studio.mine-abc"
 
 
-def test_get_dynamic_id_is_authoritative_none_means_gone(fake_store: _FakeStore) -> None:
-    # Registered locally but deleted cross-worker → store None wins (not stale local).
+def test_get_reads_your_writes_local_copy_on_store_miss(fake_store: _FakeStore) -> None:
+    # Read-your-writes: a manifest present locally (e.g. registered on this worker
+    # whose Postgres write-through failed) still resolves even when the store row
+    # is absent — the store row is preferred, the local copy is the fallback.
     reg = AgentRegistry([], {})
-    m = _manifest("agent_studio.gone-1")
-    reg._by_id[m.id] = m  # stale local copy
-    assert reg.get("agent_studio.gone-1") is None
+    m = _manifest("agent_studio.local-only-1")
+    reg._by_id[m.id] = m  # local copy, not in the store
+    assert reg.get("agent_studio.local-only-1") is m
+
+
+def test_get_unknown_dynamic_id_returns_none(fake_store: _FakeStore) -> None:
+    # No static, store, or local entry → None.
+    reg = AgentRegistry([], {})
+    assert reg.get("agent_studio.nowhere-1") is None
 
 
 def test_get_degrades_to_local_on_store_error(fake_store: _FakeStore) -> None:

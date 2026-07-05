@@ -199,24 +199,39 @@ class AgentRegistry:
         return list(merged.values())
 
     def get(self, agent_id: str) -> AgentManifest | None:
-        # Disk/static ids resolve locally with zero Postgres cost — the built-in
-        # agent invoke hot path.
+        """Resolve a manifest by id, consulting the dynamic store for non-static ids.
+
+        Preconditions:
+            * ``agent_id`` is a string.
+        Postconditions:
+            * Static/disk ids resolve from the in-memory map with zero Postgres
+              cost (the built-in-agent invoke hot path).
+            * For a dynamic id with the store active, returns the Postgres row when
+              present; otherwise falls back to this process's local ``_by_id`` copy
+              — **read-your-writes**: a manifest ``register()``'d on this worker
+              always resolves here even if its best-effort Postgres write-through
+              failed (see :meth:`register`). The cross-worker consistency model is
+              therefore *eventual*, not immediate: an ``unregister()`` on another
+              worker is seen once this worker's stale local copy is dropped (roster
+              re-sync / restart) or via the authoritative Postgres row, whichever
+              comes first. A store error degrades to the local copy.
+            * Returns ``None`` iff no static, dynamic-store, or local entry exists.
+        """
         if agent_id in self._static_ids:
             return self._by_id.get(agent_id)
         store = self._dynamic_store()
         if store is None:
             return self._by_id.get(agent_id)
         try:
-            # Postgres is authoritative for dynamic ids: a ``None`` here means the
-            # manifest was deleted/never-persisted cross-worker, so we do NOT fall
-            # back to a possibly-stale local copy. We degrade to local only on a
-            # store *error*.
-            return store.get(agent_id)
+            found = store.get(agent_id)
         except Exception:
             logger.warning(
                 "dynamic store get failed for %s; using local registry", agent_id, exc_info=True
             )
             return self._by_id.get(agent_id)
+        # Prefer the authoritative Postgres row; fall back to the local copy on a
+        # miss so a local registration whose write-through failed stays resolvable.
+        return found if found is not None else self._by_id.get(agent_id)
 
     def register(self, manifest: AgentManifest, source_path: Path | None = None) -> None:
         """Install a manifest into the live registry (for dynamically generated agents).

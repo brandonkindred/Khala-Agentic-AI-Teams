@@ -51,6 +51,14 @@ class PostgresAgentStudioConversationStore:
     def create(
         self, mode: StudioMode, source_agent_id: str | None, definition: AgentDefinition
     ) -> str:
+        """Create a conversation row and return its fresh id.
+
+        Preconditions:
+            * ``definition`` is a valid :class:`AgentDefinition` (JSON-serializable).
+        Postconditions:
+            * Returns a new ``uuid4`` id that :meth:`get` resolves until discarded;
+              ids are never reused. The conversation starts with no messages.
+        """
         cid = str(uuid4())
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -63,7 +71,15 @@ class PostgresAgentStudioConversationStore:
 
     @timed_query(store=_STORE, op="get")
     def get(self, conversation_id: str) -> ConversationRecord | None:
-        """Load a conversation (definition + messages ordered oldest-first) in one query."""
+        """Load a conversation (definition + messages ordered oldest-first) in one query.
+
+        Preconditions:
+            * ``conversation_id`` is a string.
+        Postconditions:
+            * Returns a :class:`ConversationRecord` with messages ordered
+              oldest-first, or ``None`` when the id is unknown. The returned record
+              is freshly built from the row (no shared mutable state).
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 f"SELECT c.mode, c.source_agent_id, c.definition_json, "
@@ -94,8 +110,13 @@ class PostgresAgentStudioConversationStore:
     def append_message(self, conversation_id: str, role: str, content: str) -> None:
         """Append one message; bumps the conversation's ``updated_at`` atomically.
 
-        Raises :class:`LookupError` (→ 404) if the conversation is unknown, matching
-        the in-memory store's contract (rather than silently inserting an orphan).
+        Preconditions:
+            * ``conversation_id`` names an existing conversation.
+        Postconditions:
+            * The message is appended (after all existing messages) and the parent's
+              ``updated_at`` is bumped in one statement. Raises :class:`LookupError`
+              (→ 404) if the conversation is unknown, matching the in-memory store's
+              contract rather than silently inserting an orphan.
         """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -111,7 +132,14 @@ class PostgresAgentStudioConversationStore:
 
     @timed_query(store=_STORE, op="discard")
     def discard(self, conversation_id: str) -> None:
-        """Remove a conversation (messages cascade). Idempotent — unknown id is a no-op."""
+        """Remove a conversation and its messages (FK cascade).
+
+        Preconditions:
+            * ``conversation_id`` is a string.
+        Postconditions:
+            * ``get(conversation_id)`` returns ``None`` afterward. Idempotent — an
+              unknown (or already-discarded) id is a no-op, never an error.
+        """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(f"DELETE FROM {_CONV} WHERE conversation_id = %s", (conversation_id,))
 

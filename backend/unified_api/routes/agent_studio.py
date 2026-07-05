@@ -48,8 +48,15 @@ def _build_service() -> AgentStudioService:
     With ``POSTGRES_HOST`` set the conversation store is Postgres-backed so state
     is coherent across the 4 uvicorn workers (a conversation created on one worker
     resolves on another; turns serialize via a row lock). Without it — local dev /
-    tests — the in-memory store is used, exactly as before. A failure building the
-    Postgres store degrades to in-memory rather than breaking the routes.
+    tests — the in-memory store is used, exactly as before.
+
+    The store is stateless with a lazily-opened pool, so this selection does no I/O:
+    it only decides *which* store class to instantiate. The ``try/except`` guards
+    the import/construction path (e.g. psycopg missing), NOT request-time
+    connectivity — a configured-but-unreachable Postgres is deliberately **not**
+    downgraded to in-memory at request time, because a silent per-worker fallback
+    would fork state across workers and lose durability; such a request surfaces
+    the Postgres error instead.
     """
     try:
         from shared_postgres import is_postgres_enabled

@@ -117,8 +117,13 @@ def delete(agent_id: str) -> None:
 def get(agent_id: str) -> AgentManifest | None:
     """Return the dynamic manifest for ``agent_id``, or ``None`` if unknown.
 
-    Never cached — this is the exact, immediate read the invoke / provision path
-    depends on for cross-worker save→invoke coherence.
+    Preconditions:
+        * ``agent_id`` is a string; Postgres is reachable (callers wrap failures).
+    Postconditions:
+        * Returns the persisted manifest (validated from its JSON dump) when a row
+          exists, else ``None``. Never cached — this is the exact, immediate read
+          the invoke / provision path depends on for cross-worker save→invoke
+          coherence.
     """
     from shared_postgres import dict_row, get_conn
     from shared_postgres.metrics import timed_query
@@ -136,7 +141,16 @@ def get(agent_id: str) -> AgentManifest | None:
 
 
 def all() -> list[AgentManifest]:  # noqa: A001 - mirrors AgentRegistry.all()
-    """Return every dynamic manifest (TTL micro-cached ~2s for catalog reads)."""
+    """Return every dynamic manifest.
+
+    Preconditions:
+        * Postgres is reachable (callers wrap failures).
+    Postconditions:
+        * Returns all persisted dynamic manifests, id-ordered. Result is micro-cached
+          for ``_ALL_CACHE_TTL_S`` (~2s) to shield the catalog list/search/teams
+          reads; the cache is invalidated on every :func:`upsert` / :func:`delete`
+          in this process (cross-worker writes are visible within the TTL).
+    """
     global _all_cache, _all_cache_at
     now = time.monotonic()
     with _all_cache_lock:
@@ -165,8 +179,14 @@ def manifests_with_prefix(prefix: str) -> list[AgentManifest]:
 
     Used by ``register_team_manifests``' stale-roster cleanup so removed/renamed
     generated agents are dropped across workers, not just the one that ran the
-    generation. Uses ``LIKE`` with the prefix's ``%``/``_``/``\\`` metachars
-    escaped so an id containing them can't broaden the match.
+    generation.
+
+    Preconditions:
+        * ``prefix`` is a string; Postgres is reachable (callers wrap failures).
+    Postconditions:
+        * Returns every persisted dynamic manifest whose id starts with ``prefix``
+          (id-ordered), matching literally — the prefix's ``%``/``_``/``\\`` LIKE
+          metachars are escaped so an id containing them can't broaden the match.
     """
     from shared_postgres import dict_row, get_conn
     from shared_postgres.metrics import timed_query
