@@ -145,16 +145,21 @@ def test_scan_dispatches_via_temporal_when_enabled(client, monkeypatch):
         "start_job_matching_workflow",
         lambda job_id, request: dispatched.append((job_id, request)),
     )
+    # Directly prove the thread fallback is NOT taken — no reliance on
+    # post-dispatch job status (which would be timing-dependent if a real
+    # worker existed). start_workflow is stubbed, so nothing runs the scan.
+    thread_ran: list = []
+    monkeypatch.setattr(api_main, "_run_scan_background", lambda *a, **k: thread_ran.append(a))
 
     resp = client.post("/scan", json={"top_n": 3})
     assert resp.status_code == 200
     job_id = resp.json()["job_id"]
-    # Temporal path is fire-and-forget: the worker (not the API thread) advances
-    # the job, so with the stub in place the job stays PENDING.
-    assert client.get(f"/scan/status/{job_id}").json()["status"] == "pending"
+    # Dispatched to Temporal exactly once, with the request payload...
     assert len(dispatched) == 1
     assert dispatched[0][0] == job_id
     assert dispatched[0][1]["top_n"] == 3
+    # ...and the daemon-thread path was never used.
+    assert thread_ran == []
 
 
 def test_scan_returns_503_and_marks_failed_when_temporal_dispatch_fails(client, monkeypatch):

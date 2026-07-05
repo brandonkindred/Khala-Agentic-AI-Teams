@@ -221,6 +221,13 @@ def start_scan(payload: JobMatchRequest) -> ScanJobResponse:
     create_job(job_id)
     try:
         dispatched = _dispatch_scan_via_temporal(job_id, payload)
+    # Catch broadly on purpose: ANY dispatch failure — the client-not-ready
+    # RuntimeError from _wait_for_client, connection/timeout errors, argument
+    # serialization, etc. — must mark the job FAILED and 503, never escape and
+    # leave an orphaned PENDING row. Branching on the exception type would not
+    # change the outcome (the scan didn't start regardless), and no debugging
+    # info is lost: logger.exception records the exact type + traceback and the
+    # error string is persisted on the job row.
     except Exception as exc:  # noqa: BLE001 - surface as 503, don't orphan the job
         logger.exception("Temporal dispatch failed for scan %s", job_id)
         update_job(job_id, status=JOB_STATUS_FAILED, error=f"Temporal dispatch failed: {exc}")
