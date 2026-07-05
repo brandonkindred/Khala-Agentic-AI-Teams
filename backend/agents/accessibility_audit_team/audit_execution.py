@@ -10,6 +10,7 @@ resources (job-service client, orchestrator) are created lazily on first use.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -21,6 +22,11 @@ from .orchestrator import AccessibilityAuditOrchestrator
 
 logger = logging.getLogger(__name__)
 
+# Both singletons are reachable from two threads: the API event-loop thread (the
+# in-process background task) and the Temporal worker's own loop thread. Guard the
+# lazy check-then-set with a lock so a concurrent first-call can't build two
+# orchestrators / clients.
+_singleton_lock = threading.Lock()
 _job_manager: Optional[JobServiceClient] = None
 _orchestrator: Optional[AccessibilityAuditOrchestrator] = None
 
@@ -31,11 +37,13 @@ def get_job_manager() -> JobServiceClient:
     Preconditions:
         - ``JOB_SERVICE_URL`` is configured (enforced by ``JobServiceClient``).
     Postconditions:
-        - Returns the same instance on every call within a process.
+        - Returns the same instance on every call within a process (thread-safe).
     """
     global _job_manager
     if _job_manager is None:
-        _job_manager = JobServiceClient(team="accessibility_audit_team")
+        with _singleton_lock:
+            if _job_manager is None:
+                _job_manager = JobServiceClient(team="accessibility_audit_team")
     return _job_manager
 
 
@@ -45,22 +53,29 @@ def get_orchestrator() -> AccessibilityAuditOrchestrator:
     Preconditions:
         - An LLM provider is resolvable via ``get_strands_model``.
     Postconditions:
-        - Returns the same instance on every call within a process.
+        - Returns the same instance on every call within a process (thread-safe).
     """
     global _orchestrator
     if _orchestrator is None:
-        from strands import Agent
+        with _singleton_lock:
+            if _orchestrator is None:
+                from strands import Agent
 
-        from llm_service import get_strands_model
+                from llm_service import get_strands_model
 
-        _orchestrator = AccessibilityAuditOrchestrator(
-            llm_client=Agent(model=get_strands_model("accessibility_audit")),
-        )
+                _orchestrator = AccessibilityAuditOrchestrator(
+                    llm_client=Agent(model=get_strands_model("accessibility_audit")),
+                )
     return _orchestrator
 
 
 class CreateAuditRequest(BaseModel):
-    """Request to create a new accessibility audit."""
+    """Public request body for creating an accessibility audit.
+
+    Invariants:
+        - Every entry in ``web_urls`` is an ``http(s)`` URL (enforced by
+          ``validate_urls``); all other fields fall back to sensible defaults.
+    """
 
     name: str = Field(default="", description="Human-readable audit name")
     web_urls: List[str] = Field(default_factory=list, description="Web URLs to audit")
@@ -79,6 +94,14 @@ class CreateAuditRequest(BaseModel):
     @field_validator("web_urls")
     @classmethod
     def validate_urls(cls, v: List[str]) -> List[str]:
+        """Reject non-``http(s)`` URLs.
+
+        Preconditions:
+            - ``v`` is the list of candidate web URLs.
+        Postconditions:
+            - Returns ``v`` unchanged when every entry starts with ``http://`` or
+              ``https://``; raises ``ValueError`` on the first entry that does not.
+        """
         for url in v:
             if not url.startswith(("http://", "https://")):
                 raise ValueError(f"Invalid URL (must start with http:// or https://): {url}")
@@ -124,37 +147,53 @@ def build_audit_request(request: CreateAuditRequest, audit_id: str) -> AuditRequ
     )
 
 
-async def execute_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest) -> None:
+async def run_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest) -> None:
     """Run a full audit and persist its lifecycle to the shared job store.
 
-    This is the single execution core for an audit-create job. It is invoked
-    either directly (FastAPI background task, when Temporal is disabled) or from
-    the Temporal activity (in the worker process); both write to the same
-    ``JobServiceClient`` so ``GET /audit/status/{job_id}`` reflects progress
-    regardless of where the work ran.
+    The shared execution core. It records ``running`` then a terminal state
+    (``completed``, or ``failed`` when the audit *ran* but its target was
+    unauditable). A genuine *infrastructure* failure (LLM/orchestrator crash,
+    job-service error) is NOT swallowed: it propagates so the Temporal activity
+    can fail and let Temporal's retry policy recover. Callers with no retry
+    mechanism (the FastAPI background task) wrap this in ``execute_audit_job``.
 
     Preconditions:
         - ``job_id``/``audit_id`` are non-empty and a job row already exists for ``job_id``.
     Postconditions:
-        - The job ends in ``completed`` or ``failed``; any exception is captured onto
-          the job record rather than propagated.
+        - On success/logical-failure the job ends in ``completed``/``failed``.
+        - On an infrastructure exception the exception propagates to the caller
+          (the job's last persisted state is ``running``).
     """
     manager = get_job_manager()
+    manager.update_job(job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20)
+    audit_request = build_audit_request(request, audit_id)
+    result = await get_orchestrator().run_audit(audit_request, request.tech_stack)
+    manager.update_job(
+        job_id,
+        status="completed" if result.success else JOB_STATUS_FAILED,
+        progress=100,
+        current_phase=result.current_phase.value,
+        completed_phases=[p.value for p in result.completed_phases],
+        findings_count=result.total_findings,
+        result=result.model_dump(),
+        error=None if result.success else result.failure_reason,
+    )
+
+
+async def execute_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest) -> None:
+    """FastAPI-background-task wrapper around :func:`run_audit_job`.
+
+    The in-process path has no external retry mechanism, so an infrastructure
+    exception is captured onto the job record (status ``failed``) rather than
+    propagated. The Temporal activity calls :func:`run_audit_job` directly so
+    such exceptions can drive Temporal's retry policy.
+
+    Preconditions:
+        - ``job_id``/``audit_id`` are non-empty and a job row already exists for ``job_id``.
+    Postconditions:
+        - The job ends in ``completed`` or ``failed``; no exception propagates.
+    """
     try:
-        manager.update_job(
-            job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20
-        )
-        audit_request = build_audit_request(request, audit_id)
-        result = await get_orchestrator().run_audit(audit_request, request.tech_stack)
-        manager.update_job(
-            job_id,
-            status="completed" if result.success else JOB_STATUS_FAILED,
-            progress=100,
-            current_phase=result.current_phase.value,
-            completed_phases=[p.value for p in result.completed_phases],
-            findings_count=result.total_findings,
-            result=result.model_dump(),
-            error=None if result.success else result.failure_reason,
-        )
+        await run_audit_job(job_id, audit_id, request)
     except Exception as e:
-        manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+        get_job_manager().update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))

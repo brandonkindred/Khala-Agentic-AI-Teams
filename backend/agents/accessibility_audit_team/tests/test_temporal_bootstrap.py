@@ -174,14 +174,15 @@ def test_start_workflow_dispatches_and_returns_workflow_id(monkeypatch):
     }
 
 
-def test_run_pipeline_activity_delegates_to_execute(monkeypatch):
-    """The activity rebuilds the request and runs the shared execution core
-    (proves the sync/await + CreateAuditRequest->AuditRequest bugs are fixed)."""
+def test_run_pipeline_activity_delegates_to_run_audit_job(monkeypatch):
+    """The activity rebuilds the request and runs the propagating core
+    ``run_audit_job`` (NOT the swallowing ``execute_audit_job``), so infra
+    failures can surface to Temporal."""
     from accessibility_audit_team import audit_execution as ax
     from accessibility_audit_team import temporal as t
 
     executed = mock.AsyncMock()
-    monkeypatch.setattr(ax, "execute_audit_job", executed)
+    monkeypatch.setattr(ax, "run_audit_job", executed)
 
     payload = {"job_id": "j1", "audit_id": "a1", "request": {"web_urls": ["https://e.com"]}}
     out = asyncio.run(t.run_pipeline_activity(payload))
@@ -193,7 +194,20 @@ def test_run_pipeline_activity_delegates_to_execute(monkeypatch):
     assert out["job_id"] == "j1"
 
 
-def test_workflow_run_invokes_activity(monkeypatch):
+def test_run_pipeline_activity_propagates_infra_exception(monkeypatch):
+    """An infrastructure failure must propagate out of the activity so Temporal
+    can retry it (rather than being swallowed into a green workflow)."""
+    from accessibility_audit_team import audit_execution as ax
+    from accessibility_audit_team import temporal as t
+
+    monkeypatch.setattr(ax, "run_audit_job", mock.AsyncMock(side_effect=RuntimeError("infra")))
+
+    payload = {"job_id": "j1", "audit_id": "a1", "request": {"web_urls": ["https://e.com"]}}
+    with pytest.raises(RuntimeError, match="infra"):
+        asyncio.run(t.run_pipeline_activity(payload))
+
+
+def test_workflow_run_invokes_activity_with_retry_policy(monkeypatch):
     from accessibility_audit_team import temporal as t
 
     exec_activity = mock.AsyncMock(return_value={"ok": True})
@@ -202,6 +216,8 @@ def test_workflow_run_invokes_activity(monkeypatch):
     out = asyncio.run(t.AccessibilityAuditWorkflow().run({"job_id": "j1"}))
     exec_activity.assert_awaited_once()
     assert out == {"ok": True}
+    # a bounded retry policy is attached so infra failures actually retry
+    assert exec_activity.await_args.kwargs.get("retry_policy") is t._AUDIT_RETRY_POLICY
 
 
 # ---------------------------------------------------------------------------
@@ -274,14 +290,12 @@ def test_create_audit_uses_temporal_when_dispatch_available(monkeypatch):
     assert args[0] == body["job_id"]
     assert args[1] == body["audit_id"]
     assert isinstance(args[2], dict)
-    # job is marked running with the returned workflow_id (not left PENDING)
-    running = [
-        c
-        for c in jm.update_job.call_args_list
-        if c.kwargs.get("status") == main.JOB_STATUS_RUNNING
-        and c.kwargs.get("workflow_id") == "accessibility_audit-wf1"
-    ]
-    assert running
+    # workflow_id is recorded for correlation, but the API does NOT write status
+    # (the worker activity owns status transitions, so no racy running-write).
+    wf_writes = [c for c in jm.update_job.call_args_list if "workflow_id" in c.kwargs]
+    assert wf_writes
+    assert wf_writes[0].kwargs["workflow_id"] == "accessibility_audit-wf1"
+    assert all("status" not in c.kwargs for c in wf_writes)
 
 
 def test_create_audit_uses_background_task_when_temporal_disabled(monkeypatch):
@@ -299,12 +313,13 @@ def test_create_audit_uses_background_task_when_temporal_disabled(monkeypatch):
     executed.assert_awaited_once()
 
 
-def test_create_audit_falls_back_when_dispatch_raises(monkeypatch):
-    """A dispatch failure must not orphan the job: fall back to the in-process
-    background task rather than 500 and leave the job stuck PENDING."""
+def test_create_audit_fails_fast_when_dispatch_raises(monkeypatch):
+    """A dispatch failure must fail fast (mark the job failed, return 500) rather
+    than re-running in-process, which could double-execute an accepted workflow."""
     from accessibility_audit_team.api import main
 
-    monkeypatch.setattr(main, "_job_manager", mock.Mock())
+    jm = mock.Mock()
+    monkeypatch.setattr(main, "_job_manager", jm)
 
     def _boom(*_a, **_k):
         raise RuntimeError("Temporal client not available")
@@ -314,9 +329,14 @@ def test_create_audit_falls_back_when_dispatch_raises(monkeypatch):
     monkeypatch.setattr(main, "execute_audit_job", executed)
 
     resp = client.post("/audit/create", json={"web_urls": ["https://example.com"]})
-    assert resp.status_code == 200
-    assert "(Temporal)" not in resp.json()["message"]
-    executed.assert_awaited_once()
+    assert resp.status_code == 500
+    # no in-process fallback (no double execution)
+    executed.assert_not_awaited()
+    # the job was marked failed rather than orphaned
+    failed = [
+        c for c in jm.update_job.call_args_list if c.kwargs.get("status") == main.JOB_STATUS_FAILED
+    ]
+    assert failed
 
 
 # ---------------------------------------------------------------------------
@@ -444,3 +464,24 @@ def test_execute_audit_job_captures_exception(monkeypatch):
     failed = [c for c in jm.update_job.call_args_list if c.kwargs.get("status") == "failed"]
     assert failed
     assert any("kaboom" in str(c.kwargs.get("error")) for c in failed)
+
+
+def test_run_audit_job_propagates_infra_exception(monkeypatch):
+    """The core (used by the Temporal activity) must NOT swallow infra
+    exceptions — it records running, then lets the exception propagate so
+    Temporal can retry. It does not write a terminal 'failed' itself."""
+    from accessibility_audit_team import audit_execution as ax
+
+    jm = mock.Mock()
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    orch = mock.Mock()
+    orch.run_audit = mock.AsyncMock(side_effect=RuntimeError("kaboom"))
+    monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
+
+    req = ax.CreateAuditRequest(web_urls=["https://e.com"])
+    with pytest.raises(RuntimeError, match="kaboom"):
+        asyncio.run(ax.run_audit_job("job1", "audit1", req))
+
+    statuses = [c.kwargs.get("status") for c in jm.update_job.call_args_list]
+    assert ax.JOB_STATUS_RUNNING in statuses
+    assert "failed" not in statuses  # terminal failure is execute_audit_job's job

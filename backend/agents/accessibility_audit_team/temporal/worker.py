@@ -10,12 +10,8 @@ accepting requests. Same contract as
 
 from __future__ import annotations
 
-import logging
-
 from accessibility_audit_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
 from shared_temporal import is_temporal_enabled, start_team_worker
-
-logger = logging.getLogger(__name__)
 
 
 def start_accessibility_audit_temporal_worker_thread() -> bool:

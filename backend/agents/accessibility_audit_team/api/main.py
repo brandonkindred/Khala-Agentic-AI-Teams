@@ -181,26 +181,31 @@ async def create_audit(
         request_payload=payload,
     )
 
-    message = "Audit started. Poll /audit/status/{job_id} for progress."
     dispatch = _temporal_dispatch()
     if dispatch is not None:
         try:
             # start_workflow_sync blocks (waits for the worker client, then a sync
             # round-trip to Temporal), so run it off the event loop.
             workflow_id = await asyncio.to_thread(dispatch, job_id, audit_id, payload)
-        except Exception:
-            logger.warning(
-                "Temporal dispatch failed for job %s; running the audit in-process.",
-                job_id,
-                exc_info=True,
+        except Exception as e:
+            # Fail fast rather than re-running in-process: the workflow may have
+            # been accepted server-side, so an in-process fallback could execute
+            # the same audit twice. Mark the job failed and surface a 500.
+            logger.warning("Temporal dispatch failed for job %s.", job_id, exc_info=True)
+            _job_manager.update_job(
+                job_id, status=JOB_STATUS_FAILED, error=f"Temporal dispatch failed: {e}"
             )
-            dispatch = None
-        else:
-            _job_manager.update_job(job_id, status=JOB_STATUS_RUNNING, workflow_id=workflow_id)
-            message = "Audit started (Temporal). Poll /audit/status/{job_id} for progress."
-
-    if dispatch is None:
+            raise HTTPException(
+                status_code=500, detail="Failed to dispatch audit to Temporal"
+            ) from e
+        # Record the workflow id for correlation only; the worker activity owns
+        # all status transitions (pending -> running -> terminal), so the API
+        # must not also write status here or it can race the activity.
+        _job_manager.update_job(job_id, workflow_id=workflow_id)
+        message = "Audit started (Temporal). Poll /audit/status/{job_id} for progress."
+    else:
         background_tasks.add_task(execute_audit_job, job_id, audit_id, request)
+        message = "Audit started. Poll /audit/status/{job_id} for progress."
 
     return AuditJobResponse(
         job_id=job_id,
