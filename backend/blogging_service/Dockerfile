@@ -37,6 +37,11 @@ COPY agents/shared_job_event_bus /app/shared_job_event_bus
 # Imported by blogging.api.main's job-status stream endpoint.
 COPY agents/shared_sse /app/shared_sse
 
+# Neutral JSON-salvage engine (stdlib-only leaf; lazy-imports json-repair from
+# requirements.txt). Imported by llm_service.clients.ollama to recover
+# prose-wrapped/fenced LLM output — copy it before llm_service so that resolves.
+COPY agents/shared_llm_recovery /app/shared_llm_recovery
+
 # LLM service (used by all blogging agents)
 COPY agents/llm_service /app/llm_service
 
