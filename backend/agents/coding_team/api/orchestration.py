@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Ensure backend/agents is on path for coding_team and job_service_client
 from coding_team import hitl
@@ -79,15 +79,32 @@ def run_orchestrator_wired(job_id: str, repo_path: str, plan: CodingTeamPlanInpu
     )
 
 
-def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
-    """Spawn the daemon orchestrator thread for a job whose run-thread claim is held.
+def _spawn_run_thread(
+    job_id: str,
+    run_body: Callable[[], None],
+    on_failure: Callable[[Exception], None],
+) -> None:
+    """Spawn a claim-lifecycle-managed daemon run-thread that executes *run_body*.
+
+    The shared skeleton behind ``_start_orchestrator_thread`` and
+    ``_start_github_resume_thread``: run-thread registration lives inside the
+    thread's ``try`` so the ``finally`` always releases the claim (even if
+    registration itself raises), and a thread-start failure releases the claim
+    here — the thread's ``finally`` never ran — before re-raising so the job
+    stays resumable. The two callers differ only in *run_body* (the work) and
+    *on_failure* (the log line + failed-status write), which are passed in.
 
     Preconditions:
-        - The caller holds the run-thread claim for ``job_id`` (via ``_claim_run_thread``).
+        - The caller holds the run-thread claim for *job_id*.
+        - *run_body* performs the job's work and may raise; *on_failure* records
+          the failure (log + ``update_job(status="failed", ...)``) and must not
+          itself raise.
     Postconditions:
-        - A daemon thread is running the orchestrator; the claim is released by the thread's
-          ``finally`` (or here, if the thread never started — in which case the exception
-          propagates so the job stays resumable).
+        - A daemon thread is running *run_body*. The claim is released by the
+          thread's ``finally`` on completion or *run_body* failure, or here on
+          thread-start failure (in which case the exception propagates).
+        - A *run_body* exception is routed to *on_failure*; a thread-start
+          failure is not (the work never began) and propagates to the caller.
     """
 
     def run() -> None:
@@ -95,10 +112,9 @@ def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlan
             # Registration is inside the try so the finally always releases the claim — even if
             # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
             _main._register_run_thread(job_id)
-            _main.run_orchestrator_wired(job_id, repo_path, plan)
+            run_body()
         except Exception as e:
-            logger.exception("Coding team orchestrator resume failed: %s", e)
-            _main.update_job(job_id, status="failed", error=str(e), current_activity=None)
+            on_failure(e)
         finally:
             _main._clear_run_thread(job_id)
 
@@ -116,6 +132,27 @@ def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlan
         # here so the job stays resumable instead of being wedged in _starting_run_jobs.
         _main._clear_run_thread(job_id)
         raise
+
+
+def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
+    """Spawn the daemon orchestrator thread for a job whose run-thread claim is held.
+
+    Preconditions:
+        - The caller holds the run-thread claim for ``job_id`` (via ``_claim_run_thread``).
+    Postconditions:
+        - A daemon thread is running the orchestrator; the claim is released by the thread's
+          ``finally`` (or here, if the thread never started — in which case the exception
+          propagates so the job stays resumable).
+    """
+
+    def _run_body() -> None:
+        _main.run_orchestrator_wired(job_id, repo_path, plan)
+
+    def _on_failure(e: Exception) -> None:
+        logger.exception("Coding team orchestrator resume failed: %s", e)
+        _main.update_job(job_id, status="failed", error=str(e), current_activity=None)
+
+    _spawn_run_thread(job_id, _run_body, _on_failure)
 
 
 def _start_github_resume_thread(
@@ -152,38 +189,23 @@ def _start_github_resume_thread(
         cleanup_checkout_on_success=ctx.get("cleanup_checkout_on_success") is True,
     )
 
-    def run() -> None:
-        try:
-            # Registration is inside the try so the finally always releases the claim — even if
-            # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
-            _main._register_run_thread(job_id)
-            # Advance the job out of waiting_for_user BEFORE the GitHub network I/O. The
-            # cross-worker resume claim (claim_resume) has a TTL of RESUME_CLAIM_TTL_S; if the
-            # issue fetch or branch prep takes longer than that, another worker could treat the
-            # expired claim as abandoned and spawn a second hook path. Moving the status to
-            # "running" here makes _try_auto_resume and resume_job decline (they only proceed for
-            # waiting_for_user), so the re-claiming window closes before the slow I/O begins.
-            _main.update_job(job_id, status="running", status_text="Resuming via GitHub hook…")
-            with _main.GitHubClient(token=token) as client:
-                issue = client.get_issue(request.owner, request.repo, int(ctx["issue_number"]))
-            _main._run_with_github_hooks(job_id, request, plan, issue, token)
-        except Exception as e:
-            logger.exception("GitHub-path resume failed for job %s: %s", job_id, e)
-            _main.update_job(job_id, status="failed", error=f"resume failed: {e}")
-        finally:
-            _main._clear_run_thread(job_id)
+    def _run_body() -> None:
+        # Advance the job out of waiting_for_user BEFORE the GitHub network I/O. The
+        # cross-worker resume claim (claim_resume) has a TTL of RESUME_CLAIM_TTL_S; if the
+        # issue fetch or branch prep takes longer than that, another worker could treat the
+        # expired claim as abandoned and spawn a second hook path. Moving the status to
+        # "running" here makes _try_auto_resume and resume_job decline (they only proceed for
+        # waiting_for_user), so the re-claiming window closes before the slow I/O begins.
+        _main.update_job(job_id, status="running", status_text="Resuming via GitHub hook…")
+        with _main.GitHubClient(token=token) as client:
+            issue = client.get_issue(request.owner, request.repo, int(ctx["issue_number"]))
+        _main._run_with_github_hooks(job_id, request, plan, issue, token)
 
-    try:
-        # Mirror _start_orchestrator_thread: a dead prior attempt may have left a mid-review
-        # current_activity behind (its finally never ran), which would render a frozen sub-bar
-        # through the resumed run's early phases. Wipe it first. This is the first job-service
-        # write after the claim, inside the claim-releasing try, so a store-outage raise here is
-        # handled by the except below rather than wedging the job.
-        _main.update_job(job_id, current_activity=None)
-        threading.Thread(target=run, daemon=True).start()
-    except Exception:
-        _main._clear_run_thread(job_id)
-        raise
+    def _on_failure(e: Exception) -> None:
+        logger.exception("GitHub-path resume failed for job %s: %s", job_id, e)
+        _main.update_job(job_id, status="failed", error=f"resume failed: {e}")
+
+    _spawn_run_thread(job_id, _run_body, _on_failure)
 
 
 # How long after deferring to a fresh heartbeat we re-check that the deferred-to wait loop really
@@ -236,6 +258,68 @@ def _schedule_resume_recheck(job_id: str, delay: float = _RESUME_RECHECK_DELAY_S
         logger.exception("Could not schedule resume recheck for job %s.", job_id)
 
 
+def _recover_resume_plan(
+    job_id: str, data: Dict[str, Any]
+) -> Optional[Tuple[str, CodingTeamPlanInput]]:
+    """Recover ``(repo_path, plan)`` from a job record for resume, or ``None`` if unusable.
+
+    Preconditions:
+        - ``data`` is the job record for ``job_id``.
+    Postconditions:
+        - Returns ``(repo_path, plan)`` when the record carries a usable
+          ``repo_path`` and a validatable ``plan_input``; ``None`` when either is
+          missing/invalid (an invalid plan is logged; a missing repo_path is not).
+          A non-dict ``plan_input`` is coerced to ``{}`` so ``.get`` cannot raise.
+          Never raises.
+    """
+    plan_raw = data.get("plan_input") or {}
+    if not isinstance(plan_raw, dict):
+        # A corrupted record could carry a non-dict plan_input; .get() on it would raise
+        # AttributeError and break the "Never raises" contract. Treat it as no usable plan.
+        plan_raw = {}
+    repo_path = data.get("repo_path") or plan_raw.get("repo_path")
+    if not repo_path:
+        return None
+    try:
+        plan = plan_from_input(plan_raw, repo_path)
+    except Exception:
+        logger.exception("Auto-resume for job %s skipped: invalid plan_input.", job_id)
+        return None
+    return repo_path, plan
+
+
+def _resolve_github_job_token(
+    job_id: str, data: Dict[str, Any]
+) -> Optional[Tuple[bool, Dict[str, Any], Optional[str]]]:
+    """Classify a resume as GitHub-issue or plain and resolve its token.
+
+    Preconditions:
+        - ``data`` is the job record for ``job_id``.
+    Postconditions:
+        - Returns ``(is_github_job, github_context, token)``: a plain job yields
+          ``(False, ctx, None)``; a GitHub-issue job with a usable token (persisted
+          encrypted at creation, else ``GITHUB_TOKEN``) yields ``(True, ctx, token)``.
+        - Returns ``None`` when a GitHub-issue job has no usable token — the publish
+          flow (PR, issue comments) cannot be resumed, so the caller must bail with
+          the manual-resume hint rather than silently complete without a PR. Never
+          raises.
+    """
+    ctx = data.get("github_context") or {}
+    is_github_job = bool(
+        ctx.get("owner") and ctx.get("repo") and ctx.get("issue_number") is not None
+    )
+    # Prefer the token persisted (encrypted) at job creation; fall back to GITHUB_TOKEN env.
+    token = (
+        (decrypt_token(data.get("github_token_encrypted")) or os.environ.get("GITHUB_TOKEN"))
+        if is_github_job
+        else None
+    )
+    if is_github_job and not token:
+        logger.warning("Auto-resume for GitHub job %s skipped: no GitHub token available.", job_id)
+        return None
+    return is_github_job, ctx, token
+
+
 def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     """Best-effort restart of a dead orchestrator after answers arrived.
 
@@ -272,34 +356,14 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     if _main._answer_wait_heartbeat_fresh(data):
         _main._schedule_resume_recheck(job_id)
         return True
-    plan_raw = data.get("plan_input") or {}
-    if not isinstance(plan_raw, dict):
-        # A corrupted record could carry a non-dict plan_input; .get() on it would raise
-        # AttributeError and break the "Never raises" contract. Treat it as no usable plan.
-        plan_raw = {}
-    repo_path = data.get("repo_path") or plan_raw.get("repo_path")
-    if not repo_path:
+    recovered = _recover_resume_plan(job_id, data)
+    if recovered is None:
         return False
-    try:
-        plan = plan_from_input(plan_raw, repo_path)
-    except Exception:
-        logger.exception("Auto-resume for job %s skipped: invalid plan_input.", job_id)
+    repo_path, plan = recovered
+    resolved = _resolve_github_job_token(job_id, data)
+    if resolved is None:
         return False
-    ctx = data.get("github_context") or {}
-    is_github_job = bool(
-        ctx.get("owner") and ctx.get("repo") and ctx.get("issue_number") is not None
-    )
-    # Prefer the token persisted (encrypted) at job creation; fall back to GITHUB_TOKEN env.
-    token = (
-        (decrypt_token(data.get("github_token_encrypted")) or os.environ.get("GITHUB_TOKEN"))
-        if is_github_job
-        else None
-    )
-    if is_github_job and not token:
-        # Without a token the publish flow (PR, issue comments) cannot be resumed; fall back to
-        # the explicit-resume hint rather than silently completing without a PR.
-        logger.warning("Auto-resume for GitHub job %s skipped: no GitHub token available.", job_id)
-        return False
+    is_github_job, ctx, token = resolved
     # Cross-worker claim FIRST: the process-local _claim_run_thread cannot stop a different worker
     # process from also spawning. The shared-store claim is the authoritative gate; only the worker
     # that wins it proceeds to the local claim and spawn. claim_resume() is the one job-store
@@ -492,6 +556,179 @@ def _defer_terminal_success(job_id: str):
     return _update
 
 
+def _finish_already_complete(
+    client: Any,
+    job_id: str,
+    request: RunFromGitHubRequest,
+    issue: Issue,
+    job_after: Dict[str, Any],
+) -> None:
+    """Report an already-complete no-op run: recommend closing the issue, clean up, mark done.
+
+    The team determined the issue's work was already done (planning recognized it,
+    or every task resolved as already-satisfied with no real diff), so no PR is
+    opened. This is a clean no-op success, so it runs the SAME checkout cleanup as
+    the merged-work path — otherwise it leaves the active-issue marker set (a later
+    same-issue retry would treat stale local state as interrupted progress) and
+    leaks the per-issue clone when ``cleanup_checkout_on_success`` is set.
+
+    Preconditions:
+        - ``client`` is an open ``GitHubClient``; ``job_after`` is the post-run job
+          record whose ``already_complete`` flag is set.
+    Postconditions:
+        - Posts the close-recommendation comment, clears the active-issue marker,
+          runs the optional checkout cleanup BEFORE the terminal write (so the job
+          stays in ``list_jobs(active_only=True)`` during the rmtree), then marks
+          the job ``already_complete``.
+    """
+    owner, repo, num = request.owner, request.repo, issue.number
+    evidence = str(job_after.get("completion_evidence") or "").strip()
+    body = f"Coding team job `{job_id}`: this work appears to be already complete"
+    if evidence:
+        body += f" — {evidence}"
+    body += f"\n\nNo changes were needed. Recommend closing #{num}."
+    _main._safe_comment(client, owner, repo, num, body)
+    _main._clear_active_issue_if_matches(request.repo_path, num)
+    if request.cleanup_checkout_on_success:
+        _main._cleanup_issue_checkout(request.repo_path)
+    _main.update_job(
+        job_id,
+        status="already_complete",
+        phase="completed",
+        status_text="Work already complete; no changes needed",
+    )
+
+
+def _publish_merged_work(
+    client: Any,
+    job_id: str,
+    request: RunFromGitHubRequest,
+    issue: Issue,
+    base: str,
+    integration_branch: str,
+    token: str,
+) -> None:
+    """Publish the merged work: fast-forward, push, open/reuse the draft PR, comment, finalize.
+
+    Some tasks may have merged while others reached a terminal FAILED state; the
+    merged work is still published, but the PR reference keyword and the terminal
+    job status surface the gap rather than presenting incomplete work as a clean
+    success (``Refs`` + ``completed_with_failures`` when any task failed, ``Closes``
+    + ``completed`` otherwise).
+
+    Preconditions:
+        - Called only after the orchestrator produced at least one merged task and
+          did not end failed/cancelled/waiting.
+    Postconditions:
+        - On success the integration branch is fast-forwarded and pushed, a draft
+          PR is created or its body refreshed, the active-issue marker is cleared,
+          the optional checkout cleanup runs (clean completion only) BEFORE the
+          terminal status write, and the job ends ``completed``/
+          ``completed_with_failures``. Every failure path records the failure via
+          ``_record_failure`` and returns, retaining the marker for a retry.
+    """
+    owner, repo, num = request.owner, request.repo, issue.number
+
+    ff_ok, ff_err = _main._fast_forward(request.repo_path, integration_branch, DEVELOPMENT_BRANCH)
+    if not ff_ok:
+        _record_failure(client, owner, repo, num, job_id, f"fast-forward failed: {ff_err}")
+        return
+
+    push_ok, push_err = _main._push_branch(
+        request.repo_path, request.remote, integration_branch, token
+    )
+    if not push_ok:
+        _record_failure(client, owner, repo, num, job_id, f"git push failed: {push_err}")
+        return
+
+    try:
+        existing = client.find_existing_pr(owner, repo, integration_branch)
+    except GitHubAPIError as e:
+        _record_failure(client, owner, repo, num, job_id, f"github find_existing_pr: {e}")
+        return
+
+    # Only auto-close the issue when every task landed. A partial result still
+    # leaves requested work undone, so use a non-closing reference ("Refs") to
+    # avoid closing the issue when the PR merges into the default branch.
+    failed = _failed_tasks(_main.get_job(job_id) or {})
+    ref_keyword = "Refs" if failed else "Closes"
+    pr_body = f"{ref_keyword} #{num}\n\nGenerated by Khala coding team job `{job_id}`."
+    if failed:
+        pr_body += (
+            f"\n\n> ⚠️ {len(failed)} task(s) did not complete and are **not** included in "
+            f"this PR:\n{_format_failed_tasks(failed)}"
+        )
+
+    if existing is not None:
+        pr_url, created = existing.html_url, False
+        # Always refresh the reused PR's body so it reflects the latest run: add a
+        # partial-failure warning when this run left tasks unfinished, and clear a stale
+        # warning (and old job id) from an earlier partial run that a later retry completed.
+        try:
+            updated = client.update_pull_request(
+                owner=owner, repo=repo, number=existing.number, body=pr_body
+            )
+            pr_url = updated.html_url
+        except GitHubAPIError as e:
+            # Non-fatal: the warning (if any) is still posted as a comment below.
+            logger.warning("Failed to update reused PR #%s body: %s", existing.number, e)
+    else:
+        try:
+            pr = client.create_pull_request(
+                owner=owner,
+                repo=repo,
+                title=_truncate_title(issue.title, num),
+                head=integration_branch,
+                base=base,
+                body=pr_body,
+                draft=True,
+            )
+        except GitHubAPIError as e:
+            _record_failure(client, owner, repo, num, job_id, f"github create_pull_request: {e}")
+            return
+        pr_url, created = pr.html_url, True
+
+    _main.update_job(job_id, github_pr_url=pr_url, integration_branch=integration_branch)
+    if created:
+        _main._safe_comment(client, owner, repo, num, f"Draft PR opened: {pr_url}")
+    else:
+        _main._safe_comment(client, owner, repo, num, f"Reusing existing draft PR: {pr_url}")
+    if failed:
+        _main._safe_comment(
+            client,
+            owner,
+            repo,
+            num,
+            f"⚠️ {len(failed)} task(s) did not complete and were not merged:\n"
+            f"{_format_failed_tasks(failed)}",
+        )
+    # Publication is the marker's end of life: the work now lives on the remote PR
+    # branch, so the checkout no longer holds unpublished work for this issue.
+    # Every earlier return retains the marker so a retry continues from
+    # development instead of starting over. Scoped to this job's issue: a sibling
+    # job for another issue may have re-marked the checkout since this job prepped.
+    _main._clear_active_issue_if_matches(request.repo_path, num)
+
+    # Drop the per-issue clone only on a clean completion: every task merged and the
+    # work published, so nothing local is unrecoverable. A partial result keeps the
+    # checkout so a retry can seed from its local progress. Cleanup runs BEFORE the
+    # terminal status update so the job stays in list_jobs(active_only=True) during
+    # the rmtree: a quick same-issue retry is then rejected by the duplicate guard
+    # in /run-from-github instead of cloning into a directory mid-rmtree.
+    if not failed and request.cleanup_checkout_on_success:
+        _main._cleanup_issue_checkout(request.repo_path)
+
+    # Terminal status comes last: the busy-checkout guard treats a terminal job as
+    # done with the checkout, so this must be the final action after every
+    # checkout-touching step above (including the cleanup rmtree). A job that merged
+    # some work but also has failed tasks is reported as a partial success.
+    _main.update_job(
+        job_id,
+        status="completed_with_failures" if failed else "completed",
+        phase="completed",
+    )
+
+
 def _run_with_github_hooks(
     job_id: str,
     request: RunFromGitHubRequest,
@@ -582,30 +819,10 @@ def _run_with_github_hooks(
             return
 
         if job_after.get("already_complete"):
-            # The team determined the issue's work was already done (planning recognized it, or every
-            # task resolved as already-satisfied with no real diff). Recommend closing the issue and
-            # do NOT open a no-op PR — there is nothing to merge.
-            evidence = str(job_after.get("completion_evidence") or "").strip()
-            body = f"Coding team job `{job_id}`: this work appears to be already complete"
-            if evidence:
-                body += f" — {evidence}"
-            body += f"\n\nNo changes were needed. Recommend closing #{num}."
-            _main._safe_comment(client, owner, repo, num, body)
-            # An already-complete run is a clean no-op success, so it must run the SAME checkout
-            # cleanup as the normal success path below — otherwise it leaves the active-issue marker
-            # set (a later same-issue retry would treat stale local state as interrupted progress)
-            # and leaks the per-issue clone when cleanup_checkout_on_success is set. Cleanup runs
-            # BEFORE the terminal status write so the job stays in list_jobs(active_only=True) while
-            # the checkout is removed (same ordering rationale as the merged-work path).
-            _main._clear_active_issue_if_matches(request.repo_path, num)
-            if request.cleanup_checkout_on_success:
-                _main._cleanup_issue_checkout(request.repo_path)
-            _main.update_job(
-                job_id,
-                status="already_complete",
-                phase="completed",
-                status_text="Work already complete; no changes needed",
-            )
+            # The team determined the issue's work was already done (planning
+            # recognized it, or every task resolved as already-satisfied with no
+            # real diff). Recommend closing the issue; do NOT open a no-op PR.
+            _finish_already_complete(client, job_id, request, issue, job_after)
             return
 
         if not _has_merged_tasks(job_after):
@@ -623,120 +840,4 @@ def _run_with_github_hooks(
             )
             return
 
-        ff_ok, ff_err = _main._fast_forward(
-            request.repo_path, integration_branch, DEVELOPMENT_BRANCH
-        )
-        if not ff_ok:
-            _record_failure(client, owner, repo, num, job_id, f"fast-forward failed: {ff_err}")
-            return
-
-        push_ok, push_err = _main._push_branch(
-            request.repo_path, request.remote, integration_branch, token
-        )
-        if not push_ok:
-            _record_failure(client, owner, repo, num, job_id, f"git push failed: {push_err}")
-            return
-
-        try:
-            existing = client.find_existing_pr(owner, repo, integration_branch)
-        except GitHubAPIError as e:
-            _record_failure(client, owner, repo, num, job_id, f"github find_existing_pr: {e}")
-            return
-
-        # Some tasks may have merged while others reached a terminal FAILED state. We still
-        # publish the merged work, but the PR and the job status must surface the gap rather than
-        # present incomplete work as a clean success.
-        failed = _failed_tasks(_main.get_job(job_id) or {})
-        # Only auto-close the issue when every task landed. A partial result still leaves
-        # requested work undone, so use a non-closing reference ("Refs") to avoid closing the
-        # issue when the PR merges into the default branch.
-        ref_keyword = "Refs" if failed else "Closes"
-        pr_body = f"{ref_keyword} #{num}\n\nGenerated by Khala coding team job `{job_id}`."
-        if failed:
-            pr_body += (
-                f"\n\n> ⚠️ {len(failed)} task(s) did not complete and are **not** included in "
-                f"this PR:\n{_format_failed_tasks(failed)}"
-            )
-
-        if existing is not None:
-            pr_url, created = existing.html_url, False
-            # Always refresh the reused PR's body so it reflects the latest run: add a
-            # partial-failure warning when this run left tasks unfinished, and clear a stale
-            # warning (and old job id) from an earlier partial run that a later retry completed.
-            try:
-                updated = client.update_pull_request(
-                    owner=owner, repo=repo, number=existing.number, body=pr_body
-                )
-                pr_url = updated.html_url
-            except GitHubAPIError as e:
-                # Non-fatal: the warning (if any) is still posted as a comment below.
-                logger.warning("Failed to update reused PR #%s body: %s", existing.number, e)
-        else:
-            try:
-                pr = client.create_pull_request(
-                    owner=owner,
-                    repo=repo,
-                    title=_truncate_title(issue.title, num),
-                    head=integration_branch,
-                    base=base,
-                    body=pr_body,
-                    draft=True,
-                )
-            except GitHubAPIError as e:
-                _record_failure(
-                    client, owner, repo, num, job_id, f"github create_pull_request: {e}"
-                )
-                return
-            pr_url, created = pr.html_url, True
-
-        _main.update_job(job_id, github_pr_url=pr_url, integration_branch=integration_branch)
-        if created:
-            _main._safe_comment(client, owner, repo, num, f"Draft PR opened: {pr_url}")
-        else:
-            _main._safe_comment(client, owner, repo, num, f"Reusing existing draft PR: {pr_url}")
-        if failed:
-            _main._safe_comment(
-                client,
-                owner,
-                repo,
-                num,
-                f"⚠️ {len(failed)} task(s) did not complete and were not merged:\n"
-                f"{_format_failed_tasks(failed)}",
-            )
-        # Publication is the marker's end of life: the work now lives on the
-        # remote PR branch, so the checkout no longer holds unpublished work
-        # for this issue. Every earlier return (orchestrator failure, no
-        # merged tasks, fast-forward/push/PR failure) retains the marker so a
-        # retry continues from development instead of starting over. Scoped
-        # to this job's issue: a sibling job for another issue may have
-        # re-marked the checkout since this job prepped.
-        _main._clear_active_issue_if_matches(request.repo_path, num)
-
-        # Drop the per-issue clone only on a clean completion: every task merged
-        # and the work published to the PR, so nothing local is unrecoverable. A
-        # partial result (some tasks FAILED) keeps the checkout so a retry can
-        # seed from its local progress, as does every earlier failure return.
-        # Operator-managed checkouts never set the flag, so they are never removed.
-        #
-        # Cleanup runs BEFORE the terminal status update so the job stays in
-        # list_jobs(active_only=True) while the checkout is being removed: a
-        # quick same-issue retry is then rejected by the duplicate guard in
-        # /run-from-github instead of cloning into a directory mid-rmtree. That
-        # guard (_running_job_for_issue) scans the active-jobs list by
-        # github_context, NOT the active-issue git-config marker cleared just
-        # above — the marker only attributes leftover work to an issue after a
-        # job dies — so clearing the marker early does not open the race.
-        if not failed and request.cleanup_checkout_on_success:
-            _main._cleanup_issue_checkout(request.repo_path)
-
-        # Terminal status comes last: the busy-checkout guard treats a
-        # terminal job as done with the checkout, so this must be the hook's
-        # final action after every checkout-touching step above (including the
-        # cleanup rmtree). A job that merged some work but also has failed tasks
-        # is reported as a partial success so it is not presented as a clean
-        # completion.
-        _main.update_job(
-            job_id,
-            status="completed_with_failures" if failed else "completed",
-            phase="completed",
-        )
+        _publish_merged_work(client, job_id, request, issue, base, integration_branch, token)
