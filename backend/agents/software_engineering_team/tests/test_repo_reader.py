@@ -83,6 +83,17 @@ def test_list_files_is_capped(tmp_path) -> None:
     assert len(reader.list_files()) == 4
 
 
+def test_read_cache_uses_own_cap_not_listing_cap(tmp_path) -> None:
+    """The read cache evicts by max_read_cache, independent of the (large) listing cap."""
+    for i in range(6):
+        _write(tmp_path, f"f{i}.py", f"x{i}")
+    reader = DiskRepoReader(str(tmp_path), max_listed_files=5000, max_read_cache=2)
+    for i in range(6):
+        assert reader.read_file(f"f{i}.py") == f"x{i}"
+    # Only the last max_read_cache entries are retained.
+    assert len(reader._read_cache) == 2
+
+
 def test_list_files_cached(tmp_path) -> None:
     _write(tmp_path, "a.py", "1")
     reader = DiskRepoReader(str(tmp_path))

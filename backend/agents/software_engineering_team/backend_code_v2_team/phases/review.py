@@ -19,7 +19,10 @@ from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
 from software_engineering_team.shared.llm_review import run_llm_review
 from software_engineering_team.shared.models import Task
-from software_engineering_team.shared.review_progress import call_code_review_agent
+from software_engineering_team.shared.review_progress import (
+    build_disk_repo_reader,
+    call_code_review_agent,
+)
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
     MANY_CHUNKS_WARN_THRESHOLD,
@@ -48,27 +51,6 @@ from ..output_templates import parse_documentation_self_review_template, parse_r
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT, REVIEW_PROMPT
 
 logger = logging.getLogger(__name__)
-
-
-def _disk_repo_reader(repo_path: Path) -> Any:
-    """Build a whole-repo reader for the false-positive verifier, or None.
-
-    The review runs inside the materialized task workspace, so the verifier can
-    read existing (unchanged) repository files to confirm a file/module a finding
-    claims is missing actually exists.
-
-    Postconditions:
-        - Returns a ``DiskRepoReader`` rooted at ``repo_path``; returns ``None``
-          (best-effort) if the reader cannot be constructed, so review never
-          breaks on reader setup.
-    """
-    try:
-        from code_review_agent.repo_reader import DiskRepoReader
-
-        return DiskRepoReader(str(repo_path))
-    except Exception as exc:  # noqa: BLE001 - the reader is an optional enhancement
-        logger.debug("Could not build DiskRepoReader for %s: %s", repo_path, exc)
-        return None
 
 
 def _run_llm_review(
@@ -276,7 +258,7 @@ def run_review(
                 language=language,
             )
             cr_result = call_code_review_agent(
-                code_review_agent, cr_input, None, repo_reader=_disk_repo_reader(repo_path)
+                code_review_agent, cr_input, None, repo_reader=build_disk_repo_reader(repo_path)
             )
             for item in getattr(cr_result, "issues", []):
                 issues.append(
@@ -476,7 +458,7 @@ def run_microtask_review(
                 code_review_agent,
                 cr_input,
                 detail_callback,
-                repo_reader=_disk_repo_reader(repo_path),
+                repo_reader=build_disk_repo_reader(repo_path),
             )
             for item in getattr(cr_result, "issues", []):
                 issues.append(
@@ -693,7 +675,7 @@ def run_code_review_phase(
                 code_review_agent,
                 cr_input,
                 detail_callback,
-                repo_reader=_disk_repo_reader(repo_path),
+                repo_reader=build_disk_repo_reader(repo_path),
             )
             for item in getattr(cr_result, "issues", []):
                 issues.append(

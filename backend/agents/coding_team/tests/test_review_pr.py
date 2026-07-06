@@ -2351,3 +2351,47 @@ class TestWholeFileReview:
         assert captured.get("files") is None
         assert captured["pre_numbered"] is True
         assert captured["code"]  # the hunk-rendered blob
+
+    def test_whole_file_mode_appends_focus_note(self, review_app, monkeypatch) -> None:
+        gh = review_app["github"]["client"]  # default: single reviewable file a.py
+        gh.get_file_contents = lambda o, r, path, ref: "def a():\n    return 1\n"
+        gh.get_repository_tree = lambda o, r, ref, recursive=True: ["a.py"]
+
+        captured: dict[str, Any] = {}
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                captured.update(kw)
+                return _FakeOutput(issues=[])
+
+        monkeypatch.setattr("coding_team.engine_provider._provider", _CapProvider())
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        # Whole-file mode steers the reviewer to focus on the change, not unchanged code.
+        assert "Review focus" in captured["task_requirements"]
+
+    def test_partial_head_fetch_falls_back_to_hunks(self, review_app, monkeypatch) -> None:
+        gh = review_app["github"]["client"]
+        # Two reviewable files; only one fetches whole content.
+        gh.files = [
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,3 @@\n ctx\n+added\n more", 1, 0, None),
+            PullRequestFile("b.py", "modified", "@@ -1,1 +1,2 @@\n x\n+y", 1, 0, None),
+        ]
+        gh.get_file_contents = lambda o, r, path, ref: "whole a\n" if path == "a.py" else None
+        gh.get_repository_tree = lambda o, r, ref, recursive=True: []
+
+        captured: dict[str, Any] = {}
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                captured.update(kw)
+                return _FakeOutput(issues=[])
+
+        monkeypatch.setattr("coding_team.engine_provider._provider", _CapProvider())
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        # Only 1 of 2 reviewable files fetched -> must NOT silently drop b.py.
+        # Falls back to hunk mode (covers every changed file).
+        assert captured.get("files") is None
+        assert captured["pre_numbered"] is True
+        assert captured["code"]

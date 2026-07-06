@@ -2221,3 +2221,13 @@ class TestGitHubRepoReader:
 
         reader = GitHubRepoReader(_client_with(handler), "o", "r", "sha1")
         assert reader.list_files() == []
+
+    def test_list_files_is_capped(self) -> None:
+        from coding_team.github_source import GitHubRepoReader
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            blobs = [{"type": "blob", "path": f"f{i}.py"} for i in range(10)]
+            return httpx.Response(200, json={"tree": blobs})
+
+        reader = GitHubRepoReader(_client_with(handler), "o", "r", "sha1", max_listed=3)
+        assert len(reader.list_files()) == 3  # capped, unlike the pre-fix unbounded listing

@@ -24,6 +24,8 @@ import os
 from dataclasses import dataclass
 from typing import List, Tuple, Union
 
+from .code_boundaries import node_end_line, node_start_line
+
 logger = logging.getLogger(__name__)
 
 # Extensions parsed with Python's ``ast``; cohesion extraction is Python-only.
@@ -103,29 +105,6 @@ def extract_classes(path: str, content: str) -> List[ClassUnit]:
     return [_class_unit(node) for node in tree.body if isinstance(node, ast.ClassDef)]
 
 
-def _node_start_line(node: ast.AST) -> int:
-    """1-based start line of ``node``, accounting for decorators.
-
-    Postconditions:
-        - Returns ``node.lineno`` lowered to the earliest decorator line when the
-          node is decorated, so a range starts above its decorators.
-    """
-    start = node.lineno  # type: ignore[attr-defined]
-    for dec in getattr(node, "decorator_list", None) or []:
-        start = min(start, dec.lineno)
-    return start
-
-
-def _node_end_line(node: ast.AST) -> int:
-    """1-based inclusive end line of ``node`` (falls back to its start line).
-
-    Postconditions:
-        - Returns ``node.end_lineno`` when present (Python 3.8+), else the
-          node's own ``lineno`` so the range is always well-formed.
-    """
-    return getattr(node, "end_lineno", None) or node.lineno  # type: ignore[attr-defined]
-
-
 def _class_unit(node: ast.ClassDef) -> ClassUnit:
     """Build a ``ClassUnit`` (with direct-method summaries) for a class node.
 
@@ -141,8 +120,8 @@ def _class_unit(node: ast.ClassDef) -> ClassUnit:
     return ClassUnit(
         name=node.name,
         docstring=ast.get_docstring(node) or "",
-        start_line=_node_start_line(node),
-        end_line=_node_end_line(node),
+        start_line=node_start_line(node),
+        end_line=node_end_line(node),
         methods=methods,
     )
 
@@ -158,8 +137,8 @@ def _method_summary(node: _FunctionNode) -> MethodSummary:
         name=node.name,
         signature=_signature(node),
         docstring=ast.get_docstring(node) or "",
-        start_line=_node_start_line(node),
-        end_line=_node_end_line(node),
+        start_line=node_start_line(node),
+        end_line=node_end_line(node),
     )
 
 

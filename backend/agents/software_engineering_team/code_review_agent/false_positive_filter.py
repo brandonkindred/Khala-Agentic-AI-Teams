@@ -50,6 +50,7 @@ from llm_service import LLMClient
 from shared_env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
+from .code_boundaries import node_end_line, node_start_line
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
@@ -176,19 +177,21 @@ class CodebaseIndex:
         """Read ``path`` from the repo reader, degrading to ``None``.
 
         Postconditions:
-            - Returns the reader's content for ``path`` (non-blank) when a reader
-              is attached and it resolves the path; ``None`` when there is no
-              reader, the reader returns nothing, or the reader raises (fail-safe:
+            - Returns the reader's content for ``path`` when a reader is attached
+              and it resolves the path — INCLUDING an empty string for an existing
+              zero-byte file (e.g. a package ``__init__.py``), so an existing empty
+              file is confirmed present rather than reported absent. Returns
+              ``None`` only when there is no reader, the reader itself returns
+              ``None`` (path absent/unreadable), or the reader raises (fail-safe:
               a reader failure only ever *keeps* a finding). Never raises.
         """
         if self.repo_reader is None:
             return None
         try:
-            content = self.repo_reader.read_file(path)  # type: ignore[attr-defined]
+            return self.repo_reader.read_file(path)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - a reader failure must never break verification
             logger.debug("CodebaseIndex: repo_reader.read_file(%r) failed: %s", path, exc)
             return None
-        return content if content else None
 
     def _reader_files(self) -> List[str]:
         """List the repo reader's paths, degrading to ``[]``.
@@ -468,9 +471,9 @@ def _find_python_function_at_line(
         - Returns a "module level" message when no enclosing construct is found.
         - Returns a parse-error message and never raises on ``SyntaxError`` or
           any other ``ast.parse`` failure so the caller can fall back gracefully.
-        - Requires Python 3.8+ for ``ast.AST.end_lineno``; nodes without
-          ``end_lineno`` are skipped (not possible on the project's Python 3.10
-          target, but handled defensively via ``getattr``).
+        - Start/end lines come from the shared ``node_start_line``/
+          ``node_end_line`` helpers (``end_lineno`` when present, else the node's
+          own ``lineno``), so all three AST consumers agree on construct ranges.
     """
     try:
         tree = ast.parse(content)
@@ -484,12 +487,8 @@ def _find_python_function_at_line(
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        end_line = getattr(node, "end_lineno", None)
-        if end_line is None:
-            continue
-        start_line = node.lineno
-        for dec in node.decorator_list:
-            start_line = min(start_line, dec.lineno)
+        start_line = node_start_line(node)
+        end_line = node_end_line(node)
         if start_line <= line_number <= end_line:
             kind = "class" if isinstance(node, ast.ClassDef) else "function"
             candidates.append((end_line - start_line, start_line, end_line, node.name, kind))

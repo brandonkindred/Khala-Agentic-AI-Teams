@@ -799,6 +799,19 @@ def test_index_read_file_falls_through_to_reader() -> None:
     assert idx.read_file("nowhere.py").startswith("Error")
 
 
+def test_reader_existing_empty_file_is_present() -> None:
+    """An existing zero-byte file (e.g. a package __init__.py) resolves as present,
+    not absent — so a 'must create __init__.py' finding can be refuted."""
+    idx = CodebaseIndex(
+        files={"app/main.py": "x = 1\n"},
+        repo_reader=_FakeReader({"pkg/__init__.py": ""}),
+    )
+    # read_file returns the empty content (present), not an Error string.
+    assert idx.read_file("pkg/__init__.py") == ""
+    # resolve_path treats the empty existing file as resolvable.
+    assert idx.resolve_path("pkg/__init__.py") == "pkg/__init__.py"
+
+
 def test_resolve_path_uses_reader() -> None:
     """``resolve_path`` returns the cited path when only the reader can read it."""
     idx = CodebaseIndex(

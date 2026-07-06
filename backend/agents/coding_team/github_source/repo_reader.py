@@ -15,8 +15,9 @@ Contract (matching the SE Protocol):
     - **Fail-safe.** ``read_file`` returns ``None`` (never raises) for a missing
       or unreadable path; ``list_files`` returns ``[]`` on failure. A reader
       failure only ever *keeps* a finding, never drops a real one.
-    - **Bounded.** The tree is fetched once; per-file reads are lazy and capped
-      so a review cannot fan out into unbounded API calls.
+    - **Bounded.** The tree is fetched once and its listing truncated to a cap;
+      per-file reads are lazy and capped, so a review cannot fan out into
+      unbounded API calls or an unbounded listing.
 """
 
 from __future__ import annotations
@@ -36,16 +37,24 @@ logger = logging.getLogger(__name__)
 # paths read as ``None`` (treated as "cannot confirm" → the finding is kept).
 DEFAULT_MAX_FETCHES = 200
 
+# Cap on how many paths ``list_files`` returns, so the verifier's ``list_files``
+# tool result cannot balloon into thousands of lines (token cost / context
+# overflow) on a large repository. Mirrors DiskRepoReader's listing cap; files
+# beyond the cap remain readable by exact path via ``read_file``.
+DEFAULT_MAX_LISTED_FILES = 5_000
+
 
 class GitHubRepoReader:
     """A repository reader answering reads over the GitHub API at ``head_sha``.
 
     Invariants:
         - Never mutates the repository; every method is a read.
-        - The tree listing is fetched at most once; each file is fetched at most
-          once; both are memoized under ``_lock`` so concurrent verification
-          threads share the results and never double-fetch.
-        - Total on-demand file fetches are capped at ``max_fetches``.
+        - The tree listing is fetched at most once; each distinct file is fetched
+          at most once even under concurrency (a per-key in-flight guard makes
+          same-path readers wait for the leader rather than each firing a GET),
+          so a path never double-fetches and never double-counts the cap.
+        - Total on-demand file fetches are capped at ``max_fetches``; the listing
+          is capped at ``max_listed``.
     """
 
     def __init__(
@@ -56,35 +65,42 @@ class GitHubRepoReader:
         head_sha: str,
         *,
         max_fetches: int = DEFAULT_MAX_FETCHES,
+        max_listed: int = DEFAULT_MAX_LISTED_FILES,
     ) -> None:
         """Bind the reader to one PR's head commit.
 
         Preconditions:
             - ``client`` is an open ``GitHubClient``; ``owner``/``repo`` are the
               repository coordinates; ``head_sha`` is the PR head commit SHA;
-              ``max_fetches`` > 0.
+              ``max_fetches`` > 0 and ``max_listed`` > 0.
         """
         assert head_sha, "GitHubRepoReader requires a head commit SHA"
-        assert max_fetches > 0, "max_fetches must be positive"
+        assert max_fetches > 0 and max_listed > 0, "caps must be positive"
         self._client = client
         self._owner = owner
         self._repo = repo
         self._ref = head_sha
         self._max_fetches = max_fetches
-        self._lock = threading.Lock()
+        self._max_listed = max_listed
+        # A single Condition guards all shared state and lets same-key readers
+        # wait for the in-flight leader (single-flight), so a path is fetched
+        # once even when the verifier fans out over a ThreadPoolExecutor.
+        self._cond = threading.Condition(threading.Lock())
         self._tree: Optional[List[str]] = None
         self._read_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
+        self._inflight: set[str] = set()
         self._fetches = 0
 
     def list_files(self) -> List[str]:
         """Return repository-relative file paths at the head commit (cached).
 
         Postconditions:
-            - Returns the head tree's blob paths (possibly partial when GitHub
-              truncates a very large tree), fetched once and memoized. Returns
-              ``[]`` on any API error (fail-safe). Never raises.
+            - Returns the head tree's blob paths, truncated to ``max_listed``
+              (and possibly partial when GitHub truncates a very large tree),
+              fetched once and memoized. Returns ``[]`` on any API error
+              (fail-safe). Never raises.
         """
-        with self._lock:
+        with self._cond:
             if self._tree is not None:
                 return list(self._tree)
         try:
@@ -94,7 +110,8 @@ class GitHubRepoReader:
                 "GitHubRepoReader: tree fetch failed for %s@%s: %s", self._repo, self._ref, exc
             )
             tree = []
-        with self._lock:
+        tree = tree[: self._max_listed]
+        with self._cond:
             if self._tree is None:
                 self._tree = tree
             return list(self._tree)
@@ -106,25 +123,42 @@ class GitHubRepoReader:
             - Returns the file's text for a readable file within the fetch cap;
               ``None`` for a blank path, a missing file, an API error, or once the
               per-review fetch cap is reached. Each distinct path is fetched at
-              most once (memoized under the lock). Never raises.
+              most once even under concurrent same-path reads (single-flight):
+              a second reader waits for the leader and reuses its cached result,
+              so the fetch cap is charged once per path. Never raises.
         """
         key = (path or "").strip()
         if not key:
             return None
-        with self._lock:
-            if key in self._read_cache:
+        with self._cond:
+            while True:
+                if key in self._read_cache:
+                    self._read_cache.move_to_end(key)
+                    return self._read_cache[key]
+                if key in self._inflight:
+                    # Another thread is fetching this exact path; wait for it to
+                    # populate the cache rather than issuing a duplicate GET.
+                    self._cond.wait()
+                    continue
+                if self._fetches >= self._max_fetches:
+                    logger.debug(
+                        "GitHubRepoReader: fetch cap %s reached; not reading %s",
+                        self._max_fetches,
+                        key,
+                    )
+                    return None
+                self._fetches += 1
+                self._inflight.add(key)
+                break
+        content: Optional[str] = None
+        try:
+            content = self._fetch(key)
+        finally:
+            with self._cond:
+                self._read_cache[key] = content
                 self._read_cache.move_to_end(key)
-                return self._read_cache[key]
-            if self._fetches >= self._max_fetches:
-                logger.debug(
-                    "GitHubRepoReader: fetch cap %s reached; not reading %s", self._max_fetches, key
-                )
-                return None
-            self._fetches += 1
-        content = self._fetch(key)
-        with self._lock:
-            self._read_cache[key] = content
-            self._read_cache.move_to_end(key)
+                self._inflight.discard(key)
+                self._cond.notify_all()
         return content
 
     def _fetch(self, path: str) -> Optional[str]:

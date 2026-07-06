@@ -42,6 +42,11 @@ DEFAULT_MAX_LISTED_FILES = 5_000
 # cap reads as ``None`` (treated as "cannot confirm", i.e. the finding is kept).
 DEFAULT_MAX_FILE_BYTES = 1_000_000
 
+# Cap on the number of (path -> content) entries the read cache retains, bounding
+# resident memory (up to ~max_file_bytes each). Independent of the listing cap:
+# the read cache is an LRU over recently-checked paths, not the file inventory.
+DEFAULT_MAX_READ_CACHE = 512
+
 # Directories never worth listing/reading for a code existence check.
 _SKIP_DIRS = frozenset(
     {
@@ -97,18 +102,22 @@ class DiskRepoReader:
         *,
         max_listed_files: int = DEFAULT_MAX_LISTED_FILES,
         max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        max_read_cache: int = DEFAULT_MAX_READ_CACHE,
     ) -> None:
         """Bind the reader to ``repo_root``.
 
         Preconditions:
-            - ``repo_root`` is a non-empty path string; ``max_listed_files`` and
-              ``max_file_bytes`` are positive.
+            - ``repo_root`` is a non-empty path string; ``max_listed_files``,
+              ``max_file_bytes``, and ``max_read_cache`` are positive.
         """
         assert repo_root and repo_root.strip(), "repo_root must be a non-empty path"
-        assert max_listed_files > 0 and max_file_bytes > 0, "caps must be positive"
+        assert max_listed_files > 0 and max_file_bytes > 0 and max_read_cache > 0, (
+            "caps must be positive"
+        )
         self._root = os.path.realpath(repo_root)
         self._max_listed = max_listed_files
         self._max_bytes = max_file_bytes
+        self._max_read_cache = max_read_cache
         self._lock = threading.Lock()
         self._read_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
         self._listing: Optional[List[str]] = None
@@ -150,7 +159,7 @@ class DiskRepoReader:
         with self._lock:
             self._read_cache[resolved] = content
             self._read_cache.move_to_end(resolved)
-            while len(self._read_cache) > self._max_listed:
+            while len(self._read_cache) > self._max_read_cache:
                 self._read_cache.popitem(last=False)
         return content
 

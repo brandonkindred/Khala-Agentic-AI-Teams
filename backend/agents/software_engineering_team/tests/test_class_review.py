@@ -13,6 +13,7 @@ import pytest
 from code_review_agent.class_review import (
     _cap_severity,
     _render_class_prompt,
+    clear_cohesion_cache,
     review_class_cohesion,
 )
 from code_review_agent.code_units import extract_classes
@@ -66,10 +67,18 @@ def _input(**overrides: Any) -> CodeReviewInput:
 
 @pytest.fixture(autouse=True)
 def _enable_cohesion(monkeypatch):
-    """The pass is default-on; make tests independent of the ambient env."""
+    """The pass is default-on; make tests independent of the ambient env.
+
+    Also clears the process-global cohesion outcome cache so each test's stub
+    (which simulates a different LLM response for the same class input) is not
+    shadowed by a prior test's cached result.
+    """
     monkeypatch.delenv("CODE_REVIEW_CLASS_COHESION", raising=False)
     monkeypatch.delenv("CODE_REVIEW_CLASS_COHESION_MAX_CLASSES", raising=False)
+    monkeypatch.delenv("CODE_REVIEW_COHESION_CACHE_SIZE", raising=False)
+    clear_cohesion_cache()
     yield
+    clear_cohesion_cache()
 
 
 def test_cap_severity_lowers_above_medium() -> None:
@@ -142,6 +151,40 @@ def test_zero_cap_returns_empty(monkeypatch) -> None:
 def test_per_class_failure_is_swallowed() -> None:
     # A verifier/LLM error for a class drops only that class's findings, never raises.
     assert review_class_cohesion(_RaisingStub(), [("report.py", _CLASS_SRC)], _input()) == []
+
+
+class _CountingStub(DummyLLMClient):
+    """Like _IssueStub but counts how many times the LLM was actually invoked."""
+
+    def __init__(self, issues: List[Dict[str, Any]]):
+        super().__init__()
+        self._issues = issues
+        self.calls = 0
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+        self.calls += 1
+        return {"approved": False, "issues": self._issues, "summary": "c"}
+
+
+def test_cohesion_cache_reuses_result() -> None:
+    """A second review of the same class + context is served from cache (no LLM call)."""
+    stub = _CountingStub([{"severity": "low", "description": "concern"}])
+    blocks = [("report.py", _CLASS_SRC)]
+    first = review_class_cohesion(stub, blocks, _input())
+    second = review_class_cohesion(stub, blocks, _input())
+    assert len(first) == 1 and len(second) == 1
+    assert first[0].description == second[0].description == "concern"
+    assert stub.calls == 1  # second run hit the cache
+
+
+def test_cohesion_cache_disabled_reruns(monkeypatch) -> None:
+    """With the cache disabled (size 0) the class is re-reviewed every run."""
+    monkeypatch.setenv("CODE_REVIEW_COHESION_CACHE_SIZE", "0")
+    stub = _CountingStub([{"severity": "low", "description": "concern"}])
+    blocks = [("report.py", _CLASS_SRC)]
+    review_class_cohesion(stub, blocks, _input())
+    review_class_cohesion(stub, blocks, _input())
+    assert stub.calls == 2  # no caching -> two real calls
 
 
 def test_multiple_classes_fan_out_in_parallel() -> None:

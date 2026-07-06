@@ -149,3 +149,31 @@ def test_pure_function_no_io_does_not_mutate_inputs() -> None:
     before = src
     preferred_break_lines("m.py", src)
     assert src == before
+
+
+# ---------------------------------------------------------------------------
+# Shared node_start_line / node_end_line helpers
+# ---------------------------------------------------------------------------
+
+
+def test_node_start_line_accounts_for_decorators() -> None:
+    """node_start_line lowers to the earliest decorator; node_end_line uses end_lineno."""
+    import ast
+
+    from code_review_agent.code_boundaries import node_end_line, node_start_line
+
+    tree = ast.parse("@a\n@b\ndef f():\n    return 1\n")
+    fn = tree.body[0]
+    # def is on line 3, but the earliest decorator (@a) is line 1.
+    assert node_start_line(fn) == 1
+    assert node_end_line(fn) == 4
+
+
+def test_node_start_end_line_undecorated() -> None:
+    import ast
+
+    from code_review_agent.code_boundaries import node_end_line, node_start_line
+
+    cls = ast.parse("class C:\n    def m(self):\n        pass\n").body[0]
+    assert node_start_line(cls) == 1
+    assert node_end_line(cls) == 3

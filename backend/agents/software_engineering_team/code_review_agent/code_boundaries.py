@@ -64,6 +64,37 @@ def preferred_break_lines(path: str, content: str) -> frozenset[int]:
     return _heuristic_break_lines(content)
 
 
+def node_start_line(node: ast.AST) -> int:
+    """1-based start line of a def/class node, lowered to its earliest decorator.
+
+    The single source of the "a construct starts above its decorators" rule,
+    shared by the boundary detector here, the class/method extractor
+    (``code_units``), and the enclosing-construct finder
+    (``false_positive_filter``), so all three agree on where a construct begins.
+
+    Preconditions:
+        - ``node`` has a ``lineno`` (a def/class/statement node).
+
+    Postconditions:
+        - Returns ``node.lineno`` lowered to the earliest decorator line when the
+          node is decorated, else ``node.lineno``. Never raises.
+    """
+    start = node.lineno  # type: ignore[attr-defined]
+    for dec in getattr(node, "decorator_list", None) or []:
+        start = min(start, dec.lineno)
+    return start
+
+
+def node_end_line(node: ast.AST) -> int:
+    """1-based inclusive end line of ``node`` (``end_lineno``, else ``lineno``).
+
+    Postconditions:
+        - Returns ``node.end_lineno`` when present (Python 3.8+), else the node's
+          own ``lineno`` so the range is always well-formed. Never raises.
+    """
+    return getattr(node, "end_lineno", None) or node.lineno  # type: ignore[attr-defined]
+
+
 def _python_break_lines(content: str) -> frozenset[int]:
     """Top-level def/async-def/class start lines via ``ast``.
 
@@ -87,10 +118,7 @@ def _python_break_lines(content: str) -> frozenset[int]:
     breaks: set[int] = set()
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            start = node.lineno
-            for dec in node.decorator_list:
-                start = min(start, dec.lineno)
-            breaks.add(start)
+            breaks.add(node_start_line(node))
     return frozenset(breaks)
 
 

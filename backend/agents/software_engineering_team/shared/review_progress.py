@@ -3,7 +3,35 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from typing import Any, Callable, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def build_disk_repo_reader(repo_path: Any) -> Any:
+    """Build a whole-repo ``DiskRepoReader`` for the false-positive verifier, or None.
+
+    The v2 backend/frontend review phases run inside the materialized task
+    workspace, so the verifier can read existing (unchanged) repository files to
+    confirm that a file/module a finding calls missing already exists. Shared by
+    both phases so the fail-safe construction lives in one place.
+
+    Preconditions:
+        - ``repo_path`` is the workspace path the review runs against.
+
+    Postconditions:
+        - Returns a ``DiskRepoReader`` rooted at ``repo_path``; returns ``None``
+          (best-effort, logged) if the reader cannot be constructed, so review
+          never breaks on reader setup.
+    """
+    try:
+        from code_review_agent.repo_reader import DiskRepoReader
+
+        return DiskRepoReader(str(repo_path))
+    except Exception as exc:  # noqa: BLE001 - the reader is an optional enhancement
+        logger.debug("Could not build DiskRepoReader for %s: %s", repo_path, exc)
+        return None
 
 
 def call_code_review_agent(

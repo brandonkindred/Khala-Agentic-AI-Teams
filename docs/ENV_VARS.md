@@ -446,6 +446,16 @@ floor `0`. `0` disables the pass entirely (no class is reviewed), independent of
 the `CODE_REVIEW_CLASS_COHESION` on/off flag; a negative or non-numeric value
 falls back to the default.
 
+### CODE_REVIEW_COHESION_CACHE_SIZE
+Capacity of the process-global class-cohesion outcome cache (a bounded LRU keyed
+on a class's exact rendered prompt + shared task/spec context + resolved model).
+Because the cohesion pass runs after the coordinator's map phase, it would
+otherwise re-issue one LLM call per class on every re-review (retries, the SE
+planning-cache short-circuit, etc.); the cache reuses a class's findings whenever
+nothing affecting them changed. Default `512`, floor `0`. `0` disables the cache
+(every cohesion review re-runs). Best-effort: a miss recomputes, and only
+successful per-class outcomes are cached, so a transient failure is retried.
+
 ---
 
 ## Shared Infrastructure and Storage
