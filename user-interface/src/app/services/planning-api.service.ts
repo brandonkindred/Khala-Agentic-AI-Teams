@@ -12,12 +12,12 @@ import type {
 import type { HealthResponse } from '../models/health.model';
 
 /** A single answer to an open planning question, posted to `/{job_id}/answers`. */
-export type PlanningAnswerSubmission = {
+export interface PlanningAnswerSubmission {
   question_id: string;
   selected_option_id?: string;
   selected_option_ids?: string[];
   other_text?: string | null;
-};
+}
 
 /**
  * Service for Planning Team API (client-facing discovery / PRD).
