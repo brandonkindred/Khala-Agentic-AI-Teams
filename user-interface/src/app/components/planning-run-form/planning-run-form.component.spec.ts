@@ -99,4 +99,20 @@ describe('PlanningRunFormComponent', () => {
     const button: HTMLButtonElement = fixture.nativeElement.querySelector('button');
     expect(button.disabled).toBe(true);
   });
+
+  it('submit button is disabled when canSubmit is false (no brief or spec)', () => {
+    // Default component state: initialBrief and specContent are both empty,
+    // so canSubmit is false and the button must be disabled.
+    expect(component.canSubmit).toBe(false);
+    fixture.detectChanges();
+    const button: HTMLButtonElement = fixture.nativeElement.querySelector('button');
+    expect(button.disabled).toBe(true);
+  });
+
+  it('submit button is enabled once a brief makes canSubmit true', () => {
+    component.initialBrief = 'Build a home maintenance tracker';
+    fixture.detectChanges();
+    const button: HTMLButtonElement = fixture.nativeElement.querySelector('button');
+    expect(button.disabled).toBe(false);
+  });
 });

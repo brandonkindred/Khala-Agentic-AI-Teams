@@ -1,6 +1,4 @@
 import { Component, inject } from '@angular/core';
-import { MatIconModule } from '@angular/material/icon';
-import { MatButtonModule } from '@angular/material/button';
 import { PlanningApiService } from '../../services/planning-api.service';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
@@ -12,8 +10,6 @@ import { environment } from '../../../environments/environment';
   selector: 'app-planning-page',
   standalone: true,
   imports: [
-    MatIconModule,
-    MatButtonModule,
     HealthIndicatorComponent,
     TeamAssistantChatComponent,
   ],
