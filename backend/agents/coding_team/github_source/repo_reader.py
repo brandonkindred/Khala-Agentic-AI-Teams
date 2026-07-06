@@ -55,6 +55,10 @@ class GitHubRepoReader:
           so a path never double-fetches and never double-counts the cap.
         - Total on-demand file fetches are capped at ``max_fetches``; the listing
           is capped at ``max_listed``.
+        - The read cache holds at most ``max_fetches`` entries: every stored entry
+          required a fetch, and fetches are capped, so it is size-bounded without
+          a separate eviction knob (unlike ``DiskRepoReader``, whose disk reads
+          are uncapped and therefore need an explicit ``max_read_cache``).
     """
 
     def __init__(

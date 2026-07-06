@@ -88,6 +88,9 @@ def node_start_line(node: ast.AST) -> int:
 def node_end_line(node: ast.AST) -> int:
     """1-based inclusive end line of ``node`` (``end_lineno``, else ``lineno``).
 
+    Preconditions:
+        - ``node`` has a ``lineno`` (a def/class/statement node).
+
     Postconditions:
         - Returns ``node.end_lineno`` when present (Python 3.8+), else the node's
           own ``lineno`` so the range is always well-formed. Never raises.

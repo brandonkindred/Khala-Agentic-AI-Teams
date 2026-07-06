@@ -198,6 +198,9 @@ def _whole_file_focus(body: str) -> str:
     from filing comments on pre-existing problems in code the PR never touched —
     behavior the old hunk-scoped review could not produce.
 
+    Preconditions:
+        - ``body`` is a string (the PR body or "").
+
     Postconditions:
         - Returns ``body`` with the focus note appended (or the note alone when
           ``body`` is blank).
@@ -219,6 +222,9 @@ _HEAD_FETCH_PARALLELISM = 8
 
 def _is_whole_file_reviewable(f: Any) -> bool:
     """True for a changed file eligible for whole-file review.
+
+    Preconditions:
+        - ``f`` is a ``PullRequestFile`` exposing ``.status`` and ``.patch``.
 
     Postconditions:
         - Returns True iff ``f`` is not removed and carries a diff ``patch`` (a

@@ -153,6 +153,21 @@ def test_per_class_failure_is_swallowed() -> None:
     assert review_class_cohesion(_RaisingStub(), [("report.py", _CLASS_SRC)], _input()) == []
 
 
+def test_non_llm_failure_is_also_swallowed(monkeypatch) -> None:
+    """A failure OUTSIDE the LLM call (e.g. issue normalization) must also be
+    swallowed to a [] result — the whole per-class path is best-effort, so the
+    coordinator's 'cohesion never raises' guarantee holds."""
+    import code_review_agent.class_review as cr
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("normalize boom")
+
+    monkeypatch.setattr(cr, "_issues_from_class_output", _boom)
+    stub = _IssueStub([{"severity": "low", "description": "concern"}])
+    # Must not propagate out of review_class_cohesion.
+    assert review_class_cohesion(stub, [("report.py", _CLASS_SRC)], _input()) == []
+
+
 class _CountingStub(DummyLLMClient):
     """Like _IssueStub but counts how many times the LLM was actually invoked."""
 

@@ -88,6 +88,11 @@ def clear_cohesion_cache() -> None:
 def _cohesion_key(path: str, prompt: str, input_data: CodeReviewInput, model_fp: str) -> str:
     """Stable cache key for one class's cohesion review.
 
+    Preconditions:
+        - ``prompt`` is the class's rendered cohesion prompt; ``model_fp`` is the
+          resolved review-model fingerprint; every value folded into the key is
+          JSON-native (enforced by ``_stable_json_digest``).
+
     Postconditions:
         - Returns a digest over the exact rendered class prompt plus every input
           that changes the review (path, task/requirements/criteria/language/
@@ -110,7 +115,17 @@ def _cohesion_key(path: str, prompt: str, input_data: CodeReviewInput, model_fp:
 
 
 def _cohesion_cache_get(key: str) -> Optional[List[CodeReviewIssue]]:
-    """Return a deep copy of the cached findings for ``key``, or None on a miss."""
+    """Return a deep copy of the cached findings for ``key``, or None on a miss.
+
+    Preconditions:
+        - ``key`` is a ``_cohesion_key`` digest.
+
+    Postconditions:
+        - On a hit, returns a fresh deep copy of the cached findings (so the
+          caller can mutate them without corrupting the cache) and marks the
+          entry most-recently-used. Returns None on a miss. Thread-safe (holds
+          the cache lock).
+    """
     with _COHESION_CACHE_LOCK:
         cached = _COHESION_CACHE.get(key)
         if cached is None:
@@ -120,7 +135,19 @@ def _cohesion_cache_get(key: str) -> Optional[List[CodeReviewIssue]]:
 
 
 def _cohesion_cache_put(key: str, issues: List[CodeReviewIssue], size: int) -> None:
-    """Store a deep copy of ``issues`` under ``key``, evicting LRU past ``size``."""
+    """Store a deep copy of ``issues`` under ``key``, evicting LRU past ``size``.
+
+    Preconditions:
+        - ``key`` is a ``_cohesion_key`` digest; ``issues`` is that class's
+          normalized findings; ``size`` is the resolved cache capacity.
+
+    Postconditions:
+        - A no-op when ``size <= 0``. Otherwise stores a deep copy of ``issues``
+          (so a later caller mutating the returned list cannot corrupt the cache,
+          and the caller's own list stays independent), marks it
+          most-recently-used, and evicts least-recently-used entries until the
+          cache holds at most ``size``. Thread-safe (holds the cache lock).
+    """
     if size <= 0:
         return
     with _COHESION_CACHE_LOCK:
@@ -293,14 +320,19 @@ def review_class_cohesion(
     model_fp = _review_model_fingerprint(llm)
 
     def _review_one(item: Tuple[str, ClassUnit]) -> List[CodeReviewIssue]:
+        # The ENTIRE per-class path is best-effort: prompt rendering, key/cache
+        # ops, the LLM call, and issue normalization all run under one guard so a
+        # failure anywhere drops only this class's advisory findings and never
+        # propagates out of review_class_cohesion (the coordinator relies on the
+        # pass never raising).
         path, cu = item
-        prompt = _render_class_prompt(path, cu)
-        key = _cohesion_key(path, prompt, input_data, model_fp) if cache_size > 0 else None
-        if key is not None:
-            hit = _cohesion_cache_get(key)
-            if hit is not None:
-                return hit
         try:
+            prompt = _render_class_prompt(path, cu)
+            key = _cohesion_key(path, prompt, input_data, model_fp) if cache_size > 0 else None
+            if key is not None:
+                hit = _cohesion_cache_get(key)
+                if hit is not None:
+                    return hit
             chunk_input = ChunkReviewInput(
                 code_chunk=prompt,
                 file_path_or_label=path,
@@ -312,6 +344,11 @@ def review_class_cohesion(
                 profile=ReviewProfile.CLASS_COHESION,
             )
             out = agent.run(chunk_input)
+            issues = _issues_from_class_output(path, cu, out.issues)
+            # Only successful outcomes are cached, so a transient failure retries.
+            if key is not None:
+                _cohesion_cache_put(key, issues, cache_size)
+            return issues
         except Exception as exc:  # noqa: BLE001 - best-effort: a class failure drops only its findings
             logger.warning(
                 "ClassCohesion: review failed for class %s in %s (%s: %s); skipping it",
@@ -321,11 +358,6 @@ def review_class_cohesion(
                 exc,
             )
             return []
-        # Only successful outcomes are cached, so a transient failure retries.
-        issues = _issues_from_class_output(path, cu, out.issues)
-        if key is not None:
-            _cohesion_cache_put(key, issues, cache_size)
-        return issues
 
     workers = min(_map_parallelism(), len(classes))
     if workers <= 1:
