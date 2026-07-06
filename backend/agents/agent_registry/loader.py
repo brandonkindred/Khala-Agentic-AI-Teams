@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
@@ -55,6 +56,14 @@ def _load_team_display_names() -> dict[str, str]:
 class AgentRegistry:
     """In-memory registry of agent manifests loaded from disk."""
 
+    # Bounds how long a locally-issued unregister() masks a dynamic id from get()
+    # after its best-effort Postgres delete fails (see _is_tombstoned). Short
+    # enough that a legitimate external re-registration of the same id (another
+    # worker) becomes visible again promptly; long enough to close the window
+    # where the very next get() on this worker would otherwise resurrect the
+    # stale row it just tried to delete.
+    _TOMBSTONE_TTL_S = 5.0
+
     def __init__(
         self,
         manifests: list[AgentManifest],
@@ -75,6 +84,28 @@ class AgentRegistry:
         # directory name matches ``manifest.team`` (e.g. ``branding_team`` vs.
         # ``branding``).
         self._source_paths: dict[str, Path] = source_paths or {}
+        # agent_id -> time.monotonic() of this worker's last unregister(). See
+        # _is_tombstoned / _TOMBSTONE_TTL_S.
+        self._tombstones: dict[str, float] = {}
+
+    def _is_tombstoned(self, agent_id: str) -> bool:
+        """Whether this worker locally unregistered ``agent_id`` within the TTL window.
+
+        Preconditions:
+            * ``agent_id`` is a string.
+        Postconditions:
+            * Returns ``True`` iff ``unregister(agent_id)`` ran on this worker less
+              than :attr:`_TOMBSTONE_TTL_S` ago. An expired entry is pruned and
+              ``False`` is returned. Purely local, in-memory bookkeeping — never
+              touches the store.
+        """
+        stamped_at = self._tombstones.get(agent_id)
+        if stamped_at is None:
+            return False
+        if time.monotonic() - stamped_at > self._TOMBSTONE_TTL_S:
+            self._tombstones.pop(agent_id, None)
+            return False
+        return True
 
     # ---------------------------------------------------------------
     # Construction
@@ -144,9 +175,13 @@ class AgentRegistry:
     def _merged_manifests(self) -> list[AgentManifest]:
         """All manifests visible to this worker: cross-worker dynamic + local static.
 
-        Overlays the dynamic Postgres rows with the static disk manifests (static
-        wins on id collision). Degrades to the local ``_by_id`` view on any store
-        error, so the catalog never breaks when Postgres is down.
+        Overlays the dynamic Postgres rows with this process's local view: a static
+        (disk) id always wins on collision, and a dynamic id missing from the store
+        falls back to its local copy — the same read-your-writes guarantee
+        :meth:`get` makes, so a manifest whose ``register()`` write-through failed
+        (or hasn't propagated yet) is not invisible in the catalog even though it is
+        directly resolvable by id. Degrades to the local ``_by_id`` view entirely on
+        any store error, so the catalog never breaks when Postgres is down.
         """
         store = self._dynamic_store()
         if store is None:
@@ -156,10 +191,9 @@ class AgentRegistry:
         except Exception:
             logger.warning("dynamic store all() failed; serving local registry", exc_info=True)
             return list(self._by_id.values())
-        for static_id in self._static_ids:
-            local = self._by_id.get(static_id)
-            if local is not None:
-                merged[static_id] = local
+        for agent_id, local in self._by_id.items():
+            if agent_id in self._static_ids or agent_id not in merged:
+                merged[agent_id] = local
         return list(merged.values())
 
     def all(self) -> list[AgentManifest]:
@@ -191,10 +225,12 @@ class AgentRegistry:
             )
             return local
         merged = {m.id: m for m in dynamic}
-        # Static (disk) ids win; other local entries are already represented by the
-        # authoritative dynamic rows.
+        # Static (disk) ids always win; a dynamic id missing from the store's scan
+        # falls back to its local copy — same read-your-writes guarantee as get(),
+        # so a write-through failure doesn't hide the entry from this scan (used by
+        # the generated-roster stale-cleanup pass).
         for m in local:
-            if m.id in self._static_ids:
+            if m.id in self._static_ids or m.id not in merged:
                 merged[m.id] = m
         return list(merged.values())
 
@@ -215,10 +251,16 @@ class AgentRegistry:
               worker is seen once this worker's stale local copy is dropped (roster
               re-sync / restart) or via the authoritative Postgres row, whichever
               comes first. A store error degrades to the local copy.
+            * Symmetrically, an id this worker itself ``unregister()``'d within the
+              last :attr:`_TOMBSTONE_TTL_S` never resolves here even on a stale
+              Postgres hit (its best-effort delete may have failed) — see
+              :meth:`_is_tombstoned`.
             * Returns ``None`` iff no static, dynamic-store, or local entry exists.
         """
         if agent_id in self._static_ids:
             return self._by_id.get(agent_id)
+        if self._is_tombstoned(agent_id):
+            return None
         store = self._dynamic_store()
         if store is None:
             return self._by_id.get(agent_id)
@@ -255,6 +297,8 @@ class AgentRegistry:
         self._by_id[manifest.id] = manifest
         if source_path is not None:
             self._source_paths[manifest.id] = source_path
+        # A fresh registration supersedes any earlier local unregister() of this id.
+        self._tombstones.pop(manifest.id, None)
         if manifest.id not in self._static_ids:
             store = self._dynamic_store()
             if store is not None:
@@ -274,16 +318,20 @@ class AgentRegistry:
         removed/renamed agents.
 
         Postconditions:
-            * ``get(agent_id)`` returns ``None`` afterwards. Removes the entry from
-              this process's in-memory view and, when a dynamic store is active for
-              a non-static id, from Postgres too (best-effort). Returns ``True`` when
-              a local entry was present and removed, ``False`` otherwise — the
-              cross-worker Postgres delete is issued regardless (it's a no-op when
-              the row is absent).
+            * ``get(agent_id)`` returns ``None`` afterwards on this worker for at
+              least :attr:`_TOMBSTONE_TTL_S` (see :meth:`_is_tombstoned`) — this
+              holds even if the best-effort Postgres delete below fails, so a
+              transient error can never resurrect a just-removed id on the worker
+              that removed it. Removes the entry from this process's in-memory view
+              and, when a dynamic store is active for a non-static id, from Postgres
+              too (best-effort). Returns ``True`` when a local entry was present and
+              removed, ``False`` otherwise — the cross-worker Postgres delete is
+              issued regardless (it's a no-op when the row is absent).
         """
         self._source_paths.pop(agent_id, None)
         removed = self._by_id.pop(agent_id, None) is not None
         if agent_id not in self._static_ids:
+            self._tombstones[agent_id] = time.monotonic()
             store = self._dynamic_store()
             if store is not None:
                 try:
@@ -401,8 +449,12 @@ class AgentRegistry:
             name=m.name,
             summary=m.summary,
             tags=list(m.tags),
-            has_input_schema=bool(m.inputs and (m.inputs.schema_ref or m.inputs.inline_schema)),
-            has_output_schema=bool(m.outputs and (m.outputs.schema_ref or m.outputs.inline_schema)),
+            has_input_schema=bool(
+                m.inputs and (m.inputs.schema_ref or m.inputs.inline_schema is not None)
+            ),
+            has_output_schema=bool(
+                m.outputs and (m.outputs.schema_ref or m.outputs.inline_schema is not None)
+            ),
             has_invoke=m.invoke is not None,
             has_sandbox=m.sandbox is not None,
             has_cognition=m.cognition is not None,

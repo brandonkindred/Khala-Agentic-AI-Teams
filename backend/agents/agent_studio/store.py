@@ -73,9 +73,27 @@ class ConversationTurn:
         self._on_definition = on_definition
 
     def append_message(self, role: str, content: str) -> None:
+        """Record one message on the turn's locked context.
+
+        Preconditions:
+            * Called within the enclosing ``with store.turn(...)`` block.
+        Postconditions:
+            * The message is persisted (in-memory or Postgres, per the backing
+              store) once the turn commits; a store error propagates and rolls the
+              whole turn back rather than partially applying.
+        """
         self._on_message(role, content)
 
     def set_definition(self, definition: AgentDefinition) -> None:
+        """Replace the draft definition on the turn's locked context.
+
+        Preconditions:
+            * Called within the enclosing ``with store.turn(...)`` block.
+        Postconditions:
+            * The definition is persisted once the turn commits; a store error
+              propagates and rolls the whole turn back rather than partially
+              applying.
+        """
         self._on_definition(definition)
 
 

@@ -24,6 +24,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
+import anyio
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -153,7 +154,10 @@ async def invoke_agent(
         description="Optional saved-input id to join this run back to its source.",
     ),
 ) -> Response:
-    manifest = get_registry().get(agent_id)
+    # get() can hit Postgres for a dynamically-registered agent id (agent_registry's
+    # dynamic-manifest overlay); this is an async route, so a blocking round trip here
+    # would stall the whole worker's event loop. Run it in a worker thread.
+    manifest = await anyio.to_thread.run_sync(get_registry().get, agent_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
     if "requires-live-integration" in manifest.tags:

@@ -217,6 +217,39 @@ def test_invoke_oversized_body_returns_413_without_acquiring_sandbox(
     assert resp.status_code == 413
 
 
+def test_invoke_resolves_dynamically_registered_agent_via_offloaded_get(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """invoke_agent runs get_registry().get() via anyio.to_thread.run_sync so a
+    Postgres-backed dynamic lookup never blocks the event loop; confirm a
+    dynamically-registered (non-static) agent still resolves through the offload."""
+    import unified_api.routes.agents as agents_route_mod
+    from agent_registry.loader import get_registry
+    from agent_registry.models import AgentManifest, SourceInfo
+
+    async def _fail_acquire(agent_id: str):  # pragma: no cover — must not run
+        raise AssertionError(f"acquire({agent_id!r}) must not be called on oversized body")
+
+    monkeypatch.setattr(agents_route_mod, "acquire", _fail_acquire)
+    monkeypatch.setenv("AGENT_INVOKE_MAX_PAYLOAD_BYTES", "1024")
+
+    get_registry().register(
+        AgentManifest(
+            id="agent_studio.dynamic-invoke-1",
+            team="agent_studio",
+            name="Dynamic",
+            summary="s",
+            source=SourceInfo(entrypoint="m:f"),
+        )
+    )
+    resp = client.post(
+        "/api/agents/agent_studio.dynamic-invoke-1/invoke",
+        content="x" * 4096,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 413  # not 404 — the dynamic manifest resolved
+
+
 def _install_upstream(
     monkeypatch: pytest.MonkeyPatch,
     *,

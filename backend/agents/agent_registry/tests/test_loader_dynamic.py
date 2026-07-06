@@ -160,6 +160,29 @@ def test_all_degrades_to_local_on_store_error(fake_store: _FakeStore) -> None:
     assert {m.id for m in reg.all()} == {"blogging.planner"}
 
 
+def test_all_includes_dynamic_entry_whose_write_through_failed(fake_store: _FakeStore) -> None:
+    # register() persists locally even when the best-effort Postgres upsert fails;
+    # all()/search()/teams() must not hide that entry from the catalog just because
+    # the store never received it (read-your-writes parity with get()).
+    reg = AgentRegistry([], {})
+    fake_store.raise_on = {"upsert"}
+    reg.register(_manifest("agent_studio.write-through-failed-1"))
+    ids = {m.id for m in reg.all()}
+    assert "agent_studio.write-through-failed-1" in ids
+
+
+def test_manifests_with_id_prefix_includes_dynamic_entry_whose_write_through_failed(
+    fake_store: _FakeStore,
+) -> None:
+    reg = AgentRegistry([], {})
+    fake_store.raise_on = {"upsert"}
+    reg.register(
+        _manifest("agentic.team-y.write-through-failed-1", team="agentic_team_provisioning")
+    )
+    ids = {m.id for m in reg.manifests_with_id_prefix("agentic.team-y.")}
+    assert "agentic.team-y.write-through-failed-1" in ids
+
+
 def test_search_and_teams_see_dynamic_entries(fake_store: _FakeStore) -> None:
     reg = AgentRegistry([], {})
     fake_store.upsert(_manifest("agent_studio.searchme-1", name="Searchable"))
@@ -205,6 +228,33 @@ def test_unregister_swallows_store_error(fake_store: _FakeStore) -> None:
     assert "agent_studio.del-err" not in reg._by_id
 
 
+def test_get_does_not_resurrect_after_unregister_delete_fails(fake_store: _FakeStore) -> None:
+    # A failed best-effort Postgres delete must not let get() resurrect the stale
+    # row on the worker that just unregistered it (tombstone window).
+    reg = AgentRegistry([], {})
+    m = _manifest("agent_studio.resurrect-1")
+    reg.register(m)
+    assert "agent_studio.resurrect-1" in fake_store.rows  # upsert succeeded
+    fake_store.raise_on = {"delete"}
+    assert reg.unregister("agent_studio.resurrect-1") is True
+    # The store row is still there (delete failed) but get() must not return it.
+    assert "agent_studio.resurrect-1" in fake_store.rows
+    assert reg.get("agent_studio.resurrect-1") is None
+
+
+def test_register_after_failed_unregister_clears_the_tombstone(fake_store: _FakeStore) -> None:
+    # Re-registering the same id supersedes an earlier failed-delete tombstone.
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("agent_studio.re-reg-1"))
+    fake_store.raise_on = {"delete"}
+    reg.unregister("agent_studio.re-reg-1")
+    assert reg.get("agent_studio.re-reg-1") is None  # tombstoned
+    fake_store.raise_on = set()
+    fresh = _manifest("agent_studio.re-reg-1", name="Fresh")
+    reg.register(fresh)
+    assert reg.get("agent_studio.re-reg-1") is fresh
+
+
 def test_pg_off_behaves_exactly_as_before(fake_store: _FakeStore) -> None:
     fake_store.active = False  # POSTGRES_HOST unset / in sandbox
     disk = _manifest("blogging.planner", team="blogging")
@@ -222,3 +272,14 @@ def test_inline_schema_summary_flag(fake_store: _FakeStore) -> None:
     summary = reg.search(team="agent_studio")[0]
     assert summary.has_input_schema is True
     assert summary.has_output_schema is False
+
+
+def test_inline_schema_empty_dict_still_counts_as_present(fake_store: _FakeStore) -> None:
+    # has_input_schema must key off presence (matching GET /schema/input's
+    # `is not None` check), not truthiness — an empty-but-present inline_schema is
+    # still "has a schema" on both sides, so the catalog and the schema endpoint agree.
+    m = _manifest("agent_studio.inline-empty-1")
+    m.inputs = IOSchema(inline_schema={})
+    reg = AgentRegistry([m], {})
+    summary = reg.search(team="agent_studio")[0]
+    assert summary.has_input_schema is True

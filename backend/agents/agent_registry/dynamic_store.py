@@ -158,12 +158,13 @@ def all() -> list[AgentManifest]:  # noqa: A001 - mirrors AgentRegistry.all()
     replication lag — all workers read the same primary.) The point-lookup
     :func:`get` is uncached, so cross-worker save→resolve is immediate; only the
     catalog *list* is eventually-consistent within the TTL window.
+
+    Single-flight: the lock is held across the Postgres query on a cache miss, not
+    just the freshness check, so concurrent callers racing an expired cache
+    serialize behind the one refresh instead of each issuing their own duplicate
+    query.
     """
     global _all_cache, _all_cache_at
-    now = time.monotonic()
-    with _all_cache_lock:
-        if _all_cache is not None and (now - _all_cache_at) < _ALL_CACHE_TTL_S:
-            return list(_all_cache)
 
     from shared_postgres import dict_row, get_conn
     from shared_postgres.metrics import timed_query
@@ -175,11 +176,14 @@ def all() -> list[AgentManifest]:  # noqa: A001 - mirrors AgentRegistry.all()
             rows = cur.fetchall()
         return [AgentManifest.model_validate(r["manifest"]) for r in rows]
 
-    manifests = _do()
     with _all_cache_lock:
+        now = time.monotonic()
+        if _all_cache is not None and (now - _all_cache_at) < _ALL_CACHE_TTL_S:
+            return list(_all_cache)
+        manifests = _do()
         _all_cache = list(manifests)
         _all_cache_at = time.monotonic()
-    return manifests
+        return manifests
 
 
 def manifests_with_prefix(prefix: str) -> list[AgentManifest]:
