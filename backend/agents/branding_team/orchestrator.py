@@ -17,6 +17,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import logging
+import threading
 from typing import TYPE_CHECKING, List, Optional
 
 from pydantic import BaseModel, ValidationError
@@ -61,7 +62,7 @@ _PHASE_EXTRACTION = (
 
 
 def _offload_pool_workers() -> int:
-    """Worker cap for ``_OFFLOAD_POOL`` (env-tunable, clamped to >= 1).
+    """Worker cap for the lazy offload pool (env-tunable, clamped to >= 1).
 
     Default of 4 avoids serializing concurrent offloaded runs (e.g. multiple
     async Temporal activities on the same loop each calling ``_run_coro``)
@@ -70,24 +71,48 @@ def _offload_pool_workers() -> int:
     return env_int("BRANDING_RUN_CORO_OFFLOAD_WORKERS", 4, minimum=1)
 
 
-# Shared pool for the rare case where _run_coro is invoked from a thread that
-# already has a running event loop. Reused across calls so we don't spin up
-# (and tear down) a fresh executor on every invocation.
-_OFFLOAD_POOL = concurrent.futures.ThreadPoolExecutor(
-    max_workers=_offload_pool_workers(), thread_name_prefix="branding-run-coro"
-)
-# Best-effort cleanup on interpreter exit. Threads in this pool only run
-# briefly per offloaded coroutine (see _run_coro), so this should not delay
-# shutdown in practice; wait=False avoids blocking exit on a stuck run.
-atexit.register(_OFFLOAD_POOL.shutdown, wait=False)
+_offload_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+_offload_pool_lock = threading.Lock()
+
+
+def _get_offload_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """Return (lazily creating) the shared pool used to offload ``_run_coro`` calls.
+
+    Postconditions:
+        Returns the same ``ThreadPoolExecutor`` on every call after the first;
+        registers an ``atexit`` shutdown the first time it is created.
+
+    Note:
+        Created lazily on first use rather than at module import time: worker
+        threads don't survive ``os.fork()``, so eagerly creating them at import
+        time risks a forked child (e.g. a multi-worker deployment that forks
+        after import) inheriting a pool object whose threads don't actually
+        exist in the child. Lazy creation means the pool is built after any
+        such fork, in whichever process first calls ``_run_coro`` from a
+        thread with a running loop.
+    """
+    global _offload_pool
+    if _offload_pool is None:
+        with _offload_pool_lock:
+            if _offload_pool is None:
+                pool = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=_offload_pool_workers(), thread_name_prefix="branding-run-coro"
+                )
+                # Best-effort cleanup on interpreter exit. Threads in this pool
+                # only run briefly per offloaded coroutine (see _run_coro), so
+                # this should not delay shutdown in practice; wait=False avoids
+                # blocking exit on a stuck run.
+                atexit.register(pool.shutdown, wait=False)
+                _offload_pool = pool
+    return _offload_pool
 
 
 def _run_coro(coro):
     """Run *coro* to completion from synchronous code.
 
     Uses ``asyncio.run`` when no loop runs in this thread; otherwise drives it on
-    a shared worker thread (``_OFFLOAD_POOL``) so we never call ``asyncio.run``
-    inside an active loop.
+    a shared worker thread (see ``_get_offload_pool``) so we never call
+    ``asyncio.run`` inside an active loop.
 
     Preconditions:
         ``coro`` is an un-awaited coroutine/awaitable. When called from a thread
@@ -105,8 +130,10 @@ def _run_coro(coro):
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-    if loop and loop.is_running():
-        return _OFFLOAD_POOL.submit(asyncio.run, coro).result()
+    # asyncio.get_running_loop() only ever returns a *running* loop (it raises
+    # RuntimeError otherwise), so a plain None-check is sufficient here.
+    if loop is not None:
+        return _get_offload_pool().submit(asyncio.run, coro).result()
     return asyncio.run(coro)
 
 

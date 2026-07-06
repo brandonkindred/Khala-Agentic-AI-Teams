@@ -84,14 +84,18 @@ def _parse_conversation_rows(
     identically.
 
     Preconditions:
-        ``rows`` is a non-empty list of dict rows; ``rows[0]`` carries
-        ``mission_json`` and ``latest_output_json``; message rows carry
-        ``role``/``content``/``timestamp`` (``role`` is None for the LEFT-JOIN
-        placeholder when a conversation has no messages).
+        ``rows`` is a non-empty list of dict rows (enforced below); ``rows[0]``
+        carries ``mission_json``/``latest_output_json`` as already-deserialized
+        dicts (psycopg's ``dict_row`` row factory decodes JSONB columns to
+        Python objects, not strings); message rows carry ``role``/``content``/
+        ``timestamp`` (``role`` is None for the LEFT-JOIN placeholder when a
+        conversation has no messages; ``timestamp`` is ``NOT NULL`` in the
+        schema for real message rows, i.e. whenever ``role`` is not None).
     Postconditions:
         Returns the parsed mission, optional latest output, and messages ordered
         as given (oldest-first), skipping the null-role placeholder row.
     """
+    assert rows, "_parse_conversation_rows requires at least one row"
     head = rows[0]
     mission = BrandingMission.model_validate(head["mission_json"])
     latest_output = (
