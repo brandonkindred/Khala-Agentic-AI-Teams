@@ -123,6 +123,7 @@ from .models import (
     ReviewProgressCallback,
     notify_review_progress,
 )
+from .repo_reader import RepoReader
 from .synthesis import synthesize_review_findings
 
 logger = logging.getLogger(__name__)
@@ -313,7 +314,7 @@ def run_coordinator(
     llm: LLMClient,
     input_data: CodeReviewInput,
     progress_callback: Optional[ReviewProgressCallback] = None,
-    repo_reader: Optional[object] = None,
+    repo_reader: Optional[RepoReader] = None,
 ) -> CodeReviewOutput:
     """Map-reduce review entry point: bounded chunks in, merged verdict out.
 

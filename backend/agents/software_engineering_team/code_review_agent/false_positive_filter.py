@@ -961,7 +961,7 @@ def _verify_and_filter(
     input_data: CodeReviewInput,
     issues: List[CodeReviewIssue],
     verifiable: List[CodeReviewIssue],
-    repo_reader: Optional[object] = None,
+    repo_reader: Optional[RepoReader] = None,
 ) -> List[CodeReviewIssue]:
     """Core of :func:`filter_false_positives`; may raise on setup errors.
 

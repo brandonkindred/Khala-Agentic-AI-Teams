@@ -21,6 +21,7 @@ from llm_service import get_client
 
 from .coordinator import run_coordinator
 from .models import CodeReviewInput, CodeReviewOutput, ReviewProgressCallback
+from .repo_reader import RepoReader
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ class CodeReviewAgent:
         self,
         input_data: CodeReviewInput,
         progress_callback: ReviewProgressCallback | None = None,
-        repo_reader: object | None = None,
+        repo_reader: RepoReader | None = None,
     ) -> CodeReviewOutput:
         """Review code and return approval or issues.
 
