@@ -55,8 +55,14 @@ def test_workflows_and_package_do_not_call_os_getenv_at_import_time():
     _purge("sales_team.temporal")
     import os
 
-    importlib.import_module("sales_team.temporal.workflows")
     with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
+        importlib.import_module("sales_team.temporal.workflows")
+        assert spy.call_count == 0, (
+            f"sales_team.temporal.workflows called os.getenv {spy.call_count} "
+            f"time(s) at import — this trips the temporalio workflow sandbox "
+            f"during workflow registration."
+        )
+        spy.reset_mock()
         importlib.import_module("sales_team.temporal")
         assert spy.call_count == 0, (
             f"sales_team.temporal.__init__ called os.getenv {spy.call_count} "

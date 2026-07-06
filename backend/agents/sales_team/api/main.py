@@ -239,7 +239,6 @@ def _dispatch_pipeline_job(job_id: str, request: SalesPipelineRequest) -> str:
         from sales_team.temporal.start_workflow import start_sales_workflow
 
         start_sales_workflow(job_id, request.model_dump(mode="json"))
-        logger.info("Sales pipeline dispatched via Temporal: job_id=%s", job_id)
         return "Temporal"
 
     thread = threading.Thread(target=_run_pipeline_job, args=(job_id, request), daemon=True)
@@ -271,11 +270,12 @@ def run_pipeline(request: SalesPipelineRequest) -> SalesPipelineRunResponse:
         last_updated_at=now,
     )
     try:
-        _dispatch_pipeline_job(job_id, request)
+        dispatch_method = _dispatch_pipeline_job(job_id, request)
     except Exception as exc:
         logger.exception("Failed to dispatch sales pipeline job %s", job_id)
         _update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
         raise HTTPException(status_code=500, detail="Failed to start sales pipeline run.") from exc
+    logger.info("Sales pipeline job %s dispatched via %s", job_id, dispatch_method)
     return SalesPipelineRunResponse(
         job_id=job_id,
         status=JOB_STATUS_RUNNING,
