@@ -17,6 +17,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import logging
+import os
 import threading
 from typing import TYPE_CHECKING, List, Optional
 
@@ -107,6 +108,25 @@ def _get_offload_pool() -> concurrent.futures.ThreadPoolExecutor:
     return _offload_pool
 
 
+def _reset_offload_pool_after_fork() -> None:
+    """Drop the offload pool reference inherited by a freshly forked child.
+
+    A ``ThreadPoolExecutor``'s worker threads do not survive ``os.fork()``
+    (only the forking thread continues in the child), so if the pool was
+    already created in the parent before a fork, the child would otherwise
+    inherit a reference to threads that don't exist there. Registering this
+    via ``os.register_at_fork`` closes that gap on top of lazy creation: the
+    child drops the stale reference and lazily builds its own fresh pool the
+    next time ``_run_coro`` needs to offload.
+    """
+    global _offload_pool
+    _offload_pool = None
+
+
+if hasattr(os, "register_at_fork"):  # POSIX only; no-op on platforms without fork.
+    os.register_at_fork(after_in_child=_reset_offload_pool_after_fork)
+
+
 def _run_coro(coro):
     """Run *coro* to completion from synchronous code.
 
@@ -163,9 +183,12 @@ async def _gather_integrations(
     async def _market_research():
         if not include_market_research:
             return None
-        try:
-            from .adapters.market_research import request_market_research_async
+        # Import outside the try so a broken import (e.g. a missing dependency)
+        # raises immediately instead of being swallowed as "service unavailable"
+        # alongside genuine call failures (network errors, timeouts).
+        from .adapters.market_research import request_market_research_async
 
+        try:
             return await request_market_research_async(mission)
         except Exception:
             return None
