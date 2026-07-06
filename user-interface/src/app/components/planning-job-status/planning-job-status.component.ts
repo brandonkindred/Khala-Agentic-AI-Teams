@@ -4,10 +4,11 @@ import { MatCardModule } from '@angular/material/card';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatIconModule } from '@angular/material/icon';
 import { PlanningApiService } from '../../services/planning-api.service';
+import { PLANNING_PHASES } from '../../models';
 import type { PlanningStatusResponse, PlanningResultResponse } from '../../models';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
 
-const PHASES = ['intake', 'discovery', 'requirements', 'synthesis', 'document_production', 'sub_agent_provisioning'];
+const PHASES = PLANNING_PHASES.map((p) => p.id);
 
 /** Displays the current status and progress of a Planning job, polling the API until completion. */
 @Component({

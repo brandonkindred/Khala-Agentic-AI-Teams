@@ -10,7 +10,7 @@ from temporalio import activity
 logger = logging.getLogger(__name__)
 
 
-@activity.defn(name="run_planning_workflow")
+@activity.defn(name="run_planning_activity")
 def run_planning_activity(
     job_id: str,
     repo_path: str,

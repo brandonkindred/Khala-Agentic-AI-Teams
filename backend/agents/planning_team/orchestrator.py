@@ -2,7 +2,7 @@
 Planning orchestrator: phase order, state machine, adapter invocation.
 
 Runs intake → discovery → requirements → synthesis → document_production → (optional) sub_agent_provisioning.
-Uses shared LLM and adapters for PRA, Planning, Market Research, AI Systems.
+Uses shared LLM and adapters for PRA, Market Research, AI Systems.
 """
 
 from __future__ import annotations
