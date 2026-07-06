@@ -58,15 +58,29 @@ _PHASE_EXTRACTION = (
 )
 
 
+# Shared single worker for the rare case where _run_coro is invoked from a
+# thread that already has a running event loop. Reused across calls so we don't
+# spin up (and tear down) a fresh executor on every invocation.
+_OFFLOAD_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="branding-run-coro"
+)
+
+
 def _run_coro(coro):
     """Run *coro* to completion from synchronous code.
 
     Uses ``asyncio.run`` when no loop runs in this thread; otherwise drives it on
-    a one-off worker thread so we never call ``asyncio.run`` inside an active
-    loop.
+    a shared worker thread (``_OFFLOAD_POOL``) so we never call ``asyncio.run``
+    inside an active loop.
 
     Preconditions:
-        ``coro`` is an un-awaited coroutine/awaitable.
+        ``coro`` is an un-awaited coroutine/awaitable. When called from a thread
+        that already has a running loop, ``coro`` MUST NOT depend on objects
+        bound to that loop (e.g. an ``asyncio.Queue`` or lock created on it): the
+        offload path runs it on a *new* event loop in another thread, so
+        loop-bound objects would fail. The branding coroutines passed here
+        (``graph.invoke_async``, ``_gather_integrations``) allocate their own
+        primitives, so they are safe.
     Postconditions:
         Returns the coroutine's result or propagates whatever it raises; never
         calls ``asyncio.run`` while a loop is already running in this thread.
@@ -76,8 +90,7 @@ def _run_coro(coro):
     except RuntimeError:
         loop = None
     if loop and loop.is_running():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
+        return _OFFLOAD_POOL.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
 
 

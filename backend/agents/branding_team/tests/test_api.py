@@ -284,6 +284,18 @@ def test_run_endpoint_builds_mission_and_returns_output() -> None:
 
 
 def test_request_design_assets_returns_stub() -> None:
+    """Fallback path (no cached core): the endpoint runs Phase 1, then stubs assets.
+
+    The real pipeline is patched out so this API-layer test stays fast and
+    deterministic and does not depend on the LLM/graph stack.
+    """
+    from branding_team.models import (
+        BrandPhase,
+        StrategicCoreOutput,
+        TeamOutput,
+        WorkflowStatus,
+    )
+
     create_c = client.post("/clients", json={"name": "Design Client"})
     client_id = create_c.json()["id"]
     create_b = client.post(
@@ -295,8 +307,21 @@ def test_request_design_assets_returns_stub() -> None:
         },
     )
     brand_id = create_b.json()["id"]
-    resp = client.post(f"/clients/{client_id}/brands/{brand_id}/request-design-assets")
-    assert resp.status_code == 200
+
+    # Brand has no persisted output, so the endpoint falls back to run_phase —
+    # patch it to a canned result to isolate the API layer from the pipeline.
+    fake_output = TeamOutput(
+        status=WorkflowStatus.NEEDS_HUMAN_DECISION,
+        mission_summary="stub",
+        current_phase=BrandPhase.STRATEGIC_CORE,
+        strategic_core=StrategicCoreOutput(positioning_statement="STUB-POSITIONING"),
+    )
+    with patch(
+        "branding_team.api.main.orchestrator.run_phase", return_value=fake_output
+    ) as mock_run_phase:
+        resp = client.post(f"/clients/{client_id}/brands/{brand_id}/request-design-assets")
+        assert resp.status_code == 200
+        mock_run_phase.assert_called_once()
     data = resp.json()
     assert "request_id" in data
     assert data["status"] == "pending"
