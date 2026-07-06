@@ -90,9 +90,10 @@ def _maybe_register_injected_manifest(registry) -> None:
     here — before the unknown-agent gate — lets such an agent boot and be invoked
     (the invoke shim resolves from this same ``get_registry()`` singleton).
 
-    Best-effort by design: a missing env var, missing file, or malformed JSON logs
-    a warning and returns without raising. The subsequent ``registry.get(agent_id)
-    is None`` gate remains the single authority on whether the agent can boot, so a
+    Best-effort by design: a missing env var is silently a no-op, a missing file
+    logs at info level, and malformed JSON logs a warning — none of these raise.
+    The subsequent ``registry.get(agent_id) is None`` gate remains the single
+    authority on whether the agent can boot, so a
     static agent (already in the image) is unaffected, and re-registering a static
     id is a harmless idempotent overwrite.
     """

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from pydantic import BaseModel, Field, field_validator
 
 
 class IOSchema(BaseModel):
@@ -36,6 +38,26 @@ class IOSchema(BaseModel):
         "schema-resolution endpoints.",
     )
     description: str | None = None
+
+    @field_validator("inline_schema")
+    @classmethod
+    def _validate_inline_schema(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Reject an ``inline_schema`` that isn't itself a well-formed JSON Schema.
+
+        Preconditions: none — ``value`` may be ``None``.
+        Postconditions: returns ``value`` unchanged when ``None`` or a structurally
+            valid JSON Schema document; raises ``ValueError`` (surfaced as a Pydantic
+            ``ValidationError``) otherwise. Structural only — this checks that the
+            dict is itself well-formed JSON Schema, not that any particular instance
+            validates against it.
+        """
+        if value is None:
+            return value
+        try:
+            Draft202012Validator.check_schema(value)
+        except SchemaError as exc:
+            raise ValueError(f"inline_schema is not a valid JSON Schema: {exc.message}") from exc
+        return value
 
 
 class InvokeSpec(BaseModel):
