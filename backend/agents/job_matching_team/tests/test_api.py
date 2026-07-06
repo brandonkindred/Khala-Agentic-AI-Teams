@@ -183,6 +183,28 @@ def test_scan_returns_503_and_marks_failed_when_temporal_dispatch_fails(client, 
     assert jobs[0]["status"] == "failed"
 
 
+def test_scan_still_503s_when_failed_write_also_fails(client, monkeypatch):
+    """If dispatch fails AND the FAILED write to a degraded job service also
+    raises, the caller must still get the contracted 503 — not a bare 500 that
+    leaks the second error."""
+    import shared_temporal
+    from job_matching_team.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _boom(job_id, request):
+        raise RuntimeError("Temporal client not available")
+
+    def _update_down(job_id, **fields):
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(sw, "start_job_matching_workflow", _boom)
+    monkeypatch.setattr(api_main, "update_job", _update_down)
+
+    resp = client.post("/scan", json={"top_n": 1})
+    assert resp.status_code == 503
+
+
 def test_scan_falls_back_to_thread_when_temporal_disabled(client, monkeypatch):
     """When Temporal is disabled the dispatch helper reports no-dispatch and the
     thread path runs the scan to completion."""
@@ -339,3 +361,40 @@ def test_runs_endpoints_use_store(client, monkeypatch):
     assert client.get("/runs").json()[0]["run_id"] == "r1"
     assert client.get("/runs/r1").json()["status"] == "completed"
     assert client.get("/runs/missing").status_code == 404
+
+
+def test_startup_backstop_starts_temporal_worker(monkeypatch):
+    """The API lifespan starts the Temporal worker when serving standalone
+    (no team_service entrypoint), so a TEMPORAL_ADDRESS-set process has a worker
+    to dispatch to instead of stalling every scan."""
+    from job_matching_team.temporal import worker as worker_mod
+
+    started = []
+    monkeypatch.setattr(
+        worker_mod, "start_job_matching_temporal_worker_thread", lambda: started.append(True)
+    )
+
+    api_main._start_temporal_worker_backstop()
+    assert started == [True]
+
+
+def test_startup_backstop_swallows_worker_failure(monkeypatch):
+    """A worker-start failure in the backstop must not abort app boot."""
+    from job_matching_team.temporal import worker as worker_mod
+
+    def _boom():
+        raise RuntimeError("temporal down")
+
+    monkeypatch.setattr(worker_mod, "start_job_matching_temporal_worker_thread", _boom)
+    # Must not raise.
+    api_main._start_temporal_worker_backstop()
+
+
+def test_on_startup_runs_schema_and_worker_backstop(monkeypatch):
+    """_on_startup aggregates both hooks."""
+    calls = []
+    monkeypatch.setattr(api_main, "_register_user_profile_schema", lambda: calls.append("schema"))
+    monkeypatch.setattr(api_main, "_start_temporal_worker_backstop", lambda: calls.append("worker"))
+
+    api_main._on_startup()
+    assert calls == ["schema", "worker"]

@@ -89,8 +89,20 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
         return payload
     except Exception as exc:  # noqa: BLE001 - recorded on the job store, not re-raised
         activity.logger.exception("Job matching scan %s failed", job_id)
-        if not is_job_cancelled(job_id):
-            update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
+        # Best-effort FAILED write. The bookkeeping itself makes job-service HTTP
+        # calls, so if the store outage IS the failure being handled, guard it:
+        # a re-raise here would escape the activity and trigger Temporal retries
+        # that re-run the non-idempotent scan — the opposite of the swallow
+        # contract. If we can't record the failure, leave the row as-is.
+        try:
+            if not is_job_cancelled(job_id):
+                update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
+        except Exception:  # noqa: BLE001 - job store unreachable; do not re-raise into Temporal
+            activity.logger.warning(
+                "Could not record FAILED status for scan %s (job store unreachable)",
+                job_id,
+                exc_info=True,
+            )
         return {}
 
 
@@ -98,6 +110,28 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
 class JobMatchingWorkflow:
     @workflow.run
     async def run(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Execute one scan as a durable workflow, delegating to the activity.
+
+        Preconditions:
+            * ``job_id`` refers to a job row already created by ``POST /scan``.
+            * ``request`` is the JSON dump of a :class:`JobMatchRequest`. The
+              ``(job_id, request)`` argument order is part of the contract — a
+              change would break deterministic replay of in-flight histories
+              (pinned by ``test_activity_signature_takes_job_id_first``).
+        Postconditions:
+            * Returns the activity's result — the serialised
+              :class:`JobMatchResponse` on success, else ``{}``. The activity
+              owns all job-store writes; this method performs none.
+
+        Trade-offs (shared with the sibling Temporal teams):
+            * The activity is a synchronous scan with no heartbeat, so a run that
+              exceeds ``start_to_close_timeout`` (30 min) is timed out while its
+              worker thread keeps running, and the retry re-runs the scan — a
+              slow scan can execute more than once (bounded by
+              ``maximum_attempts``). Scans are expected to finish well within
+              30 min; raise the timeout rather than lean on the retry if that
+              stops holding.
+        """
         return await workflow.execute_activity(
             run_scan_activity,
             args=[job_id, request],

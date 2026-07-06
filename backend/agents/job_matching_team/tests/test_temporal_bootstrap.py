@@ -125,76 +125,30 @@ def test_worker_start_delegates_when_enabled(monkeypatch):
     }
 
 
-def test_start_workflow_waits_for_client_then_raises(monkeypatch):
-    """When the worker is genuinely not running, the helper must time out with
-    the original error message — not raise immediately and not wait forever."""
-    import pytest
+def test_start_job_matching_workflow_delegates_to_shared_bridge(monkeypatch):
+    """start_job_matching_workflow delegates to the shared start_workflow_sync
+    with the workflow run method, positional (job_id, request), a deterministic
+    id, and the team task queue.
 
-    from job_matching_team.temporal import start_workflow as sw
-
-    monkeypatch.setattr(sw, "get_temporal_client", lambda: None)
-    monkeypatch.setattr(sw, "get_temporal_loop", lambda: None)
-    monkeypatch.setattr(sw, "CLIENT_READY_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(sw, "CLIENT_READY_POLL_S", 0.01)
-
-    with pytest.raises(RuntimeError, match="Temporal client not available"):
-        sw._wait_for_client()
-
-
-def test_start_workflow_returns_client_when_ready(monkeypatch):
-    """The happy path returns the connected (client, loop) pair without waiting."""
-    from job_matching_team.temporal import start_workflow as sw
-
-    sentinel_client = object()
-    sentinel_loop = object()
-    monkeypatch.setattr(sw, "get_temporal_client", lambda: sentinel_client)
-    monkeypatch.setattr(sw, "get_temporal_loop", lambda: sentinel_loop)
-
-    assert sw._wait_for_client() == (sentinel_client, sentinel_loop)
-
-
-def test_run_async_bridges_into_the_worker_loop(monkeypatch):
-    """_run_async must marshal a coroutine onto the worker's event loop thread
-    and return its result."""
-    import asyncio
-    import threading
-
-    from job_matching_team.temporal import start_workflow as sw
-
-    loop = asyncio.new_event_loop()
-    t = threading.Thread(target=loop.run_forever, daemon=True)
-    t.start()
-    try:
-        monkeypatch.setattr(sw, "_wait_for_client", lambda *a, **k: (object(), loop))
-
-        async def _coro():
-            return 42
-
-        assert sw._run_async(_coro()) == 42
-    finally:
-        loop.call_soon_threadsafe(loop.stop)
-        t.join(timeout=2)
-
-
-def test_start_job_matching_workflow_uses_deterministic_id_and_queue(monkeypatch):
-    """The workflow is started with a job-scoped id and the team task queue,
-    passing (job_id, request) positionally."""
-    from unittest.mock import MagicMock
-
+    The sync→async plumbing (client-ready wait, closed-loop rejection, coroutine
+    marshalling) lives in shared_temporal and is covered by its own tests, so we
+    only pin the call contract here rather than re-testing the bridge.
+    """
     from job_matching_team.temporal import TASK_QUEUE, JobMatchingWorkflow
     from job_matching_team.temporal import start_workflow as sw
 
-    fake_client = MagicMock(name="TemporalClient")
-    monkeypatch.setattr(sw, "_wait_for_client", lambda *a, **k: (fake_client, object()))
     captured: dict = {}
-    monkeypatch.setattr(sw, "_run_async", lambda coro: captured.setdefault("coro", coro))
+
+    def _fake_start_workflow_sync(workflow_run, *args, workflow_id, task_queue):
+        captured.update(
+            workflow_run=workflow_run, args=args, workflow_id=workflow_id, task_queue=task_queue
+        )
+
+    monkeypatch.setattr(sw, "start_workflow_sync", _fake_start_workflow_sync)
 
     sw.start_job_matching_workflow("job-xyz", {"top_n": 2})
 
-    fake_client.start_workflow.assert_called_once()
-    args, kwargs = fake_client.start_workflow.call_args
-    assert args[0] is JobMatchingWorkflow.run
-    assert kwargs["args"] == ["job-xyz", {"top_n": 2}]
-    assert kwargs["id"] == "job-matching-job-xyz"
-    assert kwargs["task_queue"] == TASK_QUEUE
-    assert "coro" in captured
+    assert captured["workflow_run"] is JobMatchingWorkflow.run
+    assert captured["args"] == ("job-xyz", {"top_n": 2})
+    assert captured["workflow_id"] == "job-matching-job-xyz"
+    assert captured["task_queue"] == TASK_QUEUE

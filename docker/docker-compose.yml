@@ -841,6 +841,7 @@ services:
     container_name: khala-job-matching-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base

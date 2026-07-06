@@ -116,6 +116,27 @@ def test_activity_records_failed_and_swallows(monkeypatch):
     assert store.updates[-1]["error"] == "scan exploded"
 
 
+def test_activity_swallows_job_store_outage_in_except_branch(monkeypatch):
+    """If the job store is the thing that's down, the except-branch bookkeeping
+    (is_job_cancelled/update_job — both HTTP calls) must not re-raise out of the
+    activity: a re-raise would trigger Temporal retries of the non-idempotent
+    scan. The activity returns {} instead."""
+    orch = _FakeOrchestrator(boom=True)
+    store = _FakeJobStore()
+
+    def _down(job_id):
+        raise RuntimeError("job service unreachable")
+
+    _patch(monkeypatch, orch, store)
+    # Orchestrator raises -> except branch -> is_job_cancelled itself raises
+    # (job service down). Must be swallowed, not propagated.
+    monkeypatch.setattr("job_matching_team.shared.job_store.is_job_cancelled", _down)
+
+    result = ActivityEnvironment().run(run_scan_activity, "job-2b", {})
+
+    assert result == {}  # swallowed, no exception escaped the activity
+
+
 def test_activity_skips_when_cancelled_before_start(monkeypatch):
     orch = _FakeOrchestrator()
     # Already CANCELLED at entry: the pre-run guard reads it from get_job.

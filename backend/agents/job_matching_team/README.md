@@ -81,9 +81,12 @@ either way:
 - **Temporal mode** (when `TEMPORAL_ADDRESS` is set): the scan is dispatched to a
   durable `JobMatchingWorkflow` (shared_temporal Pattern A). The workflow is
   visible in the Temporal UI and an in-flight scan survives a worker/process
-  restart. The team is registered in `shared_temporal.teams_registry`; the worker
-  boots via `temporal/worker.py` (`TEAM_TEMPORAL_WORKER_MODULE`/`_FUNC` in
-  docker-compose) or the unified API's `start_all_team_workers`.
+  restart. The worker boots via `temporal/worker.py`
+  (`TEAM_TEMPORAL_WORKER_MODULE`/`_FUNC` in docker-compose, run by the
+  team_service entrypoint), with the API lifespan (`_start_temporal_worker_backstop`
+  in `api/main.py`) as a backstop when the app is served standalone (`uvicorn …:app`).
+  The team is also registered in `shared_temporal.teams_registry` for any future
+  in-process `start_all_team_workers` host.
 
 ## Configuration
 
