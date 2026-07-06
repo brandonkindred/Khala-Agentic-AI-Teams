@@ -135,14 +135,16 @@ def _write_manifest_file(project_name: str, manifest_json: str) -> Path:
     return path
 
 
-def _resolve_manifest_json(agent_id: str) -> str:
+async def _resolve_manifest_json(agent_id: str) -> str:
     """Serialize the registered manifest for ``agent_id`` to a JSON string.
 
     Preconditions:
         * ``agent_id`` resolves in the process-wide registry (the lifecycle's
           ``_resolve_team`` already validated this before ``run_container``).
     Postconditions:
-        * Returns ``json.dumps(manifest.model_dump(mode="json"))``.
+        * Returns ``json.dumps(manifest.model_dump(mode="json"))``. Runs the
+          (possibly Postgres-backed) registry lookup in a worker thread via
+          ``asyncio.to_thread`` so it never blocks this coroutine's event loop.
     Raises:
         * :class:`DockerError` if the agent is unexpectedly unresolvable — fail
           fast here, before ``docker compose up``, rather than let the sandbox
@@ -150,7 +152,7 @@ def _resolve_manifest_json(agent_id: str) -> str:
     """
     from agent_registry import get_registry
 
-    manifest = get_registry().get(agent_id)
+    manifest = await asyncio.to_thread(get_registry().get, agent_id)
     if manifest is None:
         raise DockerError(
             f"Cannot provision sandbox for {agent_id!r}: no manifest resolved in the registry."
@@ -286,7 +288,7 @@ async def run_container(agent_id: str, container_name: str, team: str) -> str:
     # Resolve + serialize the manifest to inject into the isolated sandbox (which
     # boots from its own on-disk registry and can't reach the platform Postgres).
     # Fail fast here, before ``docker compose up``, if the agent is unresolvable.
-    manifest_json = _resolve_manifest_json(agent_id)
+    manifest_json = await _resolve_manifest_json(agent_id)
 
     # Render the project dir with the resolved agent_id so the agent
     # container's SANDBOX_AGENT_ID env var is correct.

@@ -255,6 +255,49 @@ def test_register_after_failed_unregister_clears_the_tombstone(fake_store: _Fake
     assert reg.get("agent_studio.re-reg-1") is fresh
 
 
+def test_all_excludes_tombstoned_id_even_though_store_row_still_there(
+    fake_store: _FakeStore,
+) -> None:
+    # Consistency with get(): within the tombstone window, all()/search()/teams()
+    # must not list an id this worker just unregistered, even though the stale
+    # store row (failed delete) or this worker's own stale local copy would
+    # otherwise resurface it.
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("agent_studio.tombstoned-listing-1"))
+    fake_store.raise_on = {"delete"}
+    reg.unregister("agent_studio.tombstoned-listing-1")
+    assert "agent_studio.tombstoned-listing-1" in fake_store.rows  # delete failed
+    assert reg.get("agent_studio.tombstoned-listing-1") is None  # tombstoned
+    ids = {m.id for m in reg.all()}
+    assert "agent_studio.tombstoned-listing-1" not in ids
+
+
+def test_manifests_with_id_prefix_excludes_tombstoned_id(fake_store: _FakeStore) -> None:
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("agentic.team-z.tombstoned-1", team="agentic_team_provisioning"))
+    fake_store.raise_on = {"delete"}
+    reg.unregister("agentic.team-z.tombstoned-1")
+    ids = {m.id for m in reg.manifests_with_id_prefix("agentic.team-z.")}
+    assert "agentic.team-z.tombstoned-1" not in ids
+
+
+def test_tombstones_are_bounded_and_evict_oldest(
+    fake_store: _FakeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(AgentRegistry, "_TOMBSTONE_MAX_ENTRIES", 2)
+    fake_store.raise_on = {"delete"}
+    for i in range(3):
+        reg.register(_manifest(f"agent_studio.bound-{i}"))
+        reg.unregister(f"agent_studio.bound-{i}")
+    # Cap held at 2; the oldest (bound-0) was evicted, so its tombstone no longer
+    # masks a (hypothetical) fresh store row for that id.
+    assert len(reg._tombstones) == 2
+    assert "agent_studio.bound-0" not in reg._tombstones
+    assert "agent_studio.bound-1" in reg._tombstones
+    assert "agent_studio.bound-2" in reg._tombstones
+
+
 def test_pg_off_behaves_exactly_as_before(fake_store: _FakeStore) -> None:
     fake_store.active = False  # POSTGRES_HOST unset / in sandbox
     disk = _manifest("blogging.planner", team="blogging")

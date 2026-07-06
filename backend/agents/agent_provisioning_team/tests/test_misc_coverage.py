@@ -792,6 +792,8 @@ def test_cleanup_secrets_file_swallows_oserror(tmp_path: Path, monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_module_helper_status(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import AsyncMock as _AsyncMock
+
     from agent_provisioning_team import sandbox as sb
     from agent_provisioning_team.sandbox import lifecycle as lc_mod
 
@@ -799,7 +801,7 @@ async def test_module_helper_status(tmp_path: Path, monkeypatch) -> None:
     lc_mod.get_lifecycle.cache_clear()
     monkeypatch.setattr(lc_mod, "get_lifecycle", lambda: lc)
 
-    with patch.object(lc_mod, "_resolve_team", return_value="t"):
+    with patch.object(lc_mod, "_resolve_team", _AsyncMock(return_value="t")):
         handle = await sb.status("some.agent")
     assert handle.agent_id == "some.agent"
 

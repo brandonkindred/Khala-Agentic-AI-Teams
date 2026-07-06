@@ -62,14 +62,23 @@ class UnknownAgentError(ValueError):
     """Raised when the requested ``agent_id`` has no manifest in the registry."""
 
 
-def _resolve_team(agent_id: str) -> str:
+async def _resolve_team(agent_id: str) -> str:
     """Look up the agent's team via :mod:`agent_registry`.
 
     Wrapped so tests can patch it without importing the whole registry.
+
+    Preconditions:
+        * ``agent_id`` is a string.
+    Postconditions:
+        * Returns the resolved manifest's ``team``, or raises
+          :class:`UnknownAgentError` if unresolvable. Runs the (possibly
+          Postgres-backed, for a dynamically-registered agent) registry lookup in
+          a worker thread via ``asyncio.to_thread`` so it never blocks this
+          coroutine's event loop.
     """
     from agent_registry import get_registry
 
-    manifest = get_registry().get(agent_id)
+    manifest = await asyncio.to_thread(get_registry().get, agent_id)
     if manifest is None:
         raise UnknownAgentError(f"No agent manifest for {agent_id!r}")
     return manifest.team
@@ -150,7 +159,7 @@ class Lifecycle:
         Raises :class:`UnknownAgentError` if the registry has no entry for
         ``agent_id``.
         """
-        team = _resolve_team(agent_id)
+        team = await _resolve_team(agent_id)
         lock = self._locks.setdefault(agent_id, asyncio.Lock())
         async with lock:
             existing = self._state.get(agent_id)
@@ -234,7 +243,7 @@ class Lifecycle:
         """
         st = self._state.get(agent_id)
         if st is None:
-            team = _resolve_team(agent_id)
+            team = await _resolve_team(agent_id)
             return SandboxHandle(
                 agent_id=agent_id,
                 team=team,

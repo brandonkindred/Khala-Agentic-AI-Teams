@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
@@ -63,6 +64,10 @@ class AgentRegistry:
     # where the very next get() on this worker would otherwise resurrect the
     # stale row it just tried to delete.
     _TOMBSTONE_TTL_S = 5.0
+    # Bounds _tombstones' size so an id that's unregistered and never revisited
+    # doesn't accumulate forever over a long-lived worker's lifetime; oldest
+    # entries are evicted first once the cap is exceeded (see unregister()).
+    _TOMBSTONE_MAX_ENTRIES = 1000
 
     def __init__(
         self,
@@ -84,9 +89,9 @@ class AgentRegistry:
         # directory name matches ``manifest.team`` (e.g. ``branding_team`` vs.
         # ``branding``).
         self._source_paths: dict[str, Path] = source_paths or {}
-        # agent_id -> time.monotonic() of this worker's last unregister(). See
-        # _is_tombstoned / _TOMBSTONE_TTL_S.
-        self._tombstones: dict[str, float] = {}
+        # agent_id -> time.monotonic() of this worker's last unregister(), oldest
+        # first. See _is_tombstoned / _TOMBSTONE_TTL_S / _TOMBSTONE_MAX_ENTRIES.
+        self._tombstones: "OrderedDict[str, float]" = OrderedDict()
 
     def _is_tombstoned(self, agent_id: str) -> bool:
         """Whether this worker locally unregistered ``agent_id`` within the TTL window.
@@ -95,17 +100,14 @@ class AgentRegistry:
             * ``agent_id`` is a string.
         Postconditions:
             * Returns ``True`` iff ``unregister(agent_id)`` ran on this worker less
-              than :attr:`_TOMBSTONE_TTL_S` ago. An expired entry is pruned and
-              ``False`` is returned. Purely local, in-memory bookkeeping — never
-              touches the store.
+              than :attr:`_TOMBSTONE_TTL_S` ago, ``False`` otherwise (including an
+              expired entry). Read-only — never mutates ``_tombstones``, so a
+              concurrent ``unregister()`` refreshing the same id's stamp can never
+              race an eviction triggered by this check; expiry/size pruning happens
+              only in :meth:`unregister`.
         """
         stamped_at = self._tombstones.get(agent_id)
-        if stamped_at is None:
-            return False
-        if time.monotonic() - stamped_at > self._TOMBSTONE_TTL_S:
-            self._tombstones.pop(agent_id, None)
-            return False
-        return True
+        return stamped_at is not None and (time.monotonic() - stamped_at) <= self._TOMBSTONE_TTL_S
 
     # ---------------------------------------------------------------
     # Construction
@@ -172,6 +174,23 @@ class AgentRegistry:
             logger.debug("dynamic manifest store unavailable", exc_info=True)
         return None
 
+    def _drop_tombstoned(self, merged: dict[str, AgentManifest]) -> None:
+        """Remove any dynamic id this worker just ``unregister()``'d, in place.
+
+        Preconditions:
+            * ``merged`` maps id -> manifest (as built by :meth:`_merged_manifests` /
+              :meth:`manifests_with_id_prefix`).
+        Postconditions:
+            * Keeps listings consistent with :meth:`get` during the tombstone
+              window: a dynamic id this worker recently unregistered is dropped
+              even if the store's scan still has a stale row (its best-effort
+              delete may have failed) or this worker's own local copy would
+              otherwise have resurfaced it.
+        """
+        for agent_id in list(merged):
+            if agent_id not in self._static_ids and self._is_tombstoned(agent_id):
+                del merged[agent_id]
+
     def _merged_manifests(self) -> list[AgentManifest]:
         """All manifests visible to this worker: cross-worker dynamic + local static.
 
@@ -194,6 +213,7 @@ class AgentRegistry:
         for agent_id, local in self._by_id.items():
             if agent_id in self._static_ids or agent_id not in merged:
                 merged[agent_id] = local
+        self._drop_tombstoned(merged)
         return list(merged.values())
 
     def all(self) -> list[AgentManifest]:
@@ -232,6 +252,7 @@ class AgentRegistry:
         for m in local:
             if m.id in self._static_ids or m.id not in merged:
                 merged[m.id] = m
+        self._drop_tombstoned(merged)
         return list(merged.values())
 
     def get(self, agent_id: str) -> AgentManifest | None:
@@ -332,6 +353,9 @@ class AgentRegistry:
         removed = self._by_id.pop(agent_id, None) is not None
         if agent_id not in self._static_ids:
             self._tombstones[agent_id] = time.monotonic()
+            self._tombstones.move_to_end(agent_id)
+            while len(self._tombstones) > self._TOMBSTONE_MAX_ENTRIES:
+                self._tombstones.popitem(last=False)  # evict the oldest stamp
             store = self._dynamic_store()
             if store is not None:
                 try:

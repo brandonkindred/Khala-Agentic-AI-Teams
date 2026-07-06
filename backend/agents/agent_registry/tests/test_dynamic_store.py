@@ -48,6 +48,45 @@ def test_store_inactive_inside_a_sandbox(monkeypatch: pytest.MonkeyPatch) -> Non
     assert ds._store_active() is False
 
 
+# --------------------------------------------------------------------------- #
+# _with_retry (hermetic — no Postgres, plain function retry semantics)
+# --------------------------------------------------------------------------- #
+
+
+def test_with_retry_succeeds_first_try(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ds, "_WRITE_RETRY_DELAY_S", 0.0)
+    calls = []
+    assert ds._with_retry(lambda: calls.append(1) or "ok") == "ok"
+    assert calls == [1]
+
+
+def test_with_retry_recovers_after_one_transient_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ds, "_WRITE_RETRY_DELAY_S", 0.0)
+    attempts = {"n": 0}
+
+    def _flaky():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("transient blip")
+        return "ok"
+
+    assert ds._with_retry(_flaky) == "ok"
+    assert attempts["n"] == 2
+
+
+def test_with_retry_propagates_after_exhausting_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ds, "_WRITE_RETRY_DELAY_S", 0.0)
+    attempts = {"n": 0}
+
+    def _always_fails():
+        attempts["n"] += 1
+        raise RuntimeError("sustained outage")
+
+    with pytest.raises(RuntimeError, match="sustained outage"):
+        ds._with_retry(_always_fails)
+    assert attempts["n"] == ds._WRITE_RETRY_ATTEMPTS
+
+
 def test_store_active_when_postgres_on_outside_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_HOST", "platform-postgres")
     monkeypatch.delenv("SANDBOX_AGENT_ID", raising=False)

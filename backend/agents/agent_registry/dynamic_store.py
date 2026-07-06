@@ -42,9 +42,45 @@ _TABLE = "agent_registry_dynamic_manifests"
 # catalog list/search/teams endpoints. Point ``get()`` lookups (the invoke /
 # provision hot path) are never cached — they must be exact and immediate.
 _ALL_CACHE_TTL_S = 2.0
+# Guards only the cache STATE (the two globals below) — held briefly, never across
+# a Postgres call. A separate lock (_all_cache_refresh_lock) single-flights the
+# actual query, so upsert()/delete()'s clear_cache() is never blocked behind a
+# concurrent all() query's network round trip.
 _all_cache_lock = threading.Lock()
+_all_cache_refresh_lock = threading.Lock()
 _all_cache: Optional[list[AgentManifest]] = None
 _all_cache_at: float = 0.0
+
+# Bounds retries of a write (upsert/delete) whose first attempt hits a transient
+# Postgres error, so a brief blip doesn't need AgentRegistry's caller-side
+# best-effort degrade-to-local-only path as often. Reads (get/all) are not
+# retried here — a failed read already degrades gracefully one level up.
+_WRITE_RETRY_ATTEMPTS = 2
+_WRITE_RETRY_DELAY_S = 0.05
+
+
+def _with_retry(fn) -> None:
+    """Run ``fn()`` (a no-arg write), retrying once on failure before propagating.
+
+    Preconditions:
+        * ``fn`` is idempotent (safe to run twice) — both ``upsert``'s
+          ``ON CONFLICT DO UPDATE`` and ``delete``'s ``DELETE ... WHERE id = %s``
+          qualify.
+    Postconditions:
+        * Returns ``fn()``'s result on the first success. On the first attempt's
+          exception, waits :data:`_WRITE_RETRY_DELAY_S` and tries once more; the
+          second attempt's exception (if any) propagates to the caller unchanged.
+          Narrows the window in which a purely transient error (a brief connection
+          blip) forces the caller's best-effort degrade-to-local-only path.
+    """
+    for attempt in range(_WRITE_RETRY_ATTEMPTS):
+        try:
+            return fn()
+        except Exception:
+            if attempt == _WRITE_RETRY_ATTEMPTS - 1:
+                raise
+            logger.debug("dynamic store write failed; retrying once", exc_info=True)
+            time.sleep(_WRITE_RETRY_DELAY_S)
 
 
 def _store_active() -> bool:
@@ -61,7 +97,15 @@ def _store_active() -> bool:
 
 
 def clear_cache() -> None:
-    """Drop the ``all()`` micro-cache. Called on writes and by tests."""
+    """Drop the ``all()`` micro-cache. Called on writes and by tests.
+
+    Preconditions: none.
+    Postconditions:
+        * The next ``all()`` call re-queries Postgres rather than serving a cached
+          value (modulo a refresh already in flight — see ``all()``'s docstring).
+          Acquires only the cheap cache-state lock, never the refresh lock, so a
+          slow concurrent Postgres query inside ``all()`` never delays this call.
+    """
     global _all_cache, _all_cache_at
     with _all_cache_lock:
         _all_cache = None
@@ -74,7 +118,10 @@ def upsert(manifest: AgentManifest) -> None:
     Preconditions:
         * ``manifest.id`` is non-empty.
     Postconditions:
-        * ``get(manifest.id)`` returns an equal manifest from any worker.
+        * ``get(manifest.id)`` returns an equal manifest from any worker. A single
+          transient failure is retried once (see :func:`_with_retry`) before
+          propagating, narrowing the window in which the caller's best-effort
+          degrade-to-local-only path is needed.
     """
     from shared_postgres import Json, get_conn
     from shared_postgres.metrics import timed_query
@@ -92,7 +139,7 @@ def upsert(manifest: AgentManifest) -> None:
                 (manifest.id, manifest.team, Json(list(manifest.tags)), Json(payload)),
             )
 
-    _do()
+    _with_retry(_do)
     clear_cache()
 
 
@@ -100,7 +147,10 @@ def delete(agent_id: str) -> None:
     """Remove a dynamic manifest by id (no-op if absent).
 
     Postconditions:
-        * ``get(agent_id)`` returns ``None`` afterward on every worker.
+        * ``get(agent_id)`` returns ``None`` afterward on every worker. A single
+          transient failure is retried once (see :func:`_with_retry`) before
+          propagating, narrowing the window in which a stale row could otherwise
+          resurface.
     """
     from shared_postgres import get_conn
     from shared_postgres.metrics import timed_query
@@ -110,7 +160,7 @@ def delete(agent_id: str) -> None:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(f"DELETE FROM {_TABLE} WHERE id = %s", (agent_id,))
 
-    _do()
+    _with_retry(_do)
     clear_cache()
 
 
@@ -159,30 +209,52 @@ def all() -> list[AgentManifest]:  # noqa: A001 - mirrors AgentRegistry.all()
     :func:`get` is uncached, so cross-worker save→resolve is immediate; only the
     catalog *list* is eventually-consistent within the TTL window.
 
-    Single-flight: the lock is held across the Postgres query on a cache miss, not
-    just the freshness check, so concurrent callers racing an expired cache
-    serialize behind the one refresh instead of each issuing their own duplicate
-    query.
+    Single-flight, without blocking writes: a dedicated ``_all_cache_refresh_lock``
+    (never held by ``clear_cache()``) serializes concurrent callers racing an
+    expired cache behind the one refresh instead of each issuing their own
+    duplicate Postgres query — while the cheap cache-state lock
+    (``_all_cache_lock``) is only ever held briefly to read or write the two cache
+    globals, never across the query itself. This means a concurrent
+    ``upsert()``/``delete()``'s ``clear_cache()`` is never blocked behind this
+    call's Postgres round trip, even during a slow refresh. The narrow tradeoff: if
+    ``clear_cache()`` fires while a refresh is already in flight, that refresh's
+    write-back (of pre-clear data) can briefly re-populate the cache — a self
+    -healing staleness bounded by the next ``_ALL_CACHE_TTL_S`` window, not the
+    unbounded-write-blocking hazard the single-lock version had.
     """
     global _all_cache, _all_cache_at
 
     from shared_postgres import dict_row, get_conn
     from shared_postgres.metrics import timed_query
 
-    @timed_query(store=_STORE, op="all")
-    def _do() -> list[AgentManifest]:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(f"SELECT manifest FROM {_TABLE} ORDER BY id")
-            rows = cur.fetchall()
-        return [AgentManifest.model_validate(r["manifest"]) for r in rows]
+    def _fresh_copy() -> Optional[list[AgentManifest]]:
+        with _all_cache_lock:
+            if _all_cache is not None and (time.monotonic() - _all_cache_at) < _ALL_CACHE_TTL_S:
+                return list(_all_cache)
+        return None
 
-    with _all_cache_lock:
-        now = time.monotonic()
-        if _all_cache is not None and (now - _all_cache_at) < _ALL_CACHE_TTL_S:
-            return list(_all_cache)
+    cached = _fresh_copy()
+    if cached is not None:
+        return cached
+
+    with _all_cache_refresh_lock:
+        # Double-checked: another thread may have completed a refresh while this
+        # one waited for the refresh lock.
+        cached = _fresh_copy()
+        if cached is not None:
+            return cached
+
+        @timed_query(store=_STORE, op="all")
+        def _do() -> list[AgentManifest]:
+            with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(f"SELECT manifest FROM {_TABLE} ORDER BY id")
+                rows = cur.fetchall()
+            return [AgentManifest.model_validate(r["manifest"]) for r in rows]
+
         manifests = _do()
-        _all_cache = list(manifests)
-        _all_cache_at = time.monotonic()
+        with _all_cache_lock:
+            _all_cache = list(manifests)
+            _all_cache_at = time.monotonic()
         return manifests
 
 
