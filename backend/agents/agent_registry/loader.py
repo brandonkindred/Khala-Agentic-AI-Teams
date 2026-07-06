@@ -55,7 +55,16 @@ def _load_team_display_names() -> dict[str, str]:
 
 
 class AgentRegistry:
-    """In-memory registry of agent manifests loaded from disk."""
+    """Registry of agent manifests, merging static disk manifests with a shared
+    dynamic overlay.
+
+    Static manifests are loaded from disk once at :meth:`load` and resolved with
+    zero Postgres cost (see ``_static_ids``). Manifests registered at runtime
+    (Agent Studio saves, generated team agents) live in-memory and, when a
+    Postgres-backed dynamic store is active, write through to it so every worker
+    resolves the same dynamic id coherently; see :meth:`get`, :meth:`register`,
+    and :meth:`unregister`.
+    """
 
     # Bounds how long a locally-issued unregister() masks a dynamic id from get()
     # after its best-effort Postgres delete fails (see _is_tombstoned). Short
@@ -343,7 +352,9 @@ class AgentRegistry:
         """Remove a (dynamically registered) manifest from the live registry.
 
         Used by generators that replace a team's roster to drop entries for
-        removed/renamed agents.
+        removed/renamed agents. A no-op for a *static* (disk-loaded) id — this
+        method is only for dynamically-registered manifests, and a static id must
+        remain resolvable for the process's lifetime regardless of caller error.
 
         Postconditions:
             * ``get(agent_id)`` returns ``None`` afterwards on this worker for at
@@ -353,26 +364,30 @@ class AgentRegistry:
               that removed it. Removes the entry from this process's in-memory view
               and, when a dynamic store is active for a non-static id, from Postgres
               too (best-effort). Returns ``True`` when a local entry was present and
-              removed, ``False`` otherwise — the cross-worker Postgres delete is
-              issued regardless (it's a no-op when the row is absent).
+              removed, ``False`` otherwise (including when ``agent_id`` names a
+              static id, which this method never removes) — the cross-worker
+              Postgres delete is issued regardless (it's a no-op when the row is
+              absent).
         """
+        if agent_id in self._static_ids:
+            logger.warning("Refusing to unregister static agent id %r; ignoring", agent_id)
+            return False
         self._source_paths.pop(agent_id, None)
         removed = self._by_id.pop(agent_id, None) is not None
-        if agent_id not in self._static_ids:
-            self._tombstones[agent_id] = time.monotonic()
-            self._tombstones.move_to_end(agent_id)
-            while len(self._tombstones) > self._TOMBSTONE_MAX_ENTRIES:
-                self._tombstones.popitem(last=False)  # evict the oldest stamp
-            store = self._dynamic_store()
-            if store is not None:
-                try:
-                    store.delete(agent_id)
-                except Exception:
-                    logger.warning(
-                        "dynamic store delete failed for %s; removed locally only",
-                        agent_id,
-                        exc_info=True,
-                    )
+        self._tombstones[agent_id] = time.monotonic()
+        self._tombstones.move_to_end(agent_id)
+        while len(self._tombstones) > self._TOMBSTONE_MAX_ENTRIES:
+            self._tombstones.popitem(last=False)  # evict the oldest stamp
+        store = self._dynamic_store()
+        if store is not None:
+            try:
+                store.delete(agent_id)
+            except Exception:
+                logger.warning(
+                    "dynamic store delete failed for %s; removed locally only",
+                    agent_id,
+                    exc_info=True,
+                )
         return removed
 
     def search(

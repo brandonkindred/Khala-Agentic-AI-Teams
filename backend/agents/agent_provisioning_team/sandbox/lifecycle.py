@@ -240,6 +240,10 @@ class Lifecycle:
         Reconciles against Docker: if we believe the container is WARM but
         ``docker inspect`` reports it gone, flip the state to COLD so the
         caller sees reality.
+
+        Raises :class:`UnknownAgentError` (propagated from :func:`_resolve_team`)
+        if ``agent_id`` has no entry in the registry and we have no prior tracked
+        state for it — mirrors :meth:`acquire`'s contract.
         """
         st = self._state.get(agent_id)
         if st is None:

@@ -140,6 +140,15 @@ def test_unregister_deletes_from_store(fake_store: _FakeStore) -> None:
     assert "agent_studio.del-1" not in fake_store.rows
 
 
+def test_unregister_refuses_a_static_id(fake_store: _FakeStore) -> None:
+    disk = _manifest("blogging.planner", team="blogging")
+    reg = AgentRegistry([disk], {})
+    assert reg.unregister("blogging.planner") is False
+    # Still resolvable — a static id is never actually removed.
+    assert reg.get("blogging.planner") is not None
+    assert "blogging.planner" not in fake_store.rows
+
+
 def test_all_merges_static_over_dynamic(fake_store: _FakeStore) -> None:
     disk = _manifest("blogging.planner", team="blogging", name="Disk")
     reg = AgentRegistry([disk], {})
