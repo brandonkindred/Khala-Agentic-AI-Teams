@@ -6,9 +6,12 @@ import asyncio
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from temporalio.worker import Worker
+
+if TYPE_CHECKING:
+    from temporalio.client import Client
 
 from planning_team.temporal.activities import run_planning_activity
 from planning_team.temporal.client import (
@@ -26,7 +29,14 @@ _worker_thread: Optional[threading.Thread] = None
 _activity_executor: Optional[ThreadPoolExecutor] = None
 
 
-def create_planning_worker(client: Optional[object] = None) -> Optional[Worker]:
+def create_planning_worker(client: Optional["Client"] = None) -> Optional[Worker]:
+    """Build a Temporal Worker for the Planning task queue.
+
+    Preconditions: ``client`` is a connected Temporal client, or None.
+    Postconditions: returns a Worker registered with `PlanningWorkflow` and
+    `run_planning_activity` on `TASK_QUEUE`, or None when Temporal is
+    disabled or no client was supplied.
+    """
     if not is_temporal_enabled():
         return None
     if client is None:
@@ -49,6 +59,7 @@ def create_planning_worker(client: Optional[object] = None) -> Optional[Worker]:
 
 
 async def _run_worker_async() -> None:
+    """Connect the Temporal client, register it process-wide, and run the worker until stopped."""
     client = await connect_temporal_client()
     if client is None:
         return
@@ -62,6 +73,7 @@ async def _run_worker_async() -> None:
 
 
 def _worker_thread_target() -> None:
+    """Run `_run_worker_async` on a fresh event loop in this thread; clears client/loop on exit."""
     global _worker_thread
     if not is_temporal_enabled():
         return
@@ -80,6 +92,12 @@ def _worker_thread_target() -> None:
 
 
 def start_planning_temporal_worker_thread() -> bool:
+    """Start the Planning Temporal worker on a daemon thread (idempotent while alive).
+
+    Postconditions: returns False when Temporal is disabled; returns True and
+    (re)starts the worker thread otherwise, including when an existing thread
+    is still alive (a no-op start rather than a duplicate worker).
+    """
     global _worker_thread
     if not is_temporal_enabled():
         return False

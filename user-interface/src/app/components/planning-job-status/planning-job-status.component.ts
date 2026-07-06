@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { MatCardModule } from '@angular/material/card';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatIconModule } from '@angular/material/icon';
+import { Subject, takeUntil } from 'rxjs';
 import { PlanningApiService } from '../../services/planning-api.service';
 import { PLANNING_PHASES } from '../../models';
 import type { PlanningStatusResponse, PlanningResultResponse } from '../../models';
@@ -30,6 +31,7 @@ export class PlanningJobStatusComponent implements OnInit, OnDestroy {
 
   private readonly api = inject(PlanningApiService);
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly destroy$ = new Subject<void>();
 
   status: PlanningStatusResponse | null = null;
   result: PlanningResultResponse | null = null;
@@ -43,40 +45,48 @@ export class PlanningJobStatusComponent implements OnInit, OnDestroy {
     this.pollTimer = setInterval(() => this.poll(), 15000);
   }
 
-  /** Stop the poll timer so it doesn't keep firing after the component is destroyed. */
+  /** Stop the poll timer and any in-flight requests so they can't update a destroyed component. */
   ngOnDestroy(): void {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.destroy$.next();
+    this.destroy$.complete();
   }
 
   /** Fetch the job's status; on `completed`/`failed` stop the timer, and on `completed` also fetch the result. */
   private poll(): void {
-    this.api.getStatus(this.jobId).subscribe({
-      next: (res) => {
-        this.status = res;
-        this.error = null;
-        this.statusChange.emit(res);
-        if (res.status === 'completed' || res.status === 'failed') {
-          if (this.pollTimer) {
-            clearInterval(this.pollTimer);
-            this.pollTimer = null;
+    this.api
+      .getStatus(this.jobId)
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (res) => {
+          this.status = res;
+          this.error = null;
+          this.statusChange.emit(res);
+          if (res.status === 'completed' || res.status === 'failed') {
+            if (this.pollTimer) {
+              clearInterval(this.pollTimer);
+              this.pollTimer = null;
+            }
+            if (res.status === 'completed') {
+              this.api
+                .getResult(this.jobId)
+                .pipe(takeUntil(this.destroy$))
+                .subscribe({
+                  next: (r) => (this.result = r),
+                  error: (err) => {
+                    this.error = err?.error?.detail ?? err?.message ?? 'Failed to load planning result';
+                  },
+                });
+            }
           }
-          if (res.status === 'completed') {
-            this.api.getResult(this.jobId).subscribe({
-              next: (r) => (this.result = r),
-              error: (err) => {
-                this.error = err?.error?.detail ?? err?.message ?? 'Failed to load planning result';
-              },
-            });
-          }
-        }
-      },
-      error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to fetch status';
-      },
-    });
+        },
+        error: (err) => {
+          this.error = err?.error?.detail ?? err?.message ?? 'Failed to fetch status';
+        },
+      });
   }
 
   /** Manually re-fetch status on demand (e.g. a user-triggered refresh button). */

@@ -32,6 +32,7 @@ import type { PlanningRunRequest } from '../../models';
  * backend resolves a server-side workspace.
  */
 export class PlanningRunFormComponent {
+  /** Emits the assembled `PlanningRunRequest` when the form is submitted. */
   @Output() submitRequest = new EventEmitter<PlanningRunRequest>();
 
   /**

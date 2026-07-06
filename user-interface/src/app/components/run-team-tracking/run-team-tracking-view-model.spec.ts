@@ -1,4 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { of, throwError } from 'rxjs';
 import { vi, beforeEach, afterEach } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
@@ -26,7 +27,7 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
   beforeEach(() => {
     api = { getJobStatus: vi.fn() };
     TestBed.configureTestingModule({
-      providers: [{ provide: SoftwareEngineeringApiService, useValue: api }],
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: api }, provideNoopAnimations()],
     });
     fixture = TestBed.createComponent(RunTeamTrackingComponent);
     component = fixture.componentInstance;
@@ -984,7 +985,7 @@ describe('RunTeamTrackingComponent sub-agent activity and staleness', () => {
   beforeEach(() => {
     api = { getJobStatus: vi.fn() };
     TestBed.configureTestingModule({
-      providers: [{ provide: SoftwareEngineeringApiService, useValue: api }],
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: api }, provideNoopAnimations()],
     });
     fixture = TestBed.createComponent(RunTeamTrackingComponent);
     component = fixture.componentInstance;
