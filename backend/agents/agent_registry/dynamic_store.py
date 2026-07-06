@@ -29,9 +29,11 @@ import logging
 import os
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional, TypeVar
 
 from .models import AgentManifest
+
+_T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +61,7 @@ _WRITE_RETRY_ATTEMPTS = 2
 _WRITE_RETRY_DELAY_S = 0.05
 
 
-def _with_retry(fn) -> None:
+def _with_retry(fn: Callable[[], _T]) -> _T:
     """Run ``fn()`` (a no-arg write), retrying once on failure before propagating.
 
     Preconditions:
@@ -72,6 +74,12 @@ def _with_retry(fn) -> None:
           second attempt's exception (if any) propagates to the caller unchanged.
           Narrows the window in which a purely transient error (a brief connection
           blip) forces the caller's best-effort degrade-to-local-only path.
+
+    ``except Exception`` (not a narrower psycopg error type) is deliberate: ``fn``
+    is always one of this module's own ``_do`` closures, never caller-supplied
+    business logic, so there is no distinct "programming error" class to exclude
+    here — any exception it raises is, by construction, a failure of the one
+    Postgres statement it runs.
     """
     for attempt in range(_WRITE_RETRY_ATTEMPTS):
         try:
