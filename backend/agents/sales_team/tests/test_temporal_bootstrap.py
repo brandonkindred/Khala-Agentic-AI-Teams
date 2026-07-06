@@ -25,6 +25,19 @@ import unittest.mock as mock
 
 
 def _purge(prefix: str) -> None:
+    """Drop ``prefix`` and its submodules from ``sys.modules`` so the next
+    ``import_module`` re-executes them from scratch.
+
+    Side-effect warning: this mutates the process-wide module cache. These
+    tests deliberately re-import ``sales_team.temporal`` to observe its
+    import-time behavior, which is only meaningful on a fresh import. Any test
+    that holds a reference to a purged module object would see a *different*
+    object after a later re-import — but nothing here does: every test in this
+    file re-imports the names it needs inside its own body, so the purge is
+    self-contained and order-independent. This mirrors the identical helper in
+    ``market_research_team``/``investment_team``/``user_agent_founder``'s
+    bootstrap tests.
+    """
     for name in list(sys.modules):
         if name == prefix or name.startswith(prefix + "."):
             del sys.modules[name]

@@ -91,7 +91,9 @@ def test_activity_marks_job_failed_when_request_fails_validation(monkeypatch, fa
     ran = []
     monkeypatch.setattr(job_runner, "run_pipeline_job", lambda *a, **k: ran.append((a, k)))
 
-    with pytest.raises(Exception):  # pydantic ValidationError
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         wf.run_pipeline_activity("job-invalid", {"product_name": "P"})  # missing required fields
 
     assert ran == []  # run_pipeline_job must never be called

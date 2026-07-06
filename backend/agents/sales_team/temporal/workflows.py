@@ -56,7 +56,16 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
     try:
         pipeline_request = SalesPipelineRequest(**request)
     except Exception as exc:
-        job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
+        # Best-effort mark FAILED, but the original validation error must
+        # always be what propagates — a failing update_job (e.g. transient
+        # job-service outage) should not mask it, or Temporal would surface a
+        # misleading error and the real cause would be lost.
+        try:
+            job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
+        except Exception:
+            activity.logger.exception(
+                "Failed to mark job %s FAILED after request validation error", job_id
+            )
         raise
 
     run_pipeline_job(job_id, pipeline_request)
