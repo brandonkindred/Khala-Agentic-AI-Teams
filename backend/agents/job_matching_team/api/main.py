@@ -83,6 +83,38 @@ def _register_user_profile_schema() -> None:
         logger.warning("Could not register user_profile schema at startup", exc_info=True)
 
 
+def _start_temporal_worker_backstop() -> None:
+    """Start the Temporal worker when serving the app outside the entrypoint.
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE``/``_FUNC`` before uvicorn accepts requests.
+    This backstop covers running the app standalone (``uvicorn ...:app``, local
+    dev): without it, a ``TEMPORAL_ADDRESS``-set process has no worker, so every
+    ``POST /scan`` would stall in ``_wait_for_client`` and 503. Mirrors
+    ``road_trip_planning``/``user_agent_founder``.
+
+    Postconditions:
+        * Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — a failure is logged so
+          it cannot abort app boot (``start_team_worker`` is idempotent per
+          team, so double-starting with the entrypoint is harmless).
+    """
+    try:
+        from job_matching_team.temporal.worker import (
+            start_job_matching_temporal_worker_thread,
+        )
+
+        start_job_matching_temporal_worker_thread()
+    except Exception:  # noqa: BLE001 - backstop must not abort app boot
+        logger.warning("job_matching Temporal worker backstop failed to start", exc_info=True)
+
+
+def _on_startup() -> None:
+    """Aggregate app-startup hooks (schema registration + Temporal backstop)."""
+    _register_user_profile_schema()
+    _start_temporal_worker_backstop()
+
+
 app = create_team_app(
     service_name="job-matching",
     team_key="job_matching",
@@ -90,7 +122,7 @@ app = create_team_app(
     description="Scans open roles matching a job-seeker profile and ranks the best to apply for",
     version="1.0.0",
     postgres_schema=JOB_MATCHING_SCHEMA,
-    on_startup=_register_user_profile_schema,
+    on_startup=_on_startup,
 )
 
 app.add_middleware(
@@ -175,13 +207,86 @@ def _run_scan_background(job_id: str, request: JobMatchRequest) -> None:
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
 
 
+def _dispatch_scan_via_temporal(job_id: str, payload: JobMatchRequest) -> bool:
+    """Dispatch a scan to Temporal when enabled. Returns True if dispatched.
+
+    Preconditions:
+        * ``job_id`` refers to a job row already created by the caller.
+    Postconditions:
+        * Returns False (dispatch not attempted) when Temporal is genuinely
+          unavailable (``shared_temporal`` not importable) or disabled
+          (``TEMPORAL_ADDRESS`` unset) — the caller then runs the scan on a
+          daemon thread, so behavior is unchanged in those cases.
+        * Returns True after a durable ``JobMatchingWorkflow`` has been started.
+        * Raises (does not fall back) when Temporal is enabled but the workflow
+          fails to start — including a broken team ``temporal`` import — so an
+          enabled run is never silently downgraded to a non-durable thread; the
+          caller surfaces the failure instead.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        # Temporal genuinely not installed in this image → thread mode.
+        return False
+    if not is_temporal_enabled():
+        return False
+    # Temporal IS enabled: import the team dispatcher OUTSIDE the ImportError
+    # guard above so a broken team temporal import raises (caller 503s) rather
+    # than silently downgrading a durable run to an in-process daemon thread.
+    from job_matching_team.temporal.start_workflow import start_job_matching_workflow
+
+    start_job_matching_workflow(job_id, payload.model_dump(mode="json"))
+    logger.info("Job matching scan %s dispatched via Temporal", job_id)
+    return True
+
+
 @app.post("/scan", response_model=ScanJobResponse)
 def start_scan(payload: JobMatchRequest) -> ScanJobResponse:
-    """Start an async scan. Poll ``GET /scan/status/{job_id}`` for the result."""
+    """Start an async scan. Poll ``GET /scan/status/{job_id}`` for the result.
+
+    Runs the scan on a durable Temporal workflow when ``TEMPORAL_ADDRESS`` is
+    set, else on a daemon thread. Both paths track status through the same job
+    store, so ``GET /scan/status/{job_id}`` is identical either way.
+
+    Note: in Temporal mode this handler blocks while the dispatch is accepted
+    (the shared bridge waits briefly for the worker client, then for the start
+    to be acknowledged). Under a slow/partitioned Temporal server that wait can
+    reach the shared client-ready + start timeouts before 503-ing; thread mode
+    returns immediately.
+
+    Postconditions:
+        * On success a job row exists and its scan is running (workflow or
+          thread); the returned ``job_id`` polls it.
+        * If Temporal dispatch fails, the job row is marked FAILED (best effort)
+          and a 503 is raised — the job is never left stuck PENDING with a
+          success response.
+    """
     job_id = str(uuid4())
     create_job(job_id)
-    thread = threading.Thread(target=_run_scan_background, args=(job_id, payload), daemon=True)
-    thread.start()
+    try:
+        dispatched = _dispatch_scan_via_temporal(job_id, payload)
+    # Catch broadly on purpose: ANY dispatch failure — the client-not-ready
+    # RuntimeError from the shared bridge, connection/timeout errors, argument
+    # serialization, etc. — must mark the job FAILED and 503, never escape and
+    # leave an orphaned PENDING row. Branching on the exception type would not
+    # change the outcome (the scan didn't start regardless), and no debugging
+    # info is lost: logger.exception records the exact type + traceback and the
+    # error string is persisted on the job row.
+    except Exception as exc:  # noqa: BLE001 - surface as 503, don't orphan the job
+        logger.exception("Temporal dispatch failed for scan %s", job_id)
+        # The FAILED write is itself a job-service call; guard it so a degraded
+        # job service can't swallow the 503 (which would surface a bare 500 and
+        # leave the row PENDING). The 503 is raised either way.
+        try:
+            update_job(job_id, status=JOB_STATUS_FAILED, error=f"Temporal dispatch failed: {exc}")
+        except Exception:  # noqa: BLE001 - already failing; still surface the 503
+            logger.exception("Also failed to mark scan %s FAILED after dispatch failure", job_id)
+        raise HTTPException(
+            status_code=503, detail="Temporal dispatch failed; scan not started"
+        ) from exc
+    if not dispatched:
+        thread = threading.Thread(target=_run_scan_background, args=(job_id, payload), daemon=True)
+        thread.start()
     return ScanJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
 
