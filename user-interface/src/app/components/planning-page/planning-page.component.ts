@@ -5,6 +5,7 @@ import { PlanningApiService } from '../../services/planning-api.service';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { NotificationService } from '../../core/notification.service';
+import { environment } from '../../../environments/environment';
 
 @Component({
   selector: 'app-planning-page',
@@ -21,6 +22,9 @@ import { NotificationService } from '../../core/notification.service';
 export class PlanningPageComponent {
   private readonly api = inject(PlanningApiService);
   private readonly notifications = inject(NotificationService);
+
+  /** Assistant endpoint for the team-assistant chat, derived from the configured Planning API base URL. */
+  readonly teamApiUrl = `${environment.planningApiUrl}/assistant`;
 
   healthCheck = (): ReturnType<PlanningApiService['health']> =>
     this.api.health();

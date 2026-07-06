@@ -11,6 +11,14 @@ import type {
 } from '../models';
 import type { HealthResponse } from '../models/health.model';
 
+/** A single answer to an open planning question, posted to `/{job_id}/answers`. */
+export type PlanningAnswerSubmission = {
+  question_id: string;
+  selected_option_id?: string;
+  selected_option_ids?: string[];
+  other_text?: string | null;
+};
+
 /**
  * Service for Planning Team API (client-facing discovery / PRD).
  * Base URL from environment.planningApiUrl.
@@ -41,7 +49,7 @@ export class PlanningApiService {
   }
 
   /** POST /{job_id}/answers - submit answers to open questions */
-  submitAnswers(jobId: string, answers: { question_id: string; selected_option_id?: string; selected_option_ids?: string[]; other_text?: string | null }[]): Observable<PlanningStatusResponse> {
+  submitAnswers(jobId: string, answers: PlanningAnswerSubmission[]): Observable<PlanningStatusResponse> {
     return this.http.post<PlanningStatusResponse>(`${this.baseUrl}/${jobId}/answers`, { answers });
   }
 
