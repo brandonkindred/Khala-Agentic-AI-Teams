@@ -148,6 +148,8 @@ Before judging a finding, USE THE TOOLS to inspect the code it refers to AND any
 - "no tests for X" / "missing test coverage" — when a test file or test case for X actually exists. Search for it.
 - "missing error handling / validation / null check" — when it is handled by a caller, wrapper, decorator, base class, or a part of the file the chunk reviewer did not see.
 - "duplicate / unused / dead code" — when the other usage or the single definition is elsewhere.
+- "file/module Y must be created / does not exist / needs to be added" — when Y ALREADY EXISTS in the repository. The chunk reviewer sees only the files a change touched, so a file that was not modified is invisible to it and looks missing. Call `list_files()` and `read_file()` (they can reach existing, unchanged repository files, not just the diff) to check — if Y already exists, the finding is a FALSE POSITIVE.
+- "this relative import is unclear / unresolved / should be absolute" (e.g. `from .models import X`, `from .store import Y`) — intra-package relative imports are the ESTABLISHED convention across this codebase; `.models`/`.store` resolve to sibling modules (`models.py`/`store.py`) in the same package. Confirm the sibling module exists via `list_files()`/`search_codebase()`; if it does, mark the finding a false positive. Never keep a finding that merely asks to convert a working relative import to an absolute one.
 - A finding whose claim is directly contradicted by code that is actually present.
 
 **Rules:**

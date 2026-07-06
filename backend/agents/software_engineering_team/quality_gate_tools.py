@@ -100,6 +100,7 @@ def run_code_review(
     architecture: Any = None,
     existing_codebase: Optional[str] = None,
     user_decisions: Optional[List[str]] = None,
+    repo_path: Optional[str] = None,
     llm_getter: Callable[[str], Any] = _default_llm_getter,
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
 ) -> CodeReviewResult:
@@ -111,6 +112,10 @@ def run_code_review(
         - ``user_decisions`` is None or a list of human-readable 'question → answer' lines the
           user has already answered; the reviewer treats them as settled (never flags them as open
           questions). Empty/None changes nothing about the review.
+        - ``repo_path`` is None or the path of the materialized workspace the
+          changed files live in; when set, the false-positive verifier is given
+          read access to the whole repository so it can confirm existing files a
+          finding claims are missing.
 
     Postconditions:
         - When ``files`` (a ``{path: content}`` mapping of the task's changed
@@ -122,6 +127,7 @@ def run_code_review(
     try:
         from code_review_agent import CodeReviewAgent
         from code_review_agent.models import build_code_review_input
+        from code_review_agent.repo_reader import DiskRepoReader
 
         llm = llm_getter("code_review")
         agent = CodeReviewAgent(llm)
@@ -140,7 +146,13 @@ def run_code_review(
             existing_codebase=existing_codebase,
             user_decisions=user_decisions or None,
         )
-        result = agent.run(review_input, progress_callback=progress_callback)
+        run_kwargs: Dict[str, Any] = {"progress_callback": progress_callback}
+        # Forward the reader only when a workspace path was supplied: passing
+        # ``repo_reader=None`` is a no-op for the real agent, and omitting it keeps
+        # duck-typed reviewer stubs (which may not declare the kwarg) working.
+        if repo_path:
+            run_kwargs["repo_reader"] = DiskRepoReader(repo_path)
+        result = agent.run(review_input, **run_kwargs)
         issues = []
         for i in result.issues or []:
             issues.append(i.model_dump() if hasattr(i, "model_dump") else vars(i))
