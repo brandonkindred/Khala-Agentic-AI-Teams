@@ -255,11 +255,11 @@ def test_find_function_at_line_python_top_level() -> None:
 def test_find_function_at_line_python_nested() -> None:
     """Tool returns the innermost (nested) function, not the outer one."""
     code = (
-        "def outer():\n"         # line 1
-        "    x = 1\n"            # line 2
-        "    def inner():\n"     # line 3
-        "        return x\n"     # line 4
-        "\n"                      # line 5
+        "def outer():\n"  # line 1
+        "    x = 1\n"  # line 2
+        "    def inner():\n"  # line 3
+        "        return x\n"  # line 4
+        "\n"  # line 5
     )
     idx = CodebaseIndex(files={"svc.py": code})
     _, _, _, find_function_at_line = _build_tools(idx)
@@ -271,9 +271,9 @@ def test_find_function_at_line_python_nested() -> None:
 def test_find_function_at_line_python_class_method() -> None:
     """Tool returns both the method name and its enclosing class name."""
     code = (
-        "class Foo:\n"            # line 1
-        "    def bar(self):\n"   # line 2
-        "        return 42\n"    # line 3
+        "class Foo:\n"  # line 1
+        "    def bar(self):\n"  # line 2
+        "        return 42\n"  # line 3
     )
     idx = CodebaseIndex(files={"models.py": code})
     _, _, _, find_function_at_line = _build_tools(idx)
@@ -330,8 +330,8 @@ def test_find_function_at_line_python_async_def() -> None:
 def test_find_function_at_line_python_decorated() -> None:
     """Tool reports the decorator start line as the construct start."""
     code = (
-        "@decorator\n"       # line 1
-        "def greet():\n"     # line 2
+        "@decorator\n"  # line 1
+        "def greet():\n"  # line 2
         "    return 'hi'\n"  # line 3
     )
     idx = CodebaseIndex(files={"views.py": code})
@@ -433,9 +433,7 @@ def test_find_function_at_line_pre_numbered_large_line_number() -> None:
     # The bug: with line_number=4242 and a 3-line file (physical lines 1-3),
     # ``i > line_number`` never fired and every column-0 line looked like a start.
     content = (
-        "4240: const a = 1;\n"
-        "4241: const b = 2;\n"
-        "4242: function getResult() { return a + b; }\n"
+        "4240: const a = 1;\n4241: const b = 2;\n4242: function getResult() { return a + b; }\n"
     )
     idx = CodebaseIndex(files={"util.js": content})
     _, _, _, find_function_at_line = _build_tools(idx)
@@ -452,7 +450,7 @@ def test_find_function_at_line_hunk_separator_not_treated_as_construct() -> None
     # the separator "..." is column-0. Without the fix it would be the best_start.
     content = (
         "10:   const a = 1;\n"
-        "...\n"               # separator emitted by render_annotated_hunks
+        "...\n"  # separator emitted by render_annotated_hunks
         "50: function doWork() {\n"
         "51:   return a;\n"
     )
@@ -748,6 +746,118 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
 def test_filter_empty_issue_list() -> None:
     """An empty finding list returns empty without invoking the verifier."""
     assert filter_false_positives(_RaisingStub(), _input(), []) == []
+
+
+# --------------------------------------------------------------------------- repo reader
+
+
+class _FakeReader:
+    """A minimal duck-typed RepoReader over an in-memory {path: content} map."""
+
+    def __init__(self, files: Dict[str, str]):
+        self._files = files
+
+    def list_files(self) -> List[str]:
+        return list(self._files)
+
+    def read_file(self, path: str) -> Optional[str]:
+        return self._files.get((path or "").strip())
+
+
+class _BoomReader:
+    """A reader whose every method raises, to exercise the fail-safe fall-through."""
+
+    def list_files(self) -> List[str]:
+        raise RuntimeError("tree boom")
+
+    def read_file(self, path: str) -> Optional[str]:
+        raise RuntimeError("read boom")
+
+
+def test_index_list_files_appends_reader_paths_deduped() -> None:
+    """``list_files`` lists submission paths first, then reader paths, deduped."""
+    idx = CodebaseIndex(
+        files={"app/main.py": "x = 1\n"},
+        repo_reader=_FakeReader({"app/main.py": "OTHER", "pkg/models.py": "class M: ..."}),
+    )
+    listed = idx.list_files()
+    assert listed[0] == "app/main.py"  # submission first
+    assert "pkg/models.py" in listed
+    assert listed.count("app/main.py") == 1  # submission wins the dedupe
+
+
+def test_index_read_file_falls_through_to_reader() -> None:
+    """A path absent from the submission is read from the repo reader."""
+    idx = CodebaseIndex(
+        files={"app/main.py": "x = 1\n"},
+        repo_reader=_FakeReader({"pkg/models.py": "class M:\n    pass\n"}),
+    )
+    assert idx.read_file("pkg/models.py") == "class M:\n    pass\n"
+    # Submission files still win over the reader for a shared path.
+    assert idx.read_file("app/main.py") == "x = 1\n"
+    # A path in neither still errors.
+    assert idx.read_file("nowhere.py").startswith("Error")
+
+
+def test_reader_existing_empty_file_is_present() -> None:
+    """An existing zero-byte file (e.g. a package __init__.py) resolves as present,
+    not absent — so a 'must create __init__.py' finding can be refuted."""
+    idx = CodebaseIndex(
+        files={"app/main.py": "x = 1\n"},
+        repo_reader=_FakeReader({"pkg/__init__.py": ""}),
+    )
+    # read_file returns the empty content (present), not an Error string.
+    assert idx.read_file("pkg/__init__.py") == ""
+    # resolve_path treats the empty existing file as resolvable.
+    assert idx.resolve_path("pkg/__init__.py") == "pkg/__init__.py"
+
+
+def test_resolve_path_uses_reader() -> None:
+    """``resolve_path`` returns the cited path when only the reader can read it."""
+    idx = CodebaseIndex(
+        files={"app/main.py": "x = 1\n"},
+        repo_reader=_FakeReader({"pkg/models.py": "class M: ..."}),
+    )
+    assert idx.resolve_path("pkg/models.py") == "pkg/models.py"
+    assert idx.resolve_path("still/absent.py") is None
+
+
+def test_reader_errors_are_failsafe() -> None:
+    """A reader that raises never breaks the index: reads/lists degrade gracefully."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"}, repo_reader=_BoomReader())
+    # list_files degrades to just the submission's paths.
+    assert idx.list_files() == ["app/main.py"]
+    # read_file for an absent path degrades to the not-found error (finding kept).
+    assert idx.read_file("pkg/models.py").startswith("Error")
+    assert idx.resolve_path("pkg/models.py") is None
+
+
+def test_filter_drops_finding_for_existing_repo_file() -> None:
+    """With a reader, a finding citing an existing (unchanged) repo file is
+    verifiable and droppable — the file is absent from the diff but present in
+    the repo, so the verifier can confirm the false positive."""
+    # The finding cites pkg/models.py, which is NOT in the submission's files.
+    ghost = _issue(file_path="pkg/models.py", description="pkg/models.py must be created")
+    reader = _FakeReader({"pkg/models.py": "class Model:\n    pass\n"})
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(
+        stub,
+        _input(files={"app/main.py": "from pkg.models import Model\n"}),
+        [ghost],
+        repo_reader=reader,
+    )
+    assert out == []  # confirmed existing → dropped (not skipped as unresolved)
+
+
+def test_filter_runs_with_reader_even_when_submission_has_no_files() -> None:
+    """A reader lets verification proceed even when the legacy ``code`` blob had
+    no path-headed content (index.files empty), rather than keeping everything."""
+    inp = CodeReviewInput(code="loose code with no headers", task_description="t")
+    reader = _FakeReader({"pkg/models.py": "class Model: ..."})
+    issue = _issue(file_path="pkg/models.py", description="add pkg/models.py")
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(stub, inp, [issue], repo_reader=reader)
+    assert out == []
 
 
 # --------------------------------------------------------------------------- coordinator integration

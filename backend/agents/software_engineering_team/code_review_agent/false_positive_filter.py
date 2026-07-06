@@ -50,9 +50,11 @@ from llm_service import LLMClient
 from shared_env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
+from .code_boundaries import node_end_line, node_start_line
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
+from .repo_reader import RepoReader
 
 logger = logging.getLogger(__name__)
 
@@ -117,18 +119,29 @@ class CodebaseIndex:
         - ``existing_codebase`` is the (already capped) pre-existing-code excerpt
           passed for context; it is exposed as the read-only pseudo-path
           ``<existing codebase>`` so the verifier can consult it like any file.
+        - ``repo_reader`` is an optional read-only, thread-safe ``RepoReader``
+          giving read access to the rest of the repository (files that already
+          exist but were not changed, so are absent from the submission). It is
+          consulted only as a *fall-through* after the submission and the
+          existing-codebase excerpt fail to resolve a path, which is what lets
+          the verifier confirm "this file already exists" and drop the false
+          positive. In-memory search (``search``) never touches it.
         - The index is read-only after construction: no method mutates ``files``
-          or ``existing_codebase``, so it is safe to share across the parallel
-          verification worker threads.
+          or ``existing_codebase``, and it never mutates ``repo_reader`` (whose
+          own reads are internally synchronized), so it is safe to share across
+          the parallel verification worker threads.
     """
 
     files: Dict[str, str]
     existing_codebase: str = ""
+    repo_reader: Optional[RepoReader] = None
 
     EXISTING_CODEBASE_PATH = "<existing codebase>"
 
     @classmethod
-    def from_input(cls, input_data: CodeReviewInput) -> "CodebaseIndex":
+    def from_input(
+        cls, input_data: CodeReviewInput, repo_reader: Optional[RepoReader] = None
+    ) -> "CodebaseIndex":
         """Build the index from a review input's ``files`` or legacy ``code``.
 
         Postconditions:
@@ -138,7 +151,7 @@ class CodebaseIndex:
               blocks via the coordinator's canonical parser; headerless and
               blank blocks are dropped (they cannot be addressed by a path).
             - ``existing_codebase`` carries the input's existing-codebase excerpt
-              (empty string when absent).
+              (empty string when absent); ``repo_reader`` is stored verbatim.
         """
         if input_data.files is not None:
             files = {
@@ -155,7 +168,46 @@ class CodebaseIndex:
             for path, content in parse_code_into_file_blocks(input_data.code or ""):
                 if path and content.strip():
                     files[path] = content
-        return cls(files=files, existing_codebase=input_data.existing_codebase or "")
+        return cls(
+            files=files,
+            existing_codebase=input_data.existing_codebase or "",
+            repo_reader=repo_reader,
+        )
+
+    def _reader_read(self, path: str) -> Optional[str]:
+        """Read ``path`` from the repo reader, degrading to ``None``.
+
+        Postconditions:
+            - Returns the reader's content for ``path`` when a reader is attached
+              and it resolves the path — INCLUDING an empty string for an existing
+              zero-byte file (e.g. a package ``__init__.py``), so an existing empty
+              file is confirmed present rather than reported absent. Returns
+              ``None`` only when there is no reader, the reader itself returns
+              ``None`` (path absent/unreadable), or the reader raises (fail-safe:
+              a reader failure only ever *keeps* a finding). Never raises.
+        """
+        if self.repo_reader is None:
+            return None
+        try:
+            return self.repo_reader.read_file(path)
+        except Exception as exc:  # noqa: BLE001 - a reader failure must never break verification
+            logger.debug("CodebaseIndex: repo_reader.read_file(%r) failed: %s", path, exc)
+            return None
+
+    def _reader_files(self) -> List[str]:
+        """List the repo reader's paths, degrading to ``[]``.
+
+        Postconditions:
+            - Returns the reader's paths when a reader is attached; ``[]`` when
+              there is no reader or it raises. Never raises.
+        """
+        if self.repo_reader is None:
+            return []
+        try:
+            return list(self.repo_reader.list_files())
+        except Exception as exc:  # noqa: BLE001 - a reader failure must never break verification
+            logger.debug("CodebaseIndex: repo_reader.list_files() failed: %s", exc)
+            return []
 
     def _readable_sources(self) -> List[Tuple[str, str]]:
         """All ``(path, content)`` the verifier can read, existing-codebase last.
@@ -175,14 +227,22 @@ class CodebaseIndex:
         return sources
 
     def list_files(self) -> List[str]:
-        """Return every readable path, the existing-codebase pseudo-path last.
+        """Return every readable path, repo-reader paths after the submission's.
 
         Postconditions:
-            - The submission's own files come first in insertion order; the
-              ``<existing codebase>`` pseudo-path is appended only when a
-              non-blank existing-codebase excerpt was provided.
+            - The submission's own files come first in insertion order, then the
+              ``<existing codebase>`` pseudo-path (only when a non-blank excerpt
+              was provided), then the repo reader's paths (when a reader is
+              attached), de-duplicated with submission paths winning. Never
+              raises (a reader failure contributes no paths).
         """
-        return [path for path, _ in self._readable_sources()]
+        paths = [path for path, _ in self._readable_sources()]
+        seen = set(paths)
+        for path in self._reader_files():
+            if path not in seen:
+                seen.add(path)
+                paths.append(path)
+        return paths
 
     def _resolve(self, key: str) -> Tuple[Optional[str], List[str]]:
         """Resolve a stripped ``key`` to ``(canonical_key_or_None, suffix_hits)``.
@@ -230,12 +290,21 @@ class CodebaseIndex:
               names it and a non-blank excerpt exists.
             - Returns an exact file key, or the sole suffix match (``main.py`` →
               ``app/main.py``).
-            - Returns None for a blank, absent, or ambiguous path — the verifier
-              would have no single primary file to read, so the caller keeps the
-              finding rather than verify it.
+            - Falls through to the repo reader: when the submission cannot
+              resolve the path but the reader can read it, returns the cited path
+              verbatim (so a finding about an existing-but-unchanged repo file is
+              still grouped and verified rather than skipped).
+            - Returns None for a blank, absent, or ambiguous path with no reader
+              hit — the verifier would have no single primary file to read, so the
+              caller keeps the finding rather than verify it.
         """
-        resolved, _ = self._resolve((path or "").strip())
-        return resolved
+        key = (path or "").strip()
+        resolved, _ = self._resolve(key)
+        if resolved is not None:
+            return resolved
+        if key and self._reader_read(key) is not None:
+            return key
+        return None
 
     def read_file(self, path: str) -> str:
         """Return the full content of ``path``, resolving near-misses.
@@ -258,6 +327,13 @@ class CodebaseIndex:
             return self.existing_codebase
         if resolved is not None:
             return self.files[resolved]
+        # Not in the submission — fall through to the repo reader so an
+        # existing-but-unchanged file (absent from the diff) is still readable.
+        # This is what lets the verifier confirm a file a finding calls "missing"
+        # actually exists in the repository.
+        reader_content = self._reader_read(key)
+        if reader_content is not None:
+            return reader_content
         # Resolution failed — give the tool a message that distinguishes an
         # ambiguous citation from an absent one (and a missing excerpt).
         if key == self.EXISTING_CODEBASE_PATH:
@@ -272,7 +348,13 @@ class CodebaseIndex:
     def search(
         self, query: str, max_matches: int = _SEARCH_MATCH_LIMIT
     ) -> List[Tuple[str, int, str]]:
-        """Find a case-insensitive substring across all files.
+        """Find a case-insensitive substring across the in-memory sources.
+
+        Searches only the submission's files plus the existing-codebase excerpt
+        (the in-memory ``_readable_sources``) — NOT the repo reader, which would
+        require fetching/scanning the whole repository per query. To check a
+        specific repo file's existence or content, the verifier uses
+        ``list_files`` + a targeted ``read_file`` (which does consult the reader).
 
         Preconditions:
             - ``max_matches`` > 0.
@@ -350,7 +432,7 @@ def _strip_numbered_prefixes(
         if m:
             orig = int(m.group(1))
             phys_to_orig[i] = orig
-            stripped.append(line[m.end():])
+            stripped.append(line[m.end() :])
             if orig == line_number and not exact_match:
                 physical_index = i
                 exact_match = True
@@ -390,9 +472,9 @@ def _find_python_function_at_line(
         - Returns a "module level" message when no enclosing construct is found.
         - Returns a parse-error message and never raises on ``SyntaxError`` or
           any other ``ast.parse`` failure so the caller can fall back gracefully.
-        - Requires Python 3.8+ for ``ast.AST.end_lineno``; nodes without
-          ``end_lineno`` are skipped (not possible on the project's Python 3.10
-          target, but handled defensively via ``getattr``).
+        - Start/end lines come from the shared ``node_start_line``/
+          ``node_end_line`` helpers (``end_lineno`` when present, else the node's
+          own ``lineno``), so all three AST consumers agree on construct ranges.
     """
     try:
         tree = ast.parse(content)
@@ -406,12 +488,8 @@ def _find_python_function_at_line(
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        end_line = getattr(node, "end_lineno", None)
-        if end_line is None:
-            continue
-        start_line = node.lineno
-        for dec in node.decorator_list:
-            start_line = min(start_line, dec.lineno)
+        start_line = node_start_line(node)
+        end_line = node_end_line(node)
         if start_line <= line_number <= end_line:
             kind = "class" if isinstance(node, ast.ClassDef) else "function"
             candidates.append((end_line - start_line, start_line, end_line, node.name, kind))
@@ -826,6 +904,7 @@ def filter_false_positives(
     llm: LLMClient,
     input_data: CodeReviewInput,
     issues: List[CodeReviewIssue],
+    repo_reader: Optional[RepoReader] = None,
 ) -> List[CodeReviewIssue]:
     """Return ``issues`` minus the ones a full-codebase re-check confirms are false.
 
@@ -849,7 +928,11 @@ def filter_false_positives(
           verdict, or any error is kept (fail-safe).
         - Returns ``issues`` unchanged (no LLM call) when the filter is disabled
           via ``CODE_REVIEW_FALSE_POSITIVE_FILTER``, when no finding has a file
-          path, or when the submission exposes no readable files.
+          path, or when the submission exposes no readable files and no
+          ``repo_reader`` was provided.
+        - When ``repo_reader`` is provided, the verifier can additionally read
+          existing repository files outside the diff, so it can drop findings
+          that claim an existing file/module is missing.
         - Never raises: any setup failure (index build, model resolution,
           context sizing) or per-group verification failure logs a warning and
           keeps the affected findings, so verification can never break the
@@ -863,7 +946,7 @@ def filter_false_positives(
         return list(issues)
 
     try:
-        return _verify_and_filter(llm, input_data, issues, verifiable)
+        return _verify_and_filter(llm, input_data, issues, verifiable, repo_reader)
     except Exception as exc:  # noqa: BLE001 - fail-safe: verification must never break the review
         logger.warning(
             "FalsePositiveFilter: verification failed during setup (%s: %s); keeping all findings",
@@ -878,6 +961,7 @@ def _verify_and_filter(
     input_data: CodeReviewInput,
     issues: List[CodeReviewIssue],
     verifiable: List[CodeReviewIssue],
+    repo_reader: Optional[RepoReader] = None,
 ) -> List[CodeReviewIssue]:
     """Core of :func:`filter_false_positives`; may raise on setup errors.
 
@@ -893,11 +977,13 @@ def _verify_and_filter(
         - Same removal contract as :func:`filter_false_positives`, minus the
           env-toggle and blank-path early returns the caller already handled.
     """
-    index = CodebaseIndex.from_input(input_data)
-    if not index.files:
-        # No readable submission files — the legacy ``code`` blob had no
-        # path-headed content. We cannot show the verifier any real code, so we
-        # cannot responsibly drop anything.
+    index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
+    if not index.files and index.repo_reader is None:
+        # No readable submission files AND no repo reader — the legacy ``code``
+        # blob had no path-headed content and there is no repository to consult.
+        # We cannot show the verifier any real code, so we cannot responsibly
+        # drop anything. (With a reader attached, a finding citing an existing
+        # repo file is still verifiable, so we proceed.)
         return list(issues)
 
     model = resolve_code_review_model(llm)

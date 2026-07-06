@@ -53,6 +53,7 @@ class ReviewProfile(str, Enum):
     ACCEPTANCE = "acceptance"
     SENIOR_ARCHITECTURE = "senior_architecture"
     DEVOPS_MAINTAINABILITY = "devops_maintainability"
+    CLASS_COHESION = "class_cohesion"
 
 
 @dataclass(frozen=True)
@@ -287,6 +288,29 @@ _DEVOPS_MAINTAINABILITY_CRITERIA = (
 )
 
 
+_CLASS_COHESION_CRITERIA = (
+    "\nThis review is a CLASS COHESION check. You are shown one class at a time: its stated "
+    "purpose (name + docstring) and a body-free summary of each method it defines (signature + "
+    "docstring). Judge whether the methods COLLECTIVELY serve that stated purpose.\n\n"
+    "**You check for:**\n\n"
+    "1. **Single Responsibility** - Do all methods belong to one cohesive responsibility, or does "
+    "the class mix unrelated concerns (a 'god class' doing persistence AND HTTP AND formatting)?\n\n"
+    "2. **Misfit Methods** - Is there a method whose responsibility does not match the class's "
+    "stated purpose and would be better placed on another class or as a free function?\n\n"
+    "3. **Purpose/Behavior Mismatch** - Does the class's name/docstring promise behavior its "
+    "methods do not provide, or do the methods clearly do something the stated purpose does not "
+    "describe?\n\n"
+    "4. **Missing Responsibilities** - Given the stated purpose, is an obviously-required "
+    "operation absent (e.g. a cache with no eviction, a parser with no error path)?\n\n"
+    "Emit at most a few findings, only for genuine cohesion problems — do NOT nitpick individual "
+    "method bodies (you cannot see them), naming, style, or documentation here; those are covered "
+    'by the per-function review. For every issue, set "category" to "structure" and reserve '
+    '"high"/"critical" for a class that is clearly unmaintainable; a normal cohesion concern is '
+    '"medium" or "low". If the class is cohesive, return an empty issues list with '
+    "approved=true."
+)
+
+
 REVIEW_PROFILES: dict[ReviewProfile, _ProfileSpec] = {
     ReviewProfile.CODE_REVIEW: _ProfileSpec(_CODE_REVIEW_ROLE_LINE, _CODE_REVIEW_CRITERIA),
     ReviewProfile.SPEC_CONFORMANCE: _ProfileSpec(
@@ -310,6 +334,12 @@ REVIEW_PROFILES: dict[ReviewProfile, _ProfileSpec] = {
         "maintainability, environment separation, brittle automation, architecture fit, and merge "
         "readiness.",
         _DEVOPS_MAINTAINABILITY_CRITERIA,
+    ),
+    ReviewProfile.CLASS_COHESION: _ProfileSpec(
+        "You are a Senior Software Engineer reviewing a single class for cohesion. You judge "
+        "whether the class's methods collectively serve its stated purpose (its name and "
+        "docstring), not the internals of any one method.",
+        _CLASS_COHESION_CRITERIA,
     ),
 }
 

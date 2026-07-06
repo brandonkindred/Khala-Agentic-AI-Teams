@@ -62,11 +62,22 @@ def test_all_profiles_share_the_json_output_contract() -> None:
         (ReviewProfile.ACCEPTANCE, "ACCEPTANCE VERIFICATION"),
         (ReviewProfile.SENIOR_ARCHITECTURE, "SENIOR ARCHITECT"),
         (ReviewProfile.DEVOPS_MAINTAINABILITY, "DEVOPS MAINTAINABILITY"),
+        (ReviewProfile.CLASS_COHESION, "CLASS COHESION"),
     ],
 )
 def test_each_profile_has_its_own_criteria(profile: ReviewProfile, anchor: str) -> None:
     """Each non-default profile's prompt carries its own criteria anchor."""
     assert anchor in build_review_system_prompt(profile)
+
+
+def test_class_cohesion_profile_is_advisory_and_structure_categorized() -> None:
+    """The cohesion profile judges purpose-vs-methods, tags findings as
+    ``structure``, and steers away from blocking severities and per-method nits."""
+    prompt = build_review_system_prompt(ReviewProfile.CLASS_COHESION)
+    assert "Single Responsibility" in prompt
+    assert "Misfit Methods" in prompt
+    assert '"category" to "structure"' in prompt
+    assert "do NOT nitpick individual" in prompt
 
 
 def test_acceptance_profile_instructs_criterion_tagging() -> None:
@@ -164,7 +175,7 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     the default runs it once."""
     calls: list[tuple] = []
 
-    def _spy(llm, input_data, issues):
+    def _spy(llm, input_data, issues, repo_reader=None):
         calls.append((llm, input_data, issues))
         return issues
 

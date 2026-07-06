@@ -9,6 +9,8 @@ failures (502/503/504/transport), and rate-limit-aware backoff for 403s.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 import re
@@ -566,6 +568,78 @@ class GitHubClient:
                 out.append(_pr_file_from_payload(item))
             url = _parse_next_link(response.headers.get("Link"))
         return out
+
+    def get_file_contents(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
+        """Return the decoded text of a repository file at ``ref``, or ``None``.
+
+        Fetches ``GET /repos/{owner}/{repo}/contents/{path}?ref={ref}`` and
+        base64-decodes the ``content`` field. Used to read whole files (both a
+        PR's changed files at its head SHA, and existing unchanged files the
+        review needs to confirm exist).
+
+        Preconditions:
+            - ``path`` is a repository-relative path; ``ref`` is a branch, tag, or
+              commit SHA.
+        Postconditions:
+            - Returns the file's UTF-8 text (replacing undecodable bytes) for a
+              regular file. Returns ``None`` for a missing path (404), a
+              directory or non-file entry, or a payload that is not
+              base64-decodable — so a caller treats "unreadable" as "absent"
+              rather than failing. Raises ``GitHubAPIError`` only for a non-404
+              error status (auth, rate limit, server), so a real API failure is
+              not silently masked as an absent file.
+        """
+        response = self._request(
+            "GET", f"/repos/{owner}/{repo}/contents/{path}", params={"ref": ref}
+        )
+        if response.status_code == 404:
+            return None
+        payload = self._check(response).json()
+        if not isinstance(payload, dict) or payload.get("type") != "file":
+            return None
+        if payload.get("encoding") != "base64" or not isinstance(payload.get("content"), str):
+            return None
+        try:
+            raw = base64.b64decode(payload["content"])
+        except (binascii.Error, ValueError):
+            return None
+        return raw.decode("utf-8", errors="replace")
+
+    def get_repository_tree(
+        self, owner: str, repo: str, ref: str, recursive: bool = True
+    ) -> list[str]:
+        """Return repository-relative paths of every blob (file) at ``ref``.
+
+        Fetches ``GET /repos/{owner}/{repo}/git/trees/{ref}?recursive=1``.
+
+        Preconditions:
+            - ``ref`` is a branch, tag, or commit SHA.
+        Postconditions:
+            - Returns the path of every ``blob`` entry (files, not directories) in
+              the tree. When GitHub marks the response ``truncated`` (a very large
+              repository), returns what it did send (a partial listing) rather
+              than raising — callers use the listing only as a convenience and can
+              still read any exact path via :meth:`get_file_contents`. Raises
+              ``GitHubAPIError`` on a non-2xx status.
+        """
+        params: dict[str, Any] = {"recursive": "1"} if recursive else {}
+        payload = self._check(
+            self._request("GET", f"/repos/{owner}/{repo}/git/trees/{ref}", params=params)
+        ).json()
+        if not isinstance(payload, dict):
+            return []
+        if payload.get("truncated"):
+            logger.warning(
+                "get_repository_tree: %s/%s@%s tree is truncated; listing is partial",
+                owner,
+                repo,
+                ref,
+            )
+        return [
+            entry["path"]
+            for entry in (payload.get("tree") or [])
+            if isinstance(entry, dict) and entry.get("type") == "blob" and entry.get("path")
+        ]
 
     def create_pull_request_review(
         self,
