@@ -32,6 +32,7 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
     "deepthought": "deepthought.temporal",
     "coding_team": "coding_team.temporal",
     "agent_provisioning": "agent_provisioning_team.temporal",
+    "job_matching": "job_matching_team.temporal",
 }
 
 

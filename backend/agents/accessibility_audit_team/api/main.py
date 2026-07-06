@@ -2,48 +2,49 @@
 FastAPI endpoints for the Digital Accessibility Audit Team.
 """
 
+import asyncio
 import logging
 import uuid
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from job_service_client import (
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
-    JobServiceClient,
     start_stale_job_monitor,
 )
 from shared_observability import init_otel
 
+from ..audit_execution import (
+    CreateAuditRequest,
+    execute_audit_job,
+    get_job_manager,
+    get_orchestrator,
+)
 from ..models import (
     AccessibilityAuditResult,
     AuditJobResponse,
-    AuditRequest,
     AuditStatusResponse,
     BacklogExportResponse,
     FindingsListResponse,
-    MobileAppTarget,
     Severity,
-    WCAGLevel,
 )
-from ..orchestrator import AccessibilityAuditOrchestrator
 
 init_otel(service_name="accessibility-audit-team", team_key="accessibility_audit")
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_job_manager = JobServiceClient(team="accessibility_audit_team")
+_job_manager = get_job_manager()
 _stale_monitor_stop = start_stale_job_monitor(
     _job_manager,
     interval_seconds=15.0,
     stale_after_seconds=300.0,
     reason="Job heartbeat stale while pending/running",
 )
-_orchestrator: Optional[AccessibilityAuditOrchestrator] = None
 
 
 def mark_all_running_jobs_failed(reason: str) -> None:
@@ -61,49 +62,9 @@ def _to_ui_status(status: str) -> str:
     return status
 
 
-def get_orchestrator() -> AccessibilityAuditOrchestrator:
-    """Get or create the orchestrator singleton."""
-    global _orchestrator
-    if _orchestrator is None:
-        from strands import Agent
-
-        from llm_service import get_strands_model
-
-        _orchestrator = AccessibilityAuditOrchestrator(
-            llm_client=Agent(model=get_strands_model("accessibility_audit")),
-        )
-    return _orchestrator
-
-
 # ---------------------------------------------------------------------------
 # Request/Response Models
 # ---------------------------------------------------------------------------
-
-
-class CreateAuditRequest(BaseModel):
-    """Request to create a new accessibility audit."""
-
-    name: str = Field(default="", description="Human-readable audit name")
-    web_urls: List[str] = Field(default_factory=list, description="Web URLs to audit")
-    mobile_apps: List[Dict[str, str]] = Field(
-        default_factory=list,
-        description="Mobile apps: [{platform, name, version, build}]",
-    )
-    critical_journeys: List[str] = Field(default_factory=list, description="Critical user journeys")
-    timebox_hours: Optional[int] = Field(default=None, description="Maximum hours for the audit")
-    auth_required: bool = Field(default=False)
-    max_pages: Optional[int] = Field(default=None)
-    sampling_strategy: str = Field(default="journey_based")
-    wcag_levels: List[str] = Field(default_factory=lambda: ["A", "AA"])
-    tech_stack: Dict[str, str] = Field(default_factory=lambda: {"web": "other", "mobile": "other"})
-
-    @field_validator("web_urls")
-    @classmethod
-    def validate_urls(cls, v: List[str]) -> List[str]:
-        for url in v:
-            if not url.startswith(("http://", "https://")):
-                raise ValueError(f"Invalid URL (must start with http:// or https://): {url}")
-        return v
 
 
 class RetestRequest(BaseModel):
@@ -154,6 +115,41 @@ class DesignSystemContractRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Temporal dispatch
+# ---------------------------------------------------------------------------
+
+
+def _get_temporal_dispatcher() -> Optional[Callable[[str, str, dict], str]]:
+    """Return the Temporal ``start_*_workflow`` dispatcher when Temporal is enabled.
+
+    Preconditions:
+        - None from the caller. Temporal enablement (``TEMPORAL_ADDRESS`` set) is
+          checked internally via ``shared_temporal.is_temporal_enabled()``.
+    Postconditions:
+        - Returns the ``start_accessibility_audit_workflow`` callable when
+          ``TEMPORAL_ADDRESS`` is set and the Temporal stack imports cleanly, else
+          ``None`` so callers fall back to the in-process background-task path. A
+          failed import while Temporal is enabled is logged before returning ``None``.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        return None
+    if not is_temporal_enabled():
+        return None
+    try:
+        from ..temporal.start_workflow import start_accessibility_audit_workflow
+    except ImportError:
+        logger.warning(
+            "Temporal is enabled but the accessibility-audit Temporal stack failed to "
+            "import; falling back to in-process execution.",
+            exc_info=True,
+        )
+        return None
+    return start_accessibility_audit_workflow
+
+
+# ---------------------------------------------------------------------------
 # Audit Endpoints
 # ---------------------------------------------------------------------------
 
@@ -163,41 +159,25 @@ async def create_audit(
     request: CreateAuditRequest,
     background_tasks: BackgroundTasks,
 ) -> AuditJobResponse:
-    """
-    Create and start a new accessibility audit.
+    """Create and start a new accessibility audit.
 
-    Returns a job ID that can be used to poll for status.
+    Dispatch path: when Temporal is enabled (``TEMPORAL_ADDRESS`` set) the audit
+    runs as a durable ``AccessibilityAuditWorkflow`` on the
+    ``accessibility_audit-queue`` task queue and the response's ``workflow_id`` is
+    populated for Temporal-UI correlation. Otherwise it runs in-process via a
+    FastAPI background task and ``workflow_id`` is ``None`` (never an empty
+    string). Either way the job row is created ``pending`` up front and its
+    status transitions (``running`` -> terminal) are owned by whichever path
+    executes it, so clients poll ``GET /audit/status/{job_id}`` regardless of
+    whether ``workflow_id`` is present.
+
+    Postconditions:
+        - A ``pending`` job row exists; the response returns its ``job_id`` /
+          ``audit_id`` (and ``workflow_id`` on the Temporal path) for polling.
     """
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     audit_id = f"audit_{uuid.uuid4().hex[:8]}"
-
-    # Convert mobile apps
-    mobile_app_targets = [
-        MobileAppTarget(
-            platform=app.get("platform", "ios"),
-            name=app.get("name", ""),
-            version=app.get("version", ""),
-            build=app.get("build", ""),
-        )
-        for app in request.mobile_apps
-    ]
-
-    # Convert WCAG levels
-    wcag_levels = [WCAGLevel(level) for level in request.wcag_levels if level in ["A", "AA", "AAA"]]
-
-    # Create audit request
-    audit_request = AuditRequest(
-        audit_id=audit_id,
-        name=request.name,
-        web_urls=request.web_urls,
-        mobile_apps=mobile_app_targets,
-        critical_journeys=request.critical_journeys,
-        timebox_hours=request.timebox_hours,
-        auth_required=request.auth_required,
-        max_pages=request.max_pages,
-        sampling_strategy=request.sampling_strategy,
-        wcag_levels=wcag_levels or [WCAGLevel.A, WCAGLevel.AA],
-    )
+    payload = request.model_dump()
 
     _job_manager.create_job(
         job_id,
@@ -210,41 +190,60 @@ async def create_audit(
         findings_count=0,
         result=None,
         error=None,
-        request_payload=request.model_dump(),
+        request_payload=payload,
     )
 
-    # Run audit in background
-    async def run_audit_task():
+    # None => the in-process (non-Temporal) path ran; set to the workflow id on a
+    # successful Temporal dispatch. It is never an empty string.
+    workflow_id: Optional[str] = None
+    dispatch = _get_temporal_dispatcher()
+    if dispatch is not None:
         try:
-            _job_manager.update_job(
-                job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20
-            )
-            orchestrator = get_orchestrator()
-            result = await orchestrator.run_audit(audit_request, request.tech_stack)
-            _job_manager.update_job(
-                job_id,
-                status="completed" if result.success else JOB_STATUS_FAILED,
-                progress=100,
-                current_phase=result.current_phase.value if result else "report_packaging",
-                completed_phases=[p.value for p in result.completed_phases] if result else [],
-                findings_count=result.total_findings if result else 0,
-                result=result.model_dump() if result else None,
-                error=result.failure_reason if result and not result.success else None,
-            )
-            if not result.success:
-                _job_manager.update_job(
-                    job_id, status=JOB_STATUS_FAILED, error=result.failure_reason
-                )
+            # The dispatcher is synchronous and blocking: it polls for the worker's
+            # Temporal client to connect, then makes a blocking round-trip to start
+            # the workflow. Calling it directly on the async event loop would freeze
+            # every other in-flight request, so offload it to a worker thread.
+            workflow_id = await asyncio.to_thread(dispatch, job_id, audit_id, payload)
         except Exception as e:
-            _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-
-    background_tasks.add_task(run_audit_task)
+            # Fail fast rather than re-running in-process: the workflow may have
+            # been accepted server-side, so an in-process fallback could execute
+            # the same audit twice. Mark the job failed and surface a 500. The
+            # exception type/message (e.g. connection refused vs. client-not-ready
+            # timeout) is included so operators can tell the failures apart.
+            logger.warning(
+                "Temporal dispatch failed for job %s: %s: %s",
+                job_id,
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            _job_manager.update_job(
+                job_id, status=JOB_STATUS_FAILED, error=f"Temporal dispatch failed: {e}"
+            )
+            raise HTTPException(
+                status_code=500, detail="Failed to dispatch audit to Temporal"
+            ) from e
+        # Record the workflow id for correlation only; the worker activity owns
+        # all status transitions (pending -> running -> terminal), so the API
+        # must not also write status here or it can race the activity. The
+        # workflow is already accepted server-side at this point, so a failure
+        # to persist the correlation id is logged, not raised — the job is not
+        # failed and the request still succeeds.
+        try:
+            _job_manager.update_job(job_id, workflow_id=workflow_id)
+        except Exception:
+            logger.warning("Failed to record workflow_id for job %s", job_id, exc_info=True)
+        message = "Audit queued (Temporal). Poll /audit/status/{job_id} for progress."
+    else:
+        background_tasks.add_task(execute_audit_job, job_id, audit_id, request)
+        message = "Audit queued. Poll /audit/status/{job_id} for progress."
 
     return AuditJobResponse(
         job_id=job_id,
         audit_id=audit_id,
-        status="running",
-        message="Audit started. Poll /audit/status/{job_id} for progress.",
+        status=JOB_STATUS_PENDING,
+        message=message,
+        workflow_id=workflow_id,
     )
 
 
