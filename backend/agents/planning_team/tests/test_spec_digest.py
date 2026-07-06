@@ -150,14 +150,14 @@ def test_parse_json_untagged_fence_after_prose():
 
 
 def test_env_positive_int(monkeypatch):
-    monkeypatch.setenv("PV3_TEST_INT", "120")
-    assert spec_digest._env_positive_int("PV3_TEST_INT", 50) == 120
-    monkeypatch.setenv("PV3_TEST_INT", "garbage")
-    assert spec_digest._env_positive_int("PV3_TEST_INT", 50) == 50  # garbage -> default
-    monkeypatch.setenv("PV3_TEST_INT", "0")
-    assert spec_digest._env_positive_int("PV3_TEST_INT", 50) == 50  # non-positive -> default
-    monkeypatch.delenv("PV3_TEST_INT", raising=False)
-    assert spec_digest._env_positive_int("PV3_TEST_INT", 50) == 50  # unset -> default
+    monkeypatch.setenv("PLANNING_TEST_INT", "120")
+    assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 120
+    monkeypatch.setenv("PLANNING_TEST_INT", "garbage")
+    assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 50  # garbage -> default
+    monkeypatch.setenv("PLANNING_TEST_INT", "0")
+    assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 50  # non-positive -> default
+    monkeypatch.delenv("PLANNING_TEST_INT", raising=False)
+    assert spec_digest._env_positive_int("PLANNING_TEST_INT", 50) == 50  # unset -> default
 
 
 def test_parse_json_empty_and_invalid():

@@ -5,7 +5,7 @@ Topology::
     intake → discovery → requirements → synthesis → document_production → sub_agent_provisioning
 
 The discovery and requirements phases use LLM agents; other phases use
-adapters to external services (PRA, Planning V2, Market Research, AI Systems).
+adapters to external services (PRA, Planning, Market Research, AI Systems).
 """
 
 from __future__ import annotations

@@ -2175,7 +2175,7 @@ def run_orchestrator(
             except Exception:
                 return None
 
-        p3_result = run_planning_workflow(
+        planning_result = run_planning_workflow(
             repo_path=str(path),
             spec_content=validated_spec,
             use_product_analysis=False,
@@ -2187,9 +2187,9 @@ def run_orchestrator(
             answer_callback=_build_planning_answer_callback(job_id),
             auto_answer_questions=False,
         )
-        if not p3_result.get("success"):
+        if not planning_result.get("success"):
             err = (
-                p3_result.get("failure_reason")
+                planning_result.get("failure_reason")
                 or "Planning workflow did not complete successfully."
             )
             logger.error("Planning failed: %s", err)
@@ -2198,7 +2198,7 @@ def run_orchestrator(
 
         try:
             adapter_result: PlanningAdapterResult = adapt_planning_result(
-                p3_result, spec_title=requirements.title, repo_path=str(path)
+                planning_result, spec_title=requirements.title, repo_path=str(path)
             )
         except ValueError as e:
             logger.error("Planning adapter failed: %s", e)

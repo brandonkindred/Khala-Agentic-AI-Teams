@@ -9,6 +9,7 @@ import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.
 
 const PHASES = ['intake', 'discovery', 'requirements', 'synthesis', 'document_production', 'sub_agent_provisioning'];
 
+/** Displays the current status and progress of a Planning job, polling the API until completion. */
 @Component({
   selector: 'app-planning-job-status',
   standalone: true,

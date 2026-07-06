@@ -463,7 +463,7 @@ def plan_project_activity(
             except Exception:
                 return None
 
-        p3_result = run_planning_workflow(
+        planning_result = run_planning_workflow(
             repo_path=str(path),
             spec_content=validated_spec,
             use_product_analysis=False,
@@ -471,13 +471,13 @@ def plan_project_activity(
             job_updater=_planning_updater,
             run_architecture_fn=_run_architecture,
         )
-        if not p3_result.get("success"):
-            err = p3_result.get("failure_reason") or "Planning failed"
+        if not planning_result.get("success"):
+            err = planning_result.get("failure_reason") or "Planning failed"
             update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return PlanResult().model_dump()
 
         adapter_result = adapt_planning_result(
-            p3_result, spec_title=requirements.title, repo_path=str(path)
+            planning_result, spec_title=requirements.title, repo_path=str(path)
         )
         adapter_result.shared_planning_doc_path = str(
             path / "plan" / "planning_team" / "planning_document.md"

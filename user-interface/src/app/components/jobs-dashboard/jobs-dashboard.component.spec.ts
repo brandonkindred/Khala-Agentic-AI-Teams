@@ -573,32 +573,32 @@ describe('JobsDashboardComponent', () => {
       // Planning list endpoint omits created_at, so the row arrives with
       // createdAt undefined. The dashboard should still be able to flag it
       // stuck once it has observed the job frozen for STUCK_THRESHOLD_MS+.
-      const makePV3 = (phase: string) => {
-        const job = makeJob('running', 'pv3-1', undefined as unknown as string, null);
+      const makePlanningJob = (phase: string) => {
+        const job = makeJob('running', 'planning-1', undefined as unknown as string, null);
         job.unified.source = 'planning';
         job.unified.phase = phase;
         return job;
       };
-      record([makePV3('drafting')]);
+      record([makePlanningJob('drafting')]);
       // Advance past the threshold while keeping the signal stable.
       vi.setSystemTime(new Date(Date.now() + STUCK_MS + 60_000));
-      record([makePV3('drafting')]);
-      expect(component.isStuck(makePV3('drafting'))).toBe(true);
+      record([makePlanningJob('drafting')]);
+      expect(component.isStuck(makePlanningJob('drafting'))).toBe(true);
     });
 
     it('does not flag a Planning job whose phase is still advancing', () => {
-      const makePV3 = (phase: string) => {
-        const job = makeJob('running', 'pv3-1', undefined as unknown as string, null);
+      const makePlanningJob = (phase: string) => {
+        const job = makeJob('running', 'planning-1', undefined as unknown as string, null);
         job.unified.source = 'planning';
         job.unified.phase = phase;
         return job;
       };
-      record([makePV3('drafting')]);
+      record([makePlanningJob('drafting')]);
       vi.setSystemTime(new Date(Date.now() + STUCK_MS + 60_000));
-      record([makePV3('reviewing')]);
+      record([makePlanningJob('reviewing')]);
       // Signal changed → sampleCount resets to 1, firstSeenAt resets to now,
       // so the age basis is fresh and the row is not flagged.
-      expect(component.isStuck(makePV3('reviewing'))).toBe(false);
+      expect(component.isStuck(makePlanningJob('reviewing'))).toBe(false);
     });
 
     it('tooltip uses getTimeAgo-style phrasing relative to lastChangedAt', () => {

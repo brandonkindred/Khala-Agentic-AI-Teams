@@ -232,8 +232,8 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
                     "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
-                    with patch("planning_team.orchestrator.run_workflow") as mock_run_v3:
-                        mock_run_v3.return_value = {
+                    with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
+                        mock_run_planning.return_value = {
                             "success": False,
                             "failure_reason": "Planning failed",
                         }
@@ -293,8 +293,8 @@ def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path)
                     "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
-                    with patch("planning_team.orchestrator.run_workflow") as mock_run_v3:
-                        mock_run_v3.return_value = {
+                    with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
+                        mock_run_planning.return_value = {
                             "success": False,
                             "failure_reason": "Planning failed",
                         }
@@ -382,8 +382,8 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
                     "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
-                    with patch("planning_team.orchestrator.run_workflow") as mock_run_v3:
-                        mock_run_v3.return_value = {
+                    with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
+                        mock_run_planning.return_value = {
                             "success": True,
                             "handoff_package": {
                                 "architecture_overview": "Backend FastAPI; frontend Angular."

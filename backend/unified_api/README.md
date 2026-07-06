@@ -26,7 +26,7 @@ graph TB
             AISys["/api/ai-systems"]
             Invest["/api/investment"]
             Nutrition["/api/nutrition-meal-planning"]
-            PlanV3["/api/planning"]
+            Planning["/api/planning"]
             Coding["/api/coding-team"]
             Sales["/api/sales"]
             RoadTrip["/api/road-trip-planning"]

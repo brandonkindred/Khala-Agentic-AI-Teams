@@ -1,5 +1,5 @@
 """
-Document production phase: produce context doc and spec; call PRA and optionally Planning V2.
+Document production phase: produce context doc and spec; call PRA.
 
 Persists artifacts to repo path and builds handoff package.
 """

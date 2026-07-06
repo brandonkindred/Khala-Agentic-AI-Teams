@@ -4791,7 +4791,7 @@ Previously Answered Questions:
         """Generate a Product Requirements Document (PRD) from the spec and answers.
 
         Uses the cleaned, validated spec as the base and integrates resolved answers
-        (including constraint decisions) into a structured PRD suitable for Planning V2.
+        (including constraint decisions) into a structured PRD suitable for Planning.
         """
         # Summarize answered questions for the prompt; this may be empty on the first run
         answered_summary = self._format_answered_questions(answered_questions)
