@@ -385,6 +385,8 @@ class _FakeReviewClient:
           test the broad outer error handler).
         - ``comment_fail_times``: the first N ``add_issue_comment`` calls raise a
           403, exercising the per-finding comment failure path.
+        - ``reaction_fail``: ``create_issue_reaction`` raises a 403, exercising the
+          best-effort reaction path that must never fail the job.
     Captured side effects: ``reviews`` (each submitted review's kwargs),
     ``review_comments`` (each ``create_review_comment`` kwargs — the dedicated
     review-comments endpoint that carries file-level comments), ``comments``
@@ -423,6 +425,7 @@ class _FakeReviewClient:
         self.review_exc: Optional[Exception] = None  # non-API error to raise on submit
         self.comment_fail_times = 0  # number of leading add_issue_comment calls that 422
         self._comment_calls = 0
+        self.reaction_fail = False  # create_issue_reaction raises a 403 when True
 
     def __enter__(self) -> "_FakeReviewClient":
         return self
@@ -485,6 +488,8 @@ class _FakeReviewClient:
         return {"id": 2, "html_url": "https://example/comment/2"}
 
     def create_issue_reaction(self, _o: str, _r: str, n: int, content: str = "+1") -> None:
+        if self.reaction_fail:
+            raise GitHubAPIError(403, "rate limited")
         self.reactions.append((n, content))
 
 
@@ -1216,6 +1221,11 @@ class TestReviewEndpoint:
     def test_review_with_findings_does_not_react(self, review_app) -> None:
         # The +1 reaction is reserved for a truly clean review — a review that
         # found (and posted) findings must not also get the "all good" reaction.
+        # Set agent_output explicitly (rather than relying on the fixture's
+        # default) so this test stays correct even if that default ever changes.
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[_FakeReviewIssue("high", line=2, description="a finding")]
+        )
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         gh = review_app["github"]["client"]
@@ -1224,6 +1234,20 @@ class TestReviewEndpoint:
         assert gh.reactions == []
         assert gh.comments == []
         assert job["review_summary"]["comment_findings"] == 0
+
+    def test_clean_review_reaction_failure_still_completes(self, review_app) -> None:
+        # The +1 reaction is a best-effort courtesy: a failure adding it (rate
+        # limit, missing scope, transport error) must not turn an otherwise
+        # successful clean review into a failed job.
+        review_app["github"]["agent_output"] = _FakeOutput(issues=[])
+        gh = review_app["github"]["client"]
+        gh.reaction_fail = True
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert len(gh.submitted_reviews) == 1
+        assert gh.reactions == []
 
     def test_non_422_review_error_marks_job_failed_not_degraded(self, review_app) -> None:
         # A non-422 review failure (e.g. 403 permission / rate-limit) is a real
