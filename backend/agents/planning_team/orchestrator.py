@@ -206,8 +206,8 @@ def run_workflow(
 
         result["success"] = True
         result["summary"] = "Planning completed; handoff package ready."
-        result["current_phase"] = Phase.DOCUMENT_PRODUCTION.value
-        _update(Phase.DOCUMENT_PRODUCTION.value, 100, "Complete")
+        result["current_phase"] = Phase.SUB_AGENT_PROVISIONING.value
+        _update(Phase.SUB_AGENT_PROVISIONING.value, 100, "Complete")
     except Exception as e:
         logger.exception("Planning workflow failed")
         result["failure_reason"] = str(e)

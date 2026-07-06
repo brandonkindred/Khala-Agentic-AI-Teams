@@ -6,7 +6,7 @@ A multi-agent system that simulates a real software engineering team with a mix 
 
 | Agent | Phase | Role | Expertise |
 |-------|-------|------|------------|
-| **Planning (v2)** | Discovery/Design | Product planning | 6-phase workflow: Spec Review/Gap → Planning → Implementation → Review → Problem-solving → Deliver; output adapted for Tech Lead and Architecture |
+| **Planning** | Discovery/Design | Product planning | 6-phase workflow: intake → discovery → requirements → synthesis → document_production → sub_agent_provisioning; output adapted for Tech Lead and Architecture |
 | **Architecture Expert** | Design | System designer | Designs system architecture from requirements; output used by all other agents |
 | **Tech Lead** | Design | Staff-level orchestrator | Uses initial_spec to generate full build plan; distributes work by dependency; tracks progress; triggers documentation (uses Spec Chunk Analyzer, Spec Analysis Merger, Task Generator for large specs) |
 | **Git Setup Agent** | Setup | Repo setup | Creates `work_path/backend` and `work_path/frontend` clones/branches; ensures `development` branch |

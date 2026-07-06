@@ -196,7 +196,7 @@ export function fromPlanningJobSummary(s: PlanningJobSummary): UnifiedJobSummary
     jobId: s.job_id,
     status: s.status,
     source: 'planning',
-    label: getRepoName(s.repo_path) || 'Planning',
+    label: s.repo_path ? getRepoName(s.repo_path) : 'Planning',
     createdAt: undefined,
     repoPath: s.repo_path,
     phase: s.current_phase,

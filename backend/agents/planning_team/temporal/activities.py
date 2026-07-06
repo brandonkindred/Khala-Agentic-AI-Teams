@@ -22,9 +22,9 @@ def run_planning_activity(
 ) -> None:
     """Run the Planning workflow (discovery and requirements)."""
     try:
-        from planning_team.api.main import _run_workflow_background
+        from planning_team.api.main import run_workflow_background
 
-        _run_workflow_background(
+        run_workflow_background(
             job_id,
             repo_path,
             client_name,

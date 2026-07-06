@@ -232,7 +232,10 @@ class JobStatusResponse(BaseModel):
     )
     planning_subprocess: Optional[str] = Field(
         None,
-        description="Current subprocess within planning phase (planning, implementation, review, problem_solving, deliver).",
+        description=(
+            "Current subprocess within planning phase (intake, discovery, requirements, "
+            "synthesis, document_production, sub_agent_provisioning)."
+        ),
     )
     planning_completed_phases: List[str] = Field(
         default_factory=list,

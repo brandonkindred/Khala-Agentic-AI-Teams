@@ -87,7 +87,7 @@ def _get_llm():
     return get_client("planning")
 
 
-def _run_workflow_background(
+def run_workflow_background(
     job_id: str,
     repo_path: str,
     client_name: str | None,
@@ -198,9 +198,12 @@ def run_planning(request: PlanningRunRequest) -> PlanningRunResponse:
             )
         except Exception as exc:
             # A dispatch failure (e.g. Temporal unreachable) must not leave the
-            # job stuck "running": mark it failed and surface a logged 500.
+            # job stuck "running": mark it failed, remove the now-orphaned
+            # workspace (nothing has been written to it yet), and surface a
+            # logged 500.
             logger.exception("Failed to start Planning Temporal workflow %s", job_id)
             mark_job_failed(job_id, error=str(exc))
+            shutil.rmtree(resolved_path, ignore_errors=True)
             raise HTTPException(status_code=500, detail=f"Failed to start workflow: {exc}") from exc
         return PlanningRunResponse(
             job_id=job_id,
@@ -211,7 +214,7 @@ def run_planning(request: PlanningRunRequest) -> PlanningRunResponse:
     # Thread mode (no Temporal): the background worker marks the job failed on
     # its own errors, so thread.start() is the only step left to run.
     thread = threading.Thread(
-        target=_run_workflow_background,
+        target=run_workflow_background,
         args=(
             job_id,
             resolved_path,

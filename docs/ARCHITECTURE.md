@@ -480,7 +480,7 @@ The Tech Lead and Architecture Expert run after **Planning** and **planning_adap
 
 ```mermaid
 flowchart TB
-    StartPlan["Start Planning\n(after Planning v2 + adapter)"]
+    StartPlan["Start Planning\n(after Planning + adapter)"]
     TechLeadRun["Tech Lead\nGenerate task assignment"]
     ArchRun["Architecture Expert\nDesign architecture"]
     CacheHit{"Planning\ncache hit?"}

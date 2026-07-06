@@ -66,8 +66,9 @@ export class PlanningJobStatusComponent implements OnInit, OnDestroy {
           if (res.status === 'completed') {
             this.api.getResult(this.jobId).subscribe({
               next: (r) => (this.result = r),
-              // eslint-disable-next-line @typescript-eslint/no-empty-function
-              error: () => {},
+              error: (err) => {
+                this.error = err?.error?.detail ?? err?.message ?? 'Failed to load planning result';
+              },
             });
           }
         }
