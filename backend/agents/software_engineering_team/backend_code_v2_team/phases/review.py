@@ -19,7 +19,10 @@ from llm_service import LLMClient
 from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
 from software_engineering_team.shared.llm_review import run_llm_review
 from software_engineering_team.shared.models import Task
-from software_engineering_team.shared.review_progress import call_code_review_agent
+from software_engineering_team.shared.review_progress import (
+    build_disk_repo_reader,
+    call_code_review_agent,
+)
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
     MANY_CHUNKS_WARN_THRESHOLD,
@@ -254,7 +257,9 @@ def run_review(
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
             )
-            cr_result = call_code_review_agent(code_review_agent, cr_input, None)
+            cr_result = call_code_review_agent(
+                code_review_agent, cr_input, None, repo_reader=build_disk_repo_reader(repo_path)
+            )
             for item in getattr(cr_result, "issues", []):
                 issues.append(
                     ReviewIssue(
@@ -449,7 +454,12 @@ def run_microtask_review(
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
             )
-            cr_result = call_code_review_agent(code_review_agent, cr_input, detail_callback)
+            cr_result = call_code_review_agent(
+                code_review_agent,
+                cr_input,
+                detail_callback,
+                repo_reader=build_disk_repo_reader(repo_path),
+            )
             for item in getattr(cr_result, "issues", []):
                 issues.append(
                     ReviewIssue(
@@ -661,7 +671,12 @@ def run_code_review_phase(
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
             )
-            cr_result = call_code_review_agent(code_review_agent, cr_input, detail_callback)
+            cr_result = call_code_review_agent(
+                code_review_agent,
+                cr_input,
+                detail_callback,
+                repo_reader=build_disk_repo_reader(repo_path),
+            )
             for item in getattr(cr_result, "issues", []):
                 issues.append(
                     ReviewIssue(

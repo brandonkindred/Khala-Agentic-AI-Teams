@@ -48,18 +48,14 @@ def test_quality_gate_methods_delegate(monkeypatch) -> None:
     assert provider.run_code_review(code="x", language="python") == "review"
 
 
-def test_run_pr_code_review_builds_input_and_runs_agent(monkeypatch) -> None:
+def test_run_pr_code_review_legacy_code_mode(monkeypatch) -> None:
+    """Diff-hunk (``code=``) mode: builds a code-backed input, forwards no reader."""
     import software_engineering_team.code_review_agent as cra
 
-    class _FakeInput:
-        def __init__(self, **kw):
-            self.kw = kw
-
     class _FakeAgent:
-        def run(self, review_input, progress_callback=None):
-            return types.SimpleNamespace(issues=[], review_input=review_input, cb=progress_callback)
+        def run(self, review_input, **kwargs):
+            return types.SimpleNamespace(issues=[], review_input=review_input, kwargs=kwargs)
 
-    monkeypatch.setattr(cra, "CodeReviewInput", _FakeInput)
     monkeypatch.setattr(cra, "CodeReviewAgent", _FakeAgent)
 
     out = SECodeEngineProvider().run_pr_code_review(
@@ -71,5 +67,37 @@ def test_run_pr_code_review_builds_input_and_runs_agent(monkeypatch) -> None:
         progress_callback="cb",
     )
     assert out.issues == []
-    assert out.cb == "cb"
-    assert out.review_input.kw["language"] == "python"
+    assert out.kwargs["progress_callback"] == "cb"
+    # No repo_reader supplied -> not forwarded (keeps duck-typed stubs working).
+    assert "repo_reader" not in out.kwargs
+    assert out.review_input.code == "c"
+    assert out.review_input.files is None
+    assert out.review_input.pre_numbered is True
+    assert out.review_input.language == "python"
+
+
+def test_run_pr_code_review_whole_file_mode_forwards_reader(monkeypatch) -> None:
+    """Whole-file (``files=``) mode: builds a files-backed input and forwards the reader."""
+    import software_engineering_team.code_review_agent as cra
+
+    class _FakeAgent:
+        def run(self, review_input, **kwargs):
+            return types.SimpleNamespace(issues=[], review_input=review_input, kwargs=kwargs)
+
+    monkeypatch.setattr(cra, "CodeReviewAgent", _FakeAgent)
+
+    reader = object()
+    out = SECodeEngineProvider().run_pr_code_review(
+        files={"a.py": "x = 1\n"},
+        pre_numbered=False,
+        task_description="d",
+        task_requirements="r",
+        language="python",
+        progress_callback="cb",
+        repo_reader=reader,
+    )
+    assert out.review_input.files == {"a.py": "x = 1\n"}
+    # files takes precedence: no code blob leaks through.
+    assert out.review_input.code == ""
+    assert out.review_input.pre_numbered is False
+    assert out.kwargs["repo_reader"] is reader

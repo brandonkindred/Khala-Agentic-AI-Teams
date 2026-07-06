@@ -33,11 +33,13 @@ from .pr_review_mapping import (
     render_annotated_hunks,
     split_review_comments,
 )
+from .repo_reader import GitHubRepoReader
 
 __all__ = [
     "MAX_ISSUES_TRAVERSED",
     "GitHubAPIError",
     "GitHubClient",
+    "GitHubRepoReader",
     "Issue",
     "NotAnIssueError",
     "PullRequest",
