@@ -51,6 +51,33 @@ from sales_team.postgres import SCHEMA as SALES_POSTGRES_SCHEMA
 from shared_agent_invoke import mount_invoke_shim
 from shared_app import create_team_app
 
+logger = logging.getLogger(__name__)
+
+
+def _startup() -> None:
+    """Start the Temporal worker backstop (best-effort).
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
+    backstop covers running the app standalone (``uvicorn ...:app``).
+
+    Preconditions:
+        - None (safe to call once at app startup).
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged
+          as a warning so it cannot abort app boot (this runs as an
+          ``on_startup`` hook).
+    """
+    try:
+        from sales_team.temporal.worker import start_sales_temporal_worker_thread
+
+        start_sales_temporal_worker_thread()
+    except Exception:
+        logger.warning("sales_team Temporal worker start (lifespan backstop) failed", exc_info=True)
+
+
 app = create_team_app(
     service_name="sales-team",
     team_key="sales_team",
@@ -63,10 +90,10 @@ app = create_team_app(
         "HubSpot, Anthony Iannarino, Jill Konrath, Sales Hacker, Salesfolk, and Zig Ziglar."
     ),
     postgres_schema=SALES_POSTGRES_SCHEMA,
+    on_startup=_startup,
 )
 mount_invoke_shim(app)
 
-logger = logging.getLogger(__name__)
 _job_manager = JobServiceClient(team="sales_team")
 _stale_monitor_stop = start_stale_job_monitor(
     _job_manager,
@@ -186,6 +213,40 @@ def _run_pipeline_job(job_id: str, request: SalesPipelineRequest) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _dispatch_pipeline_job(job_id: str, request: SalesPipelineRequest) -> str:
+    """Dispatch a sales pipeline run via Temporal when enabled, else a daemon thread.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Starts exactly one execution path and returns its label
+          ("Temporal" or "thread"). With ``TEMPORAL_ADDRESS`` set the run is
+          started as a durable ``SalesWorkflow``; otherwise the legacy thread
+          path runs unchanged.
+        - A missing ``shared_temporal`` (Temporal not installed) falls through
+          to the thread path; any *other* failure while starting the workflow
+          (broken import in the team's own Temporal stack, or a client that
+          never connected) propagates to the caller, which marks the job
+          FAILED — a Temporal-enabled run is never silently downgraded.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        is_temporal_enabled = None
+
+    if is_temporal_enabled is not None and is_temporal_enabled():
+        from sales_team.temporal.start_workflow import start_sales_workflow
+
+        start_sales_workflow(job_id, request.model_dump(mode="json"))
+        logger.info("Sales pipeline dispatched via Temporal: job_id=%s", job_id)
+        return "Temporal"
+
+    thread = threading.Thread(target=_run_pipeline_job, args=(job_id, request), daemon=True)
+    thread.start()
+    return "thread"
+
+
 @app.post("/sales/pipeline/run", response_model=SalesPipelineRunResponse, tags=["pipeline"])
 def run_pipeline(request: SalesPipelineRequest) -> SalesPipelineRunResponse:
     """Start a full sales pipeline run from the specified entry stage.
@@ -209,8 +270,12 @@ def run_pipeline(request: SalesPipelineRequest) -> SalesPipelineRunResponse:
         created_at=now,
         last_updated_at=now,
     )
-    thread = threading.Thread(target=_run_pipeline_job, args=(job_id, request), daemon=True)
-    thread.start()
+    try:
+        _dispatch_pipeline_job(job_id, request)
+    except Exception as exc:
+        logger.exception("Failed to dispatch sales pipeline job %s", job_id)
+        _update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to start sales pipeline run.") from exc
     return SalesPipelineRunResponse(
         job_id=job_id,
         status=JOB_STATUS_RUNNING,
