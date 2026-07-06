@@ -118,8 +118,15 @@ def _reset_offload_pool_after_fork() -> None:
     via ``os.register_at_fork`` closes that gap on top of lazy creation: the
     child drops the stale reference and lazily builds its own fresh pool the
     next time ``_run_coro`` needs to offload.
+
+    Also unregisters the parent pool's ``atexit`` shutdown callback (a stale
+    reference to a pool that doesn't exist in this process) so process exit in
+    the child doesn't invoke it; the fresh pool the child eventually builds
+    registers its own.
     """
     global _offload_pool
+    if _offload_pool is not None:
+        atexit.unregister(_offload_pool.shutdown)
     _offload_pool = None
 
 

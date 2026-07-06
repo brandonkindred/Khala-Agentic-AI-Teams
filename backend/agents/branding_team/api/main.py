@@ -73,6 +73,29 @@ _run_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+async def _run_in_pipeline_executor(func, *args):
+    """Await *func(*args)* on the bounded ``_run_executor`` (not the loop's default).
+
+    Preconditions:
+        ``func`` is a synchronous callable that may run a branding pipeline
+        (or sub-pipeline); ``args`` are its positional arguments.
+    Postconditions:
+        Returns ``func(*args)``'s result, or propagates whatever it raises.
+
+    Note:
+        Deliberately routed through ``_run_executor`` — the same bounded pool
+        used for job-tracked pipeline runs — rather than ``asyncio.to_thread``,
+        which uses the process-wide default executor shared by any other code
+        in this (single, multi-team) process calling ``asyncio.to_thread`` /
+        ``loop.run_in_executor(None, ...)``. A handful of concurrent, multi-minute
+        pipeline runs on the shared default executor could starve unrelated
+        async-offloaded work elsewhere in the app; keeping pipeline work on its
+        own bounded pool avoids that.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_run_executor, func, *args)
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     # Register Postgres schema (no-op when POSTGRES_HOST is unset).
@@ -977,8 +1000,9 @@ async def request_design_assets_for_brand(
     if cached is not None:
         strategic_core = cached
     else:
-        # No persisted strategic core yet: run Phase 1 once, off the event loop.
-        phase1_result = await asyncio.to_thread(
+        # No persisted strategic core yet: run Phase 1 once, off the event loop
+        # and on the bounded pipeline executor (not the shared default one).
+        phase1_result = await _run_in_pipeline_executor(
             orchestrator.run_phase,
             brand.mission,
             BrandPhase.STRATEGIC_CORE,
@@ -1115,6 +1139,16 @@ def _conversation_to_response(
     latest_output: Optional[TeamOutput],
     suggested_questions: List[str],
 ) -> ConversationStateResponse:
+    """Assemble the ``ConversationStateResponse`` API model from in-memory state.
+
+    Preconditions:
+        ``messages`` is a list of ``_StoredMessage``-like objects (each with
+        ``role``/``content``/``timestamp``); the rest are already-validated
+        conversation fields.
+    Postconditions:
+        Returns a ``ConversationStateResponse`` with ``messages`` mapped 1:1 to
+        ``ConversationMessage`` and ``suggested_questions`` defaulted to ``[]``.
+    """
     msg_list = [
         ConversationMessage(role=m.role, content=m.content, timestamp=m.timestamp) for m in messages
     ]
@@ -1135,12 +1169,12 @@ async def create_branding_conversation(
     """Create a conversation, optionally seeding it with an initial message.
 
     The initial-message path runs the assistant (two LLM calls) and may run the
-    full ~40-agent pipeline, so the blocking body executes off the event loop
-    via ``asyncio.to_thread`` rather than holding a worker thread for the whole
-    request.
+    full ~40-agent pipeline, so the blocking body executes on the bounded
+    pipeline executor (see ``_run_in_pipeline_executor``) rather than holding a
+    worker thread — or the shared default executor — for the whole request.
     """
     req = body or CreateConversationRequest()
-    return await asyncio.to_thread(_create_branding_conversation_impl, req)
+    return await _run_in_pipeline_executor(_create_branding_conversation_impl, req)
 
 
 def _create_branding_conversation_impl(
@@ -1172,13 +1206,18 @@ def _create_branding_conversation_impl(
 
     if initial_message:
         # Freshly created conversation: no prior history, mission is the default.
-        conversation_store.append_message(conversation_id, "user", initial_message)
+        # conversation_id was just minted above in this same synchronous call, so
+        # append failing here (conversation vanished) isn't reachable in practice;
+        # checked anyway for consistency with send_branding_conversation_message.
+        if not conversation_store.append_message(conversation_id, "user", initial_message):
+            raise HTTPException(status_code=404, detail="Conversation not found")
         messages.append(_local_message("user", initial_message))
         reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
             [], _default_mission(), initial_message
         )
         conversation_store.update_mission(conversation_id, updated_mission)
-        conversation_store.append_message(conversation_id, "assistant", reply)
+        if not conversation_store.append_message(conversation_id, "assistant", reply):
+            logger.warning("Assistant reply not persisted for conversation %s", conversation_id)
         messages.append(_local_message("assistant", reply))
         output = _run_orchestrator_if_ready(updated_mission)
         if output is not None:
@@ -1195,7 +1234,8 @@ def _create_branding_conversation_impl(
             "Hi! I'm your branding lead. I'll guide you through our 5-phase brand development framework — "
             "starting with your Strategic Core. Let's begin: what's your company or product name?"
         )
-        conversation_store.append_message(conversation_id, "assistant", reply)
+        if not conversation_store.append_message(conversation_id, "assistant", reply):
+            logger.warning("Greeting not persisted for conversation %s", conversation_id)
         messages.append(_local_message("assistant", reply))
         suggested_questions = [
             "What's your company name?",
@@ -1295,10 +1335,11 @@ async def send_branding_conversation_message(
     ``skip_save``), and returns the refreshed conversation (404 if unknown).
 
     The assistant (two LLM calls) and any pipeline run are blocking, so the body
-    executes off the event loop via ``asyncio.to_thread`` to keep the request
-    from holding a worker thread for the full pipeline duration.
+    executes on the bounded pipeline executor (see ``_run_in_pipeline_executor``)
+    to keep the request from holding a worker thread — or the shared default
+    executor — for the full pipeline duration.
     """
-    return await asyncio.to_thread(
+    return await _run_in_pipeline_executor(
         _send_branding_conversation_message_impl, conversation_id, payload
     )
 

@@ -95,7 +95,8 @@ def _parse_conversation_rows(
         Returns the parsed mission, optional latest output, and messages ordered
         as given (oldest-first), skipping the null-role placeholder row.
     """
-    assert rows, "_parse_conversation_rows requires at least one row"
+    if not rows:
+        raise ValueError("_parse_conversation_rows requires at least one row")
     head = rows[0]
     mission = BrandingMission.model_validate(head["mission_json"])
     latest_output = (
