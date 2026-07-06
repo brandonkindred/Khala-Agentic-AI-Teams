@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from sales_team import job_runner
 from sales_team.api import main as api_main
 from sales_team.models import (
     BANTScore,
@@ -154,7 +155,11 @@ def test_run_pipeline_creates_pending_job_and_starts_thread(
                 job_id=job_id, entry_stage=request.entry_stage, product_name=request.product_name
             )
 
-    monkeypatch.setattr(api_main, "SalesPodOrchestrator", _StubOrch)
+    # The thread target is job_runner.run_pipeline_job (imported into
+    # api_main as _run_pipeline_job), so its orchestrator + job manager
+    # references live in job_runner's own module namespace, not api_main's.
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _StubOrch)
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
 
     response = client.post(
         "/sales/pipeline/run",
@@ -183,7 +188,7 @@ def test_run_pipeline_creates_pending_job_and_starts_thread(
 
 def test_run_pipeline_job_failure_branch(monkeypatch: pytest.MonkeyPatch, fake_job_client) -> None:
     """When the orchestrator raises, the background runner marks the job failed."""
-    monkeypatch.setattr(api_main, "_job_manager", fake_job_client)
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
     fake_job_client.create_job("j-fail", status="pending")
 
     class _RaisingOrch:
@@ -193,7 +198,7 @@ def test_run_pipeline_job_failure_branch(monkeypatch: pytest.MonkeyPatch, fake_j
         def run(self, request, job_id, update_cb=None):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(api_main, "SalesPodOrchestrator", _RaisingOrch)
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _RaisingOrch)
 
     # Build a minimal request — pass-through values fine since orchestrator raises.
     request = api_main.SalesPipelineRequest(

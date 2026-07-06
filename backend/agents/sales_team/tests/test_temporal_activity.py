@@ -1,10 +1,12 @@
 """Tests for the sales_team Temporal activity + workflow.
 
-The activity delegates entirely to the existing ``_run_pipeline_job`` (which
-owns the same RUNNING -> COMPLETED/FAILED job-store bookkeeping used by the
-thread-dispatch path), then checks the resulting job status so a genuine
-failure surfaces as a failed Temporal workflow rather than a
-silently-"completed" one.
+The activity delegates entirely to the existing ``job_runner.run_pipeline_job``
+(which owns the same RUNNING -> COMPLETED/FAILED job-store bookkeeping used
+by the thread-dispatch path), then checks the resulting job status so a
+genuine failure surfaces as a failed Temporal workflow rather than a
+silently-"completed" one. A request that fails to validate never reaches
+``run_pipeline_job`` at all, so the activity marks the job FAILED itself
+before re-raising.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import inspect
 
 import pytest
 
-from sales_team.api import main as api_main
+from sales_team import job_runner
 from sales_team.temporal import workflows as wf
 
 _REQUEST = {
@@ -32,7 +34,7 @@ def test_activity_signature_takes_job_id_and_request():
 
 
 def test_activity_marks_job_completed_and_returns_job_id(monkeypatch, fake_job_client):
-    monkeypatch.setattr(api_main, "_job_manager", fake_job_client)
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
     fake_job_client.create_job("job-ok", status="pending")
 
     class _StubOrch:
@@ -40,11 +42,13 @@ def test_activity_marks_job_completed_and_returns_job_id(monkeypatch, fake_job_c
             pass
 
         def run(self, request, job_id, update_cb=None):
-            return api_main.SalesPipelineResult(
+            from sales_team.models import SalesPipelineResult
+
+            return SalesPipelineResult(
                 job_id=job_id, entry_stage=request.entry_stage, product_name=request.product_name
             )
 
-    monkeypatch.setattr(api_main, "SalesPodOrchestrator", _StubOrch)
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _StubOrch)
 
     result = wf.run_pipeline_activity("job-ok", _REQUEST)
 
@@ -55,9 +59,9 @@ def test_activity_marks_job_completed_and_returns_job_id(monkeypatch, fake_job_c
 
 
 def test_activity_raises_when_job_ends_failed(monkeypatch, fake_job_client):
-    """A genuine failure marks the job FAILED (via _run_pipeline_job) and the
-    activity re-raises so Temporal sees a failed workflow."""
-    monkeypatch.setattr(api_main, "_job_manager", fake_job_client)
+    """A genuine failure marks the job FAILED (via job_runner.run_pipeline_job)
+    and the activity re-raises so Temporal sees a failed workflow."""
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
     fake_job_client.create_job("job-boom", status="pending")
 
     class _RaisingOrch:
@@ -67,7 +71,7 @@ def test_activity_raises_when_job_ends_failed(monkeypatch, fake_job_client):
         def run(self, request, job_id, update_cb=None):
             raise RuntimeError("orchestrator exploded")
 
-    monkeypatch.setattr(api_main, "SalesPodOrchestrator", _RaisingOrch)
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _RaisingOrch)
 
     with pytest.raises(RuntimeError, match="orchestrator exploded"):
         wf.run_pipeline_activity("job-boom", _REQUEST)
@@ -75,6 +79,24 @@ def test_activity_raises_when_job_ends_failed(monkeypatch, fake_job_client):
     job = fake_job_client.get_job("job-boom")
     assert job["status"] == "failed"
     assert "orchestrator exploded" in (job.get("error") or "")
+
+
+def test_activity_marks_job_failed_when_request_fails_validation(monkeypatch, fake_job_client):
+    """An invalid request dict must never reach run_pipeline_job — it can't be
+    turned into a SalesPipelineRequest — so the activity itself marks the job
+    FAILED and re-raises, instead of leaving it stuck at PENDING forever."""
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
+    fake_job_client.create_job("job-invalid", status="pending")
+
+    ran = []
+    monkeypatch.setattr(job_runner, "run_pipeline_job", lambda *a, **k: ran.append((a, k)))
+
+    with pytest.raises(Exception):  # pydantic ValidationError
+        wf.run_pipeline_activity("job-invalid", {"product_name": "P"})  # missing required fields
+
+    assert ran == []  # run_pipeline_job must never be called
+    job = fake_job_client.get_job("job-invalid")
+    assert job["status"] == "failed"
 
 
 def test_workflow_run_delegates_to_activity(monkeypatch):

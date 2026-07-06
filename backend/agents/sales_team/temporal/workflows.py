@@ -7,11 +7,14 @@ worker bootstrap). Co-locating ``start_team_worker``/``is_temporal_enabled``
 with the workflow class trips the sandbox with
 ``__call__ on os.getenv restricted`` during workflow registration.
 
-The activity delegates to the *existing* ``_run_pipeline_job`` (defined in
-``sales_team.api.main``) so the job-store bookkeeping (RUNNING → COMPLETED
-or FAILED) lives in exactly one place, shared with the thread-dispatch path.
-Status is written to the durable ``JobServiceClient`` store, so a completed
-run survives a worker/process restart.
+The activity delegates to ``sales_team.job_runner.run_pipeline_job`` so the
+job-store bookkeeping (RUNNING → COMPLETED or FAILED) lives in exactly one
+place, shared with the thread-dispatch path in ``sales_team.api.main``.
+``job_runner`` has no import of ``sales_team.api.main`` (no FastAPI app
+creation, stale-job monitor, or invoke shim), so this activity stays cheap
+to import even if a worker process never imports the API module. Status is
+written to the durable ``JobServiceClient`` store, so a completed run
+survives a worker/process restart.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from temporalio.common import RetryPolicy
 
 @activity.defn(name="sales_run_pipeline")
 def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """Run the sales pipeline orchestrator and record job status.
+    """Reconstruct the request, run the sales pipeline orchestrator, and record job status.
 
     Preconditions:
         - ``job_id`` refers to a job already created in the job store
@@ -36,17 +39,28 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
     Postconditions:
         - On success the job store row ends in ``COMPLETED`` with the
           orchestrator result and the activity returns ``{"job_id": job_id}``.
-        - On a genuine failure, the job store row ends in ``FAILED`` (via
-          ``_run_pipeline_job``'s own exception handling) and this activity
-          re-raises so the failure surfaces as a failed Temporal workflow
-          rather than a silently-"completed" one. Auto-retry is bounded by
-          the workflow's ``RetryPolicy`` (see ``SalesWorkflow.run``).
+        - If ``request`` fails to validate as a ``SalesPipelineRequest``
+          (e.g. missing required fields), the job store row is marked
+          ``FAILED`` here — before ``run_pipeline_job`` would otherwise ever
+          be reached — so the job never sits stuck in PENDING.
+        - On any other genuine failure, the job store row ends in ``FAILED``
+          (via ``run_pipeline_job``'s own exception handling) and this
+          activity re-raises so the failure surfaces as a failed Temporal
+          workflow rather than a silently-"completed" one. Auto-retry is
+          bounded by the workflow's ``RetryPolicy`` (see ``SalesWorkflow.run``).
     """
-    from sales_team.api.main import JOB_STATUS_FAILED, _job_manager, _run_pipeline_job
+    from job_service_client import JOB_STATUS_FAILED
+    from sales_team.job_runner import job_manager, run_pipeline_job
     from sales_team.models import SalesPipelineRequest
 
-    _run_pipeline_job(job_id, SalesPipelineRequest(**request))
-    job = _job_manager.get_job(job_id)
+    try:
+        pipeline_request = SalesPipelineRequest(**request)
+    except Exception as exc:
+        job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
+        raise
+
+    run_pipeline_job(job_id, pipeline_request)
+    job = job_manager.get_job(job_id)
     if job and job.get("status") == JOB_STATUS_FAILED:
         raise RuntimeError(job.get("error") or "Sales pipeline failed")
     return {"job_id": job_id}

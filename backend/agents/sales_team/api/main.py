@@ -12,13 +12,13 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
 from job_service_client import (
-    JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JobServiceClient,
     start_stale_job_monitor,
 )
+from sales_team.job_runner import run_pipeline_job as _run_pipeline_job
 from sales_team.learning_engine import LearningEngine
 from sales_team.models import (
     CoachingRequest,
@@ -166,51 +166,13 @@ def mark_all_running_jobs_failed(reason: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Background job runner
-# ---------------------------------------------------------------------------
-
-
-def _run_pipeline_job(job_id: str, request: SalesPipelineRequest) -> None:
-    try:
-        _update_job(
-            job_id,
-            status=JOB_STATUS_RUNNING,
-            current_stage="initializing",
-            progress=2,
-            eta_hint="Starting pipeline...",
-        )
-
-        orchestrator = SalesPodOrchestrator(config=request.config)
-
-        def on_update(stage: str, pct: int) -> None:
-            _update_job(job_id, current_stage=stage, progress=pct, last_updated_at=_now())
-
-        result = orchestrator.run(request, job_id=job_id, update_cb=on_update)
-
-        _update_job(
-            job_id,
-            status=JOB_STATUS_COMPLETED,
-            current_stage="completed",
-            progress=100,
-            eta_hint="done",
-            result=result.model_dump(),
-            last_updated_at=_now(),
-        )
-    except Exception as exc:
-        logger.error("Sales pipeline job %s failed: %s", job_id, exc, exc_info=True)
-        _update_job(
-            job_id,
-            status=JOB_STATUS_FAILED,
-            current_stage="failed",
-            error=str(exc),
-            eta_hint=None,
-            last_updated_at=_now(),
-        )
-
-
-# ---------------------------------------------------------------------------
 # Pipeline endpoints (async, job-based)
 # ---------------------------------------------------------------------------
+#
+# The actual orchestrator run + job-status bookkeeping (RUNNING -> COMPLETED
+# or FAILED) lives in ``sales_team.job_runner.run_pipeline_job`` (imported
+# above as ``_run_pipeline_job``), shared unchanged by the thread-dispatch
+# path below and the Temporal activity in ``sales_team/temporal/workflows.py``.
 
 
 def _dispatch_pipeline_job(job_id: str, request: SalesPipelineRequest) -> str:
@@ -278,7 +240,7 @@ def run_pipeline(request: SalesPipelineRequest) -> SalesPipelineRunResponse:
     logger.info("Sales pipeline job %s dispatched via %s", job_id, dispatch_method)
     return SalesPipelineRunResponse(
         job_id=job_id,
-        status=JOB_STATUS_RUNNING,
+        status=JOB_STATUS_PENDING,
         message=(
             f"Sales pipeline started (entry: {request.entry_stage.value}). "
             f"Poll GET /sales/pipeline/status/{job_id} for updates."
