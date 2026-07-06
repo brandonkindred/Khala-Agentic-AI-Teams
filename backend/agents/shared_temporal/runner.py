@@ -48,9 +48,12 @@ def _await_client(timeout_s: float | None = None) -> tuple[Any, Any]:
         - ``timeout_s`` is ``None`` (use ``CLIENT_READY_TIMEOUT_S``) or >= 0.
 
     Postconditions:
-        - Returns ``(client, loop)`` once both are connected, or raises
-          ``RuntimeError`` after ``timeout_s`` seconds if they never become
-          available.
+        - Returns ``(client, loop)`` once both are connected and the loop is
+          open (running), or raises ``RuntimeError`` after ``timeout_s`` seconds
+          if they never become available. A closed loop — left behind by a
+          worker that connected and then died — counts as "not ready", so the
+          poll never hands back a loop that ``run_coroutine_threadsafe`` would
+          reject with "Event loop is closed".
     """
     # Resolve at call time (not as a bound default) so monkeypatching the
     # module constant in tests takes effect.
@@ -60,7 +63,7 @@ def _await_client(timeout_s: float | None = None) -> tuple[Any, Any]:
     while True:
         client = get_temporal_client()
         loop = get_temporal_loop()
-        if client is not None and loop is not None:
+        if client is not None and loop is not None and not loop.is_closed():
             return client, loop
         if time.monotonic() >= deadline:
             raise RuntimeError("Temporal client not available; is the team's worker running?")
