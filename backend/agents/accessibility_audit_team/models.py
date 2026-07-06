@@ -598,6 +598,9 @@ class AuditJobResponse(BaseModel):
     audit_id: str
     status: str
     message: str
+    # Present only on the Temporal path — the durable workflow id, so callers can
+    # correlate the run in the Temporal UI. ``None`` on the in-process path.
+    workflow_id: Optional[str] = None
 
 
 class AuditStatusResponse(BaseModel):
