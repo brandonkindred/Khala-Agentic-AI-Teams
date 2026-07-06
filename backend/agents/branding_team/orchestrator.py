@@ -14,6 +14,7 @@ Phase gate logic:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import concurrent.futures
 import logging
 from typing import TYPE_CHECKING, List, Optional
@@ -21,6 +22,7 @@ from typing import TYPE_CHECKING, List, Optional
 from pydantic import BaseModel, ValidationError
 
 from .agents import BrandComplianceAgent
+from .config import env_int
 from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
 from .graphs.top_level import build_branding_graph
 from .models import (
@@ -58,12 +60,26 @@ _PHASE_EXTRACTION = (
 )
 
 
-# Shared single worker for the rare case where _run_coro is invoked from a
-# thread that already has a running event loop. Reused across calls so we don't
-# spin up (and tear down) a fresh executor on every invocation.
+def _offload_pool_workers() -> int:
+    """Worker cap for ``_OFFLOAD_POOL`` (env-tunable, clamped to >= 1).
+
+    Default of 4 avoids serializing concurrent offloaded runs (e.g. multiple
+    async Temporal activities on the same loop each calling ``_run_coro``)
+    behind a single worker.
+    """
+    return env_int("BRANDING_RUN_CORO_OFFLOAD_WORKERS", 4, minimum=1)
+
+
+# Shared pool for the rare case where _run_coro is invoked from a thread that
+# already has a running event loop. Reused across calls so we don't spin up
+# (and tear down) a fresh executor on every invocation.
 _OFFLOAD_POOL = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="branding-run-coro"
+    max_workers=_offload_pool_workers(), thread_name_prefix="branding-run-coro"
 )
+# Best-effort cleanup on interpreter exit. Threads in this pool only run
+# briefly per offloaded coroutine (see _run_coro), so this should not delay
+# shutdown in practice; wait=False avoids blocking exit on a stuck run.
+atexit.register(_OFFLOAD_POOL.shutdown, wait=False)
 
 
 def _run_coro(coro):
