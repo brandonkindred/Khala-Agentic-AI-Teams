@@ -190,6 +190,15 @@ class ReviewCode(NamedTuple):
     files_reviewed: int
 
 
+# The PullRequestFile.status value GitHub reports for a deleted file. Named so
+# the "is this file removed" check isn't a bare string literal at each call site.
+_FILE_STATUS_REMOVED = "removed"
+
+# Prefix of the whole-file-mode focus note, exposed so callers/tests can detect
+# the note (e.g. in task_requirements) without duplicating its full wording.
+WHOLE_FILE_FOCUS_NOTE_PREFIX = "Review focus:"
+
+
 def _whole_file_focus(body: str) -> str:
     """Append a "review the change, not the whole file" instruction to ``body``.
 
@@ -203,10 +212,10 @@ def _whole_file_focus(body: str) -> str:
 
     Postconditions:
         - Returns ``body`` with the focus note appended (or the note alone when
-          ``body`` is blank).
+          ``body`` is blank). The note starts with ``WHOLE_FILE_FOCUS_NOTE_PREFIX``.
     """
     note = (
-        "Review focus: evaluate the changes this pull request makes. The complete "
+        f"{WHOLE_FILE_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. The complete "
         "file contents are provided for context, but only raise issues about code "
         "the PR adds or modifies — do not report pre-existing problems in "
         "unrelated, unchanged code."
@@ -232,7 +241,7 @@ def _is_whole_file_reviewable(f: Any) -> bool:
           ``_build_review_code`` applies, so the whole-file and hunk paths cover
           exactly the same set of files.
     """
-    return f.status != "removed" and bool(f.patch)
+    return f.status != _FILE_STATUS_REMOVED and bool(f.patch)
 
 
 def _fetch_head_files(
@@ -302,7 +311,7 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
     blocks: List[str] = []
     reviewed = 0
     for f in files:
-        if not f.patch or f.status == "removed":
+        if not f.patch or f.status == _FILE_STATUS_REMOVED:
             continue
         rendered = render_annotated_hunks(f.patch)
         if not rendered:

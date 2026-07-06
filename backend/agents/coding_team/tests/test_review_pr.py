@@ -2308,6 +2308,35 @@ class TestWholeFileReview:
         # not raise.
         assert _fetch_head_files(object(), "o", "r", files, "sha1") == {}
 
+    def test_fetch_head_files_concurrent_fetches_do_not_corrupt_results(self, review_app) -> None:
+        """_fetch_head_files fans per-file GETs out across a thread pool; each
+        worker's (filename, content) pair must land under its own key, never a
+        sibling's, even when several fetches are in flight at once.
+        """
+        import threading
+        import time
+
+        from coding_team.api.pr_review import _fetch_head_files
+
+        num_files = 16
+        files = [
+            PullRequestFile(f"f{i}.py", "modified", f"@@ -1 +1 @@\n+x{i}", 1, 0, None)
+            for i in range(num_files)
+        ]
+        seen_threads: set[int] = set()
+        lock = threading.Lock()
+
+        class _C:
+            def get_file_contents(self, o, r, path, ref):
+                with lock:
+                    seen_threads.add(threading.get_ident())
+                time.sleep(0.01)  # widen the race window so fetches overlap
+                return f"WHOLE-{path}\n"
+
+        out = _fetch_head_files(_C(), "o", "r", files, "sha1")
+        assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
+        assert len(seen_threads) > 1  # confirms the fetches actually ran concurrently
+
     def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
         from coding_team.github_source import GitHubRepoReader
 
@@ -2368,7 +2397,9 @@ class TestWholeFileReview:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         # Whole-file mode steers the reviewer to focus on the change, not unchanged code.
-        assert "Review focus" in captured["task_requirements"]
+        from coding_team.api.pr_review import WHOLE_FILE_FOCUS_NOTE_PREFIX
+
+        assert WHOLE_FILE_FOCUS_NOTE_PREFIX in captured["task_requirements"]
 
     def test_partial_head_fetch_falls_back_to_hunks(self, review_app, monkeypatch) -> None:
         gh = review_app["github"]["client"]

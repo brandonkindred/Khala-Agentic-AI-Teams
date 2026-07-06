@@ -54,6 +54,7 @@ from .code_boundaries import node_end_line, node_start_line
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
+from .repo_reader import RepoReader
 
 logger = logging.getLogger(__name__)
 
@@ -133,13 +134,13 @@ class CodebaseIndex:
 
     files: Dict[str, str]
     existing_codebase: str = ""
-    repo_reader: Optional[object] = None
+    repo_reader: Optional[RepoReader] = None
 
     EXISTING_CODEBASE_PATH = "<existing codebase>"
 
     @classmethod
     def from_input(
-        cls, input_data: CodeReviewInput, repo_reader: Optional[object] = None
+        cls, input_data: CodeReviewInput, repo_reader: Optional[RepoReader] = None
     ) -> "CodebaseIndex":
         """Build the index from a review input's ``files`` or legacy ``code``.
 
@@ -188,7 +189,7 @@ class CodebaseIndex:
         if self.repo_reader is None:
             return None
         try:
-            return self.repo_reader.read_file(path)  # type: ignore[attr-defined]
+            return self.repo_reader.read_file(path)
         except Exception as exc:  # noqa: BLE001 - a reader failure must never break verification
             logger.debug("CodebaseIndex: repo_reader.read_file(%r) failed: %s", path, exc)
             return None
@@ -203,7 +204,7 @@ class CodebaseIndex:
         if self.repo_reader is None:
             return []
         try:
-            return list(self.repo_reader.list_files())  # type: ignore[attr-defined]
+            return list(self.repo_reader.list_files())
         except Exception as exc:  # noqa: BLE001 - a reader failure must never break verification
             logger.debug("CodebaseIndex: repo_reader.list_files() failed: %s", exc)
             return []
@@ -903,7 +904,7 @@ def filter_false_positives(
     llm: LLMClient,
     input_data: CodeReviewInput,
     issues: List[CodeReviewIssue],
-    repo_reader: Optional[object] = None,
+    repo_reader: Optional[RepoReader] = None,
 ) -> List[CodeReviewIssue]:
     """Return ``issues`` minus the ones a full-codebase re-check confirms are false.
 

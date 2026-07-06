@@ -24,8 +24,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections import OrderedDict
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .client import GitHubAPIError, GitHubClient
 
@@ -49,16 +48,19 @@ class GitHubRepoReader:
 
     Invariants:
         - Never mutates the repository; every method is a read.
-        - The tree listing is fetched at most once; each distinct file is fetched
-          at most once even under concurrency (a per-key in-flight guard makes
-          same-path readers wait for the leader rather than each firing a GET),
-          so a path never double-fetches and never double-counts the cap.
+        - The tree listing is fetched at most once, and each distinct file is
+          fetched at most once, even under concurrency: both ``list_files`` and
+          ``read_file`` use a single-flight pattern (an in-flight guard makes
+          concurrent callers wait for the leader rather than each firing a GET),
+          so neither ever double-fetches or double-counts the cap.
         - Total on-demand file fetches are capped at ``max_fetches``; the listing
           is capped at ``max_listed``.
         - The read cache holds at most ``max_fetches`` entries: every stored entry
           required a fetch, and fetches are capped, so it is size-bounded without
           a separate eviction knob (unlike ``DiskRepoReader``, whose disk reads
-          are uncapped and therefore need an explicit ``max_read_cache``).
+          are uncapped and therefore need an explicit ``max_read_cache``). It is a
+          plain dict, not an LRU: nothing is ever evicted from it, so there is no
+          recency order to track.
     """
 
     def __init__(
@@ -91,7 +93,8 @@ class GitHubRepoReader:
         # once even when the verifier fans out over a ThreadPoolExecutor.
         self._cond = threading.Condition(threading.Lock())
         self._tree: Optional[List[str]] = None
-        self._read_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
+        self._tree_inflight = False
+        self._read_cache: Dict[str, Optional[str]] = {}
         self._inflight: set[str] = set()
         self._fetches = 0
 
@@ -101,12 +104,22 @@ class GitHubRepoReader:
         Postconditions:
             - Returns the head tree's blob paths, truncated to ``max_listed``
               (and possibly partial when GitHub truncates a very large tree),
-              fetched once and memoized. Returns ``[]`` on any API error
+              fetched once and memoized. Concurrent callers before the first
+              fetch completes wait for it (single-flight) rather than each
+              issuing their own tree GET. Returns ``[]`` on any API error
               (fail-safe). Never raises.
         """
         with self._cond:
-            if self._tree is not None:
-                return list(self._tree)
+            while True:
+                if self._tree is not None:
+                    return list(self._tree)
+                if self._tree_inflight:
+                    # Another thread is already fetching the tree; wait for it
+                    # rather than issuing a duplicate GET.
+                    self._cond.wait()
+                    continue
+                self._tree_inflight = True
+                break
         try:
             tree = self._client.get_repository_tree(self._owner, self._repo, self._ref)
         except GitHubAPIError as exc:
@@ -116,8 +129,9 @@ class GitHubRepoReader:
             tree = []
         tree = tree[: self._max_listed]
         with self._cond:
-            if self._tree is None:
-                self._tree = tree
+            self._tree = tree
+            self._tree_inflight = False
+            self._cond.notify_all()
             return list(self._tree)
 
     def read_file(self, path: str) -> Optional[str]:
@@ -137,7 +151,6 @@ class GitHubRepoReader:
         with self._cond:
             while True:
                 if key in self._read_cache:
-                    self._read_cache.move_to_end(key)
                     return self._read_cache[key]
                 if key in self._inflight:
                     # Another thread is fetching this exact path; wait for it to
@@ -160,7 +173,6 @@ class GitHubRepoReader:
         finally:
             with self._cond:
                 self._read_cache[key] = content
-                self._read_cache.move_to_end(key)
                 self._inflight.discard(key)
                 self._cond.notify_all()
         return content

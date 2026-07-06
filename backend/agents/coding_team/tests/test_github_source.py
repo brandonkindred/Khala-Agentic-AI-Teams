@@ -2231,3 +2231,79 @@ class TestGitHubRepoReader:
 
         reader = GitHubRepoReader(_client_with(handler), "o", "r", "sha1", max_listed=3)
         assert len(reader.list_files()) == 3  # capped, unlike the pre-fix unbounded listing
+
+    def test_read_file_single_flight_under_concurrency(self) -> None:
+        """Concurrent same-path read_file calls fetch exactly once (single-flight).
+
+        Single-flight means only the leader thread ever reaches the handler —
+        the other 7 block on the reader's own condvar, never issuing a GET — so
+        this must NOT barrier-synchronize multiple handler invocations (there is
+        only ever one). A short sleep in the handler simply widens the window in
+        which the other 7 threads arrive and queue up on the in-flight guard
+        instead of each opening their own connection.
+        """
+        import base64
+        import threading
+        import time
+
+        from coding_team.github_source import GitHubRepoReader
+
+        calls = {"contents": 0}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls["contents"] += 1
+            time.sleep(0.05)  # widen the race window so waiters queue up
+            enc = base64.b64encode(b"class M: ...").decode()
+            return httpx.Response(200, json={"type": "file", "encoding": "base64", "content": enc})
+
+        reader = GitHubRepoReader(_client_with(handler), "o", "r", "sha1")
+        results: list[Optional[str]] = [None] * 8
+
+        def _worker(i: int) -> None:
+            results[i] = reader.read_file("pkg/models.py")
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert calls["contents"] == 1  # single-flight: only the leader fetched
+        assert all(r == "class M: ..." for r in results)  # every waiter got the result
+        assert reader._fetches == 1  # the fetch cap was charged exactly once
+
+    def test_list_files_single_flight_under_concurrency(self) -> None:
+        """Concurrent list_files calls before the tree resolves fetch exactly once.
+
+        Guards against the double-checked-locking race where several threads all
+        pass the initial 'is self._tree None' check before any of them sets it,
+        each issuing its own tree GET. Only the leader ever reaches the handler
+        (the rest wait on the reader's condvar), so — as in the read_file test
+        above — this does not barrier-synchronize multiple handler invocations.
+        """
+        import threading
+        import time
+
+        from coding_team.github_source import GitHubRepoReader
+
+        calls = {"tree": 0}
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            calls["tree"] += 1
+            time.sleep(0.05)  # widen the race window so waiters queue up
+            return httpx.Response(200, json={"tree": [{"type": "blob", "path": "a.py"}]})
+
+        reader = GitHubRepoReader(_client_with(handler), "o", "r", "sha1")
+        results: list[Optional[list[str]]] = [None] * 8
+
+        def _worker(i: int) -> None:
+            results[i] = reader.list_files()
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert calls["tree"] == 1  # single-flight: only the leader fetched the tree
+        assert all(r == ["a.py"] for r in results)  # every waiter got the same listing

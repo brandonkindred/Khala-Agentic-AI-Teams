@@ -315,6 +315,11 @@ def review_class_cohesion(
     if not classes:
         return []
 
+    # One ChunkReviewAgent instance is shared across the ThreadPoolExecutor
+    # workers below. This is safe per its class docstring (chunk_reviewer.py):
+    # it holds only the injected ``llm`` handle and builds a fresh strands
+    # ``Agent`` on every ``run`` call, so concurrent ``run`` calls share no
+    # mutable state — the same sharing pattern the coordinator's map phase uses.
     agent = ChunkReviewAgent(llm)
     cache_size = _cohesion_cache_size()
     model_fp = _review_model_fingerprint(llm)
@@ -340,7 +345,9 @@ def review_class_cohesion(
                 task_description=input_data.task_description or "",
                 task_requirements=input_data.task_requirements or "",
                 acceptance_criteria=input_data.acceptance_criteria or [],
-                user_decisions=input_data.user_decisions or None,
+                # Same empty/falsy -> [] fallback the cache key uses (_cohesion_key
+                # above), so both treat "no user decisions" identically.
+                user_decisions=list(input_data.user_decisions or []),
                 profile=ReviewProfile.CLASS_COHESION,
             )
             out = agent.run(chunk_input)
