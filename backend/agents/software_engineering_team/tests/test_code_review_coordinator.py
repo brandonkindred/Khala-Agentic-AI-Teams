@@ -1790,11 +1790,15 @@ def test_coordinator_merges_class_cohesion_findings(monkeypatch) -> None:
             skip_false_positive_filter=True,
         ),
     )
-    god = [i for i in result.issues if i.description == "god class"]
-    assert len(god) == 1
-    assert god[0].file_path == "report.py"
-    # Cohesion findings are advisory: severity capped to medium, so approval holds.
-    assert god[0].severity == "medium"
+    # The cohesion finding is the ONLY issue merged: the chunk review approved
+    # with no issues, so the sole result issue is the god-class cohesion finding.
+    assert len(result.issues) == 1
+    god = result.issues[0]
+    assert god.description == "god class"
+    assert god.file_path == "report.py"
+    # Cohesion findings are advisory: severity capped to medium (from the stub's
+    # "high"), so approval still holds.
+    assert god.severity == "medium"
     assert result.approved is True
 
 
