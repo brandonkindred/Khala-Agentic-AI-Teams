@@ -227,15 +227,15 @@ async def create_audit(
         # all status transitions (pending -> running -> terminal), so the API
         # must not also write status here or it can race the activity.
         _job_manager.update_job(job_id, workflow_id=workflow_id)
-        message = "Audit started (Temporal). Poll /audit/status/{job_id} for progress."
+        message = "Audit queued (Temporal). Poll /audit/status/{job_id} for progress."
     else:
         background_tasks.add_task(execute_audit_job, job_id, audit_id, request)
-        message = "Audit started. Poll /audit/status/{job_id} for progress."
+        message = "Audit queued. Poll /audit/status/{job_id} for progress."
 
     return AuditJobResponse(
         job_id=job_id,
         audit_id=audit_id,
-        status="running",
+        status=JOB_STATUS_PENDING,
         message=message,
         workflow_id=workflow_id,
     )

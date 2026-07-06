@@ -36,7 +36,7 @@ def test_create_audit_returns_job_id():
     data = resp.json()
     assert "job_id" in data
     assert "audit_id" in data
-    assert data["status"] == "running"
+    assert data["status"] == "pending"
 
 
 def test_get_audit_status_not_found():
