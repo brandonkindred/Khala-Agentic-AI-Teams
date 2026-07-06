@@ -841,14 +841,15 @@ services:
     container_name: khala-job-matching-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
       TEAM_MODULE: job_matching_team.api.main
       TEAM_NAME: job_matching_team
       TEAM_PORT: "8111"
-      TEAM_TEMPORAL_WORKER_MODULE: ""
-      TEAM_TEMPORAL_WORKER_FUNC: ""
+      TEAM_TEMPORAL_WORKER_MODULE: job_matching_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_job_matching_temporal_worker_thread
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
     ports: ["8111:8111"]
