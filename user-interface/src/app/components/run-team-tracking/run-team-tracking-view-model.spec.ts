@@ -353,12 +353,12 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
   it('isPlanningSubprocessCompleted/Current/Pending', () => {
     component.status = buildStatus({
       planning_completed_phases: ['intake'],
-      planning_subprocess: 'planning',
+      planning_subprocess: 'discovery',
     });
     expect(component.isPlanningSubprocessCompleted('intake')).toBe(true);
-    expect(component.isPlanningSubprocessCompleted('planning')).toBe(false);
-    expect(component.isPlanningSubprocessCurrent('planning')).toBe(true);
-    expect(component.isPlanningSubprocessPending('review')).toBe(true);
+    expect(component.isPlanningSubprocessCompleted('discovery')).toBe(false);
+    expect(component.isPlanningSubprocessCurrent('discovery')).toBe(true);
+    expect(component.isPlanningSubprocessPending('requirements')).toBe(true);
   });
 
   it('isCodeTeamPhaseCompleted handles missing team_progress', () => {
@@ -592,12 +592,12 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
   it('buildProgressTree adds planning subtree', () => {
     component.status = buildStatus({
       phase: 'planning',
-      planning_subprocess: 'planning',
+      planning_subprocess: 'discovery',
       planning_completed_phases: ['intake'],
     });
     const nodes = component.buildProgressTree();
     expect(nodes.find((n) => n.id === 'planning-intake')?.status).toBe('completed');
-    expect(nodes.find((n) => n.id === 'planning-planning')?.status).toBe('current');
+    expect(nodes.find((n) => n.id === 'planning-discovery')?.status).toBe('current');
   });
 
   it('buildProgressTree adds execution subtree with teams, tasks, microtasks', () => {
@@ -694,13 +694,13 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
   it('buildDAGTree children of planning use planning subprocess data', () => {
     component.status = buildStatus({
       phase: 'planning',
-      planning_subprocess: 'planning',
+      planning_subprocess: 'discovery',
       planning_completed_phases: ['intake'],
     });
     const tree = component.buildDAGTree();
     const plan = tree.find((n) => n.id === 'phase-planning');
     expect(plan?.children?.some((c) => c.id === 'planning-intake' && c.status === 'completed')).toBe(true);
-    expect(plan?.children?.some((c) => c.id === 'planning-planning' && c.status === 'current')).toBe(true);
+    expect(plan?.children?.some((c) => c.id === 'planning-discovery' && c.status === 'current')).toBe(true);
   });
 
   it('buildDAGTree children of execution include teams + their phases', () => {
