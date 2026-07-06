@@ -70,6 +70,24 @@ see `postgres/__init__.py`), registered from the FastAPI lifespan via
 `user_profile` schema so career-profile writes work when this service starts
 first. Requires `POSTGRES_HOST`; there is no SQLite fallback.
 
+## Execution
+
+`POST /scan` runs asynchronously and the caller polls `GET /scan/status/{job_id}`.
+Two interchangeable runtimes drive the same job-store state machine
+(`pending → running → completed/failed`), so callers see identical behavior
+either way:
+
+- **Thread mode** (default): the scan runs on a daemon thread in-process.
+- **Temporal mode** (when `TEMPORAL_ADDRESS` is set): the scan is dispatched to a
+  durable `JobMatchingWorkflow` (shared_temporal Pattern A). The workflow is
+  visible in the Temporal UI and an in-flight scan survives a worker/process
+  restart. The worker boots via `temporal/worker.py`
+  (`TEAM_TEMPORAL_WORKER_MODULE`/`_FUNC` in docker-compose, run by the
+  team_service entrypoint), with the API lifespan (`_start_temporal_worker_backstop`
+  in `api/main.py`) as a backstop when the app is served standalone (`uvicorn …:app`).
+  The team is also registered in `shared_temporal.teams_registry` for any future
+  in-process `start_all_team_workers` host.
+
 ## Configuration
 
 | Variable | Purpose |
@@ -79,6 +97,7 @@ first. Requires `POSTGRES_HOST`; there is no SQLite fallback.
 | `JOB_SEEKER_PROFILE_STRICT` | When true, missing/invalid profile raises instead of falling back. |
 | `JOB_MATCHING_SERVICE_URL` | Upstream URL the unified API proxies to. |
 | `OLLAMA_WEB_SEARCH_BASE_URL` | Optional override for the web-search endpoint. |
+| `TEMPORAL_ADDRESS` | When set, scans run on a durable Temporal workflow instead of a daemon thread. |
 
 ## Agent Console
 

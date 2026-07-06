@@ -133,6 +133,89 @@ def test_scan_lifecycle(client):
     assert data["result"]["ranked_jobs"][0]["posting"]["company"] == "Acme"
 
 
+def test_scan_dispatches_via_temporal_when_enabled(client, monkeypatch):
+    """With Temporal enabled the scan is handed to the workflow, not a thread."""
+    import shared_temporal
+    from job_matching_team.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+    dispatched: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        sw,
+        "start_job_matching_workflow",
+        lambda job_id, request: dispatched.append((job_id, request)),
+    )
+    # Directly prove the thread fallback is NOT taken — no reliance on
+    # post-dispatch job status (which would be timing-dependent if a real
+    # worker existed). start_workflow is stubbed, so nothing runs the scan.
+    thread_ran: list = []
+    monkeypatch.setattr(api_main, "_run_scan_background", lambda *a, **k: thread_ran.append(a))
+
+    resp = client.post("/scan", json={"top_n": 3})
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+    # Dispatched to Temporal exactly once, with the request payload...
+    assert len(dispatched) == 1
+    assert dispatched[0][0] == job_id
+    assert dispatched[0][1]["top_n"] == 3
+    # ...and the daemon-thread path was never used.
+    assert thread_ran == []
+
+
+def test_scan_returns_503_and_marks_failed_when_temporal_dispatch_fails(client, monkeypatch):
+    """A Temporal dispatch failure must not orphan a PENDING job: the job is
+    marked FAILED and the caller gets a 503, not a bare 500 with a stuck row."""
+    import shared_temporal
+    from job_matching_team.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _boom(job_id, request):
+        raise RuntimeError("Temporal client not available")
+
+    monkeypatch.setattr(sw, "start_job_matching_workflow", _boom)
+
+    resp = client.post("/scan", json={"top_n": 1})
+    assert resp.status_code == 503
+    # No orphaned PENDING row: the one job recorded is FAILED.
+    jobs = client.get("/scan/jobs").json()["jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "failed"
+
+
+def test_scan_still_503s_when_failed_write_also_fails(client, monkeypatch):
+    """If dispatch fails AND the FAILED write to a degraded job service also
+    raises, the caller must still get the contracted 503 — not a bare 500 that
+    leaks the second error."""
+    import shared_temporal
+    from job_matching_team.temporal import start_workflow as sw
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: True)
+
+    def _boom(job_id, request):
+        raise RuntimeError("Temporal client not available")
+
+    def _update_down(job_id, **fields):
+        raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(sw, "start_job_matching_workflow", _boom)
+    monkeypatch.setattr(api_main, "update_job", _update_down)
+
+    resp = client.post("/scan", json={"top_n": 1})
+    assert resp.status_code == 503
+
+
+def test_scan_falls_back_to_thread_when_temporal_disabled(client, monkeypatch):
+    """When Temporal is disabled the dispatch helper reports no-dispatch and the
+    thread path runs the scan to completion."""
+    import shared_temporal
+
+    monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
+    job_id = client.post("/scan", json={}).json()["job_id"]
+    data = _wait_for_completion(client, job_id)
+    assert data["status"] == "completed"
+
+
 def test_scan_status_not_found(client):
     assert client.get("/scan/status/missing").status_code == 404
 
@@ -278,3 +361,40 @@ def test_runs_endpoints_use_store(client, monkeypatch):
     assert client.get("/runs").json()[0]["run_id"] == "r1"
     assert client.get("/runs/r1").json()["status"] == "completed"
     assert client.get("/runs/missing").status_code == 404
+
+
+def test_startup_backstop_starts_temporal_worker(monkeypatch):
+    """The API lifespan starts the Temporal worker when serving standalone
+    (no team_service entrypoint), so a TEMPORAL_ADDRESS-set process has a worker
+    to dispatch to instead of stalling every scan."""
+    from job_matching_team.temporal import worker as worker_mod
+
+    started = []
+    monkeypatch.setattr(
+        worker_mod, "start_job_matching_temporal_worker_thread", lambda: started.append(True)
+    )
+
+    api_main._start_temporal_worker_backstop()
+    assert started == [True]
+
+
+def test_startup_backstop_swallows_worker_failure(monkeypatch):
+    """A worker-start failure in the backstop must not abort app boot."""
+    from job_matching_team.temporal import worker as worker_mod
+
+    def _boom():
+        raise RuntimeError("temporal down")
+
+    monkeypatch.setattr(worker_mod, "start_job_matching_temporal_worker_thread", _boom)
+    # Must not raise.
+    api_main._start_temporal_worker_backstop()
+
+
+def test_on_startup_runs_schema_and_worker_backstop(monkeypatch):
+    """_on_startup aggregates both hooks."""
+    calls = []
+    monkeypatch.setattr(api_main, "_register_user_profile_schema", lambda: calls.append("schema"))
+    monkeypatch.setattr(api_main, "_start_temporal_worker_backstop", lambda: calls.append("worker"))
+
+    api_main._on_startup()
+    assert calls == ["schema", "worker"]
