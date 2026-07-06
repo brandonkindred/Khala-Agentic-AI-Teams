@@ -17,6 +17,7 @@ from typing import Any, Iterable, Optional
 from shared_temporal.client import (
     connect_temporal_client,
     get_default_task_queue,
+    get_temporal_loop,
     is_temporal_enabled,
     set_temporal_client,
     set_temporal_loop,
@@ -121,6 +122,15 @@ def start_team_worker(
         except Exception as e:
             logger.exception("Temporal worker failed for team=%s: %s", team, e)
         finally:
+            # _run_worker_async populates the shared client/loop slots with THIS
+            # loop before running. Now that the loop is about to close, release
+            # those slots so a later start_workflow_sync waits for a live worker
+            # (or fails clearly) instead of submitting to a closed loop and
+            # raising "Event loop is closed". Guard on identity so we never
+            # clobber a different worker that has since taken ownership.
+            if get_temporal_loop() is loop:
+                set_temporal_loop(None)
+                set_temporal_client(None)
             loop.close()
 
     thread = threading.Thread(target=_target, name=f"{team}-temporal-worker", daemon=True)
