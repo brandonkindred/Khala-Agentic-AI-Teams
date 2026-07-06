@@ -1738,3 +1738,85 @@ def test_empty_input_still_reports_done() -> None:
     assert result.approved is True
     assert calls[-1][0] == "done"
     assert calls[-1][2] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Class-cohesion pass + repo-reader threading
+# ---------------------------------------------------------------------------
+
+
+def test_coordinator_merges_class_cohesion_findings(monkeypatch) -> None:
+    """A class cohesion finding is merged into the coordinator's output, anchored
+    to its file, and capped to an advisory (non-blocking) severity.
+
+    Precondition: the class-cohesion pass is active. The test clears
+    CODE_REVIEW_CLASS_COHESION and CODE_REVIEW_CLASS_COHESION_MAX_CLASSES below,
+    so the scenario never depends on the ambient environment.
+    """
+    monkeypatch.delenv("CODE_REVIEW_CLASS_COHESION", raising=False)
+    monkeypatch.delenv("CODE_REVIEW_CLASS_COHESION_MAX_CLASSES", raising=False)
+    src = (
+        "class Report:\n"
+        '    """Builds a report."""\n'
+        "    def build(self):\n"
+        "        return 1\n"
+        "    def send_email(self, to):\n"
+        "        return to\n"
+    )
+
+    class _CohesionStub(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if "Stated purpose" in prompt:  # the cohesion review call
+                return {
+                    "approved": False,
+                    "issues": [
+                        {
+                            "severity": "high",
+                            "category": "structure",
+                            "description": "god class",
+                            "suggestion": "split",
+                        }
+                    ],
+                    "summary": "cohesion",
+                }
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    result = run_coordinator(
+        _CohesionStub(),
+        CodeReviewInput(
+            files={"report.py": src},
+            task_description="t",
+            language="python",
+            skip_false_positive_filter=True,
+        ),
+    )
+    # The cohesion finding is the ONLY issue merged: the chunk review approved
+    # with no issues, so the sole result issue is the god-class cohesion finding.
+    assert len(result.issues) == 1
+    god = result.issues[0]
+    assert god.description == "god class"
+    assert god.file_path == "report.py"
+    # Cohesion findings are advisory: severity capped to medium (from the stub's
+    # "high"), so approval still holds.
+    assert god.severity == "medium"
+    assert result.approved is True
+
+
+def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:
+    """The ``repo_reader`` argument is forwarded verbatim to the false-positive filter."""
+    import code_review_agent.coordinator as coord
+
+    captured: Dict[str, Any] = {}
+
+    def _spy(llm, input_data, issues, repo_reader=None):
+        captured["reader"] = repo_reader
+        return issues
+
+    monkeypatch.setattr(coord, "filter_false_positives", _spy)
+    reader = object()
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+        repo_reader=reader,
+    )
+    assert captured["reader"] is reader

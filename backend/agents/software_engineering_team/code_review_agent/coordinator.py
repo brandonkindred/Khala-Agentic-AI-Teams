@@ -96,6 +96,7 @@ from .chunking import (
     parse_code_into_file_blocks,
     split_block_into_segments,
 )
+from .class_review import review_class_cohesion
 from .false_positive_filter import filter_false_positives
 from .mapping import (
     _cached_review_chunk,
@@ -122,6 +123,7 @@ from .models import (
     ReviewProgressCallback,
     notify_review_progress,
 )
+from .repo_reader import RepoReader
 from .synthesis import synthesize_review_findings
 
 logger = logging.getLogger(__name__)
@@ -312,6 +314,7 @@ def run_coordinator(
     llm: LLMClient,
     input_data: CodeReviewInput,
     progress_callback: Optional[ReviewProgressCallback] = None,
+    repo_reader: Optional[RepoReader] = None,
 ) -> CodeReviewOutput:
     """Map-reduce review entry point: bounded chunks in, merged verdict out.
 
@@ -321,6 +324,12 @@ def run_coordinator(
         - ``progress_callback`` is None or satisfies the
           ``ReviewProgressCallback`` contract (non-raising, accepts
           ``(step, detail, fraction)``).
+        - ``repo_reader`` is None or a ``repo_reader.RepoReader`` (read-only,
+          thread-safe, fail-safe): whole-repo read access handed to the
+          false-positive verifier so it can confirm that a file/module a finding
+          claims is missing already exists outside the diff. Passed as an
+          argument (never a ``CodeReviewInput`` field) so the live reader object
+          can never enter the submission/chunk cache keys.
 
     Postconditions:
         - Every input file/line range is either reviewed or named: empty files
@@ -480,7 +489,15 @@ def run_coordinator(
     # (``not_reviewed_issues``, empty-file notices) are never passed in, so the
     # gate's anti-loop nets stay intact; on any verifier failure the findings are
     # kept (fail-safe).
-    genuine_issues = _dedupe_issues(outcome.issues)
+    # Class-cohesion pass: the per-chunk map review reads one function/method at
+    # a time and cannot judge whether a class's methods together serve its stated
+    # purpose. This adds one bounded review per class (advisory: severities capped
+    # at medium) and merges its findings in *before* the false-positive filter and
+    # the approval gate, so cohesion findings are verified and deduped exactly like
+    # reviewer findings. Best-effort and env-gated: it never raises and yields []
+    # when disabled or when the submission has no reviewable class.
+    cohesion_issues = review_class_cohesion(llm, blocks, input_data)
+    genuine_issues = _dedupe_issues([*outcome.issues, *cohesion_issues])
     notify_review_progress(
         progress_callback,
         "verifying",
@@ -494,7 +511,7 @@ def run_coordinator(
         # drop-false-positives step, so it can only ever keep more findings.
         verified = genuine_issues
     else:
-        verified = filter_false_positives(llm, input_data, genuine_issues)
+        verified = filter_false_positives(llm, input_data, genuine_issues, repo_reader=repo_reader)
 
     notify_review_progress(
         progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
