@@ -119,7 +119,7 @@ class DesignSystemContractRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _temporal_dispatch() -> Optional[Callable[[str, str, dict], str]]:
+def _get_temporal_dispatcher() -> Optional[Callable[[str, str, dict], str]]:
     """Return the Temporal ``start_*_workflow`` dispatcher when Temporal is enabled.
 
     Preconditions:
@@ -196,7 +196,7 @@ async def create_audit(
     # None => the in-process (non-Temporal) path ran; set to the workflow id on a
     # successful Temporal dispatch. It is never an empty string.
     workflow_id: Optional[str] = None
-    dispatch = _temporal_dispatch()
+    dispatch = _get_temporal_dispatcher()
     if dispatch is not None:
         try:
             # The dispatcher is synchronous and blocking: it polls for the worker's

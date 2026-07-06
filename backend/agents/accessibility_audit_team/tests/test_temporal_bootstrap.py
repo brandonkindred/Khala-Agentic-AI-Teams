@@ -231,7 +231,7 @@ def test_temporal_dispatch_none_when_disabled(monkeypatch):
     monkeypatch.setattr(shared_temporal, "is_temporal_enabled", lambda: False)
     from accessibility_audit_team.api import main
 
-    assert main._temporal_dispatch() is None
+    assert main._get_temporal_dispatcher() is None
 
 
 def test_temporal_dispatch_none_on_import_error(monkeypatch):
@@ -242,7 +242,7 @@ def test_temporal_dispatch_none_on_import_error(monkeypatch):
 
     # A non-module object makes ``from shared_temporal import ...`` raise ImportError.
     monkeypatch.setitem(sys.modules, "shared_temporal", object())
-    assert main._temporal_dispatch() is None
+    assert main._get_temporal_dispatcher() is None
 
 
 def test_temporal_dispatch_returns_starter_when_enabled(monkeypatch):
@@ -254,7 +254,7 @@ def test_temporal_dispatch_returns_starter_when_enabled(monkeypatch):
         start_accessibility_audit_workflow,
     )
 
-    assert main._temporal_dispatch() is start_accessibility_audit_workflow
+    assert main._get_temporal_dispatcher() is start_accessibility_audit_workflow
 
 
 def test_temporal_dispatch_logs_and_falls_back_on_start_workflow_import_error(monkeypatch):
@@ -268,7 +268,7 @@ def test_temporal_dispatch_logs_and_falls_back_on_start_workflow_import_error(mo
     from accessibility_audit_team.api import main
 
     with mock.patch.object(main.logger, "warning") as warn:
-        assert main._temporal_dispatch() is None
+        assert main._get_temporal_dispatcher() is None
         warn.assert_called_once()
 
 
@@ -278,7 +278,7 @@ def test_create_audit_uses_temporal_when_dispatch_available(monkeypatch):
     jm = mock.Mock()
     monkeypatch.setattr(main, "_job_manager", jm)
     dispatch = mock.Mock(return_value="accessibility_audit-wf1")
-    monkeypatch.setattr(main, "_temporal_dispatch", lambda: dispatch)
+    monkeypatch.setattr(main, "_get_temporal_dispatcher", lambda: dispatch)
     exec_job = mock.Mock()
     monkeypatch.setattr(main, "execute_audit_job", exec_job)
 
@@ -314,7 +314,7 @@ def test_create_audit_succeeds_when_workflow_id_persist_fails(monkeypatch):
     jm.update_job.side_effect = ConnectionError("job-service unreachable")
     monkeypatch.setattr(main, "_job_manager", jm)
     dispatch = mock.Mock(return_value="accessibility_audit-wf1")
-    monkeypatch.setattr(main, "_temporal_dispatch", lambda: dispatch)
+    monkeypatch.setattr(main, "_get_temporal_dispatcher", lambda: dispatch)
     exec_job = mock.Mock()
     monkeypatch.setattr(main, "execute_audit_job", exec_job)
 
@@ -331,7 +331,7 @@ def test_create_audit_uses_background_task_when_temporal_disabled(monkeypatch):
     from accessibility_audit_team.api import main
 
     monkeypatch.setattr(main, "_job_manager", mock.Mock())
-    monkeypatch.setattr(main, "_temporal_dispatch", lambda: None)
+    monkeypatch.setattr(main, "_get_temporal_dispatcher", lambda: None)
     executed = mock.AsyncMock()
     monkeypatch.setattr(main, "execute_audit_job", executed)
 
@@ -356,7 +356,7 @@ def test_create_audit_fails_fast_when_dispatch_raises(monkeypatch):
     def _boom(*_a, **_k):
         raise RuntimeError("Temporal client not available")
 
-    monkeypatch.setattr(main, "_temporal_dispatch", lambda: _boom)
+    monkeypatch.setattr(main, "_get_temporal_dispatcher", lambda: _boom)
     executed = mock.AsyncMock()
     monkeypatch.setattr(main, "execute_audit_job", executed)
 
