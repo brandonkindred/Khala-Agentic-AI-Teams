@@ -877,8 +877,6 @@ class TechLeadAgent:
         Decide whether documentation needs updating after a task completes,
         and if so, trigger the Documentation Agent.
         """
-        from pathlib import Path
-
         logger.info(
             "Tech Lead: evaluating documentation update for task %s (%s)",
             task_update.task_id,
@@ -984,8 +982,6 @@ class TechLeadAgent:
         Trigger the DevOps agent to add containerization and deployment for the backend repo.
         Returns True if run and write succeeded, False otherwise (non-blocking).
         """
-        from pathlib import Path
-
         path = Path(repo_path).resolve()
         if not (path / ".git").exists():
             logger.warning("Tech Lead: skip DevOps for backend (not a git repo): %s", path)
@@ -1031,8 +1027,6 @@ class TechLeadAgent:
         Trigger the DevOps agent to add containerization and deployment for the frontend repo.
         Returns True if run and write succeeded, False otherwise (non-blocking).
         """
-        from pathlib import Path
-
         path = Path(repo_path).resolve()
         if not (path / ".git").exists():
             logger.warning("Tech Lead: skip DevOps for frontend (not a git repo): %s", path)
