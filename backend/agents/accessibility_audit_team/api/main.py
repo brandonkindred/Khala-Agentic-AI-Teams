@@ -225,8 +225,14 @@ async def create_audit(
             ) from e
         # Record the workflow id for correlation only; the worker activity owns
         # all status transitions (pending -> running -> terminal), so the API
-        # must not also write status here or it can race the activity.
-        _job_manager.update_job(job_id, workflow_id=workflow_id)
+        # must not also write status here or it can race the activity. The
+        # workflow is already accepted server-side at this point, so a failure
+        # to persist the correlation id is logged, not raised — the job is not
+        # failed and the request still succeeds.
+        try:
+            _job_manager.update_job(job_id, workflow_id=workflow_id)
+        except Exception:
+            logger.warning("Failed to record workflow_id for job %s", job_id, exc_info=True)
         message = "Audit queued (Temporal). Poll /audit/status/{job_id} for progress."
     else:
         background_tasks.add_task(execute_audit_job, job_id, audit_id, request)

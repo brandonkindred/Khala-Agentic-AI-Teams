@@ -279,6 +279,8 @@ def test_create_audit_uses_temporal_when_dispatch_available(monkeypatch):
     monkeypatch.setattr(main, "_job_manager", jm)
     dispatch = mock.Mock(return_value="accessibility_audit-wf1")
     monkeypatch.setattr(main, "_temporal_dispatch", lambda: dispatch)
+    exec_job = mock.Mock()
+    monkeypatch.setattr(main, "execute_audit_job", exec_job)
 
     resp = client.post("/audit/create", json={"web_urls": ["https://example.com"]})
     assert resp.status_code == 200
@@ -298,6 +300,31 @@ def test_create_audit_uses_temporal_when_dispatch_available(monkeypatch):
     assert wf_writes
     assert wf_writes[0].kwargs["workflow_id"] == "accessibility_audit-wf1"
     assert all("status" not in c.kwargs for c in wf_writes)
+    # the Temporal dispatch branch must not also schedule the in-process path
+    exec_job.assert_not_called()
+
+
+def test_create_audit_succeeds_when_workflow_id_persist_fails(monkeypatch):
+    """The workflow already started server-side by the time workflow_id is
+    persisted for correlation, so a failure to persist it must be logged, not
+    raised — the request still succeeds (200) with no in-process fallback."""
+    from accessibility_audit_team.api import main
+
+    jm = mock.Mock()
+    jm.update_job.side_effect = ConnectionError("job-service unreachable")
+    monkeypatch.setattr(main, "_job_manager", jm)
+    dispatch = mock.Mock(return_value="accessibility_audit-wf1")
+    monkeypatch.setattr(main, "_temporal_dispatch", lambda: dispatch)
+    exec_job = mock.Mock()
+    monkeypatch.setattr(main, "execute_audit_job", exec_job)
+
+    with mock.patch.object(main.logger, "warning") as warn:
+        resp = client.post("/audit/create", json={"web_urls": ["https://example.com"]})
+        warn.assert_called_once()
+
+    assert resp.status_code == 200
+    assert resp.json()["workflow_id"] == "accessibility_audit-wf1"
+    exec_job.assert_not_called()
 
 
 def test_create_audit_uses_background_task_when_temporal_disabled(monkeypatch):
@@ -505,3 +532,42 @@ def test_run_audit_job_propagates_infra_exception(monkeypatch, exc):
     statuses = [c.kwargs.get("status") for c in jm.update_job.call_args_list]
     assert ax.JOB_STATUS_RUNNING in statuses
     assert "failed" not in statuses  # terminal failure is execute_audit_job's job
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+def test_run_audit_job_is_idempotent_on_retry_after_terminal(monkeypatch, terminal_status):
+    """A Temporal retry that fires after the job already reached a terminal
+    state (e.g. the retry was triggered by the terminal ``update_job`` call
+    itself failing post-hoc) must not re-run the full audit from scratch."""
+    from accessibility_audit_team import audit_execution as ax
+
+    jm = mock.Mock()
+    jm.get_job.return_value = {"status": terminal_status}
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    orch = mock.Mock()
+    orch.run_audit = mock.AsyncMock(return_value=_fake_result(True))
+    monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
+
+    req = ax.CreateAuditRequest(web_urls=["https://e.com"])
+    asyncio.run(ax.run_audit_job("job1", "audit1", req))
+
+    orch.run_audit.assert_not_awaited()
+    jm.update_job.assert_not_called()
+
+
+def test_run_audit_job_runs_when_no_existing_job_row(monkeypatch):
+    """No prior job row (``get_job`` returns ``None``) is not a terminal state
+    — the audit must still run (covers the first-ever execution)."""
+    from accessibility_audit_team import audit_execution as ax
+
+    jm = mock.Mock()
+    jm.get_job.return_value = None
+    monkeypatch.setattr(ax, "get_job_manager", lambda: jm)
+    orch = mock.Mock()
+    orch.run_audit = mock.AsyncMock(return_value=_fake_result(True))
+    monkeypatch.setattr(ax, "get_orchestrator", lambda: orch)
+
+    req = ax.CreateAuditRequest(web_urls=["https://e.com"])
+    asyncio.run(ax.run_audit_job("job1", "audit1", req))
+
+    orch.run_audit.assert_awaited_once()

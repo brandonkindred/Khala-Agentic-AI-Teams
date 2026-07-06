@@ -15,7 +15,12 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from job_service_client import JOB_STATUS_FAILED, JOB_STATUS_RUNNING, JobServiceClient
+from job_service_client import (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_RUNNING,
+    JobServiceClient,
+)
 
 from .models import AuditRequest, MobileAppTarget, WCAGLevel
 from .orchestrator import AccessibilityAuditOrchestrator
@@ -160,17 +165,25 @@ async def run_audit_job(job_id: str, audit_id: str, request: CreateAuditRequest)
     Preconditions:
         - ``job_id``/``audit_id`` are non-empty and a job row already exists for ``job_id``.
     Postconditions:
-        - On success/logical-failure the job ends in ``completed``/``failed``.
+        - If the job is already in a terminal state (``completed``/``failed``), the
+          audit is NOT re-run — this makes a Temporal retry that fires *after* the
+          terminal ``update_job`` below already landed (e.g. the retry was triggered
+          by a job-store network blip on that same call) a no-op instead of
+          re-executing the full (up to 2h) audit.
+        - Otherwise, on success/logical-failure the job ends in ``completed``/``failed``.
         - On an infrastructure exception the exception propagates to the caller
           (the job's last persisted state is ``running``).
     """
     manager = get_job_manager()
+    existing = manager.get_job(job_id)
+    if existing is not None and existing.get("status") in (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED):
+        return
     manager.update_job(job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20)
     audit_request = build_audit_request(request, audit_id)
     result = await get_orchestrator().run_audit(audit_request, request.tech_stack)
     manager.update_job(
         job_id,
-        status="completed" if result.success else JOB_STATUS_FAILED,
+        status=JOB_STATUS_COMPLETED if result.success else JOB_STATUS_FAILED,
         progress=100,
         current_phase=result.current_phase.value,
         completed_phases=[p.value for p in result.completed_phases],
@@ -196,4 +209,5 @@ async def execute_audit_job(job_id: str, audit_id: str, request: CreateAuditRequ
     try:
         await run_audit_job(job_id, audit_id, request)
     except Exception as e:
+        logger.exception("Audit job %s failed", job_id)
         get_job_manager().update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
