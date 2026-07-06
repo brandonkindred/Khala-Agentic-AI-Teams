@@ -129,7 +129,12 @@ def _write_manifest_file(project_name: str, manifest_json: str) -> Path:
     path = _manifest_host_path(project_name)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(manifest_json, encoding="utf-8")
+    # Create with the target mode atomically (no separate chmod window) — umask
+    # is still applied to this request, so still explicitly chmod after to
+    # guarantee 0644 regardless of the process's umask.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(manifest_json)
     os.chmod(tmp, 0o644)
     os.replace(tmp, path)
     return path

@@ -236,7 +236,11 @@ class AgentStudioConversationStore:
 
         Yields a :class:`ConversationTurn` snapshotting the history + definition at
         turn start; its ``append_message`` / ``set_definition`` delegate to the
-        store's own thread-safe methods.
+        store's own thread-safe methods. Unlike the Postgres store (whose writes
+        share one transaction that rolls back atomically), each write here applies
+        immediately — so an exception after a partial write is caught and the
+        pre-turn ``messages`` / ``definition`` are restored before re-raising,
+        giving the same "rolls back, never partially applied" guarantee.
 
         Preconditions:
             * ``conversation_id`` exists (raises :class:`LookupError` → 404 if not).
@@ -258,14 +262,27 @@ class AgentStudioConversationStore:
                     raise LookupError(f"Unknown conversation: {conversation_id}")
                 history = [(m.role, m.content) for m in record.messages]
                 definition = record.definition.model_copy(deep=True)
-            yield ConversationTurn(
-                history=history,
-                definition=definition,
-                on_message=lambda role, content: self.append_message(
-                    conversation_id, role, content
-                ),
-                on_definition=lambda d: self.set_definition(conversation_id, d),
-            )
+            # Rollback snapshot: messages/definition are frozen/immutable-once-set,
+            # so holding these references (not deep copies) is enough to restore
+            # the exact pre-turn state on failure.
+            messages_before = list(record.messages)
+            definition_before = record.definition
+            try:
+                yield ConversationTurn(
+                    history=history,
+                    definition=definition,
+                    on_message=lambda role, content: self.append_message(
+                        conversation_id, role, content
+                    ),
+                    on_definition=lambda d: self.set_definition(conversation_id, d),
+                )
+            except BaseException:
+                with self._lock:
+                    still_present = self._records.get(conversation_id)
+                    if still_present is not None:
+                        still_present.messages = messages_before
+                        still_present.definition = definition_before
+                raise
         finally:
             lock.release()
 

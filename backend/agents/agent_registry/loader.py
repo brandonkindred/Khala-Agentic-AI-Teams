@@ -264,10 +264,17 @@ class AgentRegistry:
             * Static/disk ids resolve from the in-memory map with zero Postgres
               cost (the built-in-agent invoke hot path).
             * For a dynamic id with the store active, returns the Postgres row when
-              present; otherwise falls back to this process's local ``_by_id`` copy
-              — **read-your-writes**: a manifest ``register()``'d on this worker
-              always resolves here even if its best-effort Postgres write-through
-              failed (see :meth:`register`). The cross-worker consistency model is
+              present; otherwise falls back to this process's local ``_by_id``
+              copy — **read-your-writes for a first registration**: a *brand-new*
+              dynamic id ``register()``'d on this worker always resolves here even
+              if its best-effort Postgres write-through failed (see
+              :meth:`register`), because the store has no row yet (a miss). This
+              guarantee does **not** extend to updating an *existing* dynamic id:
+              if ``register()`` writes a new version locally but its upsert fails,
+              the store still holds the older confirmed row, which is preferred
+              over the unconfirmed local update (a present store row always wins,
+              by design — an unconfirmed local write is not assumed more correct
+              than the last confirmed one). The cross-worker consistency model is
               therefore *eventual*, not immediate: an ``unregister()`` on another
               worker is seen once this worker's stale local copy is dropped (roster
               re-sync / restart) or via the authoritative Postgres row, whichever

@@ -242,3 +242,27 @@ def test_turn_rolls_back_nothing_on_exception() -> None:
     with store.turn(cid) as t:
         t.append_message("user", "again")
     assert len(store.get(cid).messages) == 1
+
+
+def test_turn_rolls_back_a_partial_write_on_later_exception() -> None:
+    # Unlike a failure before any write, an exception AFTER a message was already
+    # appended must still leave the conversation exactly as it was pre-turn (no
+    # partially-applied state) — each in-memory write applies immediately, so the
+    # store must explicitly restore the snapshot rather than relying on a
+    # transaction.
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition(name="x", role="r"))
+    with pytest.raises(RuntimeError):
+        with store.turn(cid) as t:
+            t.append_message("user", "hi")
+            updated = t.definition.model_copy()
+            updated.name = "should-not-stick"
+            t.set_definition(updated)
+            raise RuntimeError("failed after partial writes")
+    record = store.get(cid)
+    assert record.messages == []
+    assert record.definition.name == "x"
+    # Lock released: a subsequent turn proceeds normally.
+    with store.turn(cid) as t:
+        t.append_message("user", "again")
+    assert len(store.get(cid).messages) == 1

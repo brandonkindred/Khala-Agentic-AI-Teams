@@ -52,10 +52,11 @@ def _build_service() -> AgentStudioService:
 
     The store is stateless with a lazily-opened pool, so this selection does no I/O:
     it only decides *which* store class to instantiate. The ``except`` is narrowed
-    to :class:`ImportError` / :class:`ModuleNotFoundError` on purpose — the only
-    non-connectivity failure possible here is a missing optional dependency (e.g.
-    psycopg absent), which legitimately degrades to in-memory. A configured-but-
-    unreachable Postgres is deliberately **not** downgraded: construction opens no
+    to :class:`ImportError` on purpose (``ModuleNotFoundError`` is a subclass, so
+    it's already covered) — the only non-connectivity failure possible here is a
+    missing optional dependency (e.g. psycopg absent), which legitimately degrades
+    to in-memory. A configured-but-unreachable Postgres is deliberately **not**
+    downgraded: construction opens no
     connection, so a connectivity error can only surface later inside a request,
     where it propagates rather than silently forking per-worker state. Any other
     unexpected error at construction likewise propagates (fail loud) instead of
@@ -68,7 +69,7 @@ def _build_service() -> AgentStudioService:
             from agent_studio.pg_store import PostgresAgentStudioConversationStore
 
             return AgentStudioService(store=PostgresAgentStudioConversationStore())
-    except (ImportError, ModuleNotFoundError):  # pragma: no cover - only a missing dep degrades
+    except ImportError:  # pragma: no cover - only a missing dep degrades (ModuleNotFoundError is a subclass)
         logger.warning(
             "Postgres Agent Studio store unavailable (missing dependency); using in-memory store",
             exc_info=True,
