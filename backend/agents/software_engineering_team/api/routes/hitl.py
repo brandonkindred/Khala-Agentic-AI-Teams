@@ -175,7 +175,7 @@ def auto_answer_run_team_question(
     if data.get("job_type") not in (None, "run_team"):
         raise HTTPException(
             status_code=400,
-            detail="This endpoint is only for run-team jobs. Use /planning-v2/{job_id}/auto-answer/{question_id} for planning-v2 jobs.",
+            detail="This endpoint is only for run-team jobs.",
         )
 
     pending_questions = data.get("pending_questions", [])

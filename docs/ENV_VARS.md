@@ -853,16 +853,16 @@ Winning Posts Bank (default `0.7`).
 
 ---
 
-## Planning V3
+## Planning
 
-### PLANNING_V3_MANY_SECTIONS_WARN
-Soft threshold for the spec-digestion engine (`planning_v3_team/spec_digest.py`): when a
+### PLANNING_MANY_SECTIONS_WARN
+Soft threshold for the spec-digestion engine (`planning_team/spec_digest.py`): when a
 brief+spec splits into more than this many sections, `map_reduce` logs a warning (one LLM call
 runs per section, so a very large spec has a proportional cost/latency). Observability only — it
 never caps or drops sections (that would discard spec content). Default `50`; garbage or
 non-positive values fall back to the default.
 
-### PLANNING_V3_RESERVED_PROMPT_TOKENS / PLANNING_V3_RESERVED_RESPONSE_TOKENS
+### PLANNING_RESERVED_PROMPT_TOKENS / PLANNING_RESERVED_RESPONSE_TOKENS
 Token reserves the spec-digestion engine carves out of the model context before sizing each
 per-section prompt — for the phase prompt template/headers and the model's response,
 respectively. Defaults `6000` / `4096`; raise them for prompt-heavy phases or models that

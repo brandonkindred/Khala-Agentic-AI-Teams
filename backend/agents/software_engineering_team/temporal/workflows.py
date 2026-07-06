@@ -83,7 +83,7 @@ class RetryFailedWorkflow:
 class RunTeamWorkflowV2:
     """Multi-step orchestration: each pipeline phase is a separate Temporal activity.
 
-    Phases: spec parsing + PRA → Planning V3 → Coding Team execution.
+    Phases: spec parsing + PRA → Planning → Coding Team execution.
     Each activity can fail and retry independently.
     """
 
@@ -106,7 +106,7 @@ class RunTeamWorkflowV2:
             retry_policy=DEFAULT_RETRY_POLICY,
         )
 
-        # Phase 2: Planning V3
+        # Phase 2: Planning
         plan_result = await workflow.execute_activity(
             _activities.plan_project_activity,
             args=[job_id, repo_path, spec_result],
@@ -132,7 +132,7 @@ class RunTeamWorkflowV2:
 
 @workflow.defn(name="StandaloneJobWorkflow")
 class StandaloneJobWorkflow:
-    """Runs a standalone job (frontend-code-v2, backend-code-v2, planning-v2, product-analysis)."""
+    """Runs a standalone job (frontend-code-v2, backend-code-v2, product-analysis)."""
 
     @workflow.run
     async def run(

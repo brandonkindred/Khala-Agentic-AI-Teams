@@ -1,7 +1,7 @@
 # Unified sandbox image: superset of every runnable team's runtime deps.
 # Each container loads exactly one agent (SANDBOX_AGENT_ID) but the image
 # supports any of them, so deps are merged. Built from:
-#   team_service/requirements.txt (generic teams — planning-v3, branding, SE, etc.)
+#   team_service/requirements.txt (generic teams — planning, branding, SE, etc.)
 #   agents/blogging/requirements.txt (Playwright, jinja2, textstat)
 #   agents/software_engineering_team/requirements.txt
 #   agents/agent_provisioning_team/requirements.txt

@@ -40,7 +40,7 @@ def test_team_configs_has_expected_teams():
         "ai_systems",
         "investment",
         "nutrition_meal_planning",
-        "planning_v3",
+        "planning",
         "coding_team",
         "sales_team",
         "road_trip_planning",

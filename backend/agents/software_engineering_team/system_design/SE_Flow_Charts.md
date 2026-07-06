@@ -11,8 +11,8 @@ flowchart TD
     PRA["Phase 1: Product Requirements Analysis\nspec_review → communicate →\nspec_update → spec_cleanup"]
     CANCEL2{"Cancelled?"}
 
-    PV3["Phase 2: Planning V3\nintake → discovery → requirements →\nsynthesis → document_production →\nsub_agent_provisioning"]
-    ADAPT["adapt_planning_v3_result()\n→ CodingTeamPlanInput"]
+    PV3["Phase 2: Planning\nintake → discovery → requirements →\nsynthesis → document_production →\nsub_agent_provisioning"]
+    ADAPT["adapt_planning_result()\n→ CodingTeamPlanInput"]
     CANCEL3{"Cancelled?"}
 
     DECISION{"use_coding_team?\n(default: True)"}
@@ -326,11 +326,11 @@ flowchart LR
     ENV -->|production| PROD
 ```
 
-## 6. Planning V3 Workflow
+## 6. Planning Workflow
 
 ```mermaid
 flowchart TD
-    START["Planning V3 run_workflow()"]
+    START["Planning run_workflow()"]
 
     INTAKE["INTAKE (5%)\nParse client_name, brief, spec\n→ initial ClientContext"]
 
@@ -382,7 +382,7 @@ flowchart TD
 flowchart LR
     subgraph MainThread["Main Thread"]
         M1["PRA"]
-        M2["Planning V3"]
+        M2["Planning"]
         M3["Tech Lead"]
         M4["Architecture Expert"]
         M5["Consolidation"]
@@ -486,13 +486,13 @@ flowchart TD
     style ABORT fill:#f8d7da
 ```
 
-## 9. Planning V3 → Coding Team Data Flow
+## 9. Planning → Coding Team Data Flow
 
 End-to-end data transformation from planning to execution.
 
 ```mermaid
 flowchart TD
-    subgraph PV3Output["Planning V3 Output"]
+    subgraph PV3Output["Planning Output"]
         HP["HandoffPackage"]
         CC["ClientContext"]
         VS["validated_spec_content"]
@@ -500,9 +500,9 @@ flowchart TD
         AO["architecture_overview"]
     end
 
-    ADAPT["adapt_planning_v3_result()"]
+    ADAPT["adapt_planning_result()"]
 
-    subgraph AdapterResult["PlanningV2AdapterResult"]
+    subgraph AdapterResult["PlanningAdapterResult"]
         REQ["ProductRequirements\ntitle, description,\nacceptance_criteria"]
         PO["project_overview\nfeatures_and_functionality_doc\ngoals"]
         HIER["PlanningHierarchy\ninitiatives → epics → stories → tasks"]

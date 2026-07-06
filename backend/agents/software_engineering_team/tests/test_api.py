@@ -332,7 +332,7 @@ def test_resume_400_when_job_type_not_run_team(client: TestClient, temp_work_pat
     from software_engineering_team.shared.job_store import create_job
 
     job_id = str(uuid.uuid4())
-    create_job(job_id, str(temp_work_path), job_type="planning_v2")
+    create_job(job_id, str(temp_work_path), job_type="backend_code_v2")
 
     r = client.post(f"/run-team/{job_id}/resume")
     assert r.status_code == 400
@@ -466,7 +466,7 @@ def test_restart_400_when_job_type_not_run_team(client: TestClient, temp_work_pa
     from software_engineering_team.shared.job_store import create_job, update_job
 
     job_id = str(uuid.uuid4())
-    create_job(job_id, str(temp_work_path), job_type="planning_v2")
+    create_job(job_id, str(temp_work_path), job_type="backend_code_v2")
     update_job(job_id, status="failed")
 
     r = client.post(f"/run-team/{job_id}/restart")

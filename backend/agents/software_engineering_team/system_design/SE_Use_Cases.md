@@ -43,7 +43,7 @@ sequenceDiagram
     participant ORC as Orchestrator
     participant PRA as PRA Agent
     participant JS as Job Store
-    participant PV3 as Planning V3
+    participant PV3 as Planning
     participant ADP as Adapter
     participant ARCH as Architecture Expert
     participant CT as Coding Team
@@ -69,7 +69,7 @@ sequenceDiagram
     PV3->>PV3: sub_agent_provisioning(90%)
     PV3-->>ORC: HandoffPackage
 
-    ORC->>ADP: adapt_planning_v3_result()
+    ORC->>ADP: adapt_planning_result()
     ADP-->>ORC: CodingTeamPlanInput
 
     ORC->>JS: check cancellation
@@ -122,7 +122,7 @@ sequenceDiagram
     participant SEC as Security Agent
     participant DOC as Documentation Agent
 
-    Note over ORC: After Planning V3 (same as UC-2)
+    Note over ORC: After Planning (same as UC-2)
 
     ORC->>TL: generate TaskAssignment
     TL-->>ORC: tasks[], execution_order

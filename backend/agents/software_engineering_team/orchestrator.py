@@ -113,7 +113,7 @@ def _partition_tasks_by_completion(
 
 
 # The SE job owns the allocation of its progress bar across phases. Sub-agents
-# (PRA, Planning V3, coding team) each report their OWN 0-100 progress; the job
+# (PRA, Planning, coding team) each report their OWN 0-100 progress; the job
 # updaters rescale those onto the phase's band so the bar is monotone across the
 # whole run instead of repeatedly sprinting to 100 and collapsing at each handoff.
 PROGRESS_BAND_PRODUCT_ANALYSIS = (0, 15)
@@ -142,7 +142,7 @@ def _scale_progress(pct: Any, band: "tuple[int, int]") -> Optional[int]:
 
 
 PRA_PHASE_ORDER = ["spec_review", "communicate", "spec_update", "spec_cleanup"]
-PLANNING_V3_PHASE_ORDER = [
+PLANNING_PHASE_ORDER = [
     "intake",
     "discovery",
     "requirements",
@@ -185,8 +185,8 @@ def _make_pra_job_updater(job_id: str) -> Callable[..., None]:
     return _updater
 
 
-def _make_planning_v3_job_updater(job_id: str) -> Callable[..., None]:
-    """Build the job updater handed to the Planning V3 workflow.
+def _make_planning_job_updater(job_id: str) -> Callable[..., None]:
+    """Build the job updater handed to the Planning workflow.
 
     Postconditions: mirrors :func:`_make_pra_job_updater` for the planning phase —
     ``current_phase`` becomes ``planning_subprocess``/``planning_completed_phases``
@@ -199,12 +199,12 @@ def _make_planning_v3_job_updater(job_id: str) -> Callable[..., None]:
             if planning_phase:
                 kwargs["planning_subprocess"] = planning_phase
                 completed_phases = []
-                for p in PLANNING_V3_PHASE_ORDER:
+                for p in PLANNING_PHASE_ORDER:
                     if p == planning_phase:
                         break
                     completed_phases.append(p)
                 kwargs["planning_completed_phases"] = completed_phases
-            # Planning V3 reports its own 0-100 progress; rescale onto this
+            # Planning reports its own 0-100 progress; rescale onto this
             # phase's band so the job bar stays monotone into the coding phase.
             if "progress" in kwargs:
                 scaled = _scale_progress(kwargs.pop("progress"), PROGRESS_BAND_PLANNING)
@@ -352,11 +352,11 @@ def _run_se_decision_gate(
     return answers_to_resolved(submitted, structured), True
 
 
-def _build_planning_v3_answer_callback(job_id: str) -> Callable[[list], list]:
-    """Build an escalating answer callback for Planning V3 PRA — surface questions, never auto-decide.
+def _build_planning_answer_callback(job_id: str) -> Callable[[list], list]:
+    """Build an escalating answer callback for Planning PRA — surface questions, never auto-decide.
 
-    When Planning V3's product-analysis phase asks clarification questions, this pauses the SE job
-    and routes them to the user (instead of Planning V3 auto-selecting a default). It preserves each
+    When Planning's product-analysis phase asks clarification questions, this pauses the SE job
+    and routes them to the user (instead of Planning auto-selecting a default). It preserves each
     PRA question's id/options so the submitted answers map straight back to PRA.
 
     Postconditions:
@@ -587,7 +587,7 @@ def _log_task_breakdown(
 def _get_agents() -> Dict[str, Any]:
     """Lazy init agents including the code review, documentation, and DbC comments agents.
     Each agent uses get_client(key) for per-agent model configuration.
-    Main pipeline uses planning_v3_team for planning; spec_intake/project_planning/domain planning agents
+    Main pipeline uses planning_team for planning; spec_intake/project_planning/domain planning agents
     are not used in the main flow (clarification_store may still use Spec Intake elsewhere)."""
     from acceptance_verifier_agent import AcceptanceVerifierAgent
     from accessibility_agent import AccessibilityExpertAgent
@@ -659,7 +659,7 @@ def _build_coding_team_plan_input(
     existing_code_summary: Optional[str] = None,
     resolved_questions: Optional[List[Dict[str, Any]]] = None,
 ) -> Any:
-    """Build CodingTeamPlanInput from PlanningV2AdapterResult for coding_team orchestrator."""
+    """Build CodingTeamPlanInput from PlanningAdapterResult for coding_team orchestrator."""
     from coding_team.models import CodingTeamPlanInput
 
     req = adapter_result.requirements
@@ -2089,7 +2089,7 @@ def run_orchestrator(
         # Check for cancellation after PRA
         _check_cancellation(job_id)
 
-        # ── Step 2: Planning V3 Team ──────────────────────────────────────────
+        # ── Step 2: Planning Team ──────────────────────────────────────────
         # Receives validated spec, performs planning (intake → discovery → requirements → synthesis → document production)
         update_job(
             job_id,
@@ -2097,21 +2097,21 @@ def run_orchestrator(
             message="Starting planning workflow...",
             status_text="Starting planning workflow",
         )
-        logger.info("Next step -> Running Planning V3 team to generate handoff and context")
+        logger.info("Next step -> Running Planning team to generate handoff and context")
 
-        from planning_v3_adapter import PlanningV2AdapterResult, adapt_planning_v3_result
+        from planning_adapter import PlanningAdapterResult, adapt_planning_result
 
-        from planning_v3_team.orchestrator import run_workflow as run_planning_v3_workflow
+        from planning_team.orchestrator import run_workflow as run_planning_workflow
 
-        _planning_v3_job_updater = _make_planning_v3_job_updater(job_id)
+        _planning_job_updater = _make_planning_job_updater(job_id)
 
-        def _run_architecture_for_planning_v3(  # pragma: no cover  # integration-only: runs ArchitectureExpert LLM
+        def _run_architecture_for_planning(  # pragma: no cover  # integration-only: runs ArchitectureExpert LLM
             spec_content: str,
             prd_content: Optional[str],
             repo_path: str,
             client_context: Optional[Dict[str, Any]],
         ) -> Optional[str]:
-            """Produce architecture overview during Planning V3 document production (merged Architecture Expert)."""
+            """Produce architecture overview during Planning document production (merged Architecture Expert)."""
             from architecture_expert.models import ArchitectureInput
 
             from software_engineering_team.shared.models import ProductRequirements
@@ -2120,7 +2120,7 @@ def run_orchestrator(
             if (prd_content or "").strip():
                 req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
             if not req_desc:
-                req_desc = "See Planning V3 handoff artifacts."
+                req_desc = "See Planning handoff artifacts."
             acceptance = ["Deliver according to spec and planning artifacts."]
             if client_context and client_context.get("success_criteria"):
                 acceptance = list(client_context["success_criteria"])
@@ -2175,34 +2175,33 @@ def run_orchestrator(
             except Exception:
                 return None
 
-        p3_result = run_planning_v3_workflow(
+        p3_result = run_planning_workflow(
             repo_path=str(path),
             spec_content=validated_spec,
             use_product_analysis=False,
-            use_planning_v2=False,
             llm=get_client("project_planning"),
-            job_updater=_planning_v3_job_updater,
-            run_architecture_fn=_run_architecture_for_planning_v3,
-            # Never let Planning V3 silently auto-decide a clarification question on this path:
+            job_updater=_planning_job_updater,
+            run_architecture_fn=_run_architecture_for_planning,
+            # Never let Planning silently auto-decide a clarification question on this path:
             # escalate to the user, and fail closed if escalation is somehow unavailable.
-            answer_callback=_build_planning_v3_answer_callback(job_id),
+            answer_callback=_build_planning_answer_callback(job_id),
             auto_answer_questions=False,
         )
         if not p3_result.get("success"):
             err = (
                 p3_result.get("failure_reason")
-                or "Planning V3 workflow did not complete successfully."
+                or "Planning workflow did not complete successfully."
             )
-            logger.error("Planning V3 failed: %s", err)
+            logger.error("Planning failed: %s", err)
             update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return
 
         try:
-            adapter_result: PlanningV2AdapterResult = adapt_planning_v3_result(
+            adapter_result: PlanningAdapterResult = adapt_planning_result(
                 p3_result, spec_title=requirements.title, repo_path=str(path)
             )
         except ValueError as e:
-            logger.error("Planning V3 adapter failed: %s", e)
+            logger.error("Planning adapter failed: %s", e)
             update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
             return
 
@@ -2212,7 +2211,7 @@ def run_orchestrator(
         requirements = adapter_result.requirements
         update_job(job_id, requirements_title=requirements.title)
 
-        # Check for cancellation after Planning V3
+        # Check for cancellation after Planning
         _check_cancellation(job_id)
 
         # Human-in-the-loop decision gate (default path). If planning surfaced open questions that

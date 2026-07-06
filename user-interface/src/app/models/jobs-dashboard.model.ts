@@ -9,7 +9,7 @@ import type { ProvisionJobSummary } from './agent-provisioning.model';
 import type { MarketingJobListItem } from './social-marketing.model';
 import type { InvestmentJobSummary } from './investment.model';
 import type { SalesPipelineJobListItem } from './sales-team.model';
-import type { PlanningV3JobSummary } from './planning-v3.model';
+import type { PlanningJobSummary } from './planning.model';
 import type { GenericJobRecord } from '../services/generic-jobs-api.service';
 
 export type JobSource =
@@ -22,7 +22,7 @@ export type JobSource =
   | 'user_agent_founder'
   | 'soc2_compliance'
   | 'personal_assistant'
-  | 'planning_v3'
+  | 'planning'
   | 'road_trip_planning'
   | 'nutrition_meal_planning'
   | 'coding_team'
@@ -191,12 +191,12 @@ export function fromSalesJobListItem(s: SalesPipelineJobListItem): UnifiedJobSum
   };
 }
 
-export function fromPlanningV3JobSummary(s: PlanningV3JobSummary): UnifiedJobSummary {
+export function fromPlanningJobSummary(s: PlanningJobSummary): UnifiedJobSummary {
   return {
     jobId: s.job_id,
     status: s.status,
-    source: 'planning_v3',
-    label: getRepoName(s.repo_path) || 'Planning V3',
+    source: 'planning',
+    label: getRepoName(s.repo_path) || 'Planning',
     createdAt: undefined,
     repoPath: s.repo_path,
     phase: s.current_phase,
@@ -233,7 +233,7 @@ export const SOURCE_DISPLAY: Record<
   user_agent_founder: { label: 'Testing Personas', icon: 'person_search', route: '/persona-testing' },
   soc2_compliance: { label: 'SOC2 Compliance', icon: 'verified_user', route: '/soc2-compliance' },
   personal_assistant: { label: 'Personal Assistant', icon: 'assistant', route: '/personal-assistant' },
-  planning_v3: { label: 'Planning V3', icon: 'description', route: '/software-engineering/planning-v3' },
+  planning: { label: 'Planning', icon: 'description', route: '/software-engineering/planning' },
   road_trip_planning: { label: 'Road Trip', icon: 'directions_car', route: '/dashboard' },
   nutrition_meal_planning: { label: 'Nutrition', icon: 'restaurant', route: '/nutrition' },
   coding_team: { label: 'Coding Team', icon: 'terminal', route: '/software-engineering/coding-team' },

@@ -1,7 +1,7 @@
 """End-to-end smoke matrix for the per-agent sandbox lifecycle (issue #268, Phase 6).
 
 Exercises the four-team smoke matrix from the Phase 6 epic against a live stack:
-``blogging.planner``, ``se.backend.api_openapi``, ``planning_v3.intake``, and
+``blogging.planner``, ``se.backend.api_openapi``, ``planning.intake``, and
 ``branding.creative_director``. Verifies that the unified ``khala-agent-sandbox``
 image provisions one container per agent, persists a row to
 ``agent_console_runs``, exposes a loopback-only sandbox URL, and gets reaped
@@ -86,8 +86,8 @@ SMOKE_MATRIX: list[tuple[str, str, dict[str, Any]]] = [
         },
     ),
     (
-        "planning_v3.intake",
-        "planning_v3",
+        "planning.intake",
+        "planning",
         {
             "repo_path": "/tmp/phase6-smoke",
             "client_name": "phase6-smoke",

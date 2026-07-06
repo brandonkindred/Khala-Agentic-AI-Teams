@@ -398,7 +398,7 @@ def plan_project_activity(
     repo_path: str,
     spec_parse_result: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Phase 2: Run Planning V3 workflow.
+    """Phase 2: Run Planning workflow.
 
     Returns PlanResult as a dict.
     """
@@ -413,22 +413,22 @@ def plan_project_activity(
 
         update_job(job_id, phase="planning", status_text="Starting planning workflow")
 
-        from planning_v3_adapter import adapt_planning_v3_result
+        from planning_adapter import adapt_planning_result
         from spec_parser import parse_spec_with_llm
 
         from llm_service import get_client
-        from planning_v3_team.orchestrator import run_workflow as run_planning_v3_workflow
+        from planning_team.orchestrator import run_workflow as run_planning_workflow
 
         # Re-parse requirements for the adapter (lightweight)
         requirements = parse_spec_with_llm(spec_data.spec_content, get_client("spec_intake"))
 
         agents = _get_agents()
 
-        from software_engineering_team.orchestrator import _make_planning_v3_job_updater
+        from software_engineering_team.orchestrator import _make_planning_job_updater
 
-        # Shared with the thread path: rescales Planning V3's own 0-100 progress onto
+        # Shared with the thread path: rescales Planning's own 0-100 progress onto
         # the planning band so the Temporal bar stays monotone into the coding phase.
-        _planning_updater = _make_planning_v3_job_updater(job_id)
+        _planning_updater = _make_planning_job_updater(job_id)
 
         def _run_architecture(spec_content, prd_content, rp, client_context):
             from architecture_expert.models import ArchitectureInput
@@ -463,21 +463,20 @@ def plan_project_activity(
             except Exception:
                 return None
 
-        p3_result = run_planning_v3_workflow(
+        p3_result = run_planning_workflow(
             repo_path=str(path),
             spec_content=validated_spec,
             use_product_analysis=False,
-            use_planning_v2=False,
             llm=get_client("project_planning"),
             job_updater=_planning_updater,
             run_architecture_fn=_run_architecture,
         )
         if not p3_result.get("success"):
-            err = p3_result.get("failure_reason") or "Planning V3 failed"
+            err = p3_result.get("failure_reason") or "Planning failed"
             update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return PlanResult().model_dump()
 
-        adapter_result = adapt_planning_v3_result(
+        adapter_result = adapt_planning_result(
             p3_result, spec_title=requirements.title, repo_path=str(path)
         )
         adapter_result.shared_planning_doc_path = str(
@@ -560,9 +559,9 @@ def execute_coding_team_activity(
         path = Path(repo_path).resolve()
 
         # Reconstruct adapter_result from dict
-        from planning_v3_adapter import PlanningV2AdapterResult
+        from planning_adapter import PlanningAdapterResult
 
-        adapter_result = PlanningV2AdapterResult.from_dict(plan_data.adapter_result_dict)
+        adapter_result = PlanningAdapterResult.from_dict(plan_data.adapter_result_dict)
 
         existing_code = _truncate_for_context(_read_repo_code(path), 8000)
         if existing_code == "# No code files found":

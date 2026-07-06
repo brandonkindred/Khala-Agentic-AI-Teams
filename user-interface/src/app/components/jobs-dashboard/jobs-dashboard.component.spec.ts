@@ -16,7 +16,7 @@ import { SocialMarketingApiService } from '../../services/social-marketing-api.s
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { SalesApiService } from '../../services/sales-api.service';
-import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
+import { PlanningApiService } from '../../services/planning-api.service';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { GenericJobsApiService } from '../../services/generic-jobs-api.service';
 import { JobsDashboardComponent } from './jobs-dashboard.component';
@@ -51,7 +51,6 @@ describe('JobsDashboardComponent', () => {
     const seApi = {
       getRunningJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
       getJobStatus: vi.fn(),
-      getPlanningV2Status: vi.fn(),
       getProductAnalysisStatus: vi.fn(),
       getBackendCodeV2Status: vi.fn(),
       getFrontendCodeV2Status: vi.fn(),
@@ -90,7 +89,7 @@ describe('JobsDashboardComponent', () => {
       cancelJob: vi.fn().mockReturnValue(of({})),
       deleteJob: vi.fn().mockReturnValue(of({})),
     };
-    const planningV3Api = {
+    const planningApi = {
       getJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
     };
     const codingTeamApi = {};
@@ -115,7 +114,7 @@ describe('JobsDashboardComponent', () => {
         { provide: InvestmentApiService, useValue: investmentApi },
         { provide: PersonaTestingApiService, useValue: personaApi },
         { provide: SalesApiService, useValue: salesApi },
-        { provide: PlanningV3ApiService, useValue: planningV3Api },
+        { provide: PlanningApiService, useValue: planningApi },
         { provide: CodingTeamApiService, useValue: codingTeamApi },
         { provide: GenericJobsApiService, useValue: genericJobsApi },
         { provide: Router, useValue: routerSpy },
@@ -149,7 +148,7 @@ describe('JobsDashboardComponent', () => {
     expect(sources).toContain('user_agent_founder');
     expect(sources).toContain('soc2_compliance');
     expect(sources).toContain('personal_assistant');
-    expect(sources).toContain('planning_v3');
+    expect(sources).toContain('planning');
     expect(sources).toContain('road_trip_planning');
     expect(sources).toContain('nutrition_meal_planning');
     expect(sources).toContain('coding_team');
@@ -570,13 +569,13 @@ describe('JobsDashboardComponent', () => {
       expect(component.isStuck(job)).toBe(false);
     });
 
-    it('flags a Planning-V3-style job (no createdAt) after enough observed-poll time', () => {
-      // Planning V3 list endpoint omits created_at, so the row arrives with
+    it('flags a Planning-style job (no createdAt) after enough observed-poll time', () => {
+      // Planning list endpoint omits created_at, so the row arrives with
       // createdAt undefined. The dashboard should still be able to flag it
       // stuck once it has observed the job frozen for STUCK_THRESHOLD_MS+.
       const makePV3 = (phase: string) => {
         const job = makeJob('running', 'pv3-1', undefined as unknown as string, null);
-        job.unified.source = 'planning_v3';
+        job.unified.source = 'planning';
         job.unified.phase = phase;
         return job;
       };
@@ -587,10 +586,10 @@ describe('JobsDashboardComponent', () => {
       expect(component.isStuck(makePV3('drafting'))).toBe(true);
     });
 
-    it('does not flag a Planning-V3 job whose phase is still advancing', () => {
+    it('does not flag a Planning job whose phase is still advancing', () => {
       const makePV3 = (phase: string) => {
         const job = makeJob('running', 'pv3-1', undefined as unknown as string, null);
-        job.unified.source = 'planning_v3';
+        job.unified.source = 'planning';
         job.unified.phase = phase;
         return job;
       };
@@ -872,7 +871,7 @@ describe('JobsDashboardComponent', () => {
       expect(component.canStopJob(makeJob('running', 'investment'))).toBe(true);
       expect(component.canStopJob(makeJob('running', 'soc2_compliance'))).toBe(true);
       expect(component.canStopJob(makeJob('running', 'sales'))).toBe(true);
-      expect(component.canStopJob(makeJob('pending', 'planning_v3'))).toBe(true);
+      expect(component.canStopJob(makeJob('pending', 'planning'))).toBe(true);
     });
     it('returns false for non-active statuses', () => {
       expect(component.canStopJob(makeJob('completed'))).toBe(false);

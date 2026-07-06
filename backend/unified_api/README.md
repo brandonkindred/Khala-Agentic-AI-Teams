@@ -26,7 +26,7 @@ graph TB
             AISys["/api/ai-systems"]
             Invest["/api/investment"]
             Nutrition["/api/nutrition-meal-planning"]
-            PlanV3["/api/planning-v3"]
+            PlanV3["/api/planning"]
             Coding["/api/coding-team"]
             Sales["/api/sales"]
             RoadTrip["/api/road-trip-planning"]
@@ -96,7 +96,7 @@ Execution stays in agent code (e.g. `agent_git_tools` + `GitToolContext`); these
 | AI Systems | `/api/ai-systems` | `/api/ai-systems/docs` |
 | Investment | `/api/investment` | `/api/investment/docs` |
 | Nutrition & Meal Planning | `/api/nutrition-meal-planning` | `/api/nutrition-meal-planning/docs` |
-| Planning V3 | `/api/planning-v3` | `/api/planning-v3/docs` |
+| Planning | `/api/planning` | `/api/planning/docs` |
 | Coding Team | `/api/coding-team` | `/api/coding-team/docs` |
 | AI Sales Team | `/api/sales` | `/api/sales/docs` |
 | Road Trip Planning | `/api/road-trip-planning` | `/api/road-trip-planning/docs` |
@@ -363,7 +363,7 @@ Software Engineering jobs are stored under `{cache_dir}/software_engineering_tea
 ### Slack integration (Phase 1)
 
 - **Integrations API:** `GET /api/integrations` lists configured integrations. **Slack:** `GET/PUT /api/integrations/slack`, OAuth connect/disconnect — configure via UI in `webhook` or `bot` mode; `SLACK_WEBHOOK_URL` remains a webhook fallback env var. **Shared Google browser login:** `GET/PUT/DELETE /api/integrations/google-browser-login` — one **Fernet-encrypted** Gmail/Google email+password for **all** integrations that use “Sign in with Google” via Playwright (**Postgres only** when `POSTGRES_HOST` is set, e.g. Docker; `PUT` returns 503 without Postgres). **Medium (blogging stats):** `GET/PUT /api/integrations/medium`, optional `GET /api/integrations/medium/oauth/google/connect` + callback, `POST/DELETE /api/integrations/medium/session` for manual `storage_state` at `${INTEGRATIONS_BROWSER_SESSION_ROOT:-$AGENT_CACHE/integrations/browser_sessions}/medium/storage_state.json`, and `POST /api/integrations/medium/session/browser-login` to capture Medium using the **shared** Google credentials (`playwright install chromium` on the API host). Stats **auto-login** when the session file is missing if shared credentials exist.
-- **Manual E2E checklist:** (1) Start unified API and Angular UI. (2) Open **Integrations**, enable Slack, paste a valid Incoming Webhook URL, save. (3) Run a software-engineering job (or planning-v2 / product-analysis) that produces open questions; confirm a message appears in the Slack channel with a link to the UI. (4) Send a message to the Personal Assistant; confirm the assistant reply appears in the same Slack channel.
+- **Manual E2E checklist:** (1) Start unified API and Angular UI. (2) Open **Integrations**, enable Slack, paste a valid Incoming Webhook URL, save. (3) Run a software-engineering job (or product-analysis) that produces open questions; confirm a message appears in the Slack channel with a link to the UI. (4) Send a message to the Personal Assistant; confirm the assistant reply appears in the same Slack channel.
 
 ### Phase 2: Inbound from Slack (optional)
 
@@ -371,7 +371,7 @@ To allow answering open questions and PA chat from Slack (instead of only the UI
 
 1. **Slack App setup:** Create a Slack App at api.slack.com. Enable **Incoming Webhooks** (for outbound). For inbound: add a **Bot token** and enable **Events API** (e.g. `message.channels`, `message.im`) or **Socket Mode** so the backend can receive events without a public URL. Install the app to your workspace.
 2. **Events service:** Run a small service (e.g. in `unified_api` or a separate process) that receives Slack events (HTTP endpoint for Events API or Socket Mode client). Map Slack channel/thread to `job_id` (e.g. when posting "open questions" to Slack, store `thread_ts` → `job_id` in a file or cache).
-3. **Submit answers:** On message events in the question thread, parse the user reply (or use interactive Block Kit buttons), build `AnswerSubmission[]`, and call the existing `store_submit_answers(job_id, answers)` (and planning-v2 / product-analysis equivalents by job type).
+3. **Submit answers:** On message events in the question thread, parse the user reply (or use interactive Block Kit buttons), build `AnswerSubmission[]`, and call the existing `store_submit_answers(job_id, answers)` (and product-analysis equivalents by job type).
 4. **PA chat from Slack:** On message events (e.g. DM to bot or message in configured channel), call `POST /assistant/jobs?user_id={user_id}` (map Slack user to `user_id` via config or store), poll `GET /assistant/jobs/{job_id}` until completed, then post `AssistantResponse.message` back to Slack via `chat.postMessage` (Bot token).
 
 ### CORS Issues

@@ -60,7 +60,7 @@ class RunningJobSummary(BaseModel):
     repo_path: Optional[str] = Field(None, description="Path to the repo.")
     job_type: str = Field(
         default="run_team",
-        description="run_team, backend_code_v2, or planning_v2.",
+        description="run_team or backend_code_v2.",
     )
     created_at: Optional[str] = Field(None, description="ISO timestamp when job was created.")
 
@@ -458,93 +458,6 @@ class FrontendCodeV2StatusResponse(BaseModel):
         None,
         description="Short human-readable status (e.g. what is being worked on right now).",
     )
-
-
-class PlanningV2RunRequest(BaseModel):
-    """Request body for POST /planning-v2/run."""
-
-    spec_content: str = Field(..., description="Product/specification content")
-    repo_path: str = Field(..., description="Local path where planning artifacts will be written")
-    inspiration_content: Optional[str] = Field(
-        None, description="Optional inspiration/moodboard content"
-    )
-
-
-class PlanningV2RunResponse(BaseModel):
-    """Response from POST /planning-v2/run."""
-
-    job_id: str = Field(..., description="Job ID for polling status")
-    status: str = Field(default="running")
-    message: str = Field(default="")
-
-
-class PlanningV2StatusResponse(BaseModel):
-    """Response from GET /planning-v2/status/{job_id}."""
-
-    job_id: str = Field(...)
-    status: str = Field(default="pending", description="pending, running, completed, failed")
-    repo_path: Optional[str] = None
-    current_phase: Optional[str] = None
-    progress: int = Field(default=0, description="0-100 completion percentage")
-    completed_phases: List[str] = Field(default_factory=list)
-    active_roles: List[str] = Field(
-        default_factory=list, description="Roles active in current phase"
-    )
-    error: Optional[str] = None
-    summary: Optional[str] = None
-    pending_questions: List[PendingQuestion] = Field(
-        default_factory=list,
-        description="Questions requiring user input before workflow can continue.",
-    )
-    waiting_for_answers: bool = Field(
-        default=False,
-        description="True if the workflow is paused waiting for user answers.",
-    )
-    status_text: Optional[str] = Field(
-        default=None,
-        description="Human-readable status message describing current activity.",
-    )
-
-
-PlanningV2StatusResponse.model_rebuild()
-
-
-class PlanningV2ResultResponse(BaseModel):
-    """Response from GET /planning-v2/result/{job_id}. Phase results when job has completed (or failed after some phases)."""
-
-    job_id: str = Field(..., description="Job ID")
-    status: str = Field(..., description="completed or failed")
-    phase_results: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Phase outputs: spec_review_result, planning_result, implementation_result, review_result, problem_solving_result, deliver_result",
-    )
-    summary: Optional[str] = None
-    error: Optional[str] = None
-
-
-class PlanningArtifactMeta(BaseModel):
-    """Metadata for a single planning artifact file."""
-
-    name: str = Field(..., description="Artifact filename.")
-    size_bytes: int = Field(..., description="File size in bytes.")
-    modified_at: str = Field(..., description="ISO timestamp of last modification.")
-    sections: List[str] = Field(
-        default_factory=list, description="Section names (for shared planning document only)."
-    )
-
-
-class PlanningArtifactListResponse(BaseModel):
-    """Response listing planning artifacts for a job."""
-
-    artifacts: List[PlanningArtifactMeta] = Field(default_factory=list)
-
-
-class PlanningArtifactContentResponse(BaseModel):
-    """Response with the content of a single planning artifact."""
-
-    name: str = Field(..., description="Artifact filename.")
-    content: str = Field(..., description="File content (markdown or JSON string).")
-    content_type: str = Field(..., description="Content type: 'markdown' or 'json'.")
 
 
 class AutoAnswerRequest(BaseModel):

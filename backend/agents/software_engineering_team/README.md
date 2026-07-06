@@ -45,10 +45,10 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 
 | Phase | Sub-team | Agents |
 |-------|----------|--------|
-| **Discovery / Design (planning)** | planning_v3_team | Planning V3 workflow (intake → discovery → requirements → synthesis → document production); planning_v3_adapter maps handoff to ProductRequirements and project_overview for Tech Lead and Architecture |
+| **Discovery / Design (planning)** | planning_team | Planning workflow (intake → discovery → requirements → synthesis → document production); planning_adapter maps handoff to ProductRequirements and project_overview for Tech Lead and Architecture |
 | **Design (post-planning)** | top-level | Architecture Expert, Tech Lead, planning consolidation |
 | **Setup** | top-level | Git Setup |
-| **Implementation** | **coding_team** (sub-team; `backend/agents/coding_team/`) | Tech Lead, frontend_v2/backend_v2 workers, Task Graph — **default SE execution path** after Planning V3 + adapter |
+| **Implementation** | **coding_team** (sub-team; `backend/agents/coding_team/`) | Tech Lead, frontend_v2/backend_v2 workers, Task Graph — **default SE execution path** after Planning + adapter |
 | **Implementation** | backend | Backend Expert (legacy path when not using coding_team) |
 | **Implementation** | frontend_team | UX Designer, UI Designer, Design System, Frontend Architect, Feature Agent, UX Engineer, Performance Engineer, Build/Release |
 | **Implementation** | ai_agent_development_team | Intake/Planning/Execution/Review/Problem-solving/Delivery phases for spec-to-agent-system workflows with dedicated tool agents |
@@ -57,7 +57,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 
 **Coding Team:** The `coding_team` package is the **Software Engineering sub-team** responsible for task-graph execution (see `coding_team/README.md`). The SE orchestrator calls `run_coding_team_orchestrator` in-process after planning; the same team is also exposed as `/api/coding-team` for standalone runs.
 
-**Planning:** The main pipeline uses `planning_v3_team` for discovery and planning; its handoff is adapted by `planning_v3_adapter` into ProductRequirements and project_overview for Tech Lead and Architecture Expert. The legacy `planning_team` (Spec Intake, Project Planning, domain planning agents) is no longer used in the main flow; clarification sessions still use `planning_team.spec_intake_agent` and `spec_clarification_agent` for open questions and assumptions.
+**Planning:** The main pipeline uses the standalone `planning_team` (`backend/agents/planning_team/`) for discovery and planning; its handoff is adapted by `planning_adapter` into ProductRequirements and project_overview for Tech Lead and Architecture Expert. The SE orchestrator invokes it via `planning_team.orchestrator.run_workflow` (thread and Temporal paths).
 
 **Accessibility:** Lives under `frontend_team/` but is conceptually part of the **Quality** phase—it reviews frontend code for WCAG 2.2 compliance and is invoked per frontend task.
 
@@ -66,8 +66,8 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 ```mermaid
 flowchart LR
   subgraph discovery [Discovery and planning]
-    PlanningV3[Planning V3\nhandoff workflow]
-    Adapter[planning_v3_adapter]
+    Planning[Planning\nhandoff workflow]
+    Adapter[planning_adapter]
   end
 
   subgraph design [Design and planning]
@@ -118,10 +118,9 @@ flowchart LR
 
 ## Plan folder
 
-All planning artifacts are written to a `plan/` folder at the project root (work path). The folder is created when the spec is first ingested successfully. The main pipeline uses Planning V3, which writes context and handoff artifacts under `plan/`. The standalone Planning V2 API (if used) writes to `planning_v2/`. Artifacts include:
+All planning artifacts are written to a `plan/` folder at the project root (work path). The folder is created when the spec is first ingested successfully. The main pipeline uses the Planning team, which writes context and handoff artifacts under `plan/`. Artifacts include:
 
-- `plan/` (Planning V3 handoff: client context, validated spec, PRD)
-- `planning_v2/planning_artifacts.md` (Planning v2 Implementation phase, when using standalone Planning V2 API)
+- `plan/` (Planning handoff: client context, validated spec, PRD)
 - `plan/architecture.md` (Architecture Expert)
 - `plan/tech_lead.md` (Tech Lead task plan)
 - `plan/master_plan.md` (Consolidated master plan, risk register, ship checklist)

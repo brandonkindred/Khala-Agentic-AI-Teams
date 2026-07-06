@@ -30,7 +30,7 @@ API base URLs are configured in `src/environments/environment.ts` (development) 
 | **Unified API (local)** | `http://localhost:8080` | 8080 |
 | **Unified API (Docker)** | `http://localhost:8888` | 8888 (host) → 8080 (container) |
 
-**Note:** The Unified API provides all 20 team APIs under a single endpoint with namespaced prefixes — `/api/blogging`, `/api/software-engineering`, `/api/personal-assistant`, `/api/market-research`, `/api/soc2-compliance`, `/api/social-marketing`, `/api/branding`, `/api/agent-provisioning`, `/api/accessibility-audit`, `/api/ai-systems`, `/api/investment`, `/api/nutrition-meal-planning`, `/api/planning-v3`, `/api/coding-team`, `/api/sales`, `/api/road-trip-planning`, `/api/agentic-team-provisioning`, `/api/startup-advisor`, `/api/user-agent-founder`, `/api/deepthought`. When running via Docker Compose the UI at port 4201 proxies all `/api/*` requests to the agents container exposed on host port 8888.
+**Note:** The Unified API provides all 20 team APIs under a single endpoint with namespaced prefixes — `/api/blogging`, `/api/software-engineering`, `/api/personal-assistant`, `/api/market-research`, `/api/soc2-compliance`, `/api/social-marketing`, `/api/branding`, `/api/agent-provisioning`, `/api/accessibility-audit`, `/api/ai-systems`, `/api/investment`, `/api/nutrition-meal-planning`, `/api/planning`, `/api/coding-team`, `/api/sales`, `/api/road-trip-planning`, `/api/agentic-team-provisioning`, `/api/startup-advisor`, `/api/user-agent-founder`, `/api/deepthought`. When running via Docker Compose the UI at port 4201 proxies all `/api/*` requests to the agents container exposed on host port 8888.
 
 To override, edit `src/environments/environment.ts` before building.
 
@@ -104,7 +104,7 @@ See [docs/API_MAPPING.md](docs/API_MAPPING.md) for the full UI-to-API mapping.
 
 ## UI navigation highlights
 
-- **Software Engineering:** Main dashboard plus nested **Planning** (`/software-engineering/planning-v3`) and **Coding Team** (`/software-engineering/coding-team`) — the latter is the SE sub-team surface; API prefix remains `/api/coding-team`.
+- **Software Engineering:** Main dashboard plus nested **Planning** (`/software-engineering/planning`) and **Coding Team** (`/software-engineering/coding-team`) — the latter is the SE sub-team surface; API prefix remains `/api/coding-team`.
 - **Investment:** **Advisor & IPS** (`/investment/advisor`), **Strategy Lab** (`/investment/strategy-lab`, profile not required for lab flows), and overview (`/investment`).
 - **Agentic Teams:** Process designer with a live **Team Roster** column (agents, roles, skills, staffing validation) alongside chat and the process diagram (`/agentic-teams`).
 
