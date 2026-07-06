@@ -1,7 +1,7 @@
 """Tests for the startup-advisor Temporal activity + workflow.
 
 The activity owns the same job-store bookkeeping the thread path performs via
-``_run_advisor_core``: RUNNING → COMPLETED with the serialized conversation
+``run_advisor_core``: RUNNING → COMPLETED with the serialized conversation
 state on success, FAILED + re-raise on error. These tests pin that contract
 against the in-memory fake job client (installed by the team ``conftest.py``
 for non-integration tests).
@@ -14,7 +14,7 @@ import inspect
 
 import pytest
 
-from startup_advisor.api import main as api_main
+from startup_advisor import pipeline
 from startup_advisor.shared.job_store import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -32,14 +32,14 @@ def test_activity_signature_takes_job_id_and_message():
 
 
 def test_activity_marks_job_completed_with_result(monkeypatch):
-    canned = api_main.ConversationStateResponse(
+    canned = pipeline.ConversationStateResponse(
         conversation_id="conv-1",
         messages=[],
         context={},
         artifacts=[],
         suggested_questions=[],
     )
-    monkeypatch.setattr(api_main, "_process_advisor_message", lambda message: canned)
+    monkeypatch.setattr(pipeline, "process_advisor_message", lambda message: canned)
     create_job("job-ok", message="hello")
 
     result = wf.run_pipeline_activity("job-ok", "hello")
@@ -57,7 +57,7 @@ def test_activity_marks_job_failed_and_reraises_on_exception(monkeypatch):
     def _boom(_message):
         raise RuntimeError("advisor exploded")
 
-    monkeypatch.setattr(api_main, "_process_advisor_message", _boom)
+    monkeypatch.setattr(pipeline, "process_advisor_message", _boom)
     create_job("job-boom", message="hello")
 
     with pytest.raises(RuntimeError, match="advisor exploded"):
@@ -66,6 +66,28 @@ def test_activity_marks_job_failed_and_reraises_on_exception(monkeypatch):
     job = get_job("job-boom")
     assert job["status"] == JOB_STATUS_FAILED
     assert "advisor exploded" in (job.get("error") or "")
+
+
+def test_activity_reraises_original_exception_when_mark_failed_also_raises(monkeypatch):
+    """If update_job(FAILED) itself raises (e.g. job-store outage), the
+    activity must still surface the *original* pipeline failure to Temporal,
+    not the update_job failure — otherwise the real root cause is lost."""
+
+    def _boom_process(_message):
+        raise RuntimeError("advisor exploded")
+
+    def _boom_update_job(*_a, **_k):
+        raise RuntimeError("job store unreachable")
+
+    monkeypatch.setattr(pipeline, "process_advisor_message", _boom_process)
+    # The activity does `from startup_advisor.shared.job_store import ... update_job`
+    # as a local import inside the function body, so patch the source module —
+    # patching `wf.update_job` would miss it (no such module-level binding exists).
+    monkeypatch.setattr("startup_advisor.shared.job_store.update_job", _boom_update_job)
+    create_job("job-double-fail", message="hello")
+
+    with pytest.raises(RuntimeError, match="advisor exploded"):
+        wf.run_pipeline_activity("job-double-fail", "hello")
 
 
 def test_workflow_run_delegates_to_activity(monkeypatch):
@@ -88,6 +110,6 @@ def test_workflow_run_delegates_to_activity(monkeypatch):
     assert captured["fn"] is wf.run_pipeline_activity
     assert captured["args"] == ["job-wf", "hello"]
     assert captured["task_queue"] == wf.TASK_QUEUE
-    # Retries are explicitly capped at a single attempt: _run_advisor_core
+    # Retries are explicitly capped at a single attempt: run_advisor_core
     # appends the user message as a non-idempotent side effect.
     assert captured["retry_policy"].maximum_attempts == 1

@@ -11,8 +11,9 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from startup_advisor import pipeline
 from startup_advisor.api import main as api_main
-from startup_advisor.shared.job_store import JOB_STATUS_FAILED, create_job
+from startup_advisor.shared.job_store import JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, create_job
 
 
 @pytest.fixture
@@ -104,16 +105,58 @@ def test_background_swallows_update_job_failure_on_mark_failed(monkeypatch):
         raise RuntimeError("advisor exploded")
 
     def _boom_update_job(*_a, **_k):
-        # RUNNING is set before _process_advisor_message runs; only make the
-        # FAILED write (from the except block) blow up, isolating the
-        # scenario finding 3 is about.
-        if _k.get("status") == api_main.JOB_STATUS_FAILED:
+        # RUNNING is set (via pipeline's own update_job reference) before
+        # process_advisor_message runs; only make the FAILED write (from
+        # api_main's except block) blow up, isolating the scenario finding 3
+        # is about.
+        if _k.get("status") == JOB_STATUS_FAILED:
             raise RuntimeError("job store unreachable")
 
-    monkeypatch.setattr(api_main, "_process_advisor_message", _boom_process)
+    monkeypatch.setattr(pipeline, "process_advisor_message", _boom_process)
     monkeypatch.setattr(api_main, "update_job", _boom_update_job)
     create_job("job-double-fail", message="hi")
 
     # Must not raise despite both the pipeline and the failure-reporting call
     # raising.
     api_main._run_advisor_message_background("job-double-fail", "hi")
+
+
+def test_send_message_endpoint_thread_path_end_to_end(client, monkeypatch):
+    """End-to-end check (via TestClient) of the default, most-used code path:
+    Temporal disabled, thread fallback, through to a terminal job status.
+
+    Runs the background function synchronously (via a thread stub that calls
+    the target immediately) so the test is deterministic, and stubs
+    ``process_advisor_message`` so no real LLM/agent call is made.
+    """
+    monkeypatch.setattr("shared_temporal.is_temporal_enabled", lambda: False)
+
+    canned = pipeline.ConversationStateResponse(
+        conversation_id="conv-e2e",
+        messages=[],
+        context={},
+        artifacts=[],
+        suggested_questions=[],
+    )
+    monkeypatch.setattr(pipeline, "process_advisor_message", lambda message: canned)
+
+    class _SyncThread:
+        def __init__(self, *, target, args, daemon):
+            self._target = target
+            self._args = args
+
+        def start(self):
+            self._target(*self._args)
+
+    monkeypatch.setattr(api_main.threading, "Thread", _SyncThread)
+
+    response = client.post("/conversation/messages", json={"message": "Hello there"})
+
+    assert response.status_code == 200, response.text
+    job_id = response.json()["job_id"]
+
+    status_response = client.get(f"/conversation/messages/status/{job_id}")
+    assert status_response.status_code == 200
+    status_body = status_response.json()
+    assert status_body["status"] == JOB_STATUS_COMPLETED
+    assert status_body["result"]["conversation_id"] == "conv-e2e"

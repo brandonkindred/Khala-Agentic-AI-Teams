@@ -11,10 +11,18 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from shared_app import create_team_app
+from startup_advisor.pipeline import (
+    DEFAULT_SUGGESTED,
+    WELCOME_MESSAGE,
+    ArtifactResponse,
+    ConversationStateResponse,
+    build_response,
+    get_store,
+    run_advisor_core,
+)
 from startup_advisor.postgres import SCHEMA as STARTUP_ADVISOR_POSTGRES_SCHEMA
 from startup_advisor.shared.job_store import (
     JOB_STATUS_CANCELLED,
-    JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
@@ -85,100 +93,11 @@ class SendMessageRequest(BaseModel):
     message: str = Field(..., min_length=1)
 
 
-class ConversationMessageResponse(BaseModel):
-    role: str
-    content: str
-    timestamp: str
-
-
-class ArtifactResponse(BaseModel):
-    artifact_id: int
-    artifact_type: str
-    title: str
-    payload: dict[str, Any]
-    created_at: str
-
-
-class ConversationStateResponse(BaseModel):
-    conversation_id: str
-    messages: list[ConversationMessageResponse]
-    context: dict[str, Any]
-    artifacts: list[ArtifactResponse]
-    suggested_questions: list[str]
-
-
 class ConversationSummaryResponse(BaseModel):
     conversation_id: str
     created_at: str
     updated_at: str
     message_count: int
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_WELCOME_MESSAGE = (
-    "Welcome! I'm your startup advisor. I'm here to help you think through "
-    "your startup strategy — from customer discovery to fundraising to execution.\n\n"
-    "To give you the best advice, I'll need to understand your situation first. "
-    "Let's start: what are you working on, and what stage is your startup at?"
-)
-
-_DEFAULT_SUGGESTED = [
-    "I'm validating a new idea and need help with customer discovery.",
-    "I'm building an MVP and want to prioritize features.",
-    "I need help with my go-to-market strategy.",
-]
-
-
-def _get_store():  # noqa: ANN202
-    from startup_advisor.store import get_conversation_store
-
-    return get_conversation_store()
-
-
-def _get_agent():  # noqa: ANN202
-    from startup_advisor.assistant.agent import get_advisor_agent
-
-    return get_advisor_agent()
-
-
-def _build_response(
-    conversation_id: str,
-    messages,  # noqa: ANN001
-    context: dict[str, Any],
-    artifacts,  # noqa: ANN001
-    suggested_questions: list[str],
-) -> ConversationStateResponse:
-    return ConversationStateResponse(
-        conversation_id=conversation_id,
-        messages=[
-            ConversationMessageResponse(role=m.role, content=m.content, timestamp=m.timestamp)
-            for m in messages
-        ],
-        context=context,
-        artifacts=[
-            ArtifactResponse(
-                artifact_id=a.artifact_id,
-                artifact_type=a.artifact_type,
-                title=a.title,
-                payload=a.payload,
-                created_at=a.created_at,
-            )
-            for a in artifacts
-        ],
-        suggested_questions=suggested_questions,
-    )
-
-
-def _merge_context(existing: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
-    """Merge context_update into existing context, preserving prior values."""
-    merged = dict(existing)
-    for key, value in update.items():
-        if value is not None and value != "":
-            merged[key] = value
-    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +108,7 @@ def _merge_context(existing: dict[str, Any], update: dict[str, Any]) -> dict[str
 @app.get("/conversation", response_model=ConversationStateResponse)
 def get_or_create_conversation() -> ConversationStateResponse:
     """Get the singleton conversation, creating it with a welcome message if it doesn't exist."""
-    store = _get_store()
+    store = get_store()
     cid = store.get_or_create_singleton()
     state = store.get(cid)
     if state is None:
@@ -200,14 +119,14 @@ def get_or_create_conversation() -> ConversationStateResponse:
 
     # If the conversation is brand new (no messages), add the welcome message
     if len(messages) == 0:
-        store.append_message(cid, "assistant", _WELCOME_MESSAGE)
+        store.append_message(cid, "assistant", WELCOME_MESSAGE)
         state = store.get(cid)
         if state is None:
             raise HTTPException(status_code=500, detail="Failed to load conversation")
         messages, context = state
 
-    return _build_response(
-        cid, messages, context, artifacts, _DEFAULT_SUGGESTED if len(messages) <= 1 else []
+    return build_response(
+        cid, messages, context, artifacts, DEFAULT_SUGGESTED if len(messages) <= 1 else []
     )
 
 
@@ -236,34 +155,6 @@ class SendMessageJobListResponse(BaseModel):
     jobs: List[SendMessageJobListItem]
 
 
-def _run_advisor_core(job_id: str, message: str) -> None:
-    """RUNNING/COMPLETED job-store bookkeeping around ``_process_advisor_message``.
-
-    Shared by the thread dispatch path and the Temporal activity so the
-    state-machine transition lives in exactly one place.
-
-    Preconditions:
-        - ``job_id`` refers to a job already created in the job store.
-
-    Postconditions:
-        - If the job was cancelled before or during processing, returns
-          without writing a terminal status (the cancellation already owns
-          the job's terminal state).
-        - Otherwise marks the job RUNNING, runs ``_process_advisor_message``,
-          then marks it COMPLETED with the serialized result.
-        - Propagates any exception unchanged — from ``_process_advisor_message``
-          or from either ``update_job`` call itself (e.g. a job-store
-          connectivity failure) — the caller owns the failure policy.
-    """
-    if is_job_cancelled(job_id):
-        return
-    update_job(job_id, status=JOB_STATUS_RUNNING)
-    result = _process_advisor_message(message)
-    if is_job_cancelled(job_id):
-        return
-    update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump(mode="json"))
-
-
 def _run_advisor_message_background(job_id: str, message: str) -> None:
     """Thread-path runner: execute the advisor core and swallow failures as FAILED.
 
@@ -271,9 +162,9 @@ def _run_advisor_message_background(job_id: str, message: str) -> None:
         - ``job_id`` refers to a job already created in the job store.
 
     Postconditions:
-        - Delegates to ``_run_advisor_core`` for the RUNNING/COMPLETED
+        - Delegates to ``run_advisor_core`` for the RUNNING/COMPLETED
           transition.
-        - On any exception from ``_run_advisor_core``, logs it and marks the
+        - On any exception from ``run_advisor_core``, logs it and marks the
           job FAILED (unless the job was cancelled in the meantime), instead
           of letting the exception escape the thread.
         - If marking the job FAILED itself raises (e.g. the job store is
@@ -282,7 +173,7 @@ def _run_advisor_message_background(job_id: str, message: str) -> None:
           thread cannot die with an unhandled exception.
     """
     try:
-        _run_advisor_core(job_id, message)
+        run_advisor_core(job_id, message)
     except Exception as exc:
         logger.exception("Startup advisor job %s failed", job_id)
         if is_job_cancelled(job_id):
@@ -291,67 +182,6 @@ def _run_advisor_message_background(job_id: str, message: str) -> None:
             update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
         except Exception:
             logger.exception("Failed to mark startup advisor job %s as FAILED", job_id)
-
-
-def _process_advisor_message(message: str) -> ConversationStateResponse:
-    """Run one turn of the advisor conversation and return the updated state.
-
-    Preconditions:
-        - ``message`` is a non-empty user message.
-
-    Postconditions:
-        - The singleton conversation is created (with the welcome message) if
-          it did not already exist.
-        - ``message`` is appended as a "user" message, the agent's reply is
-          appended as an "assistant" message, and any artifact the agent
-          returns is persisted — all as side effects on the conversation
-          store.
-        - Returns a ``ConversationStateResponse`` reflecting the conversation
-          state after these appends.
-    """
-    store = _get_store()
-    agent = _get_agent()
-
-    cid = store.get_or_create_singleton()
-    state = store.get(cid)
-    if state is None:
-        raise RuntimeError("Failed to load conversation")
-    messages, context = state
-
-    if len(messages) == 0:
-        store.append_message(cid, "assistant", _WELCOME_MESSAGE)
-        state = store.get(cid)
-        if state is None:
-            raise RuntimeError("Failed to load conversation")
-        messages, context = state
-
-    store.append_message(cid, "user", message)
-
-    msg_pairs = [(m.role, m.content) for m in messages]
-    msg_pairs.append(("user", message))
-
-    reply, context_update, suggested_questions, artifact = agent.respond(
-        msg_pairs, context, message
-    )
-
-    if context_update:
-        context = _merge_context(context, context_update)
-        store.update_context(cid, context)
-
-    store.append_message(cid, "assistant", reply)
-
-    if artifact and isinstance(artifact, dict):
-        artifact_type = artifact.get("type", "advice")
-        title = artifact.get("title", "Untitled")
-        content = artifact.get("content", artifact)
-        store.add_artifact(cid, artifact_type, title, content)
-
-    state = store.get(cid)
-    if state is None:
-        raise RuntimeError("Failed to reload conversation")
-    messages, context = state
-    artifacts = store.get_artifacts(cid)
-    return _build_response(cid, messages, context, artifacts, suggested_questions)
 
 
 def _dispatch_advisor_message(job_id: str, message: str) -> str:
@@ -470,7 +300,7 @@ def delete_advisor_job(job_id: str) -> Dict[str, Any]:
 @app.get("/conversation/artifacts", response_model=list[ArtifactResponse])
 def list_artifacts() -> list[ArtifactResponse]:
     """List all artifacts produced during the conversation."""
-    store = _get_store()
+    store = get_store()
     cid = store.get_or_create_singleton()
     artifacts = store.get_artifacts(cid)
     return [
