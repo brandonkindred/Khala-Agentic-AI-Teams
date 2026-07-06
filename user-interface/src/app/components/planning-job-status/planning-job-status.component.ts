@@ -37,11 +37,13 @@ export class PlanningJobStatusComponent implements OnInit, OnDestroy {
 
   readonly phases = PHASES;
 
+  /** Fetch status immediately, then poll every 15s until the job reaches a terminal state. */
   ngOnInit(): void {
     this.poll();
     this.pollTimer = setInterval(() => this.poll(), 15000);
   }
 
+  /** Stop the poll timer so it doesn't keep firing after the component is destroyed. */
   ngOnDestroy(): void {
     if (this.pollTimer) {
       clearInterval(this.pollTimer);
@@ -49,6 +51,7 @@ export class PlanningJobStatusComponent implements OnInit, OnDestroy {
     }
   }
 
+  /** Fetch the job's status; on `completed`/`failed` stop the timer, and on `completed` also fetch the result. */
   private poll(): void {
     this.api.getStatus(this.jobId).subscribe({
       next: (res) => {
@@ -75,6 +78,7 @@ export class PlanningJobStatusComponent implements OnInit, OnDestroy {
     });
   }
 
+  /** Manually re-fetch status on demand (e.g. a user-triggered refresh button). */
   refresh(): void {
     this.poll();
   }

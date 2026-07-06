@@ -2,7 +2,7 @@ schema_version: 1
 id: planning.sub_agent_provisioning
 team: planning
 name: Planning — Sub-Agent Provisioning
-summary: Routes the produced PRD to downstream specialized teams (SE, branding, blogging).
+summary: Provisions a sub-agent via the AI Systems Team when a capability gap is identified during planning.
 tags: [planning, handoff, routing]
 sandbox:
   manifest_path: default.yaml

@@ -117,7 +117,7 @@ def adapt_planning_result(
             (success, handoff_package, failure_reason).
         spec_title: Title for the requirements (e.g. from initial spec).
         repo_path: Optional repo path; used to read PRD from disk when handoff
-            has no prd_content (e.g. when use_product_analysis=False in V3).
+            has no prd_content (e.g. when use_product_analysis=False).
 
     Returns:
         PlanningAdapterResult with requirements, project_overview, open_questions,

@@ -361,6 +361,32 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
     expect(component.isPlanningSubprocessPending('requirements')).toBe(true);
   });
 
+  it('isPlanningSubprocessCompleted/Current/Pending across all six planning phases', () => {
+    // With document_production current and everything before it completed, each
+    // of the six real Planning-team phases should land in exactly one bucket.
+    component.status = buildStatus({
+      planning_completed_phases: ['intake', 'discovery', 'requirements', 'synthesis'],
+      planning_subprocess: 'document_production',
+    });
+    const completed = ['intake', 'discovery', 'requirements', 'synthesis'];
+    const current = 'document_production';
+    const pending = ['sub_agent_provisioning'];
+
+    for (const phase of completed) {
+      expect(component.isPlanningSubprocessCompleted(phase)).toBe(true);
+      expect(component.isPlanningSubprocessCurrent(phase)).toBe(false);
+      expect(component.isPlanningSubprocessPending(phase)).toBe(false);
+    }
+    expect(component.isPlanningSubprocessCompleted(current)).toBe(false);
+    expect(component.isPlanningSubprocessCurrent(current)).toBe(true);
+    expect(component.isPlanningSubprocessPending(current)).toBe(false);
+    for (const phase of pending) {
+      expect(component.isPlanningSubprocessCompleted(phase)).toBe(false);
+      expect(component.isPlanningSubprocessCurrent(phase)).toBe(false);
+      expect(component.isPlanningSubprocessPending(phase)).toBe(true);
+    }
+  });
+
   it('isCodeTeamPhaseCompleted handles missing team_progress', () => {
     component.status = buildStatus();
     expect(component.isCodeTeamPhaseCompleted('backend-code-v2', 'setup')).toBe(false);

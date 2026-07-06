@@ -315,6 +315,11 @@ export class PendingQuestionsComponent implements OnChanges {
     });
   }
 
+  /**
+   * Route the answer submission to the API service matching `submitEndpoint`,
+   * translating the shared `AnswerSubmission[]` shape into each backend's
+   * expected request body (e.g. coding-team strips the multi-select field).
+   */
   private getSubmitObservable(
     jobId: string,
     request: { answers: AnswerSubmission[] }
@@ -367,6 +372,12 @@ export class PendingQuestionsComponent implements OnChanges {
     this.autoAnswerResults.delete(questionId);
   }
 
+  /**
+   * Submit the currently-selected answers for every answerable question,
+   * dispatching to the correct backend via `getSubmitObservable` and
+   * emitting `answersSubmitted` with the resulting job status on success.
+   * A no-op when there is no active job or not every question is answered.
+   */
   submitAnswers(): void {
     if (!this.jobId || !this.allAnswersSubmittable) return;
     const jobId = this.jobId;

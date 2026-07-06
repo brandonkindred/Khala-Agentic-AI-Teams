@@ -237,6 +237,18 @@ def run_planning(request: PlanningRunRequest) -> PlanningRunResponse:
     summary="Get job status",
 )
 def get_status(job_id: str) -> PlanningStatusResponse:
+    """Return the current status and progress of a Planning job.
+
+    Args:
+        job_id: The job identifier.
+
+    Returns:
+        PlanningStatusResponse with status, progress, current phase, and any
+        pending questions.
+
+    Raises:
+        HTTPException: 404 if the job does not exist.
+    """
     data = get_job(job_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
@@ -260,6 +272,19 @@ def get_status(job_id: str) -> PlanningStatusResponse:
     summary="Get job result",
 )
 def get_result(job_id: str) -> PlanningResultResponse:
+    """Return the final result and handoff package for a Planning job.
+
+    Args:
+        job_id: The job identifier.
+
+    Returns:
+        PlanningResultResponse with a success flag, the handoff package, and
+        the individual artifact paths (client context, validated spec, PRD).
+        ``success`` is only true once the job has completed.
+
+    Raises:
+        HTTPException: 404 if the job does not exist.
+    """
     data = get_job(job_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
@@ -283,6 +308,13 @@ def get_result(job_id: str) -> PlanningResultResponse:
 
 @app.get("/jobs", summary="List jobs")
 def list_planning_jobs() -> dict:
+    """List currently running or pending Planning jobs.
+
+    Returns:
+        A dict with a ``jobs`` key holding a list of summaries (job_id,
+        status, repo_path, current_phase) for jobs not yet in a terminal
+        state.
+    """
     jobs = list_jobs(running_only=True)
     return {
         "jobs": [
@@ -303,6 +335,23 @@ def list_planning_jobs() -> dict:
     summary="Submit answers to open questions",
 )
 def submit_answers(job_id: str, request: SubmitAnswersRequest) -> PlanningStatusResponse:
+    """Submit answers to a Planning job's open questions.
+
+    Placeholder for interactive question gates: the workflow currently
+    resolves open questions inline (PRA's auto-answer callback) and never
+    sets ``waiting_for_answers``, so this endpoint always 400s today.
+
+    Args:
+        job_id: The job identifier.
+        request: The submitted answers.
+
+    Returns:
+        PlanningStatusResponse reflecting the updated job state.
+
+    Raises:
+        HTTPException: 404 if the job does not exist; 400 if the job is not
+            waiting for answers.
+    """
     data = get_job(job_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")

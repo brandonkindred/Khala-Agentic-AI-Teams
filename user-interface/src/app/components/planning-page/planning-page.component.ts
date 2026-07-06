@@ -7,6 +7,7 @@ import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistan
 import { NotificationService } from '../../core/notification.service';
 import { environment } from '../../../environments/environment';
 
+/** Page component for the Planning team dashboard: health status, the run form, job status, and the team-assistant chat. */
 @Component({
   selector: 'app-planning-page',
   standalone: true,
