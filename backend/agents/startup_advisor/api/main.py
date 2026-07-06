@@ -29,6 +29,36 @@ from startup_advisor.shared.job_store import (
 
 logger = logging.getLogger(__name__)
 
+
+def _startup() -> None:
+    """Start the Temporal worker backstop (best-effort).
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
+    backstop covers running the app standalone (``uvicorn ...:app``).
+
+    Preconditions:
+        - None (safe to call once at app startup).
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged
+          as a warning so it cannot abort app boot (this runs as an
+          ``on_startup`` hook).
+    """
+    try:
+        from startup_advisor.temporal.worker import (
+            start_startup_advisor_temporal_worker_thread,
+        )
+
+        start_startup_advisor_temporal_worker_thread()
+    except Exception:
+        logger.warning(
+            "startup_advisor Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
+
 app = create_team_app(
     service_name="startup-advisor",
     team_key="startup_advisor",
@@ -36,6 +66,7 @@ app = create_team_app(
     description="Persistent conversational startup advisor with probing dialogue",
     version="1.0.0",
     postgres_schema=STARTUP_ADVISOR_POSTGRES_SCHEMA,
+    on_startup=_startup,
 )
 
 
@@ -205,15 +236,36 @@ class SendMessageJobListResponse(BaseModel):
     jobs: List[SendMessageJobListItem]
 
 
+def _run_advisor_core(job_id: str, message: str) -> None:
+    """RUNNING/COMPLETED job-store bookkeeping around ``_process_advisor_message``.
+
+    Shared by the thread dispatch path and the Temporal activity so the
+    state-machine transition lives in exactly one place.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - If the job was cancelled before or during processing, returns
+          without writing a terminal status (the cancellation already owns
+          the job's terminal state).
+        - Otherwise marks the job RUNNING, runs ``_process_advisor_message``,
+          then marks it COMPLETED with the serialized result.
+        - Propagates any exception from ``_process_advisor_message``
+          unchanged — the caller owns the failure policy.
+    """
+    if is_job_cancelled(job_id):
+        return
+    update_job(job_id, status=JOB_STATUS_RUNNING)
+    result = _process_advisor_message(message)
+    if is_job_cancelled(job_id):
+        return
+    update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump(mode="json"))
+
+
 def _run_advisor_message_background(job_id: str, message: str) -> None:
     try:
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = _process_advisor_message(message)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump(mode="json"))
+        _run_advisor_core(job_id, message)
     except Exception as exc:
         logger.exception("Startup advisor job %s failed", job_id)
         if is_job_cancelled(job_id):
@@ -267,6 +319,43 @@ def _process_advisor_message(message: str) -> ConversationStateResponse:
     return _build_response(cid, messages, context, artifacts, suggested_questions)
 
 
+def _dispatch_advisor_message(job_id: str, message: str) -> str:
+    """Dispatch an advisor message via Temporal when enabled, else a daemon thread.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Starts exactly one execution path and returns its label
+          ("Temporal" or "thread"). With ``TEMPORAL_ADDRESS`` set the run is
+          started as a durable ``StartupAdvisorWorkflow``; otherwise the
+          legacy thread path runs unchanged.
+        - A missing ``shared_temporal`` (Temporal not installed) falls
+          through to the thread path; any *other* failure while starting the
+          workflow propagates to the caller, which marks the job FAILED — a
+          Temporal-enabled run is never silently downgraded.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        is_temporal_enabled = None
+
+    if is_temporal_enabled is not None and is_temporal_enabled():
+        from startup_advisor.temporal.start_workflow import start_startup_advisor_workflow
+
+        start_startup_advisor_workflow(job_id, message)
+        logger.info("Startup advisor job dispatched via Temporal: job_id=%s", job_id)
+        return "Temporal"
+
+    thread = threading.Thread(
+        target=_run_advisor_message_background,
+        args=(job_id, message),
+        daemon=True,
+    )
+    thread.start()
+    return "thread"
+
+
 @app.post("/conversation/messages", response_model=SendMessageJobResponse)
 def send_message(payload: SendMessageRequest) -> SendMessageJobResponse:
     """Submit a message to the startup advisor. Poll
@@ -275,12 +364,17 @@ def send_message(payload: SendMessageRequest) -> SendMessageJobResponse:
     """
     job_id = str(uuid4())
     create_job(job_id, message=payload.message)
-    thread = threading.Thread(
-        target=_run_advisor_message_background,
-        args=(job_id, payload.message),
-        daemon=True,
-    )
-    thread.start()
+
+    try:
+        _dispatch_advisor_message(job_id, payload.message)
+    except Exception as exc:
+        # A dispatch failure (e.g. the Temporal worker client never connected)
+        # must not leave the freshly-created job orphaned in PENDING — mark it
+        # FAILED so callers polling status see a terminal state.
+        logger.exception("Failed to dispatch startup advisor job %s", job_id)
+        update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to start startup advisor run.") from exc
+
     return SendMessageJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
 
