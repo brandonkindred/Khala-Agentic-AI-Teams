@@ -34,4 +34,6 @@ def start_startup_advisor_temporal_worker_thread() -> bool:
     """
     if not is_temporal_enabled():
         return False
-    return start_team_worker("startup_advisor", WORKFLOWS, ACTIVITIES, task_queue=TASK_QUEUE)
+    started = start_team_worker("startup_advisor", WORKFLOWS, ACTIVITIES, task_queue=TASK_QUEUE)
+    logger.info("Startup Advisor Temporal worker start requested: started=%s", started)
+    return started

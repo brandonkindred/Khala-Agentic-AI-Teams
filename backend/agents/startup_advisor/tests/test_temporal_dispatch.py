@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from startup_advisor.api import main as api_main
-from startup_advisor.shared.job_store import JOB_STATUS_FAILED
+from startup_advisor.shared.job_store import JOB_STATUS_FAILED, create_job
 
 
 @pytest.fixture
@@ -94,3 +94,26 @@ def test_dispatch_helper_returns_thread_label_when_disabled(monkeypatch):
     assert started["daemon"] is True
     assert started["target"] is api_main._run_advisor_message_background
     assert started["args"] == ("job-thread", "hi")
+
+
+def test_background_swallows_update_job_failure_on_mark_failed(monkeypatch):
+    """A job-store outage while recording the FAILED status must not kill the
+    background thread with an unhandled exception (it has no supervisor)."""
+
+    def _boom_process(_message):
+        raise RuntimeError("advisor exploded")
+
+    def _boom_update_job(*_a, **_k):
+        # RUNNING is set before _process_advisor_message runs; only make the
+        # FAILED write (from the except block) blow up, isolating the
+        # scenario finding 3 is about.
+        if _k.get("status") == api_main.JOB_STATUS_FAILED:
+            raise RuntimeError("job store unreachable")
+
+    monkeypatch.setattr(api_main, "_process_advisor_message", _boom_process)
+    monkeypatch.setattr(api_main, "update_job", _boom_update_job)
+    create_job("job-double-fail", message="hi")
+
+    # Must not raise despite both the pipeline and the failure-reporting call
+    # raising.
+    api_main._run_advisor_message_background("job-double-fail", "hi")

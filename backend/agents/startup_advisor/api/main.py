@@ -251,8 +251,9 @@ def _run_advisor_core(job_id: str, message: str) -> None:
           the job's terminal state).
         - Otherwise marks the job RUNNING, runs ``_process_advisor_message``,
           then marks it COMPLETED with the serialized result.
-        - Propagates any exception from ``_process_advisor_message``
-          unchanged — the caller owns the failure policy.
+        - Propagates any exception unchanged — from ``_process_advisor_message``
+          or from either ``update_job`` call itself (e.g. a job-store
+          connectivity failure) — the caller owns the failure policy.
     """
     if is_job_cancelled(job_id):
         return
@@ -264,16 +265,50 @@ def _run_advisor_core(job_id: str, message: str) -> None:
 
 
 def _run_advisor_message_background(job_id: str, message: str) -> None:
+    """Thread-path runner: execute the advisor core and swallow failures as FAILED.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Delegates to ``_run_advisor_core`` for the RUNNING/COMPLETED
+          transition.
+        - On any exception from ``_run_advisor_core``, logs it and marks the
+          job FAILED (unless the job was cancelled in the meantime), instead
+          of letting the exception escape the thread.
+        - If marking the job FAILED itself raises (e.g. the job store is
+          unreachable), that failure is logged and swallowed too — this is
+          the thread's top-level function, so nothing propagates and the
+          thread cannot die with an unhandled exception.
+    """
     try:
         _run_advisor_core(job_id, message)
     except Exception as exc:
         logger.exception("Startup advisor job %s failed", job_id)
         if is_job_cancelled(job_id):
             return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
+        try:
+            update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
+        except Exception:
+            logger.exception("Failed to mark startup advisor job %s as FAILED", job_id)
 
 
 def _process_advisor_message(message: str) -> ConversationStateResponse:
+    """Run one turn of the advisor conversation and return the updated state.
+
+    Preconditions:
+        - ``message`` is a non-empty user message.
+
+    Postconditions:
+        - The singleton conversation is created (with the welcome message) if
+          it did not already exist.
+        - ``message`` is appended as a "user" message, the agent's reply is
+          appended as an "assistant" message, and any artifact the agent
+          returns is persisted — all as side effects on the conversation
+          store.
+        - Returns a ``ConversationStateResponse`` reflecting the conversation
+          state after these appends.
+    """
     store = _get_store()
     agent = _get_agent()
 
