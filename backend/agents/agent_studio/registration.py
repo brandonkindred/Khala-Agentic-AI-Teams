@@ -144,9 +144,10 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     authored inline I/O schemas). An authored ``input_schema`` / ``output_schema``
     is transferred back from ``IOSchema.inline_schema`` when the source manifest
     carries one (the generic shared-entrypoint ``schema_ref`` is not — it describes
-    the runtime envelope, not an authored contract). ``system_prompt`` is still not
-    transferred (the manifest does not store it) — the refine conversation
-    re-elicits it.
+    the runtime envelope, not an authored contract). The top-level
+    ``AgentDefinition.system_prompt`` is still not transferred (the manifest does
+    not store it) — the refine conversation re-elicits it. Each *state's* own
+    ``system_prompt`` is a different field and IS transferred, per-state, below.
 
     The operating ``states`` ARE transferred (the manifest persists them). Cloning
     a legacy manifest saved before states existed (empty ``states``), or one whose

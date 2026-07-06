@@ -212,6 +212,7 @@ class PostgresAgentStudioConversationStore:
                 )
                 history = [(r["role"], r["content"]) for r in cur.fetchall()]
 
+            @timed_query(store=_STORE, op="turn_append_message")
             def _on_message(role: str, content: str) -> None:
                 """Append one message on the turn's locked transaction (bumps updated_at).
 
@@ -229,6 +230,7 @@ class PostgresAgentStudioConversationStore:
                         (conversation_id, role, content),
                     )
 
+            @timed_query(store=_STORE, op="turn_set_definition")
             def _on_definition(new_definition: AgentDefinition) -> None:
                 """Replace the draft definition on the turn's locked transaction.
 

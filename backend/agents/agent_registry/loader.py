@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections import OrderedDict
 from functools import lru_cache
@@ -101,6 +102,16 @@ class AgentRegistry:
         # agent_id -> time.monotonic() of this worker's last unregister(), oldest
         # first. See _is_tombstoned / _TOMBSTONE_TTL_S / _TOMBSTONE_MAX_ENTRIES.
         self._tombstones: "OrderedDict[str, float]" = OrderedDict()
+        # Guards every local mutation (register/unregister) and iteration
+        # (_merged_manifests/manifests_with_id_prefix) of _by_id/_tombstones/
+        # _source_paths. FastAPI runs sync `def` routes in a threadpool, so
+        # register()/unregister() on one request can genuinely race a concurrent
+        # all()/search() iterating the same dict on another thread — CPython
+        # raises ``RuntimeError: dictionary changed size during iteration`` if a
+        # key is added/removed mid-scan. Never held across a dynamic-store
+        # Postgres call (those run outside the lock) so a slow query can't
+        # serialize the whole registry.
+        self._lock = threading.Lock()
 
     def _is_tombstoned(self, agent_id: str) -> bool:
         """Whether this worker locally unregistered ``agent_id`` within the TTL window.
@@ -213,16 +224,19 @@ class AgentRegistry:
         """
         store = self._dynamic_store()
         if store is None:
-            return list(self._by_id.values())
+            with self._lock:
+                return list(self._by_id.values())
         try:
             merged: dict[str, AgentManifest] = {m.id: m for m in store.all()}
         except Exception:
             logger.warning("dynamic store all() failed; serving local registry", exc_info=True)
-            return list(self._by_id.values())
-        for agent_id, local in self._by_id.items():
-            if agent_id in self._static_ids or agent_id not in merged:
-                merged[agent_id] = local
-        self._drop_tombstoned(merged)
+            with self._lock:
+                return list(self._by_id.values())
+        with self._lock:
+            for agent_id, local in self._by_id.items():
+                if agent_id in self._static_ids or agent_id not in merged:
+                    merged[agent_id] = local
+            self._drop_tombstoned(merged)
         return list(merged.values())
 
     def all(self) -> list[AgentManifest]:
@@ -242,7 +256,8 @@ class AgentRegistry:
         Postconditions: returns every registered manifest ``m`` with
             ``m.id.startswith(prefix)`` (empty list when none match); read-only.
         """
-        local = [m for m in self._by_id.values() if m.id.startswith(prefix)]
+        with self._lock:
+            local = [m for m in self._by_id.values() if m.id.startswith(prefix)]
         store = self._dynamic_store()
         if store is None:
             return local
@@ -261,7 +276,8 @@ class AgentRegistry:
         for m in local:
             if m.id in self._static_ids or m.id not in merged:
                 merged[m.id] = m
-        self._drop_tombstoned(merged)
+        with self._lock:
+            self._drop_tombstoned(merged)
         return list(merged.values())
 
     def get(self, agent_id: str) -> AgentManifest | None:
@@ -294,23 +310,25 @@ class AgentRegistry:
               :meth:`_is_tombstoned`.
             * Returns ``None`` iff no static, dynamic-store, or local entry exists.
         """
-        if agent_id in self._static_ids:
-            return self._by_id.get(agent_id)
-        if self._is_tombstoned(agent_id):
-            return None
+        with self._lock:
+            if agent_id in self._static_ids:
+                return self._by_id.get(agent_id)
+            if self._is_tombstoned(agent_id):
+                return None
+            local_fallback = self._by_id.get(agent_id)
         store = self._dynamic_store()
         if store is None:
-            return self._by_id.get(agent_id)
+            return local_fallback
         try:
             found = store.get(agent_id)
         except Exception:
             logger.warning(
                 "dynamic store get failed for %s; using local registry", agent_id, exc_info=True
             )
-            return self._by_id.get(agent_id)
+            return local_fallback
         # Prefer the authoritative Postgres row; fall back to the local copy on a
         # miss so a local registration whose write-through failed stays resolvable.
-        return found if found is not None else self._by_id.get(agent_id)
+        return found if found is not None else local_fallback
 
     def register(self, manifest: AgentManifest, source_path: Path | None = None) -> None:
         """Install a manifest into the live registry (for dynamically generated agents).
@@ -331,11 +349,16 @@ class AgentRegistry:
               roster path hold a lock and swallow registry errors).
         """
         assert manifest.id, "register: manifest.id must be non-empty"
-        self._by_id[manifest.id] = manifest
-        if source_path is not None:
-            self._source_paths[manifest.id] = source_path
-        # A fresh registration supersedes any earlier local unregister() of this id.
-        self._tombstones.pop(manifest.id, None)
+        with self._lock:
+            self._by_id[manifest.id] = manifest
+            if source_path is not None:
+                self._source_paths[manifest.id] = source_path
+            # A fresh registration supersedes any earlier local unregister() of
+            # this id. Cleared under the same lock as the _by_id write above so a
+            # concurrent get() never observes the torn state where the manifest is
+            # already installed but the stale tombstone still masks it (or vice
+            # versa) — see get()'s matching lock scope.
+            self._tombstones.pop(manifest.id, None)
         if manifest.id not in self._static_ids:
             store = self._dynamic_store()
             if store is not None:
@@ -369,15 +392,16 @@ class AgentRegistry:
               Postgres delete is issued regardless (it's a no-op when the row is
               absent).
         """
-        if agent_id in self._static_ids:
-            logger.warning("Refusing to unregister static agent id %r; ignoring", agent_id)
-            return False
-        self._source_paths.pop(agent_id, None)
-        removed = self._by_id.pop(agent_id, None) is not None
-        self._tombstones[agent_id] = time.monotonic()
-        self._tombstones.move_to_end(agent_id)
-        while len(self._tombstones) > self._TOMBSTONE_MAX_ENTRIES:
-            self._tombstones.popitem(last=False)  # evict the oldest stamp
+        with self._lock:
+            if agent_id in self._static_ids:
+                logger.warning("Refusing to unregister static agent id %r; ignoring", agent_id)
+                return False
+            self._source_paths.pop(agent_id, None)
+            removed = self._by_id.pop(agent_id, None) is not None
+            self._tombstones[agent_id] = time.monotonic()
+            self._tombstones.move_to_end(agent_id)
+            while len(self._tombstones) > self._TOMBSTONE_MAX_ENTRIES:
+                self._tombstones.popitem(last=False)  # evict the oldest stamp
         store = self._dynamic_store()
         if store is not None:
             try:
