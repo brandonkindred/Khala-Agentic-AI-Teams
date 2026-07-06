@@ -170,6 +170,7 @@ def test_shared_start_workflow_sync_dispatches_when_client_ready(monkeypatch):
     fake_client = mock.MagicMock(name="client")
     fake_client.start_workflow.return_value = mock.MagicMock(name="coro")
     fake_loop = mock.MagicMock(name="loop")
+    fake_loop.is_closed.return_value = False  # a usable worker loop is open
     monkeypatch.setattr(runner, "get_temporal_client", lambda: fake_client)
     monkeypatch.setattr(runner, "get_temporal_loop", lambda: fake_loop)
 
