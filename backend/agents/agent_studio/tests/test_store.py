@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -162,3 +163,106 @@ def test_concurrent_creates_are_thread_safe() -> None:
     assert len(ids) == 20 * 25
     assert len(set(ids)) == len(ids)  # no duplicate / lost ids
     assert len(store) == cap  # cap held under concurrency (public __len__)
+
+
+# ---------------------------------------------------------------------------
+# turn() — per-conversation turn serialization (P4)
+# ---------------------------------------------------------------------------
+
+
+def test_turn_applies_messages_and_definition() -> None:
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition(name="x", role="r"))
+    with store.turn(cid) as t:
+        assert t.history == []
+        assert t.definition.name == "x"
+        t.append_message("user", "hi")
+        t.append_message("assistant", "hello")
+        updated = t.definition.model_copy()
+        updated.name = "Renamed"
+        t.set_definition(updated)
+    record = store.get(cid)
+    assert [m.content for m in record.messages] == ["hi", "hello"]
+    assert record.definition.name == "Renamed"
+
+
+def test_turn_unknown_conversation_raises() -> None:
+    store = AgentStudioConversationStore()
+    with pytest.raises(LookupError):
+        with store.turn("nope"):
+            pass
+
+
+def test_turn_history_snapshots_prior_messages() -> None:
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition(name="x", role="r"))
+    store.append_message(cid, "assistant", "greeting")
+    with store.turn(cid) as t:
+        assert t.history == [("assistant", "greeting")]
+
+
+def test_turn_serializes_concurrent_turns_no_lost_update() -> None:
+    # Each turn reads a counter from the definition, waits (widening the race
+    # window), then writes counter+1. Without serialization concurrent turns would
+    # read the same base and lose updates; the per-conversation lock guarantees the
+    # final value equals the number of turns.
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition(name="x", role="r", description="0"))
+    n = 12
+    barrier = threading.Barrier(n)
+
+    def do_turn() -> None:
+        barrier.wait()
+        with store.turn(cid) as t:
+            current = int(t.definition.description or "0")
+            time.sleep(0.003)
+            updated = t.definition.model_copy()
+            updated.description = str(current + 1)
+            t.set_definition(updated)
+
+    threads = [threading.Thread(target=do_turn) for _ in range(n)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert store.get(cid).definition.description == str(n)
+
+
+def test_turn_rolls_back_nothing_on_exception() -> None:
+    # If the body raises before any write (assistant-first ordering), the
+    # conversation is unchanged and the lock is released for the next turn.
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition(name="x", role="r"))
+    with pytest.raises(RuntimeError):
+        with store.turn(cid):
+            raise RuntimeError("llm blew up")
+    assert store.get(cid).messages == []
+    # Lock released: a subsequent turn proceeds.
+    with store.turn(cid) as t:
+        t.append_message("user", "again")
+    assert len(store.get(cid).messages) == 1
+
+
+def test_turn_rolls_back_a_partial_write_on_later_exception() -> None:
+    # Unlike a failure before any write, an exception AFTER a message was already
+    # appended must still leave the conversation exactly as it was pre-turn (no
+    # partially-applied state) — each in-memory write applies immediately, so the
+    # store must explicitly restore the snapshot rather than relying on a
+    # transaction.
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition(name="x", role="r"))
+    with pytest.raises(RuntimeError):
+        with store.turn(cid) as t:
+            t.append_message("user", "hi")
+            updated = t.definition.model_copy()
+            updated.name = "should-not-stick"
+            t.set_definition(updated)
+            raise RuntimeError("failed after partial writes")
+    record = store.get(cid)
+    assert record.messages == []
+    assert record.definition.name == "x"
+    # Lock released: a subsequent turn proceeds normally.
+    with store.turn(cid) as t:
+        t.append_message("user", "again")
+    assert len(store.get(cid).messages) == 1

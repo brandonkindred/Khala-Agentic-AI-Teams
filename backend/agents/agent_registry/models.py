@@ -2,20 +2,62 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from pydantic import BaseModel, Field, field_validator
 
 
 class IOSchema(BaseModel):
-    """Pointer to a Pydantic model that describes an agent's input or output."""
+    """Describes an agent's input or output, as either a dotted class ref or inline JSON Schema.
+
+    An agent may advertise its schema two ways:
+      * ``schema_ref`` — a dotted ``module.path:ClassName`` import path to a Pydantic
+        model, resolved lazily to JSON Schema at request time.
+      * ``inline_schema`` — a literal JSON Schema dict carried on the manifest, for
+        agents authored without a corresponding Python class (e.g. Agent Studio
+        definitions with an authored ``input_schema`` / ``output_schema``).
+
+    Invariants:
+        * Both fields are optional. When ``inline_schema`` is present it is
+          authoritative and returned verbatim (no import needed); ``schema_ref`` is
+          only consulted when ``inline_schema`` is absent. An ``IOSchema`` with
+          neither advertises no schema.
+    """
 
     schema_ref: str | None = Field(
         default=None,
         description="Dotted import path in 'module.path:ClassName' form. "
         "Resolved lazily via pydantic.TypeAdapter(cls).json_schema().",
     )
+    inline_schema: dict[str, Any] | None = Field(
+        default=None,
+        description="Literal JSON Schema for an agent authored without a Python model. "
+        "Takes precedence over schema_ref when present; returned verbatim by the "
+        "schema-resolution endpoints.",
+    )
     description: str | None = None
+
+    @field_validator("inline_schema")
+    @classmethod
+    def _validate_inline_schema(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Reject an ``inline_schema`` that isn't itself a well-formed JSON Schema.
+
+        Preconditions: none — ``value`` may be ``None``.
+        Postconditions: returns ``value`` unchanged when ``None`` or a structurally
+            valid JSON Schema document; raises ``ValueError`` (surfaced as a Pydantic
+            ``ValidationError``) otherwise. Structural only — this checks that the
+            dict is itself well-formed JSON Schema, not that any particular instance
+            validates against it.
+        """
+        if value is None:
+            return value
+        try:
+            Draft202012Validator.check_schema(value)
+        except SchemaError as exc:
+            raise ValueError(f"inline_schema is not a valid JSON Schema: {exc.message}") from exc
+        return value
 
 
 class InvokeSpec(BaseModel):

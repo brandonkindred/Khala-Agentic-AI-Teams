@@ -253,8 +253,11 @@ def test_degraded_outcome_is_not_cached() -> None:
     client = _FailOnMarkerClient(fail_marker="BBBB")
     degraded = run_coordinator(client, _two_file_input(a, b))
     calls_after_degraded = client.map_calls
-    assert degraded.approved is False  # the not-reviewed finding blocks the merge
-    assert any("could not be reviewed" in i.description for i in degraded.issues)
+    # Default graceful degradation: the clean sibling drives an approved verdict,
+    # chunk b is recorded as a non-blocking not-reviewed range (never posted).
+    assert degraded.approved is True
+    assert not any("could not be reviewed" in i.description for i in degraded.issues)
+    assert degraded.not_reviewed_ranges  # b's range is recorded for observability
 
     # Heal the client and re-run identical input: chunk a is a cache hit (no new
     # call); chunk b was degraded so nothing was cached for it → exactly one new
@@ -811,5 +814,3 @@ def test_submission_cache_evicts_oldest_entry(monkeypatch: pytest.MonkeyPatch) -
     assert spy["n"] == 0
     run_coordinator(client, a)  # A was evicted → full review again
     assert spy["n"] == 1
-
-

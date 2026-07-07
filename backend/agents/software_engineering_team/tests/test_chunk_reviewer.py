@@ -8,8 +8,10 @@ assertions on ``complete_json.call_args`` are no longer meaningful.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
+import pytest
 from code_review_agent.chunk_reviewer import ChunkReviewAgent, review_chunk
 from code_review_agent.models import ChunkReviewInput, ChunkReviewOutput
 
@@ -51,6 +53,30 @@ def _chunk_input(**overrides: Any) -> ChunkReviewInput:
     return ChunkReviewInput(**base)  # type: ignore[arg-type]
 
 
+class _NonJsonClient(DummyLLMClient):
+    """DummyLLMClient whose reply is not JSON, so the reviewer's ``json.loads``
+    of the model output raises ``json.JSONDecodeError`` (a non-dict reply is
+    emitted verbatim as assistant text by the dummy strands stream)."""
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        return "I could not produce the requested JSON object."
+
+
+def test_chunk_review_raises_json_decode_error_on_non_json_model_output() -> None:
+    """The chunk reviewer parses the model reply with a bare ``json.loads``, so an
+    invalid (non-JSON) reply surfaces as a raw ``json.JSONDecodeError``.
+
+    This guards the coupling in ``mapping._CONTENT_FAILURE_TYPES``, which lists
+    ``json.JSONDecodeError`` precisely because this parse path raises it: if the
+    reviewer ever wrapped or replaced ``json.loads`` (e.g. re-raising as an
+    ``LLMJsonParseError``), that classification would silently stop matching —
+    this test fails loudly instead.
+    """
+    agent = ChunkReviewAgent(llm=_NonJsonClient())
+    with pytest.raises(json.JSONDecodeError):
+        agent.run(_chunk_input())
+
+
 def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:
     """Legacy ``review_chunk`` helper delegates to ChunkReviewAgent but
     still returns a plain dict for backward compat."""
@@ -73,6 +99,8 @@ def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:
 
 
 def test_chunk_review_agent_run_returns_chunk_review_output() -> None:
+    """``ChunkReviewAgent.run`` returns a ``ChunkReviewOutput`` — approved with no
+    issues — when backed by the default ``DummyLLMClient``."""
     agent = ChunkReviewAgent(llm=DummyLLMClient())
     result = agent.run(_chunk_input())
     assert isinstance(result, ChunkReviewOutput)
@@ -124,6 +152,8 @@ class _RecorderClient(DummyLLMClient):
 
 
 def test_segment_note_is_prepended_to_prompt() -> None:
+    """A segment note is rendered under a ``**Segment notes:**`` header and appears
+    before the code-to-review section in the chunk prompt."""
     client = _RecorderClient()
     agent = ChunkReviewAgent(llm=client)
     note = "app/main.py is shown only from original line 501 to 1000 (of 2400 total)."
@@ -136,6 +166,7 @@ def test_segment_note_is_prepended_to_prompt() -> None:
 
 
 def test_no_segment_note_means_no_segment_section() -> None:
+    """With no segment note, the prompt omits the ``**Segment notes:**`` section."""
     client = _RecorderClient()
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input())
@@ -172,6 +203,7 @@ def test_user_decisions_rendered_as_settled_in_prompt() -> None:
 
 
 def test_no_user_decisions_means_no_decisions_section() -> None:
+    """With no user decisions, the prompt omits the settled-decisions section."""
     client = _RecorderClient()
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input())
@@ -198,6 +230,8 @@ def test_code_chunk_is_never_compacted() -> None:
 
 
 def test_new_output_fields_are_parsed_through() -> None:
+    """``spec_compliance_notes`` from the model reply is passed through onto the
+    ``ChunkReviewOutput``."""
     agent = ChunkReviewAgent(
         llm=_StubClient(
             {
@@ -213,6 +247,7 @@ def test_new_output_fields_are_parsed_through() -> None:
 
 
 def test_missing_new_output_fields_default_to_empty() -> None:
+    """When the model omits the new output fields, they default to empty strings."""
     agent = ChunkReviewAgent(llm=_StubClient({"approved": True, "issues": [], "summary": "ok"}))
     result = agent.run(_chunk_input())
     assert result.spec_compliance_notes == ""
@@ -256,6 +291,44 @@ def test_declared_language_reaches_prompt_without_heuristic() -> None:
     fallback_client = _RecorderClient()
     ChunkReviewAgent(llm=fallback_client).run(_chunk_input(code_chunk="TIMEOUT = 30"))
     assert "**Language:** typescript" in fallback_client.prompts[0]
+
+
+def test_final_output_contract_note_follows_the_code_block() -> None:
+    """The output-contract nudge (emit only the JSON, no reasoning) is appended as
+    the last thing the model reads — after the code block — so a thinking model is
+    steered toward a final answer instead of reasoning-only output."""
+    from code_review_agent.chunk_reviewer import FINAL_OUTPUT_CONTRACT_NOTE
+
+    client = _RecorderClient()
+    ChunkReviewAgent(llm=client).run(_chunk_input())
+    prompt = client.prompts[0]
+    assert FINAL_OUTPUT_CONTRACT_NOTE.strip() in prompt
+    # It comes after the code-to-review section (last thing the model sees).
+    assert prompt.index("Code to review") < prompt.index("Respond with ONLY")
+
+
+def test_run_forwards_think_override(monkeypatch) -> None:
+    """``ChunkReviewAgent.run(think=...)`` threads the override to
+    ``resolve_code_review_model``; the default is ``None`` (model default)."""
+    from code_review_agent import chunk_reviewer
+
+    captured: Dict[str, Any] = {}
+    real = chunk_reviewer.resolve_code_review_model
+
+    def _spy(llm: Any, think: Any = None) -> Any:
+        captured["think"] = think
+        # Resolve against the injected Dummy (a strands Model) so the review still
+        # runs; the Dummy ignores think, so pass None to the real resolver.
+        return real(llm, think=None)
+
+    monkeypatch.setattr(chunk_reviewer, "resolve_code_review_model", _spy)
+
+    agent = ChunkReviewAgent(llm=DummyLLMClient())
+    agent.run(_chunk_input(), think=False)
+    assert captured["think"] is False
+    captured.clear()
+    agent.run(_chunk_input())
+    assert captured["think"] is None
 
 
 def test_shared_context_is_hard_capped_deterministically() -> None:

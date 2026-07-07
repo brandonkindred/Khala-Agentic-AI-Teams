@@ -121,7 +121,8 @@ async def test_reap_once_skips_non_warm(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_team_success() -> None:
+@pytest.mark.asyncio
+async def test_resolve_team_success() -> None:
     from agent_provisioning_team.sandbox.lifecycle import _resolve_team
 
     fake_manifest = MagicMock()
@@ -133,10 +134,11 @@ def test_resolve_team_success() -> None:
         "agent_registry.get_registry",
         return_value=fake_registry,
     ):
-        assert _resolve_team("agent.x") == "myteam"
+        assert await _resolve_team("agent.x") == "myteam"
 
 
-def test_resolve_team_unknown() -> None:
+@pytest.mark.asyncio
+async def test_resolve_team_unknown() -> None:
     from agent_provisioning_team.sandbox.lifecycle import (
         UnknownAgentError,
         _resolve_team,
@@ -147,7 +149,7 @@ def test_resolve_team_unknown() -> None:
 
     with patch("agent_registry.get_registry", return_value=fake_registry):
         with pytest.raises(UnknownAgentError):
-            _resolve_team("ghost")
+            await _resolve_team("ghost")
 
 
 # ---------------------------------------------------------------------------
@@ -210,11 +212,15 @@ def test_materialise_project_dir_copies_grafana(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_STACK_TEMPLATE", str(template))
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "cache"))
 
-    path = pm._materialise_project_dir("khala-sbx-test", host_port=12345, postgres_password="pw")
+    path = pm._materialise_project_dir(
+        "khala-sbx-test", host_port=12345, postgres_password="pw", manifest_json='{"id": "x"}'
+    )
     assert (path / "docker-compose.yml").exists()
     assert (path / "grafana-provisioning" / "datasources.yml").exists()
     # Re-run should overwrite (tests the grafana_dst exists rmtree branch).
-    pm._materialise_project_dir("khala-sbx-test", host_port=12345, postgres_password="pw")
+    pm._materialise_project_dir(
+        "khala-sbx-test", host_port=12345, postgres_password="pw", manifest_json='{"id": "x"}'
+    )
 
 
 # ---------------------------------------------------------------------------

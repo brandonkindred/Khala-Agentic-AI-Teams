@@ -20,6 +20,7 @@ Phase 3 additions:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -93,21 +94,42 @@ def get_agent(agent_id: str) -> AgentDetail:
 
 @router.get("/{agent_id}/schema/input")
 def get_input_schema(agent_id: str) -> dict[str, Any]:
+    """Return the agent's input JSON Schema.
+
+    Resolution order (inline takes precedence over the dotted ref):
+        1. An authored ``inputs.inline_schema`` (present ⇒ returned verbatim, even
+           ``{}``) — the schema the user wrote in Agent Studio.
+        2. Else a dotted ``inputs.schema_ref`` resolved to a JSON Schema.
+
+    404 when the agent id is unknown, or when the agent advertises neither an
+    inline schema nor a resolvable ``schema_ref``.
+    """
     manifest = get_registry().get(agent_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    if manifest.inputs and manifest.inputs.inline_schema is not None:
+        return manifest.inputs.inline_schema
     if not (manifest.inputs and manifest.inputs.schema_ref):
-        raise HTTPException(status_code=404, detail="Agent has no input schema_ref configured.")
+        raise HTTPException(status_code=404, detail="Agent has no input schema configured.")
     return _resolve_or_404(manifest.inputs.schema_ref, kind="input")
 
 
 @router.get("/{agent_id}/schema/output")
 def get_output_schema(agent_id: str) -> dict[str, Any]:
+    """Return the agent's output JSON Schema.
+
+    Mirrors :func:`get_input_schema`: an authored ``outputs.inline_schema`` is
+    returned verbatim when present (including ``{}``); otherwise a dotted
+    ``outputs.schema_ref`` is resolved. 404 when the agent id is unknown or it
+    advertises neither an inline schema nor a resolvable ``schema_ref``.
+    """
     manifest = get_registry().get(agent_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    if manifest.outputs and manifest.outputs.inline_schema is not None:
+        return manifest.outputs.inline_schema
     if not (manifest.outputs and manifest.outputs.schema_ref):
-        raise HTTPException(status_code=404, detail="Agent has no output schema_ref configured.")
+        raise HTTPException(status_code=404, detail="Agent has no output schema configured.")
     return _resolve_or_404(manifest.outputs.schema_ref, kind="output")
 
 
@@ -149,7 +171,34 @@ async def invoke_agent(
         description="Optional saved-input id to join this run back to its source.",
     ),
 ) -> Response:
-    manifest = get_registry().get(agent_id)
+    """Run one agent invocation in its ephemeral sandbox and return the result.
+
+    Flow: resolve the manifest (404 unknown; 409 if it needs live integrations),
+    cap the request body (413 over cap; 400 if it carries the reserved cognition
+    envelope marker), acquire the sandbox (503 Docker down / 502 warm failure /
+    202 still warming), then — for a cognition agent — run the ``prepare_invoke``
+    gate (idempotency claim / replay, precondition enforcement, envelope wrap)
+    before proxying the POST to the sandbox.
+
+    Once the gate has *claimed* a run, every exit obeys one of exactly three
+    contracts:
+        1. ``finalize_invoke`` — a parseable upstream response (any status):
+           gates, persists, and completes the ledger entry.
+        2. ``abandon_invoke`` — the agent provably produced nothing usable (e.g.
+           an over-cap response): release the claim so a retry re-executes.
+        3. hold the lease — a transport error/timeout leaves the run leased,
+           because the agent may still be executing and the lease is the
+           concurrent double-run guard.
+
+    Preconditions: ``agent_id`` is a path segment; ``request`` is the live HTTP
+        request. Postconditions: returns a ``Response`` (proxied result, replay,
+        warming 202, or an ``HTTPException`` mapped to the status codes above);
+        no claimed run is both finalized and abandoned.
+    """
+    # get() can hit Postgres for a dynamically-registered agent id (agent_registry's
+    # dynamic-manifest overlay); this is an async route, so a blocking round trip here
+    # would stall the whole worker's event loop. Run it in a worker thread.
+    manifest = await asyncio.to_thread(get_registry().get, agent_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
     if "requires-live-integration" in manifest.tags:
