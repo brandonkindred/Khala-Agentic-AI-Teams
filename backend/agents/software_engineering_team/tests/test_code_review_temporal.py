@@ -444,6 +444,17 @@ def test_reports_review_unavailable_terminates_on_cyclic_chain() -> None:
     assert _reports_review_unavailable(a, "CodeReviewUnavailableError") is False
 
 
+def test_reports_review_unavailable_matches_by_class_name() -> None:
+    from code_review_agent.agent import _reports_review_unavailable
+
+    # The real ``CodeReviewUnavailableError`` carries no ``.type`` attribute, so
+    # the marker is recognised by the class-name branch of the walk — the shape a
+    # map/verify activity's own exception takes before Temporal converts it.
+    exc = CodeReviewUnavailableError("infra down")
+    assert getattr(exc, "type", None) is None
+    assert _reports_review_unavailable(exc, "CodeReviewUnavailableError") is True
+
+
 def test_dispatch_unavailable_is_distinct_from_review_failure() -> None:
     assert issubclass(_TemporalDispatchUnavailable, RuntimeError)
     assert not issubclass(_TemporalDispatchUnavailable, CodeReviewUnavailableError)
