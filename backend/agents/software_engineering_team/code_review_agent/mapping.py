@@ -285,43 +285,26 @@ def _is_content_failure(exc: BaseException) -> bool:
     return any(isinstance(c, _CONTENT_FAILURE_TYPES) for c in _exception_chain(exc))
 
 
-def _is_semantic_exhaustion(exc: BaseException) -> bool:
-    """Classify a chunk-review failure as LLM semantic exhaustion specifically.
+def _semantic_exhaustion_in_chain(exc: BaseException) -> "Optional[LLMSemanticExhaustionError]":
+    """Return the chain's ``LLMSemanticExhaustionError``, or None.
 
-    Semantic exhaustion (the model emitted only reasoning and no assistant
-    content, even after the client's own thinking-downgrade ladder) is a content
-    failure, but — unlike a JSON parse error or a ``finish_reason=length``
-    truncation — it is **not** an input-size problem. Line-splitting only shrinks
-    the input, so each half re-exhausts and each runs its own doomed multi-minute
-    call: it multiplies the cost without changing the outcome. Callers use this to
-    route semantic exhaustion away from line-splitting.
-
-    Postconditions:
-        - Returns True only when the ``__cause__``/``__context__`` chain contains
-          an ``LLMSemanticExhaustionError`` (bounded walk; strands may wrap it).
-        - Never raises.
-    """
-    return any(isinstance(c, LLMSemanticExhaustionError) for c in _exception_chain(exc))
-
-
-def _semantic_ladder_was_spent(exc: BaseException) -> bool:
-    """Whether the chain's semantic exhaustion actually ran a downgrade rung.
-
-    ``retry_thinking_level`` on the receipt is ``None`` only when NO proof-of-change
-    rung was attempted (thinking was already off), and a lower level / ``False``
-    once at least one rung ran. A no-ladder exhaustion is an ordinary stochastic
-    empty response that one fresh same-input sample may still recover, so callers
-    fast-path (skip the retry) only when a ladder was genuinely spent.
+    The receipt object is returned (not just a bool) so callers can read its
+    ``finish_reason`` and ``retry_thinking_level``: a ``finish_reason="length"``
+    empty turn is a token-budget/truncation scenario where a smaller chunk can
+    leave room for content — it must still line-split, like ``LLMTruncatedError`` —
+    whereas a non-length reasoning-only exhaustion is input-size invariant (each
+    half re-exhausts), and ``retry_thinking_level is None`` marks a no-ladder
+    stochastic empty that a same-input retry may still recover.
 
     Postconditions:
-        - Returns True iff the chain's first ``LLMSemanticExhaustionError`` has a
-          non-None ``retry_thinking_level``; False when there is none or no ladder
-          ran. Never raises.
+        - Returns the first ``LLMSemanticExhaustionError`` on the
+          ``__cause__``/``__context__`` chain (strands may wrap it), else None.
+          Never raises.
     """
     for current in _exception_chain(exc):
         if isinstance(current, LLMSemanticExhaustionError):
-            return current.retry_thinking_level is not None
-    return False
+            return current
+    return None
 
 
 def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
@@ -427,18 +410,18 @@ def _review_chunk_with_recovery(
           ``_degraded_outcome``) rather than aborting the whole run; a one-off
           transient error in a terminal child therefore never costs even that
           child's review.
-        - Semantic exhaustion (``_is_semantic_exhaustion``) is the exception: it
-          is not an input-size failure, so a single-file chunk NEVER line-splits.
-          When the client actually spent its downgrade ladder
-          (``_semantic_ladder_was_spent``) the single-file chunk degrades
-          immediately without a same-input retry too (both futile). When NO ladder
-          ran (thinking was already off), it is a stochastic empty that keeps its
-          one same-input retry. A multi-file chunk is still split by file either
-          way, since only one file may be the culprit and the others can still be
-          reviewed.
+        - A REASONING-LOOP semantic exhaustion (``finish_reason != "length"``) is
+          the exception: it is not an input-size failure, so a single-file chunk
+          NEVER line-splits. When the client actually spent its downgrade ladder
+          (``retry_thinking_level`` set) the single-file chunk degrades immediately
+          without a same-input retry too (both futile); when NO ladder ran (thinking
+          was already off) it keeps its one same-input retry. A multi-file chunk is
+          still split by file either way. A ``finish_reason="length"`` empty turn is
+          token-budget-bound, so it line-splits like a truncation instead (a smaller
+          chunk can leave room for content).
         - Recovery (bisection / retry) is dispatched OUTSIDE the ``except`` block
           so a child failure is never implicitly context-chained to this chunk's
-          exception (which ``_is_semantic_exhaustion`` would otherwise misread).
+          exception (which ``_semantic_exhaustion_in_chain`` would otherwise misread).
         - A sub-review that rejects with no extractable issues but a non-empty
           summary contributes one synthesized high issue built from that
           summary: applied here, per sub-review, because at the merged level
@@ -497,24 +480,27 @@ def _review_chunk_with_recovery(
     # This runs AFTER the `except` block has exited, deliberately: the child
     # ``reviewer.run`` calls below must NOT execute while ``failure`` is the active
     # exception, or Python would implicitly chain it onto any child failure's
-    # ``__context__`` — and ``_is_semantic_exhaustion`` walks ``__context__``, so a
-    # child truncation/parse error would be misclassified as semantic and stripped
-    # of its own line-bisect/retry recovery.
+    # ``__context__`` — and ``_semantic_exhaustion_in_chain`` walks ``__context__``,
+    # so a child truncation/parse error would be misclassified as semantic and
+    # stripped of its own line-bisect/retry recovery.
     exc = failure
-    # Semantic exhaustion is content-shaped but NOT input-size-shaped: the model
-    # produced only reasoning. LINE-splitting a single file only multiplies doomed
-    # multi-minute calls (each half re-exhausts), and a same-input retry re-runs the
-    # downgrade ladder the client already spent — so a ladder-spent semantic
-    # exhaustion skips both. But SEPARATING a multi-file chunk is still worthwhile
-    # (only one file may be the culprit; the others can still be reviewed), so a
-    # multi-segment chunk is split by file; and a semantic exhaustion where NO
-    # ladder ran (thinking was already off) is an ordinary stochastic empty that
-    # keeps its one same-input retry. Other content failures (JSON parse,
-    # finish_reason=length truncation) line-bisect as before, where a smaller chunk
-    # genuinely helps.
-    semantic = _is_semantic_exhaustion(exc)
-    skip_retry = semantic and _semantic_ladder_was_spent(exc)
-    can_bisect = depth < _max_bisect_depth() and (not semantic or len(chunk.segments) > 1)
+    # A REASONING-LOOP semantic exhaustion (``finish_reason != "length"``: the model
+    # emitted only reasoning and stopped) is content-shaped but NOT input-size-shaped.
+    # LINE-splitting a single file only multiplies doomed multi-minute calls (each
+    # half re-exhausts), and a same-input retry re-runs the downgrade ladder the
+    # client already spent — so a ladder-spent reasoning-loop exhaustion skips both.
+    # A ``finish_reason="length"`` empty turn, by contrast, is token-budget-bound (the
+    # model ran out of tokens mid-reasoning): a smaller chunk can leave room for
+    # content, so it line-splits like ``LLMTruncatedError`` (it is NOT a reasoning
+    # loop here). SEPARATING a multi-file chunk is worthwhile either way (only one
+    # file may be the culprit), so a multi-segment reasoning-loop chunk is split by
+    # file; and a reasoning-loop exhaustion where NO ladder ran (thinking was already
+    # off) is a stochastic empty that keeps its one same-input retry. Other content
+    # failures (JSON parse, length truncation) line-bisect as before.
+    sem_exc = _semantic_exhaustion_in_chain(exc)
+    reasoning_loop = sem_exc is not None and sem_exc.finish_reason != "length"
+    skip_retry = reasoning_loop and sem_exc.retry_thinking_level is not None
+    can_bisect = depth < _max_bisect_depth() and (not reasoning_loop or len(chunk.segments) > 1)
     halves = _bisect_chunk(chunk) if can_bisect else None
     if halves is not None:
         logger.warning(

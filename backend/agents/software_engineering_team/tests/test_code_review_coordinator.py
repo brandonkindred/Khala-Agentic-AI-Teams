@@ -950,6 +950,32 @@ def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> N
     assert any("big.py" in r for r in excinfo.value.unreviewed)
 
 
+def test_length_empty_semantic_exhaustion_still_line_splits() -> None:
+    """A ``finish_reason="length"`` empty turn is token-budget-bound, not a reasoning
+    loop: a smaller chunk can leave room for content, so it must still line-split like
+    a truncation — unlike a reasoning-only (finish_reason=stop) exhaustion, which does
+    not. This is the same large single-file setup as the reasoning-loop test above,
+    but the length variant bisects (>=2 calls) instead of degrading on the first."""
+    budget = compute_code_review_map_chunk_chars(DummyLLMClient())
+    line_len = 41
+    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
+    content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    client = _SelectiveRaiser(
+        "FAILME",
+        exc=LLMSemanticExhaustionError(
+            "no content at the token cap", finish_reason="length", retry_thinking_level=False
+        ),
+    )
+    with pytest.raises(CodeReviewUnavailableError) as excinfo:
+        run_coordinator(
+            client,
+            CodeReviewInput(files={"big.py": content}, task_description="t", language="python"),
+        )
+    assert len(client.prompts) >= 2  # line-split like a truncation, not degraded on attempt 1
+    assert any("big.py" in r for r in excinfo.value.unreviewed)
+
+
 def test_semantic_exhaustion_multi_file_still_separates_files() -> None:
     """A multi-file chunk that semantically exhausts on the combined review still
     splits by FILE, so a clean sibling is reviewed while only the culprit degrades

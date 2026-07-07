@@ -1578,8 +1578,10 @@ def test_boolean_thinking_retries_once_with_thinking_off(monkeypatch: pytest.Mon
 
 
 def test_reasoning_json_probe_is_total_including_recursion(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The reasoning-channel JSON probe never raises — including on deeply nested
-    input, where ``json.loads`` raises ``RecursionError`` (not a ``ValueError``)."""
+    """The reasoning-channel JSON probe never raises and always returns a bool —
+    including when ``json.loads`` raises ``RecursionError`` (not a ``ValueError``, so
+    a naive guard would let it escape)."""
+    import llm_service.clients.ollama as ollama_mod
     from llm_service.clients.ollama import _reasoning_json_probe
 
     assert _reasoning_json_probe("") is False
@@ -1588,9 +1590,19 @@ def test_reasoning_json_probe_is_total_including_recursion(monkeypatch: pytest.M
     assert _reasoning_json_probe("}{ closing before opening") is False
     assert _reasoning_json_probe("{ never closed") is False
     assert _reasoning_json_probe("{not: valid}") is False  # braces present but unparseable
-    # Deeply nested object → json.loads exceeds the recursion limit; must be caught.
+    # A given runtime's JSON nesting limit varies (some parse deep input, some raise
+    # RecursionError), so the deep case only asserts the probe returns a bool without
+    # raising — never a specific truthiness.
     deep = '{"a":' * 2000 + "1" + "}" * 2000
-    assert _reasoning_json_probe(deep) is False
+    assert _reasoning_json_probe(deep) in (True, False)
+
+    # Deterministically exercise the RecursionError branch on every runtime: force
+    # json.loads to raise it and confirm the probe swallows it into False.
+    def _raise_recursion(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(ollama_mod.json, "loads", _raise_recursion)
+    assert _reasoning_json_probe('{"a": 1}') is False
 
 
 @pytest.mark.parametrize(
