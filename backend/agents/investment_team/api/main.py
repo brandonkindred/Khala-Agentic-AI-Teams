@@ -176,6 +176,35 @@ def _clamp_max_parallel(requested: int) -> int:
     return effective
 
 
+def _startup() -> None:
+    """Start the Temporal worker backstop (best-effort).
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
+    backstop covers running the app standalone (``uvicorn ...:app``) and a
+    wrapper start that silently failed.
+
+    Preconditions:
+        - None (safe to call once at app startup; idempotent per team).
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — failures are logged
+          so they cannot abort app boot (this runs as an ``on_startup`` hook).
+    """
+    try:
+        from investment_team.temporal.worker import (
+            start_investment_temporal_worker_thread,
+        )
+
+        start_investment_temporal_worker_thread()
+    except Exception:
+        logger.warning(
+            "investment_team Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
+
 def _run_investment_service_shutdown() -> (
     None
 ):  # pragma: no cover - process-lifecycle shutdown hook driven by uvicorn; the meaningful exercise needs a live server. The body is a defensive try/except around the event-bus reaper teardown.
@@ -196,8 +225,10 @@ def _run_investment_service_shutdown() -> (
 
 # Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
 # The Postgres schema registers the market-data cache snapshot index DDL on
-# startup (no-op when POSTGRES_HOST is unset); the on_shutdown hook stops the
-# event-bus reaper thread before the pool is closed.
+# startup (no-op when POSTGRES_HOST is unset); the on_startup hook is the
+# Temporal-worker lifespan backstop (a second start path alongside the
+# team_service entrypoint); the on_shutdown hook stops the event-bus reaper
+# thread before the pool is closed.
 app = create_team_app(
     service_name="investment-team",
     team_key="investment",
@@ -205,6 +236,7 @@ app = create_team_app(
     description="Investment profile management, portfolio proposals, strategy validation, and promotion gates.",
     version="1.0.0",
     postgres_schema=MD_CACHE_SCHEMA,
+    on_startup=_startup,
     on_shutdown=_run_investment_service_shutdown,
 )
 
