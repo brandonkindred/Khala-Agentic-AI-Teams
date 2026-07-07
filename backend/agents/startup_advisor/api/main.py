@@ -11,10 +11,18 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from shared_app import create_team_app
+from startup_advisor.pipeline import (
+    DEFAULT_SUGGESTED,
+    WELCOME_MESSAGE,
+    ArtifactResponse,
+    ConversationStateResponse,
+    build_response,
+    get_store,
+    run_advisor_core,
+)
 from startup_advisor.postgres import SCHEMA as STARTUP_ADVISOR_POSTGRES_SCHEMA
 from startup_advisor.shared.job_store import (
     JOB_STATUS_CANCELLED,
-    JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
@@ -29,6 +37,36 @@ from startup_advisor.shared.job_store import (
 
 logger = logging.getLogger(__name__)
 
+
+def _startup() -> None:
+    """Start the Temporal worker backstop (best-effort).
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
+    backstop covers running the app standalone (``uvicorn ...:app``).
+
+    Preconditions:
+        - None (safe to call once at app startup).
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged
+          as a warning so it cannot abort app boot (this runs as an
+          ``on_startup`` hook).
+    """
+    try:
+        from startup_advisor.temporal.worker import (
+            start_startup_advisor_temporal_worker_thread,
+        )
+
+        start_startup_advisor_temporal_worker_thread()
+    except Exception:
+        logger.warning(
+            "startup_advisor Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
+
 app = create_team_app(
     service_name="startup-advisor",
     team_key="startup_advisor",
@@ -36,6 +74,7 @@ app = create_team_app(
     description="Persistent conversational startup advisor with probing dialogue",
     version="1.0.0",
     postgres_schema=STARTUP_ADVISOR_POSTGRES_SCHEMA,
+    on_startup=_startup,
 )
 
 
@@ -54,100 +93,11 @@ class SendMessageRequest(BaseModel):
     message: str = Field(..., min_length=1)
 
 
-class ConversationMessageResponse(BaseModel):
-    role: str
-    content: str
-    timestamp: str
-
-
-class ArtifactResponse(BaseModel):
-    artifact_id: int
-    artifact_type: str
-    title: str
-    payload: dict[str, Any]
-    created_at: str
-
-
-class ConversationStateResponse(BaseModel):
-    conversation_id: str
-    messages: list[ConversationMessageResponse]
-    context: dict[str, Any]
-    artifacts: list[ArtifactResponse]
-    suggested_questions: list[str]
-
-
 class ConversationSummaryResponse(BaseModel):
     conversation_id: str
     created_at: str
     updated_at: str
     message_count: int
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_WELCOME_MESSAGE = (
-    "Welcome! I'm your startup advisor. I'm here to help you think through "
-    "your startup strategy — from customer discovery to fundraising to execution.\n\n"
-    "To give you the best advice, I'll need to understand your situation first. "
-    "Let's start: what are you working on, and what stage is your startup at?"
-)
-
-_DEFAULT_SUGGESTED = [
-    "I'm validating a new idea and need help with customer discovery.",
-    "I'm building an MVP and want to prioritize features.",
-    "I need help with my go-to-market strategy.",
-]
-
-
-def _get_store():  # noqa: ANN202
-    from startup_advisor.store import get_conversation_store
-
-    return get_conversation_store()
-
-
-def _get_agent():  # noqa: ANN202
-    from startup_advisor.assistant.agent import get_advisor_agent
-
-    return get_advisor_agent()
-
-
-def _build_response(
-    conversation_id: str,
-    messages,  # noqa: ANN001
-    context: dict[str, Any],
-    artifacts,  # noqa: ANN001
-    suggested_questions: list[str],
-) -> ConversationStateResponse:
-    return ConversationStateResponse(
-        conversation_id=conversation_id,
-        messages=[
-            ConversationMessageResponse(role=m.role, content=m.content, timestamp=m.timestamp)
-            for m in messages
-        ],
-        context=context,
-        artifacts=[
-            ArtifactResponse(
-                artifact_id=a.artifact_id,
-                artifact_type=a.artifact_type,
-                title=a.title,
-                payload=a.payload,
-                created_at=a.created_at,
-            )
-            for a in artifacts
-        ],
-        suggested_questions=suggested_questions,
-    )
-
-
-def _merge_context(existing: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
-    """Merge context_update into existing context, preserving prior values."""
-    merged = dict(existing)
-    for key, value in update.items():
-        if value is not None and value != "":
-            merged[key] = value
-    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +108,7 @@ def _merge_context(existing: dict[str, Any], update: dict[str, Any]) -> dict[str
 @app.get("/conversation", response_model=ConversationStateResponse)
 def get_or_create_conversation() -> ConversationStateResponse:
     """Get the singleton conversation, creating it with a welcome message if it doesn't exist."""
-    store = _get_store()
+    store = get_store()
     cid = store.get_or_create_singleton()
     state = store.get(cid)
     if state is None:
@@ -169,14 +119,14 @@ def get_or_create_conversation() -> ConversationStateResponse:
 
     # If the conversation is brand new (no messages), add the welcome message
     if len(messages) == 0:
-        store.append_message(cid, "assistant", _WELCOME_MESSAGE)
+        store.append_message(cid, "assistant", WELCOME_MESSAGE)
         state = store.get(cid)
         if state is None:
             raise HTTPException(status_code=500, detail="Failed to load conversation")
         messages, context = state
 
-    return _build_response(
-        cid, messages, context, artifacts, _DEFAULT_SUGGESTED if len(messages) <= 1 else []
+    return build_response(
+        cid, messages, context, artifacts, DEFAULT_SUGGESTED if len(messages) <= 1 else []
     )
 
 
@@ -206,65 +156,69 @@ class SendMessageJobListResponse(BaseModel):
 
 
 def _run_advisor_message_background(job_id: str, message: str) -> None:
+    """Thread-path runner: execute the advisor core and swallow failures as FAILED.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Delegates to ``run_advisor_core`` for the RUNNING/COMPLETED
+          transition.
+        - On any exception from ``run_advisor_core``, logs it and marks the
+          job FAILED (unless the job was cancelled in the meantime), instead
+          of letting the exception escape the thread.
+        - If marking the job FAILED itself raises (e.g. the job store is
+          unreachable), that failure is logged and swallowed too — this is
+          the thread's top-level function, so nothing propagates and the
+          thread cannot die with an unhandled exception.
+    """
     try:
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = _process_advisor_message(message)
-        if is_job_cancelled(job_id):
-            return
-        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump(mode="json"))
+        run_advisor_core(job_id, message)
     except Exception as exc:
         logger.exception("Startup advisor job %s failed", job_id)
         if is_job_cancelled(job_id):
             return
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
+        try:
+            update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
+        except Exception:
+            logger.exception("Failed to mark startup advisor job %s as FAILED", job_id)
 
 
-def _process_advisor_message(message: str) -> ConversationStateResponse:
-    store = _get_store()
-    agent = _get_agent()
+def _dispatch_advisor_message(job_id: str, message: str) -> str:
+    """Dispatch an advisor message via Temporal when enabled, else a daemon thread.
 
-    cid = store.get_or_create_singleton()
-    state = store.get(cid)
-    if state is None:
-        raise RuntimeError("Failed to load conversation")
-    messages, context = state
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
 
-    if len(messages) == 0:
-        store.append_message(cid, "assistant", _WELCOME_MESSAGE)
-        state = store.get(cid)
-        if state is None:
-            raise RuntimeError("Failed to load conversation")
-        messages, context = state
+    Postconditions:
+        - Starts exactly one execution path and returns its label
+          ("Temporal" or "thread"). With ``TEMPORAL_ADDRESS`` set the run is
+          started as a durable ``StartupAdvisorWorkflow``; otherwise the
+          legacy thread path runs unchanged.
+        - A missing ``shared_temporal`` (Temporal not installed) falls
+          through to the thread path; any *other* failure while starting the
+          workflow propagates to the caller, which marks the job FAILED — a
+          Temporal-enabled run is never silently downgraded.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        is_temporal_enabled = None
 
-    store.append_message(cid, "user", message)
+    if is_temporal_enabled is not None and is_temporal_enabled():
+        from startup_advisor.temporal.start_workflow import start_startup_advisor_workflow
 
-    msg_pairs = [(m.role, m.content) for m in messages]
-    msg_pairs.append(("user", message))
+        start_startup_advisor_workflow(job_id, message)
+        logger.info("Startup advisor job dispatched via Temporal: job_id=%s", job_id)
+        return "Temporal"
 
-    reply, context_update, suggested_questions, artifact = agent.respond(
-        msg_pairs, context, message
+    thread = threading.Thread(
+        target=_run_advisor_message_background,
+        args=(job_id, message),
+        daemon=True,
     )
-
-    if context_update:
-        context = _merge_context(context, context_update)
-        store.update_context(cid, context)
-
-    store.append_message(cid, "assistant", reply)
-
-    if artifact and isinstance(artifact, dict):
-        artifact_type = artifact.get("type", "advice")
-        title = artifact.get("title", "Untitled")
-        content = artifact.get("content", artifact)
-        store.add_artifact(cid, artifact_type, title, content)
-
-    state = store.get(cid)
-    if state is None:
-        raise RuntimeError("Failed to reload conversation")
-    messages, context = state
-    artifacts = store.get_artifacts(cid)
-    return _build_response(cid, messages, context, artifacts, suggested_questions)
+    thread.start()
+    return "thread"
 
 
 @app.post("/conversation/messages", response_model=SendMessageJobResponse)
@@ -275,12 +229,17 @@ def send_message(payload: SendMessageRequest) -> SendMessageJobResponse:
     """
     job_id = str(uuid4())
     create_job(job_id, message=payload.message)
-    thread = threading.Thread(
-        target=_run_advisor_message_background,
-        args=(job_id, payload.message),
-        daemon=True,
-    )
-    thread.start()
+
+    try:
+        _dispatch_advisor_message(job_id, payload.message)
+    except Exception as exc:
+        # A dispatch failure (e.g. the Temporal worker client never connected)
+        # must not leave the freshly-created job orphaned in PENDING — mark it
+        # FAILED so callers polling status see a terminal state.
+        logger.exception("Failed to dispatch startup advisor job %s", job_id)
+        update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to start startup advisor run.") from exc
+
     return SendMessageJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
 
@@ -341,7 +300,7 @@ def delete_advisor_job(job_id: str) -> Dict[str, Any]:
 @app.get("/conversation/artifacts", response_model=list[ArtifactResponse])
 def list_artifacts() -> list[ArtifactResponse]:
     """List all artifacts produced during the conversation."""
-    store = _get_store()
+    store = get_store()
     cid = store.get_or_create_singleton()
     artifacts = store.get_artifacts(cid)
     return [
