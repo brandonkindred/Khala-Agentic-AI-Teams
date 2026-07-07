@@ -840,6 +840,76 @@ def test_non_rate_limit_error_not_retried(monkeypatch, _fast_rate_limit):
 
 
 # ---------------------------------------------------------------------------
+# Global concurrency gate: _invoke holds the process-global semaphore around the
+# network call only, and releases it before the 429 backoff sleep.
+# ---------------------------------------------------------------------------
+
+
+def test_invoke_acquires_global_concurrency_gate(monkeypatch):
+    """The network exchange runs inside the shared concurrency gate: it is
+    entered, the streamed message is assembled inside it, and it is released only
+    afterward — so concurrent Claude calls are bounded by LLM_MAX_CONCURRENCY."""
+    events: list[str] = []
+
+    class _ProbeSem:
+        def __enter__(self):
+            events.append("enter")
+            return self
+
+        def __exit__(self, *_a):
+            events.append("exit")
+            return False
+
+    monkeypatch.setattr(_claude_mod, "get_llm_semaphore", lambda: _ProbeSem())
+
+    class _RecordingStreamCtx(_FakeStreamCtx):
+        def get_final_message(self):
+            events.append("call")
+            return super().get_final_message()
+
+    capture: dict = {}
+    client = ClaudeLLMClient(model="claude-opus-4-8", api_key="sk-test")
+    client._client = _FakeClient(
+        _RecordingStreamCtx(message=_text_message('{"ok": true}')), capture
+    )
+
+    out = client.complete_json("q", objective="t")
+
+    assert out == {"ok": True}
+    assert events == ["enter", "call", "exit"]
+
+
+def test_gate_released_before_rate_limit_backoff_sleep(monkeypatch):
+    """The 429 backoff sleep must never run while the concurrency slot is held,
+    or a rate-limited call would keep a slot for minutes and re-create the
+    concurrent-request stall. At every sleep the gate is fully released."""
+    monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "1")
+    depth = {"n": 0}
+    depth_at_sleep: list[int] = []
+
+    class _ProbeSem:
+        def __enter__(self):
+            depth["n"] += 1
+            return self
+
+        def __exit__(self, *_a):
+            depth["n"] -= 1
+            return False
+
+    monkeypatch.setattr(_claude_mod, "get_llm_semaphore", lambda: _ProbeSem())
+    monkeypatch.setattr(_claude_mod.time, "sleep", lambda _s: depth_at_sleep.append(depth["n"]))
+
+    err = _http_error(anthropic.RateLimitError, 429)
+    client, _ = _make_client(exc=err)
+
+    with pytest.raises(LLMRateLimitError):
+        client._invoke_with_rate_limit_retry(**_invoke_kwargs())
+
+    assert depth_at_sleep == [0]  # one retry, gate released before its sleep
+    assert depth["n"] == 0  # balanced — no leaked slot
+
+
+# ---------------------------------------------------------------------------
 # Signed thinking blocks must round-trip across tool-use turns. Under extended
 # thinking (the default), Anthropic 400s if the signed thinking/redacted_thinking
 # blocks from a tool-use turn are not replayed unchanged and first on the next

@@ -96,7 +96,6 @@ from .chunking import (
     parse_code_into_file_blocks,
     split_block_into_segments,
 )
-from .class_review import review_class_cohesion
 from .false_positive_filter import filter_false_positives
 from .mapping import (
     _cached_review_chunk,
@@ -489,15 +488,7 @@ def run_coordinator(
     # (``not_reviewed_issues``, empty-file notices) are never passed in, so the
     # gate's anti-loop nets stay intact; on any verifier failure the findings are
     # kept (fail-safe).
-    # Class-cohesion pass: the per-chunk map review reads one function/method at
-    # a time and cannot judge whether a class's methods together serve its stated
-    # purpose. This adds one bounded review per class (advisory: severities capped
-    # at medium) and merges its findings in *before* the false-positive filter and
-    # the approval gate, so cohesion findings are verified and deduped exactly like
-    # reviewer findings. Best-effort and env-gated: it never raises and yields []
-    # when disabled or when the submission has no reviewable class.
-    cohesion_issues = review_class_cohesion(llm, blocks, input_data)
-    genuine_issues = _dedupe_issues([*outcome.issues, *cohesion_issues])
+    genuine_issues = _dedupe_issues(outcome.issues)
     notify_review_progress(
         progress_callback,
         "verifying",
