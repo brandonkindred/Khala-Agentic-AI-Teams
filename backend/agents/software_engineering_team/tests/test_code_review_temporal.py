@@ -199,6 +199,30 @@ def test_activity_pipeline_matches_coordinator_verdict() -> None:
     ]
 
 
+def test_activity_pipeline_matches_coordinator_verdict_multi_chunk() -> None:
+    # Two large files force the submission past a single map chunk, exercising the
+    # multi-file/multi-chunk path: multiple ``review_chunk_activity`` fan-outs, the
+    # dedupe/reconcile reduce, and the >1-summary synthesis branch. The durable
+    # pipeline's verdict must still match ``run_coordinator``'s for the same input.
+    big_1 = "### app/main.py ###\n" + ("a" * 25_000)
+    big_2 = "### app/util.py ###\n" + ("b" * 25_000)
+    review_input = _input(code=big_1 + "\n\n" + big_2)
+
+    # Confirm the input really does split into more than one chunk (otherwise the
+    # test would silently degrade to the single-chunk path it means to complement).
+    from code_review_agent.temporal import activities as A
+
+    prep = A.prepare_review_activity(review_input.model_dump(mode="json"))
+    assert len(prep["chunks"]) > 1, "expected a multi-chunk submission"
+
+    coordinator_out = run_coordinator(DummyLLMClient(), review_input)
+    pipeline_out = _run_activity_pipeline(review_input)
+    assert pipeline_out.approved == coordinator_out.approved
+    assert [i.model_dump() for i in pipeline_out.issues] == [
+        i.model_dump() for i in coordinator_out.issues
+    ]
+
+
 def test_prepare_activity_reports_no_code_for_empty_files() -> None:
     from code_review_agent.temporal import activities as A
 
@@ -411,6 +435,19 @@ def test_reports_review_unavailable_walks_cause_chain() -> None:
     assert _reports_review_unavailable(nested, marker) is True
     # Unrelated failure is not misclassified.
     assert _reports_review_unavailable(RuntimeError("boom"), marker) is False
+
+
+def test_reports_review_unavailable_terminates_on_cyclic_chain() -> None:
+    from code_review_agent.agent import _reports_review_unavailable
+
+    # A pathological cyclic cause chain must not hang the walk: the ``seen`` set
+    # (and depth bound) terminate it. Neither node carries the marker, so the
+    # result is False — the point is that it returns at all.
+    a = RuntimeError("a")
+    b = RuntimeError("b")
+    a.__cause__ = b
+    b.__cause__ = a
+    assert _reports_review_unavailable(a, "CodeReviewUnavailableError") is False
 
 
 def test_dispatch_unavailable_is_distinct_from_review_failure() -> None:
