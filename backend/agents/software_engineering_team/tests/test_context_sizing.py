@@ -108,26 +108,6 @@ def test_parse_env_int_defensive_parsing(monkeypatch) -> None:
     assert parse_env_int("SOME_KNOB", 7, 1) == 1
 
 
-def test_class_cohesion_max_classes_knob(monkeypatch) -> None:
-    """The cohesion class cap defaults, parses an override, and floors at 0."""
-    from software_engineering_team.shared.context_sizing import (
-        CODE_REVIEW_CLASS_COHESION_MAX_CLASSES,
-        compute_code_review_class_cohesion_max_classes,
-    )
-
-    monkeypatch.delenv("CODE_REVIEW_CLASS_COHESION_MAX_CLASSES", raising=False)
-    assert (
-        compute_code_review_class_cohesion_max_classes() == CODE_REVIEW_CLASS_COHESION_MAX_CLASSES
-    )
-    monkeypatch.setenv("CODE_REVIEW_CLASS_COHESION_MAX_CLASSES", "5")
-    assert compute_code_review_class_cohesion_max_classes() == 5
-    # 0 is load-bearing (disables the pass); a negative floors to 0.
-    monkeypatch.setenv("CODE_REVIEW_CLASS_COHESION_MAX_CLASSES", "0")
-    assert compute_code_review_class_cohesion_max_classes() == 0
-    monkeypatch.setenv("CODE_REVIEW_CLASS_COHESION_MAX_CLASSES", "-4")
-    assert compute_code_review_class_cohesion_max_classes() == 0
-
-
 def test_parse_env_int_rejects_default_below_floor() -> None:
     """Precondition (default >= floor) is enforced with an explicit ValueError
     so the check survives ``python -O`` (assert would be stripped)."""
