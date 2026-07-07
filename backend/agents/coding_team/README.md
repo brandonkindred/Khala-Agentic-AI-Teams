@@ -1,6 +1,6 @@
 # Coding Team
 
-The **coding_team** is a **sub-team of the Software Engineering team**. It implements the main implementation path after planning: the SE orchestrator hands off to it; it receives the adapted plan from Planning V3, generates a Task Graph, and executes work through a Tech Lead plus the `frontend_v2` and `backend_v2` implementation teams. The public API remains at `/api/coding-team` for direct jobs and health checks; logically it sits under Software Engineering in the platform hierarchy.
+The **coding_team** is a **sub-team of the Software Engineering team**. It implements the main implementation path after planning: the SE orchestrator hands off to it; it receives the adapted plan from Planning, generates a Task Graph, and executes work through a Tech Lead plus the `frontend_v2` and `backend_v2` implementation teams. The public API remains at `/api/coding-team` for direct jobs and health checks; logically it sits under Software Engineering in the platform hierarchy.
 
 ## Architecture (Mermaid)
 
@@ -10,7 +10,7 @@ The **coding_team** is a **sub-team of the Software Engineering team**. It imple
 flowchart TB
   subgraph external [External inputs]
     SEOrch[software_engineering_orchestrator]
-    PlanV3[Planning_V3_handoff]
+    Planning[Planning_handoff]
     Repo[repo_path_workspace]
     JobSvc[job_service_client_team_coding_team]
   end
@@ -31,7 +31,7 @@ flowchart TB
   end
 
   SEOrch -->|"CodingTeamPlanInput"| Orch
-  PlanV3 -.->|"requirements_spec"| SEOrch
+  Planning -.->|"requirements_spec"| SEOrch
   Run -->|"background_thread"| Orch
   Orch --> TL
   TL -->|"tasks_stacks_JSON"| TG

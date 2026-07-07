@@ -145,16 +145,16 @@ def test_wrapper_starts_temporal_worker_when_configured() -> None:
     """With a worker module/func, the wrapper starts the worker in-process,
     gated on TEMPORAL_ADDRESS and resolved via importlib at runtime."""
     body = entrypoint.build_wrapper_body(
-        "planning_v3_team",
-        "planning_v3_team.api.main",
+        "planning_team",
+        "planning_team.api.main",
         "app",
-        "planning_v3_team.temporal.worker",
-        "start_planning_v3_temporal_worker_thread",
+        "planning_team.temporal.worker",
+        "start_planning_temporal_worker_thread",
     )
     _compile(body)
     assert "_os.environ.get('TEMPORAL_ADDRESS', '').strip()" in body
-    assert "_il.import_module('planning_v3_team.temporal.worker')" in body
-    assert "'start_planning_v3_temporal_worker_thread'" in body
+    assert "_il.import_module('planning_team.temporal.worker')" in body
+    assert "'start_planning_temporal_worker_thread'" in body
 
 
 def test_wrapper_omits_temporal_worker_when_not_configured() -> None:

@@ -22,14 +22,13 @@ import { SocialMarketingApiService } from '../../services/social-marketing-api.s
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { SalesApiService } from '../../services/sales-api.service';
-import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
+import { PlanningApiService } from '../../services/planning-api.service';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { GenericJobsApiService } from '../../services/generic-jobs-api.service';
 import { JobActionsService } from '../../services/job-actions.service';
 import type {
   RunningJobSummary,
   JobStatusResponse,
-  PlanningV2StatusResponse,
   ProductAnalysisStatusResponse,
   TeamProgressEntry,
 } from '../../models';
@@ -49,7 +48,7 @@ import {
   fromInvestmentJobSummary,
   fromFounderJobSummary,
   fromSalesJobListItem,
-  fromPlanningV3JobSummary,
+  fromPlanningJobSummary,
   fromGenericJobRecord,
 } from '../../models';
 
@@ -63,7 +62,7 @@ interface JobTypeInfo {
 
 const JOB_TYPE_INFO: Record<string, JobTypeInfo> = {
   'run_team': { label: 'Run Team', icon: 'groups', route: '/software-engineering', tabIndex: 0 },
-  'planning_v3': { label: 'Planning', icon: 'description', route: '/software-engineering/planning-v3' },
+  'planning': { label: 'Planning', icon: 'description', route: '/software-engineering/planning' },
   'backend_code_v2': { label: 'Backend Code V2', icon: 'dns', route: '/software-engineering', tabIndex: 2 },
   'frontend_code_v2': { label: 'Frontend Code V2', icon: 'web', route: '/software-engineering', tabIndex: 3 },
   'product_analysis': { label: 'Product Analysis', icon: 'analytics', route: '/software-engineering', tabIndex: 1 },
@@ -165,7 +164,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   private readonly investmentApi = inject(InvestmentApiService);
   private readonly personaApi = inject(PersonaTestingApiService);
   private readonly salesApi = inject(SalesApiService);
-  private readonly planningV3Api = inject(PlanningV3ApiService);
+  private readonly planningApi = inject(PlanningApiService);
   private readonly codingTeamApi = inject(CodingTeamApiService);
   private readonly genericJobsApi = inject(GenericJobsApiService);
   private readonly jobActions = inject(JobActionsService);
@@ -387,14 +386,14 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       investment: this.investmentApi.listStrategyLabJobs(false).pipe(catchError(() => of({ jobs: [] }))),
       persona: this.personaApi.listJobs(false).pipe(catchError(() => of({ jobs: [] }))),
       sales: this.salesApi.listPipelineJobs(false).pipe(catchError(() => of([]))),
-      planningV3: this.planningV3Api.getJobs().pipe(catchError(() => of({ jobs: [] }))),
+      planning: this.planningApi.getJobs().pipe(catchError(() => of({ jobs: [] }))),
       codingTeam: this.genericJobsApi.listJobs('coding_team').pipe(catchError(() => of({ jobs: [] }))),
       soc2: this.genericJobsApi.listJobs('soc2_compliance_team').pipe(catchError(() => of({ jobs: [] }))),
       pa: this.genericJobsApi.listJobs('personal_assistant_team').pipe(catchError(() => of({ jobs: [] }))),
       roadTrip: this.genericJobsApi.listJobs('road_trip_planning_team').pipe(catchError(() => of({ jobs: [] }))),
       nutrition: this.genericJobsApi.listJobs('nutrition_meal_planning_team').pipe(catchError(() => of({ jobs: [] }))),
     }).pipe(
-      map(({ se, blogging, ai, prov, social, investment, persona, sales, planningV3, codingTeam, soc2, pa, roadTrip, nutrition }) => {
+      map(({ se, blogging, ai, prov, social, investment, persona, sales, planning, codingTeam, soc2, pa, roadTrip, nutrition }) => {
         this.seFetchError = (se as { _error?: string })._error ?? null;
         const seJobs = (se as { jobs: RunningJobSummary[] }).jobs;
         type RowWithSe = DashboardRow & { seSummary?: RunningJobSummary };
@@ -423,8 +422,8 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
         for (const s of sales) {
           rows.push({ unified: fromSalesJobListItem(s) });
         }
-        for (const s of planningV3.jobs ?? []) {
-          rows.push({ unified: fromPlanningV3JobSummary(s) });
+        for (const s of planning.jobs ?? []) {
+          rows.push({ unified: fromPlanningJobSummary(s) });
         }
         for (const s of codingTeam.jobs ?? []) {
           rows.push({ unified: fromGenericJobRecord('coding_team', s) });
@@ -470,18 +469,6 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   private fetchSEDetail(summary: RunningJobSummary) {
     const jobType = summary.job_type;
-    if (jobType === 'planning_v2') {
-      return this.seApi.getPlanningV2Status(summary.job_id).pipe(
-        map((status: PlanningV2StatusResponse) => this.toSEDetail({
-          progress: status.progress,
-          statusText: status.status_text,
-          currentPhase: status.current_phase,
-          waitingForAnswers: status.waiting_for_answers,
-          teamProgress: { 'planning': { current_phase: status.current_phase, progress: status.progress } },
-        })),
-        catchError(() => of(null))
-      );
-    }
     if (jobType === 'product_analysis') {
       return this.seApi.getProductAnalysisStatus(summary.job_id).pipe(
         map((status: ProductAnalysisStatusResponse) => this.toSEDetail({
@@ -619,7 +606,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     if (!entry) return false;
     const now = Date.now();
     // Prefer createdAt for the age gate; fall back to firstSeenAt for sources
-    // that don't surface createdAt (e.g. Planning V3 jobs) so they can still
+    // that don't surface createdAt (e.g. Planning jobs) so they can still
     // be flagged once the dashboard itself has observed them frozen long
     // enough.
     const createdAt = job.unified.createdAt;

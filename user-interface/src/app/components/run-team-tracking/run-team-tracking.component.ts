@@ -8,7 +8,7 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { Subscription, switchMap, timer } from 'rxjs';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse, TaskStateEntry, TeamProgressEntry } from '../../models';
-import { PLANNING_V2_PHASES, CODE_TEAM_PHASES, MICROTASK_PHASES, PRODUCT_ANALYSIS_PHASES, type PhaseDefinition } from '../../models';
+import { PLANNING_PHASES, CODE_TEAM_PHASES, MICROTASK_PHASES, PRODUCT_ANALYSIS_PHASES, type PhaseDefinition } from '../../models';
 import { markStatusReceived } from '../../shared/staleness.util';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
@@ -380,9 +380,9 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   // Subprocess Tracking (Planning and Execution phases)
   // ---------------------------------------------------------------------------
 
-  /** Get all planning-v3 subprocess phases for display. */
+  /** Get all planning subprocess phases for display. */
   getPlanningSubprocessPhases(): PhaseDefinition[] {
-    return PLANNING_V2_PHASES;
+    return PLANNING_PHASES;
   }
 
   /** Get all code team phases for display (used by backend-code-v2, frontend-code-v2). */
@@ -647,7 +647,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   }
 
   private addPlanningSubtree(nodes: FlatTreeNode[], parentIsLast: boolean): void {
-    const phases = PLANNING_V2_PHASES;
+    const phases = PLANNING_PHASES;
     phases.forEach((phase, idx) => {
       const isLast = idx === phases.length - 1;
       let status: 'completed' | 'current' | 'pending' = 'pending';
@@ -856,7 +856,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   }
 
   private buildPlanningDAGChildren(): DAGNode[] {
-    return PLANNING_V2_PHASES.map(phase => {
+    return PLANNING_PHASES.map(phase => {
       let status: 'completed' | 'current' | 'pending' = 'pending';
       if (this.isPlanningSubprocessCompleted(phase.id)) {
         status = 'completed';

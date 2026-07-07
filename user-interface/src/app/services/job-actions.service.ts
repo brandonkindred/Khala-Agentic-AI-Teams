@@ -30,7 +30,7 @@ const SOURCE_TO_TEAM: Record<string, string> = {
   user_agent_founder: 'user_agent_founder',
   soc2_compliance: 'soc2_compliance_team',
   personal_assistant: 'personal_assistant_team',
-  planning_v3: 'planning_v3_team',
+  planning: 'planning_team',
   road_trip_planning: 'road_trip_planning_team',
   nutrition_meal_planning: 'nutrition_meal_planning_team',
   coding_team: 'coding_team',

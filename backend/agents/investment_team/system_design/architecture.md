@@ -11,7 +11,7 @@ depend on. For the detailed component view and data model, see
 flowchart TB
   subgraph clients[Clients]
     UI[Angular 19 UI<br/>user-interface/]
-    OtherTeams[Other Khala teams<br/>e.g. SE, planning_v3]
+    OtherTeams[Other Khala teams<br/>e.g. SE, planning]
     CLI[External callers / CLI]
   end
 

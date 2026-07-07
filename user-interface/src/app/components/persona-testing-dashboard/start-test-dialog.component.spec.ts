@@ -62,7 +62,7 @@ describe('StartTestDialogComponent', () => {
   it('does not pre-select team when multiple options are available', () => {
     const { fixture } = configure({
       personas: [persona('p-1')],
-      teams: [team('software_engineering'), team('planning_v3')],
+      teams: [team('software_engineering'), team('planning')],
     });
     expect(fixture.componentInstance.targetTeamKey()).toBe('');
     expect(fixture.componentInstance.isValid()).toBe(false);

@@ -63,7 +63,7 @@ The API also exposes `GET /run-team/{job_id}` for polling job status, `POST /run
 
 When `TEMPORAL_ADDRESS` is set (e.g. in Docker), the SE team uses **Temporal** instead of background threads:
 
-- **Workflows**: `RunTeamWorkflow`, `RetryFailedWorkflow`, `StandaloneJobWorkflow` (for frontend-code-v2, backend-code-v2, planning-v2, product-analysis).
+- **Workflows**: `RunTeamWorkflow`, `RetryFailedWorkflow`, `StandaloneJobWorkflow` (for frontend-code-v2, backend-code-v2, product-analysis).
 - **Activities**: Each workflow runs activities that call the same logic as the former thread targets (`run_orchestrator`, `run_failed_tasks`, and the standalone runners). Activities update the **job store** so the API and UI continue to poll status from the store.
 - **Worker**: A Temporal worker runs in-process (started from the unified API lifespan or when the SE API runs standalone), using task queue `software-engineering` (override with `TEMPORAL_TASK_QUEUE`).
 - **Resilience**: Progress is durable in Temporal; after a server restart, the worker reconnects and in-progress workflows continue. **Resume** is allowed for `failed` jobs as well as `pending`, `running`, and `agent_crash`, so jobs marked failed (e.g. by the stale-heartbeat monitor) can be resumed via `POST /run-team/{job_id}/resume`.
@@ -73,16 +73,16 @@ When `TEMPORAL_ADDRESS` is set (e.g. in Docker), the SE team uses **Temporal** i
 
 ## 2. End-to-End Pipeline
 
-A single run goes through four major phases: Discovery, Design, Execution, and Integration. The orchestrator (`orchestrator.py`) drives this pipeline sequentially. Planning is handled by **planning_v2_team** (6-phase workflow); its output is adapted by **planning_v2_adapter** for Tech Lead and Architecture Expert.
+A single run goes through four major phases: Discovery, Design, Execution, and Integration. The orchestrator (`orchestrator.py`) drives this pipeline sequentially. Planning is handled by the standalone **planning_team**; its handoff is adapted by **planning_adapter** for Tech Lead and Architecture Expert.
 
 ```mermaid
 flowchart TB
     subgraph discovery ["1 - Discovery"]
         LoadSpec["Load Spec\n(initial_spec.md or override)"]
         ParseSpec["Parse Spec with LLM\n(ProductRequirements)"]
-        PlanningV2["Planning (v2)\n6-phase workflow"]
-        Adapter["planning_v2_adapter\n(ProductRequirements, project_overview)"]
-        LoadSpec --> ParseSpec --> PlanningV2 --> Adapter
+        Planning["Planning\nhandoff workflow"]
+        Adapter["planning_adapter\n(ProductRequirements, project_overview)"]
+        LoadSpec --> ParseSpec --> Planning --> Adapter
     end
 
     subgraph design ["2 - Design"]
@@ -116,15 +116,15 @@ Each phase produces artifacts that feed the next. Planning artifacts are written
 
 ## 3. Agent Registry and Roles
 
-The orchestrator instantiates agents via `_get_agents()`. The main pipeline uses **planning_v2_team** (PlanningV2TeamLead) for discovery/planning, with **planning_v2_adapter** mapping its result to ProductRequirements and project_overview for Tech Lead and Architecture. Legacy planning_team agents (Spec Intake, Project Planning, domain planning) are not in the main flow; clarification sessions still use Spec Intake.
+The orchestrator instantiates agents via `_get_agents()`. The main pipeline uses the standalone **planning_team** for discovery/planning, with **planning_adapter** mapping its handoff to ProductRequirements and project_overview for Tech Lead and Architecture.
 
 ```mermaid
 flowchart TB
     Orch["Orchestrator"]
 
     subgraph planning [Planning - main pipeline]
-        planningV2["Planning (v2)\n6-phase workflow"]
-        adapter["planning_v2_adapter"]
+        planningTeam["Planning\nhandoff workflow"]
+        adapter["planning_adapter"]
         archExpert["Architecture Expert"]
         techLead["Tech Lead"]
     end
@@ -476,11 +476,11 @@ Hard gates that must pass: `iac_validate`, `iac_validate_fmt`, `policy_checks`, 
 
 ## 9. Planning Loop
 
-The Tech Lead and Architecture Expert run after **Planning (v2)** and **planning_v2_adapter** produce ProductRequirements and project_overview. An optional planning cache short-circuits when the spec, architecture, and project overview are unchanged from a previous run.
+The Tech Lead and Architecture Expert run after **Planning** and **planning_adapter** produce ProductRequirements and project_overview. An optional planning cache short-circuits when the spec, architecture, and project overview are unchanged from a previous run.
 
 ```mermaid
 flowchart TB
-    StartPlan["Start Planning\n(after Planning v2 + adapter)"]
+    StartPlan["Start Planning\n(after Planning + adapter)"]
     TechLeadRun["Tech Lead\nGenerate task assignment"]
     ArchRun["Architecture Expert\nDesign architecture"]
     CacheHit{"Planning\ncache hit?"}
@@ -504,14 +504,13 @@ The alignment inner loop runs up to `SW_MAX_ALIGNMENT_ITERATIONS` (default 20) a
 
 ## 10. Plan Folder and Artifacts
 
-Planning (v2) writes to `planning_v2/` under the repo path. The rest of planning outputs are written to `plan/` at the work path root.
+The Planning team writes its handoff artifacts (client context, validated spec, PRD) under `plan/`; the rest of the planning outputs are also written to `plan/` at the work path root.
 
 ```mermaid
 flowchart LR
     PlanDir["plan/"]
-    P2Dir["planning_v2/"]
 
-    P2Dir --> P2Art["Planning (v2)\nplanning_artifacts.md"]
+    PlanDir --> PlanArt["Planning handoff\nclient_context.md, validated_spec.md, PRD"]
 
     PlanDir --> ArchArt["Architecture\narchitecture.md"]
 
@@ -573,7 +572,7 @@ sequenceDiagram
     participant PO as ProductOwnerAgent
     participant SP as SprintPlannerAgent
     participant SE as SE Orchestrator
-    participant Pipe as Planning V3 / Coding / DevOps / Integration
+    participant Pipe as Planning / Coding / DevOps / Integration
     participant RM as ReleaseManagerAgent
     participant FB as feedback_items
 
@@ -672,8 +671,7 @@ flowchart TB
     SWTeam --> swOrch["orchestrator.py"]
     SWTeam --> swAPI["api/"]
     SWTeam --> swCLI["agent_implementations/"]
-    SWTeam --> swPlanningV2["planning_v2_team/\n(6-phase workflow)\nplanning_v2_adapter"]
-    SWTeam --> swPlanning["planning_team/\n(legacy; clarification)"]
+    SWTeam --> swAdapter["planning_adapter.py\n(handoff → ProductRequirements)"]
     SWTeam --> swBackend["backend_agent/"]
     SWTeam --> swBackendV2["backend_code_v2_team/\n(standalone 5-phase team,\n3 tool agents)"]
     SWTeam --> swFrontend["frontend_team/\n(12 agents)"]
