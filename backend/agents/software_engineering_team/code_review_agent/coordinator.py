@@ -9,15 +9,19 @@ chunk reviewer saw only a slice, and confirmed false positives are dropped — s
 nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars`` of
 code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
-after recovery degrades to a blocking ``high`` "not reviewed" finding naming
-its range so the run completes over the chunks that succeeded while the merged
-review is rejected — unreviewed code never passes the gate as approved. The run
-still fails loudly with ``CodeReviewUnavailableError`` for infrastructure
-failures (rate limit, unreachable endpoint, auth/config) and when *no* chunk
-could be reviewed at all; an unexpected error (a defect in the reviewer code,
-not a known LLM content failure) propagates unchanged so it fails closed rather
-than being masked — the review never renders an approving verdict on code it
-did not see.
+after recovery (retry, bisection, and a last-resort thinking-off retry) degrades
+gracefully — by default its range is surfaced non-blockingly as
+``CodeReviewOutput.not_reviewed_ranges`` (never posted as a PR comment, never
+blocking) so the run completes over the chunks that succeeded, because a
+reviewer-side hiccup is not a code defect. Setting
+``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` restores the legacy fail-closed behavior
+where that range becomes a blocking ``high`` "not reviewed" finding and the
+merged review is rejected. The run still fails loudly with
+``CodeReviewUnavailableError`` for infrastructure failures (rate limit,
+unreachable endpoint, auth/config) and when *no* chunk could be reviewed at all;
+an unexpected error (a defect in the reviewer code, not a known LLM content
+failure) propagates unchanged so it fails closed rather than being masked — the
+review never renders an approving verdict on code it did not see.
 
 This module owns the orchestration (``run_coordinator``) and the reduce phase
 (dedupe, approval gate, narrative merge). The chunking transforms live in
@@ -73,6 +77,7 @@ from collections import OrderedDict
 from typing import List, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
+from shared_env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_existing_codebase_chars,
@@ -199,6 +204,36 @@ def clear_submission_outcome_cache() -> None:
     """
     with _SUBMISSION_OUTCOME_CACHE_LOCK:
         _SUBMISSION_OUTCOME_CACHE.clear()
+
+
+def _block_on_unreviewed() -> bool:
+    """Whether a chunk that could not be reviewed should block the merged review.
+
+    Postconditions:
+        - Returns ``True`` only when ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` is an
+          explicit truthy value (``true``/``1``/``yes``/``on``); unset or
+          anything else is ``False``. Default off: an unreviewable chunk degrades
+          gracefully (no posted "could not be reviewed" finding, no block) and is
+          surfaced only as non-blocking ``CodeReviewOutput.not_reviewed_ranges``.
+          Set it to restore the legacy fail-closed behavior where the chunk's code
+          is named by a blocking ``high`` finding that rejects the review.
+    """
+    return env_bool("CODE_REVIEW_BLOCK_ON_UNREVIEWED", default=False)
+
+
+def _not_reviewed_range_label(issue: CodeReviewIssue) -> str:
+    """Render a not-reviewed coverage finding as a concise ``path (lines A-B)`` label.
+
+    Postconditions:
+        - Returns ``"<path> (lines <start>-<end>)"`` when the finding carries a
+          line range, ``"<path>"`` when it does not, and ``"(unknown)"`` for a
+          headerless finding with no path. Pure formatting for the non-blocking
+          ``not_reviewed_ranges`` observability list; never raises.
+    """
+    path = issue.file_path or "(unknown)"
+    if issue.start_line is not None and issue.line is not None:
+        return f"{path} (lines {issue.start_line}-{issue.line})"
+    return path
 
 
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
@@ -333,10 +368,12 @@ def run_coordinator(
     Postconditions:
         - Every input file/line range is either reviewed or named: empty files
           get info findings, and a chunk that cannot be reviewed after recovery
-          degrades to a blocking ``high`` "not reviewed" finding naming its
-          range while the run completes over the chunks that succeeded. The
-          degraded finding rejects the merged review, so unreviewed code never
-          passes the gate as approved; no covered line is silently dropped.
+          is recorded in ``not_reviewed_ranges`` while the run completes over the
+          chunks that succeeded (no covered line is silently dropped). By default
+          those ranges are non-blocking (never posted, never affecting
+          ``approved``); under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` they instead
+          appear as blocking ``high`` findings in ``issues`` and reject the merge,
+          so unreviewed code cannot pass the gate as approved.
         - ``approved is False`` implies at least one critical/high issue.
         - Every genuine reviewer finding is re-checked against the whole
           submission and dropped only when the verifier confirms it is a false
@@ -346,9 +383,9 @@ def run_coordinator(
           never touches the not-reviewed coverage findings.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
-        - A submission byte-identical to one this process already approved (same
-          code + context + model) returns the recorded approved output with no
-          LLM call at all.
+        - A submission byte-identical to one this process already approved *and
+          fully reviewed* (same code + context + model; no unreviewed ranges)
+          returns the recorded approved output with no LLM call at all.
         - When ``progress_callback`` is provided, it is invoked with
           non-decreasing fractions ending at 1.0 (step ``done``) on every
           successful return, including per-chunk ``reviewing`` reports.
@@ -506,7 +543,25 @@ def run_coordinator(
     notify_review_progress(
         progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
     )
-    deduped = _dedupe_issues([*verified, *outcome.not_reviewed_issues, *skipped_issues])
+    # A chunk that could not be reviewed after recovery degrades gracefully: by
+    # default its "not reviewed" coverage findings are NOT posted and do NOT block
+    # (they would otherwise surface as an alarming "[HIGH] ... could not be
+    # reviewed automatically" PR comment for a reviewer-side hiccup, not a code
+    # defect). They are still surfaced non-blockingly via ``not_reviewed_ranges``
+    # below and in the telemetry log. Set CODE_REVIEW_BLOCK_ON_UNREVIEWED to
+    # restore the legacy fail-closed behavior where they block the merge.
+    not_reviewed_ranges = [_not_reviewed_range_label(i) for i in outcome.not_reviewed_issues]
+    if _block_on_unreviewed():
+        deduped = _dedupe_issues([*verified, *outcome.not_reviewed_issues, *skipped_issues])
+    else:
+        if not_reviewed_ranges:
+            logger.warning(
+                "CodeReview: %s chunk range(s) could not be reviewed; degrading gracefully "
+                "(not posting/blocking; ranges=%s)",
+                len(not_reviewed_ranges),
+                not_reviewed_ranges,
+            )
+        deduped = _dedupe_issues([*verified, *skipped_issues])
     all_llm_approved = bool(outcome.approved_flags) and all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
@@ -526,6 +581,7 @@ def run_coordinator(
     result = CodeReviewOutput(
         approved=approved,
         issues=deduped,
+        not_reviewed_ranges=not_reviewed_ranges,
         summary=merged_summary,
         spec_compliance_notes=spec_notes,
     )
@@ -533,9 +589,13 @@ def run_coordinator(
     # identical resubmission returns this output with no LLM work. A rejection is
     # not stored — the fix that follows changes the submission, and if the same
     # rejected bytes reappear the (mostly cached) map phase still surfaces the
-    # findings the coding agent needs. Store a clone so a later hit can be mutated
-    # freely without corrupting the cached entry.
-    if submission_key is not None and result.approved:
+    # findings the coding agent needs. A run that left any range unreviewed is
+    # also not stored: freezing it would keep serving a partial verdict on later
+    # identical cycles instead of re-attempting the chunk that could not be
+    # reviewed (a semantic-exhaustion/truncation hiccup may not recur), matching
+    # the map-phase rule that degraded chunk outcomes are never cached. Store a
+    # clone so a later hit can be mutated freely without corrupting the entry.
+    if submission_key is not None and result.approved and not not_reviewed_ranges:
         with _SUBMISSION_OUTCOME_CACHE_LOCK:
             _SUBMISSION_OUTCOME_CACHE[submission_key] = result.model_copy(deep=True)
             _SUBMISSION_OUTCOME_CACHE.move_to_end(submission_key)

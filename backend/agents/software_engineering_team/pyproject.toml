@@ -50,6 +50,12 @@ omit = [
     "software_engineering_team/temporal/activities.py",
     "software_engineering_team/temporal/worker.py",
     "software_engineering_team/temporal/workflows.py",
+    # Code review agent's Temporal layer — runtime-only (workflow body, sync
+    # dispatch bridge, worker bootstrap); config.py, phase_models.py, and the
+    # activity wrappers are unit-covered in tests/test_code_review_temporal.py.
+    "software_engineering_team/code_review_agent/temporal/start_workflow.py",
+    "software_engineering_team/code_review_agent/temporal/worker.py",
+    "software_engineering_team/code_review_agent/temporal/workflows.py",
     "software_engineering_team/agent_implementations/*",
     "software_engineering_team/product_requirements_analysis_agent/agent.py",
     "software_engineering_team/backend_code_v2_team/phases/review.py",

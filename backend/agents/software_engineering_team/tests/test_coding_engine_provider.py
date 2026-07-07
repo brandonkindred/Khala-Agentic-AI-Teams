@@ -2,9 +2,30 @@
 
 from __future__ import annotations
 
+import sys
 import types
+from pathlib import Path
 
 from software_engineering_team.coding_engine_provider import SECodeEngineProvider
+
+
+def test_import_bootstraps_se_team_dir_on_syspath() -> None:
+    """Importing the provider puts the SE team dir on ``sys.path``.
+
+    SE's engines (``quality_gate_tools.run_code_review``) use bare team-local
+    imports like ``from code_review_agent import ...`` that resolve only with the
+    SE team directory on ``sys.path``. Out-of-package composition roots (the
+    standalone coding-team service, the coding_team Temporal worker) reach these
+    engines solely through this provider and never import ``software_engineering_team.api``,
+    which is what otherwise bootstraps that path. Guard the invariant so the
+    ``No module named 'code_review_agent'`` regression that stalled the coding
+    pipeline cannot return.
+    """
+    team_dir = Path(__file__).resolve().parent.parent
+    assert str(team_dir) in sys.path
+    assert str(team_dir / "architect-agents") in sys.path
+    # The bare team-local name the engines depend on must now be discoverable.
+    assert (team_dir / "code_review_agent").is_dir()
 
 
 def test_build_team_lead_routes_frontend(monkeypatch) -> None:

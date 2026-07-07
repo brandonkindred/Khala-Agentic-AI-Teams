@@ -87,6 +87,14 @@ omit = [
     "agents/software_engineering_team/temporal/activities.py",
     "agents/software_engineering_team/temporal/worker.py",
     "agents/software_engineering_team/temporal/workflows.py",
+    # Code review agent's Temporal layer — same story: the workflow body, sync
+    # dispatch bridge, and worker bootstrap only run inside a live Temporal
+    # cluster. The pure resolver (config.py), the boundary DTOs
+    # (phase_models.py), and the activity wrappers are covered by
+    # tests/test_code_review_temporal.py against the in-process coordinator.
+    "agents/software_engineering_team/code_review_agent/temporal/start_workflow.py",
+    "agents/software_engineering_team/code_review_agent/temporal/worker.py",
+    "agents/software_engineering_team/code_review_agent/temporal/workflows.py",
     # Thin uvicorn/CLI entrypoints for the SE team — invoke the api/main app
     # without adding any business logic of their own.
     "agents/software_engineering_team/agent_implementations/*",

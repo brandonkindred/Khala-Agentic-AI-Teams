@@ -18,10 +18,17 @@ to be enforced upstream (reverse proxy / API gateway) rather than at the applica
 layer for the Stage-1 backend; application-level auth is a platform-wide follow-up.
 Note the ``SecurityGatewayMiddleware`` fronting all ``/api/*`` routes is an
 abuse/prompt-injection scanner, **not** an authn/authz layer.
+
+Store selection is bound **once at import time**: ``_service = _build_service()``
+reads ``POSTGRES_HOST`` when this module first loads, so the durable-vs-in-memory
+choice is fixed for the process. ``POSTGRES_HOST`` must therefore be set before
+the worker imports this module (it is, via the process environment) — flipping it
+at runtime does not re-select the store.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -36,13 +43,51 @@ from agent_studio.models import (
 )
 from agent_studio.service import AgentStudioService
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/agent-studio", tags=["agent-studio"])
 
-# Process-wide default service (in-memory conversation store). It is resolved
-# through the ``get_agent_studio_service`` dependency below so tests inject an
-# isolated instance via ``app.dependency_overrides`` rather than mutating module
-# state — the idiomatic FastAPI seam.
-_service = AgentStudioService()
+
+def _build_service() -> AgentStudioService:
+    """Build the process-wide service with a durable store when Postgres is on.
+
+    With ``POSTGRES_HOST`` set the conversation store is Postgres-backed so state
+    is coherent across the 4 uvicorn workers (a conversation created on one worker
+    resolves on another; turns serialize via a row lock). Without it — local dev /
+    tests — the in-memory store is used, exactly as before.
+
+    The store is stateless with a lazily-opened pool, so this selection does no I/O:
+    it only decides *which* store class to instantiate. The ``except`` is narrowed
+    to :class:`ImportError` on purpose (``ModuleNotFoundError`` is a subclass, so
+    it's already covered) — the only non-connectivity failure possible here is a
+    missing optional dependency (e.g. psycopg absent), which legitimately degrades
+    to in-memory. A configured-but-unreachable Postgres is deliberately **not**
+    downgraded: construction opens no
+    connection, so a connectivity error can only surface later inside a request,
+    where it propagates rather than silently forking per-worker state. Any other
+    unexpected error at construction likewise propagates (fail loud) instead of
+    being swallowed into a silent fallback.
+    """
+    try:
+        from shared_postgres import is_postgres_enabled
+
+        if is_postgres_enabled():
+            from agent_studio.pg_store import PostgresAgentStudioConversationStore
+
+            return AgentStudioService(store=PostgresAgentStudioConversationStore())
+    except ImportError:  # pragma: no cover - only a missing dep degrades (ModuleNotFoundError is a subclass)
+        logger.warning(
+            "Postgres Agent Studio store unavailable (missing dependency); using in-memory store",
+            exc_info=True,
+        )
+    return AgentStudioService()
+
+
+# Process-wide default service. Resolved through the ``get_agent_studio_service``
+# dependency below so tests inject an isolated instance via
+# ``app.dependency_overrides`` rather than mutating module state — the idiomatic
+# FastAPI seam.
+_service = _build_service()
 
 
 def get_agent_studio_service() -> AgentStudioService:

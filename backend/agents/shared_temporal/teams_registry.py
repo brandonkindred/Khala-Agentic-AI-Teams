@@ -33,6 +33,10 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
     "coding_team": "coding_team.temporal",
     "agent_provisioning": "agent_provisioning_team.temporal",
     "job_matching": "job_matching_team.temporal",
+    # The code review agent runs Temporal by default; its worker serves the
+    # code_review-queue used by ``CodeReviewWorkflow`` and its map/verify/reduce
+    # activities (see ``software_engineering_team/code_review_agent/temporal``).
+    "code_review": "software_engineering_team.code_review_agent.temporal",
 }
 
 

@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
@@ -53,7 +56,28 @@ def _load_team_display_names() -> dict[str, str]:
 
 
 class AgentRegistry:
-    """In-memory registry of agent manifests loaded from disk."""
+    """Registry of agent manifests, merging static disk manifests with a shared
+    dynamic overlay.
+
+    Static manifests are loaded from disk once at :meth:`load` and resolved with
+    zero Postgres cost (see ``_static_ids``). Manifests registered at runtime
+    (Agent Studio saves, generated team agents) live in-memory and, when a
+    Postgres-backed dynamic store is active, write through to it so every worker
+    resolves the same dynamic id coherently; see :meth:`get`, :meth:`register`,
+    and :meth:`unregister`.
+    """
+
+    # Bounds how long a locally-issued unregister() masks a dynamic id from get()
+    # after its best-effort Postgres delete fails (see _is_tombstoned). Short
+    # enough that a legitimate external re-registration of the same id (another
+    # worker) becomes visible again promptly; long enough to close the window
+    # where the very next get() on this worker would otherwise resurrect the
+    # stale row it just tried to delete.
+    _TOMBSTONE_TTL_S = 5.0
+    # Bounds _tombstones' size so an id that's unregistered and never revisited
+    # doesn't accumulate forever over a long-lived worker's lifetime; oldest
+    # entries are evicted first once the cap is exceeded (see unregister()).
+    _TOMBSTONE_MAX_ENTRIES = 1000
 
     def __init__(
         self,
@@ -62,12 +86,57 @@ class AgentRegistry:
         source_paths: dict[str, Path] | None = None,
     ) -> None:
         self._by_id: dict[str, AgentManifest] = {m.id: m for m in manifests}
+        # Ids present at construction are the **disk/static** manifests: never
+        # written to the dynamic Postgres store (they're already on every worker's
+        # disk and in every sandbox image) and always resolved locally, so the
+        # built-in-agent invoke hot path never touches Postgres. Runtime
+        # ``register()`` of a *new* id does NOT add to this set — that's a dynamic
+        # manifest, and it is what gets persisted / read cross-worker.
+        self._static_ids: frozenset[str] = frozenset(self._by_id)
         self._team_display_names = team_display_names
         # Map agent_id → the YAML file it was loaded from. Used to locate
         # per-agent ``samples/`` directories without assuming that the team
         # directory name matches ``manifest.team`` (e.g. ``branding_team`` vs.
         # ``branding``).
         self._source_paths: dict[str, Path] = source_paths or {}
+        # agent_id -> time.monotonic() of this worker's last unregister(), oldest
+        # first. See _is_tombstoned / _TOMBSTONE_TTL_S / _TOMBSTONE_MAX_ENTRIES.
+        self._tombstones: "OrderedDict[str, float]" = OrderedDict()
+        # Dynamic ids whose Postgres write-through in register() FAILED (or which
+        # were registered while no dynamic store was active). Only these fall back
+        # to the local ``_by_id`` copy on an *authoritative store miss* — see get().
+        # This is what makes the local fallback read-your-writes-only: an id whose
+        # write-through succeeded is trusted to the store, so a later store miss
+        # means it was deleted on another worker (drop it) rather than resurrecting
+        # a stale local copy forever. Entries clear on a later successful
+        # register()/upsert or on unregister().
+        self._unconfirmed: set[str] = set()
+        # Guards every local mutation (register/unregister) and iteration
+        # (_merged_manifests/manifests_with_id_prefix) of _by_id/_tombstones/
+        # _source_paths. FastAPI runs sync `def` routes in a threadpool, so
+        # register()/unregister() on one request can genuinely race a concurrent
+        # all()/search() iterating the same dict on another thread — CPython
+        # raises ``RuntimeError: dictionary changed size during iteration`` if a
+        # key is added/removed mid-scan. Never held across a dynamic-store
+        # Postgres call (those run outside the lock) so a slow query can't
+        # serialize the whole registry.
+        self._lock = threading.Lock()
+
+    def _is_tombstoned(self, agent_id: str) -> bool:
+        """Whether this worker locally unregistered ``agent_id`` within the TTL window.
+
+        Preconditions:
+            * ``agent_id`` is a string.
+        Postconditions:
+            * Returns ``True`` iff ``unregister(agent_id)`` ran on this worker less
+              than :attr:`_TOMBSTONE_TTL_S` ago, ``False`` otherwise (including an
+              expired entry). Read-only — never mutates ``_tombstones``, so a
+              concurrent ``unregister()`` refreshing the same id's stamp can never
+              race an eviction triggered by this check; expiry/size pruning happens
+              only in :meth:`unregister`.
+        """
+        stamped_at = self._tombstones.get(agent_id)
+        return stamped_at is not None and (time.monotonic() - stamped_at) <= self._TOMBSTONE_TTL_S
 
     # ---------------------------------------------------------------
     # Construction
@@ -116,8 +185,89 @@ class AgentRegistry:
     # Queries
     # ---------------------------------------------------------------
 
+    def _dynamic_store(self):
+        """Return the ``dynamic_store`` module iff it should back this process.
+
+        Postconditions:
+            * Returns the module when Postgres is configured and we are not inside
+              a per-invoke sandbox; otherwise ``None`` (in-memory-only, as before).
+              Any import failure degrades to ``None`` — a Postgres-less environment
+              must never break registry resolution.
+        """
+        try:
+            from . import dynamic_store  # noqa: PLC0415
+
+            if dynamic_store._store_active():
+                return dynamic_store
+        except Exception:  # pragma: no cover - defensive: never break disk resolution
+            logger.debug("dynamic manifest store unavailable", exc_info=True)
+        return None
+
+    def _drop_tombstoned(self, merged: dict[str, AgentManifest]) -> None:
+        """Remove any dynamic id this worker just ``unregister()``'d, in place.
+
+        Preconditions:
+            * ``merged`` maps id -> manifest (as built by :meth:`_merged_manifests` /
+              :meth:`manifests_with_id_prefix`).
+        Postconditions:
+            * Keeps listings consistent with :meth:`get` during the tombstone
+              window: a dynamic id this worker recently unregistered is dropped
+              even if the store's scan still has a stale row (its best-effort
+              delete may have failed) or this worker's own local copy would
+              otherwise have resurfaced it.
+        """
+        for agent_id in list(merged):
+            if agent_id not in self._static_ids and self._is_tombstoned(agent_id):
+                del merged[agent_id]
+
+    def _merged_manifests(self) -> list[AgentManifest]:
+        """All manifests visible to this worker: cross-worker dynamic + local static.
+
+        Overlays the dynamic Postgres rows with this process's local view: a static
+        (disk) id always wins on collision, and a dynamic id missing from the store
+        falls back to its local copy **only when unconfirmed** — the same
+        read-your-writes guarantee :meth:`get` makes, so a manifest whose
+        ``register()`` write-through failed (or hasn't propagated yet) is not
+        invisible in the catalog, while a *confirmed* id absent from the store (i.e.
+        deleted on another worker) is correctly dropped rather than resurrected.
+        Degrades to the local ``_by_id`` view entirely on any store error, so the
+        catalog never breaks when Postgres is down.
+
+        Consistency note: ``store.all()`` runs *before* the lock is taken (a slow
+        Postgres scan must not serialize the whole registry). A dynamic id
+        ``register()``'d on this worker in the window between that scan and the lock
+        can therefore be briefly absent from this one listing — its confirmed
+        write-through means it isn't in ``_unconfirmed``, so the local-fallback merge
+        below skips it, and the scan predated its store row. This is an accepted
+        eventual-consistency window for the *catalog listing only*: the next scan
+        (≤ the dynamic store's short ``all()`` cache TTL) includes it, and a point
+        :meth:`get` / invoke of that id resolves it immediately from the store. The
+        window can't be closed by a re-check under the lock, because a confirmed id
+        missing from the scan is genuinely ambiguous — just-registered (include) vs.
+        deleted-elsewhere (exclude) — and only a per-id store read distinguishes
+        them, which would defeat the point of a single bulk listing.
+        """
+        store = self._dynamic_store()
+        if store is None:
+            with self._lock:
+                return list(self._by_id.values())
+        try:
+            merged: dict[str, AgentManifest] = {m.id: m for m in store.all()}
+        except Exception:
+            logger.warning("dynamic store all() failed; serving local registry", exc_info=True)
+            with self._lock:
+                return list(self._by_id.values())
+        with self._lock:
+            for agent_id, local in self._by_id.items():
+                if agent_id in self._static_ids:
+                    merged[agent_id] = local  # static disk id always wins
+                elif agent_id not in merged and agent_id in self._unconfirmed:
+                    merged[agent_id] = local  # unconfirmed local write-through only
+            self._drop_tombstoned(merged)
+        return list(merged.values())
+
     def all(self) -> list[AgentManifest]:
-        return list(self._by_id.values())
+        return self._merged_manifests()
 
     def manifests_with_id_prefix(self, prefix: str) -> list[AgentManifest]:
         """Return registered manifests whose ``id`` starts with ``prefix``.
@@ -125,16 +275,110 @@ class AgentRegistry:
         Materializes only the matching subset in one pass, unlike :meth:`all`, which
         copies the whole registry before the caller filters — useful for a caller that
         wants just one namespace's entries (e.g. a single team's generated wrappers)
-        and runs the scan while holding a lock.
+        and runs the scan while holding a lock. When a dynamic store is active the
+        scan spans **all workers'** dynamic entries (not just this process's), so a
+        roster-replacement cleanup drops stale generated agents everywhere.
 
         Preconditions: ``prefix`` is a string.
         Postconditions: returns every registered manifest ``m`` with
             ``m.id.startswith(prefix)`` (empty list when none match); read-only.
+            Carries the same brief scan-then-lock eventual-consistency window as
+            :meth:`_merged_manifests` (a dynamic id registered between the store
+            prefix scan and the lock may be momentarily absent); see that method's
+            consistency note.
         """
-        return [m for m in self._by_id.values() if m.id.startswith(prefix)]
+        with self._lock:
+            local = [m for m in self._by_id.values() if m.id.startswith(prefix)]
+        store = self._dynamic_store()
+        if store is None:
+            return local
+        try:
+            dynamic = store.manifests_with_prefix(prefix)
+        except Exception:
+            logger.warning(
+                "dynamic store prefix scan failed for %r; serving local", prefix, exc_info=True
+            )
+            return local
+        merged = {m.id: m for m in dynamic}
+        # Static (disk) ids always win; a dynamic id missing from the store's scan
+        # falls back to its local copy ONLY when unconfirmed — same read-your-writes
+        # guarantee as get(), so a write-through failure doesn't hide the entry from
+        # this scan (used by the generated-roster stale-cleanup pass), while a
+        # confirmed id deleted on another worker is dropped rather than resurrected.
+        with self._lock:
+            for m in local:
+                if m.id in self._static_ids:
+                    merged[m.id] = m
+                elif m.id not in merged and m.id in self._unconfirmed:
+                    merged[m.id] = m
+            self._drop_tombstoned(merged)
+        return list(merged.values())
 
     def get(self, agent_id: str) -> AgentManifest | None:
-        return self._by_id.get(agent_id)
+        """Resolve a manifest by id, consulting the dynamic store for non-static ids.
+
+        Preconditions:
+            * ``agent_id`` is a string.
+        Postconditions:
+            * Static/disk ids resolve from the in-memory map with zero Postgres
+              cost (the built-in-agent invoke hot path).
+            * For a dynamic id with the store active, returns the Postgres row when
+              present. On an authoritative **miss** (the store has no row) the local
+              ``_by_id`` copy is returned **only if the id is unconfirmed** (its
+              write-through to Postgres failed / never happened — see
+              :attr:`_unconfirmed`); this is the **read-your-writes for a first
+              registration** guarantee, so a brand-new dynamic id whose upsert failed
+              still resolves on the worker that registered it. For a **confirmed** id
+              a store miss means it was ``unregister()``'d on another worker, so this
+              returns ``None`` rather than resurrecting the stale local copy — cross-
+              worker deletes are seen immediately, not merely on restart/roster-resync.
+              Updating an existing *confirmed* id whose upsert fails still returns the
+              store's older confirmed row (a present store row always wins — the
+              unconfirmed local update is not assumed more correct than the last
+              confirmed one). A store *error* (as opposed to a miss) degrades to the
+              local copy, since the true state is unknown.
+            * Symmetrically, an id this worker itself ``unregister()``'d within the
+              last :attr:`_TOMBSTONE_TTL_S` never resolves here even on a stale
+              Postgres hit (its best-effort delete may have failed) — see
+              :meth:`_is_tombstoned`.
+            * Returns ``None`` iff no static, dynamic-store, or local entry exists.
+        """
+        with self._lock:
+            if agent_id in self._static_ids:
+                return self._by_id.get(agent_id)
+            if self._is_tombstoned(agent_id):
+                return None
+            local_fallback = self._by_id.get(agent_id)
+        store = self._dynamic_store()
+        if store is None:
+            return local_fallback
+        try:
+            found = store.get(agent_id)
+        except Exception:
+            # Store *error* (not a miss): true state unknown → degrade to the local
+            # copy rather than spuriously 404 a live agent.
+            logger.warning(
+                "dynamic store get failed for %s; using local registry", agent_id, exc_info=True
+            )
+            return local_fallback
+        if found is not None:
+            return found
+        # Store *miss* (authoritative absence). Fall back to the local copy ONLY for
+        # an unconfirmed write-through (read-your-writes: the store never accepted
+        # our row). For a confirmed id, a miss means it was deleted on another
+        # worker — return None instead of resurrecting the stale local copy.
+        #
+        # Re-read the local state under the lock rather than trusting the snapshot
+        # taken before the (unlocked) store round trip: a concurrent register()/
+        # unregister() during the round trip could have overwritten the manifest,
+        # confirmed a previously-unconfirmed write, or tombstoned the id. Re-checking
+        # here makes the read-your-writes decision reflect the latest state instead
+        # of a stale ``unconfirmed``/``local_fallback`` pair. Cheap: this runs only
+        # on the cold store-miss path (a store hit returned above).
+        with self._lock:
+            if self._is_tombstoned(agent_id):
+                return None
+            return self._by_id.get(agent_id) if agent_id in self._unconfirmed else None
 
     def register(self, manifest: AgentManifest, source_path: Path | None = None) -> None:
         """Install a manifest into the live registry (for dynamically generated agents).
@@ -147,27 +391,94 @@ class AgentRegistry:
             * ``manifest.id`` is non-empty.
         Postconditions:
             * ``get(manifest.id)`` returns ``manifest`` (re-registering the same id
-              overwrites the prior entry). Registration is in-memory only and does
-              not persist across process restarts.
+              overwrites the prior entry). Always updates this process's in-memory
+              view; when a dynamic store is active and ``manifest.id`` is not a
+              static/disk id, it is also persisted to Postgres so other workers and
+              the per-invoke sandbox resolve it. The write-through is best-effort —
+              a Postgres error is logged, never raised (callers like the generated
+              roster path hold a lock and swallow registry errors).
         """
         assert manifest.id, "register: manifest.id must be non-empty"
-        self._by_id[manifest.id] = manifest
-        if source_path is not None:
-            self._source_paths[manifest.id] = source_path
+        with self._lock:
+            self._by_id[manifest.id] = manifest
+            if source_path is not None:
+                self._source_paths[manifest.id] = source_path
+            # A fresh registration supersedes any earlier local unregister() of
+            # this id. Cleared under the same lock as the _by_id write above so a
+            # concurrent get() never observes the torn state where the manifest is
+            # already installed but the stale tombstone still masks it (or vice
+            # versa) — see get()'s matching lock scope.
+            self._tombstones.pop(manifest.id, None)
+        if manifest.id not in self._static_ids:
+            store = self._dynamic_store()
+            if store is None:
+                # No active store to confirm against (Postgres off / in sandbox):
+                # the local copy is authoritative, so a store miss must never drop
+                # it. Treat as unconfirmed.
+                with self._lock:
+                    self._unconfirmed.add(manifest.id)
+                return
+            try:
+                store.upsert(manifest)
+            except Exception:
+                logger.warning(
+                    "dynamic store upsert failed for %s; registered locally only",
+                    manifest.id,
+                    exc_info=True,
+                )
+                # Write-through failed → the store has no (new) row for this id, so
+                # get() must keep serving the local copy on a miss (read-your-writes).
+                with self._lock:
+                    self._unconfirmed.add(manifest.id)
+            else:
+                # Confirmed in Postgres → the store is now authoritative for this id.
+                # A future store miss means an authoritative delete, not our failure.
+                with self._lock:
+                    self._unconfirmed.discard(manifest.id)
 
     def unregister(self, agent_id: str) -> bool:
         """Remove a (dynamically registered) manifest from the live registry.
 
         Used by generators that replace a team's roster to drop entries for
-        removed/renamed agents.
+        removed/renamed agents. A no-op for a *static* (disk-loaded) id — this
+        method is only for dynamically-registered manifests, and a static id must
+        remain resolvable for the process's lifetime regardless of caller error.
 
         Postconditions:
-            * ``get(agent_id)`` returns ``None`` afterwards. Returns ``True`` when
-              an entry was present and removed, ``False`` when the id was unknown
-              (a no-op).
+            * ``get(agent_id)`` returns ``None`` afterwards on this worker for at
+              least :attr:`_TOMBSTONE_TTL_S` (see :meth:`_is_tombstoned`) — this
+              holds even if the best-effort Postgres delete below fails, so a
+              transient error can never resurrect a just-removed id on the worker
+              that removed it. Removes the entry from this process's in-memory view
+              and, when a dynamic store is active for a non-static id, from Postgres
+              too (best-effort). Returns ``True`` when a local entry was present and
+              removed, ``False`` otherwise (including when ``agent_id`` names a
+              static id, which this method never removes) — the cross-worker
+              Postgres delete is issued regardless (it's a no-op when the row is
+              absent).
         """
-        self._source_paths.pop(agent_id, None)
-        return self._by_id.pop(agent_id, None) is not None
+        with self._lock:
+            if agent_id in self._static_ids:
+                logger.warning("Refusing to unregister static agent id %r; ignoring", agent_id)
+                return False
+            self._source_paths.pop(agent_id, None)
+            removed = self._by_id.pop(agent_id, None) is not None
+            self._unconfirmed.discard(agent_id)
+            self._tombstones[agent_id] = time.monotonic()
+            self._tombstones.move_to_end(agent_id)
+            while len(self._tombstones) > self._TOMBSTONE_MAX_ENTRIES:
+                self._tombstones.popitem(last=False)  # evict the oldest stamp
+        store = self._dynamic_store()
+        if store is not None:
+            try:
+                store.delete(agent_id)
+            except Exception:
+                logger.warning(
+                    "dynamic store delete failed for %s; removed locally only",
+                    agent_id,
+                    exc_info=True,
+                )
+        return removed
 
     def search(
         self,
@@ -178,7 +489,7 @@ class AgentRegistry:
     ) -> list[AgentSummary]:
         needle = q.strip().lower() if q else None
         results: list[AgentSummary] = []
-        for m in self._by_id.values():
+        for m in self._merged_manifests():
             if team and m.team != team:
                 continue
             if tag and tag not in m.tags:
@@ -192,7 +503,7 @@ class AgentRegistry:
     def teams(self) -> list[TeamGroup]:
         counts: dict[str, int] = {}
         tags: dict[str, set[str]] = {}
-        for m in self._by_id.values():
+        for m in self._merged_manifests():
             counts[m.team] = counts.get(m.team, 0) + 1
             tags.setdefault(m.team, set()).update(m.tags)
         groups = [
@@ -239,7 +550,8 @@ class AgentRegistry:
         Falls back to ``<agents_root>/<manifest.team>/...`` when the source
         path is unknown (e.g. tests that instantiate ``AgentRegistry`` manually).
         """
-        source = self._source_paths.get(agent_id)
+        with self._lock:
+            source = self._source_paths.get(agent_id)
         if source is not None:
             team_console_dir = source.parent.parent  # manifests/ → agent_console/
             return team_console_dir / "samples" / agent_id
@@ -274,8 +586,12 @@ class AgentRegistry:
             name=m.name,
             summary=m.summary,
             tags=list(m.tags),
-            has_input_schema=bool(m.inputs and m.inputs.schema_ref),
-            has_output_schema=bool(m.outputs and m.outputs.schema_ref),
+            has_input_schema=bool(
+                m.inputs and (m.inputs.schema_ref or m.inputs.inline_schema is not None)
+            ),
+            has_output_schema=bool(
+                m.outputs and (m.outputs.schema_ref or m.outputs.inline_schema is not None)
+            ),
             has_invoke=m.invoke is not None,
             has_sandbox=m.sandbox is not None,
             has_cognition=m.cognition is not None,

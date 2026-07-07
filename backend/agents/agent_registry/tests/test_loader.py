@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from textwrap import dedent
 
@@ -11,6 +12,18 @@ from pydantic import ValidationError
 
 from agent_registry.loader import AgentRegistry
 from agent_registry.models import AgentManifest
+
+
+@pytest.fixture(autouse=True)
+def _no_dynamic_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep these hermetic tests off the dynamic Postgres overlay.
+
+    They construct throwaway registries and assert exact contents, so they must
+    behave as the Postgres-less path regardless of whether ``POSTGRES_HOST`` is
+    set in the dev environment. The overlay's own behavior is covered in
+    ``test_loader_dynamic.py`` (fake store) and ``test_dynamic_store.py`` (live PG).
+    """
+    monkeypatch.setattr(AgentRegistry, "_dynamic_store", lambda self: None)
 
 
 def _write_manifest(root: Path, team: str, filename: str, body: str) -> Path:
@@ -121,6 +134,51 @@ def test_register_installs_and_overwrites() -> None:
     reg.register(second)
     assert reg.get("gen.a") is second
     assert reg.get("gen.a").name == "Second"
+
+
+def test_concurrent_register_unregister_and_iteration_do_not_race() -> None:
+    # register()/unregister() mutate _by_id's size; manifests_with_id_prefix()'s
+    # `[m for m in self._by_id.values() if ...]` iterates it with per-item Python
+    # bytecode (the filter condition), which is the shape CPython can actually
+    # interrupt mid-iteration. Without AgentRegistry's internal lock this reliably
+    # raises "RuntimeError: dictionary changed size during iteration" under load
+    # (confirmed by temporarily stubbing out the lock) — a large seeded registry
+    # gives the iteration enough width for a concurrent register()/unregister() to
+    # land mid-scan.
+    seed = [_manifest(f"seed.{i}", "N") for i in range(3000)]
+    reg = AgentRegistry(seed, {})
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def writer(i: int) -> None:
+        for n in range(500):
+            try:
+                reg.register(_manifest(f"gen.race-{i}-{n}", "N"))
+                reg.unregister(f"gen.race-{i}-{n}")
+            except BaseException as exc:  # noqa: BLE001 - capture to report from the main thread
+                errors.append(exc)
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                reg.manifests_with_id_prefix("gen.")
+                reg.all()
+                reg.search()
+                reg.teams()
+            except BaseException as exc:  # noqa: BLE001 - capture to report from the main thread
+                errors.append(exc)
+
+    readers = [threading.Thread(target=reader) for _ in range(4)]
+    writers = [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+    for t in readers + writers:
+        t.start()
+    for t in writers:
+        t.join()
+    stop.set()
+    for t in readers:
+        t.join()
+
+    assert errors == []
 
 
 def test_manifests_with_id_prefix_returns_only_matching() -> None:
