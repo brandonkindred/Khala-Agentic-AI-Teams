@@ -28,7 +28,7 @@ from agent_provisioning_team.sandbox import provisioner as provisioner_mod
 from agent_provisioning_team.sandbox.lifecycle import Lifecycle
 
 
-def _fake_resolve_team(agent_id: str) -> str:
+async def _fake_resolve_team(agent_id: str) -> str:
     if agent_id.startswith("blogging."):
         return "blogging"
     raise UnknownAgentError(f"No agent manifest for {agent_id!r}")

@@ -710,9 +710,19 @@ async def test_run_container_cleans_up_on_inspect_failure(tmp_path: Path, monkey
         return 0, "", ""
 
     monkeypatch.setattr(pm, "_exec", fake_exec)
+    # Stub manifest resolution so the test reaches the compose-up → inspect-fail
+    # path (the cleanup branch under test) regardless of the on-disk registry's
+    # contents — otherwise an unresolvable agent id would fail fast in
+    # ``_resolve_manifest_json`` before the project dir is ever created, and the
+    # ``not project_dir.exists()`` assertion would pass vacuously (false positive).
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    monkeypatch.setattr(pm, "_resolve_manifest_json", _AsyncMock(return_value="{}"))
 
     with pytest.raises(pm.DockerError):
-        await pm.run_container(agent_id="a1", container_name="khala-sbx-inspect-fail", team="x")
+        await pm.run_container(
+            agent_id="test.agent", container_name="khala-sbx-inspect-fail", team="x"
+        )
 
     # Project dir must be removed on cleanup.
     project_dir = (
@@ -733,9 +743,14 @@ async def test_run_container_cleans_up_on_docker_error_in_exec(tmp_path: Path, m
         return 0, "", ""
 
     monkeypatch.setattr(pm, "_exec", boom)
+    # See the inspect-failure test above: stub manifest resolution so we reach the
+    # compose-up failure (the cleanup path) rather than the unknown-agent fail-fast.
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    monkeypatch.setattr(pm, "_resolve_manifest_json", _AsyncMock(return_value="{}"))
 
     with pytest.raises(pm.DockerError):
-        await pm.run_container(agent_id="a1", container_name="khala-sbx-boom", team="x")
+        await pm.run_container(agent_id="test.agent", container_name="khala-sbx-boom", team="x")
 
     project_dir = tmp_path / "agent_provisioning" / "sandboxes" / "stacks" / "khala-sbx-boom"
     assert not project_dir.exists()
@@ -786,6 +801,8 @@ def test_cleanup_secrets_file_swallows_oserror(tmp_path: Path, monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_module_helper_status(tmp_path: Path, monkeypatch) -> None:
+    from unittest.mock import AsyncMock as _AsyncMock
+
     from agent_provisioning_team import sandbox as sb
     from agent_provisioning_team.sandbox import lifecycle as lc_mod
 
@@ -793,7 +810,7 @@ async def test_module_helper_status(tmp_path: Path, monkeypatch) -> None:
     lc_mod.get_lifecycle.cache_clear()
     monkeypatch.setattr(lc_mod, "get_lifecycle", lambda: lc)
 
-    with patch.object(lc_mod, "_resolve_team", return_value="t"):
+    with patch.object(lc_mod, "_resolve_team", _AsyncMock(return_value="t")):
         handle = await sb.status("some.agent")
     assert handle.agent_id == "some.agent"
 
