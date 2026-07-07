@@ -94,6 +94,50 @@ def test_store_active_when_postgres_on_outside_sandbox(monkeypatch: pytest.Monke
 
 
 # --------------------------------------------------------------------------- #
+# _ensure_schema (hermetic — the table DDL is applied lazily on first write so a
+# write from a process that never ran the unified-api lifespan still lands)
+# --------------------------------------------------------------------------- #
+
+
+def test_ensure_schema_registers_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    import shared_postgres
+
+    calls = []
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda schema: calls.append(schema))
+    monkeypatch.setattr(ds, "_schema_ensured", False)
+    ds._ensure_schema()
+    ds._ensure_schema()  # guarded — no second DDL apply
+    assert len(calls) == 1
+    assert ds._schema_ensured is True
+
+
+def test_ensure_schema_failure_leaves_guard_unset_for_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    import shared_postgres
+
+    monkeypatch.setattr(ds, "_schema_ensured", False)
+
+    def _boom(_schema):
+        raise RuntimeError("postgres not ready")
+
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", _boom)
+    with pytest.raises(RuntimeError, match="postgres not ready"):
+        ds._ensure_schema()
+    # Guard stays False so a later write retries the DDL once Postgres recovers.
+    assert ds._schema_ensured is False
+
+
+def test_upsert_ensures_schema_before_writing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The write path must apply the DDL *before* the INSERT, so the first
+    # registration from a process that never ran the lifespan still lands.
+    order = []
+    monkeypatch.setattr(ds, "_ensure_schema", lambda: order.append("ensure"))
+    monkeypatch.setattr(ds, "_with_retry", lambda fn: order.append("write"))
+    monkeypatch.setattr(ds, "clear_cache", lambda: order.append("clear"))
+    ds.upsert(_manifest("agent_studio.x-1"))
+    assert order == ["ensure", "write", "clear"]
+
+
+# --------------------------------------------------------------------------- #
 # CRUD (live Postgres — skipped when POSTGRES_HOST is unset)
 # --------------------------------------------------------------------------- #
 

@@ -19,8 +19,11 @@ Trust / scope boundary:
 
 All functions raise on Postgres failure; ``AgentRegistry`` wraps every call so a
 Postgres outage degrades to local in-memory resolution rather than breaking the
-registry. DDL lives in ``agent_registry.postgres`` and is registered from the
-unified API lifespan.
+registry. DDL lives in ``agent_registry.postgres``; it is registered from the
+unified API lifespan **and** ensured lazily on the first write here (see
+:func:`_ensure_schema`), so a write from a process that never applied the DDL
+(e.g. the standalone ``agentic_team_provisioning`` service) still lands in the
+shared table rather than silently degrading the agent to local-only.
 """
 
 from __future__ import annotations
@@ -104,6 +107,46 @@ def _store_active() -> bool:
     return is_postgres_enabled() and not os.environ.get("SANDBOX_AGENT_ID")
 
 
+# Per-process guard so the first write applies this store's DDL at most once.
+_schema_ensured = False
+_schema_ensure_lock = threading.Lock()
+
+
+def _ensure_schema() -> None:
+    """Idempotently create this store's table before a write, once per process.
+
+    The ``agent_registry_dynamic_manifests`` DDL is normally applied by the
+    unified API lifespan, but ``AgentRegistry.register()`` / ``unregister()`` also
+    run in *other* processes — notably the standalone ``agentic_team_provisioning``
+    service, whose own lifespan registers only its team schema. On a fresh
+    Postgres, or if that service handles a generation request before unified-api
+    has applied the DDL, the first ``upsert`` / ``delete`` would hit
+    ``UndefinedTable`` and the caller would silently degrade the agent to
+    local-only (invisible to other workers/sandboxes). Applying the schema here on
+    the first write — it is ``CREATE TABLE IF NOT EXISTS``, hence idempotent and
+    safe to run alongside the lifespan registration — makes the write path
+    self-sufficient regardless of process startup order.
+
+    Postconditions:
+        * On success the table exists and the per-process guard is set, so
+          subsequent writes skip the DDL. A failure leaves the guard unset (the
+          next write retries) and propagates, so the caller still degrades to
+          local exactly as before.
+    """
+    global _schema_ensured
+    if _schema_ensured:
+        return
+    with _schema_ensure_lock:
+        if _schema_ensured:
+            return
+        from shared_postgres import register_team_schemas
+
+        from . import postgres as _pg_schema
+
+        register_team_schemas(_pg_schema.SCHEMA)
+        _schema_ensured = True
+
+
 def clear_cache() -> None:
     """Drop the ``all()`` micro-cache. Called on writes and by tests.
 
@@ -147,6 +190,7 @@ def upsert(manifest: AgentManifest) -> None:
                 (manifest.id, manifest.team, Json(list(manifest.tags)), Json(payload)),
             )
 
+    _ensure_schema()
     _with_retry(_do)
     clear_cache()
 
@@ -168,6 +212,7 @@ def delete(agent_id: str) -> None:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(f"DELETE FROM {_TABLE} WHERE id = %s", (agent_id,))
 
+    _ensure_schema()
     _with_retry(_do)
     clear_cache()
 
