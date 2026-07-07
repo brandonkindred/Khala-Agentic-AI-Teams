@@ -1665,7 +1665,7 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
     assert not any("slow.py" in d for _s, d, _f in calls)
 
 
-def test_coordinator_single_chunk_propagates_notes_and_commit_message() -> None:
+def test_coordinator_single_chunk_propagates_notes() -> None:
     client = _ScriptedClient(
         [
             {
@@ -1673,7 +1673,6 @@ def test_coordinator_single_chunk_propagates_notes_and_commit_message() -> None:
                 "issues": [],
                 "summary": "All good.",
                 "spec_compliance_notes": "Meets all acceptance criteria.",
-                "suggested_commit_message": "feat: add a()",
             }
         ]
     )
@@ -1682,14 +1681,12 @@ def test_coordinator_single_chunk_propagates_notes_and_commit_message() -> None:
         CodeReviewInput(code="### a.py ###\ndef a(): pass", task_description="t"),
     )
     assert result.spec_compliance_notes == "Meets all acceptance criteria."
-    assert result.suggested_commit_message == "feat: add a()"
 
 
-def test_coordinator_multi_chunk_synthesizes_notes_and_drops_commit_message() -> None:
+def test_coordinator_multi_chunk_synthesizes_notes() -> None:
     """Spec notes must survive multi-chunk reviews; the reduce phase runs one
     findings-only synthesis pass that produces a single coherent value (not a
-    raw join). A commit message synthesized from a fraction of the change is
-    misleading and is still dropped."""
+    raw join)."""
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     files = {
@@ -1706,22 +1703,17 @@ def test_coordinator_multi_chunk_synthesizes_notes_and_drops_commit_message() ->
                 "issues": [],
                 "summary": "ok",
                 "spec_compliance_notes": "chunk notes",
-                "suggested_commit_message": "msg",
             }
         ]
     )
     result = run_coordinator(client, CodeReviewInput(files=files, task_description="t"))
     assert result.approved is True
     assert result.spec_compliance_notes == "chunk notes"
-    assert result.suggested_commit_message == ""
 
 
-def test_single_chunk_keeps_notes_but_drops_commit_message_after_bisection() -> None:
+def test_single_chunk_keeps_notes_after_bisection() -> None:
     """A logically-single-chunk review that recovers via bisection keeps its
-    spec notes (now via the findings-only synthesis pass over the two halves),
-    but drops the commit message: each half's message was written having seen
-    only part of the change, so forwarding one would present a partial view as
-    covering the whole submission."""
+    spec notes (now via the findings-only synthesis pass over the two halves)."""
 
     class _FailCombinedWithNotes(DummyLLMClient):
         def __init__(self) -> None:
@@ -1737,7 +1729,6 @@ def test_single_chunk_keeps_notes_but_drops_commit_message_after_bisection() -> 
                 "issues": [],
                 "summary": "ok",
                 "spec_compliance_notes": "half notes",
-                "suggested_commit_message": "feat: half",
             }
 
     result = run_coordinator(
@@ -1749,8 +1740,6 @@ def test_single_chunk_keeps_notes_but_drops_commit_message_after_bisection() -> 
         ),
     )
     assert result.spec_compliance_notes == "half notes"
-    # Two sub-reviews → neither commit message saw the whole change.
-    assert result.suggested_commit_message == ""
 
 
 # ---------------------------------------------------------------------------

@@ -205,7 +205,7 @@ def test_small_code_routes_through_coordinator_chunk_path() -> None:
     assert "one chunk of the full codebase" in client.prompts[0]
 
 
-def test_single_chunk_propagates_notes_and_commit_message_through_agent() -> None:
+def test_single_chunk_propagates_notes_through_agent() -> None:
     agent = CodeReviewAgent(
         llm_client=_StubClient(
             {
@@ -213,14 +213,12 @@ def test_single_chunk_propagates_notes_and_commit_message_through_agent() -> Non
                 "issues": [],
                 "summary": "Looks good.",
                 "spec_compliance_notes": "Meets the acceptance criteria.",
-                "suggested_commit_message": "feat: add foo helper",
             }
         )
     )
     result = agent.run(_input())
     assert result.approved is True
     assert result.spec_compliance_notes == "Meets the acceptance criteria."
-    assert result.suggested_commit_message == "feat: add foo helper"
 
 
 def test_agent_accepts_files_dict_input() -> None:
