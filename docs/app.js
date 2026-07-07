@@ -8,7 +8,7 @@ const TEAMS = [
   // Core Dev
   { group: 'core', name: 'Software Engineering', route: '/api/software-engineering',
     desc: 'Full dev-team simulation: architecture, planning, coding, review, release.' },
-  { group: 'core', name: 'Planning V3', route: '/api/planning-v3',
+  { group: 'core', name: 'Planning', route: '/api/planning',
     desc: 'Client-facing discovery and PRDs; hands off to dev and UX.' },
   { group: 'core', name: 'Coding Team', route: '/api/coding-team',
     desc: 'SE sub-team: tech lead plus stack specialists with a task graph.' },

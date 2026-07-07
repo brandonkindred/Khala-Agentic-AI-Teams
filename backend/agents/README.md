@@ -27,7 +27,7 @@ backend/agents/
 ├── market_research_team/
 ├── nutrition_meal_planning_team/
 ├── personal_assistant_team/
-├── planning_v3_team/
+├── planning_team/
 ├── plans/                             # Planning artifacts
 ├── road_trip_planning_team/
 ├── sales_team/
@@ -80,7 +80,7 @@ For team-specific setup and env vars, use each team's README.
 
 - `software_engineering_team/README.md`
 - `coding_team/README.md`
-- `planning_v3_team/README.md`
+- `planning_team/README.md`
 - `blogging/README.md`
 - `personal_assistant_team/README.md`
 - `social_media_marketing_team/README.md`

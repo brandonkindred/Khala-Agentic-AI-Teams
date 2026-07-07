@@ -15,7 +15,7 @@ This spec extends the feature so a user can:
 - Open a **Start Test** form, pick a persona, pick a target team, and click **Start Test**.
 - See run history annotated with the persona and target team used.
 
-**Scope for this release:** Only Software Engineering is listed as a testable team. The orchestrator is refactored behind a small adapter interface so future teams (e.g. `planning_v3_team`) can opt in as additive adapter files, without touching the orchestrator core.
+**Scope for this release:** Only Software Engineering is listed as a testable team. The orchestrator is refactored behind a small adapter interface so future teams (e.g. `planning_team`) can opt in as additive adapter files, without touching the orchestrator core.
 
 ## Goals & Non-Goals
 

@@ -106,7 +106,7 @@ def start_standalone_workflow(
     inspiration_content: Optional[str] = None,
     initial_spec_path: Optional[str] = None,
 ) -> None:
-    """Start StandaloneJobWorkflow (frontend-code-v2, backend-code-v2, planning-v2, product-analysis)."""
+    """Start StandaloneJobWorkflow (frontend-code-v2, backend-code-v2, product-analysis)."""
     client = get_temporal_client()
     if client is None:
         raise RuntimeError("Temporal client not available")

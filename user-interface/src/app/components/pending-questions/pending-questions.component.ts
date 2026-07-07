@@ -13,14 +13,13 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatChipsModule } from '@angular/material/chips';
 import { Observable, throwError } from 'rxjs';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
-import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
+import { PlanningApiService } from '../../services/planning-api.service';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import type {
   PendingQuestion,
   AnswerSubmission,
   JobStatusResponse,
-  PlanningV2StatusResponse,
-  PlanningV3StatusResponse,
+  PlanningStatusResponse,
   ProductAnalysisStatusResponse,
   AutoAnswerResponse,
 } from '../../models';
@@ -28,7 +27,7 @@ import type { CodingTeamJobStatus } from '../../models/coding-team.model';
 import { QuestionCardComponent } from './question-card/question-card.component';
 
 /** Endpoint type determines which API to call for submitting answers. */
-export type SubmitEndpointType = 'run-team' | 'planning-v2' | 'planning-v3' | 'product-analysis' | 'coding-team';
+export type SubmitEndpointType = 'run-team' | 'planning' | 'product-analysis' | 'coding-team';
 
 /**
  * Everything `answersSubmitted` can emit — the post-submit status of whichever
@@ -37,8 +36,7 @@ export type SubmitEndpointType = 'run-team' | 'planning-v2' | 'planning-v3' | 'p
  */
 export type AnswersSubmittedStatus =
   | JobStatusResponse
-  | PlanningV2StatusResponse
-  | PlanningV3StatusResponse
+  | PlanningStatusResponse
   | ProductAnalysisStatusResponse
   | CodingTeamJobStatus;
 
@@ -47,12 +45,11 @@ export type AnswersSubmittedStatus =
  * endpoint a compile error until its capabilities are declared here — the
  * single source of truth for whether AI auto-answer is offered (default-deny:
  * an endpoint must opt IN; coding-team decisions are user-only by policy and
- * planning-v3 exposes no auto-answer API).
+ * planning exposes no auto-answer API).
  */
 const ENDPOINT_CAPABILITIES: Record<SubmitEndpointType, { autoAnswer: boolean }> = {
   'run-team': { autoAnswer: true },
-  'planning-v2': { autoAnswer: true },
-  'planning-v3': { autoAnswer: false },
+  'planning': { autoAnswer: false },
   'product-analysis': { autoAnswer: true },
   'coding-team': { autoAnswer: false },
 };
@@ -91,12 +88,12 @@ interface QuestionAnswer {
 })
 export class PendingQuestionsComponent implements OnChanges {
   private readonly api = inject(SoftwareEngineeringApiService);
-  private readonly planningV3Api = inject(PlanningV3ApiService);
+  private readonly planningApi = inject(PlanningApiService);
   private readonly codingTeamApi = inject(CodingTeamApiService);
 
   @Input() jobId: string | null = null;
   @Input() questions: PendingQuestion[] = [];
-  /** Which endpoint to call: 'run-team' (default), 'planning-v3', 'product-analysis', or 'coding-team'. */
+  /** Which endpoint to call: 'run-team' (default), 'planning', 'product-analysis', or 'coding-team'. */
   @Input() submitEndpoint: SubmitEndpointType = 'run-team';
   @Output() answersSubmitted = new EventEmitter<AnswersSubmittedStatus>();
 
@@ -275,7 +272,6 @@ export class PendingQuestionsComponent implements OnChanges {
         });
         break;
       case 'run-team':
-      case 'planning-v2':
         this.api.autoAnswerRunTeam(this.jobId, question.id).subscribe({
           next: handleSuccess,
           error: handleError,
@@ -319,28 +315,30 @@ export class PendingQuestionsComponent implements OnChanges {
     });
   }
 
+  /**
+   * Route the answer submission to the API service matching `submitEndpoint`,
+   * translating the shared `AnswerSubmission[]` shape into each backend's
+   * expected request body (e.g. coding-team strips the multi-select field).
+   */
   private getSubmitObservable(
     jobId: string,
     request: { answers: AnswerSubmission[] }
   ): Observable<
     | JobStatusResponse
-    | PlanningV2StatusResponse
-    | PlanningV3StatusResponse
+    | PlanningStatusResponse
     | ProductAnalysisStatusResponse
     | CodingTeamJobStatus
   > {
     switch (this.submitEndpoint) {
-      case 'planning-v3': {
+      case 'planning': {
         const body = request.answers.map((a) => ({
           question_id: a.question_id,
           selected_option_id: a.selected_option_id ?? undefined,
           selected_option_ids: a.selected_option_ids,
           other_text: a.other_text ?? undefined,
         }));
-        return this.planningV3Api.submitAnswers(jobId, body);
+        return this.planningApi.submitAnswers(jobId, body);
       }
-      case 'planning-v2':
-        return this.api.submitPlanningV2Answers(jobId, request);
       case 'product-analysis':
         return this.api.submitProductAnalysisAnswers(jobId, request) as Observable<ProductAnalysisStatusResponse>;
       case 'coding-team': {
@@ -374,6 +372,12 @@ export class PendingQuestionsComponent implements OnChanges {
     this.autoAnswerResults.delete(questionId);
   }
 
+  /**
+   * Submit the currently-selected answers for every answerable question,
+   * dispatching to the correct backend via `getSubmitObservable` and
+   * emitting `answersSubmitted` with the resulting job status on success.
+   * A no-op when there is no active job or not every question is answered.
+   */
   submitAnswers(): void {
     if (!this.jobId || !this.allAnswersSubmittable) return;
     const jobId = this.jobId;

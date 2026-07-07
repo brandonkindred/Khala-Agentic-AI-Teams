@@ -1,4 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideNoopAnimations } from '@angular/platform-browser/animations';
 import { of, throwError } from 'rxjs';
 import { vi, beforeEach, afterEach } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
@@ -26,7 +27,7 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
   beforeEach(() => {
     api = { getJobStatus: vi.fn() };
     TestBed.configureTestingModule({
-      providers: [{ provide: SoftwareEngineeringApiService, useValue: api }],
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: api }, provideNoopAnimations()],
     });
     fixture = TestBed.createComponent(RunTeamTrackingComponent);
     component = fixture.componentInstance;
@@ -353,12 +354,38 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
   it('isPlanningSubprocessCompleted/Current/Pending', () => {
     component.status = buildStatus({
       planning_completed_phases: ['intake'],
-      planning_subprocess: 'planning',
+      planning_subprocess: 'discovery',
     });
     expect(component.isPlanningSubprocessCompleted('intake')).toBe(true);
-    expect(component.isPlanningSubprocessCompleted('planning')).toBe(false);
-    expect(component.isPlanningSubprocessCurrent('planning')).toBe(true);
-    expect(component.isPlanningSubprocessPending('review')).toBe(true);
+    expect(component.isPlanningSubprocessCompleted('discovery')).toBe(false);
+    expect(component.isPlanningSubprocessCurrent('discovery')).toBe(true);
+    expect(component.isPlanningSubprocessPending('requirements')).toBe(true);
+  });
+
+  it('isPlanningSubprocessCompleted/Current/Pending across all six planning phases', () => {
+    // With document_production current and everything before it completed, each
+    // of the six real Planning-team phases should land in exactly one bucket.
+    component.status = buildStatus({
+      planning_completed_phases: ['intake', 'discovery', 'requirements', 'synthesis'],
+      planning_subprocess: 'document_production',
+    });
+    const completed = ['intake', 'discovery', 'requirements', 'synthesis'];
+    const current = 'document_production';
+    const pending = ['sub_agent_provisioning'];
+
+    for (const phase of completed) {
+      expect(component.isPlanningSubprocessCompleted(phase)).toBe(true);
+      expect(component.isPlanningSubprocessCurrent(phase)).toBe(false);
+      expect(component.isPlanningSubprocessPending(phase)).toBe(false);
+    }
+    expect(component.isPlanningSubprocessCompleted(current)).toBe(false);
+    expect(component.isPlanningSubprocessCurrent(current)).toBe(true);
+    expect(component.isPlanningSubprocessPending(current)).toBe(false);
+    for (const phase of pending) {
+      expect(component.isPlanningSubprocessCompleted(phase)).toBe(false);
+      expect(component.isPlanningSubprocessCurrent(phase)).toBe(false);
+      expect(component.isPlanningSubprocessPending(phase)).toBe(true);
+    }
   });
 
   it('isCodeTeamPhaseCompleted handles missing team_progress', () => {
@@ -592,12 +619,12 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
   it('buildProgressTree adds planning subtree', () => {
     component.status = buildStatus({
       phase: 'planning',
-      planning_subprocess: 'planning',
+      planning_subprocess: 'discovery',
       planning_completed_phases: ['intake'],
     });
     const nodes = component.buildProgressTree();
     expect(nodes.find((n) => n.id === 'planning-intake')?.status).toBe('completed');
-    expect(nodes.find((n) => n.id === 'planning-planning')?.status).toBe('current');
+    expect(nodes.find((n) => n.id === 'planning-discovery')?.status).toBe('current');
   });
 
   it('buildProgressTree adds execution subtree with teams, tasks, microtasks', () => {
@@ -694,13 +721,13 @@ describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', ()
   it('buildDAGTree children of planning use planning subprocess data', () => {
     component.status = buildStatus({
       phase: 'planning',
-      planning_subprocess: 'planning',
+      planning_subprocess: 'discovery',
       planning_completed_phases: ['intake'],
     });
     const tree = component.buildDAGTree();
     const plan = tree.find((n) => n.id === 'phase-planning');
     expect(plan?.children?.some((c) => c.id === 'planning-intake' && c.status === 'completed')).toBe(true);
-    expect(plan?.children?.some((c) => c.id === 'planning-planning' && c.status === 'current')).toBe(true);
+    expect(plan?.children?.some((c) => c.id === 'planning-discovery' && c.status === 'current')).toBe(true);
   });
 
   it('buildDAGTree children of execution include teams + their phases', () => {
@@ -958,7 +985,7 @@ describe('RunTeamTrackingComponent sub-agent activity and staleness', () => {
   beforeEach(() => {
     api = { getJobStatus: vi.fn() };
     TestBed.configureTestingModule({
-      providers: [{ provide: SoftwareEngineeringApiService, useValue: api }],
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: api }, provideNoopAnimations()],
     });
     fixture = TestBed.createComponent(RunTeamTrackingComponent);
     component = fixture.componentInstance;

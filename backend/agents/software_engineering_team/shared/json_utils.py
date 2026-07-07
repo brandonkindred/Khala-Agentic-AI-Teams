@@ -1,4 +1,4 @@
-"""Shared text completion and truncation handling for planning_v2_team tool agents.
+"""Shared text completion and truncation handling for tool agents.
 
 Uses text-only LLM calls with continuation on truncation. No JSON is required;
 consumers parse responses via output_templates (section markers).
@@ -23,7 +23,7 @@ def complete_text_with_continuation(
     llm: "LLMClient",
     prompt: str,
     *,
-    agent_name: str = "PlanningV2",
+    agent_name: str = "TextAgent",
     max_continuation_cycles: int = MAX_CONTINUATION_CYCLES,
 ) -> str:
     """Call LLM with text mode via Strands Agent.
@@ -96,7 +96,7 @@ def complete_with_continuation(
     llm: "LLMClient",
     prompt: str,
     *,
-    agent_name: str = "PlanningV2",
+    agent_name: str = "TextAgent",
     max_continuation_cycles: int = MAX_CONTINUATION_CYCLES,
     mode: str = "text",
     decompose_fn: Optional[Callable[[str], List[str]]] = None,
@@ -122,7 +122,7 @@ def parse_json_with_recovery(
     llm: "LLMClient",
     prompt: str,
     *,
-    agent_name: str = "PlanningV2",
+    agent_name: str = "TextAgent",
     decompose_fn: Optional[Callable[[str], List[str]]] = None,
     merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]] = None,
     original_content: Optional[str] = None,

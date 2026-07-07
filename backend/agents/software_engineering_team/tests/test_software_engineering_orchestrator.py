@@ -161,7 +161,7 @@ def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
 
 
 def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: Path) -> None:
-    """When Planning V3 workflow fails (success=False), job fails with planning error."""
+    """When Planning workflow fails (success=False), job fails with planning error."""
     (tmp_path / "initial_spec.md").write_text("# Test App\n\nBuild a todo app.", encoding="utf-8")
     job_id = "test-planning-fail"
     update_job_calls = []
@@ -232,8 +232,8 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
                     "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
-                    with patch("planning_v3_team.orchestrator.run_workflow") as mock_run_v3:
-                        mock_run_v3.return_value = {
+                    with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
+                        mock_run_planning.return_value = {
                             "success": False,
                             "failure_reason": "Planning failed",
                         }
@@ -246,7 +246,7 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
 
 
 def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path) -> None:
-    """When Planning V3 workflow fails (success=False), job is marked failed."""
+    """When Planning workflow fails (success=False), job is marked failed."""
     (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
     job_id = "test-planning-total-fail"
     update_job_calls = []
@@ -293,8 +293,8 @@ def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path)
                     "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
-                    with patch("planning_v3_team.orchestrator.run_workflow") as mock_run_v3:
-                        mock_run_v3.return_value = {
+                    with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
+                        mock_run_planning.return_value = {
                             "success": False,
                             "failure_reason": "Planning failed",
                         }
@@ -308,8 +308,8 @@ def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path)
 def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers(
     tmp_path: Path,
 ) -> None:
-    """Main path: after Planning V3 and adapter, run_coding_team_orchestrator is called; Tech Lead and v2 workers are not."""
-    from planning_v3_adapter import PlanningV2AdapterResult
+    """Main path: after Planning and adapter, run_coding_team_orchestrator is called; Tech Lead and v2 workers are not."""
+    from planning_adapter import PlanningAdapterResult
 
     (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
     job_id = "test-coding-team-path"
@@ -325,7 +325,7 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
     mock_pra_agent = MagicMock()
     mock_pra_agent.run_workflow.return_value = mock_pra_result
 
-    adapter_result = PlanningV2AdapterResult(
+    adapter_result = PlanningAdapterResult(
         requirements=ProductRequirements(
             title="Test",
             description="Desc",
@@ -382,8 +382,8 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
                     "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
                     return_value=mock_pra_agent,
                 ):
-                    with patch("planning_v3_team.orchestrator.run_workflow") as mock_run_v3:
-                        mock_run_v3.return_value = {
+                    with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
+                        mock_run_planning.return_value = {
                             "success": True,
                             "handoff_package": {
                                 "architecture_overview": "Backend FastAPI; frontend Angular."
@@ -391,7 +391,7 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
                             "failure_reason": None,
                         }
                         with patch(
-                            "planning_v3_adapter.adapt_planning_v3_result",
+                            "planning_adapter.adapt_planning_result",
                             return_value=adapter_result,
                         ):
                             with patch(

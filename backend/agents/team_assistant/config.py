@@ -570,9 +570,9 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
         launch_spec=None,
     ),
     # -----------------------------------------------------------------------
-    "planning_v3": TeamAssistantConfig(
-        team_key="planning_v3",
-        team_name="Planning V3",
+    "planning": TeamAssistantConfig(
+        team_key="planning",
+        team_name="Planning",
         system_prompt_context=(
             "A planning team that runs client-facing discovery and requirements gathering, "
             "producing a PRD and handoff for development. The user needs to describe their "
@@ -602,7 +602,7 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "Help me run a discovery session with requirements.",
         ],
         launch_spec=LaunchSpec(
-            path="/api/planning-v3/run",
+            path="/api/planning/run",
             body_builder=declarative_builder(
                 required=["initial_brief"],
                 optional=["client_name", "repo_path"],

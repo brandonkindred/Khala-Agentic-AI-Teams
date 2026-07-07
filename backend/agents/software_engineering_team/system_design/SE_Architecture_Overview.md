@@ -199,8 +199,8 @@ The orchestrator supports two execution paths. The **Coding Team** path is the c
 ```mermaid
 flowchart TD
     START["run_orchestrator()"] --> PRA["Product Requirements\nAnalysis"]
-    PRA --> PV3["Planning V3\n6-phase workflow"]
-    PV3 --> DECISION{use_coding_team?}
+    PRA --> Planning["Planning\nhandoff workflow"]
+    Planning --> DECISION{use_coding_team?}
 
     DECISION -->|"True (default)"| CT["Coding Team\nSwarm Orchestrator"]
     CT --> DONE["COMPLETED"]

@@ -1,7 +1,7 @@
 """
 Shared deduplication utilities for semantic near-duplicate removal.
 
-Used by Planning V2 tool agents and Product Requirements Analysis agent
+Used by Planning tool agents and Product Requirements Analysis agent
 to avoid repeated or near-identical items in merged lists.
 """
 

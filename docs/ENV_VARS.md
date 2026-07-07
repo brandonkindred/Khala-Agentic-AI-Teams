@@ -917,16 +917,32 @@ Winning Posts Bank (default `0.7`).
 
 ---
 
-## Planning V3
+## Planning
 
-### PLANNING_V3_MANY_SECTIONS_WARN
-Soft threshold for the spec-digestion engine (`planning_v3_team/spec_digest.py`): when a
+### PLANNING_SERVICE_URL
+Base URL the unified API proxies `/api/planning/*` requests to when the Planning team
+runs as its own service (Docker/production). Unset in local dev, where the team runs
+in-process. See the analogous `<TEAM>_SERVICE_URL` entries for other teams.
+
+### PLANNING_SOFTWARE_ENGINEERING_URL / PLANNING_MARKET_RESEARCH_URL / PLANNING_AI_SYSTEMS_URL
+Per-adapter base-URL overrides the Planning team uses when calling the Product
+Requirements Analysis (SE), Market Research, and AI Systems adapters, respectively.
+Each falls back to `UNIFIED_API_BASE_URL` when unset, so these only need to be set
+when an adapter's target team is reachable at a different address than the unified API
+(e.g. hitting a team's standalone service directly).
+
+### TEMPORAL_TASK_QUEUE_PLANNING
+Temporal task queue name the Planning worker polls and the API dispatches workflows to
+when Temporal mode is enabled (`TEMPORAL_ADDRESS` set). Default `planning`.
+
+### PLANNING_MANY_SECTIONS_WARN
+Soft threshold for the spec-digestion engine (`planning_team/spec_digest.py`): when a
 brief+spec splits into more than this many sections, `map_reduce` logs a warning (one LLM call
 runs per section, so a very large spec has a proportional cost/latency). Observability only — it
 never caps or drops sections (that would discard spec content). Default `50`; garbage or
 non-positive values fall back to the default.
 
-### PLANNING_V3_RESERVED_PROMPT_TOKENS / PLANNING_V3_RESERVED_RESPONSE_TOKENS
+### PLANNING_RESERVED_PROMPT_TOKENS / PLANNING_RESERVED_RESPONSE_TOKENS
 Token reserves the spec-digestion engine carves out of the model context before sizing each
 per-section prompt — for the phase prompt template/headers and the model's response,
 respectively. Defaults `6000` / `4096`; raise them for prompt-heavy phases or models that
