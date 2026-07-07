@@ -21,6 +21,7 @@ than the thread path's DB-polling loop.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import timedelta
 from typing import Any
 
@@ -142,7 +143,12 @@ def run_step_activity(
     for existing in step_results:
         if existing.get("step_id") == step_id and existing.get("status") == "completed":
             # Replay after a mid-activity crash: do not re-run the LLM or double-append.
-            return existing.get("output") or ""
+            # Return the RAW handler return value (``output_raw``), not the display
+            # ``output``. They differ for a DECISION step — ``run_step`` returns the bare
+            # branch id while the recorded output is ``"Decision: <id>"`` — so returning
+            # ``output`` would change ``prev_output`` for later steps versus a non-crash
+            # run. ``output_raw`` is absent only on rows written before this field existed.
+            return existing.get("output_raw", existing.get("output")) or ""
 
     process = ProcessDefinition(**process_json)
     step = next((s for s in process.steps if s.step_id == step_id), None)
@@ -166,21 +172,29 @@ def run_step_activity(
 
 
 @activity.defn(name="agentic_pipeline_wait_setup")
-def wait_setup_activity(run_id: str, step_id: str, step_name: str, prompt_text: str) -> None:
+def wait_setup_activity(run_id: str, step_id: str, step_name: str, prompt_text: str) -> bool:
     """Publish a WAIT step: append a ``waiting_for_input`` result and pause the run.
 
     Preconditions: ``run_id`` refers to a run in the store; ``prompt_text`` is the
         human-facing prompt.
-    Postconditions: the run row is ``waiting_for_input`` with ``human_prompt`` set and a
-        ``waiting_for_input`` step result appended (idempotent — a re-run does not append
-        a second waiting result for the same ``step_id``). GET status endpoints observe
-        the pause immediately.
+    Postconditions:
+        - Returns ``False`` without writing anything if the run is missing or already
+          terminal (cancelled/failed/completed) — e.g. a cancel that landed while this
+          activity was in flight or being retried. This prevents resurrecting a
+          cancelled row back to ``waiting_for_input`` (Temporal-owned rows are skipped by
+          the stale-heartbeat reaper, so a resurrected row would otherwise be stuck). The
+          workflow stops the run when this returns ``False``.
+        - Otherwise sets the run ``waiting_for_input`` with ``human_prompt`` and appends a
+          ``waiting_for_input`` step result (idempotent — a re-run does not append a
+          second waiting result for the same ``step_id``) and returns ``True``.
     """
     from agentic_team_provisioning.testing.store import get_test_store
 
     store = get_test_store()
     run = store.get_pipeline_run(run_id)
-    step_results: list[dict[str, Any]] = list((run or {}).get("step_results") or [])
+    if run is None or run.get("status") in _TERMINAL_STATUSES:
+        return False
+    step_results: list[dict[str, Any]] = list(run.get("step_results") or [])
     if not any(s.get("step_id") == step_id for s in step_results):
         step_results.append(
             {
@@ -198,58 +212,63 @@ def wait_setup_activity(run_id: str, step_id: str, step_name: str, prompt_text: 
         human_prompt=prompt_text,
         step_results=step_results,
     )
+    return True
 
 
-@activity.defn(name="agentic_pipeline_wait_resume")
-def wait_resume_activity(run_id: str, step_id: str, human_input: str) -> str:
-    """Record the submitted human input on the WAIT step result.
+@activity.defn(name="agentic_pipeline_wait_finalize")
+def wait_finalize_activity(run_id: str, step_id: str, allow_expire: bool, wait_timeout_s: int) -> dict:
+    """Reconcile a WAIT step's outcome from the durable store (single source of truth).
 
-    The ``/input`` endpoint has already performed the authoritative resume transition
-    (compare-and-swap ``waiting_for_input`` -> ``running`` + persisted ``human_input``)
-    before signalling the workflow, so this activity does NOT own the status flip — it
-    only marks the WAIT step result completed with the answer. Critically, it must not
-    revive a run that went terminal (e.g. cancelled) in the window between the endpoint's
-    flip and this activity, so the write is skipped entirely once the run is terminal.
+    Called after ``workflow.wait_condition`` returns (a ``submit_input`` signal) OR its
+    timer elapses. Rather than trusting the local signal/timeout, this reads the run's
+    actual status — which the ``/input`` endpoint (resume) and the cancel path (cancel)
+    both drive via compare-and-swap — and decides the outcome, taking the human input
+    from the persisted row (not the signal). This closes the resume-vs-timeout and
+    signal-delivery races: a resume that won just as the timer fired is still honoured,
+    and a resume whose signal was lost is picked up here when the timer elapses.
 
-    Preconditions: ``run_id`` refers to a run whose ``/input`` CAS already succeeded;
-        ``human_input`` is a str (may be empty).
-    Postconditions: if the run is still active (not terminal), the matching WAIT step
-        result is marked ``completed`` with ``output = human_input`` and ``human_prompt``
-        is cleared — WITHOUT writing ``status`` (the endpoint owns it, so a cancelled run
-        is never resurrected). Always returns ``human_input`` as the next step's
-        ``prev_output``; the workflow's next ``advance_step_activity`` CAS then stops the
-        run cleanly if it was cancelled.
+    Preconditions: ``run_id`` refers to a run in the store; ``allow_expire`` is True only
+        when the WAIT timer has fully elapsed; ``wait_timeout_s`` > 0.
+    Postconditions: returns ``{"state": ...}`` (with ``"output"`` when resumed):
+        - ``"resumed"`` — the row is ``running`` (endpoint resume committed). The WAIT
+          step result is marked ``completed`` with the row's persisted ``human_input``
+          (idempotent) and ``human_prompt`` is cleared WITHOUT writing ``status`` (the
+          endpoint owns it, so a cancelled run is never revived). ``output`` is that input.
+        - ``"terminal"`` — the row is cancelled/failed/completed; the workflow stops.
+        - ``"expired"`` — only when ``allow_expire`` and the row was still
+          ``waiting_for_input``: the run is CAS-moved to ``failed`` and the step marked
+          ``timed_out``. If the expire CAS is lost (a resume/cancel won the race) the
+          store is re-read and ``"resumed"``/``"terminal"`` is returned instead — the
+          timeout never clobbers a resume.
+        - ``"waiting"`` — still ``waiting_for_input`` and not yet allowed to expire; the
+          workflow re-arms its wait.
     """
     from agentic_team_provisioning.testing.store import get_test_store
 
     store = get_test_store()
+
+    def _resumed(run_row: dict) -> dict:
+        human_input = store.get_pipeline_status(run_id)
+        human_input = human_input["human_input"] if human_input else ""
+        step_results = list(run_row.get("step_results") or [])
+        for s in step_results:
+            if s.get("step_id") == step_id and s.get("status") != "completed":
+                s["status"] = "completed"
+                s["output"] = human_input
+                break
+        store.update_pipeline_run(run_id, human_prompt=None, step_results=step_results)
+        return {"state": "resumed", "output": human_input}
+
     run = store.get_pipeline_run(run_id)
-    if run is None or run.get("status") in _TERMINAL_STATUSES:
-        # Cancelled/failed/completed out-of-band between the endpoint flip and now —
-        # do not touch the row (no revival), let the workflow stop on the next advance.
-        return human_input
-    step_results: list[dict[str, Any]] = list(run.get("step_results") or [])
-    for s in step_results:
-        if s.get("step_id") == step_id:
-            s["status"] = "completed"
-            s["output"] = human_input
-            break
-    store.update_pipeline_run(run_id, human_prompt=None, step_results=step_results)
-    return human_input
+    status = run.get("status") if run else None
+    if status == "running":
+        return _resumed(run)
+    if status in _TERMINAL_STATUSES:
+        return {"state": "terminal"}
+    # status == "waiting_for_input" (or missing)
+    if not allow_expire:
+        return {"state": "waiting"}
 
-
-@activity.defn(name="agentic_pipeline_wait_expire")
-def wait_expire_activity(run_id: str, step_id: str, wait_timeout_s: int) -> None:
-    """Fail a WAIT step whose human-input timeout elapsed.
-
-    Preconditions: ``run_id`` refers to a still-waiting run; ``wait_timeout_s`` > 0.
-    Postconditions: if the run is still ``waiting_for_input`` it is moved to ``failed``
-        (compare-and-swap) and the WAIT step result is marked ``timed_out``; a concurrent
-        resume/cancel that already left ``waiting_for_input`` is left untouched.
-    """
-    from agentic_team_provisioning.testing.store import get_test_store
-
-    store = get_test_store()
     error = f"wait_timeout: no human input for WAIT step '{step_id}' within {wait_timeout_s}s"
     if store.try_expire_pipeline_run(run_id, error):
         run = store.get_pipeline_run(run_id)
@@ -260,6 +279,14 @@ def wait_expire_activity(run_id: str, step_id: str, wait_timeout_s: int) -> None
                 s["output"] = f"Timed out after {wait_timeout_s}s waiting for human input"
                 break
         store.update_pipeline_run(run_id, step_results=step_results)
+        return {"state": "expired"}
+
+    # Lost the expire CAS — a resume or cancel won the race just now. Re-read and honour it.
+    run = store.get_pipeline_run(run_id)
+    status = run.get("status") if run else None
+    if status == "running":
+        return _resumed(run)
+    return {"state": "terminal"}
 
 
 @activity.defn(name="agentic_pipeline_complete")
@@ -329,6 +356,65 @@ class AgenticPipelineWorkflow:
         """Deliver human input for the current WAIT step (wakes ``wait_condition``)."""
         self._human_input = human_input
 
+    async def _run_wait_step(
+        self, run_id: str, step: dict[str, Any], wait_timeout_s: int
+    ) -> dict[str, Any]:
+        """Drive one WAIT step to a store-reconciled outcome.
+
+        The ``submit_input`` signal is only a fast-path *wake*; the authoritative
+        outcome is always read from the durable store by ``wait_finalize_activity``
+        (resume, cancel, and timeout all transition the row via compare-and-swap). This
+        makes the store the single source of truth, so none of the resume-vs-timeout,
+        signal-loss, or cancel races can desync the workflow from the run row.
+
+        Preconditions: ``step`` is a WAIT step dict; ``wait_timeout_s`` > 0.
+        Postconditions: returns ``{"state": "resumed", "output": <input>}``,
+            ``{"state": "expired"}`` (WAIT timed out), or ``{"state": "terminal"}``
+            (cancelled/failed out-of-band, or setup skipped because the run was already
+            terminal). Bounded by a deterministic ``workflow.now()`` deadline, so a
+            spurious wake cannot loop past the WAIT timeout.
+        """
+        step_id = step["step_id"]
+        prompt_text = step.get("description") or (
+            f"Human input required for: {step.get('name', step_id)}"
+        )
+        # Reset BEFORE setup makes the run resumable: once ``waiting_for_input`` is
+        # published, the API can signal; a reset after setup could discard a signal
+        # landing in that window. (Mirrors the thread runner's "clear before publishing".)
+        self._human_input = None
+        published = await workflow.execute_activity(
+            wait_setup_activity,
+            args=[run_id, step_id, step.get("name", ""), prompt_text],
+            start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
+            retry_policy=_STORE_RETRY,
+        )
+        if not published:
+            # Run went terminal (e.g. cancelled) before/while setup ran — do not wait.
+            return {"state": "terminal"}
+
+        deadline = workflow.now() + timedelta(seconds=wait_timeout_s)
+        while True:
+            remaining = (deadline - workflow.now()).total_seconds()
+            allow_expire = remaining <= 0
+            if not allow_expire:
+                # A signal wakes us immediately; otherwise we re-check at the deadline.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await workflow.wait_condition(
+                        lambda: self._human_input is not None,
+                        timeout=timedelta(seconds=remaining),
+                    )
+            outcome = await workflow.execute_activity(
+                wait_finalize_activity,
+                args=[run_id, step_id, allow_expire, wait_timeout_s],
+                start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
+                retry_policy=_STORE_RETRY,
+            )
+            if outcome["state"] != "waiting":
+                return outcome
+            # Still waiting (a spurious/duplicate wake before the resume CAS committed).
+            # Reset the wake flag and re-arm; the workflow.now() deadline bounds the loop.
+            self._human_input = None
+
     @workflow.run
     async def run(
         self,
@@ -367,44 +453,13 @@ class AgenticPipelineWorkflow:
                     return {"run_id": run_id, "terminal": "out_of_band"}
 
                 if step.get("step_type") == "wait":
-                    prompt_text = step.get("description") or (
-                        f"Human input required for: {step.get('name', step['step_id'])}"
-                    )
-                    # Reset BEFORE the setup activity makes the run resumable: once
-                    # ``wait_setup_activity`` publishes ``waiting_for_input`` to the store,
-                    # the API can observe it and deliver a ``submit_input`` signal. If the
-                    # reset ran after setup, a signal landing in that window would set
-                    # ``_human_input`` only for this line to immediately discard it, and the
-                    # run would hang until the WAIT timeout despite valid input. Clearing
-                    # first means any such signal is preserved and ``wait_condition`` sees it.
-                    # (Mirrors the thread runner's "clear before publishing" ordering in
-                    # ``PipelineRunner._handle_wait_step``.)
-                    self._human_input = None
-                    await workflow.execute_activity(
-                        wait_setup_activity,
-                        args=[run_id, step["step_id"], step.get("name", ""), prompt_text],
-                        start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                        retry_policy=_STORE_RETRY,
-                    )
-                    try:
-                        await workflow.wait_condition(
-                            lambda: self._human_input is not None,
-                            timeout=timedelta(seconds=wait_timeout_s),
-                        )
-                    except asyncio.TimeoutError:
-                        await workflow.execute_activity(
-                            wait_expire_activity,
-                            args=[run_id, step["step_id"], wait_timeout_s],
-                            start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                            retry_policy=_STORE_RETRY,
-                        )
+                    outcome = await self._run_wait_step(run_id, step, wait_timeout_s)
+                    if outcome["state"] == "resumed":
+                        prev_output = outcome["output"]
+                    elif outcome["state"] == "expired":
                         return {"run_id": run_id, "terminal": "timed_out"}
-                    prev_output = await workflow.execute_activity(
-                        wait_resume_activity,
-                        args=[run_id, step["step_id"], self._human_input],
-                        start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                        retry_policy=_STORE_RETRY,
-                    )
+                    else:  # "terminal" — cancelled/failed out-of-band, or setup skipped it
+                        return {"run_id": run_id, "terminal": "out_of_band"}
                 else:
                     prev_output = await workflow.execute_activity(
                         run_step_activity,

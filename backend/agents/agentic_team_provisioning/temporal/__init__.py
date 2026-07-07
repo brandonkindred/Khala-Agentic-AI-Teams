@@ -18,8 +18,7 @@ from agentic_team_provisioning.temporal.workflows import (
     complete_activity,
     fail_activity,
     run_step_activity,
-    wait_expire_activity,
-    wait_resume_activity,
+    wait_finalize_activity,
     wait_setup_activity,
 )
 
@@ -28,8 +27,7 @@ ACTIVITIES = [
     advance_step_activity,
     run_step_activity,
     wait_setup_activity,
-    wait_resume_activity,
-    wait_expire_activity,
+    wait_finalize_activity,
     complete_activity,
     cancel_reconcile_activity,
     fail_activity,
@@ -48,7 +46,6 @@ __all__ = [
     "complete_activity",
     "fail_activity",
     "run_step_activity",
-    "wait_expire_activity",
-    "wait_resume_activity",
+    "wait_finalize_activity",
     "wait_setup_activity",
 ]

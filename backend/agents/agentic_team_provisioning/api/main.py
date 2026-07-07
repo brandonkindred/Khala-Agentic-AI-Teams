@@ -1386,8 +1386,12 @@ def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputReq
         #     instead of a second signal overwriting the first answer.
         #   * A cancel that already moved the row terminal makes the CAS a no-op -> 409,
         #     so a resume can never revive a cancelled run.
-        # The workflow's wait_resume_activity then only records the step result (it no
-        # longer owns the status flip), so it cannot resurrect a terminal run either.
+        # The CAS durably records the resume; the workflow's wait_finalize_activity reads
+        # the outcome from the store, so the signal below is only a best-effort *wake* to
+        # resume promptly. If it fails (Temporal client down), the row is already
+        # ``running`` with the input persisted, and the workflow reconciles it at the WAIT
+        # timeout — so the run never gets stuck. We therefore do NOT 500 here (that would
+        # contradict the already-committed running row); we log and return the updated row.
         from agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
         from shared_temporal import signal_workflow_sync
 
@@ -1399,11 +1403,13 @@ def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputReq
             )
         try:
             signal_workflow_sync(f"{WORKFLOW_ID_PREFIX}{run_id}", "submit_input", req.input)
-        except Exception as exc:
-            logger.exception("Failed to signal agentic pipeline run %s", run_id)
-            raise HTTPException(
-                status_code=500, detail="Failed to submit input to pipeline run."
-            ) from exc
+        except Exception:
+            logger.warning(
+                "Failed to signal agentic pipeline run %s; the resume is durably recorded "
+                "and will be reconciled at the WAIT timeout",
+                run_id,
+                exc_info=True,
+            )
         updated = _test_store.get_pipeline_run(run_id)
         return TestPipelineRun(**(updated or row))
 

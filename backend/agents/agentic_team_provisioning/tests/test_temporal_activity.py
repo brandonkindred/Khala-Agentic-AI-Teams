@@ -140,63 +140,107 @@ def test_run_step_activity_decision(fake_pg: dict, monkeypatch: pytest.MonkeyPat
     assert out == "step_b"
     assert store.get_pipeline_run("r1")["step_results"][0]["output"] == "Decision: step_b"
 
+    # P2 regression: replay (crash after the decision recorded, before Temporal marked the
+    # activity done) must return the RAW branch id, not the "Decision: ..." display output,
+    # so prev_output for downstream steps matches the non-crash path.
+    prompts = _stub_llm(monkeypatch, "SHOULD-NOT-BE-CALLED")
+    replayed = wf.run_step_activity("r1", _TEAM_AGENTS, process, "d1", "prev")
+    assert replayed == "step_b"  # raw id, not "Decision: step_b"
+    assert prompts == []  # LLM not re-invoked on replay
 
-def test_wait_setup_resume_expire_activities(fake_pg: dict) -> None:
+
+def test_wait_setup_activity_publishes_and_is_idempotent(fake_pg: dict) -> None:
     _seed_team(fake_pg)
     store = AgenticTestStore()
     store.create_pipeline_run("r1", "t1", "p1")
 
-    wf.wait_setup_activity("r1", "w1", "Ask", "please answer")
+    assert wf.wait_setup_activity("r1", "w1", "Ask", "please answer") is True
     row = store.get_pipeline_run("r1")
     assert row["status"] == "waiting_for_input"
     assert row["human_prompt"] == "please answer"
     assert row["step_results"][0]["status"] == "waiting_for_input"
 
     # Idempotent: a re-run does not append a second waiting result.
-    wf.wait_setup_activity("r1", "w1", "Ask", "please answer")
+    assert wf.wait_setup_activity("r1", "w1", "Ask", "please answer") is True
     assert len(store.get_pipeline_run("r1")["step_results"]) == 1
 
-    # The /input endpoint owns the authoritative resume transition (CAS to running +
-    # persist the answer); wait_resume_activity only records the step result.
-    assert store.try_resume_pipeline_run_temporal("r1", "the answer") is True
-    returned = wf.wait_resume_activity("r1", "w1", "the answer")
-    assert returned == "the answer"
+
+def test_wait_setup_activity_skips_terminal_run(fake_pg: dict) -> None:
+    """P2 regression: a cancel landing while wait_setup is in flight must not resurrect
+    the run to waiting_for_input — the activity returns False and writes nothing."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")
+    assert store.try_cancel_pipeline_run("r1") is True
+
+    assert wf.wait_setup_activity("r1", "w1", "Ask", "please answer") is False
     row = store.get_pipeline_run("r1")
-    assert row["status"] == "running"  # set by the endpoint CAS above
+    assert row["status"] == "cancelled"  # NOT revived
+    assert row["step_results"] == []
+
+
+def test_wait_finalize_resumes_from_running_row(fake_pg: dict) -> None:
+    """When the /input endpoint CAS'd the row to running + persisted the input,
+    wait_finalize records the step result and returns the persisted input."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")
+    wf.wait_setup_activity("r1", "w1", "Ask", "please answer")
+    assert store.try_resume_pipeline_run_temporal("r1", "the answer") is True  # endpoint CAS
+
+    out = wf.wait_finalize_activity("r1", "w1", False, 60)
+    assert out == {"state": "resumed", "output": "the answer"}
+    row = store.get_pipeline_run("r1")
+    assert row["status"] == "running"
     assert row["human_prompt"] is None
     assert row["step_results"][0]["status"] == "completed"
     assert row["step_results"][0]["output"] == "the answer"
 
 
-def test_wait_resume_activity_does_not_revive_terminal_run(fake_pg: dict) -> None:
-    """P2 regression: a cancel landing between the endpoint's flip and this activity must
-    not be resurrected — wait_resume never writes ``status`` and skips a terminal row."""
-    _seed_team(fake_pg)
-    store = AgenticTestStore()
-    store.create_pipeline_run("r1", "t1", "p1")
-    wf.wait_setup_activity("r1", "w1", "Ask", "please answer")
-    # Cancel wins the race (row now terminal) before wait_resume runs.
-    assert store.try_cancel_pipeline_run("r1") is True
-
-    returned = wf.wait_resume_activity("r1", "w1", "late answer")
-    assert returned == "late answer"  # still threads for the caller
-    row = store.get_pipeline_run("r1")
-    assert row["status"] == "cancelled"  # NOT revived to running
-    # The waiting step result is left as-is (not overwritten to completed).
-    assert row["step_results"][0]["status"] == "waiting_for_input"
-
-
-def test_wait_expire_activity_fails_still_waiting_run(fake_pg: dict) -> None:
+def test_wait_finalize_expires_only_when_allowed(fake_pg: dict) -> None:
     _seed_team(fake_pg)
     store = AgenticTestStore()
     store.create_pipeline_run("r1", "t1", "p1")
     wf.wait_setup_activity("r1", "w1", "Ask", "please answer")
 
-    wf.wait_expire_activity("r1", "w1", 60)
+    # Not yet allowed to expire -> still waiting.
+    assert wf.wait_finalize_activity("r1", "w1", False, 60) == {"state": "waiting"}
+    assert store.get_pipeline_run("r1")["status"] == "waiting_for_input"
+
+    # Allowed to expire -> fails the run and marks the step timed_out.
+    assert wf.wait_finalize_activity("r1", "w1", True, 60) == {"state": "expired"}
     row = store.get_pipeline_run("r1")
     assert row["status"] == "failed"
     assert "wait_timeout" in row["error"]
     assert row["step_results"][0]["status"] == "timed_out"
+
+
+def test_wait_finalize_reports_terminal_and_does_not_revive(fake_pg: dict) -> None:
+    """P1/P2 regression: a cancelled run is reported terminal and never written back to
+    running/waiting, even when finalize is asked to expire."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")
+    wf.wait_setup_activity("r1", "w1", "Ask", "please answer")
+    assert store.try_cancel_pipeline_run("r1") is True
+
+    assert wf.wait_finalize_activity("r1", "w1", True, 60) == {"state": "terminal"}
+    assert store.get_pipeline_run("r1")["status"] == "cancelled"  # untouched
+
+
+def test_wait_finalize_resume_wins_lost_expire_race(fake_pg: dict) -> None:
+    """P1 regression: if a resume CAS'd the row to running just as the timer elapsed, the
+    expire CAS loses and finalize honours the resume instead of clobbering it."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")
+    wf.wait_setup_activity("r1", "w1", "Ask", "please answer")
+    # Resume won the race first: row is already running with the input.
+    assert store.try_resume_pipeline_run_temporal("r1", "just in time") is True
+
+    out = wf.wait_finalize_activity("r1", "w1", True, 60)  # allow_expire, but row running
+    assert out == {"state": "resumed", "output": "just in time"}
+    assert store.get_pipeline_run("r1")["status"] == "running"
 
 
 def test_complete_cancel_fail_activities(fake_pg: dict) -> None:
@@ -223,8 +267,12 @@ def test_complete_cancel_fail_activities(fake_pg: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+_FIXED_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
 def _patch_execute(monkeypatch, handlers: dict) -> list:
-    """Patch workflow.execute_activity to dispatch by activity-function identity."""
+    """Patch workflow.execute_activity to dispatch by activity-function identity, and
+    workflow.now() to a fixed instant (the WAIT loop is bounded by it)."""
     calls: list = []
 
     async def _fake_exec(fn, *, args, **_kw):
@@ -233,6 +281,7 @@ def _patch_execute(monkeypatch, handlers: dict) -> list:
         return handler(args) if handler else None
 
     monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    monkeypatch.setattr("temporalio.workflow.now", lambda: _FIXED_NOW)
     return calls
 
 
@@ -258,14 +307,15 @@ def test_workflow_run_completes_action_then_wait(monkeypatch: pytest.MonkeyPatch
         {
             wf.advance_step_activity: lambda args: True,
             wf.run_step_activity: lambda args: "action-out",
-            wf.wait_setup_activity: lambda args: None,
-            wf.wait_resume_activity: lambda args: args[2],  # echo the human input
+            wf.wait_setup_activity: lambda args: True,  # published
+            # finalize reconciles from the store; the signal woke us -> resumed.
+            wf.wait_finalize_activity: lambda args: {"state": "resumed", "output": "human answer"},
             wf.complete_activity: lambda args: None,
         },
     )
 
     async def _fake_wait(pred, timeout=None):
-        # Simulate the submit_input signal arriving.
+        # Simulate the submit_input signal arriving (fast-path wake).
         workflow_obj.submit_input("human answer")
 
     monkeypatch.setattr("temporalio.workflow.wait_condition", _fake_wait)
@@ -276,27 +326,17 @@ def test_workflow_run_completes_action_then_wait(monkeypatch: pytest.MonkeyPatch
     fns = [c[0] for c in calls]
     assert wf.run_step_activity in fns
     assert wf.wait_setup_activity in fns
-    assert wf.wait_resume_activity in fns
+    assert wf.wait_finalize_activity in fns
     assert wf.complete_activity in fns
-    # The action step's output threads into the WAIT setup as prev context is internal;
-    # assert the resume echoed the signalled input as the next prev_output.
-    resume_call = next(c for c in calls if c[0] is wf.wait_resume_activity)
-    assert resume_call[1] == ["r1", "w1", "human answer"]
+    # finalize was asked NOT to expire (still within the WAIT deadline).
+    finalize_call = next(c for c in calls if c[0] is wf.wait_finalize_activity)
+    assert finalize_call[1][:2] == ["r1", "w1"]
+    assert finalize_call[1][2] is False  # allow_expire
 
 
-def test_workflow_run_wait_preserves_signal_arriving_during_setup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Regression: a ``submit_input`` signal delivered while ``wait_setup_activity`` is
-    publishing the ``waiting_for_input`` state must NOT be discarded.
-
-    The reset of ``_human_input`` happens *before* the setup activity makes the run
-    resumable, so an input that lands in that window survives and the run resumes
-    instead of hanging until the WAIT timeout. Here the ``wait_setup`` handler fires the
-    signal (standing in for the API observing the row and signalling), and
-    ``wait_condition`` returns only if the predicate already holds — so the buggy
-    "reset after setup" ordering would fall through to the timeout branch.
-    """
+def test_workflow_run_wait_setup_terminal_stops_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If wait_setup reports the run already went terminal (cancel raced setup), the
+    workflow stops without waiting or finalizing."""
     workflow_obj = wf.AgenticPipelineWorkflow()
     process = {
         "process_id": "p1",
@@ -304,32 +344,22 @@ def test_workflow_run_wait_preserves_signal_arriving_during_setup(
             {"step_id": "w1", "step_type": "wait", "name": "W", "description": "?", "next_steps": []}
         ],
     }
-
     calls = _patch_execute(
         monkeypatch,
         {
             wf.advance_step_activity: lambda args: True,
-            # Signal arrives as the run becomes resumable (mid-setup).
-            wf.wait_setup_activity: lambda args: workflow_obj.submit_input("early answer"),
-            wf.wait_resume_activity: lambda args: args[2],
-            wf.complete_activity: lambda args: None,
+            wf.wait_setup_activity: lambda args: False,  # terminal -> not published
         },
     )
 
-    async def _fake_wait(pred, timeout=None):
-        if pred():
-            return
-        raise asyncio.TimeoutError
+    async def _no_wait(pred, timeout=None):  # pragma: no cover - must not wait
+        raise AssertionError("must not wait when setup reports terminal")
 
-    monkeypatch.setattr("temporalio.workflow.wait_condition", _fake_wait)
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _no_wait)
 
     result = asyncio.run(workflow_obj.run("r1", _TEAM_AGENTS, process, None, 3600))
-
-    assert result == {"run_id": "r1", "terminal": "completed"}
-    # The early input was preserved and threaded into the resume, not lost to a reset.
-    resume_call = next(c for c in calls if c[0] is wf.wait_resume_activity)
-    assert resume_call[1] == ["r1", "w1", "early answer"]
-    assert wf.wait_expire_activity not in [c[0] for c in calls]
+    assert result == {"run_id": "r1", "terminal": "out_of_band"}
+    assert wf.wait_finalize_activity not in [c[0] for c in calls]
 
 
 def test_workflow_run_wait_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -350,19 +380,52 @@ def test_workflow_run_wait_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch,
         {
             wf.advance_step_activity: lambda args: True,
-            wf.wait_setup_activity: lambda args: None,
-            wf.wait_expire_activity: lambda args: None,
+            wf.wait_setup_activity: lambda args: True,
+            wf.wait_finalize_activity: lambda args: {"state": "expired"},
         },
     )
 
-    async def _timeout(pred, timeout=None):
-        raise asyncio.TimeoutError
+    async def _no_wait(pred, timeout=None):  # pragma: no cover - wait_timeout_s=0 skips it
+        raise AssertionError("wait_condition should be skipped once the deadline elapsed")
 
-    monkeypatch.setattr("temporalio.workflow.wait_condition", _timeout)
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _no_wait)
 
-    result = asyncio.run(workflow_obj.run("r1", _TEAM_AGENTS, process, None, 60))
+    # wait_timeout_s=0 -> deadline is now, so the first iteration is allowed to expire.
+    result = asyncio.run(workflow_obj.run("r1", _TEAM_AGENTS, process, None, 0))
     assert result == {"run_id": "r1", "terminal": "timed_out"}
-    assert wf.wait_expire_activity in [c[0] for c in calls]
+    finalize_call = next(c for c in calls if c[0] is wf.wait_finalize_activity)
+    assert finalize_call[1][2] is True  # allow_expire
+
+
+def test_workflow_run_wait_reloops_on_waiting_then_resumes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spurious wake (finalize returns 'waiting') re-arms the wait; a subsequent
+    'resumed' finalize threads the input and the run completes."""
+    workflow_obj = wf.AgenticPipelineWorkflow()
+    process = {
+        "process_id": "p1",
+        "steps": [
+            {"step_id": "w1", "step_type": "wait", "name": "W", "description": "?", "next_steps": []}
+        ],
+    }
+    states = iter([{"state": "waiting"}, {"state": "resumed", "output": "answer"}])
+    calls = _patch_execute(
+        monkeypatch,
+        {
+            wf.advance_step_activity: lambda args: True,
+            wf.wait_setup_activity: lambda args: True,
+            wf.wait_finalize_activity: lambda args: next(states),
+            wf.complete_activity: lambda args: None,
+        },
+    )
+
+    async def _fake_wait(pred, timeout=None):
+        workflow_obj.submit_input("answer")
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _fake_wait)
+
+    result = asyncio.run(workflow_obj.run("r1", _TEAM_AGENTS, process, None, 3600))
+    assert result == {"run_id": "r1", "terminal": "completed"}
+    assert [c[0] for c in calls].count(wf.wait_finalize_activity) == 2
 
 
 def test_workflow_run_stops_on_out_of_band_terminal(monkeypatch: pytest.MonkeyPatch) -> None:

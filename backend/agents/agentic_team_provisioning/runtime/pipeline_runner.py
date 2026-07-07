@@ -480,6 +480,11 @@ class PipelineRunner:
                 "agent_name": agent_name,
                 "input": prev_output,
                 "output": f"Decision: {decision}",
+                # The bare branch id this method returns (threaded as the next step's
+                # prev_output) — distinct from the "Decision: ..." display ``output``, so a
+                # Temporal activity replaying a completed decision returns the same value a
+                # non-crash run would (see ``run_step_activity``'s idempotency guard).
+                "output_raw": decision,
                 "status": "completed",
             },
         )
