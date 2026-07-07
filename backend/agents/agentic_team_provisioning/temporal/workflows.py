@@ -27,6 +27,8 @@ from typing import Any
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 
+from agentic_team_provisioning.step_ordering import order_step_ids
+
 # Activity timeouts: agent steps are long, blocking LLM calls; bookkeeping steps are
 # quick. The wait timeout for a WAIT step is a *workflow timer*, not an activity
 # timeout, so it is passed to ``run`` as an argument (resolved in the API process).
@@ -41,10 +43,11 @@ _SINGLE_ATTEMPT = RetryPolicy(maximum_attempts=1)
 def _topo_order(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Order step dicts following ``next_steps`` edges (pure, deterministic).
 
-    A dict-based clone of ``PipelineRunner._topological_sort`` reading only
-    ``step_id`` / ``next_steps``. Lives here (not imported from ``pipeline_runner``)
-    so the workflow sandbox never imports the heavyweight runtime module. Being pure,
-    it replays deterministically.
+    Delegates the ordering to the shared, stdlib-only
+    ``agentic_team_provisioning.step_ordering.order_step_ids`` — the same algorithm the
+    daemon-thread ``PipelineRunner._topological_sort`` uses — reading only ``step_id`` /
+    ``next_steps`` from each dict. ``step_ordering`` pulls in nothing heavy, so importing
+    it here keeps the workflow sandbox-safe; being pure, this replays deterministically.
 
     Preconditions: each element is a dict with a ``step_id`` str and a ``next_steps``
         list of str (missing ``next_steps`` is treated as empty).
@@ -52,35 +55,9 @@ def _topo_order(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         points (steps referenced by no other step's ``next_steps``); unreachable steps
         are appended at the end. Falls back to input order when the graph is ambiguous.
     """
-    if not steps:
-        return []
-
     step_map = {s["step_id"]: s for s in steps}
-    all_next: set[str] = set()
-    for s in steps:
-        all_next.update(s.get("next_steps") or [])
-
-    entry_ids = [s["step_id"] for s in steps if s["step_id"] not in all_next]
-    if not entry_ids:
-        entry_ids = [steps[0]["step_id"]]
-
-    visited: set[str] = set()
-    ordered: list[dict[str, Any]] = []
-    queue = list(entry_ids)
-    while queue:
-        sid = queue.pop(0)
-        if sid in visited:
-            continue
-        visited.add(sid)
-        step = step_map.get(sid)
-        if step:
-            ordered.append(step)
-            queue.extend(step.get("next_steps") or [])
-
-    for s in steps:
-        if s["step_id"] not in visited:
-            ordered.append(s)
-    return ordered
+    order = order_step_ids([(s["step_id"], s.get("next_steps") or []) for s in steps])
+    return [step_map[sid] for sid in order]
 
 
 # ---------------------------------------------------------------------------
@@ -130,11 +107,7 @@ def run_step_activity(
           any non-WAIT) step returns the agent output. Handler exceptions propagate so
           the failure surfaces as a failed workflow.
     """
-    from agentic_team_provisioning.models import (
-        AgenticTeamAgent,
-        ProcessDefinition,
-        StepType,
-    )
+    from agentic_team_provisioning.models import AgenticTeamAgent, ProcessDefinition
     from agentic_team_provisioning.runtime.pipeline_runner import PipelineRunner
     from agentic_team_provisioning.testing.store import get_test_store
 
@@ -156,9 +129,7 @@ def run_step_activity(
     agents_by_name = {a.agent_name: a for a in agents}
 
     runner = PipelineRunner(store, start_sweeper=False)
-    if step.step_type == StepType.DECISION:
-        return runner._handle_decision_step(run_id, step, prev_output, step_results, agents_by_name)
-    return runner._handle_action_step(run_id, step, prev_output, step_results, agents_by_name)
+    return runner.run_step(run_id, step, prev_output, step_results, agents_by_name)
 
 
 @activity.defn(name="agentic_pipeline_wait_setup")

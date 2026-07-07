@@ -158,3 +158,43 @@ def test_start_workflow_delegates_to_shared_bridge(monkeypatch):
     )
     assert captured["workflow_id"] == "agentic-pipeline-run-abc"
     assert captured["task_queue"] == "agentic_team_provisioning-queue"
+
+
+def test_activities_carry_temporal_activity_definitions():
+    """The workflow-driver tests call activities directly, so a dropped ``@activity.defn``
+    would go unnoticed until a real worker failed to register. Assert every exported
+    activity is a registered Temporal activity with the expected name."""
+    from agentic_team_provisioning.temporal import ACTIVITIES
+
+    names = set()
+    for fn in ACTIVITIES:
+        defn = getattr(fn, "__temporal_activity_definition", None)
+        assert defn is not None, f"{fn.__name__} is missing the @activity.defn decorator"
+        names.add(defn.name)
+
+    assert names == {
+        "agentic_pipeline_advance_step",
+        "agentic_pipeline_run_step",
+        "agentic_pipeline_wait_setup",
+        "agentic_pipeline_wait_resume",
+        "agentic_pipeline_wait_expire",
+        "agentic_pipeline_complete",
+        "agentic_pipeline_cancel_reconcile",
+        "agentic_pipeline_fail",
+    }
+
+
+def test_workflow_carries_temporal_workflow_definition():
+    """A dropped ``@workflow.defn`` / ``@workflow.run`` / ``@workflow.signal`` would only
+    surface when a worker registers the workflow. Assert the Temporal definition exposes
+    the run method and the ``submit_input`` signal used by the resume path."""
+    from temporalio import workflow
+
+    from agentic_team_provisioning.temporal import WORKFLOWS, AgenticPipelineWorkflow
+
+    assert WORKFLOWS == [AgenticPipelineWorkflow]
+    defn = workflow._Definition.from_class(AgenticPipelineWorkflow)
+    assert defn is not None, "AgenticPipelineWorkflow is missing the @workflow.defn decorator"
+    assert defn.name == "AgenticPipelineWorkflow"
+    assert defn.run_fn.__name__ == "run"
+    assert "submit_input" in defn.signals

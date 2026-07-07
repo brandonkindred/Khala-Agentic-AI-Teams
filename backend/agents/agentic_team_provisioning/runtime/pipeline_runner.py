@@ -35,6 +35,7 @@ from agentic_team_provisioning.models import (
     StepType,
 )
 from agentic_team_provisioning.runtime.agent_builder import build_agent, call_agent
+from agentic_team_provisioning.step_ordering import order_step_ids
 from agentic_team_provisioning.testing.store import AgenticTestStore
 from shared_concurrency import BackgroundHeartbeat
 from shared_env import parse_int
@@ -239,12 +240,8 @@ class PipelineRunner:
                         if resumed is None:
                             return
                         prev_output = resumed
-                    elif step.step_type == StepType.DECISION:
-                        prev_output = self._handle_decision_step(
-                            run_id, step, prev_output, step_results, agents_by_name
-                        )
                     else:
-                        prev_output = self._handle_action_step(
+                        prev_output = self.run_step(
                             run_id, step, prev_output, step_results, agents_by_name
                         )
 
@@ -298,6 +295,38 @@ class PipelineRunner:
         """Append a finished step's result and persist the updated step_results."""
         step_results.append(result)
         self._store.update_pipeline_run(run_id, step_results=step_results)
+
+    def run_step(
+        self,
+        run_id: str,
+        step: ProcessStep,
+        prev_output: str,
+        step_results: list[dict[str, Any]],
+        agents_by_name: dict[str, AgenticTeamAgent],
+    ) -> str:
+        """Run one non-WAIT step (ACTION/DECISION/default), recording its result.
+
+        The public dispatch entry point shared by the in-thread ``_execute`` loop and the
+        Temporal ``run_step_activity``, so callers depend on this method rather than the
+        private per-type handlers. WAIT steps are handled separately (they pause for human
+        input) and must not be routed here.
+
+        Preconditions:
+            - ``step.step_type`` is not ``StepType.WAIT``.
+            - ``run_id`` refers to a run already created in the store; ``step_results`` is
+              the current (mutable) list of recorded results for the run.
+
+        Postconditions:
+            - Appends exactly one ``completed`` result for ``step`` to ``step_results``
+              (persisted via ``_record_step``) and returns the step's output: the chosen
+              branch ``step_id`` for a DECISION, otherwise the agent output string.
+        """
+        assert step.step_type != StepType.WAIT, "run_step must not be called for WAIT steps"
+        if step.step_type == StepType.DECISION:
+            return self._handle_decision_step(
+                run_id, step, prev_output, step_results, agents_by_name
+            )
+        return self._handle_action_step(run_id, step, prev_output, step_results, agents_by_name)
 
     def _handle_action_step(
         self,
@@ -463,39 +492,14 @@ class PipelineRunner:
         Finds entry points (steps not referenced as next_step by any
         other step) and walks the DAG breadth-first. Falls back to the
         original order if the graph structure is ambiguous.
+
+        Delegates the pure ordering to ``step_ordering.order_step_ids`` so the
+        Temporal workflow can reuse the identical algorithm without importing this
+        heavyweight runtime module into its sandbox.
         """
-        if not steps:
-            return []
-
         step_map = {s.step_id: s for s in steps}
-        all_next: set[str] = set()
-        for s in steps:
-            all_next.update(s.next_steps)
-
-        entry_ids = [s.step_id for s in steps if s.step_id not in all_next]
-        if not entry_ids:
-            entry_ids = [steps[0].step_id]
-
-        visited: set[str] = set()
-        ordered: list[ProcessStep] = []
-        queue = list(entry_ids)
-
-        while queue:
-            sid = queue.pop(0)
-            if sid in visited:
-                continue
-            visited.add(sid)
-            step = step_map.get(sid)
-            if step:
-                ordered.append(step)
-                queue.extend(step.next_steps)
-
-        # Include any unreachable steps at the end
-        for s in steps:
-            if s.step_id not in visited:
-                ordered.append(s)
-
-        return ordered
+        order = order_step_ids([(s.step_id, s.next_steps) for s in steps])
+        return [step_map[sid] for sid in order]
 
 
 # ---------------------------------------------------------------------------
