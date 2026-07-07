@@ -918,6 +918,8 @@ def _run_pr_review_body(
                 f"{inline_count} inline, {file_comment_count} file-level, "
                 f"{comment_findings} comment(s), event={event}"
             )
+            if not output.issues:
+                _react_to_pr(client, owner, repo, pr_number)
             _finalize_review(
                 job_id,
                 "completed",
@@ -948,6 +950,19 @@ def _run_pr_review_body(
             # no exception of its own); surface it on both the job and review row.
             safe_err = scrub_token_from_text(str(review_exc))
             _finalize_review(job_id, "failed", error=safe_err)
+
+
+def _react_to_pr(client: _main.GitHubClient, owner: str, repo: str, pr_number: int) -> None:
+    """Best-effort +1 reaction on the PR itself, celebrating a clean review.
+
+    Postconditions: adds a "+1" reaction to PR #``pr_number``. Never raises — a
+    failure here (rate limit, missing scope, transport error) must not turn an
+    otherwise-successful clean review into a failed job.
+    """
+    try:
+        client.create_issue_reaction(owner, repo, pr_number, content="+1")
+    except Exception:  # noqa: BLE001 - reaction is a courtesy signal only
+        logger.warning("Could not add +1 reaction to PR #%s", pr_number, exc_info=True)
 
 
 def _try_review(
