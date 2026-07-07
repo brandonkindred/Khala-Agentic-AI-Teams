@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from sales_team import job_runner
 from sales_team.api import main as api_main
 from sales_team.models import (
     BANTScore,
@@ -154,7 +155,11 @@ def test_run_pipeline_creates_pending_job_and_starts_thread(
                 job_id=job_id, entry_stage=request.entry_stage, product_name=request.product_name
             )
 
-    monkeypatch.setattr(api_main, "SalesPodOrchestrator", _StubOrch)
+    # The thread target is job_runner.run_pipeline_job (imported into
+    # api_main as _run_pipeline_job), so its orchestrator + job manager
+    # references live in job_runner's own module namespace, not api_main's.
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _StubOrch)
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
 
     response = client.post(
         "/sales/pipeline/run",
@@ -183,7 +188,7 @@ def test_run_pipeline_creates_pending_job_and_starts_thread(
 
 def test_run_pipeline_job_failure_branch(monkeypatch: pytest.MonkeyPatch, fake_job_client) -> None:
     """When the orchestrator raises, the background runner marks the job failed."""
-    monkeypatch.setattr(api_main, "_job_manager", fake_job_client)
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
     fake_job_client.create_job("j-fail", status="pending")
 
     class _RaisingOrch:
@@ -193,7 +198,7 @@ def test_run_pipeline_job_failure_branch(monkeypatch: pytest.MonkeyPatch, fake_j
         def run(self, request, job_id, update_cb=None):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(api_main, "SalesPodOrchestrator", _RaisingOrch)
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _RaisingOrch)
 
     # Build a minimal request — pass-through values fine since orchestrator raises.
     request = api_main.SalesPipelineRequest(
@@ -206,6 +211,63 @@ def test_run_pipeline_job_failure_branch(monkeypatch: pytest.MonkeyPatch, fake_j
     assert job["status"] == "failed"
     assert job["error"] == "boom"
     assert job["current_stage"] == "failed"
+
+
+def _minimal_request() -> "api_main.SalesPipelineRequest":
+    return api_main.SalesPipelineRequest(
+        product_name="P",
+        value_proposition="A valid value proposition.",
+        icp={"industry": ["SaaS"]},
+    )
+
+
+def test_run_pipeline_job_skips_when_already_cancelled(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """A job that reached a terminal state before the runner starts (e.g. a
+    Temporal workflow that sat queued while the user cancelled the job) must
+    NOT be resurrected — the orchestrator is never constructed and the
+    terminal status is preserved."""
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
+    fake_job_client.create_job("j-cancelled", status="cancelled")
+
+    class _NeverRunOrch:
+        def __init__(self, **_kw):  # pragma: no cover - must not be constructed
+            raise AssertionError("orchestrator must not run for a terminal job")
+
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _NeverRunOrch)
+
+    api_main._run_pipeline_job("j-cancelled", _minimal_request())
+
+    job = fake_job_client.get_job("j-cancelled")
+    assert job["status"] == "cancelled"  # untouched
+
+
+def test_run_pipeline_job_does_not_clobber_cancel_landing_mid_run(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """A cancel that lands while the orchestrator is running must not be
+    overwritten by the COMPLETED write."""
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
+    fake_job_client.create_job("j-midcancel", status="pending")
+
+    class _CancellingOrch:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, request, job_id, update_cb=None):
+            # Simulate a cancel landing while the pipeline runs.
+            fake_job_client.update_job(job_id, status="cancelled")
+            return SalesPipelineResult(
+                job_id=job_id, entry_stage=request.entry_stage, product_name=request.product_name
+            )
+
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _CancellingOrch)
+
+    api_main._run_pipeline_job("j-midcancel", _minimal_request())
+
+    job = fake_job_client.get_job("j-midcancel")
+    assert job["status"] == "cancelled"  # not overwritten with completed
 
 
 # ---------------------------------------------------------------------------
