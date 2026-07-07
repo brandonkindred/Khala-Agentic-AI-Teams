@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -102,6 +103,68 @@ def _write_sandbox_secrets_file(project_name: str, *, postgres_password: str) ->
     return path
 
 
+def _manifest_host_path(project_name: str) -> Path:
+    """Deterministic path for the injected agent-manifest bind-mount source.
+
+    Lives in the per-sandbox project directory alongside the compose file and
+    secrets file, so a single ``rmtree`` of that directory cleans it up.
+    """
+    return sandbox_project_dir(project_name) / "agent-manifest.json"
+
+
+def _write_manifest_file(project_name: str, manifest_json: str) -> Path:
+    """Write the platform-authored agent manifest for the sandbox to bind-mount.
+
+    The entrypoint reads this (``SANDBOX_AGENT_MANIFEST_FILE``) and registers it so
+    a dynamically-registered agent — absent from the sandbox image's on-disk
+    registry — can still boot. Platform-authored, carries no secrets; mounted
+    read-only into the agent container.
+
+    Preconditions:
+        * ``manifest_json`` is a JSON object string (an ``AgentManifest`` dump).
+    Postconditions:
+        * The file exists at :func:`_manifest_host_path` and is world-readable
+          (0644) so the container's non-root user can read the bind mount.
+    """
+    path = _manifest_host_path(project_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    # Create with the target mode atomically (no separate chmod window) — umask
+    # is still applied to this request, so still explicitly chmod after to
+    # guarantee 0644 regardless of the process's umask.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(manifest_json)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    return path
+
+
+async def _resolve_manifest_json(agent_id: str) -> str:
+    """Serialize the registered manifest for ``agent_id`` to a JSON string.
+
+    Preconditions:
+        * ``agent_id`` resolves in the process-wide registry (the lifecycle's
+          ``_resolve_team`` already validated this before ``run_container``).
+    Postconditions:
+        * Returns ``json.dumps(manifest.model_dump(mode="json"))``. Runs the
+          (possibly Postgres-backed) registry lookup in a worker thread via
+          ``asyncio.to_thread`` so it never blocks this coroutine's event loop.
+    Raises:
+        * :class:`DockerError` if the agent is unexpectedly unresolvable — fail
+          fast here, before ``docker compose up``, rather than let the sandbox
+          boot and exit ``EXIT_UNKNOWN_AGENT``.
+    """
+    from agent_registry import get_registry
+
+    manifest = await asyncio.to_thread(get_registry().get, agent_id)
+    if manifest is None:
+        raise DockerError(
+            f"Cannot provision sandbox for {agent_id!r}: no manifest resolved in the registry."
+        )
+    return json.dumps(manifest.model_dump(mode="json"))
+
+
 def cleanup_secrets_file(project_name: str) -> None:
     """Idempotently remove the per-sandbox project directory + secrets.
 
@@ -169,12 +232,16 @@ def _allocate_host_port() -> int:
         s.close()
 
 
-def _materialise_project_dir(project_name: str, *, host_port: int, postgres_password: str) -> Path:
+def _materialise_project_dir(
+    project_name: str, *, host_port: int, postgres_password: str, manifest_json: str
+) -> Path:
     """Render the compose template into a fresh per-project directory.
 
     Copies the support assets (postgres-init.sql, prometheus.yml,
     grafana-provisioning/) alongside so the rendered compose file's
-    relative volume paths resolve. Returns the project directory.
+    relative volume paths resolve. Also writes the injected agent-manifest
+    JSON that the ``{agent_manifest_file}`` bind-mount points at. Returns the
+    project directory.
     """
     project_dir = sandbox_project_dir(project_name)
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -194,6 +261,7 @@ def _materialise_project_dir(project_name: str, *, host_port: int, postgres_pass
         shutil.copytree(grafana_src, grafana_dst)
 
     secrets_path = _write_sandbox_secrets_file(project_name, postgres_password=postgres_password)
+    manifest_path = _write_manifest_file(project_name, manifest_json)
 
     template = sandbox_stack_template_path().read_text(encoding="utf-8")
     rendered = template.format(
@@ -202,6 +270,7 @@ def _materialise_project_dir(project_name: str, *, host_port: int, postgres_pass
         agent_image=sandbox_image(),
         pg_password=postgres_password,
         agent_secrets_file=str(secrets_path),
+        agent_manifest_file=str(manifest_path),
         agent_host_port=host_port,
     )
     (project_dir / "docker-compose.yml").write_text(rendered, encoding="utf-8")
@@ -221,12 +290,20 @@ async def run_container(agent_id: str, container_name: str, team: str) -> str:
     postgres_password = secrets.token_urlsafe(24)
     host_port = _allocate_host_port()
 
+    # Resolve + serialize the manifest to inject into the isolated sandbox (which
+    # boots from its own on-disk registry and can't reach the platform Postgres).
+    # Fail fast here, before ``docker compose up``, if the agent is unresolvable.
+    manifest_json = await _resolve_manifest_json(agent_id)
+
     # Render the project dir with the resolved agent_id so the agent
     # container's SANDBOX_AGENT_ID env var is correct.
     os.environ["_RENDER_AGENT_ID"] = agent_id
     try:
         project_dir = _materialise_project_dir(
-            project_name, host_port=host_port, postgres_password=postgres_password
+            project_name,
+            host_port=host_port,
+            postgres_password=postgres_password,
+            manifest_json=manifest_json,
         )
     finally:
         os.environ.pop("_RENDER_AGENT_ID", None)

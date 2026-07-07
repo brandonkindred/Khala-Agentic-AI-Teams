@@ -32,6 +32,17 @@ def _write(dir_: Path, team: str, filename: str, body: str) -> None:
     (d / filename).write_text(dedent(body).lstrip(), encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _no_dynamic_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep these route tests off the dynamic Postgres overlay.
+
+    They build isolated registries from tmp manifests and assert exact catalog
+    contents, so the registry must behave as the Postgres-less path regardless of
+    a dev ``POSTGRES_HOST``. The overlay is covered by the agent_registry suites.
+    """
+    monkeypatch.setattr(AgentRegistry, "_dynamic_store", lambda self: None)
+
+
 @pytest.fixture()
 def client(tmp_path: Path) -> TestClient:
     # Isolated registry: these synthetic manifests are loaded from tmp_path, NOT the
@@ -155,6 +166,36 @@ def test_schema_output_404_when_missing_ref(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_schema_endpoints_return_inline_schema_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent authored with inline JSON schemas (no dotted ref) serves them
+    verbatim from the schema-resolution endpoints (P2)."""
+    import unified_api.routes.agents as agents_route_mod
+    from agent_registry.models import AgentManifest, IOSchema, SourceInfo
+
+    in_schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+    out_schema = {"type": "string"}
+    manifest = AgentManifest(
+        id="agent_studio.inline-1",
+        team="agent_studio",
+        name="Inline",
+        summary="s",
+        inputs=IOSchema(inline_schema=in_schema),
+        outputs=IOSchema(inline_schema=out_schema),
+        source=SourceInfo(entrypoint="x:y"),
+    )
+    reg = AgentRegistry([manifest], {})
+    monkeypatch.setattr(agents_route_mod, "get_registry", lambda: reg)
+
+    app = FastAPI()
+    app.include_router(agents_router)
+    c = TestClient(app)
+
+    r_in = c.get("/api/agents/agent_studio.inline-1/schema/input")
+    assert r_in.status_code == 200 and r_in.json() == in_schema
+    r_out = c.get("/api/agents/agent_studio.inline-1/schema/output")
+    assert r_out.status_code == 200 and r_out.json() == out_schema
+
+
 def test_invoke_oversized_body_returns_413_without_acquiring_sandbox(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -174,6 +215,39 @@ def test_invoke_oversized_body_returns_413_without_acquiring_sandbox(
         headers={"Content-Type": "application/json"},
     )
     assert resp.status_code == 413
+
+
+def test_invoke_resolves_dynamically_registered_agent_via_offloaded_get(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """invoke_agent runs get_registry().get() via anyio.to_thread.run_sync so a
+    Postgres-backed dynamic lookup never blocks the event loop; confirm a
+    dynamically-registered (non-static) agent still resolves through the offload."""
+    import unified_api.routes.agents as agents_route_mod
+    from agent_registry.loader import get_registry
+    from agent_registry.models import AgentManifest, SourceInfo
+
+    async def _fail_acquire(agent_id: str):  # pragma: no cover — must not run
+        raise AssertionError(f"acquire({agent_id!r}) must not be called on oversized body")
+
+    monkeypatch.setattr(agents_route_mod, "acquire", _fail_acquire)
+    monkeypatch.setenv("AGENT_INVOKE_MAX_PAYLOAD_BYTES", "1024")
+
+    get_registry().register(
+        AgentManifest(
+            id="agent_studio.dynamic-invoke-1",
+            team="agent_studio",
+            name="Dynamic",
+            summary="s",
+            source=SourceInfo(entrypoint="m:f"),
+        )
+    )
+    resp = client.post(
+        "/api/agents/agent_studio.dynamic-invoke-1/invoke",
+        content="x" * 4096,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 413  # not 404 — the dynamic manifest resolved
 
 
 def _install_upstream(
