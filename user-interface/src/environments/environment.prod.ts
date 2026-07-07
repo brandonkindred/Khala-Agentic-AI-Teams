@@ -8,7 +8,7 @@ export const environment = {
   bloggingApiUrl: `${apiBase}/api/blogging`,
   softwareEngineeringApiUrl: `${apiBase}/api/software-engineering`,
   codingTeamApiUrl: `${apiBase}/api/coding-team`,
-  planningV3ApiUrl: `${apiBase}/api/planning-v3`,
+  planningApiUrl: `${apiBase}/api/planning`,
   marketResearchApiUrl: `${apiBase}/api/market-research`,
   soc2ComplianceApiUrl: `${apiBase}/api/soc2-compliance`,
   socialMarketingApiUrl: `${apiBase}/api/social-marketing`,

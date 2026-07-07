@@ -156,9 +156,9 @@ def get_strands_model(
     hardened ``llm_service`` client (via :func:`llm_service.strands_adapter.
     get_strands_model`) rather than constructing strands' native ``OllamaModel``
     directly. The llm_service client converts an empty / thinking-only / prose-
-    only model turn into a real signal — it detects it, retries once with a
-    reduced-thinking ("proof-of-change") pass, and raises
-    ``LLMSemanticExhaustionError`` when the payload truly yields no content —
+    only model turn into a real signal — it detects it, runs a reduced-thinking
+    ("proof-of-change") retry ladder that ends by disabling thinking entirely, and
+    raises ``LLMSemanticExhaustionError`` when the payload truly yields no content —
     instead of returning a "successful" empty string that the strategy-lab
     parser then rejects with ``"No JSON object found in LLM response"``. The
     client also resolves the model's ``num_ctx`` from ``/api/show`` (so a large

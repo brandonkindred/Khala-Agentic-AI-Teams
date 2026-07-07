@@ -137,7 +137,7 @@ class Task(BaseModel):
 
 class CodingTeamPlanInput(BaseModel):
     """Input passed from the software_engineering_team orchestrator to coding_team.
-    Mirrors what the Planning team (Planning V3) produces; architecture comes from handoff.
+    Mirrors what the Planning team produces; architecture comes from handoff.
     """
 
     requirements_title: str = Field(default="Project", description="Product/project title")
@@ -155,12 +155,12 @@ class CodingTeamPlanInput(BaseModel):
     )
     final_spec_content: Optional[str] = Field(
         default=None,
-        description="Final approved spec content from Planning V3",
+        description="Final approved spec content from Planning",
     )
     repo_path: str = Field(..., description="Path to the repository")
     architecture_overview: Optional[str] = Field(
         default=None,
-        description="Architecture overview from Planning V3 handoff",
+        description="Architecture overview from Planning handoff",
     )
     existing_code_summary: Optional[str] = Field(
         default=None,
@@ -230,11 +230,14 @@ class AgentStatusEntry(BaseModel):
           fields only when this agent owns the single live ``current_activity``.
     """
 
-    agent_id: str = Field(..., description="Stable agent id (worker stack/team name, or 'tech_lead')")
+    agent_id: str = Field(
+        ..., description="Stable agent id (worker stack/team name, or 'tech_lead')"
+    )
     role: str = Field(..., description="'tech_lead' or 'implementation_worker'")
     display_name: str = Field(..., description="Human-readable label for the agent card")
     stack: Optional[str] = Field(
-        default=None, description="Stack/team name for implementation workers; None for the Tech Lead"
+        default=None,
+        description="Stack/team name for implementation workers; None for the Tech Lead",
     )
     tools_services: List[str] = Field(
         default_factory=list,

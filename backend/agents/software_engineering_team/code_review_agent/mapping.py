@@ -48,7 +48,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from llm_service import (
     LLMClient,
@@ -198,6 +198,27 @@ class _ChunkOutcome:
         )
 
 
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """Yield ``exc`` and its ``__cause__``/``__context__`` ancestors.
+
+    Strands (and the failover client) wrap the originating LLM error, so a chunk
+    failure must be classified by walking the chain, not just its top type. Prefers
+    an explicit ``__cause__`` (``raise ... from``) over the implicit ``__context__``,
+    dedups by ``id()``, and stops after 10 hops.
+
+    Postconditions:
+        - Yields at most 10 distinct exceptions, starting with ``exc``; never
+          raises. The single owner of this walk so the classifiers below cannot
+          drift apart.
+    """
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen and len(seen) < 10:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
 def _is_infra_failure(exc: BaseException) -> bool:
     """Classify a chunk-review failure as infrastructure vs content-related.
 
@@ -211,10 +232,7 @@ def _is_infra_failure(exc: BaseException) -> bool:
         - Walks the ``__cause__``/``__context__`` chain (strands may wrap the
           client error) up to a bounded depth; never raises.
     """
-    seen: set[int] = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen and len(seen) < 10:
-        seen.add(id(current))
+    for current in _exception_chain(exc):
         if isinstance(current, (LLMJsonParseError, LLMSchemaValidationError)):
             return False
         if isinstance(
@@ -222,7 +240,6 @@ def _is_infra_failure(exc: BaseException) -> bool:
             (LLMRateLimitError, LLMUnreachableAfterRetriesError, LLMPermanentError),
         ):
             return True
-        current = current.__cause__ or current.__context__
     return False
 
 
@@ -265,14 +282,29 @@ def _is_content_failure(exc: BaseException) -> bool:
         - Walks the ``__cause__``/``__context__`` chain (strands may wrap the
           client error) up to a bounded depth; never raises.
     """
-    seen: set[int] = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen and len(seen) < 10:
-        seen.add(id(current))
-        if isinstance(current, _CONTENT_FAILURE_TYPES):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    return any(isinstance(c, _CONTENT_FAILURE_TYPES) for c in _exception_chain(exc))
+
+
+def _semantic_exhaustion_in_chain(exc: BaseException) -> "Optional[LLMSemanticExhaustionError]":
+    """Return the chain's ``LLMSemanticExhaustionError``, or None.
+
+    The receipt object is returned (not just a bool) so callers can read its
+    ``finish_reason`` and ``retry_thinking_level``: a ``finish_reason="length"``
+    empty turn is a token-budget/truncation scenario where a smaller chunk can
+    leave room for content — it must still line-split, like ``LLMTruncatedError`` —
+    whereas a non-length reasoning-only exhaustion is input-size invariant (each
+    half re-exhausts), and ``retry_thinking_level is None`` marks a no-ladder
+    stochastic empty that a same-input retry may still recover.
+
+    Postconditions:
+        - Returns the first ``LLMSemanticExhaustionError`` on the
+          ``__cause__``/``__context__`` chain (strands may wrap it), else None.
+          Never raises.
+    """
+    for current in _exception_chain(exc):
+        if isinstance(current, LLMSemanticExhaustionError):
+            return current
+    return None
 
 
 def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
@@ -286,8 +318,10 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
 
     Preconditions:
         - The failure was already classified a known content failure
-          (``_is_content_failure``) — not infra, not an unexpected defect — and
-          could be neither bisected further nor recovered by retry.
+          (``_is_content_failure``) — not infra, not an unexpected defect. Either
+          it could be neither bisected further nor recovered by retry, OR it is a
+          ladder-spent semantic exhaustion whose fast-path deliberately skips
+          line-splitting and the same-input retry (both futile for it).
 
     Postconditions:
         - Returns one ``high``/``general`` finding per segment in the outcome's
@@ -376,6 +410,18 @@ def _review_chunk_with_recovery(
           ``_degraded_outcome``) rather than aborting the whole run; a one-off
           transient error in a terminal child therefore never costs even that
           child's review.
+        - A REASONING-LOOP semantic exhaustion (``finish_reason != "length"``) is
+          the exception: it is not an input-size failure, so a single-file chunk
+          NEVER line-splits. When the client actually spent its downgrade ladder
+          (``retry_thinking_level`` set) the single-file chunk degrades immediately
+          without a same-input retry too (both futile); when NO ladder ran (thinking
+          was already off) it keeps its one same-input retry. A multi-file chunk is
+          still split by file either way. A ``finish_reason="length"`` empty turn is
+          token-budget-bound, so it line-splits like a truncation instead (a smaller
+          chunk can leave room for content).
+        - Recovery (bisection / retry) is dispatched OUTSIDE the ``except`` block
+          so a child failure is never implicitly context-chained to this chunk's
+          exception (which ``_semantic_exhaustion_in_chain`` would otherwise misread).
         - A sub-review that rejects with no extractable issues but a non-empty
           summary contributes one synthesized high issue built from that
           summary: applied here, per sub-review, because at the merged level
@@ -389,6 +435,7 @@ def _review_chunk_with_recovery(
         sibling_surface=sibling_surface,
         **base_input,
     )
+    failure: Optional[BaseException] = None
     try:
         output = reviewer.run(chunk_input)
     except Exception as exc:
@@ -405,82 +452,123 @@ def _review_chunk_with_recovery(
             # not-reviewed finding that another approving chunk could carry
             # past the gate.
             raise
-        halves = _bisect_chunk(chunk) if depth < _max_bisect_depth() else None
-        if halves is not None:
-            logger.warning(
-                "CodeReviewCoordinator: chunk review failed at depth %s (%s: %s) — bisecting [%s]",
-                depth,
-                type(exc).__name__,
-                exc,
-                chunk.paths_label,
-            )
-            # Each half recomputes its sibling surface: a half no longer contains
-            # the other half's files, so those files become genuine siblings whose
-            # surface it should see (when surface_by_path is unavailable — a direct
-            # caller passed None — the parent's surface rides along unchanged).
-            outcome = _review_chunk_with_recovery(
+        # Known content failure: stash it and recover BELOW, outside this `except`
+        # block (see the recovery comment) — never recurse/retry in here.
+        failure = exc
+    else:
+        issues = _issues_from_chunk_output(chunk, output.issues)
+        if not output.approved and not issues and output.summary and output.summary.strip():
+            issues = [
+                CodeReviewIssue(
+                    severity="high",
+                    category="general",
+                    file_path="",
+                    description=f"Code review rejected: {output.summary}",
+                    suggestion="Address the concerns described in the review summary. "
+                    "Ensure the code meets all acceptance criteria and follows project conventions.",
+                )
+            ]
+        return _ChunkOutcome(
+            issues=issues,
+            summaries=[output.summary],
+            spec_notes=[output.spec_compliance_notes],
+            commit_messages=[output.suggested_commit_message],
+            approved_flags=[output.approved],
+        )
+
+    # --- Recovery for a known content failure -------------------------------
+    # This runs AFTER the `except` block has exited, deliberately: the child
+    # ``reviewer.run`` calls below must NOT execute while ``failure`` is the active
+    # exception, or Python would implicitly chain it onto any child failure's
+    # ``__context__`` — and ``_semantic_exhaustion_in_chain`` walks ``__context__``,
+    # so a child truncation/parse error would be misclassified as semantic and
+    # stripped of its own line-bisect/retry recovery.
+    exc = failure
+    # A REASONING-LOOP semantic exhaustion (``finish_reason != "length"``: the model
+    # emitted only reasoning and stopped) is content-shaped but NOT input-size-shaped.
+    # LINE-splitting a single file only multiplies doomed multi-minute calls (each
+    # half re-exhausts), and a same-input retry re-runs the downgrade ladder the
+    # client already spent — so a ladder-spent reasoning-loop exhaustion skips both.
+    # A ``finish_reason="length"`` empty turn, by contrast, is token-budget-bound (the
+    # model ran out of tokens mid-reasoning): a smaller chunk can leave room for
+    # content, so it line-splits like ``LLMTruncatedError`` (it is NOT a reasoning
+    # loop here). SEPARATING a multi-file chunk is worthwhile either way (only one
+    # file may be the culprit), so a multi-segment reasoning-loop chunk is split by
+    # file; and a reasoning-loop exhaustion where NO ladder ran (thinking was already
+    # off) is a stochastic empty that keeps its one same-input retry. Other content
+    # failures (JSON parse, length truncation) line-bisect as before.
+    sem_exc = _semantic_exhaustion_in_chain(exc)
+    reasoning_loop = sem_exc is not None and sem_exc.finish_reason != "length"
+    skip_retry = reasoning_loop and sem_exc.retry_thinking_level is not None
+    can_bisect = depth < _max_bisect_depth() and (not reasoning_loop or len(chunk.segments) > 1)
+    halves = _bisect_chunk(chunk) if can_bisect else None
+    if halves is not None:
+        logger.warning(
+            "CodeReviewCoordinator: chunk review failed at depth %s (%s: %s) — bisecting [%s]",
+            depth,
+            type(exc).__name__,
+            exc,
+            chunk.paths_label,
+        )
+        # Each half recomputes its sibling surface: a half no longer contains
+        # the other half's files, so those files become genuine siblings whose
+        # surface it should see (when surface_by_path is unavailable — a direct
+        # caller passed None — the parent's surface rides along unchanged).
+        outcome = _review_chunk_with_recovery(
+            reviewer,
+            halves[0],
+            base_input,
+            _half_sibling_surface(halves[0], surface_by_path, sibling_surface),
+            surface_by_path,
+            depth + 1,
+        )
+        outcome.absorb(
+            _review_chunk_with_recovery(
                 reviewer,
-                halves[0],
+                halves[1],
                 base_input,
-                _half_sibling_surface(halves[0], surface_by_path, sibling_surface),
+                _half_sibling_surface(halves[1], surface_by_path, sibling_surface),
                 surface_by_path,
                 depth + 1,
             )
-            outcome.absorb(
-                _review_chunk_with_recovery(
-                    reviewer,
-                    halves[1],
-                    base_input,
-                    _half_sibling_surface(halves[1], surface_by_path, sibling_surface),
-                    surface_by_path,
-                    depth + 1,
-                )
-            )
-            return outcome
-        if not retried:
-            logger.warning(
-                "CodeReviewCoordinator: chunk review failed (%s: %s) — retrying once [%s]",
-                type(exc).__name__,
-                exc,
-                chunk.paths_label,
-            )
-            return _review_chunk_with_recovery(
-                reviewer, chunk, base_input, sibling_surface, surface_by_path, depth, retried=True
-            )
-        # Known content failure that cannot bisect further and survived its
-        # retry: degrade instead of aborting the whole run. The chunk's code is
-        # named by a blocking ``high`` "not reviewed" finding (which rejects the
-        # merged review, so unreviewed code is never approved), while the chunks
-        # that did succeed still contribute their verdicts. (A run in which *no*
-        # chunk succeeds is caught by ``run_coordinator``'s total-failure guard,
-        # which still raises.)
+        )
+        return outcome
+    if skip_retry:
+        # Ladder-spent semantic exhaustion at a single (or depth-capped) chunk:
+        # line-splitting and a same-input retry are both futile (see above), so
+        # degrade straight to a blocking "not reviewed" finding without either.
         logger.warning(
-            "CodeReviewCoordinator: chunk unreviewable after recovery (%s: %s) — "
-            "degrading to a not-reviewed finding [%s]",
+            "CodeReviewCoordinator: chunk semantically exhausted (%s: %s) — "
+            "degrading without line-splitting or retry [%s]",
             type(exc).__name__,
             exc,
             chunk.paths_label,
         )
         return _degraded_outcome(chunk, exc)
-    issues = _issues_from_chunk_output(chunk, output.issues)
-    if not output.approved and not issues and output.summary and output.summary.strip():
-        issues = [
-            CodeReviewIssue(
-                severity="high",
-                category="general",
-                file_path="",
-                description=f"Code review rejected: {output.summary}",
-                suggestion="Address the concerns described in the review summary. "
-                "Ensure the code meets all acceptance criteria and follows project conventions.",
-            )
-        ]
-    return _ChunkOutcome(
-        issues=issues,
-        summaries=[output.summary],
-        spec_notes=[output.spec_compliance_notes],
-        commit_messages=[output.suggested_commit_message],
-        approved_flags=[output.approved],
+    if not retried:
+        logger.warning(
+            "CodeReviewCoordinator: chunk review failed (%s: %s) — retrying once [%s]",
+            type(exc).__name__,
+            exc,
+            chunk.paths_label,
+        )
+        return _review_chunk_with_recovery(
+            reviewer, chunk, base_input, sibling_surface, surface_by_path, depth, retried=True
+        )
+    # Known content failure that cannot bisect further and survived its retry:
+    # degrade instead of aborting the whole run. The chunk's code is named by a
+    # blocking ``high`` "not reviewed" finding (which rejects the merged review, so
+    # unreviewed code is never approved), while the chunks that did succeed still
+    # contribute their verdicts. (A run in which *no* chunk succeeds is caught by
+    # ``run_coordinator``'s total-failure guard, which still raises.)
+    logger.warning(
+        "CodeReviewCoordinator: chunk unreviewable after recovery (%s: %s) — "
+        "degrading to a not-reviewed finding [%s]",
+        type(exc).__name__,
+        exc,
+        chunk.paths_label,
     )
+    return _degraded_outcome(chunk, exc)
 
 
 def _review_model_fingerprint(llm: LLMClient) -> str:

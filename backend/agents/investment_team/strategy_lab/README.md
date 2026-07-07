@@ -242,7 +242,8 @@ routes every Strategy Lab LLM call through the platform's hardened `llm_service`
 thinking-only / prose-only turn on a long code-emitting generation: the strands-native path returned
 that as a "successful" empty string, which the parser then rejected with
 `No JSON object found in LLM response`, wasting the whole round. The `llm_service` client instead
-**detects** an empty response, **retries once with reduced thinking** ("proof-of-change"), and raises
+**detects** an empty response, **retries with progressively reduced thinking** ("proof-of-change",
+ending in thinking-off), and raises
 `LLMSemanticExhaustionError` only when the payload truly yields nothing — and it resolves the model's
 `num_ctx` from `/api/show` (so a large refinement prompt is not silently truncated), caps
 `max_tokens`, and adds rate-limit / JSON-repair handling. Agents that recover their result with

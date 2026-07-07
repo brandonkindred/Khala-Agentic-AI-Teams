@@ -41,7 +41,7 @@ record_association_safe(ArtifactType.BRAND, "branding", brand.id, label=brand.na
 ```
 
 Existing call sites: branding `create_brand`, blogging `create_blog_job`,
-planning-v3 / coding-team `create_job`, and agentic `create_team`.
+planning / coding-team `create_job`, and agentic `create_team`.
 
 ## API
 

@@ -155,9 +155,9 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         cell="personal",
         timeout_seconds=120.0,
     ),
-    "planning_v3": TeamConfig(
-        name="Planning V3",
-        prefix="/api/planning-v3",
+    "planning": TeamConfig(
+        name="Planning",
+        prefix="/api/planning",
         description="Client-facing discovery and requirements; PRD and handoff for dev/UI/UX",
         tags=["planning", "discovery", "prd"],
         cell="core_dev",

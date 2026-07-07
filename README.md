@@ -32,7 +32,7 @@
 Khala is made up of teams of [AWS Strands](https://strandsagents.com/) Agents. Each team has an assistant that collaborates with you and communicates with the team that they are assigned to. Every team plugs into the same shared mind, so you can bring them in on whatever you're working on:
 
 - **Ship a spec into code** → the Software Engineering team runs Discovery → Design → Execution → Integration alongside you: planning, code + tests + docs in parallel backend/frontend queues, merging to a `development` branch when the quality gates pass.
-- **Figure out a market** → Market Research pairs with you on user discovery and concept viability; Planning V3 turns the conversation into a PRD the dev teams can run with.
+- **Figure out a market** → Market Research pairs with you on user discovery and concept viability; Planning turns the conversation into a PRD the dev teams can run with.
 - **Plan a launch** → Blogging (research → planning → draft → copy-edit → gates) writes with you; Social Marketing builds per-platform campaigns with you; the Sales team runs B2B prospecting, qualification, and close with you.
 - **Pass an audit** → SOC2 Compliance drives the workflow; Accessibility Audit reports WCAG 2.2 / Section 508 findings for web and mobile.
 - **Run a portfolio** → the Investment team pairs a Financial Advisor (IPS, proposals, memos) with a Strategy Lab (ideation, backtests) behind one API prefix.
@@ -88,7 +88,7 @@ Today Khala ships with 20 specialist teams behind one gateway, grouped loosely f
 | Team | Route | What it does |
 |---|---|---|
 | **Software Engineering** | `/api/software-engineering` | The whole pod — PM, architect, devs, reviewer, release captain. Hand it a spec, get a merged PR. |
-| **Planning V3** | `/api/planning-v3` | Turns a fuzzy idea into a PRD the dev teams can actually build from. |
+| **Planning** | `/api/planning` | Turns a fuzzy idea into a PRD the dev teams can actually build from. |
 | **Coding Team** | `/api/coding-team` | A tech lead and a stack of specialists, wired to a task graph. The SE team's engine room. |
 | **AI Systems** | `/api/ai-systems` | A factory that reads a spec and builds the AI agent system it describes. |
 | **Agent Provisioning** | `/api/agent-provisioning` | Stands up the sandbox — database, git, docker — so a new agent can actually run. |
@@ -212,7 +212,7 @@ Growing the collective is a first-class feature, not an afterthought — it's th
 
 ### Core Dev
 - [`backend/agents/software_engineering_team/`](backend/agents/software_engineering_team/README.md) — the flagship SE pipeline (planning, coding, review, release)
-- [`backend/agents/planning_v3_team/`](backend/agents/planning_v3_team/README.md)
+- [`backend/agents/planning_team/`](backend/agents/planning_team/README.md)
 - [`backend/agents/coding_team/`](backend/agents/coding_team/README.md)
 - [`backend/agents/ai_systems_team/`](backend/agents/ai_systems_team/README.md)
 - [`backend/agents/agent_provisioning_team/`](backend/agents/agent_provisioning_team/README.md)

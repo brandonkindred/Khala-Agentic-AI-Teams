@@ -2,7 +2,7 @@
 
 ## Context
 
-The Khala SE team (`backend/agents/software_engineering_team/`) coordinates ~15 specialized agents across a 4-phase pipeline: Product Analysis → Planning V3 → Execution → Integration. Most internal coordination is hand-rolled: `threading.Lock`-guarded shared dicts for parallel workers, `while` loops for review gates, and sequential `.run()` calls even where comments say "parallel". There is no DAG framework and no Strands usage today. A class literally named `CodingTeamSwarm` is a hand-rolled 500-round while loop that reimplements swarm primitives.
+The Khala SE team (`backend/agents/software_engineering_team/`) coordinates ~15 specialized agents across a 4-phase pipeline: Product Analysis → Planning → Execution → Integration. Most internal coordination is hand-rolled: `threading.Lock`-guarded shared dicts for parallel workers, `while` loops for review gates, and sequential `.run()` calls even where comments say "parallel". There is no DAG framework and no Strands usage today. A class literally named `CodingTeamSwarm` is a hand-rolled 500-round while loop that reimplements swarm primitives.
 
 The request: review the SE team and identify the highest-value places where Strands `Graph` (deterministic DAG, parallel fan-out, conditional edges) or Strands `Swarm` (autonomous handoffs via `handoff_to_agent`, shared context, built-in safety) would measurably improve outcomes — speed, quality, robustness, or clarity.
 

@@ -775,7 +775,7 @@ def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
     written: list = []
     monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
 
-    updater = se_orch._make_planning_v3_job_updater("j1")
+    updater = se_orch._make_planning_job_updater("j1")
     updater(progress=100, status_text="done")
     assert written[-1]["progress"] == 30
     assert written[-1]["status_text"] == "done"

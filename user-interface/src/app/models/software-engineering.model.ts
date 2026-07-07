@@ -87,14 +87,14 @@ export interface PhaseDefinition {
   icon: string;
 }
 
-/** Planning-v2 subprocesses (planning, implementation, etc.). */
-export const PLANNING_V2_PHASES: PhaseDefinition[] = [
+/** Planning subprocess phases (the Planning team's workflow). */
+export const PLANNING_PHASES: PhaseDefinition[] = [
   { id: 'intake', label: 'Intake', icon: 'input' },
-  { id: 'planning', label: 'Planning', icon: 'event_note' },
-  { id: 'implementation', label: 'Implementation', icon: 'build' },
-  { id: 'review', label: 'Review', icon: 'rate_review' },
-  { id: 'problem_solving', label: 'Problem Solving', icon: 'psychology' },
-  { id: 'deliver', label: 'Deliver', icon: 'local_shipping' },
+  { id: 'discovery', label: 'Discovery', icon: 'search' },
+  { id: 'requirements', label: 'Requirements', icon: 'checklist' },
+  { id: 'synthesis', label: 'Synthesis', icon: 'merge_type' },
+  { id: 'document_production', label: 'Document Production', icon: 'description' },
+  { id: 'sub_agent_provisioning', label: 'Sub-Agent Provisioning', icon: 'smart_toy' },
 ];
 
 /** Code team phases (backend-code-v2, frontend-code-v2). */
@@ -400,52 +400,6 @@ export interface FrontendCodeV2StatusResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Planning-V2
-// ---------------------------------------------------------------------------
-
-/** Request for POST /planning-v2/run. */
-export interface PlanningV2RunRequest {
-  spec_content: string;
-  repo_path: string;
-  inspiration_content?: string;
-}
-
-/** Response from POST /planning-v2/run. */
-export interface PlanningV2RunResponse {
-  job_id: string;
-  status: string;
-  message: string;
-}
-
-/** Response from GET /planning-v2/status/{job_id}. */
-export interface PlanningV2StatusResponse {
-  job_id: string;
-  status: string;
-  repo_path?: string;
-  current_phase?: string;
-  progress: number;
-  completed_phases: string[];
-  active_roles?: string[];
-  error?: string;
-  summary?: string;
-  /** Questions awaiting user response before workflow can continue. */
-  pending_questions?: PendingQuestion[];
-  /** True when workflow is blocked waiting for user to answer open questions. */
-  waiting_for_answers?: boolean;
-  /** Human-readable status message describing current activity. */
-  status_text?: string;
-}
-
-/** Response from GET /planning-v2/result/{job_id}. */
-export interface PlanningV2ResultResponse {
-  job_id: string;
-  status: string;
-  phase_results: Record<string, unknown>;
-  summary?: string;
-  error?: string;
-}
-
-// ---------------------------------------------------------------------------
 // Product Analysis
 // ---------------------------------------------------------------------------
 
@@ -483,28 +437,4 @@ export interface ProductAnalysisStatusResponse {
   error?: string;
   summary?: string;
   validated_spec_path?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Planning Artifact Viewing
-// ---------------------------------------------------------------------------
-
-/** Metadata for a single planning artifact file. */
-export interface PlanningArtifactMeta {
-  name: string;
-  size_bytes: number;
-  modified_at: string;
-  sections?: string[];
-}
-
-/** Response listing planning artifacts for a job. */
-export interface PlanningArtifactListResponse {
-  artifacts: PlanningArtifactMeta[];
-}
-
-/** Response with the content of a single planning artifact. */
-export interface PlanningArtifactContentResponse {
-  name: string;
-  content: string | Record<string, unknown>;
-  content_type: string;
 }

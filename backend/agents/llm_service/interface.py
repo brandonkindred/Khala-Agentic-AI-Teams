@@ -67,9 +67,11 @@ class LLMSemanticExhaustionError(LLMTemporaryError):
     A semantically exhausted call is one where the request transport succeeded
     (HTTP 200) but the model returned zero content — typically because it spent
     its whole generation on reasoning. Unlike transport faults, re-sending the
-    identical payload is very unlikely to help, so the client performs at most
-    one retry with reduced thinking and then raises this error as a terminal
-    receipt instead of looping on the transient schedule.
+    identical payload is very unlikely to help, so the client runs a
+    proof-of-change thinking-downgrade ladder (steps reasoning down and ends by
+    disabling thinking entirely — up to two rungs from a top tier, e.g.
+    ``max`` -> ``high`` -> off) and then raises this error as a terminal receipt
+    instead of looping on the transient schedule.
 
     Subclasses ``LLMTemporaryError`` so existing pause/degrade handlers keep
     working: at the macro level the condition is temporary (a different prompt
@@ -83,9 +85,12 @@ class LLMSemanticExhaustionError(LLMTemporaryError):
           receipt; the client always supplies every field.
     Postconditions / Invariants:
         - ``failure_class`` is always ``"semantic_exhaustion"``.
-        - ``retry_thinking_level`` is the reduced thinking value used on the
-          proof-of-change retry, or ``None`` when no downgrade was available
-          (thinking already off / at the lowest registered level).
+        - ``retry_thinking_level`` is the thinking value used on the LAST
+          proof-of-change rung — a lower level string, or ``False`` once the
+          ladder reached thinking-off — or ``None`` when no downgrade ran at all
+          (thinking was already off, so no rung was attempted). A ``None`` here
+          therefore distinguishes "the ladder was never run" from "the ladder ran
+          and ended at thinking-off" (``False``).
         - ``content_bytes_seen`` is True iff any failing attempt produced raw
           content bytes. Those bytes are necessarily whitespace-only: an
           attempt with non-whitespace content succeeds and never contributes

@@ -1,0 +1,11 @@
+schema_version: 1
+id: planning.synthesis
+team: planning
+name: Planning — Synthesis
+summary: Consolidates discovery and requirements into a validated spec.
+tags: [planning, synthesis, prd]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: planning_team.phases.synthesis:run_synthesis

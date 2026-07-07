@@ -11,8 +11,8 @@ flowchart TD
     PRA["Phase 1: Product Requirements Analysis\nspec_review → communicate →\nspec_update → spec_cleanup"]
     CANCEL2{"Cancelled?"}
 
-    PV3["Phase 2: Planning V3\nintake → discovery → requirements →\nsynthesis → document_production →\nsub_agent_provisioning"]
-    ADAPT["adapt_planning_v3_result()\n→ CodingTeamPlanInput"]
+    Planning["Phase 2: Planning\nintake → discovery → requirements →\nsynthesis → document_production →\nsub_agent_provisioning"]
+    ADAPT["adapt_planning_result()\n→ CodingTeamPlanInput"]
     CANCEL3{"Cancelled?"}
 
     DECISION{"use_coding_team?\n(default: True)"}
@@ -41,8 +41,8 @@ flowchart TD
     START --> CREATE --> PRA
     PRA --> CANCEL1
     CANCEL1 -->|Yes| ERR_FAIL
-    CANCEL1 -->|No| PV3
-    PV3 --> ADAPT --> CANCEL2
+    CANCEL1 -->|No| Planning
+    Planning --> ADAPT --> CANCEL2
     CANCEL2 -->|Yes| ERR_FAIL
     CANCEL2 -->|No| DECISION
 
@@ -58,7 +58,7 @@ flowchart TD
     CANCEL3 -->|No| INTEG --> SEC --> DOCS --> DEVOPS --> DONE2
 
     PRA -.->|LLMUnreachable| ERR_LLM
-    PV3 -.->|LLMRateLimit| ERR_LIMIT
+    Planning -.->|LLMRateLimit| ERR_LIMIT
     CT -.->|Exception| ERR_FAIL
 ```
 
@@ -326,11 +326,11 @@ flowchart LR
     ENV -->|production| PROD
 ```
 
-## 6. Planning V3 Workflow
+## 6. Planning Workflow
 
 ```mermaid
 flowchart TD
-    START["Planning V3 run_workflow()"]
+    START["Planning run_workflow()"]
 
     INTAKE["INTAKE (5%)\nParse client_name, brief, spec\n→ initial ClientContext"]
 
@@ -344,9 +344,6 @@ flowchart TD
 
     PRA_OPT{"use_product\n_analysis?"}
     PRA_RUN["Run PRA Agent\nvalidate + refine spec"]
-
-    PV2_OPT{"use_planning\n_v2?"}
-    PV2_RUN["Run Planning V2\nlegacy 6-phase planning"]
 
     ARCH_OPT{"run_architecture\n_fn?"}
     ARCH_RUN["Architecture Expert\ngenerate architecture_overview"]
@@ -362,11 +359,8 @@ flowchart TD
     START --> INTAKE --> DISC --> REQ --> SYN --> DOCPROD
 
     DOCPROD --> PRA_OPT
-    PRA_OPT -->|Yes| PRA_RUN --> PV2_OPT
-    PRA_OPT -->|No| PV2_OPT
-
-    PV2_OPT -->|Yes| PV2_RUN --> ARCH_OPT
-    PV2_OPT -->|No| ARCH_OPT
+    PRA_OPT -->|Yes| PRA_RUN --> ARCH_OPT
+    PRA_OPT -->|No| ARCH_OPT
 
     ARCH_OPT -->|Yes| ARCH_RUN --> HANDOFF
     ARCH_OPT -->|No| HANDOFF
@@ -382,7 +376,7 @@ flowchart TD
 flowchart LR
     subgraph MainThread["Main Thread"]
         M1["PRA"]
-        M2["Planning V3"]
+        M2["Planning"]
         M3["Tech Lead"]
         M4["Architecture Expert"]
         M5["Consolidation"]
@@ -486,13 +480,13 @@ flowchart TD
     style ABORT fill:#f8d7da
 ```
 
-## 9. Planning V3 → Coding Team Data Flow
+## 9. Planning → Coding Team Data Flow
 
 End-to-end data transformation from planning to execution.
 
 ```mermaid
 flowchart TD
-    subgraph PV3Output["Planning V3 Output"]
+    subgraph PlanningOutput["Planning Output"]
         HP["HandoffPackage"]
         CC["ClientContext"]
         VS["validated_spec_content"]
@@ -500,9 +494,9 @@ flowchart TD
         AO["architecture_overview"]
     end
 
-    ADAPT["adapt_planning_v3_result()"]
+    ADAPT["adapt_planning_result()"]
 
-    subgraph AdapterResult["PlanningV2AdapterResult"]
+    subgraph AdapterResult["PlanningAdapterResult"]
         REQ["ProductRequirements\ntitle, description,\nacceptance_criteria"]
         PO["project_overview\nfeatures_and_functionality_doc\ngoals"]
         HIER["PlanningHierarchy\ninitiatives → epics → stories → tasks"]
@@ -524,7 +518,7 @@ flowchart TD
         TG_ST["Subtask[]\nper task decomposition"]
     end
 
-    PV3Output --> ADAPT
+    PlanningOutput --> ADAPT
     ADAPT --> AdapterResult
     AdapterResult --> CTInput
     CTInput -->|TechLead.run_plan_to_task_graph| TaskGraph

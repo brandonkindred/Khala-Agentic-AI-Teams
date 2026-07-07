@@ -54,7 +54,7 @@ permanently. Negative floors to `0` (retry on next call).
 ### LLM_MAX_RETRIES / LLM_BACKOFF_BASE / LLM_BACKOFF_MAX
 **Transient** (5xx / connection / timeout) retry schedule for the central Ollama client — defaults
 `10` / `2`s / `120`s. These no longer govern HTTP 429 rate limits (see the `LLM_RATE_LIMIT_*` row),
-nor empty 200 responses, which get a single proof-of-change thinking-downgrade retry instead (see
+nor empty 200 responses, which get a proof-of-change thinking-downgrade ladder instead (see
 `LLM_THINKING_DOWNGRADE_RETRY`).
 
 ### LLM_ENABLE_THINKING
@@ -69,20 +69,30 @@ aren't a registered level for the model fall back to the max level with a warnin
 models that only support boolean think.
 
 ### LLM_THINKING_DOWNGRADE_RETRY
-Proof-of-change retry for semantically exhausted calls (default on; `false`/`0`/`no` disables). A
-**semantically exhausted** call is an HTTP 200 with zero assistant content — typically a thinking
-model that produced only reasoning. Re-sending the identical payload rarely helps, so instead of
-spending the transient `LLM_MAX_RETRIES` schedule on it, the client retries **once, immediately**
-with reduced thinking: one level down for models registered in `KNOWN_MODEL_THINKING_LEVELS`
-(e.g. `max` → `high`), `think=False` for boolean/unregistered thinking. If the downgraded attempt
-is also empty — or thinking is already off / at the lowest level, leaving no provable change — the
-call fails hard with `LLMSemanticExhaustionError`, whose receipt carries `failure_class`,
-`attempts_used`, the original and retry thinking levels, whether any raw (necessarily
-whitespace-only) content bytes were ever seen,
-the `finish_reason`, and a fingerprint of the last payload (also logged at ERROR; the downgrade
-itself is logged at WARNING). Transient 5xx/connection/timeout faults and 429s keep their own
-independent schedules before and after the downgrade. Disabling the toggle restores the legacy
+Proof-of-change retry ladder for semantically exhausted calls (default on; `false`/`0`/`no`
+disables). A **semantically exhausted** call is an HTTP 200 with zero assistant content — typically
+a thinking model that produced only reasoning. Re-sending the identical payload rarely helps, so
+instead of spending the transient `LLM_MAX_RETRIES` schedule on it, the client retries **immediately**
+with progressively reduced reasoning, ending by disabling thinking entirely (the strongest proof of
+change — a non-reasoning turn is forced to open the content channel): from a model's **top** tier it
+steps one notch down (e.g. `max` → `high`) then, if still empty, to thinking-off; from an
+**already-reduced** tier it goes straight to thinking-off (the wire-redundant intermediate tiers are
+skipped — e.g. `deepseek-v4-pro:cloud` collapses low/medium/high to one reasoning effort); boolean/
+unregistered thinking goes straight to `think=False`. When the ladder is exhausted — or thinking is
+already off, leaving no provable change — the call fails hard with `LLMSemanticExhaustionError`,
+whose receipt carries `failure_class`, `attempts_used`, the original and last retry thinking levels,
+whether any raw (necessarily whitespace-only) content bytes were ever seen, the `finish_reason`, and a
+fingerprint of the last payload. The same ERROR log line additionally reports a diagnostic of the
+reasoning channel (its accumulated length across attempts and whether a JSON object was found there —
+to detect answers misrouted into reasoning); these two fields are logged only, not carried on the
+exception object. Each downgrade rung is logged at WARNING. Transient 5xx/connection/timeout faults and 429s keep their own
+independent schedules before and after the downgrades. Disabling the toggle restores the legacy
 behavior (empty 200s retried verbatim on the transient schedule).
+
+Agents that run a reasoning model in JSON mode where the top `max` tier reliably reasoning-loops can
+pin a reduced default tier via `AGENT_DEFAULT_THINK` in `llm_service/config.py` (e.g. `code_review`
+defaults to `high`), so the **first** call already runs at a tier that opens the content channel
+rather than relying on this post-hoc ladder.
 
 ---
 
@@ -874,16 +884,32 @@ Winning Posts Bank (default `0.7`).
 
 ---
 
-## Planning V3
+## Planning
 
-### PLANNING_V3_MANY_SECTIONS_WARN
-Soft threshold for the spec-digestion engine (`planning_v3_team/spec_digest.py`): when a
+### PLANNING_SERVICE_URL
+Base URL the unified API proxies `/api/planning/*` requests to when the Planning team
+runs as its own service (Docker/production). Unset in local dev, where the team runs
+in-process. See the analogous `<TEAM>_SERVICE_URL` entries for other teams.
+
+### PLANNING_SOFTWARE_ENGINEERING_URL / PLANNING_MARKET_RESEARCH_URL / PLANNING_AI_SYSTEMS_URL
+Per-adapter base-URL overrides the Planning team uses when calling the Product
+Requirements Analysis (SE), Market Research, and AI Systems adapters, respectively.
+Each falls back to `UNIFIED_API_BASE_URL` when unset, so these only need to be set
+when an adapter's target team is reachable at a different address than the unified API
+(e.g. hitting a team's standalone service directly).
+
+### TEMPORAL_TASK_QUEUE_PLANNING
+Temporal task queue name the Planning worker polls and the API dispatches workflows to
+when Temporal mode is enabled (`TEMPORAL_ADDRESS` set). Default `planning`.
+
+### PLANNING_MANY_SECTIONS_WARN
+Soft threshold for the spec-digestion engine (`planning_team/spec_digest.py`): when a
 brief+spec splits into more than this many sections, `map_reduce` logs a warning (one LLM call
 runs per section, so a very large spec has a proportional cost/latency). Observability only — it
 never caps or drops sections (that would discard spec content). Default `50`; garbage or
 non-positive values fall back to the default.
 
-### PLANNING_V3_RESERVED_PROMPT_TOKENS / PLANNING_V3_RESERVED_RESPONSE_TOKENS
+### PLANNING_RESERVED_PROMPT_TOKENS / PLANNING_RESERVED_RESPONSE_TOKENS
 Token reserves the spec-digestion engine carves out of the model context before sizing each
 per-section prompt — for the phase prompt template/headers and the model's response,
 respectively. Defaults `6000` / `4096`; raise them for prompt-heavy phases or models that
