@@ -455,6 +455,24 @@ def test_reports_review_unavailable_matches_by_class_name() -> None:
     assert _reports_review_unavailable(exc, "CodeReviewUnavailableError") is True
 
 
+def test_reports_review_unavailable_ignores_none_type_node() -> None:
+    from code_review_agent.agent import _reports_review_unavailable
+    from temporalio.exceptions import ApplicationError
+
+    marker = "CodeReviewUnavailableError"
+    # A node whose ``type`` is explicitly None (e.g. a Temporal FailureError with
+    # no application type) must not be treated as the marker — ``None == marker``
+    # is False — so an unrelated failure is not a false positive...
+    none_type = RuntimeError("wrapper")
+    none_type.type = None  # type: ignore[attr-defined]
+    assert _reports_review_unavailable(none_type, marker) is False
+    # ...and the walk continues past it to find a genuine marker nested below.
+    none_type_with_marker = RuntimeError("wrapper")
+    none_type_with_marker.type = None  # type: ignore[attr-defined]
+    none_type_with_marker.__cause__ = ApplicationError("m", type=marker)
+    assert _reports_review_unavailable(none_type_with_marker, marker) is True
+
+
 def test_dispatch_unavailable_is_distinct_from_review_failure() -> None:
     assert issubclass(_TemporalDispatchUnavailable, RuntimeError)
     assert not issubclass(_TemporalDispatchUnavailable, CodeReviewUnavailableError)
