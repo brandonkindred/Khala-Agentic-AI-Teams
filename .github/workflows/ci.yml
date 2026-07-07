@@ -143,7 +143,7 @@ jobs:
               - 'backend/agents/agent_registry/**'
               - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
-            # SE imports coding_team, planning_v3_team, agent_repair_team
+            # SE imports coding_team, planning_team, agent_repair_team
             # from its orchestrator and Temporal activities. agents/api is
             # the blog research API (see agents/api/README.md) — it's
             # owned by blogging, listed in the blogging filter below.
@@ -151,7 +151,7 @@ jobs:
               - 'backend/agents/software_engineering_team/**'
               - 'backend/agents/coding_team/**'
               - 'backend/agents/coding_team_service/**'
-              - 'backend/agents/planning_v3_team/**'
+              - 'backend/agents/planning_team/**'
               - 'backend/agents/agent_repair_team/**'
               # SE/coding_team's Senior SWE imports the shared repo-inspection tools.
               - 'backend/agents/agent_repo_tools/**'
@@ -261,7 +261,7 @@ jobs:
               # Per-team paths (each has its own filter)
               - '!backend/agents/software_engineering_team/**'
               - '!backend/agents/coding_team/**'
-              - '!backend/agents/planning_v3_team/**'
+              - '!backend/agents/planning_team/**'
               - '!backend/agents/agent_repair_team/**'
               - '!backend/agents/agent_repo_tools/**'
               - '!backend/agents/api/**'

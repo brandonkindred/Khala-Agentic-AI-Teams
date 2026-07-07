@@ -316,11 +316,11 @@ def test_execute_coding_team_activity_passes_band_and_default_llm_getter(
 
     monkeypatch.setattr(coding_orch, "run_coding_team_orchestrator", fake_orchestrator)
 
-    from planning_v3_adapter import PlanningV2AdapterResult
+    from planning_adapter import PlanningAdapterResult
 
     from software_engineering_team.shared.models import ProductRequirements
 
-    adapter_dict = PlanningV2AdapterResult(
+    adapter_dict = PlanningAdapterResult(
         requirements=ProductRequirements(
             title="T",
             description="d",
@@ -368,7 +368,7 @@ def test_temporal_pra_and_planning_updaters_are_the_shared_band_factories(monkey
         == se_orch.PROGRESS_BAND_PRODUCT_ANALYSIS[0] + (se_orch.PROGRESS_BAND_PRODUCT_ANALYSIS[1])
     )
 
-    planning = se_orch._make_planning_v3_job_updater("j-t")
+    planning = se_orch._make_planning_job_updater("j-t")
     planning(progress=100)
     base, span = se_orch.PROGRESS_BAND_PLANNING
     assert written[-1]["progress"] == base + span
@@ -381,11 +381,11 @@ def test_adapter_result_round_trips_through_dict() -> None:
     a lossless round trip including the nested Pydantic models."""
     import json
 
-    from planning_v3_adapter import PlanningV2AdapterResult
+    from planning_adapter import PlanningAdapterResult
 
     from software_engineering_team.shared.models import ProductRequirements
 
-    original = PlanningV2AdapterResult(
+    original = PlanningAdapterResult(
         requirements=ProductRequirements(
             title="Build it",
             description="desc",
@@ -406,7 +406,7 @@ def test_adapter_result_round_trips_through_dict() -> None:
     payload = original.to_dict()
     json.dumps(payload)  # must be JSON-safe for the Temporal payload converter
 
-    rebuilt = PlanningV2AdapterResult.from_dict(payload)
+    rebuilt = PlanningAdapterResult.from_dict(payload)
     assert rebuilt.requirements == original.requirements
     assert rebuilt.project_overview == original.project_overview
     assert rebuilt.open_questions == original.open_questions

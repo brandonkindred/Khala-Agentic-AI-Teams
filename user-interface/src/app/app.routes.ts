@@ -57,9 +57,9 @@ export const routes: Routes = [
         data: { breadcrumb: 'Software Engineering' },
       },
       {
-        path: 'software-engineering/planning-v3',
+        path: 'software-engineering/planning',
         loadComponent: () =>
-          import('./components/planning-v3-page/planning-v3-page.component').then((m) => m.PlanningV3PageComponent),
+          import('./components/planning-page/planning-page.component').then((m) => m.PlanningPageComponent),
         title: 'Planning',
         data: { breadcrumb: 'Planning' },
       },
@@ -76,15 +76,6 @@ export const routes: Routes = [
           import('./components/code-review-panel/code-review-panel.component').then((m) => m.CodeReviewPanelComponent),
         title: 'Code Review',
         data: { breadcrumb: 'Code Review' },
-      },
-      {
-        path: 'software-engineering/planning-v2/jobs/:jobId/artifacts/:artifactName',
-        loadComponent: () =>
-          import('./components/planning-artifact-detail/planning-artifact-detail.component').then(
-            (m) => m.PlanningArtifactDetailComponent,
-          ),
-        title: 'Planning Artifact',
-        data: { breadcrumb: 'Artifact' },
       },
       {
         path: 'market-research',

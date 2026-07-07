@@ -43,7 +43,7 @@ sequenceDiagram
     participant ORC as Orchestrator
     participant PRA as PRA Agent
     participant JS as Job Store
-    participant PV3 as Planning V3
+    participant Planning as Planning
     participant ADP as Adapter
     participant ARCH as Architecture Expert
     participant CT as Coding Team
@@ -58,18 +58,18 @@ sequenceDiagram
 
     ORC->>JS: check cancellation
     Note over ORC: Phase 2: planning
-    ORC->>PV3: run_workflow(validated_spec)
-    PV3->>PV3: intake(5%) → discovery(15%) → requirements(25%)
-    PV3->>PV3: synthesis(35%) → document_production(45%)
+    ORC->>Planning: run_workflow(validated_spec)
+    Planning->>Planning: intake(5%) → discovery(15%) → requirements(25%)
+    Planning->>Planning: synthesis(35%) → document_production(45%)
 
-    Note over PV3,ARCH: Architecture callback during doc production
-    PV3->>ARCH: run_architecture_fn()
-    ARCH-->>PV3: architecture_overview
+    Note over Planning,ARCH: Architecture callback during doc production
+    Planning->>ARCH: run_architecture_fn()
+    ARCH-->>Planning: architecture_overview
 
-    PV3->>PV3: sub_agent_provisioning(90%)
-    PV3-->>ORC: HandoffPackage
+    Planning->>Planning: sub_agent_provisioning(90%)
+    Planning-->>ORC: HandoffPackage
 
-    ORC->>ADP: adapt_planning_v3_result()
+    ORC->>ADP: adapt_planning_result()
     ADP-->>ORC: CodingTeamPlanInput
 
     ORC->>JS: check cancellation
@@ -122,7 +122,7 @@ sequenceDiagram
     participant SEC as Security Agent
     participant DOC as Documentation Agent
 
-    Note over ORC: After Planning V3 (same as UC-2)
+    Note over ORC: After Planning (same as UC-2)
 
     ORC->>TL: generate TaskAssignment
     TL-->>ORC: tasks[], execution_order

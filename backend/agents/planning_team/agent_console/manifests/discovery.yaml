@@ -1,0 +1,11 @@
+schema_version: 1
+id: planning.discovery
+team: planning
+name: Planning — Discovery
+summary: Synthesizes problem statement, personas, and success criteria from the brief.
+tags: [planning, discovery]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: planning_team.phases.discovery:run_discovery
