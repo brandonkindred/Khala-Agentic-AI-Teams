@@ -305,6 +305,31 @@ def test_reset_failed_demotes_failed_to_todo_and_frees_agent() -> None:
     assert "agent-a" not in tg.snapshot()["agent_task_map"]
 
 
+def test_reset_failed_resets_revision_budget_preserving_feedback() -> None:
+    """A task that reached FAILED by exhausting the revision cap gets a fresh revision window on
+    reset (counters cleared) while its accumulated revision_feedback is preserved as history."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="T1")
+    feedback = [{"source": "tech_lead", "reason": "fix X"}]
+    tg.update_task(
+        "t1",
+        status=TaskStatus.FAILED,
+        revision_count=20,  # at MAX_TASK_REVISIONS: without a reset the next bounce re-fails it
+        no_change_revisits=3,
+        last_change_digest="deadbeef",
+        revision_feedback=feedback,
+    )
+
+    tg.reset_failed()
+
+    task = tg.get_task("t1")
+    assert task.status == TaskStatus.TO_DO
+    assert task.revision_count == 0
+    assert task.no_change_revisits == 0
+    assert task.last_change_digest == ""
+    assert task.revision_feedback == feedback  # history preserved
+
+
 def test_reset_failed_leaves_non_failed_untouched() -> None:
     """reset_failed only touches FAILED tasks; MERGED/TO_DO/IN_PROGRESS are preserved."""
     tg = TaskGraphService(job_id="j1")

@@ -2143,8 +2143,12 @@ def run_failed_tasks(job_id: str) -> None:
 
     base, span = PROGRESS_BAND_CODING
     # current_activity from the failed run is stale by definition here; clear it so the retry does
-    # not render the old run's frozen sub-bar.
-    update_job(job_id, status=JOB_STATUS_RUNNING, error=None, current_activity=None)
+    # not render the old run's frozen sub-bar. Clear failed_tasks too: the coding-team run only
+    # writes task_graph_snapshot, never failed_tasks, so the persisted list the status endpoint and
+    # retry gate read (api/routes/jobs.py) would otherwise keep reporting the pre-retry failures.
+    update_job(
+        job_id, status=JOB_STATUS_RUNNING, failed_tasks=[], error=None, current_activity=None
+    )
     try:
         # Bind team/job_id attribution around the whole coding run so every LLM call it makes is
         # attributed to this SE job — that is what the cost tracker keys on (see the main run).

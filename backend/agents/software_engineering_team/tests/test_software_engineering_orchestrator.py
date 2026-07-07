@@ -98,6 +98,7 @@ def _seed_retry_job(tmp_path: Path, job_id: str) -> None:
     update_job(
         job_id,
         task_graph_snapshot=[{"id": "t1", "status": "failed", "title": "Backend task"}],
+        failed_tasks=[{"task_id": "t1", "reason": "prior fail", "title": "Backend task"}],
         requirements_title="Task Manager API",
         architecture_overview="API + frontend",
         resolved_questions=[{"question": "q?", "answer": "a"}],
@@ -133,6 +134,12 @@ def test_run_failed_tasks_delegates_to_coding_team(tmp_path: Path) -> None:
     assert plan_input.architecture_overview == "API + frontend"
     assert plan_input.resolved_questions == [{"question": "q?", "answer": "a"}]
     emit_called.assert_called_once_with(job_id)
+
+    # The pre-retry failed_tasks list is cleared at the RUNNING transition so the status endpoint
+    # and retry gate do not keep reporting stale failures (the coding-team run never writes it).
+    from software_engineering_team.shared.job_store import get_job
+
+    assert get_job(job_id).get("failed_tasks") == []
 
 
 def test_run_failed_tasks_marks_failed_on_delegate_error(tmp_path: Path) -> None:

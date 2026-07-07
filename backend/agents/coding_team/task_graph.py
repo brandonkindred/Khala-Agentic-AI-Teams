@@ -182,19 +182,31 @@ class TaskGraphService:
         it. Demoting all FAILED tasks to unassigned TO_DO lets a fresh swarm re-plan and re-pick
         them. A task cascade-FAILED because it depended on a FAILED task (`mark_dependents_failed`)
         holds the same FAILED status, so it is reset here too and becomes eligible again once its
-        (now TO_DO) dependency re-merges. Any prior `revision_feedback` is left intact as history.
-        Only meaningful on the resume branch — a fresh run has no FAILED tasks yet.
+        (now TO_DO) dependency re-merges. Only meaningful on the resume branch — a fresh run has no
+        FAILED tasks yet.
+
+        The revision budget is reset too: a task that reached FAILED by exhausting
+        `MAX_TASK_REVISIONS` carries `revision_count` at/above the cap in the snapshot, so without
+        this the very next review bounce would immediately re-trip the cap and re-fail it, denying
+        the user-triggered retry a fresh window. `revision_count`, `no_change_revisits`, and
+        `last_change_digest` are cleared; `revision_feedback` is left intact as history.
 
         Preconditions:
             - Called on a graph (typically just restored from a snapshot).
         Postconditions:
-            - No task is FAILED; no formerly-FAILED task retains an agent mapping.
+            - No task is FAILED; no formerly-FAILED task retains an agent mapping; every
+              formerly-FAILED task has a fresh revision budget (counters 0) with its feedback
+              history preserved.
         """
         for task in self._tasks.values():
             if task.status == TaskStatus.FAILED:
                 task.status = TaskStatus.TO_DO
                 self._free_agent(task)  # uses task.assigned_agent_id — must run before we null it
                 task.assigned_agent_id = None
+                # Fresh revision window for the retry; keep revision_feedback as history.
+                task.revision_count = 0
+                task.no_change_revisits = 0
+                task.last_change_digest = ""
         self._maybe_persist()
 
     def get_tasks(self) -> List[Task]:
