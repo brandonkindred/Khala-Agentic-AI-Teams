@@ -53,6 +53,7 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
+    JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
     JOB_STATUS_RUNNING,
     LLM_SEMANTIC_EXHAUSTION,
     LLM_UNREACHABLE_AFTER_RETRIES,
@@ -2070,6 +2071,11 @@ def run_orchestrator(
         # to finalize here — writing COMPLETED would clobber a failure, a partial-success, or an
         # already-complete result it already set. ``already_complete`` (the work was already
         # done — no changes needed) is a terminal success and is left intact.
+        #
+        # Reconcile the SE failed_tasks list (and any LLM-pause status) from the persisted snapshot
+        # so partial failures are visible and retryable via /retry-failed, and a recurring LLM
+        # weekly-limit / connectivity failure pauses for recovery (see _finalize_from_coding_snapshot).
+        _finalize_from_coding_snapshot(job_id)
         return
 
     except (
@@ -2087,6 +2093,86 @@ def run_orchestrator(
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Orchestrator failed")
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
+
+
+def _coding_snapshot_failure_reasons(task: Dict[str, Any]) -> List[str]:
+    """Return the recorded failure-reason strings for a snapshot task.
+
+    Preconditions:
+        - ``task`` is a task dict from a persisted ``task_graph_snapshot``.
+    Postconditions:
+        - Returns the ``reason`` string of every ``revision_feedback`` entry (possibly empty).
+    """
+    return [
+        str(fb.get("reason", ""))
+        for fb in (task.get("revision_feedback") or [])
+        if isinstance(fb, dict)
+    ]
+
+
+def _finalize_from_coding_snapshot(job_id: str) -> None:
+    """Reconcile the SE job-status contract from a completed coding-team run's task graph.
+
+    The coding-team orchestrator persists only ``task_graph_snapshot`` plus a coarse status; it
+    never writes the SE ``failed_tasks`` list that ``GET /run-team/{job_id}`` and the
+    ``/retry-failed`` gate read, and it does not translate LLM weekly-limit / connectivity failures
+    into the ``paused_llm_*`` statuses the resume-after-LLM-check flow depends on. This helper
+    derives both from the persisted snapshot after the run so those flows keep working — for the
+    main run and the retry alike.
+
+    Preconditions:
+        - Called after ``run_coding_team_orchestrator`` returned for ``job_id`` (it has persisted the
+          final ``task_graph_snapshot`` and its terminal status).
+    Postconditions:
+        - ``failed_tasks`` reflects the snapshot's FAILED tasks (``[]`` when none failed).
+        - When a failure reason carries an Ollama weekly-limit / connectivity marker, the job status
+          is overridden to ``paused_llm_limit`` / ``paused_llm_connectivity`` (else the coding-team
+          terminal status is left intact). No-op when the job or its snapshot is absent.
+    """
+    data = get_job(job_id)
+    if not data:
+        return
+    snapshot = data.get("task_graph_snapshot") or []
+    if not snapshot:
+        return
+
+    failed = [t for t in snapshot if isinstance(t, dict) and t.get("status") == "failed"]
+    failed_details: List[Dict[str, Any]] = []
+    all_reasons: List[str] = []
+    for t in failed:
+        reasons = _coding_snapshot_failure_reasons(t)
+        all_reasons.extend(reasons)
+        failed_details.append(
+            {
+                "task_id": str(t.get("id", "")),
+                "title": str(t.get("title") or t.get("id") or ""),
+                "reason": reasons[-1] if reasons else "Task failed during the coding run",
+            }
+        )
+
+    # Repopulate the SE failed_tasks list so status/retry APIs see the current failures (the
+    # coding-team run only wrote task_graph_snapshot). Empty list on a clean run is intentional.
+    update_job(job_id, failed_tasks=failed_details)
+
+    # Restore the LLM-pause statuses the old retry path produced: a weekly-limit or connectivity
+    # failure that recurred during the run should pause for recovery rather than read as a plain
+    # completed-with-failures, so the documented resume-after-LLM-check flow still applies.
+    if any(OLLAMA_WEEKLY_LIMIT_MESSAGE in r for r in all_reasons):
+        update_job(
+            job_id,
+            status="paused_llm_limit",
+            error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
+            current_task=None,
+        )
+    elif any(
+        LLM_SEMANTIC_EXHAUSTION in r or LLM_UNREACHABLE_AFTER_RETRIES in r for r in all_reasons
+    ):
+        error = (
+            LLM_SEMANTIC_EXHAUSTION
+            if any(LLM_SEMANTIC_EXHAUSTION in r for r in all_reasons)
+            else LLM_UNREACHABLE_AFTER_RETRIES
+        )
+        update_job(job_id, status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY, error=error)
 
 
 def run_failed_tasks(job_id: str) -> None:
@@ -2166,9 +2252,10 @@ def run_failed_tasks(job_id: str) -> None:
             )
         # Emit DORA lifecycle events from the persisted task graph and flush final cost.
         _emit_coding_team_metrics(job_id)
-        # run_coding_team_orchestrator owns its terminal status on every exit path (completed /
-        # completed_with_failures / already_complete / failed / cancelled), so there is nothing to
-        # finalize here.
+        # run_coding_team_orchestrator owns its success/partial terminal status; reconcile the SE
+        # failed_tasks list and any LLM-pause status from the persisted snapshot so the status and
+        # /retry-failed APIs reflect this run's failures (see _finalize_from_coding_snapshot).
+        _finalize_from_coding_snapshot(job_id)
     except CancellationError:
         logger.info("Retry orchestrator stopped due to job cancellation: %s", job_id)
         update_job(

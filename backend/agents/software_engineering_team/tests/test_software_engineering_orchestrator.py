@@ -118,6 +118,9 @@ def test_run_failed_tasks_delegates_to_coding_team(tmp_path: Path) -> None:
         captured["repo_path"] = repo_path
         captured["plan_input"] = plan_input
         captured["kwargs"] = kwargs
+        # Simulate a fully successful retry: the coding-team run merges the task and updates the
+        # persisted snapshot via the injected callback.
+        kwargs["update_job_fn"](task_graph_snapshot=[{"id": "t1", "status": "merged"}])
 
     emit_called = MagicMock()
 
@@ -135,11 +138,40 @@ def test_run_failed_tasks_delegates_to_coding_team(tmp_path: Path) -> None:
     assert plan_input.resolved_questions == [{"question": "q?", "answer": "a"}]
     emit_called.assert_called_once_with(job_id)
 
-    # The pre-retry failed_tasks list is cleared at the RUNNING transition so the status endpoint
-    # and retry gate do not keep reporting stale failures (the coding-team run never writes it).
+    # A fully successful retry leaves no FAILED tasks in the snapshot, so failed_tasks is cleared —
+    # the status endpoint and retry gate no longer report the pre-retry failures.
     from software_engineering_team.shared.job_store import get_job
 
     assert get_job(job_id).get("failed_tasks") == []
+
+
+def test_run_failed_tasks_repopulates_failed_from_snapshot(tmp_path: Path) -> None:
+    """A retry that still leaves a FAILED task repopulates failed_tasks from the snapshot so the
+    job stays visible/retryable (the coding-team run itself never writes failed_tasks)."""
+    job_id = "test-retry-still-failing"
+    _seed_retry_job(tmp_path, job_id)
+
+    def fake_delegate(jid, repo_path, plan_input, **kwargs):
+        kwargs["update_job_fn"](
+            status="completed_with_failures",
+            task_graph_snapshot=[
+                {
+                    "id": "t1",
+                    "status": "failed",
+                    "title": "Backend task",
+                    "revision_feedback": [{"source": "engineer", "reason": "still broken"}],
+                }
+            ],
+        )
+
+    with patch("coding_team.orchestrator.run_coding_team_orchestrator", side_effect=fake_delegate):
+        with patch("orchestrator._emit_coding_team_metrics", MagicMock()):
+            orchestrator.run_failed_tasks(job_id)
+
+    from software_engineering_team.shared.job_store import get_job
+
+    failed = get_job(job_id).get("failed_tasks")
+    assert failed == [{"task_id": "t1", "title": "Backend task", "reason": "still broken"}]
 
 
 def test_run_failed_tasks_marks_failed_on_delegate_error(tmp_path: Path) -> None:
@@ -216,6 +248,99 @@ def test_run_failed_tasks_raises_without_snapshot(tmp_path: Path) -> None:
     create_job(job_id, str(tmp_path))
     with pytest.raises(ValueError, match="no task graph snapshot"):
         orchestrator.run_failed_tasks(job_id)
+
+
+def _finalize_job(tmp_path: Path, job_id: str, snapshot: list) -> dict:
+    """Seed a job with a snapshot, run the finalize reconciliation, and return the job record."""
+    from software_engineering_team.shared.job_store import create_job, get_job, update_job
+
+    create_job(job_id, str(tmp_path))
+    update_job(job_id, task_graph_snapshot=snapshot, status="completed_with_failures")
+    orchestrator._finalize_from_coding_snapshot(job_id)
+    return get_job(job_id)
+
+
+def test_finalize_repopulates_failed_tasks_from_snapshot(tmp_path: Path) -> None:
+    """FAILED tasks in the snapshot become failed_tasks entries with task_id/title/reason."""
+    data = _finalize_job(
+        tmp_path,
+        "fin-failed",
+        [
+            {"id": "t1", "status": "merged", "title": "OK"},
+            {
+                "id": "t2",
+                "status": "failed",
+                "title": "Broken",
+                "revision_feedback": [
+                    {"reason": "first attempt"},
+                    {"reason": "gave up after revisions"},
+                ],
+            },
+        ],
+    )
+    assert data.get("failed_tasks") == [
+        {"task_id": "t2", "title": "Broken", "reason": "gave up after revisions"}
+    ]
+    # No LLM markers → the coding-team terminal status is left intact.
+    assert data.get("status") == "completed_with_failures"
+
+
+def test_finalize_clears_failed_tasks_on_clean_run(tmp_path: Path) -> None:
+    """A snapshot with no FAILED tasks yields an empty failed_tasks list."""
+    data = _finalize_job(tmp_path, "fin-clean", [{"id": "t1", "status": "merged", "title": "OK"}])
+    assert data.get("failed_tasks") == []
+
+
+def test_finalize_pauses_on_llm_weekly_limit(tmp_path: Path) -> None:
+    """A failure reason carrying the Ollama weekly-limit marker overrides status to paused_llm_limit."""
+    from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE as WEEKLY
+
+    data = _finalize_job(
+        tmp_path,
+        "fin-llm-limit",
+        [
+            {
+                "id": "t1",
+                "status": "failed",
+                "title": "T1",
+                "revision_feedback": [{"reason": f"Implementation failed: {WEEKLY}"}],
+            }
+        ],
+    )
+    assert data.get("status") == "paused_llm_limit"
+    assert data.get("error") == WEEKLY
+    assert data.get("failed_tasks")  # still recorded
+
+
+def test_finalize_pauses_on_llm_connectivity(tmp_path: Path) -> None:
+    """A connectivity marker overrides status to paused_llm_connectivity."""
+    from software_engineering_team.shared.job_store import LLM_UNREACHABLE_AFTER_RETRIES
+
+    data = _finalize_job(
+        tmp_path,
+        "fin-llm-conn",
+        [
+            {
+                "id": "t1",
+                "status": "failed",
+                "title": "T1",
+                "revision_feedback": [{"reason": f"Implementation failed: {LLM_UNREACHABLE_AFTER_RETRIES}"}],
+            }
+        ],
+    )
+    assert data.get("status") == orchestrator.JOB_STATUS_PAUSED_LLM_CONNECTIVITY
+    assert data.get("error") == LLM_UNREACHABLE_AFTER_RETRIES
+
+
+def test_finalize_noop_without_snapshot(tmp_path: Path) -> None:
+    """No snapshot (or no job) → the helper does nothing and does not raise."""
+    from software_engineering_team.shared.job_store import create_job, get_job
+
+    create_job("fin-nosnap", str(tmp_path))
+    orchestrator._finalize_from_coding_snapshot("fin-nosnap")
+    assert "failed_tasks" not in get_job("fin-nosnap") or get_job("fin-nosnap").get("failed_tasks") in (None, [])
+    # Unknown job is a clean no-op.
+    orchestrator._finalize_from_coding_snapshot("fin-does-not-exist")
 
 
 def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: Path) -> None:
