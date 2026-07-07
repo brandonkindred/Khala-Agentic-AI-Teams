@@ -391,12 +391,29 @@ def test_run_coordinator_drops_unanchored_twin_of_anchored_finding() -> None:
 def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
     """End-to-end: ``CodeReviewAgent.run`` with code larger than the
     single-call limit dispatches to the coordinator and returns a
-    merged CodeReviewOutput."""
+    merged CodeReviewOutput. The map-call count proves the coordinator split the
+    oversized code into more than one chunk (rather than a single-call path)."""
     from code_review_agent.agent import CodeReviewAgent
+    from code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 
-    code = "### app/main.py ###\n" + ("x" * 25_000)
+    class _MapCounter(DummyLLMClient):
+        """Counts per-chunk map-phase reviews (prompts carrying the code header)."""
 
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+        def __init__(self) -> None:
+            super().__init__()
+            self.map_calls = 0
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if CODE_TO_REVIEW_HEADER in prompt:
+                self.map_calls += 1
+            return super().complete_json(prompt, **kwargs)
+
+    # Multi-line so the splitter can break it at line boundaries into >1 chunk
+    # (a single 25k-char line would stay one un-splittable chunk).
+    code = "### app/main.py ###\n" + "".join(f"x{i} = {i}\n" for i in range(4000))
+
+    client = _MapCounter()
+    agent = CodeReviewAgent(llm_client=client)
     result = agent.run(
         CodeReviewInput(
             code=code,
@@ -407,6 +424,8 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
 
     assert isinstance(result, CodeReviewOutput)
     assert result.approved is True
+    # Oversized code took the coordinator's map-reduce path: >1 chunk reviewed.
+    assert client.map_calls > 1
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +708,7 @@ def test_review_chunk_paths_label_marks_partial_segments() -> None:
     assert len(chunks) > 1
     first = chunks[0]
     assert first.paths_label.startswith("big.py (lines 1-")
-    assert f"of {750})" in first.paths_label.replace("of 750)", f"of {750})")
+    assert "of 750)" in first.paths_label
     whole = ReviewChunk(segments=[FileSegment(path="a.py", content="x = 1", total_lines=1)])
     assert whole.paths_label == "a.py"
 

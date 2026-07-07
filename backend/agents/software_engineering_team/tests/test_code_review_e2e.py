@@ -82,7 +82,7 @@ def test_e2e_bounded_prompts_and_full_coverage() -> None:
 
     client = _BigCtxRecorder()
     cap = compute_code_review_map_chunk_chars(client)
-    assert cap == CODE_REVIEW_ABS_CHUNK_CHARS == 80_000
+    assert cap == CODE_REVIEW_ABS_CHUNK_CHARS  # documented default: 80_000
 
     # The splitter's own output: every chunk's rendered code is within the cap.
     chunks = build_review_chunks(list(files.items()), cap)
@@ -159,6 +159,9 @@ def test_e2e_merged_issues_reanchored_to_original_lines() -> None:
     expected = sorted(seg.start_line for seg in segments)
     assert sorted(i.line for i in result.issues) == expected
     assert all(i.file_path == "huge.py" for i in result.issues)
+    # The client cites the same value for line and start_line; the merge must keep
+    # both consistent, so a regression where start_line diverges from line is caught.
+    assert all(i.start_line == i.line for i in result.issues)
 
 
 class _FailOneFile(DummyLLMClient):

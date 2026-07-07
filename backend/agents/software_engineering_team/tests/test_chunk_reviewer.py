@@ -73,6 +73,8 @@ def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:
 
 
 def test_chunk_review_agent_run_returns_chunk_review_output() -> None:
+    """``ChunkReviewAgent.run`` returns a ``ChunkReviewOutput`` — approved with no
+    issues — when backed by the default ``DummyLLMClient``."""
     agent = ChunkReviewAgent(llm=DummyLLMClient())
     result = agent.run(_chunk_input())
     assert isinstance(result, ChunkReviewOutput)
@@ -124,6 +126,8 @@ class _RecorderClient(DummyLLMClient):
 
 
 def test_segment_note_is_prepended_to_prompt() -> None:
+    """A segment note is rendered under a ``**Segment notes:**`` header and appears
+    before the code-to-review section in the chunk prompt."""
     client = _RecorderClient()
     agent = ChunkReviewAgent(llm=client)
     note = "app/main.py is shown only from original line 501 to 1000 (of 2400 total)."
@@ -136,6 +140,7 @@ def test_segment_note_is_prepended_to_prompt() -> None:
 
 
 def test_no_segment_note_means_no_segment_section() -> None:
+    """With no segment note, the prompt omits the ``**Segment notes:**`` section."""
     client = _RecorderClient()
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input())
@@ -172,6 +177,7 @@ def test_user_decisions_rendered_as_settled_in_prompt() -> None:
 
 
 def test_no_user_decisions_means_no_decisions_section() -> None:
+    """With no user decisions, the prompt omits the settled-decisions section."""
     client = _RecorderClient()
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input())
@@ -198,6 +204,8 @@ def test_code_chunk_is_never_compacted() -> None:
 
 
 def test_new_output_fields_are_parsed_through() -> None:
+    """``spec_compliance_notes`` and ``suggested_commit_message`` from the model
+    reply are passed through onto the ``ChunkReviewOutput``."""
     agent = ChunkReviewAgent(
         llm=_StubClient(
             {
@@ -215,6 +223,7 @@ def test_new_output_fields_are_parsed_through() -> None:
 
 
 def test_missing_new_output_fields_default_to_empty() -> None:
+    """When the model omits the new output fields, they default to empty strings."""
     agent = ChunkReviewAgent(llm=_StubClient({"approved": True, "issues": [], "summary": "ok"}))
     result = agent.run(_chunk_input())
     assert result.spec_compliance_notes == ""

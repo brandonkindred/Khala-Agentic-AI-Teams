@@ -997,7 +997,10 @@ class TestReviewEndpoint:
         # Direct contract: heartbeat_job delegates to the job service's heartbeat.
         jobs = fake_jobs.list_jobs()
         assert jobs, "a review job should exist"
-        job_store_mod.heartbeat_job(jobs[0]["job_id"])  # must not raise
+        job_id = jobs[0]["job_id"]
+        job_store_mod.heartbeat_job(job_id)  # must not raise
+        # And it actually touched the liveness stamp (not a silent no-op).
+        assert fake_jobs.get_job(job_id).get("last_heartbeat_at") is not None
 
     def test_agent_failure_marks_job_failed(self, review_app) -> None:
         review_app["github"]["agent_output"] = RuntimeError("llm down")
