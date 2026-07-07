@@ -73,12 +73,16 @@ def _io_schema(
     Preconditions:
         * ``schema_ref`` is a non-empty dotted ref (the shared-entrypoint fallback).
     Postconditions:
-        * Returns ``IOSchema(inline_schema=inline, ...)`` when ``inline`` is a
-          non-empty dict, else ``IOSchema(schema_ref=schema_ref, ...)``. An empty
-          dict is treated as "no authored schema" and falls back to the ref, so a
-          blank authored field never shadows the runnable generic schema.
+        * Returns ``IOSchema(inline_schema=inline, ...)`` when ``inline is not None``
+          (an authored schema was supplied — including the empty schema ``{}``, which
+          is a valid JSON Schema meaning "accept anything"), else
+          ``IOSchema(schema_ref=schema_ref, ...)``. Only an *omitted* schema (``None``)
+          falls back to the ref; this matches the presence test (``inline_schema is
+          not None``) used by the summary flags, the ``/schema/{input|output}`` route,
+          and :func:`clone_from_manifest`, so an authored ``{}`` round-trips instead of
+          being silently replaced by the generic ref.
     """
-    if inline:
+    if inline is not None:
         return IOSchema(inline_schema=inline, description=inline_description)
     return IOSchema(schema_ref=schema_ref, description=ref_description)
 

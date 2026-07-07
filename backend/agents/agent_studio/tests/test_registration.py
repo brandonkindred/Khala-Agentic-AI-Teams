@@ -191,9 +191,23 @@ def test_build_manifest_carries_authored_inline_schemas() -> None:
     assert reloaded.inputs.inline_schema == in_schema
 
 
-def test_build_manifest_empty_authored_schema_falls_back_to_ref() -> None:
-    # A blank authored dict must not shadow the runnable generic schema_ref.
+def test_build_manifest_empty_authored_schema_is_preserved() -> None:
+    # An authored empty schema ({}) is a valid JSON Schema ("accept anything") and
+    # must be preserved verbatim — not silently replaced by the generic schema_ref.
+    # Only an *omitted* schema (None) falls back to the ref. This keeps the write
+    # path consistent with the presence test (inline_schema is not None) used by the
+    # summary flags, the /schema route, and clone_from_manifest.
     definition = AgentDefinition(name="Planner", role="r", input_schema={})
+    manifest = build_studio_agent_manifest(definition)
+    assert manifest.inputs.inline_schema == {}
+    assert manifest.inputs.schema_ref is None
+    # And it round-trips back out via clone.
+    assert clone_from_manifest(manifest).input_schema == {}
+
+
+def test_build_manifest_omitted_schema_falls_back_to_ref() -> None:
+    # A None (omitted) authored schema still falls back to the runnable generic ref.
+    definition = AgentDefinition(name="Planner", role="r")  # input_schema defaults None
     manifest = build_studio_agent_manifest(definition)
     assert manifest.inputs.inline_schema is None
     assert manifest.inputs.schema_ref is not None

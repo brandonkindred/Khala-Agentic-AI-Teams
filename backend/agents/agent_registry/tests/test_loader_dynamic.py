@@ -86,13 +86,33 @@ def test_get_resolves_dynamic_id_from_store(fake_store: _FakeStore) -> None:
 
 
 def test_get_reads_your_writes_local_copy_on_store_miss(fake_store: _FakeStore) -> None:
-    # Read-your-writes: a manifest present locally (e.g. registered on this worker
-    # whose Postgres write-through failed) still resolves even when the store row
-    # is absent — the store row is preferred, the local copy is the fallback.
+    # Read-your-writes: a manifest registered on this worker whose Postgres
+    # write-through FAILED (so it's unconfirmed) still resolves on a store miss —
+    # the local copy is the fallback for exactly this case.
     reg = AgentRegistry([], {})
+    fake_store.raise_on = {"upsert"}  # write-through fails → id marked unconfirmed
     m = _manifest("agent_studio.local-only-1")
-    reg._by_id[m.id] = m  # local copy, not in the store
-    assert reg.get("agent_studio.local-only-1") is m
+    reg.register(m)
+    assert "agent_studio.local-only-1" in reg._unconfirmed
+    assert reg.get("agent_studio.local-only-1").id == "agent_studio.local-only-1"
+
+
+def test_get_does_not_resurrect_confirmed_id_deleted_on_another_worker(
+    fake_store: _FakeStore,
+) -> None:
+    # The resurrection bug: register() confirms the write-through (id NOT unconfirmed),
+    # then another worker deletes the row from Postgres. A store miss for a *confirmed*
+    # id must return None — not the stale local copy — so cross-worker deletes are seen.
+    reg = AgentRegistry([], {})
+    m = _manifest("agent_studio.shared-1")
+    reg.register(m)  # upsert succeeds → confirmed, still in local _by_id
+    assert "agent_studio.shared-1" not in reg._unconfirmed
+    assert reg.get("agent_studio.shared-1") is not None  # resolves via the store row
+    # Simulate another worker's unregister(): the Postgres row is gone.
+    fake_store.rows.pop("agent_studio.shared-1")
+    assert reg.get("agent_studio.shared-1") is None  # not resurrected from _by_id
+    # And it's dropped from the catalog listing too (consistent with get()).
+    assert "agent_studio.shared-1" not in {mm.id for mm in reg.all()}
 
 
 def test_get_unknown_dynamic_id_returns_none(fake_store: _FakeStore) -> None:

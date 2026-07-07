@@ -102,6 +102,15 @@ class AgentRegistry:
         # agent_id -> time.monotonic() of this worker's last unregister(), oldest
         # first. See _is_tombstoned / _TOMBSTONE_TTL_S / _TOMBSTONE_MAX_ENTRIES.
         self._tombstones: "OrderedDict[str, float]" = OrderedDict()
+        # Dynamic ids whose Postgres write-through in register() FAILED (or which
+        # were registered while no dynamic store was active). Only these fall back
+        # to the local ``_by_id`` copy on an *authoritative store miss* — see get().
+        # This is what makes the local fallback read-your-writes-only: an id whose
+        # write-through succeeded is trusted to the store, so a later store miss
+        # means it was deleted on another worker (drop it) rather than resurrecting
+        # a stale local copy forever. Entries clear on a later successful
+        # register()/upsert or on unregister().
+        self._unconfirmed: set[str] = set()
         # Guards every local mutation (register/unregister) and iteration
         # (_merged_manifests/manifests_with_id_prefix) of _by_id/_tombstones/
         # _source_paths. FastAPI runs sync `def` routes in a threadpool, so
@@ -216,11 +225,13 @@ class AgentRegistry:
 
         Overlays the dynamic Postgres rows with this process's local view: a static
         (disk) id always wins on collision, and a dynamic id missing from the store
-        falls back to its local copy — the same read-your-writes guarantee
-        :meth:`get` makes, so a manifest whose ``register()`` write-through failed
-        (or hasn't propagated yet) is not invisible in the catalog even though it is
-        directly resolvable by id. Degrades to the local ``_by_id`` view entirely on
-        any store error, so the catalog never breaks when Postgres is down.
+        falls back to its local copy **only when unconfirmed** — the same
+        read-your-writes guarantee :meth:`get` makes, so a manifest whose
+        ``register()`` write-through failed (or hasn't propagated yet) is not
+        invisible in the catalog, while a *confirmed* id absent from the store (i.e.
+        deleted on another worker) is correctly dropped rather than resurrected.
+        Degrades to the local ``_by_id`` view entirely on any store error, so the
+        catalog never breaks when Postgres is down.
         """
         store = self._dynamic_store()
         if store is None:
@@ -234,8 +245,10 @@ class AgentRegistry:
                 return list(self._by_id.values())
         with self._lock:
             for agent_id, local in self._by_id.items():
-                if agent_id in self._static_ids or agent_id not in merged:
-                    merged[agent_id] = local
+                if agent_id in self._static_ids:
+                    merged[agent_id] = local  # static disk id always wins
+                elif agent_id not in merged and agent_id in self._unconfirmed:
+                    merged[agent_id] = local  # unconfirmed local write-through only
             self._drop_tombstoned(merged)
         return list(merged.values())
 
@@ -270,13 +283,16 @@ class AgentRegistry:
             return local
         merged = {m.id: m for m in dynamic}
         # Static (disk) ids always win; a dynamic id missing from the store's scan
-        # falls back to its local copy — same read-your-writes guarantee as get(),
-        # so a write-through failure doesn't hide the entry from this scan (used by
-        # the generated-roster stale-cleanup pass).
-        for m in local:
-            if m.id in self._static_ids or m.id not in merged:
-                merged[m.id] = m
+        # falls back to its local copy ONLY when unconfirmed — same read-your-writes
+        # guarantee as get(), so a write-through failure doesn't hide the entry from
+        # this scan (used by the generated-roster stale-cleanup pass), while a
+        # confirmed id deleted on another worker is dropped rather than resurrected.
         with self._lock:
+            for m in local:
+                if m.id in self._static_ids:
+                    merged[m.id] = m
+                elif m.id not in merged and m.id in self._unconfirmed:
+                    merged[m.id] = m
             self._drop_tombstoned(merged)
         return list(merged.values())
 
@@ -289,21 +305,20 @@ class AgentRegistry:
             * Static/disk ids resolve from the in-memory map with zero Postgres
               cost (the built-in-agent invoke hot path).
             * For a dynamic id with the store active, returns the Postgres row when
-              present; otherwise falls back to this process's local ``_by_id``
-              copy — **read-your-writes for a first registration**: a *brand-new*
-              dynamic id ``register()``'d on this worker always resolves here even
-              if its best-effort Postgres write-through failed (see
-              :meth:`register`), because the store has no row yet (a miss). This
-              guarantee does **not** extend to updating an *existing* dynamic id:
-              if ``register()`` writes a new version locally but its upsert fails,
-              the store still holds the older confirmed row, which is preferred
-              over the unconfirmed local update (a present store row always wins,
-              by design — an unconfirmed local write is not assumed more correct
-              than the last confirmed one). The cross-worker consistency model is
-              therefore *eventual*, not immediate: an ``unregister()`` on another
-              worker is seen once this worker's stale local copy is dropped (roster
-              re-sync / restart) or via the authoritative Postgres row, whichever
-              comes first. A store error degrades to the local copy.
+              present. On an authoritative **miss** (the store has no row) the local
+              ``_by_id`` copy is returned **only if the id is unconfirmed** (its
+              write-through to Postgres failed / never happened — see
+              :attr:`_unconfirmed`); this is the **read-your-writes for a first
+              registration** guarantee, so a brand-new dynamic id whose upsert failed
+              still resolves on the worker that registered it. For a **confirmed** id
+              a store miss means it was ``unregister()``'d on another worker, so this
+              returns ``None`` rather than resurrecting the stale local copy — cross-
+              worker deletes are seen immediately, not merely on restart/roster-resync.
+              Updating an existing *confirmed* id whose upsert fails still returns the
+              store's older confirmed row (a present store row always wins — the
+              unconfirmed local update is not assumed more correct than the last
+              confirmed one). A store *error* (as opposed to a miss) degrades to the
+              local copy, since the true state is unknown.
             * Symmetrically, an id this worker itself ``unregister()``'d within the
               last :attr:`_TOMBSTONE_TTL_S` never resolves here even on a stale
               Postgres hit (its best-effort delete may have failed) — see
@@ -316,19 +331,26 @@ class AgentRegistry:
             if self._is_tombstoned(agent_id):
                 return None
             local_fallback = self._by_id.get(agent_id)
+            unconfirmed = agent_id in self._unconfirmed
         store = self._dynamic_store()
         if store is None:
             return local_fallback
         try:
             found = store.get(agent_id)
         except Exception:
+            # Store *error* (not a miss): true state unknown → degrade to the local
+            # copy rather than spuriously 404 a live agent.
             logger.warning(
                 "dynamic store get failed for %s; using local registry", agent_id, exc_info=True
             )
             return local_fallback
-        # Prefer the authoritative Postgres row; fall back to the local copy on a
-        # miss so a local registration whose write-through failed stays resolvable.
-        return found if found is not None else local_fallback
+        if found is not None:
+            return found
+        # Store *miss* (authoritative absence). Fall back to the local copy ONLY for
+        # an unconfirmed write-through (read-your-writes: the store never accepted
+        # our row). For a confirmed id, a miss means it was deleted on another
+        # worker — return None instead of resurrecting the stale local copy.
+        return local_fallback if unconfirmed else None
 
     def register(self, manifest: AgentManifest, source_path: Path | None = None) -> None:
         """Install a manifest into the live registry (for dynamically generated agents).
@@ -361,15 +383,30 @@ class AgentRegistry:
             self._tombstones.pop(manifest.id, None)
         if manifest.id not in self._static_ids:
             store = self._dynamic_store()
-            if store is not None:
-                try:
-                    store.upsert(manifest)
-                except Exception:
-                    logger.warning(
-                        "dynamic store upsert failed for %s; registered locally only",
-                        manifest.id,
-                        exc_info=True,
-                    )
+            if store is None:
+                # No active store to confirm against (Postgres off / in sandbox):
+                # the local copy is authoritative, so a store miss must never drop
+                # it. Treat as unconfirmed.
+                with self._lock:
+                    self._unconfirmed.add(manifest.id)
+                return
+            try:
+                store.upsert(manifest)
+            except Exception:
+                logger.warning(
+                    "dynamic store upsert failed for %s; registered locally only",
+                    manifest.id,
+                    exc_info=True,
+                )
+                # Write-through failed → the store has no (new) row for this id, so
+                # get() must keep serving the local copy on a miss (read-your-writes).
+                with self._lock:
+                    self._unconfirmed.add(manifest.id)
+            else:
+                # Confirmed in Postgres → the store is now authoritative for this id.
+                # A future store miss means an authoritative delete, not our failure.
+                with self._lock:
+                    self._unconfirmed.discard(manifest.id)
 
     def unregister(self, agent_id: str) -> bool:
         """Remove a (dynamically registered) manifest from the live registry.
@@ -398,6 +435,7 @@ class AgentRegistry:
                 return False
             self._source_paths.pop(agent_id, None)
             removed = self._by_id.pop(agent_id, None) is not None
+            self._unconfirmed.discard(agent_id)
             self._tombstones[agent_id] = time.monotonic()
             self._tombstones.move_to_end(agent_id)
             while len(self._tombstones) > self._TOMBSTONE_MAX_ENTRIES:
