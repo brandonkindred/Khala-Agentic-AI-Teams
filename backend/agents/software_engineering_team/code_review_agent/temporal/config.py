@@ -5,22 +5,26 @@ default**: it does not wait for an operator to set ``TEMPORAL_ADDRESS``. When
 nothing is configured it targets the application's own deployed Temporal
 container (``temporal:7233`` — the address the docker stack already wires into
 every service), and an operator overrides that by pointing ``TEMPORAL_ADDRESS``
-(or the code-review-specific ``CODE_REVIEW_TEMPORAL_ADDRESS``, which takes
-precedence) at a different Temporal server. Setting either to an empty /
+at a different Temporal server. Setting ``TEMPORAL_ADDRESS`` to an empty /
 ``disabled`` / ``none`` / ``off`` value, selecting the ``dummy`` LLM harness, or
 running under ``pytest`` falls the agent back to the in-process thread-mode
 coordinator.
 
-This resolver is deliberately separate from
-``shared_temporal.get_temporal_address`` / ``shared_temporal.is_temporal_enabled``
-(which stay ``None``-default) so the *other* teams' thread-default behavior is
-unchanged: the "Temporal by default" flip is scoped to the code review agent
-alone.
+There is deliberately **no** code-review-specific address override: the code
+review worker connects through the process-wide ``shared_temporal`` client, which
+reads only ``TEMPORAL_ADDRESS`` (``shared_temporal.client.get_temporal_address``),
+so a distinct per-agent address could not actually route to a different cluster —
+it would be silently ignored. Code review therefore shares the process Temporal
+address; ``TEMPORAL_ADDRESS`` is the single override.
+
+The "Temporal by default" flip is scoped to the code review agent: this resolver
+is separate from ``shared_temporal.is_temporal_enabled`` (which stays
+``None``-default), so the *other* teams' thread-default dispatch decision is
+unchanged even though they read the same ``TEMPORAL_ADDRESS``.
 
 Invariants:
     - ``resolve_code_review_temporal_address`` is pure with respect to the
-      environment (it only reads ``CODE_REVIEW_TEMPORAL_ADDRESS`` /
-      ``TEMPORAL_ADDRESS``) and never raises.
+      environment (it only reads ``TEMPORAL_ADDRESS``) and never raises.
     - ``code_review_temporal_enabled`` never returns ``True`` while the resolved
       address is ``None``.
 """
@@ -52,36 +56,29 @@ _DISABLE_SENTINELS = frozenset({"", "disabled", "none", "off", "0", "false", "no
 # Truthy spellings for the test-only force flag.
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
-# Address env vars in precedence order: a code-review-specific override first,
-# then the shared address, then the built-in default.
-_ADDRESS_VARS = ("CODE_REVIEW_TEMPORAL_ADDRESS", "TEMPORAL_ADDRESS")
-
 
 def resolve_code_review_temporal_address() -> Optional[str]:
     """Resolve the Temporal server address the code review agent should target.
 
     Postconditions:
-        - Returns ``CODE_REVIEW_TEMPORAL_ADDRESS`` when it is set to a real value
-          (it takes precedence, so per-agent targeting overrides the shared var).
-        - Otherwise returns ``TEMPORAL_ADDRESS`` when it is set to a real value
-          (the operator override onto a different Temporal server).
-        - Returns ``None`` when the first var that *is present* holds a disable
-          sentinel (empty / ``disabled`` / ``none`` / ``off`` / ``0`` / ``false``
-          / ``no``) — an explicit "use thread mode" signal.
-        - Returns :data:`DEFAULT_CODE_REVIEW_TEMPORAL_ADDRESS` when neither var is
-          set, so an unconfigured deployment defaults onto the app's own Temporal
-          container.
+        - Returns ``TEMPORAL_ADDRESS`` when it is set to a real value (the
+          operator override onto a different Temporal server — honored because the
+          shared client connects to exactly this address).
+        - Returns ``None`` when ``TEMPORAL_ADDRESS`` *is present* but holds a
+          disable sentinel (empty / ``disabled`` / ``none`` / ``off`` / ``0`` /
+          ``false`` / ``no``) — an explicit "use thread mode" signal.
+        - Returns :data:`DEFAULT_CODE_REVIEW_TEMPORAL_ADDRESS` when
+          ``TEMPORAL_ADDRESS`` is unset, so an unconfigured deployment defaults
+          onto the app's own Temporal container.
         - Never raises.
     """
-    for var in _ADDRESS_VARS:
-        value = os.environ.get(var)
-        if value is None:
-            continue
-        stripped = value.strip()
-        if stripped.lower() in _DISABLE_SENTINELS:
-            return None
-        return stripped
-    return DEFAULT_CODE_REVIEW_TEMPORAL_ADDRESS
+    value = os.environ.get("TEMPORAL_ADDRESS")
+    if value is None:
+        return DEFAULT_CODE_REVIEW_TEMPORAL_ADDRESS
+    stripped = value.strip()
+    if stripped.lower() in _DISABLE_SENTINELS:
+        return None
+    return stripped
 
 
 def _force_enabled() -> bool:

@@ -32,6 +32,36 @@ from .repo_reader import RepoReader
 
 logger = logging.getLogger(__name__)
 
+# Bounded walk so a cyclic/adversarial cause chain can never loop forever.
+_MAX_CAUSE_DEPTH = 12
+
+
+def _reports_review_unavailable(exc: BaseException, marker: str) -> bool:
+    """Walk an exception's cause chain for the code-review "unavailable" marker.
+
+    Temporal surfaces a workflow failure differently depending on where the
+    marker was raised: the workflow's own total-failure guard puts the
+    ``ApplicationError`` at the top of the chain, while an infra failure a
+    map/verify activity raised is nested one level deeper under an
+    ``ActivityError``. Both spell the marker as ``ApplicationError.type`` (or the
+    original exception's class name), so this walks ``cause``/``__cause__``/
+    ``__context__`` up to a bounded depth.
+
+    Postconditions:
+        - Returns ``True`` iff some node in the chain carries ``type == marker``
+          or is itself named ``marker``. Never raises; bounded and cycle-safe.
+    """
+    seen: set[int] = set()
+    node: BaseException | None = exc
+    depth = 0
+    while node is not None and id(node) not in seen and depth < _MAX_CAUSE_DEPTH:
+        seen.add(id(node))
+        depth += 1
+        if getattr(node, "type", None) == marker or type(node).__name__ == marker:
+            return True
+        node = getattr(node, "cause", None) or node.__cause__ or node.__context__
+    return False
+
 
 def _code_review_temporal_enabled() -> bool:
     """Whether to dispatch reviews to Temporal, defaulting off if the layer is absent.
@@ -184,9 +214,15 @@ class CodeReviewAgent:
             # ``_await_client`` raises this when no worker client is available.
             raise _TemporalDispatchUnavailable(str(exc)) from exc
         except WorkflowFailureError as exc:
-            cause = exc.cause
-            if getattr(cause, "type", "") == CODE_REVIEW_UNAVAILABLE_TYPE:
-                raise CodeReviewUnavailableError(str(cause)) from exc
+            # The unavailable marker may sit at the top of the cause chain (the
+            # workflow's own total-failure guard) OR be nested under an
+            # ``ActivityError`` (an infra failure a map/verify activity raised),
+            # so walk the chain rather than checking only the top-level cause —
+            # otherwise an expected reviewer-infrastructure outage would leak as
+            # an unexpected ``WorkflowFailureError`` instead of the
+            # ``CodeReviewUnavailableError`` callers fail-close on.
+            if _reports_review_unavailable(exc, CODE_REVIEW_UNAVAILABLE_TYPE):
+                raise CodeReviewUnavailableError(str(exc)) from exc
             raise
 
         notify_review_progress(progress_callback, "done", "durable review complete", 1.0)

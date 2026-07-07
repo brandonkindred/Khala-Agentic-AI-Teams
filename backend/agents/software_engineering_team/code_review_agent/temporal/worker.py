@@ -9,10 +9,12 @@ entrypoint.
 
 Because the code review agent runs Temporal by default (see :mod:`.config`), when
 the process has no ``TEMPORAL_ADDRESS`` set at all this boot points the shared
-Temporal client at the resolved default (the app's ``temporal:7233`` container)
-so the shared client can connect. In the deployed stack ``TEMPORAL_ADDRESS`` is
-already set, so that branch is inert; it only takes effect for an unconfigured
-run that has nonetheless opted into (defaulted to) Temporal.
+Temporal client at the default (the app's ``temporal:7233`` container) so the
+shared client can connect. In the deployed stack ``TEMPORAL_ADDRESS`` is already
+set, so that branch is inert; it only takes effect for an unconfigured run that
+has nonetheless opted into (defaulted to) Temporal. An operator's explicit
+``TEMPORAL_ADDRESS`` is never overwritten — the shared client connects to exactly
+that address, so the override is honored end to end.
 """
 
 from __future__ import annotations
@@ -39,9 +41,9 @@ def start_code_review_temporal_worker_thread() -> bool:
         - Returns ``False`` when code-review Temporal is disabled (sentinel /
           ``dummy`` / under pytest) and starts nothing.
         - Otherwise ensures the shared client has an address to connect to
-          (defaulting to the resolved code-review address only when
-          ``TEMPORAL_ADDRESS`` is unset — never overwriting an operator's value)
-          and starts the worker on the ``code_review-queue``. Idempotent per team.
+          (defaulting ``TEMPORAL_ADDRESS`` to the deployed container only when it
+          is unset — never overwriting an operator's value) and starts the worker
+          on the ``code_review-queue``. Idempotent per team.
     """
     if not code_review_temporal_enabled():
         return False

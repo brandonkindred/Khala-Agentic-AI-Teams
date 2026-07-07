@@ -44,12 +44,7 @@ def _input(
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in (
-        "CODE_REVIEW_TEMPORAL_ADDRESS",
-        "TEMPORAL_ADDRESS",
-        "LLM_PROVIDER",
-        "CODE_REVIEW_TEMPORAL_FORCE",
-    ):
+    for var in ("TEMPORAL_ADDRESS", "LLM_PROVIDER", "CODE_REVIEW_TEMPORAL_FORCE"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -65,26 +60,12 @@ def test_resolve_honours_temporal_address_override(monkeypatch: pytest.MonkeyPat
     assert cfg.resolve_code_review_temporal_address() == "ext.example:7233"
 
 
-def test_code_review_var_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "shared:7233")
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_ADDRESS", "cr:7233")
-    assert cfg.resolve_code_review_temporal_address() == "cr:7233"
-
-
 @pytest.mark.parametrize(
     "sentinel", ["", "disabled", "none", "off", "0", "false", "no", " DISABLED "]
 )
 def test_disable_sentinels_resolve_to_none(monkeypatch: pytest.MonkeyPatch, sentinel: str) -> None:
     _clear_env(monkeypatch)
     monkeypatch.setenv("TEMPORAL_ADDRESS", sentinel)
-    assert cfg.resolve_code_review_temporal_address() is None
-
-
-def test_code_review_disable_wins_over_shared_address(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("TEMPORAL_ADDRESS", "shared:7233")
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_ADDRESS", "disabled")
     assert cfg.resolve_code_review_temporal_address() is None
 
 
@@ -103,7 +84,7 @@ def test_force_flag_enables_under_pytest(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_force_flag_still_requires_an_address(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
     monkeypatch.setenv("CODE_REVIEW_TEMPORAL_FORCE", "yes")
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_ADDRESS", "none")
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "none")
     assert cfg.code_review_temporal_enabled() is False
 
 
@@ -402,14 +383,34 @@ def test_run_maps_workflow_unavailable_marker(monkeypatch: pytest.MonkeyPatch) -
     )
 
     def _fail(payload, **kw):
-        cause = ApplicationError("no chunk reviewed", type="CodeReviewUnavailableError")
-        raise WorkflowFailureError(cause=cause)
+        # Nested chain: a map/verify activity raised the marker, so Temporal wraps
+        # it under an intermediate (activity) error rather than at the top level.
+        app = ApplicationError("infra down", type="CodeReviewUnavailableError")
+        activity_wrapper = RuntimeError("activity failed")
+        activity_wrapper.__cause__ = app
+        raise WorkflowFailureError(cause=activity_wrapper)
 
     monkeypatch.setattr(
         "code_review_agent.temporal.start_workflow.execute_code_review_workflow_sync", _fail
     )
     with pytest.raises(CodeReviewUnavailableError):
         CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+
+
+def test_reports_review_unavailable_walks_cause_chain() -> None:
+    from code_review_agent.agent import _reports_review_unavailable
+    from temporalio.exceptions import ApplicationError
+
+    marker = "CodeReviewUnavailableError"
+    # Top-level marker (workflow total-failure guard).
+    top = ApplicationError("m", type=marker)
+    assert _reports_review_unavailable(top, marker) is True
+    # Nested two levels deep (activity infra failure).
+    nested = RuntimeError("outer")
+    nested.__cause__ = ApplicationError("m", type=marker)
+    assert _reports_review_unavailable(nested, marker) is True
+    # Unrelated failure is not misclassified.
+    assert _reports_review_unavailable(RuntimeError("boom"), marker) is False
 
 
 def test_dispatch_unavailable_is_distinct_from_review_failure() -> None:
