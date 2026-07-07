@@ -3,7 +3,7 @@ import { of, throwError } from 'rxjs';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
-import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
+import { PlanningApiService } from '../../services/planning-api.service';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { PendingQuestionsComponent } from './pending-questions.component';
 
@@ -12,10 +12,9 @@ describe('PendingQuestionsComponent', () => {
   let fixture: ComponentFixture<PendingQuestionsComponent>;
   let apiSpy: {
     submitAnswers: ReturnType<typeof vi.fn>;
-    submitPlanningV2Answers: ReturnType<typeof vi.fn>;
     submitProductAnalysisAnswers: ReturnType<typeof vi.fn>;
   };
-  let planningV3ApiSpy: { submitAnswers: ReturnType<typeof vi.fn> };
+  let planningApiSpy: { submitAnswers: ReturnType<typeof vi.fn> };
   let codingTeamApiSpy: { submitAnswers: ReturnType<typeof vi.fn> };
 
   const mockQuestion = {
@@ -28,17 +27,16 @@ describe('PendingQuestionsComponent', () => {
   beforeEach(async () => {
     apiSpy = {
       submitAnswers: vi.fn(),
-      submitPlanningV2Answers: vi.fn(),
       submitProductAnalysisAnswers: vi.fn(),
     };
-    planningV3ApiSpy = { submitAnswers: vi.fn() };
+    planningApiSpy = { submitAnswers: vi.fn() };
     codingTeamApiSpy = { submitAnswers: vi.fn() };
 
     await TestBed.configureTestingModule({
       imports: [PendingQuestionsComponent, NoopAnimationsModule],
       providers: [
         { provide: SoftwareEngineeringApiService, useValue: apiSpy },
-        { provide: PlanningV3ApiService, useValue: planningV3ApiSpy },
+        { provide: PlanningApiService, useValue: planningApiSpy },
         { provide: CodingTeamApiService, useValue: codingTeamApiSpy },
       ],
     }).compileComponents();
@@ -80,30 +78,17 @@ describe('PendingQuestionsComponent', () => {
     expect(component.submitting).toBe(false);
   });
 
-  it('should call submitPlanningV2Answers when submitEndpoint is planning-v2', () => {
-    component.submitEndpoint = 'planning-v2';
+  it('should call PlanningApiService.submitAnswers when submitEndpoint is planning', () => {
+    component.submitEndpoint = 'planning';
     component.questions = [{ ...mockQuestion, required: false } as any];
     component.initializeAnswers();
     component.getAnswer('q1')!.selectedOptionIds.add('a1');
     component.answers = new Map(component.answers);
 
-    apiSpy.submitPlanningV2Answers.mockReturnValue(of({ job_id: 'job-1', status: 'completed' } as any));
+    planningApiSpy.submitAnswers.mockReturnValue(of({ job_id: 'job-1', status: 'completed' } as any));
     component.submitAnswers();
 
-    expect(apiSpy.submitPlanningV2Answers).toHaveBeenCalledWith('job-1', expect.any(Object));
-  });
-
-  it('should call PlanningV3ApiService.submitAnswers when submitEndpoint is planning-v3', () => {
-    component.submitEndpoint = 'planning-v3';
-    component.questions = [{ ...mockQuestion, required: false } as any];
-    component.initializeAnswers();
-    component.getAnswer('q1')!.selectedOptionIds.add('a1');
-    component.answers = new Map(component.answers);
-
-    planningV3ApiSpy.submitAnswers.mockReturnValue(of({ job_id: 'job-1', status: 'completed' } as any));
-    component.submitAnswers();
-
-    expect(planningV3ApiSpy.submitAnswers).toHaveBeenCalledWith('job-1', expect.any(Array));
+    expect(planningApiSpy.submitAnswers).toHaveBeenCalledWith('job-1', expect.any(Array));
   });
 
   it('should call submitProductAnalysisAnswers when submitEndpoint is product-analysis', () => {
@@ -229,8 +214,8 @@ describe('PendingQuestionsComponent', () => {
     expect(component.hasAutoAnswerResult('q1')).toBe(true);
   });
 
-  it('autoAnswerQuestion no-op for planning-v3', () => {
-    component.submitEndpoint = 'planning-v3';
+  it('autoAnswerQuestion no-op for planning', () => {
+    component.submitEndpoint = 'planning';
     component.autoAnswerQuestion(mockQuestion as any);
     expect(component.hasAutoAnswerResult('q1')).toBe(false);
     expect(component.isAutoAnswering('q1')).toBe(false);
@@ -258,12 +243,12 @@ describe('PendingQuestionsComponent', () => {
     expect(component.error).toContain('oops');
   });
 
-  it('applyAutoAnswer uses planning-v3 endpoint', () => {
-    component.submitEndpoint = 'planning-v3';
+  it('applyAutoAnswer uses planning endpoint', () => {
+    component.submitEndpoint = 'planning';
     component.autoAnswerResults.set('q1', { selected_option_id: 'a1' } as any);
-    planningV3ApiSpy.submitAnswers.mockReturnValue(of({ job_id: 'job-1', status: 'completed' } as any));
+    planningApiSpy.submitAnswers.mockReturnValue(of({ job_id: 'job-1', status: 'completed' } as any));
     component.applyAutoAnswer('q1');
-    expect(planningV3ApiSpy.submitAnswers).toHaveBeenCalled();
+    expect(planningApiSpy.submitAnswers).toHaveBeenCalled();
   });
 
   it('applyAutoAnswer uses product-analysis endpoint', () => {
@@ -332,10 +317,10 @@ describe('PendingQuestionsComponent', () => {
     expect(component.submitting).toBe(false);
   });
 
-  it('autoAnswerEnabled is false for coding-team and planning-v3, true otherwise', () => {
+  it('autoAnswerEnabled is false for coding-team and planning, true otherwise', () => {
     component.submitEndpoint = 'coding-team';
     expect(component.autoAnswerEnabled).toBe(false);
-    component.submitEndpoint = 'planning-v3';
+    component.submitEndpoint = 'planning';
     expect(component.autoAnswerEnabled).toBe(false);
     component.submitEndpoint = 'run-team';
     expect(component.autoAnswerEnabled).toBe(true);

@@ -337,7 +337,7 @@ class TaskPlan(BaseModel):
         default=2,
         ge=1,
         le=13,
-        description="Fibonacci complexity estimate. Planning V2 guideline: most tasks 2-5 days (points 2, 3, 5); point 1 (~1 day) is allowed as an exception. Downstream teams break tasks into subtasks.",
+        description="Fibonacci complexity estimate. Planning guideline: most tasks 2-5 days (points 2, 3, 5); point 1 (~1 day) is allowed as an exception. Downstream teams break tasks into subtasks.",
     )
 
 

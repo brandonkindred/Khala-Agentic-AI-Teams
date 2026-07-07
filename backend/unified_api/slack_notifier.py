@@ -107,7 +107,6 @@ def _build_open_questions_blocks(
 ) -> list[dict[str, Any]]:
     source_label = {
         "run-team": "Run team",
-        "planning-v2": "Planning v2",
         "product-analysis": "Product analysis",
     }.get(source, source)
     blocks: list[dict[str, Any]] = [

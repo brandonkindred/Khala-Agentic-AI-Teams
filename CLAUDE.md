@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It currently mounts **21 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning v3, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought, job matching) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list lives in `backend/unified_api/config.py` (`TEAM_CONFIGS`).
+**Khala** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It currently mounts **21 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning, coding team, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought, job matching) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list lives in `backend/unified_api/config.py` (`TEAM_CONFIGS`).
 
 ## Repository Structure
 
@@ -14,9 +14,9 @@ One directory per agent team under `backend/agents/` — the authoritative team 
 backend/
   agents/
     software_engineering_team/  # Primary team — full dev pipeline; contains the backend/frontend
-                                # code-v2, devops, planning-v2, integration, and QA sub-teams
+                                # code-v2, devops, planning, integration, and QA sub-teams
     coding_team/             # Standalone /api/coding-team; SE uses it as a logical sub-team
-    planning_v3_team/        # Client-facing discovery/PRD team (/api/planning-v3)
+    planning_team/           # Client-facing discovery/PRD team (/api/planning)
     product_delivery/        # Persistent Product Delivery Loop (/api/product-delivery)
     llm_service/             # Centralized LLM client (Ollama, Claude)
     agent_registry/          # Agent Console catalog: per-agent YAML manifests → /api/agents
@@ -115,7 +115,7 @@ Each agent team has a **team-lead orchestrator** that coordinates role-separated
 
 ### Software Engineering Team Pipeline (4 phases)
 
-1. **Discovery**: Spec → LLM parsing → Planning (Planning-v2 6-phase workflow via `planning_v2_adapter.py`, or the newer `planning_v3_adapter.py` which delegates to the standalone `planning_v3_team`)
+1. **Discovery**: Spec → LLM parsing → Planning (`planning_adapter.py`, which delegates to the standalone `planning_team`)
 2. **Design**: Tech Lead generates task assignments; Architecture Expert produces architecture docs
 3. **Execution** (parallel queues):
    - Prefix queue: git/DevOps setup (sequential)
@@ -129,14 +129,13 @@ Each agent team has a **team-lead orchestrator** that coordinates role-separated
 
 ### Sub-Team Variants
 
-All three live **inside** `backend/agents/software_engineering_team/`:
+The first three live **inside** `backend/agents/software_engineering_team/`; Coding Team and Planning are standalone modules under `backend/agents/`:
 
 - **Backend-Code-V2** (`software_engineering_team/backend_code_v2_team/`): 3-layer (Backend Tech Lead → Backend Dev Agent + tool agents for linting, build, code review, security, QA, DbC, git ops)
 - **Frontend-Code-V2** (`software_engineering_team/frontend_code_v2_team/`): 3-layer (Frontend Tech Lead → Frontend Dev Agent + tool agents)
 - **DevOps Team** (`software_engineering_team/devops_team/`): 5-phase (Intake → Change Design → Write Artifacts → Validation → Completion)
-- **Planning V2** (`software_engineering_team/planning_v2_team/`): legacy 6-phase planning, still supported via `planning_v2_adapter.py`
 - **Coding Team** (`backend/agents/coding_team/`): standalone module mounted at `/api/coding-team` and used by SE as a logical sub-team (`parent_team_key="software_engineering"`)
-- **Planning V3** (`backend/agents/planning_v3_team/`): standalone client-facing discovery/PRD team mounted at `/api/planning-v3`; SE invokes it through `planning_v3_adapter.py`
+- **Planning** (`backend/agents/planning_team/`): standalone client-facing discovery/PRD team mounted at `/api/planning`; SE invokes it through `planning_adapter.py`
 
 ### Unified API Routing
 
@@ -215,7 +214,7 @@ Core vars only. The complete reference — every var, defaults, backoff math, fa
 ## Testing
 
 - **Coverage requirement: tests must cover at least 90% of code (line coverage) on both backend and frontend.** This is a hard floor for new and modified code; CI enforces it. If a file or branch cannot reach 90%, document the reason explicitly in the PR and add a targeted `# pragma: no cover` (Python) or `/* istanbul ignore next */` (TypeScript) with a one-line justification — do not lower the global threshold.
-- **Backend**: `pytest` with `pytest-cov` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning v3, sales, deepthought, etc.) and fails the build below 90% line coverage.
+- **Backend**: `pytest` with `pytest-cov` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning, sales, deepthought, etc.) and fails the build below 90% line coverage.
 - **Frontend**: Vitest + Angular testing utilities; **90% line coverage target** for `src/app`.
 - **CI**: GitHub Actions — ruff lint must pass first, then parallel test jobs (coverage-gated at 90%), then docker smoke test.
 

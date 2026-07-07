@@ -135,7 +135,7 @@ class TechLeadAgent:
         requirements: "ProductRequirements",
     ) -> str:
         """
-        Generate a detailed development plan summary from the Planning V2 hierarchy
+        Generate a detailed development plan summary from the Planning hierarchy
         and plan artifacts.
         """
 
@@ -214,7 +214,7 @@ class TechLeadAgent:
         """
         Produce an Initiative -> Epic -> Story hierarchy based on the requirements, existing codebase, and system architecture, existing tasks, and the spec.
 
-        If a planning_hierarchy is provided (from Planning V2), use it directly
+        If a planning_hierarchy is provided (from Planning), use it directly
         instead of generating new tasks. The Tech Lead still produces a development
         plan summary but does not re-create the task breakdown.
 
@@ -223,7 +223,7 @@ class TechLeadAgent:
         """
         logger.info("Tech Lead: planning for %s", input_data.requirements.title)
 
-        # If Planning V2 hierarchy is provided, use it directly
+        # If Planning hierarchy is provided, use it directly
         if input_data.planning_hierarchy:
             hierarchy = input_data.planning_hierarchy
             assignment = flatten_hierarchy_to_assignment(hierarchy)
@@ -239,7 +239,7 @@ class TechLeadAgent:
                 team_counts[team] = team_counts.get(team, 0) + 1
 
             logger.info(
-                "Tech Lead: using Planning V2 hierarchy (%s tasks across %s stories)",
+                "Tech Lead: using Planning hierarchy (%s tasks across %s stories)",
                 task_count,
                 story_count,
             )
@@ -470,7 +470,7 @@ class TechLeadAgent:
         if input_data.repo_path:
             context_parts.extend(["", f"**Repo path:** {input_data.repo_path}"])
 
-        # Include plan artifacts if available (from Planning V2 or explicit input)
+        # Include plan artifacts if available (from Planning or explicit input)
         plan_artifacts = input_data.plan_artifacts_content or ""
         if not plan_artifacts and input_data.repo_path:
             plan_artifacts = self._read_plan_artifacts(input_data.repo_path)
@@ -877,8 +877,6 @@ class TechLeadAgent:
         Decide whether documentation needs updating after a task completes,
         and if so, trigger the Documentation Agent.
         """
-        from pathlib import Path
-
         logger.info(
             "Tech Lead: evaluating documentation update for task %s (%s)",
             task_update.task_id,
@@ -984,8 +982,6 @@ class TechLeadAgent:
         Trigger the DevOps agent to add containerization and deployment for the backend repo.
         Returns True if run and write succeeded, False otherwise (non-blocking).
         """
-        from pathlib import Path
-
         path = Path(repo_path).resolve()
         if not (path / ".git").exists():
             logger.warning("Tech Lead: skip DevOps for backend (not a git repo): %s", path)
@@ -1031,8 +1027,6 @@ class TechLeadAgent:
         Trigger the DevOps agent to add containerization and deployment for the frontend repo.
         Returns True if run and write succeeded, False otherwise (non-blocking).
         """
-        from pathlib import Path
-
         path = Path(repo_path).resolve()
         if not (path / ".git").exists():
             logger.warning("Tech Lead: skip DevOps for frontend (not a git repo): %s", path)

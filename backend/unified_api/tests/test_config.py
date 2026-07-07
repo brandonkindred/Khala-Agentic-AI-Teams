@@ -40,12 +40,18 @@ def test_team_configs_has_expected_teams():
         "ai_systems",
         "investment",
         "nutrition_meal_planning",
-        "planning_v3",
+        "planning",
         "coding_team",
         "sales_team",
         "road_trip_planning",
     }
     assert expected.issubset(set(TEAM_CONFIGS.keys()))
+
+
+def test_team_configs_has_no_legacy_planning_keys():
+    """The retired planning_v3/planning_v2 keys never reappear in TEAM_CONFIGS."""
+    assert "planning_v3" not in TEAM_CONFIGS
+    assert "planning_v2" not in TEAM_CONFIGS
 
 
 def test_team_configs_prefixes_start_with_api():

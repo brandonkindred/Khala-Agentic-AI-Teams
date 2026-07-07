@@ -12,7 +12,7 @@ import { SocialMarketingApiService } from '../../services/social-marketing-api.s
 import { InvestmentApiService } from '../../services/investment-api.service';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { SalesApiService } from '../../services/sales-api.service';
-import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
+import { PlanningApiService } from '../../services/planning-api.service';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { GenericJobsApiService } from '../../services/generic-jobs-api.service';
 import { JobsDashboardComponent } from './jobs-dashboard.component';
@@ -33,7 +33,6 @@ describe('JobsDashboardComponent a11y', () => {
     const seApi = {
       getRunningJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
       getJobStatus: vi.fn(),
-      getPlanningV2Status: vi.fn(),
       getProductAnalysisStatus: vi.fn(),
       getBackendCodeV2Status: vi.fn(),
       getFrontendCodeV2Status: vi.fn(),
@@ -49,7 +48,7 @@ describe('JobsDashboardComponent a11y', () => {
     const investmentApi = { listStrategyLabJobs: vi.fn().mockReturnValue(of({ jobs: [] })), deleteJob: vi.fn() };
     const personaApi = { listJobs: vi.fn().mockReturnValue(of({ jobs: [] })), cancelJob: vi.fn(), deleteJob: vi.fn() };
     const salesApi = { listPipelineJobs: vi.fn().mockReturnValue(of([])), cancelJob: vi.fn(), deleteJob: vi.fn() };
-    const planningV3Api = { getJobs: vi.fn().mockReturnValue(of({ jobs: [] })) };
+    const planningApi = { getJobs: vi.fn().mockReturnValue(of({ jobs: [] })) };
     const codingTeamApi = {};
     const genericJobsApi = {
       listJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
@@ -72,7 +71,7 @@ describe('JobsDashboardComponent a11y', () => {
         { provide: InvestmentApiService, useValue: investmentApi },
         { provide: PersonaTestingApiService, useValue: personaApi },
         { provide: SalesApiService, useValue: salesApi },
-        { provide: PlanningV3ApiService, useValue: planningV3Api },
+        { provide: PlanningApiService, useValue: planningApi },
         { provide: CodingTeamApiService, useValue: codingTeamApi },
         { provide: GenericJobsApiService, useValue: genericJobsApi },
         { provide: Router, useValue: { navigate: vi.fn() } },

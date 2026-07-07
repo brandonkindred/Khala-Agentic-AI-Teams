@@ -154,59 +154,6 @@ describe('SoftwareEngineeringApiService', () => {
     httpMock.expectOne(`${baseUrl}/frontend-code-v2/status/j1`).flush({});
   });
 
-  it('POST /planning-v2/run', () => {
-    service.runPlanningV2({} as never).subscribe();
-    const req = httpMock.expectOne(`${baseUrl}/planning-v2/run`);
-    expect(req.request.method).toBe('POST');
-    req.flush({});
-  });
-
-  it('GET /planning-v2/status/{id}', () => {
-    service.getPlanningV2Status('j1').subscribe();
-    httpMock.expectOne(`${baseUrl}/planning-v2/status/j1`).flush({});
-  });
-
-  it('GET /planning-v2/jobs', () => {
-    service.getPlanningV2Jobs().subscribe();
-    httpMock.expectOne(`${baseUrl}/planning-v2/jobs`).flush({});
-  });
-
-  it('GET /planning-v2/result/{id}', () => {
-    service.getPlanningV2Result('j1').subscribe();
-    httpMock.expectOne(`${baseUrl}/planning-v2/result/j1`).flush({});
-  });
-
-  it('POST /planning-v2/{id}/answers', () => {
-    service.submitPlanningV2Answers('j1', {} as never).subscribe();
-    const req = httpMock.expectOne(`${baseUrl}/planning-v2/j1/answers`);
-    expect(req.request.method).toBe('POST');
-    req.flush({});
-  });
-
-  it('POST /planning-v2/{id}/auto-answer/{qid} default body', () => {
-    service.autoAnswerPlanningV2('j1', 'q1').subscribe();
-    const req = httpMock.expectOne(`${baseUrl}/planning-v2/j1/auto-answer/q1`);
-    expect(req.request.body).toEqual({});
-    req.flush({});
-  });
-
-  it('POST /planning-v2/{id}/auto-answer/{qid} with body', () => {
-    service.autoAnswerPlanningV2('j1', 'q1', { context: 'x' } as never).subscribe();
-    const req = httpMock.expectOne(`${baseUrl}/planning-v2/j1/auto-answer/q1`);
-    expect(req.request.body).toEqual({ context: 'x' });
-    req.flush({});
-  });
-
-  it('GET /planning-v2/{id}/artifacts', () => {
-    service.getPlanningV2Artifacts('j1').subscribe();
-    httpMock.expectOne(`${baseUrl}/planning-v2/j1/artifacts`).flush({});
-  });
-
-  it('GET /planning-v2/{id}/artifacts/{name} encodes name', () => {
-    service.getPlanningV2ArtifactContent('j1', 'a/b.md').subscribe();
-    httpMock.expectOne(`${baseUrl}/planning-v2/j1/artifacts/${encodeURIComponent('a/b.md')}`).flush({});
-  });
-
   it('POST /product-analysis/run', () => {
     service.runProductAnalysis({} as never).subscribe();
     const req = httpMock.expectOne(`${baseUrl}/product-analysis/run`);
