@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 from strands.models.model import Model
 
@@ -134,6 +134,7 @@ def get_strands_model(
     response_format: str = "json",
     client: Optional[LLMClient] = None,
     lazy: bool = False,
+    think: Optional[Union[bool, str]] = None,
 ) -> Model:
     """Return a Strands-compatible model backed by the centralized LLM service.
 
@@ -166,11 +167,23 @@ def get_strands_model(
     the agent run fails instead, matching the documented no-LLM behavior.
     Incompatible with an explicit ``client`` (which already bypasses resolution).
 
+    ``think`` overrides the model's thinking level for the returned adapter
+    (``False`` forces reasoning off, a level string selects a registered level).
+    It is forwarded to ``LLMClientModel``; because ``think`` is not part of the
+    cache key, passing it always builds a fresh, uncached adapter, so a cached
+    default-thinking model is never served for an explicit override and vice
+    versa. Used by rare, deliberate paths (e.g. the code-review last-resort
+    thinking-off retry). ``None`` (default) keeps the provider/model default and
+    the normal cached behavior. Applies to eager construction only — it is not
+    threaded through the ``lazy`` stand-in (no caller combines the two).
+
     Args:
         agent_key: Optional agent identifier for per-agent model overrides.
         response_format: ``"json"`` (default) or ``"text"``.
         client: Optional pre-built ``LLMClient`` to wrap (bypasses cache).
         lazy: When True, defer provider resolution until first use.
+        think: Optional thinking-level override (``False``/level string); ``None``
+            keeps the default. Passing it bypasses the model cache.
 
     Returns:
         A configured ``LLMClientModel`` instance backed by the centralized LLM client,
@@ -217,9 +230,24 @@ def get_strands_model(
             model_id=client_model
             or llm_config.resolve_model_for_provider(agent_key, provider=provider),
             response_format=response_format,
+            think=think,
         )
 
     model_id = llm_config.resolve_model_for_provider(agent_key, provider=provider)
+
+    # An explicit thinking override is NOT part of the cache key below, so a
+    # cached adapter would serve the wrong level. Build a fresh (uncached)
+    # adapter for it — callers pass ``think`` only on rare, deliberate paths
+    # (e.g. the code-review last-resort thinking-off retry), so bypassing the
+    # cache here costs nothing while keeping the default cached path untouched.
+    if think is not None:
+        return LLMClientModel(
+            get_client(agent_key),
+            agent_key=agent_key,
+            model_id=model_id,
+            response_format=response_format,
+            think=think,
+        )
 
     # ``agent_key`` is part of the cache key so two agents that resolve to the
     # same model don't share one ``LLMClientModel`` (which would attribute every

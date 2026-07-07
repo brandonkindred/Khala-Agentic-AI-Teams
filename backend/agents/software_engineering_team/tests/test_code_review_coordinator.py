@@ -1390,6 +1390,25 @@ def test_resolve_code_review_model_think_override(monkeypatch) -> None:
     assert thinking_override_supported(object()) is True
 
 
+def test_resolve_code_review_model_think_off_uses_real_factory(monkeypatch) -> None:
+    """Regression: the production thinking-off path must not raise. It calls the
+    real ``llm_service.get_strands_model(..., think=False)`` — an earlier version
+    of that export did not accept ``think``, so this raised ``TypeError`` that the
+    retry swallowed, silently disabling the last-resort retry in production. Uses
+    ``LLM_PROVIDER=dummy`` so a real ``LLMClientModel`` is built without a
+    configured provider, and does NOT monkeypatch ``get_strands_model`` so the
+    real signature is exercised."""
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    from code_review_agent.model_resolution import resolve_code_review_model
+
+    # ``object()`` is not a strands Model, so this takes the production
+    # ``get_strands_model`` path (the one that was broken).
+    model = resolve_code_review_model(object(), think=False)
+    assert model.get_config().get("think") is False
+    # The default (think=None) path stays on the provider default.
+    assert resolve_code_review_model(object()).get_config().get("think") is None
+
+
 def test_not_reviewed_range_label_edge_cases() -> None:
     """The observability label handles a missing path and a missing line range."""
     from code_review_agent.coordinator import _not_reviewed_range_label
