@@ -726,14 +726,15 @@ services:
     container_name: khala-startup-advisor-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
       TEAM_MODULE: startup_advisor.api.main
       TEAM_NAME: startup_advisor_team
       TEAM_PORT: "8107"
-      TEAM_TEMPORAL_WORKER_MODULE: ""
-      TEAM_TEMPORAL_WORKER_FUNC: ""
+      TEAM_TEMPORAL_WORKER_MODULE: startup_advisor.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_startup_advisor_temporal_worker_thread
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
     ports: ["8107:8107"]
