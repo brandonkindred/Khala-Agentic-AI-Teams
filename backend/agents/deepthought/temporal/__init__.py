@@ -13,8 +13,6 @@ polling works identically whether a job runs on a thread or a Temporal worker.
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 import logging
 from datetime import timedelta
 from typing import Any
@@ -72,11 +70,9 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
     try:
         update_job(job_id, status=JOB_STATUS_RUNNING)
         req = DeepthoughtRequest(**request)
+        # ``process_message`` is synchronous and returns a ``DeepthoughtResponse``.
         result = DeepthoughtOrchestrator().process_message(req)
-        if inspect.iscoroutine(result):
-            result = asyncio.new_event_loop().run_until_complete(result)
-        dump = result.model_dump() if hasattr(result, "model_dump") else result
-        dump = dump if isinstance(dump, dict) else {"result": dump}
+        dump = result.model_dump()
         if is_job_cancelled(job_id):
             return dump
         update_job(job_id, status=JOB_STATUS_COMPLETED, result=dump)

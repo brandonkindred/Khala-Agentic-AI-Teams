@@ -206,9 +206,38 @@ def test_ask_uses_temporal_when_enabled():
         resp = client.post("/deepthought/ask", json={"message": "q"})
 
     assert resp.status_code == 200
-    assert resp.json()["status"] == "running"
+    # Both runtimes leave the job PENDING until it starts, so the submission
+    # response matches the thread path (and the job store).
+    assert resp.json()["status"] == "pending"
     mock_create.assert_called_once()
     mock_start.assert_called_once()
+    mock_thread.assert_not_called()
+
+
+def test_ask_marks_failed_when_temporal_start_raises():
+    """A workflow-start failure must not orphan the job in PENDING.
+
+    The job is flipped to FAILED and the error surfaces to the client rather
+    than silently falling back to a thread.
+    """
+    from deepthought.api import main
+
+    with (
+        patch("shared_temporal.is_temporal_enabled", return_value=True),
+        patch(
+            "deepthought.temporal.start_workflow.start_deepthought_workflow",
+            side_effect=RuntimeError("worker unreachable"),
+        ),
+        patch.object(main, "create_job"),
+        patch.object(main, "update_job") as mock_update,
+        patch("threading.Thread") as mock_thread,
+    ):
+        client = TestClient(main.app, raise_server_exceptions=False)
+        resp = client.post("/deepthought/ask", json={"message": "q"})
+
+    assert resp.status_code == 500
+    mock_update.assert_called_once()
+    assert mock_update.call_args.kwargs["status"] == "failed"
     mock_thread.assert_not_called()
 
 
