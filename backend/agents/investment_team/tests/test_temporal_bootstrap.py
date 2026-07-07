@@ -115,16 +115,34 @@ def test_worker_start_is_no_op_when_temporal_disabled(monkeypatch) -> None:
     assert start_investment_temporal_worker_thread() is False
 
 
-def test_app_wires_startup_lifespan_backstop() -> None:
-    """The app's ``on_startup`` hook is the in-app worker backstop — the second
+def test_app_wires_startup_lifespan_backstop(monkeypatch) -> None:
+    """The app's lifespan startup is the in-app worker backstop — the second
     start path alongside the team_service entrypoint. Keep it wired so a bare
     ``uvicorn ...:app`` run (or a swallowed entrypoint failure) still connects
-    the worker client that Strategy Lab dispatch depends on."""
-    from investment_team.api import main as api_main
+    the worker client that Strategy Lab dispatch depends on.
 
-    assert callable(getattr(api_main, "_startup", None)), (
-        "investment_team.api.main._startup lifespan backstop is missing"
+    ``create_team_app`` wires ``on_startup`` inside an ``@asynccontextmanager``
+    lifespan (it is *not* in ``app.router.on_startup``), so assert the wiring by
+    actually driving the lifespan via the TestClient context manager and
+    confirming the worker start fires — not merely that ``_startup`` exists."""
+    from fastapi.testclient import TestClient
+
+    from investment_team.api import main as api_main
+    from investment_team.temporal import worker as worker_mod
+
+    called = []
+    monkeypatch.setattr(
+        worker_mod,
+        "start_investment_temporal_worker_thread",
+        lambda: called.append(True) or True,
     )
+
+    # Entering the TestClient context runs the app lifespan startup, which
+    # invokes the registered on_startup hook (_startup) → the worker start.
+    with TestClient(api_main.app):
+        pass
+
+    assert called == [True], "app lifespan startup did not invoke the worker backstop"
 
 
 def test_startup_backstop_starts_worker(monkeypatch) -> None:
