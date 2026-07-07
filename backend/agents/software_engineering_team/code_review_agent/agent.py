@@ -16,14 +16,66 @@ unexpected reviewer defect propagates unchanged (fails closed).
 from __future__ import annotations
 
 import logging
+import uuid
 
 from llm_service import get_client
 
 from .coordinator import run_coordinator
-from .models import CodeReviewInput, CodeReviewOutput, ReviewProgressCallback
+from .models import (
+    CodeReviewInput,
+    CodeReviewOutput,
+    CodeReviewUnavailableError,
+    ReviewProgressCallback,
+    notify_review_progress,
+)
 from .repo_reader import RepoReader
 
 logger = logging.getLogger(__name__)
+
+# Bounded walk so a cyclic/adversarial cause chain can never loop forever.
+_MAX_CAUSE_DEPTH = 12
+
+
+def _reports_review_unavailable(exc: BaseException, marker: str) -> bool:
+    """Walk an exception's cause chain for the code-review "unavailable" marker.
+
+    Temporal surfaces a workflow failure differently depending on where the
+    marker was raised: the workflow's own total-failure guard puts the
+    ``ApplicationError`` at the top of the chain, while an infra failure a
+    map/verify activity raised is nested one level deeper under an
+    ``ActivityError``. Both spell the marker as ``ApplicationError.type`` (or the
+    original exception's class name), so this walks ``cause``/``__cause__``/
+    ``__context__`` up to a bounded depth.
+
+    Postconditions:
+        - Returns ``True`` iff some node in the chain carries ``type == marker``
+          or is itself named ``marker``. Never raises; bounded and cycle-safe.
+    """
+    seen: set[int] = set()
+    node: BaseException | None = exc
+    depth = 0
+    while node is not None and id(node) not in seen and depth < _MAX_CAUSE_DEPTH:
+        seen.add(id(node))
+        depth += 1
+        if getattr(node, "type", None) == marker or type(node).__name__ == marker:
+            return True
+        node = getattr(node, "cause", None) or node.__cause__ or node.__context__
+    return False
+
+
+def _code_review_temporal_enabled() -> bool:
+    """Whether to dispatch reviews to Temporal, defaulting off if the layer is absent.
+
+    Importing the temporal package pulls in ``temporalio``; if it (or the temporal
+    layer) cannot be imported for any reason, code review must still work in
+    thread mode, so any import failure resolves to ``False``.
+    """
+    try:
+        from .temporal.config import code_review_temporal_enabled
+    except Exception:  # noqa: BLE001 - a missing/broken temporal layer must not break reviews
+        logger.debug("Code review temporal layer unavailable; using in-process mode", exc_info=True)
+        return False
+    return code_review_temporal_enabled()
 
 
 class CodeReviewAgent:
@@ -94,6 +146,93 @@ class CodeReviewAgent:
             input_data.architecture is not None,
             len(input_data.acceptance_criteria),
         )
+        # Temporal is the default execution mode for the code review agent (see
+        # ``temporal/config.py``). Dispatch the durable ``CodeReviewWorkflow`` when
+        # enabled; fall back to the in-process coordinator only when Temporal is
+        # explicitly disabled (sentinel / dummy / pytest) or unavailable.
+        if _code_review_temporal_enabled():
+            try:
+                return self._run_via_temporal(input_data, progress_callback)
+            except CodeReviewUnavailableError:
+                # A real review failure — never silently downgrade to thread mode,
+                # or a resubmit could mask the failure as feedback.
+                raise
+            except _TemporalDispatchUnavailable as exc:
+                logger.warning(
+                    "CodeReview: Temporal dispatch unavailable (%s); "
+                    "falling back to in-process review",
+                    exc,
+                )
         return run_coordinator(
             self.llm, input_data, progress_callback=progress_callback, repo_reader=repo_reader
         )
+
+    def _run_via_temporal(
+        self,
+        input_data: CodeReviewInput,
+        progress_callback: ReviewProgressCallback | None,
+    ) -> CodeReviewOutput:
+        """Execute the review as a durable ``CodeReviewWorkflow`` and return its output.
+
+        Preconditions:
+            - Temporal is enabled for the code review agent
+              (``code_review_temporal_enabled()``).
+
+        Postconditions:
+            - Returns the workflow's ``CodeReviewOutput``. ``progress_callback``, a
+              live in-process object that cannot cross the Temporal boundary, is
+              invoked at the coarse start/end milestones so its contract
+              (non-decreasing, ends at 1.0) still holds; fine-grained progress
+              lives on the workflow's ``progress`` query. ``repo_reader`` is
+              likewise not forwarded — the false-positive pass runs without
+              out-of-diff read access, a strictly keep-more (fail-safe) behavior.
+
+        Raises:
+            CodeReviewUnavailableError: the workflow reported it could not review
+                the submission (mapped from its ``ApplicationError`` marker).
+            _TemporalDispatchUnavailable: the worker/client never became available
+                (the caller falls back to in-process review).
+        """
+        from temporalio.client import WorkflowFailureError
+
+        from .temporal.config import WORKFLOW_ID_PREFIX
+        from .temporal.start_workflow import execute_code_review_workflow_sync
+        from .temporal.worker import start_code_review_temporal_worker_thread
+        from .temporal.workflows import CODE_REVIEW_UNAVAILABLE_TYPE
+
+        notify_review_progress(progress_callback, "preparing", "dispatching durable review", 0.02)
+        # Ensure a worker (and the shared client) is running in this process;
+        # idempotent per team, so repeated reviews reuse the same worker.
+        start_code_review_temporal_worker_thread()
+
+        workflow_id = f"{WORKFLOW_ID_PREFIX}{uuid.uuid4().hex}"
+        try:
+            result = execute_code_review_workflow_sync(
+                input_data.model_dump(mode="json"), workflow_id=workflow_id
+            )
+        except RuntimeError as exc:
+            # ``_await_client`` raises this when no worker client is available.
+            raise _TemporalDispatchUnavailable(str(exc)) from exc
+        except WorkflowFailureError as exc:
+            # The unavailable marker may sit at the top of the cause chain (the
+            # workflow's own total-failure guard) OR be nested under an
+            # ``ActivityError`` (an infra failure a map/verify activity raised),
+            # so walk the chain rather than checking only the top-level cause —
+            # otherwise an expected reviewer-infrastructure outage would leak as
+            # an unexpected ``WorkflowFailureError`` instead of the
+            # ``CodeReviewUnavailableError`` callers fail-close on.
+            if _reports_review_unavailable(exc, CODE_REVIEW_UNAVAILABLE_TYPE):
+                raise CodeReviewUnavailableError(str(exc)) from exc
+            raise
+
+        notify_review_progress(progress_callback, "done", "durable review complete", 1.0)
+        return CodeReviewOutput.model_validate(result)
+
+
+class _TemporalDispatchUnavailable(RuntimeError):
+    """The Temporal worker/client was not available to dispatch the review.
+
+    Distinct from ``CodeReviewUnavailableError`` (a real review failure): this
+    means the durable path could not even start, so ``CodeReviewAgent.run`` falls
+    back to the in-process coordinator rather than failing the review.
+    """

@@ -169,6 +169,26 @@ Temporal namespace.
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
 
+### Code review agent: Temporal by default
+**The code review agent runs Temporal by default** (unlike the other teams, which
+only switch on when `TEMPORAL_ADDRESS` is set): `CodeReviewAgent.run` dispatches
+the durable `CodeReviewWorkflow` and falls back to the in-process coordinator only
+when Temporal is explicitly disabled or unavailable. Its address resolves to
+`TEMPORAL_ADDRESS` when set, otherwise the built-in default `temporal:7233` (the
+app's own deployed Temporal container). There is intentionally no code-review-only
+address override: the worker connects through the process-wide shared Temporal
+client, which reads only `TEMPORAL_ADDRESS`, so `TEMPORAL_ADDRESS` is the single
+override for where reviews run. Setting `TEMPORAL_ADDRESS` to an empty /
+`disabled` / `none` / `off` / `0` / `false` / `no` value, selecting
+`LLM_PROVIDER=dummy`, or running under `pytest` falls back to thread mode. Only the
+code review agent's *default* is flipped on; every other team's thread-default
+dispatch decision is unchanged.
+
+### CODE_REVIEW_TEMPORAL_FORCE
+Test-only escape hatch (truthy: `1`/`true`/`yes`/`on`) that re-enables code-review
+Temporal mode despite the `pytest`/`dummy` guards, provided an address still
+resolves. Not load-bearing outside integration tests.
+
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
 
