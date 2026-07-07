@@ -329,13 +329,22 @@ class AgenticPipelineWorkflow:
                     prompt_text = step.get("description") or (
                         f"Human input required for: {step.get('name', step['step_id'])}"
                     )
+                    # Reset BEFORE the setup activity makes the run resumable: once
+                    # ``wait_setup_activity`` publishes ``waiting_for_input`` to the store,
+                    # the API can observe it and deliver a ``submit_input`` signal. If the
+                    # reset ran after setup, a signal landing in that window would set
+                    # ``_human_input`` only for this line to immediately discard it, and the
+                    # run would hang until the WAIT timeout despite valid input. Clearing
+                    # first means any such signal is preserved and ``wait_condition`` sees it.
+                    # (Mirrors the thread runner's "clear before publishing" ordering in
+                    # ``PipelineRunner._handle_wait_step``.)
+                    self._human_input = None
                     await workflow.execute_activity(
                         wait_setup_activity,
                         args=[run_id, step["step_id"], step.get("name", ""), prompt_text],
                         start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
                         retry_policy=_SINGLE_ATTEMPT,
                     )
-                    self._human_input = None
                     try:
                         await workflow.wait_condition(
                             lambda: self._human_input is not None,

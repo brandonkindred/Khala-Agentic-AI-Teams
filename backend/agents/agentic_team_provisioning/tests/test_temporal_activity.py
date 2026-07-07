@@ -263,6 +263,54 @@ def test_workflow_run_completes_action_then_wait(monkeypatch: pytest.MonkeyPatch
     assert resume_call[1] == ["r1", "w1", "human answer"]
 
 
+def test_workflow_run_wait_preserves_signal_arriving_during_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a ``submit_input`` signal delivered while ``wait_setup_activity`` is
+    publishing the ``waiting_for_input`` state must NOT be discarded.
+
+    The reset of ``_human_input`` happens *before* the setup activity makes the run
+    resumable, so an input that lands in that window survives and the run resumes
+    instead of hanging until the WAIT timeout. Here the ``wait_setup`` handler fires the
+    signal (standing in for the API observing the row and signalling), and
+    ``wait_condition`` returns only if the predicate already holds — so the buggy
+    "reset after setup" ordering would fall through to the timeout branch.
+    """
+    workflow_obj = wf.AgenticPipelineWorkflow()
+    process = {
+        "process_id": "p1",
+        "steps": [
+            {"step_id": "w1", "step_type": "wait", "name": "W", "description": "?", "next_steps": []}
+        ],
+    }
+
+    calls = _patch_execute(
+        monkeypatch,
+        {
+            wf.advance_step_activity: lambda args: True,
+            # Signal arrives as the run becomes resumable (mid-setup).
+            wf.wait_setup_activity: lambda args: workflow_obj.submit_input("early answer"),
+            wf.wait_resume_activity: lambda args: args[2],
+            wf.complete_activity: lambda args: None,
+        },
+    )
+
+    async def _fake_wait(pred, timeout=None):
+        if pred():
+            return
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr("temporalio.workflow.wait_condition", _fake_wait)
+
+    result = asyncio.run(workflow_obj.run("r1", _TEAM_AGENTS, process, None, 3600))
+
+    assert result == {"run_id": "r1", "terminal": "completed"}
+    # The early input was preserved and threaded into the resume, not lost to a reset.
+    resume_call = next(c for c in calls if c[0] is wf.wait_resume_activity)
+    assert resume_call[1] == ["r1", "w1", "early answer"]
+    assert wf.wait_expire_activity not in [c[0] for c in calls]
+
+
 def test_workflow_run_wait_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     workflow_obj = wf.AgenticPipelineWorkflow()
     process = {
