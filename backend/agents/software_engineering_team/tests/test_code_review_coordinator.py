@@ -1741,20 +1741,30 @@ def test_empty_input_still_reports_done() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Class-cohesion pass + repo-reader threading
+# repo-reader threading
 # ---------------------------------------------------------------------------
 
 
-def test_coordinator_merges_class_cohesion_findings(monkeypatch) -> None:
-    """A class cohesion finding is merged into the coordinator's output, anchored
-    to its file, and capped to an advisory (non-blocking) severity.
+def test_coordinator_does_not_run_class_cohesion_pass() -> None:
+    """The coordinator no longer runs a per-class cohesion review.
 
-    Precondition: the class-cohesion pass is active. The test clears
-    CODE_REVIEW_CLASS_COHESION and CODE_REVIEW_CLASS_COHESION_MAX_CLASSES below,
-    so the scenario never depends on the ambient environment.
+    A submission containing a Python class is reviewed only through the
+    size-based map phase — no per-class LLM call (whose prompt would carry the
+    cohesion "Stated purpose" marker) is ever issued, and no advisory
+    structure/medium cohesion finding appears in the output.
     """
-    monkeypatch.delenv("CODE_REVIEW_CLASS_COHESION", raising=False)
-    monkeypatch.delenv("CODE_REVIEW_CLASS_COHESION_MAX_CLASSES", raising=False)
+
+    class _CohesionSpy(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.saw_cohesion_prompt = False
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if "Stated purpose" in prompt:
+                self.saw_cohesion_prompt = True
+            return {"approved": True, "issues": [], "summary": "ok"}
+
+    spy = _CohesionSpy()
     src = (
         "class Report:\n"
         '    """Builds a report."""\n'
@@ -1763,26 +1773,8 @@ def test_coordinator_merges_class_cohesion_findings(monkeypatch) -> None:
         "    def send_email(self, to):\n"
         "        return to\n"
     )
-
-    class _CohesionStub(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if "Stated purpose" in prompt:  # the cohesion review call
-                return {
-                    "approved": False,
-                    "issues": [
-                        {
-                            "severity": "high",
-                            "category": "structure",
-                            "description": "god class",
-                            "suggestion": "split",
-                        }
-                    ],
-                    "summary": "cohesion",
-                }
-            return {"approved": True, "issues": [], "summary": "ok"}
-
     result = run_coordinator(
-        _CohesionStub(),
+        spy,
         CodeReviewInput(
             files={"report.py": src},
             task_description="t",
@@ -1790,16 +1782,9 @@ def test_coordinator_merges_class_cohesion_findings(monkeypatch) -> None:
             skip_false_positive_filter=True,
         ),
     )
-    # The cohesion finding is the ONLY issue merged: the chunk review approved
-    # with no issues, so the sole result issue is the god-class cohesion finding.
-    assert len(result.issues) == 1
-    god = result.issues[0]
-    assert god.description == "god class"
-    assert god.file_path == "report.py"
-    # Cohesion findings are advisory: severity capped to medium (from the stub's
-    # "high"), so approval still holds.
-    assert god.severity == "medium"
+    assert spy.saw_cohesion_prompt is False
     assert result.approved is True
+    assert result.issues == []
 
 
 def test_coordinator_threads_repo_reader_to_filter(monkeypatch) -> None:

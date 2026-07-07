@@ -68,9 +68,8 @@ def node_start_line(node: ast.AST) -> int:
     """1-based start line of a def/class node, lowered to its earliest decorator.
 
     The single source of the "a construct starts above its decorators" rule,
-    shared by the boundary detector here, the class/method extractor
-    (``code_units``), and the enclosing-construct finder
-    (``false_positive_filter``), so all three agree on where a construct begins.
+    shared by the boundary detector here and the enclosing-construct finder
+    (``false_positive_filter``), so both agree on where a construct begins.
 
     Preconditions:
         - ``node`` has a ``lineno`` (a def/class/statement node).

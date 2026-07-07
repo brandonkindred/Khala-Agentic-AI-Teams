@@ -89,14 +89,27 @@ behavior (empty 200s retried verbatim on the transient schedule).
 ## LLM Rate Limits
 
 ### LLM_RATE_LIMIT_MAX_RETRIES / LLM_RATE_LIMIT_BACKOFF_INITIAL / LLM_RATE_LIMIT_BACKOFF_MAX
-Dedicated **slow** backoff schedule for HTTP **429** rate limits, applied independently of the
+Dedicated backoff schedule for HTTP **429** rate limits, applied independently of the
 transient schedule above. A 429 means the provider budget is exhausted and won't reset in seconds,
-so the first retry waits `LLM_RATE_LIMIT_BACKOFF_INITIAL` seconds (default `300`), doubling with
-additive jitter up to `LLM_RATE_LIMIT_BACKOFF_MAX` (default `3600`), for `LLM_RATE_LIMIT_MAX_RETRIES`
-retries (default `5` → 6 attempts, worst-case ~2h15m of waiting) before raising `LLMRateLimitError`.
-The 429 backoff `time.sleep` runs **after** the concurrency semaphore and HTTP stream are released
-(never while holding them); a 429 retry never consumes a transient attempt and vice-versa. The
-shared schedule lives in `llm_service/backoff.py` and is reused by the Strategy Lab envelope.
+so the first retry waits `LLM_RATE_LIMIT_BACKOFF_INITIAL` seconds (default `30`), doubling with
+additive jitter up to `LLM_RATE_LIMIT_BACKOFF_MAX` (default `120`), for `LLM_RATE_LIMIT_MAX_RETRIES`
+retries (default `3` → 4 attempts, worst-case ~3.6 min of waiting; hard ceiling `retries × cap` = 6 min)
+before raising `LLMRateLimitError`. The schedule is kept short so a rate-limited call fails fast and
+lets failover / the caller take over instead of hanging for an hour; a provider that genuinely needs
+long waits can raise these values (e.g. `300`/`3600`/`5` for the previous behavior). Note a
+`Retry-After` longer than `LLM_RATE_LIMIT_BACKOFF_MAX` is clamped down to the cap. The 429 backoff
+`time.sleep` runs **after** the concurrency semaphore and HTTP stream are released (never while
+holding them); a 429 retry never consumes a transient attempt and vice-versa. The shared schedule
+lives in `llm_service/backoff.py` and is reused by the Strategy Lab envelope.
+
+### LLM_MAX_CONCURRENCY
+Process-global cap on how many LLM network calls run at once, shared by **both** the Ollama and
+Claude client paths (`llm_service/concurrency.py`). Default `4`; a missing/garbage value falls back
+to `4` and a zero/negative value is floored to `1`. A single `BoundedSemaphore` is acquired around
+each provider's network call (and released before the 429 backoff sleep), so a review that fans out
+many concurrent chunk/verification calls can never exceed this many in-flight requests regardless of
+which provider the failover list resolves to. Lower it (e.g. `2`) when your provider plan permits few
+concurrent requests; the limit is read once at first use per process.
 
 ### LLM_RATE_LIMIT_HONOR_RETRY_AFTER
 When truthy (default on; `false`/`0`/`no` disables), the central Ollama client honors an
@@ -427,34 +440,6 @@ read existing repository files *outside* the diff. This lets it confirm that a
 file/module a finding claims is missing ("add X" / "X does not exist") already
 exists, and drop that false positive. The reader is read-only, bounded, and
 fail-safe (a read failure only ever keeps a finding).
-
-### CODE_REVIEW_CLASS_COHESION
-Default-on toggle for the class-cohesion review pass. After the per-function
-map-reduce review, one bounded LLM review runs per class, evaluating the class's
-stated purpose (its name + docstring) against a body-free summary of its methods
-(signatures + docstrings) to flag single-responsibility violations, misfit
-methods, missing responsibilities, and purpose/behavior mismatches. Findings are
-**advisory** — severity is capped at `medium`, so a cohesion concern never blocks
-a merge — and flow through the false-positive filter and merge like any other
-finding. Only Python classes are analyzed. Set to `false`/`0`/`no` to disable the
-pass (any other value, or unset, leaves it enabled).
-
-### CODE_REVIEW_CLASS_COHESION_MAX_CLASSES
-Cap on the number of classes the cohesion pass reviews per submission (one bounded
-LLM call each), so the fan-out cannot balloon on a large submission. Default `40`,
-floor `0`. `0` disables the pass entirely (no class is reviewed), independent of
-the `CODE_REVIEW_CLASS_COHESION` on/off flag; a negative or non-numeric value
-falls back to the default.
-
-### CODE_REVIEW_COHESION_CACHE_SIZE
-Capacity of the process-global class-cohesion outcome cache (a bounded LRU keyed
-on a class's exact rendered prompt + shared task/spec context + resolved model).
-Because the cohesion pass runs after the coordinator's map phase, it would
-otherwise re-issue one LLM call per class on every re-review (retries, the SE
-planning-cache short-circuit, etc.); the cache reuses a class's findings whenever
-nothing affecting them changed. Default `512`, floor `0`. `0` disables the cache
-(every cohesion review re-runs). Best-effort: a miss recomputes, and only
-successful per-class outcomes are cached, so a transient failure is retried.
 
 ---
 
