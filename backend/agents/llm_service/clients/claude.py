@@ -44,6 +44,7 @@ from ..attribution import (
     caller_team as _caller_team,
 )
 from ..backoff import parse_rate_limit_retry_config, rate_limit_backoff_sleep
+from ..concurrency import get_llm_semaphore
 from ..interface import (
     LLMClient,
     LLMJsonParseError,
@@ -354,6 +355,10 @@ class ClaudeLLMClient(LLMClient):
     ) -> Any:
         """Stream one request and return the final Anthropic message.
 
+        The network exchange runs under the process-global concurrency gate
+        (``get_llm_semaphore``), released as soon as the stream context exits, so
+        no slot is held during the outer 429 backoff sleep.
+
         Maps Anthropic SDK exceptions onto the unified LLM error hierarchy. The SDK
         already retries 429/5xx/connection errors (``max_retries``); a raised error
         means retries are exhausted.
@@ -382,14 +387,22 @@ class ClaudeLLMClient(LLMClient):
             kwargs["tools"] = anthropic_tools
         kwargs.update(self._thinking_kwargs(think))
         try:
-            with client.messages.stream(**kwargs) as stream:
-                if self.on_reasoning is not None:
-                    # Forward thinking-token deltas to the per-caller sink while the
-                    # stream is consumed; get_final_message() still returns the fully
-                    # assembled message afterward.
-                    for event in stream:
-                        self._emit_reasoning(event)
-                return stream.get_final_message()
+            # Hold the process-global concurrency gate for the network exchange
+            # only. It is released the moment this stream context exits — on both
+            # the normal return and any exception — so the multi-minute 429 backoff
+            # sleep in _invoke_with_rate_limit_retry (which runs OUTSIDE _invoke)
+            # never waits while holding a slot. This is the single global cap the
+            # Ollama client also acquires, so concurrent review workers can never
+            # exceed LLM_MAX_CONCURRENCY in-flight requests regardless of provider.
+            with get_llm_semaphore():
+                with client.messages.stream(**kwargs) as stream:
+                    if self.on_reasoning is not None:
+                        # Forward thinking-token deltas to the per-caller sink while
+                        # the stream is consumed; get_final_message() still returns
+                        # the fully assembled message afterward.
+                        for event in stream:
+                            self._emit_reasoning(event)
+                    return stream.get_final_message()
         except anthropic.RateLimitError as e:
             raise LLMRateLimitError(
                 f"Claude rate limited (429): {e}",
@@ -451,8 +464,8 @@ class ClaudeLLMClient(LLMClient):
         The Anthropic SDK's built-in ``max_retries`` already absorbs transient
         429/5xx blips on a fast schedule; a 429 that survives it means the
         account/budget is rate-limited and will not clear in seconds. So — mirroring
-        the Ollama client — the call is retried on the deliberately slow
-        ``LLM_RATE_LIMIT_*`` schedule (default first wait 300s, doubling to a 3600s
+        the Ollama client — the call is retried on the dedicated
+        ``LLM_RATE_LIMIT_*`` schedule (default first wait 30s, doubling to a 120s
         cap), honoring a parsed ``Retry-After`` when present and not disabled via
         ``LLM_RATE_LIMIT_HONOR_RETRY_AFTER``. The sleep happens here,
         above the HTTP stream context in :meth:`_invoke`, so no connection or shared

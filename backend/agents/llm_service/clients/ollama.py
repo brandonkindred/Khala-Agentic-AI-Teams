@@ -35,6 +35,7 @@ from ..attribution import (
     caller_team as _caller_team,
 )
 from ..backoff import parse_rate_limit_retry_config, rate_limit_backoff_sleep
+from ..concurrency import get_llm_semaphore
 from ..interface import (
     LLMClient,
     LLMJsonParseError,
@@ -394,24 +395,6 @@ def _rate_limit_backoff_sleep(
         request_id=current_request_id() or "-",
         context=_attribution_log_fields(),
     )
-
-
-_ollama_semaphore: Optional[threading.BoundedSemaphore] = None
-_semaphore_lock = threading.Lock()
-
-
-def _get_ollama_semaphore() -> threading.BoundedSemaphore:
-    """Lazily create the global Ollama concurrency semaphore."""
-    global _ollama_semaphore
-    with _semaphore_lock:
-        if _ollama_semaphore is None:
-            raw = os.environ.get(llm_config.ENV_LLM_MAX_CONCURRENCY) or "4"
-            try:
-                limit = max(1, int(raw))
-            except ValueError:
-                limit = 4
-            _ollama_semaphore = threading.BoundedSemaphore(limit)
-        return _ollama_semaphore
 
 
 class OllamaLLMClient(LLMClient):
@@ -1478,7 +1461,7 @@ class OllamaLLMClient(LLMClient):
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
-        sem = _get_ollama_semaphore()
+        sem = get_llm_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request: rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
@@ -1722,7 +1705,7 @@ class OllamaLLMClient(LLMClient):
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
-        sem = _get_ollama_semaphore()
+        sem = get_llm_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request (text): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
@@ -1909,7 +1892,7 @@ class OllamaLLMClient(LLMClient):
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
-        sem = _get_ollama_semaphore()
+        sem = get_llm_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request (chat): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s rf=%s",

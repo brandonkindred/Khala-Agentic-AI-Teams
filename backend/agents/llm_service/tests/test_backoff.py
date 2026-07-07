@@ -16,7 +16,7 @@ def test_parse_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         "LLM_RATE_LIMIT_BACKOFF_MAX",
     ):
         monkeypatch.delenv(var, raising=False)
-    assert parse_rate_limit_retry_config() == (5, 300.0, 3600.0)
+    assert parse_rate_limit_retry_config() == (3, 30.0, 120.0)
 
 
 def test_parse_valid_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -30,14 +30,14 @@ def test_parse_garbage_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "not-an-int")
     monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_INITIAL", "abc")
     monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_MAX", "xyz")
-    assert parse_rate_limit_retry_config() == (5, 300.0, 3600.0)
+    assert parse_rate_limit_retry_config() == (3, 30.0, 120.0)
 
 
 def test_parse_empty_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "")
     monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_INITIAL", "")
     monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_MAX", "")
-    assert parse_rate_limit_retry_config() == (5, 300.0, 3600.0)
+    assert parse_rate_limit_retry_config() == (3, 30.0, 120.0)
 
 
 def test_parse_negative_retries_floored_to_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,7 +49,7 @@ def test_parse_negative_retries_floored_to_zero(monkeypatch: pytest.MonkeyPatch)
 def test_parse_nonpositive_initial_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_INITIAL", "0")
     _, initial, _ = parse_rate_limit_retry_config()
-    assert initial == 300.0
+    assert initial == 30.0
 
 
 def test_parse_cap_below_initial_clamped_up(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,3 +119,20 @@ def test_delay_nonpositive_initial_raises() -> None:
 def test_delay_cap_below_initial_raises() -> None:
     with pytest.raises(ValueError):
         rate_limit_retry_delay(0, 300.0, 100.0)
+
+
+def test_default_worst_case_total_wait_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the default schedule, the summed backoff across all retries is a few
+    minutes — not the hours the old 300s/3600s/5 defaults produced — so a
+    rate-limited call fails fast instead of hanging."""
+    for var in (
+        "LLM_RATE_LIMIT_MAX_RETRIES",
+        "LLM_RATE_LIMIT_BACKOFF_INITIAL",
+        "LLM_RATE_LIMIT_BACKOFF_MAX",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    retries, initial, cap = parse_rate_limit_retry_config()
+    assert retries == 3
+    total = sum(rate_limit_retry_delay(i, initial, cap) for i in range(retries))
+    assert total <= 240.0  # ~3.6 min worst case, comfortably under 4 min
+    assert total <= retries * cap  # never exceeds the hard ceiling
