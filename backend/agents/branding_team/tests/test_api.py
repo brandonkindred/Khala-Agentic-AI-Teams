@@ -429,6 +429,53 @@ def test_request_design_assets_recomputes_after_mission_edit() -> None:
     assert any("FRESH-POSITIONING" in a for a in resp.json()["artifacts"])
 
 
+def test_update_brand_unchanged_mission_preserves_output() -> None:
+    """A PUT that resends unchanged mission fields (e.g. with a name edit) must
+    not discard the generated output — only a real mission change invalidates it."""
+    from branding_team.models import (
+        BrandPhase,
+        StrategicCoreOutput,
+        TeamOutput,
+        WorkflowStatus,
+    )
+
+    create_c = client.post("/clients", json={"name": "Idempotent Client"})
+    client_id = create_c.json()["id"]
+    create_b = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "IdemCo",
+            "company_description": "Description that will be resent unchanged",
+            "target_audience": "everyone",
+        },
+    )
+    brand_id = create_b.json()["id"]
+    branding_store.append_brand_version(
+        client_id,
+        brand_id,
+        TeamOutput(
+            status=WorkflowStatus.READY_FOR_ROLLOUT,
+            mission_summary="cached",
+            current_phase=BrandPhase.STRATEGIC_CORE,
+            strategic_core=StrategicCoreOutput(positioning_statement="KEEP-ME"),
+        ),
+    )
+
+    # Resend the same mission fields alongside a name change: output is preserved.
+    resp = client.put(
+        f"/clients/{client_id}/brands/{brand_id}",
+        json={
+            "name": "Renamed Brand",
+            "company_description": "Description that will be resent unchanged",
+            "target_audience": "everyone",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Renamed Brand"
+    assert resp.json()["latest_output"] is not None
+    assert resp.json()["latest_output"]["strategic_core"]["positioning_statement"] == "KEEP-ME"
+
+
 def test_request_design_assets_unknown_brand_404() -> None:
     create_c = client.post("/clients", json={"name": "DA 404 Client"})
     client_id = create_c.json()["id"]

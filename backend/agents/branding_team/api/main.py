@@ -641,6 +641,13 @@ def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> 
                 if v is not None
             }
         )
+        # A full-form PUT may resend unchanged mission fields alongside a
+        # status/name edit. Only forward a mission to the store when its content
+        # actually differs — passing an (unchanged) mission would needlessly
+        # invalidate the generated output there (see update_brand), making an
+        # otherwise idempotent update discard cached brand artifacts.
+        if mission == brand.mission:
+            mission = None
     from branding_team.models import BrandStatus
 
     status = None
