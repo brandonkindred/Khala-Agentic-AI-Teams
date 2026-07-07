@@ -416,8 +416,8 @@ def test_resolve_config_rate_limit_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     ):
         monkeypatch.delenv(k, raising=False)
     cfg = _resolve_config("strategy_ideation", None, None, None, None, None)
-    assert cfg.rl_initial == 300.0
-    assert cfg.rl_cap == 3600.0
+    assert cfg.rl_initial == 30.0
+    assert cfg.rl_cap == 120.0
 
 
 def test_resolve_config_rate_limit_cascade_and_floor(monkeypatch: pytest.MonkeyPatch) -> None:
