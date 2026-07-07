@@ -8,8 +8,10 @@ assertions on ``complete_json.call_args`` are no longer meaningful.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
+import pytest
 from code_review_agent.chunk_reviewer import ChunkReviewAgent, review_chunk
 from code_review_agent.models import ChunkReviewInput, ChunkReviewOutput
 
@@ -49,6 +51,30 @@ def _chunk_input(**overrides: Any) -> ChunkReviewInput:
     }
     base.update(overrides)
     return ChunkReviewInput(**base)  # type: ignore[arg-type]
+
+
+class _NonJsonClient(DummyLLMClient):
+    """DummyLLMClient whose reply is not JSON, so the reviewer's ``json.loads``
+    of the model output raises ``json.JSONDecodeError`` (a non-dict reply is
+    emitted verbatim as assistant text by the dummy strands stream)."""
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        return "I could not produce the requested JSON object."
+
+
+def test_chunk_review_raises_json_decode_error_on_non_json_model_output() -> None:
+    """The chunk reviewer parses the model reply with a bare ``json.loads``, so an
+    invalid (non-JSON) reply surfaces as a raw ``json.JSONDecodeError``.
+
+    This guards the coupling in ``mapping._CONTENT_FAILURE_TYPES``, which lists
+    ``json.JSONDecodeError`` precisely because this parse path raises it: if the
+    reviewer ever wrapped or replaced ``json.loads`` (e.g. re-raising as an
+    ``LLMJsonParseError``), that classification would silently stop matching —
+    this test fails loudly instead.
+    """
+    agent = ChunkReviewAgent(llm=_NonJsonClient())
+    with pytest.raises(json.JSONDecodeError):
+        agent.run(_chunk_input())
 
 
 def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:

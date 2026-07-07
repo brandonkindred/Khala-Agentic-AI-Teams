@@ -490,6 +490,11 @@ def _record_failure(
     safe = scrub_token_from_text(error)
     # status_text/current_activity are reset so a failed job cannot keep claiming
     # mid-review progress (e.g. a frozen "Reviewing PR #7 (85%)" line) forever.
+    # Unlike _record_review_outage, this deliberately does NOT set phase="completed":
+    # it is the generic failure recorder used across the pipeline, so it leaves the
+    # job's last-known phase intact for diagnosis. The review-outage path is a
+    # terminal post-review state, so it marks the phase completed to match the
+    # success/provider-abort paths.
     _main.update_job(job_id, status="failed", error=safe, status_text=None, current_activity=None)
     # No-op for non-review jobs (no matching code_review_runs row); persists the
     # failure for review jobs so the Code Review page shows the failed outcome.

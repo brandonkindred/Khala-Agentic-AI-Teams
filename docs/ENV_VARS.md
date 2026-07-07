@@ -427,9 +427,9 @@ Ollama client); this knob forces reasoning fully off in one shot at the
 code-review layer for any provider.
 
 ### CODE_REVIEW_BLOCK_ON_UNREVIEWED
-Default-**off** opt-out that restores the legacy fail-closed behavior for a chunk
-that still could not be reviewed after all recovery (bisection, same-input retry,
-and the thinking-off retry). By default such a chunk degrades **gracefully**: its
+Default-**off** toggle that, when enabled, restores the legacy fail-closed behavior
+for a chunk that still could not be reviewed after all recovery (bisection,
+same-input retry, and the thinking-off retry). By default such a chunk degrades **gracefully**: its
 range is recorded non-blockingly on `CodeReviewOutput.not_reviewed_ranges` and in
 a telemetry log, but it is **never** posted as a PR comment and **never** blocks
 the review — a reviewer-side hiccup is not a code defect, so the chunks that did

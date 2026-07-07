@@ -547,25 +547,11 @@ def _review_chunk_with_recovery(
         # block (see the recovery comment) — never recurse/retry in here.
         failure = exc
     else:
-        issues = _issues_from_chunk_output(chunk, output.issues)
-        if not output.approved and not issues and output.summary and output.summary.strip():
-            issues = [
-                CodeReviewIssue(
-                    severity="high",
-                    category="general",
-                    file_path="",
-                    description=f"Code review rejected: {output.summary}",
-                    suggestion="Address the concerns described in the review summary. "
-                    "Ensure the code meets all acceptance criteria and follows project conventions.",
-                )
-            ]
-        return _ChunkOutcome(
-            issues=issues,
-            summaries=[output.summary],
-            spec_notes=[output.spec_compliance_notes],
-            commit_messages=[output.suggested_commit_message],
-            approved_flags=[output.approved],
-        )
+        # A clean review: build the outcome (including the empty-issues rejection
+        # synthesis) via the shared ``_outcome_from_output`` helper — the same one
+        # the thinking-off retry uses — so the synthesized-issue format lives in a
+        # single place.
+        return _outcome_from_output(chunk, output)
 
     # --- Recovery for a known content failure -------------------------------
     # This runs AFTER the `except` block has exited, deliberately: the child
