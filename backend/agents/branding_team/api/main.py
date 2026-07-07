@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -98,6 +99,13 @@ async def _run_in_pipeline_executor(func, *args):
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
+    """FastAPI startup/shutdown lifecycle for the branding app.
+
+    On startup: registers the team's Postgres schema (a no-op when
+    ``POSTGRES_HOST`` is unset). On shutdown: stops the bounded run executor
+    (cancelling queued runs) and closes the shared Postgres pool. Failures in
+    either phase are logged, not raised, so app startup/teardown is resilient.
+    """
     # Register Postgres schema (no-op when POSTGRES_HOST is unset).
     try:
         from shared_postgres import register_team_schemas
@@ -127,19 +135,28 @@ conversation_store = get_conversation_store()
 
 # Public name so tests can patch 'branding_team.api.main.assistant_agent'.
 assistant_agent: Optional[BrandingAssistantAgent] = None
+_assistant_agent_lock = threading.Lock()
 
 
 def _get_assistant_agent() -> BrandingAssistantAgent:
-    """Lazy-init the branding assistant so the app mounts even if llm_service is unavailable."""
+    """Lazy-init the branding assistant so the app mounts even if llm_service is unavailable.
+
+    Thread-safe: the chat endpoints run in worker threads (via
+    ``_run_in_pipeline_executor``), so first-use initialization is guarded by a
+    ``threading.Lock`` with double-checked locking to avoid constructing several
+    ``BrandingAssistantAgent`` instances under concurrent first requests.
+    """
     global assistant_agent
     if assistant_agent is None:
-        try:
-            assistant_agent = BrandingAssistantAgent()
-        except Exception:
-            raise HTTPException(
-                status_code=503,
-                detail="Branding assistant is temporarily unavailable. LLM service may not be configured.",
-            )
+        with _assistant_agent_lock:
+            if assistant_agent is None:
+                try:
+                    assistant_agent = BrandingAssistantAgent()
+                except Exception:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Branding assistant is temporarily unavailable. LLM service may not be configured.",
+                    )
     return assistant_agent
 
 

@@ -19,7 +19,7 @@ import concurrent.futures
 import logging
 import os
 import threading
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, List, Optional
 
 from pydantic import BaseModel, ValidationError
 
@@ -517,7 +517,9 @@ def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[
     return None
 
 
-def _bullets(title: str, items, fmt=lambda x: x) -> str:
+def _bullets(
+    title: str, items: Iterable[Any], fmt: Callable[[Any], str] = lambda x: x
+) -> str:
     """Render a markdown section: a ``# title`` heading over a bullet list.
 
     Preconditions:
