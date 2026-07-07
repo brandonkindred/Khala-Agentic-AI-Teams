@@ -52,7 +52,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from llm_service import (
     LLMClient,
@@ -215,6 +215,27 @@ class _ChunkOutcome:
         )
 
 
+def _exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """Yield ``exc`` and its ``__cause__``/``__context__`` ancestors.
+
+    Strands (and the failover client) wrap the originating LLM error, so a chunk
+    failure must be classified by walking the chain, not just its top type. Prefers
+    an explicit ``__cause__`` (``raise ... from``) over the implicit ``__context__``,
+    dedups by ``id()``, and stops after 10 hops.
+
+    Postconditions:
+        - Yields at most 10 distinct exceptions, starting with ``exc``; never
+          raises. The single owner of this walk so the classifiers below cannot
+          drift apart.
+    """
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen and len(seen) < 10:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
 def _is_infra_failure(exc: BaseException) -> bool:
     """Classify a chunk-review failure as infrastructure vs content-related.
 
@@ -228,10 +249,7 @@ def _is_infra_failure(exc: BaseException) -> bool:
         - Walks the ``__cause__``/``__context__`` chain (strands may wrap the
           client error) up to a bounded depth; never raises.
     """
-    seen: set[int] = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen and len(seen) < 10:
-        seen.add(id(current))
+    for current in _exception_chain(exc):
         if isinstance(current, (LLMJsonParseError, LLMSchemaValidationError)):
             return False
         if isinstance(
@@ -239,7 +257,6 @@ def _is_infra_failure(exc: BaseException) -> bool:
             (LLMRateLimitError, LLMUnreachableAfterRetriesError, LLMPermanentError),
         ):
             return True
-        current = current.__cause__ or current.__context__
     return False
 
 
@@ -282,14 +299,29 @@ def _is_content_failure(exc: BaseException) -> bool:
         - Walks the ``__cause__``/``__context__`` chain (strands may wrap the
           client error) up to a bounded depth; never raises.
     """
-    seen: set[int] = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen and len(seen) < 10:
-        seen.add(id(current))
-        if isinstance(current, _CONTENT_FAILURE_TYPES):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    return any(isinstance(c, _CONTENT_FAILURE_TYPES) for c in _exception_chain(exc))
+
+
+def _semantic_exhaustion_in_chain(exc: BaseException) -> "Optional[LLMSemanticExhaustionError]":
+    """Return the chain's ``LLMSemanticExhaustionError``, or None.
+
+    The receipt object is returned (not just a bool) so callers can read its
+    ``finish_reason`` and ``retry_thinking_level``: a ``finish_reason="length"``
+    empty turn is a token-budget/truncation scenario where a smaller chunk can
+    leave room for content — it must still line-split, like ``LLMTruncatedError`` —
+    whereas a non-length reasoning-only exhaustion is input-size invariant (each
+    half re-exhausts), and ``retry_thinking_level is None`` marks a no-ladder
+    stochastic empty that a same-input retry may still recover.
+
+    Postconditions:
+        - Returns the first ``LLMSemanticExhaustionError`` on the
+          ``__cause__``/``__context__`` chain (strands may wrap it), else None.
+          Never raises.
+    """
+    for current in _exception_chain(exc):
+        if isinstance(current, LLMSemanticExhaustionError):
+            return current
+    return None
 
 
 def _thinking_off_retry_enabled() -> bool:
@@ -371,8 +403,10 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
 
     Preconditions:
         - The failure was already classified a known content failure
-          (``_is_content_failure``) — not infra, not an unexpected defect — and
-          could be neither bisected further nor recovered by retry.
+          (``_is_content_failure``) — not infra, not an unexpected defect. Either
+          it could be neither bisected further nor recovered by retry, OR it is a
+          ladder-spent semantic exhaustion whose fast-path deliberately skips
+          line-splitting and the same-input retry (both futile for it).
 
     Postconditions:
         - Returns one ``high``/``general`` finding per segment in the outcome's
@@ -458,16 +492,26 @@ def _review_chunk_with_recovery(
           masked as a not-reviewed finding.
         - Known content failures bisect up to the depth cap; any chunk that
           cannot bisect further — the original or a bisected child — gets
-          exactly one same-input retry. If the terminal failure is a
-          reasoning-only exhaustion or an output truncation, one further
-          thinking-off retry is attempted (env-gated, production path only) to
-          turn it into a real review. A terminal content failure that survives
-          all of that degrades via ``_degraded_outcome`` rather than aborting the
-          whole run: by default the range is surfaced non-blockingly (it becomes
+          exactly one same-input retry, EXCEPT a ladder-spent reasoning-loop
+          semantic exhaustion (``finish_reason != "length"`` with
+          ``retry_thinking_level`` set): that skips both the line-split and the
+          same-input retry (re-running the model's already spent downgrade ladder
+          is futile). A multi-file reasoning-loop chunk is still split by file, and
+          a reasoning-loop exhaustion where NO ladder ran keeps its one same-input
+          retry. If the terminal failure is a reasoning-only exhaustion or an
+          output truncation, one further thinking-off retry is attempted
+          (env-gated, production path only) to turn it into a real review. A
+          terminal content failure that survives all of that degrades via
+          ``_degraded_outcome`` rather than aborting the whole run: by default the
+          range is surfaced non-blockingly (it becomes
           ``CodeReviewOutput.not_reviewed_ranges``, not a posted finding and not a
           block); under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` the coordinator turns
           it into a blocking ``high`` finding. A one-off transient error in a
           terminal child therefore never costs even that child's review.
+        - Recovery (bisection / retry) is dispatched OUTSIDE the ``except`` block
+          so a child failure is never implicitly context-chained to this chunk's
+          exception (which ``_semantic_exhaustion_in_chain`` would otherwise
+          misread).
         - A sub-review that rejects with no extractable issues but a non-empty
           summary contributes one synthesized high issue built from that
           summary (see ``_outcome_from_output``): applied per sub-review, because
@@ -482,6 +526,7 @@ def _review_chunk_with_recovery(
         sibling_surface=sibling_surface,
         **base_input,
     )
+    failure: Optional[BaseException] = None
     try:
         output = reviewer.run(chunk_input)
     except Exception as exc:
@@ -498,109 +543,158 @@ def _review_chunk_with_recovery(
             # not-reviewed finding that another approving chunk could carry
             # past the gate.
             raise
-        halves = _bisect_chunk(chunk) if depth < _max_bisect_depth() else None
-        if halves is not None:
-            logger.warning(
-                "CodeReviewCoordinator: chunk review failed at depth %s (%s: %s) — bisecting [%s]",
-                depth,
-                type(exc).__name__,
-                exc,
-                chunk.paths_label,
-            )
-            # Each half recomputes its sibling surface: a half no longer contains
-            # the other half's files, so those files become genuine siblings whose
-            # surface it should see (when surface_by_path is unavailable — a direct
-            # caller passed None — the parent's surface rides along unchanged).
-            outcome = _review_chunk_with_recovery(
+        # Known content failure: stash it and recover BELOW, outside this `except`
+        # block (see the recovery comment) — never recurse/retry in here.
+        failure = exc
+    else:
+        issues = _issues_from_chunk_output(chunk, output.issues)
+        if not output.approved and not issues and output.summary and output.summary.strip():
+            issues = [
+                CodeReviewIssue(
+                    severity="high",
+                    category="general",
+                    file_path="",
+                    description=f"Code review rejected: {output.summary}",
+                    suggestion="Address the concerns described in the review summary. "
+                    "Ensure the code meets all acceptance criteria and follows project conventions.",
+                )
+            ]
+        return _ChunkOutcome(
+            issues=issues,
+            summaries=[output.summary],
+            spec_notes=[output.spec_compliance_notes],
+            commit_messages=[output.suggested_commit_message],
+            approved_flags=[output.approved],
+        )
+
+    # --- Recovery for a known content failure -------------------------------
+    # This runs AFTER the `except` block has exited, deliberately: the child
+    # ``reviewer.run`` calls below must NOT execute while ``failure`` is the active
+    # exception, or Python would implicitly chain it onto any child failure's
+    # ``__context__`` — and ``_semantic_exhaustion_in_chain`` walks ``__context__``,
+    # so a child truncation/parse error would be misclassified as semantic and
+    # stripped of its own line-bisect/retry recovery.
+    exc = failure
+    # A REASONING-LOOP semantic exhaustion (``finish_reason != "length"``: the model
+    # emitted only reasoning and stopped) is content-shaped but NOT input-size-shaped.
+    # LINE-splitting a single file only multiplies doomed multi-minute calls (each
+    # half re-exhausts), and a same-input retry re-runs the downgrade ladder the
+    # client already spent — so a ladder-spent reasoning-loop exhaustion skips both.
+    # A ``finish_reason="length"`` empty turn, by contrast, is token-budget-bound (the
+    # model ran out of tokens mid-reasoning): a smaller chunk can leave room for
+    # content, so it line-splits like ``LLMTruncatedError`` (it is NOT a reasoning
+    # loop here). SEPARATING a multi-file chunk is worthwhile either way (only one
+    # file may be the culprit), so a multi-segment reasoning-loop chunk is split by
+    # file; and a reasoning-loop exhaustion where NO ladder ran (thinking was already
+    # off) is a stochastic empty that keeps its one same-input retry. Other content
+    # failures (JSON parse, length truncation) line-bisect as before.
+    sem_exc = _semantic_exhaustion_in_chain(exc)
+    reasoning_loop = sem_exc is not None and sem_exc.finish_reason != "length"
+    skip_retry = reasoning_loop and sem_exc.retry_thinking_level is not None
+    can_bisect = depth < _max_bisect_depth() and (not reasoning_loop or len(chunk.segments) > 1)
+    halves = _bisect_chunk(chunk) if can_bisect else None
+    if halves is not None:
+        logger.warning(
+            "CodeReviewCoordinator: chunk review failed at depth %s (%s: %s) — bisecting [%s]",
+            depth,
+            type(exc).__name__,
+            exc,
+            chunk.paths_label,
+        )
+        # Each half recomputes its sibling surface: a half no longer contains
+        # the other half's files, so those files become genuine siblings whose
+        # surface it should see (when surface_by_path is unavailable — a direct
+        # caller passed None — the parent's surface rides along unchanged).
+        outcome = _review_chunk_with_recovery(
+            reviewer,
+            halves[0],
+            base_input,
+            _half_sibling_surface(halves[0], surface_by_path, sibling_surface),
+            surface_by_path,
+            depth + 1,
+        )
+        outcome.absorb(
+            _review_chunk_with_recovery(
                 reviewer,
-                halves[0],
+                halves[1],
                 base_input,
-                _half_sibling_surface(halves[0], surface_by_path, sibling_surface),
+                _half_sibling_surface(halves[1], surface_by_path, sibling_surface),
                 surface_by_path,
                 depth + 1,
             )
-            outcome.absorb(
-                _review_chunk_with_recovery(
-                    reviewer,
-                    halves[1],
-                    base_input,
-                    _half_sibling_surface(halves[1], surface_by_path, sibling_surface),
-                    surface_by_path,
-                    depth + 1,
-                )
-            )
-            return outcome
-        if not retried:
-            logger.warning(
-                "CodeReviewCoordinator: chunk review failed (%s: %s) — retrying once [%s]",
-                type(exc).__name__,
-                exc,
-                chunk.paths_label,
-            )
-            return _review_chunk_with_recovery(
-                reviewer, chunk, base_input, sibling_surface, surface_by_path, depth, retried=True
-            )
-        # Last resort before degrading: for the content failures a non-thinking
-        # pass can fix — a reasoning-only response (``LLMSemanticExhaustionError``)
-        # or an output-token truncation (``LLMTruncatedError``) — retry once with
-        # thinking forced OFF. This turns the common "the model thought but never
-        # answered" case into a real review instead of a not-reviewed range, which
-        # is what makes the degraded finding rare. Gated by env and only possible
-        # on the production path (an injected strands ``Model`` can't have its
-        # thinking level re-resolved, so tests skip this and keep their call
-        # counts). Any failure here falls through to the degrade below.
-        if (
-            _thinking_off_retry_enabled()
-            and thinking_override_supported(reviewer.llm)
-            and _chain_has(exc, (LLMSemanticExhaustionError, LLMTruncatedError))
-        ):
-            logger.warning(
-                "CodeReview: last-resort thinking-off retry after %s [%s]",
-                type(exc).__name__,
-                chunk.paths_label,
-            )
-            try:
-                recovered = reviewer.run(chunk_input, think=False)
-            except Exception as exc2:
-                # This best-effort retry runs while the original content failure is
-                # still being handled, so any exception it raises is already a real
-                # content failure (or is implicitly chained to one). An infra
-                # failure still surfaces as unavailable; anything else means the
-                # retry did not help, so fall through to degrade on the original
-                # failure — no worse than not having attempted the retry at all. A
-                # genuine reviewer-code bug is not masked here: it would have failed
-                # closed on the first attempt, before this last-resort retry.
-                if _is_infra_failure(exc2):
-                    raise CodeReviewUnavailableError(
-                        f"Review model unavailable ({type(exc2).__name__}: {exc2}); "
-                        "no verdict was produced for this submission.",
-                        unreviewed=_chunk_ranges(chunk),
-                    ) from exc2
-            else:
-                outcome = _outcome_from_output(chunk, recovered)
-                # Reduced-fidelity recovery: don't freeze it under the full-chunk
-                # cache key (see `_ChunkOutcome.degraded_recovery`).
-                outcome.degraded_recovery = True
-                return outcome
-        # Known content failure that cannot bisect further and survived its retry
-        # (and the thinking-off retry, if any): degrade instead of aborting the
-        # whole run. By default the chunk's range is surfaced non-blockingly via
-        # ``CodeReviewOutput.not_reviewed_ranges`` (no posted finding, no block);
-        # under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` it becomes a blocking ``high``
-        # "not reviewed" finding instead. Chunks that did succeed still contribute
-        # their verdicts. (A run in which *no* chunk succeeds is caught by
-        # ``run_coordinator``'s total-failure guard, which still raises.)
-        # Stable, greppable telemetry so operators can count how often the
-        # reviewer gives up on a chunk (the condition the user wants to be rare).
-        # ``exc`` is logged, never posted — the degraded finding names only the class.
-        logger.warning(
-            "CodeReview degrade: failure_class=%s ranges=%s detail=%s",
-            type(exc).__name__,
-            _chunk_ranges(chunk),
-            exc,
         )
-        return _degraded_outcome(chunk, exc)
-    return _outcome_from_output(chunk, output)
+        return outcome
+    # A same-input retry is worthwhile unless it is futile: a ladder-spent
+    # reasoning-loop exhaustion (``skip_retry``) would only re-run the model's
+    # already spent thinking ladder, and a chunk that already retried gets no
+    # second one.
+    if not retried and not skip_retry:
+        logger.warning(
+            "CodeReviewCoordinator: chunk review failed (%s: %s) — retrying once [%s]",
+            type(exc).__name__,
+            exc,
+            chunk.paths_label,
+        )
+        return _review_chunk_with_recovery(
+            reviewer, chunk, base_input, sibling_surface, surface_by_path, depth, retried=True
+        )
+    # Last resort before degrading: for the content failures a non-thinking pass can
+    # fix — a reasoning-only response (``LLMSemanticExhaustionError``) or an
+    # output-token truncation (``LLMTruncatedError``) — retry once with thinking
+    # forced OFF. This turns the common "the model thought but never answered" case
+    # (including a ladder-spent reasoning loop) into a real review instead of a
+    # not-reviewed range, which is what makes the degraded finding rare. Gated by env
+    # and only possible on the production path (an injected strands ``Model`` can't
+    # have its thinking level re-resolved, so tests skip this and keep their call
+    # counts). Any failure here falls through to the degrade below.
+    if (
+        _thinking_off_retry_enabled()
+        and thinking_override_supported(reviewer.llm)
+        and _chain_has(exc, (LLMSemanticExhaustionError, LLMTruncatedError))
+    ):
+        logger.warning(
+            "CodeReview: last-resort thinking-off retry after %s [%s]",
+            type(exc).__name__,
+            chunk.paths_label,
+        )
+        try:
+            recovered = reviewer.run(chunk_input, think=False)
+        except Exception as exc2:
+            # This best-effort retry runs after the original content failure has been
+            # handled; an infra failure still surfaces as unavailable, anything else
+            # means the retry did not help, so fall through to degrade on the original
+            # failure — no worse than not having attempted it. A genuine reviewer-code
+            # bug is not masked: it would have failed closed on the first attempt,
+            # before this last-resort retry.
+            if _is_infra_failure(exc2):
+                raise CodeReviewUnavailableError(
+                    f"Review model unavailable ({type(exc2).__name__}: {exc2}); "
+                    "no verdict was produced for this submission.",
+                    unreviewed=_chunk_ranges(chunk),
+                ) from exc2
+        else:
+            outcome = _outcome_from_output(chunk, recovered)
+            # Reduced-fidelity recovery: don't freeze it under the full-chunk cache
+            # key (see ``_ChunkOutcome.degraded_recovery``).
+            outcome.degraded_recovery = True
+            return outcome
+    # Known content failure that cannot bisect further and survived its retry (and the
+    # thinking-off retry, if any): degrade instead of aborting the whole run. By
+    # default the chunk's range is surfaced non-blockingly via
+    # ``CodeReviewOutput.not_reviewed_ranges`` (no posted finding, no block); under
+    # ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` it becomes a blocking ``high`` "not reviewed"
+    # finding instead. Chunks that did succeed still contribute their verdicts. (A run
+    # in which *no* chunk succeeds is caught by ``run_coordinator``'s total-failure
+    # guard, which still raises.) Stable, greppable telemetry so operators can count
+    # how often the reviewer gives up on a chunk (the condition the user wants to be
+    # rare). ``exc`` is logged, never posted — the degraded finding names only the class.
+    logger.warning(
+        "CodeReview degrade: failure_class=%s ranges=%s detail=%s",
+        type(exc).__name__,
+        _chunk_ranges(chunk),
+        exc,
+    )
+    return _degraded_outcome(chunk, exc)
 
 
 def _review_model_fingerprint(llm: LLMClient) -> str:

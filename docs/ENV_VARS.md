@@ -54,7 +54,7 @@ permanently. Negative floors to `0` (retry on next call).
 ### LLM_MAX_RETRIES / LLM_BACKOFF_BASE / LLM_BACKOFF_MAX
 **Transient** (5xx / connection / timeout) retry schedule for the central Ollama client — defaults
 `10` / `2`s / `120`s. These no longer govern HTTP 429 rate limits (see the `LLM_RATE_LIMIT_*` row),
-nor empty 200 responses, which get a single proof-of-change thinking-downgrade retry instead (see
+nor empty 200 responses, which get a proof-of-change thinking-downgrade ladder instead (see
 `LLM_THINKING_DOWNGRADE_RETRY`).
 
 ### LLM_ENABLE_THINKING
@@ -69,21 +69,31 @@ aren't a registered level for the model fall back to the max level with a warnin
 models that only support boolean think.
 
 ### LLM_THINKING_DOWNGRADE_RETRY
-Proof-of-change retry for semantically exhausted calls (default on; `false`/`0`/`no` disables). A
-**semantically exhausted** call is an HTTP 200 with zero assistant content — typically a thinking
-model that produced only reasoning. Re-sending the identical payload rarely helps, so instead of
-spending the transient `LLM_MAX_RETRIES` schedule on it, the client retries **once, immediately**
-with reduced thinking: one level down for models registered in `KNOWN_MODEL_THINKING_LEVELS`
-(e.g. `max` → `high`), `think=False` for boolean/unregistered thinking. If the downgraded attempt
-is also empty — or thinking is already off / at the lowest level, leaving no provable change — the
-call fails hard with `LLMSemanticExhaustionError`, whose receipt carries `failure_class`,
-`attempts_used`, the original and retry thinking levels, whether any raw (necessarily
-whitespace-only) content bytes were ever seen,
-the `finish_reason`, and a fingerprint of the last payload (also logged at ERROR; the downgrade
-itself is logged at WARNING). Transient 5xx/connection/timeout faults and 429s keep their own
-independent schedules before and after the downgrade. Disabling the toggle restores the legacy
+Proof-of-change retry ladder for semantically exhausted calls (default on; `false`/`0`/`no`
+disables). A **semantically exhausted** call is an HTTP 200 with zero assistant content — typically
+a thinking model that produced only reasoning. Re-sending the identical payload rarely helps, so
+instead of spending the transient `LLM_MAX_RETRIES` schedule on it, the client retries **immediately**
+with progressively reduced reasoning, ending by disabling thinking entirely (the strongest proof of
+change — a non-reasoning turn is forced to open the content channel): from a model's **top** tier it
+steps one notch down (e.g. `max` → `high`) then, if still empty, to thinking-off; from an
+**already-reduced** tier it goes straight to thinking-off (the wire-redundant intermediate tiers are
+skipped — e.g. `deepseek-v4-pro:cloud` collapses low/medium/high to one reasoning effort); boolean/
+unregistered thinking goes straight to `think=False`. When the ladder is exhausted — or thinking is
+already off, leaving no provable change — the call fails hard with `LLMSemanticExhaustionError`,
+whose receipt carries `failure_class`, `attempts_used`, the original and last retry thinking levels,
+whether any raw (necessarily whitespace-only) content bytes were ever seen, the `finish_reason`, and a
+fingerprint of the last payload. The same ERROR log line additionally reports a diagnostic of the
+reasoning channel (its accumulated length across attempts and whether a JSON object was found there —
+to detect answers misrouted into reasoning); these two fields are logged only, not carried on the
+exception object. Each downgrade rung is logged at WARNING. Transient 5xx/connection/timeout faults and 429s keep their own
+independent schedules before and after the downgrades. Disabling the toggle restores the legacy
 behavior (empty 200s retried verbatim on the transient schedule). The code-review engine layers a
 further recovery on top of this for its chunk reviews — see `CODE_REVIEW_THINKING_OFF_RETRY`.
+
+Agents that run a reasoning model in JSON mode where the top `max` tier reliably reasoning-loops can
+pin a reduced default tier via `AGENT_DEFAULT_THINK` in `llm_service/config.py` (e.g. `code_review`
+defaults to `high`), so the **first** call already runs at a tier that opens the content channel
+rather than relying on this post-hoc ladder.
 
 ---
 
