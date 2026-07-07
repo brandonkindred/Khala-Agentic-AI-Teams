@@ -205,20 +205,17 @@ def test_new_output_fields_are_parsed_through() -> None:
                 "issues": [],
                 "summary": "ok",
                 "spec_compliance_notes": "Chunk meets the spec.",
-                "suggested_commit_message": "refactor: tidy main",
             }
         )
     )
     result = agent.run(_chunk_input())
     assert result.spec_compliance_notes == "Chunk meets the spec."
-    assert result.suggested_commit_message == "refactor: tidy main"
 
 
 def test_missing_new_output_fields_default_to_empty() -> None:
     agent = ChunkReviewAgent(llm=_StubClient({"approved": True, "issues": [], "summary": "ok"}))
     result = agent.run(_chunk_input())
     assert result.spec_compliance_notes == ""
-    assert result.suggested_commit_message == ""
 
 
 def test_chunk_review_agent_passes_blank_file_path_through_unchanged() -> None:
