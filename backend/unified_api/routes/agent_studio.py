@@ -18,6 +18,12 @@ to be enforced upstream (reverse proxy / API gateway) rather than at the applica
 layer for the Stage-1 backend; application-level auth is a platform-wide follow-up.
 Note the ``SecurityGatewayMiddleware`` fronting all ``/api/*`` routes is an
 abuse/prompt-injection scanner, **not** an authn/authz layer.
+
+Store selection is bound **once at import time**: ``_service = _build_service()``
+reads ``POSTGRES_HOST`` when this module first loads, so the durable-vs-in-memory
+choice is fixed for the process. ``POSTGRES_HOST`` must therefore be set before
+the worker imports this module (it is, via the process environment) — flipping it
+at runtime does not re-select the store.
 """
 
 from __future__ import annotations

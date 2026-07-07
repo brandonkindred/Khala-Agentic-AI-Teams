@@ -232,6 +232,20 @@ class AgentRegistry:
         deleted on another worker) is correctly dropped rather than resurrected.
         Degrades to the local ``_by_id`` view entirely on any store error, so the
         catalog never breaks when Postgres is down.
+
+        Consistency note: ``store.all()`` runs *before* the lock is taken (a slow
+        Postgres scan must not serialize the whole registry). A dynamic id
+        ``register()``'d on this worker in the window between that scan and the lock
+        can therefore be briefly absent from this one listing — its confirmed
+        write-through means it isn't in ``_unconfirmed``, so the local-fallback merge
+        below skips it, and the scan predated its store row. This is an accepted
+        eventual-consistency window for the *catalog listing only*: the next scan
+        (≤ the dynamic store's short ``all()`` cache TTL) includes it, and a point
+        :meth:`get` / invoke of that id resolves it immediately from the store. The
+        window can't be closed by a re-check under the lock, because a confirmed id
+        missing from the scan is genuinely ambiguous — just-registered (include) vs.
+        deleted-elsewhere (exclude) — and only a per-id store read distinguishes
+        them, which would defeat the point of a single bulk listing.
         """
         store = self._dynamic_store()
         if store is None:
@@ -268,6 +282,10 @@ class AgentRegistry:
         Preconditions: ``prefix`` is a string.
         Postconditions: returns every registered manifest ``m`` with
             ``m.id.startswith(prefix)`` (empty list when none match); read-only.
+            Carries the same brief scan-then-lock eventual-consistency window as
+            :meth:`_merged_manifests` (a dynamic id registered between the store
+            prefix scan and the lock may be momentarily absent); see that method's
+            consistency note.
         """
         with self._lock:
             local = [m for m in self._by_id.values() if m.id.startswith(prefix)]
@@ -331,7 +349,6 @@ class AgentRegistry:
             if self._is_tombstoned(agent_id):
                 return None
             local_fallback = self._by_id.get(agent_id)
-            unconfirmed = agent_id in self._unconfirmed
         store = self._dynamic_store()
         if store is None:
             return local_fallback
@@ -350,7 +367,18 @@ class AgentRegistry:
         # an unconfirmed write-through (read-your-writes: the store never accepted
         # our row). For a confirmed id, a miss means it was deleted on another
         # worker — return None instead of resurrecting the stale local copy.
-        return local_fallback if unconfirmed else None
+        #
+        # Re-read the local state under the lock rather than trusting the snapshot
+        # taken before the (unlocked) store round trip: a concurrent register()/
+        # unregister() during the round trip could have overwritten the manifest,
+        # confirmed a previously-unconfirmed write, or tombstoned the id. Re-checking
+        # here makes the read-your-writes decision reflect the latest state instead
+        # of a stale ``unconfirmed``/``local_fallback`` pair. Cheap: this runs only
+        # on the cold store-miss path (a store hit returned above).
+        with self._lock:
+            if self._is_tombstoned(agent_id):
+                return None
+            return self._by_id.get(agent_id) if agent_id in self._unconfirmed else None
 
     def register(self, manifest: AgentManifest, source_path: Path | None = None) -> None:
         """Install a manifest into the live registry (for dynamically generated agents).
