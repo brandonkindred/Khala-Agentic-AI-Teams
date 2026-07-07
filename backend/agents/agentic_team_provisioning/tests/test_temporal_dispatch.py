@@ -162,6 +162,33 @@ def test_submit_input_signals_workflow_when_temporal_owned(api_main, client, mon
         "signal": "submit_input",
         "value": "hi",
     }
+    # The endpoint performed the authoritative resume CAS synchronously: the response
+    # (and the caller's next poll) no longer shows waiting_for_input, and the input is
+    # persisted — the /input contract holds without waiting on the workflow activity.
+    assert resp.json()["status"] == "running"
+    assert api_main._test_store.get_pipeline_status(run_id)["human_input"] == "hi"
+
+
+def test_submit_input_conflict_when_resume_cas_lost(api_main, client, monkeypatch):
+    """If the resume CAS is lost (e.g. a cancel won the race after the precheck), the
+    endpoint returns 409 and never signals the workflow."""
+    team_id, _ = _seed_team_with_process(api_main)
+    run_id = "run-lost"
+    api_main._test_store.create_pipeline_run(run_id, team_id, "proc-1", temporal_owned=True)
+    api_main._test_store.update_pipeline_run(run_id, status="waiting_for_input")
+
+    # Simulate losing the atomic transition after the status precheck passed.
+    monkeypatch.setattr(
+        api_main._test_store, "try_resume_pipeline_run_temporal", lambda *_a, **_k: False
+    )
+
+    def _no_signal(*_a, **_k):  # pragma: no cover - must not signal on a lost CAS
+        raise AssertionError("must not signal the workflow when the resume CAS is lost")
+
+    monkeypatch.setattr("shared_temporal.signal_workflow_sync", _no_signal)
+
+    resp = client.post(f"/teams/{team_id}/test-pipeline/runs/{run_id}/input", json={"input": "hi"})
+    assert resp.status_code == 409
 
 
 def test_cancel_cancels_workflow_when_temporal_owned(api_main, client, monkeypatch):

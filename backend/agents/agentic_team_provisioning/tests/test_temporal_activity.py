@@ -156,13 +156,34 @@ def test_wait_setup_resume_expire_activities(fake_pg: dict) -> None:
     wf.wait_setup_activity("r1", "w1", "Ask", "please answer")
     assert len(store.get_pipeline_run("r1")["step_results"]) == 1
 
+    # The /input endpoint owns the authoritative resume transition (CAS to running +
+    # persist the answer); wait_resume_activity only records the step result.
+    assert store.try_resume_pipeline_run_temporal("r1", "the answer") is True
     returned = wf.wait_resume_activity("r1", "w1", "the answer")
     assert returned == "the answer"
     row = store.get_pipeline_run("r1")
-    assert row["status"] == "running"
+    assert row["status"] == "running"  # set by the endpoint CAS above
     assert row["human_prompt"] is None
     assert row["step_results"][0]["status"] == "completed"
     assert row["step_results"][0]["output"] == "the answer"
+
+
+def test_wait_resume_activity_does_not_revive_terminal_run(fake_pg: dict) -> None:
+    """P2 regression: a cancel landing between the endpoint's flip and this activity must
+    not be resurrected — wait_resume never writes ``status`` and skips a terminal row."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")
+    wf.wait_setup_activity("r1", "w1", "Ask", "please answer")
+    # Cancel wins the race (row now terminal) before wait_resume runs.
+    assert store.try_cancel_pipeline_run("r1") is True
+
+    returned = wf.wait_resume_activity("r1", "w1", "late answer")
+    assert returned == "late answer"  # still threads for the caller
+    row = store.get_pipeline_run("r1")
+    assert row["status"] == "cancelled"  # NOT revived to running
+    # The waiting step result is left as-is (not overwritten to completed).
+    assert row["step_results"][0]["status"] == "waiting_for_input"
 
 
 def test_wait_expire_activity_fails_still_waiting_run(fake_pg: dict) -> None:
@@ -398,8 +419,37 @@ def test_workflow_run_failure_marks_failed(monkeypatch: pytest.MonkeyPatch) -> N
     assert failed and failed[0][0] == "r1" and "kaboom" in failed[0][1]
 
 
-def test_single_attempt_retry_policy() -> None:
-    assert wf._SINGLE_ATTEMPT.maximum_attempts == 1
+def test_retry_policies_allow_crash_recovery() -> None:
+    """Activities must allow bounded retries so a worker crash mid-activity is recovered
+    (not left to fail after the start-to-close timeout with a single attempt)."""
+    assert wf._STORE_RETRY.maximum_attempts > 1
+    assert wf._AGENT_RETRY.maximum_attempts > 1
+
+
+def test_run_step_activity_wraps_failure_as_non_retryable(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine handler failure fails fast (non_retryable) so the expensive, non-
+    idempotent LLM step is not auto-retried under _AGENT_RETRY."""
+    from temporalio.exceptions import ApplicationError
+
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")
+    monkeypatch.setattr(
+        "agentic_team_provisioning.runtime.pipeline_runner.build_agent",
+        lambda *a, **k: object(),
+    )
+
+    def _boom(_agent, _prompt):
+        raise RuntimeError("llm exploded")
+
+    monkeypatch.setattr("agentic_team_provisioning.runtime.pipeline_runner.call_agent", _boom)
+
+    with pytest.raises(ApplicationError) as exc_info:
+        wf.run_step_activity("r1", _TEAM_AGENTS, _ACTION_PROCESS, "s1", "prev")
+    assert exc_info.value.non_retryable is True
+    assert "llm exploded" in str(exc_info.value)
 
 
 def test_get_test_store_singleton_is_agentic_store(fake_pg: dict) -> None:

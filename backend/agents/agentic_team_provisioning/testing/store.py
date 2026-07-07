@@ -497,6 +497,34 @@ class AgenticTestStore:
             where_params=(_stale_cutoff(now, stale_seconds),),
         )
 
+    @timed_query(store=_STORE, op="try_resume_pipeline_run_temporal")
+    def try_resume_pipeline_run_temporal(self, run_id: str, human_input: str) -> bool:
+        """Atomically move a *waiting* Temporal-owned run to ``running`` with the answer.
+
+        Like :meth:`try_resume_pipeline_run` but WITHOUT the heartbeat-freshness guard:
+        a Temporal-owned run has no per-run heartbeat thread — the Temporal workflow owns
+        its liveness and restart recovery — so ``heartbeat_at`` is not a resumability
+        signal for it. Postgres serializes the conditional UPDATE, so exactly one
+        concurrent ``/input`` caller wins the transition; this gives the Temporal path
+        the same race-free, synchronous resume + 409-on-loss semantics the thread path
+        gets from ``try_resume_pipeline_run``, and closes the duplicate-submit window
+        where a second signal could overwrite the first answer.
+
+        Preconditions:
+            ``run_id`` is a non-empty str; ``human_input`` is a str (may be empty).
+        Postconditions:
+            Returns True iff the row was ``waiting_for_input`` and is now ``running``
+            with ``human_input`` persisted and ``human_prompt`` cleared. Returns False
+            (no-op) if the row already left ``waiting_for_input`` (cancelled, timed out,
+            completed) — so a resume racing a cancel cannot revive a terminal run.
+        """
+        return self._cas_pipeline_run(
+            run_id,
+            set_sql="status = 'running', human_prompt = NULL, human_input = %s",
+            set_params=(human_input,),
+            where_sql="status = 'waiting_for_input'",
+        )
+
     @timed_query(store=_STORE, op="try_expire_pipeline_run")
     def try_expire_pipeline_run(self, run_id: str, error: str) -> bool:
         """Atomically fail a still-waiting run whose human-input timeout elapsed.

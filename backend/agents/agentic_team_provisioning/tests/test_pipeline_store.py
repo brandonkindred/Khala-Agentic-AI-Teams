@@ -95,6 +95,40 @@ def test_try_resume_rejects_stale_orphan(fake_pg: dict) -> None:
     assert store.try_resume_pipeline_run("r1", "answer", 30) is False
 
 
+def test_try_resume_temporal_is_a_compare_and_swap_without_heartbeat_guard(fake_pg: dict) -> None:
+    """The Temporal resume CAS flips waiting -> running + persists the input, wins for
+    exactly one caller, ignores heartbeat freshness (Temporal owns liveness), and never
+    revives a terminal run."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1", temporal_owned=True)
+
+    # Not waiting yet -> CAS loses.
+    assert store.try_resume_pipeline_run_temporal("r1", "answer") is False
+
+    # Waiting with a STALE heartbeat is still resumable (no freshness guard).
+    store.update_pipeline_run(
+        "r1",
+        status="waiting_for_input",
+        heartbeat_at=datetime.now(tz=timezone.utc) - timedelta(seconds=3600),
+    )
+    assert store.try_resume_pipeline_run_temporal("r1", "answer") is True
+    row = store.get_pipeline_run("r1")
+    assert row["status"] == "running"
+    assert row["human_prompt"] is None
+    assert store.get_pipeline_status("r1")["human_input"] == "answer"
+
+    # Second resume loses (already left waiting_for_input).
+    assert store.try_resume_pipeline_run_temporal("r1", "again") is False
+
+    # A cancelled run cannot be revived by resume.
+    store.create_pipeline_run("r2", "t1", "p1", temporal_owned=True)
+    store.update_pipeline_run("r2", status="waiting_for_input")
+    store.try_cancel_pipeline_run("r2")
+    assert store.try_resume_pipeline_run_temporal("r2", "answer") is False
+    assert store.get_pipeline_run("r2")["status"] == "cancelled"
+
+
 def test_try_expire_is_a_compare_and_swap(fake_pg: dict) -> None:
     _seed_team(fake_pg)
     store = AgenticTestStore()

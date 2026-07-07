@@ -1376,12 +1376,27 @@ def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputReq
         raise HTTPException(status_code=400, detail="Pipeline is not waiting for input")
 
     if _test_store.is_pipeline_run_temporal_owned(run_id):
-        # Temporal-owned run: deliver the answer as a workflow signal. The workflow's
-        # wait_resume_activity flips the store row back to running and records the input
-        # on the WAIT step result — we re-read to return the updated row.
+        # Temporal-owned run. Do the authoritative resume transition synchronously here
+        # (mirroring the thread path's compare-and-swap) BEFORE waking the workflow, then
+        # deliver the answer as a signal:
+        #   * The CAS flips waiting_for_input -> running and persists the input, so the
+        #     /input contract holds — the response (and the caller's next poll) no longer
+        #     shows waiting_for_input, and the same WAIT question is not re-surfaced.
+        #   * Exactly one concurrent submit wins the CAS; a duplicate loses with a 409
+        #     instead of a second signal overwriting the first answer.
+        #   * A cancel that already moved the row terminal makes the CAS a no-op -> 409,
+        #     so a resume can never revive a cancelled run.
+        # The workflow's wait_resume_activity then only records the step result (it no
+        # longer owns the status flip), so it cannot resurrect a terminal run either.
         from agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
         from shared_temporal import signal_workflow_sync
 
+        if not _test_store.try_resume_pipeline_run_temporal(run_id, req.input):
+            raise HTTPException(
+                status_code=409,
+                detail="Pipeline run is no longer resumable (it timed out, was cancelled, "
+                "or was reaped). Start a new run.",
+            )
         try:
             signal_workflow_sync(f"{WORKFLOW_ID_PREFIX}{run_id}", "submit_input", req.input)
         except Exception as exc:

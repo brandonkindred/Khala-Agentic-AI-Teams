@@ -570,6 +570,22 @@ class _FakeCursor:
                 self._last_fetch_all = rows[:limit]
             return
 
+        # try_resume_pipeline_run_temporal (CAS into 'running', NO heartbeat guard).
+        # Must precede the heartbeat-guarded resume below; distinguished by the absence
+        # of a heartbeat_at clause in the SET (Temporal owns liveness).
+        if (
+            norm.startswith("update agentic_test_pipeline_runs set status = 'running'")
+            and "heartbeat_at" not in norm
+        ):
+            human_input, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] == "waiting_for_input":
+                row.update(status="running", human_prompt=None, human_input=human_input)
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
         # try_resume_pipeline_run (compare-and-swap into 'running', fresh-heartbeat).
         if norm.startswith("update agentic_test_pipeline_runs set status = 'running'"):
             human_input, heartbeat_at, run_id, cutoff = params

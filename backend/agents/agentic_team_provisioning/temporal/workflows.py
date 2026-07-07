@@ -26,8 +26,13 @@ from typing import Any
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 from agentic_team_provisioning.step_ordering import order_step_ids
+
+# Run statuses that are terminal — an activity must never write over one of these
+# (e.g. resurrect a cancelled run). Mirrors the store's compare-and-swap guards.
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 # Activity timeouts: agent steps are long, blocking LLM calls; bookkeeping steps are
 # quick. The wait timeout for a WAIT step is a *workflow timer*, not an activity
@@ -35,9 +40,24 @@ from agentic_team_provisioning.step_ordering import order_step_ids
 _AGENT_STEP_TIMEOUT = timedelta(hours=2)
 _BOOKKEEPING_TIMEOUT = timedelta(seconds=30)
 
-# LLM/store steps are non-idempotent; a failure surfaces as a failed workflow (and a
-# FAILED run-store row) for explicit resubmission rather than being auto-retried.
-_SINGLE_ATTEMPT = RetryPolicy(maximum_attempts=1)
+# Retry policies. Temporal only retries an activity when the retry policy allows it, so
+# ``maximum_attempts=1`` would mean a worker crash / lost task mid-activity is NOT
+# recovered — the workflow would fail once the start-to-close timeout elapses, defeating
+# the "survives a worker/process restart" guarantee. Instead we allow bounded retries so
+# a crashed activity is picked up by another worker:
+#   * ``_STORE_RETRY`` — the short, idempotent store-bookkeeping activities (advance,
+#     wait setup/resume/expire, complete, cancel, fail). All are written to be safe to
+#     re-run (compare-and-swap or "append iff absent"), so retrying on any transient
+#     fault is safe.
+#   * ``_AGENT_RETRY`` — the long, non-idempotent LLM step. Retries recover a crashed
+#     worker (``run_step_activity`` short-circuits on an already-completed step, so a
+#     re-run does not double-charge), but a *genuine* application error is raised as a
+#     ``non_retryable`` ``ApplicationError`` (see ``run_step_activity``) so it fails fast
+#     instead of re-running the expensive model call. Note: without activity
+#     heartbeating, a crash mid-LLM-call is only detected after ``_AGENT_STEP_TIMEOUT``;
+#     adding heartbeats to shorten that window is a follow-up.
+_STORE_RETRY = RetryPolicy(initial_interval=timedelta(seconds=1), maximum_attempts=5)
+_AGENT_RETRY = RetryPolicy(initial_interval=timedelta(seconds=2), maximum_attempts=3)
 
 
 def _topo_order(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -104,8 +124,12 @@ def run_step_activity(
           is returned WITHOUT re-invoking the LLM or re-appending — no double-charge,
           no duplicate step result.
         - A DECISION step returns the chosen branch's ``step_id`` string; an ACTION (or
-          any non-WAIT) step returns the agent output. Handler exceptions propagate so
-          the failure surfaces as a failed workflow.
+          any non-WAIT) step returns the agent output.
+        - A genuine handler failure (e.g. the LLM call raising) is re-raised as a
+          ``non_retryable`` ``ApplicationError`` so it fails the workflow *fast* rather
+          than re-running the expensive model call under ``_AGENT_RETRY``. A worker
+          crash / lost task (not an exception) is still retried by that policy so the
+          step is picked up by another worker — recovery, without retrying real errors.
     """
     from agentic_team_provisioning.models import AgenticTeamAgent, ProcessDefinition
     from agentic_team_provisioning.runtime.pipeline_runner import PipelineRunner
@@ -129,7 +153,16 @@ def run_step_activity(
     agents_by_name = {a.agent_name: a for a in agents}
 
     runner = PipelineRunner(store, start_sweeper=False)
-    return runner.run_step(run_id, step, prev_output, step_results, agents_by_name)
+    try:
+        return runner.run_step(run_id, step, prev_output, step_results, agents_by_name)
+    except Exception as exc:
+        # Genuine application failure — do NOT retry the expensive, non-idempotent LLM
+        # call. Mark non_retryable so ``_AGENT_RETRY`` fails the workflow immediately;
+        # only crashes/timeouts (which arrive as retryable task failures, not exceptions)
+        # consume the retry budget.
+        raise ApplicationError(
+            str(exc), type=type(exc).__name__, non_retryable=True
+        ) from exc
 
 
 @activity.defn(name="agentic_pipeline_wait_setup")
@@ -169,31 +202,39 @@ def wait_setup_activity(run_id: str, step_id: str, step_name: str, prompt_text: 
 
 @activity.defn(name="agentic_pipeline_wait_resume")
 def wait_resume_activity(run_id: str, step_id: str, human_input: str) -> str:
-    """Record the submitted human input and move the run back to ``running``.
+    """Record the submitted human input on the WAIT step result.
 
-    Preconditions: ``run_id`` refers to a run that was ``waiting_for_input``;
+    The ``/input`` endpoint has already performed the authoritative resume transition
+    (compare-and-swap ``waiting_for_input`` -> ``running`` + persisted ``human_input``)
+    before signalling the workflow, so this activity does NOT own the status flip — it
+    only marks the WAIT step result completed with the answer. Critically, it must not
+    revive a run that went terminal (e.g. cancelled) in the window between the endpoint's
+    flip and this activity, so the write is skipped entirely once the run is terminal.
+
+    Preconditions: ``run_id`` refers to a run whose ``/input`` CAS already succeeded;
         ``human_input`` is a str (may be empty).
-    Postconditions: the matching WAIT step result is marked ``completed`` with
-        ``output = human_input``, ``human_prompt`` is cleared, the run is ``running``,
-        and ``human_input`` is returned as the next step's ``prev_output``. No
-        heartbeat-freshness guard is applied — Temporal owns this run's liveness.
+    Postconditions: if the run is still active (not terminal), the matching WAIT step
+        result is marked ``completed`` with ``output = human_input`` and ``human_prompt``
+        is cleared — WITHOUT writing ``status`` (the endpoint owns it, so a cancelled run
+        is never resurrected). Always returns ``human_input`` as the next step's
+        ``prev_output``; the workflow's next ``advance_step_activity`` CAS then stops the
+        run cleanly if it was cancelled.
     """
     from agentic_team_provisioning.testing.store import get_test_store
 
     store = get_test_store()
     run = store.get_pipeline_run(run_id)
-    step_results: list[dict[str, Any]] = list((run or {}).get("step_results") or [])
+    if run is None or run.get("status") in _TERMINAL_STATUSES:
+        # Cancelled/failed/completed out-of-band between the endpoint flip and now —
+        # do not touch the row (no revival), let the workflow stop on the next advance.
+        return human_input
+    step_results: list[dict[str, Any]] = list(run.get("step_results") or [])
     for s in step_results:
         if s.get("step_id") == step_id:
             s["status"] = "completed"
             s["output"] = human_input
             break
-    store.update_pipeline_run(
-        run_id,
-        status="running",
-        human_prompt=None,
-        step_results=step_results,
-    )
+    store.update_pipeline_run(run_id, human_prompt=None, step_results=step_results)
     return human_input
 
 
@@ -320,7 +361,7 @@ class AgenticPipelineWorkflow:
                     advance_step_activity,
                     args=[run_id, step["step_id"]],
                     start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                    retry_policy=_SINGLE_ATTEMPT,
+                    retry_policy=_STORE_RETRY,
                 )
                 if not advanced:
                     return {"run_id": run_id, "terminal": "out_of_band"}
@@ -343,7 +384,7 @@ class AgenticPipelineWorkflow:
                         wait_setup_activity,
                         args=[run_id, step["step_id"], step.get("name", ""), prompt_text],
                         start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                        retry_policy=_SINGLE_ATTEMPT,
+                        retry_policy=_STORE_RETRY,
                     )
                     try:
                         await workflow.wait_condition(
@@ -355,28 +396,28 @@ class AgenticPipelineWorkflow:
                             wait_expire_activity,
                             args=[run_id, step["step_id"], wait_timeout_s],
                             start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                            retry_policy=_SINGLE_ATTEMPT,
+                            retry_policy=_STORE_RETRY,
                         )
                         return {"run_id": run_id, "terminal": "timed_out"}
                     prev_output = await workflow.execute_activity(
                         wait_resume_activity,
                         args=[run_id, step["step_id"], self._human_input],
                         start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                        retry_policy=_SINGLE_ATTEMPT,
+                        retry_policy=_STORE_RETRY,
                     )
                 else:
                     prev_output = await workflow.execute_activity(
                         run_step_activity,
                         args=[run_id, team_agents_json, process_json, step["step_id"], prev_output],
                         start_to_close_timeout=_AGENT_STEP_TIMEOUT,
-                        retry_policy=_SINGLE_ATTEMPT,
+                        retry_policy=_AGENT_RETRY,
                     )
 
             await workflow.execute_activity(
                 complete_activity,
                 args=[run_id],
                 start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                retry_policy=_SINGLE_ATTEMPT,
+                retry_policy=_STORE_RETRY,
             )
             return {"run_id": run_id, "terminal": "completed"}
         except asyncio.CancelledError:
@@ -387,7 +428,7 @@ class AgenticPipelineWorkflow:
                 cancel_reconcile_activity,
                 args=[run_id],
                 start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                retry_policy=_SINGLE_ATTEMPT,
+                retry_policy=_STORE_RETRY,
             )
             raise
         except Exception as exc:
@@ -395,6 +436,6 @@ class AgenticPipelineWorkflow:
                 fail_activity,
                 args=[run_id, str(exc)],
                 start_to_close_timeout=_BOOKKEEPING_TIMEOUT,
-                retry_policy=_SINGLE_ATTEMPT,
+                retry_policy=_STORE_RETRY,
             )
             raise
