@@ -87,7 +87,8 @@ reasoning channel (its accumulated length across attempts and whether a JSON obj
 to detect answers misrouted into reasoning); these two fields are logged only, not carried on the
 exception object. Each downgrade rung is logged at WARNING. Transient 5xx/connection/timeout faults and 429s keep their own
 independent schedules before and after the downgrades. Disabling the toggle restores the legacy
-behavior (empty 200s retried verbatim on the transient schedule).
+behavior (empty 200s retried verbatim on the transient schedule). The code-review engine layers a
+further recovery on top of this for its chunk reviews — see `CODE_REVIEW_THINKING_OFF_RETRY`.
 
 Agents that run a reasoning model in JSON mode where the top `max` tier reliably reasoning-loops can
 pin a reduced default tier via `AGENT_DEFAULT_THINK` in `llm_service/config.py` (e.g. `code_review`
@@ -400,9 +401,55 @@ A failing chunk smaller than twice this is retried once as-is instead of being
 bisected. Default `8000`, floor `1000`.
 
 ### CODE_REVIEW_MAX_BISECT_DEPTH
-Max bisect-and-retry recursion depth for a failing review chunk before the run
-fails with `CodeReviewUnavailableError`. Default `3`, floor `0` (`0` disables
-bisection; a chunk then gets only the single same-input retry).
+Max bisect-and-retry recursion depth for a failing review chunk before the chunk
+is treated as unreviewable and degraded (see `CODE_REVIEW_BLOCK_ON_UNREVIEWED`:
+by default its range is recorded non-blockingly in `not_reviewed_ranges`; with
+the opt-out on it becomes a blocking `high` finding). The whole run only raises
+`CodeReviewUnavailableError` when *no* chunk could be reviewed at all. Default
+`3`, floor `0` (`0` disables bisection; a chunk then gets only the single
+same-input retry, then the thinking-off retry, before degrading).
+
+### CODE_REVIEW_THINKING_OFF_RETRY
+Default-on last-resort retry for a chunk whose review could not be recovered by
+bisection or the same-input retry **and** failed with a reasoning-only
+exhaustion (`LLMSemanticExhaustionError`) or an output-token truncation
+(`LLMTruncatedError`). One more review is attempted with thinking forced off
+(`get_strands_model("code_review", think=False)`), which turns the common
+"thinking model reasoned but never emitted the final JSON" case into a real
+review instead of a degraded "not reviewed" range — the main lever that makes
+that degradation rare. Set to `false`/`0`/`no`/`off` to disable. Only fires on
+the production path (an injected strands model, used in tests, has no
+re-resolvable thinking level and is skipped); a successful thinking-off recovery
+is treated as reduced-fidelity and is never frozen in the map-phase cache, so the
+next identical cycle re-attempts at full fidelity. Complements the client-level
+`LLM_THINKING_DOWNGRADE_RETRY` (which does a single one-level downgrade inside the
+Ollama client); this knob forces reasoning fully off in one shot at the
+code-review layer for any provider.
+
+### CODE_REVIEW_BLOCK_ON_UNREVIEWED
+Default-**off** toggle that, when enabled, restores the legacy fail-closed behavior
+for a chunk that still could not be reviewed after all recovery (bisection,
+same-input retry, and the thinking-off retry). By default such a chunk degrades **gracefully**: its
+range is recorded non-blockingly on `CodeReviewOutput.not_reviewed_ranges` and in
+a telemetry log, but it is **never** posted as a PR comment and **never** blocks
+the review — a reviewer-side hiccup is not a code defect, so the chunks that did
+review drive the verdict. Set to `true`/`1`/`yes`/`on` to instead turn each
+unreviewable range into a blocking `high` "not reviewed" finding that is posted
+and rejects the merged review (so unreviewed code cannot pass the gate as
+approved). Either way, the **total-failure** guard is unchanged: when *no* chunk
+could be reviewed at all the run still raises `CodeReviewUnavailableError`.
+
+### PR_REVIEW_POST_OUTAGE_NOTICE
+Default-on toggle for the `/review-pr` flow. When an automated PR review cannot
+complete (the review engine is unavailable, a chunk's review could not be
+recovered, or the reviewer returned no output), the job/review row is still marked
+`failed` with the real detail captured in the store, but the pull request receives
+at most a single neutral, non-blocking note ("Automated code review could not
+complete and did not post findings; it can be re-run.") instead of the raw
+exception text. Set to `false`/`0`/`no`/`off` to post nothing at all on the PR for
+a review outage (the failure is still recorded in the job store either way). This
+does not affect the distinct "no engine provider configured" deploy-misconfig
+abort, which remains a loud operator-facing comment.
 
 ### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
 Max entries in the coordinator's process-global map-phase outcome cache. The

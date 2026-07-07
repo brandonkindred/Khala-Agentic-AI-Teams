@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from strands import Agent
 
@@ -76,6 +76,16 @@ REVIEW_GUARDRAILS_NOTE = (
 # named constant so callers/tests can identify a map-phase review prompt without
 # duplicating the literal (it is unique to this prompt template).
 CODE_TO_REVIEW_HEADER = "**Code to review:**"
+
+# Output-contract reminder appended AFTER the code block (the last thing the
+# model reads). Keeps a thinking model from returning reasoning-only output with
+# no final answer — the semantic-exhaustion failure mode. Rides the user prompt
+# because the CODE_REVIEW system prompt is byte-locked.
+FINAL_OUTPUT_CONTRACT_NOTE = (
+    "\nRespond with ONLY the single JSON object your instructions specify "
+    "(approved, issues, summary, spec_compliance_notes). "
+    "Do not emit reasoning, analysis, or any prose outside that JSON object."
+)
 
 
 class ChunkReviewAgent:
@@ -124,14 +134,22 @@ class ChunkReviewAgent:
     def __init__(self, llm: LLMClient) -> None:
         self.llm = llm
 
-    def run(self, input_data: ChunkReviewInput) -> ChunkReviewOutput:
+    def run(
+        self, input_data: ChunkReviewInput, think: Optional[Union[bool, str]] = None
+    ) -> ChunkReviewOutput:
         """Review one chunk and return approved, issues, summary.
+
+        Preconditions:
+            - ``think`` is ``None`` (use the model's default thinking level) or an
+              explicit override forwarded to ``resolve_code_review_model`` — e.g.
+              ``False`` for the coordinator's last-resort thinking-off retry of a
+              chunk whose default-thinking review returned no usable content.
 
         Postconditions:
             - ``spec_compliance_notes`` from the LLM is passed through so
               single-chunk reviews keep full output fidelity.
         """
-        result = _run_chunk_review(self.llm, input_data)
+        result = _run_chunk_review(self.llm, input_data, think=think)
         return ChunkReviewOutput(
             approved=result["approved"],
             issues=result["issues"],
@@ -140,7 +158,9 @@ class ChunkReviewAgent:
         )
 
 
-def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
+def _run_chunk_review(
+    llm: LLMClient, input_data: ChunkReviewInput, think: Optional[Union[bool, str]] = None
+) -> dict:
     """
     Review one chunk of code. Returns dict with approved, issues, summary,
     and spec_compliance_notes.
@@ -149,6 +169,9 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         - ``input_data.code_chunk`` is already bounded by the coordinator
           (≤ ``compute_code_review_map_chunk_chars``); it is reviewed verbatim,
           never compacted or truncated here.
+        - ``think`` is ``None`` (model default) or an explicit thinking override
+          forwarded to ``resolve_code_review_model`` (ignored for an injected
+          strands ``Model``, which cannot re-resolve its thinking level).
 
     Postconditions:
         - Shared context (spec/architecture/existing code) is hard-capped to
@@ -253,11 +276,17 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
             "```",
             code_chunk,
             "```",
+            # Last thing the model sees: a plain output-contract reminder. The
+            # CODE_REVIEW system prompt is byte-locked, so this rides the user
+            # prompt (like REVIEW_GUARDRAILS_NOTE). It nudges a thinking model to
+            # emit the final JSON rather than reasoning-only output, the failure
+            # mode that otherwise raises LLMSemanticExhaustionError.
+            FINAL_OUTPUT_CONTRACT_NOTE,
         ]
     )
 
     prompt = "\n".join(context_parts)
-    model = resolve_code_review_model(llm)
+    model = resolve_code_review_model(llm, think=think)
     agent = Agent(model=model, system_prompt=build_review_system_prompt(input_data.profile))
     result = agent(prompt)
     raw = str(result).strip()
