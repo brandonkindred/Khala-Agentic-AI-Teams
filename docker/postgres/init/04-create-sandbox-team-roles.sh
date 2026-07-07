@@ -36,6 +36,6 @@ GRANT CONNECT ON DATABASE "sandbox_${team}" TO "sandbox_${team}";
 SQL
 }
 
-for team in blogging software_engineering planning_v3 branding; do
+for team in blogging software_engineering planning branding; do
   create_team_role "$team"
 done

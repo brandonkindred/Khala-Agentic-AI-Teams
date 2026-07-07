@@ -354,7 +354,7 @@ classDiagram
 | staging | true | false | true | medium |
 | production | false | **true** | true | **high** |
 
-## 6. Planning V3 Data Model
+## 6. Planning Data Model
 
 ```mermaid
 classDiagram
@@ -380,7 +380,6 @@ classDiagram
         +str prd_path
         +str validated_spec_content
         +str prd_content
-        +Dict planning_v2_artifact_paths
         +str architecture_overview
         +Dict sub_agent_blueprint
         +str summary
@@ -394,7 +393,7 @@ classDiagram
         +str priority
         +List~OpenQuestionOption~ options
         +bool allow_multiple = false
-        +str source = "planning_v3"
+        +str source = "planning"
     }
 
     class PlanningPhase {
@@ -561,15 +560,15 @@ flowchart TD
 | POST | `/run-team/{job_id}/resume-after-llm-check` | - | `RetryResponse` | Resume after LLM outage |
 | POST | `/run-team/{job_id}/answers` | `SubmitAnswersRequest` | `JobStatusResponse` | Answer clarification questions |
 
-### Planning V3 API Endpoints
+### Planning API Endpoints
 
 | Method | Path | Request | Response | Purpose |
 |--------|------|---------|----------|---------|
-| POST | `/run` | `PlanningV3RunRequest` | `PlanningV3RunResponse` | Start planning |
-| GET | `/status/{job_id}` | - | `PlanningV3StatusResponse` | Poll status |
-| GET | `/result/{job_id}` | - | `PlanningV3ResultResponse` | Get handoff package |
+| POST | `/run` | `PlanningRunRequest` | `PlanningRunResponse` | Start planning |
+| GET | `/status/{job_id}` | - | `PlanningStatusResponse` | Poll status |
+| GET | `/result/{job_id}` | - | `PlanningResultResponse` | Get handoff package |
 | GET | `/jobs` | - | Job list | List active jobs |
-| POST | `/{job_id}/answers` | Answers | `PlanningV3StatusResponse` | Submit answers |
+| POST | `/{job_id}/answers` | Answers | `PlanningStatusResponse` | Submit answers |
 
 ### Coding Team API Endpoints
 

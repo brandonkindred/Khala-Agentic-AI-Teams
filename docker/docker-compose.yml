@@ -26,7 +26,7 @@ services:
       # POSTGRES_* creds for sandboxes in that team.
       POSTGRES_PASSWORD_SANDBOX_BLOGGING: ${POSTGRES_PASSWORD_SANDBOX_BLOGGING:-}
       POSTGRES_PASSWORD_SANDBOX_SOFTWARE_ENGINEERING: ${POSTGRES_PASSWORD_SANDBOX_SOFTWARE_ENGINEERING:-}
-      POSTGRES_PASSWORD_SANDBOX_PLANNING_V3: ${POSTGRES_PASSWORD_SANDBOX_PLANNING_V3:-}
+      POSTGRES_PASSWORD_SANDBOX_PLANNING: ${POSTGRES_PASSWORD_SANDBOX_PLANNING:-}
       POSTGRES_PASSWORD_SANDBOX_BRANDING: ${POSTGRES_PASSWORD_SANDBOX_BRANDING:-}
     ports:
       - "5432:5432"
@@ -582,29 +582,29 @@ services:
       timeout: 5s
       retries: 5
 
-  planning-v3-service:
+  planning-service:
     build:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8102" }
-    image: khala-planning-v3-service
-    container_name: khala-planning-v3-service
+    image: khala-planning-service
+    container_name: khala-planning-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
-      TEAM_MODULE: planning_v3_team.api.main
-      TEAM_NAME: planning_v3_team
+      TEAM_MODULE: planning_team.api.main
+      TEAM_NAME: planning_team
       TEAM_PORT: "8102"
-      TEAM_TEMPORAL_WORKER_MODULE: planning_v3_team.temporal.worker
-      TEAM_TEMPORAL_WORKER_FUNC: start_planning_v3_temporal_worker_thread
+      TEAM_TEMPORAL_WORKER_MODULE: planning_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_planning_temporal_worker_thread
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
     ports: ["8102:8102"]
     networks:
-      stack: { ipv4_address: 172.28.0.20, aliases: [planning-v3-service] }
+      stack: { ipv4_address: 172.28.0.20, aliases: [planning-service] }
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8102/health"]
@@ -888,7 +888,7 @@ services:
       ai-systems-service: { condition: service_healthy }
       investment-service: { condition: service_healthy }
       nutrition-service: { condition: service_healthy }
-      planning-v3-service: { condition: service_healthy }
+      planning-service: { condition: service_healthy }
       coding-team-service: { condition: service_healthy }
       sales-service: { condition: service_healthy }
       road-trip-service: { condition: service_healthy }
@@ -953,7 +953,7 @@ services:
       AI_SYSTEMS_SERVICE_URL: http://ai-systems-service:8099
       INVESTMENT_SERVICE_URL: http://investment-service:8100
       NUTRITION_MEAL_PLANNING_SERVICE_URL: http://nutrition-service:8101
-      PLANNING_V3_SERVICE_URL: http://planning-v3-service:8102
+      PLANNING_SERVICE_URL: http://planning-service:8102
       CODING_TEAM_SERVICE_URL: http://coding-team-service:8103
       SALES_TEAM_SERVICE_URL: http://sales-service:8105
       ROAD_TRIP_PLANNING_SERVICE_URL: http://road-trip-service:8106
@@ -978,7 +978,7 @@ services:
       - "ai-systems-service:172.28.0.17"
       - "investment-service:172.28.0.18"
       - "nutrition-service:172.28.0.19"
-      - "planning-v3-service:172.28.0.20"
+      - "planning-service:172.28.0.20"
       - "coding-team-service:172.28.0.21"
       - "sales-service:172.28.0.23"
       - "road-trip-service:172.28.0.24"
@@ -1056,7 +1056,7 @@ services:
       - "ai-systems-service:172.28.0.17"
       - "investment-service:172.28.0.18"
       - "nutrition-service:172.28.0.19"
-      - "planning-v3-service:172.28.0.20"
+      - "planning-service:172.28.0.20"
       - "coding-team-service:172.28.0.21"
       - "sales-service:172.28.0.23"
       - "road-trip-service:172.28.0.24"

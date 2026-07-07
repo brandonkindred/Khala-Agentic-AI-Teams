@@ -18,17 +18,11 @@ import type {
   FrontendCodeV2RunRequest,
   FrontendCodeV2RunResponse,
   FrontendCodeV2StatusResponse,
-  PlanningV2RunRequest,
-  PlanningV2RunResponse,
-  PlanningV2StatusResponse,
-  PlanningV2ResultResponse,
   AutoAnswerRequest,
   AutoAnswerResponse,
   ProductAnalysisRunRequest,
   ProductAnalysisRunResponse,
   ProductAnalysisStatusResponse,
-  PlanningArtifactListResponse,
-  PlanningArtifactContentResponse,
 } from '../models';
 
 /**
@@ -265,105 +259,6 @@ export class SoftwareEngineeringApiService {
   ): Observable<FrontendCodeV2StatusResponse> {
     return this.http.get<FrontendCodeV2StatusResponse>(
       `${this.baseUrl}/frontend-code-v2/status/${jobId}`
-    );
-  }
-
-  // -----------------------------------------------------------------------
-  // Planning-V2
-  // -----------------------------------------------------------------------
-
-  /**
-   * POST /planning-v2/run
-   */
-  runPlanningV2(
-    request: PlanningV2RunRequest
-  ): Observable<PlanningV2RunResponse> {
-    return this.http.post<PlanningV2RunResponse>(
-      `${this.baseUrl}/planning-v2/run`,
-      request
-    );
-  }
-
-  /**
-   * GET /planning-v2/status/{job_id}
-   */
-  getPlanningV2Status(
-    jobId: string
-  ): Observable<PlanningV2StatusResponse> {
-    return this.http.get<PlanningV2StatusResponse>(
-      `${this.baseUrl}/planning-v2/status/${jobId}`
-    );
-  }
-
-  /**
-   * GET /planning-v2/jobs - list running and pending planning-v2 jobs.
-   */
-  getPlanningV2Jobs(): Observable<RunningJobsResponse> {
-    return this.http.get<RunningJobsResponse>(
-      `${this.baseUrl}/planning-v2/jobs`
-    );
-  }
-
-  /**
-   * GET /planning-v2/result/{job_id}
-   */
-  getPlanningV2Result(jobId: string): Observable<PlanningV2ResultResponse> {
-    return this.http.get<PlanningV2ResultResponse>(
-      `${this.baseUrl}/planning-v2/result/${jobId}`
-    );
-  }
-
-  /**
-   * POST /planning-v2/{job_id}/answers
-   * Submit answers to open questions to resume planning-v2 workflow.
-   */
-  submitPlanningV2Answers(
-    jobId: string,
-    request: SubmitAnswersRequest
-  ): Observable<PlanningV2StatusResponse> {
-    return this.http.post<PlanningV2StatusResponse>(
-      `${this.baseUrl}/planning-v2/${jobId}/answers`,
-      request
-    );
-  }
-
-  /**
-   * POST /planning-v2/{job_id}/auto-answer/{question_id}
-   * Auto-answer a pending question using LLM analysis.
-   */
-  autoAnswerPlanningV2(
-    jobId: string,
-    questionId: string,
-    request?: AutoAnswerRequest
-  ): Observable<AutoAnswerResponse> {
-    return this.http.post<AutoAnswerResponse>(
-      `${this.baseUrl}/planning-v2/${jobId}/auto-answer/${questionId}`,
-      request ?? {}
-    );
-  }
-
-  /**
-   * GET /planning-v2/{job_id}/artifacts
-   * List planning artifacts for a planning-v2 job.
-   */
-  getPlanningV2Artifacts(
-    jobId: string
-  ): Observable<PlanningArtifactListResponse> {
-    return this.http.get<PlanningArtifactListResponse>(
-      `${this.baseUrl}/planning-v2/${jobId}/artifacts`
-    );
-  }
-
-  /**
-   * GET /planning-v2/{job_id}/artifacts/{artifact_name}
-   * Get the content of a specific planning artifact.
-   */
-  getPlanningV2ArtifactContent(
-    jobId: string,
-    artifactName: string
-  ): Observable<PlanningArtifactContentResponse> {
-    return this.http.get<PlanningArtifactContentResponse>(
-      `${this.baseUrl}/planning-v2/${jobId}/artifacts/${encodeURIComponent(artifactName)}`
     );
   }
 

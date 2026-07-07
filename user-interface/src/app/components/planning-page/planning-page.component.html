@@ -1,0 +1,21 @@
+<div class="kh-page-header">
+  <div class="kh-page-header__titles">
+    <h1>Planning</h1>
+    <p>Client-facing discovery and requirements: context doc, PRD, and handoff for dev/UI/UX.</p>
+  </div>
+  <div class="kh-page-header__status" aria-live="polite">
+    <app-health-indicator [healthCheck]="healthCheck" label="Planning API" />
+  </div>
+</div>
+
+<app-team-assistant-chat
+  [teamApiUrl]="teamApiUrl"
+  [teamName]="'Planning'"
+  [teamDescription]="'Scope and plan your project with discovery and requirements gathering'"
+  [fields]="[
+    {key: 'repo_path', label: 'Repository path', placeholder: 'Path to project repository', required: true},
+    {key: 'initial_brief', label: 'Project brief', placeholder: 'Describe what needs to be built', required: true},
+    {key: 'client_name', label: 'Client name', placeholder: 'Name of client or project'}
+  ]"
+  (workflowLaunched)="onWorkflowLaunched($event)"
+/>
