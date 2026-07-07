@@ -174,7 +174,6 @@ class _ChunkOutcome:
     not_reviewed_issues: List[CodeReviewIssue] = field(default_factory=list)
     summaries: List[str] = field(default_factory=list)
     spec_notes: List[str] = field(default_factory=list)
-    commit_messages: List[str] = field(default_factory=list)
     approved_flags: List[bool] = field(default_factory=list)
     # True when this outcome came from a reduced-fidelity recovery (a thinking-off
     # retry of a chunk whose default-thinking review exhausted). Like a bisected
@@ -189,7 +188,6 @@ class _ChunkOutcome:
         self.not_reviewed_issues.extend(other.not_reviewed_issues)
         self.summaries.extend(other.summaries)
         self.spec_notes.extend(other.spec_notes)
-        self.commit_messages.extend(other.commit_messages)
         self.approved_flags.extend(other.approved_flags)
         self.degraded_recovery = self.degraded_recovery or other.degraded_recovery
 
@@ -209,7 +207,6 @@ class _ChunkOutcome:
             not_reviewed_issues=[i.model_copy(deep=True) for i in self.not_reviewed_issues],
             summaries=list(self.summaries),
             spec_notes=list(self.spec_notes),
-            commit_messages=list(self.commit_messages),
             approved_flags=list(self.approved_flags),
             degraded_recovery=self.degraded_recovery,
         )
@@ -383,7 +380,6 @@ def _outcome_from_output(chunk: ReviewChunk, output: ChunkReviewOutput) -> _Chun
         issues=issues,
         summaries=[output.summary],
         spec_notes=[output.spec_compliance_notes],
-        commit_messages=[output.suggested_commit_message],
         approved_flags=[output.approved],
     )
 

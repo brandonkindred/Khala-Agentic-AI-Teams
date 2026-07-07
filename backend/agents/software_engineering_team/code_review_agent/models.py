@@ -259,10 +259,6 @@ class ChunkReviewOutput(BaseModel):
         default="",
         description="Notes on how well the chunk meets the spec and acceptance criteria",
     )
-    suggested_commit_message: str = Field(
-        default="",
-        description="Optional commit message suggestion from the reviewer",
-    )
 
 
 class CodeReviewIssue(BaseModel):
@@ -413,10 +409,6 @@ class CodeReviewOutput(BaseModel):
     spec_compliance_notes: str = Field(
         default="",
         description="Notes on how well the code meets the specification and acceptance criteria",
-    )
-    suggested_commit_message: str = Field(
-        default="",
-        description="Conventional Commits format, if reviewer wants to suggest a better message",
     )
 
 
