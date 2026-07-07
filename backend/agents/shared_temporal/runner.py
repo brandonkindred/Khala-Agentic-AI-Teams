@@ -165,6 +165,14 @@ def cancel_workflow_sync(
 
 
 def _get_job_manager(team: str) -> Any:
+    # Import lazily (not at module top) on purpose: only ``run_team_job`` — the
+    # job-store-backed dispatch path — needs ``JobServiceClient`` (and its transitive
+    # ``httpx`` dependency). The lightweight bridges in this module
+    # (``start_workflow_sync`` / ``signal_workflow_sync`` / ``cancel_workflow_sync``),
+    # which many callers use without ever touching the job store, must not pull that in
+    # just by importing ``shared_temporal.runner``. There is no circular-import concern
+    # (``job_service_client`` does not import ``shared_temporal``); this is purely to
+    # keep the import surface of the bridge path minimal.
     from job_service_client import JobServiceClient
 
     return JobServiceClient(team=team)
