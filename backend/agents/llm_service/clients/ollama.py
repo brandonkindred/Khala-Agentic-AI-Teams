@@ -214,6 +214,94 @@ def _thinking_downgrade_enabled() -> bool:
     return llm_config.env_flag_enabled(llm_config.ENV_LLM_THINKING_DOWNGRADE_RETRY)
 
 
+def _semantic_retry_think(model: str, active_think: "bool | str | None") -> "bool | str | None":
+    """Next thinking value for a proof-of-change retry after a reasoning-only turn.
+
+    A reasoning model in JSON mode can spend a whole turn in its reasoning channel
+    and emit no assistant content. The recovery is to re-issue the call with
+    reasoning reduced — a provably different payload — ending by disabling thinking
+    entirely, the strongest available proof of change and the most reliable way to
+    force such a model to open the content channel.
+
+    The ladder, from ``active_think`` (the value the just-failed attempt used):
+      - the model's TOP registered tier       -> one notch down (e.g. ``max`` -> ``high``);
+      - any already-reduced tier / boolean-on  -> ``False`` (thinking disabled);
+      - already-off / unknown level            -> ``None`` (no further provable change).
+
+    Intermediate registered tiers are intentionally skipped once below the top
+    tier: for the models in use (e.g. ``deepseek-v4-pro:cloud``, whose
+    low/medium/high all collapse to one wire reasoning effort) the intermediate
+    tiers are wire-identical retries — a wasted multi-minute call. Jumping straight
+    to thinking-off from a reduced tier is both cheaper and more effective.
+
+    Preconditions:
+        - ``active_think`` is a resolved wire value (bool, level string, or None).
+    Postconditions:
+        - Returns the next reduced setting, or ``None`` when nothing is left to
+          change. The sequence strictly reduces reasoning and always terminates.
+          Pure function: no env reads, never raises.
+    """
+    if active_think is None or active_think is False:
+        return None
+    if active_think is True:
+        return False
+    levels = llm_config.KNOWN_MODEL_THINKING_LEVELS.get(model) or ()
+    if len(levels) > 1 and active_think == levels[-1]:
+        # From the model's top tier: step down one notch first, giving the model a
+        # chance to answer with reduced-but-still-on reasoning before it is cut off.
+        return levels[-2]
+    # Already at a reduced tier, or an unregistered level string: the only
+    # remaining provable change that reliably forces content is disabling thinking.
+    return False
+
+
+def _max_semantic_retries(model: str, resolved_think: "bool | str | None") -> int:
+    """Number of proof-of-change downgrade retries the ladder can spend.
+
+    Mirrors :func:`_semantic_retry_think`'s ladder length so the request loop's
+    log denominator and its hard cap stay honest:
+      - top tier of a multi-tier model            -> 2 (one notch down, then off);
+      - any other on-thinking value               -> 1 (thinking-off);
+      - already-off / unknown / feature disabled  -> 0.
+
+    Postconditions: returns a non-negative int; pure function, never raises.
+    """
+    if not _thinking_downgrade_enabled():
+        return 0
+    if resolved_think is None or resolved_think is False:
+        return 0
+    if resolved_think is True:
+        return 1
+    levels = llm_config.KNOWN_MODEL_THINKING_LEVELS.get(model) or ()
+    if len(levels) > 1 and resolved_think == levels[-1]:
+        return 2
+    return 1
+
+
+def _reasoning_json_probe(reasoning: str) -> bool:
+    """Best-effort diagnostic: does ``reasoning`` contain a JSON object that parses?
+
+    Answers whether a semantically-exhausted turn's answer may have been misrouted
+    into the reasoning channel (some providers route all tokens there when
+    ``reasoning_effort`` is set), so operators can decide whether a reasoning-channel
+    salvage is worthwhile. Diagnostic only — never used as answer content here.
+
+    Postconditions: True iff the first-``{``-to-last-``}`` slice parses as JSON;
+        never raises (any parse failure → False).
+    """
+    if not reasoning:
+        return False
+    start = reasoning.find("{")
+    end = reasoning.rfind("}")
+    if start == -1 or end <= start:
+        return False
+    try:
+        json.loads(reasoning[start : end + 1])
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def _ollama_bearer_auth_headers() -> dict[str, str]:
     """Return the Authorization Bearer header for the model-listing Ollama request.
 
@@ -285,17 +373,30 @@ class _EmptyResponseSignal(Exception):
 
     Preconditions: ``finish_reason`` is the response's finish reason;
         ``has_reasoning`` is True iff the response carried reasoning tokens;
-        ``content_len`` is the (stripped-empty) raw content length in chars.
+        ``content_len`` is the (stripped-empty) raw content length in chars;
+        ``reasoning_len`` is the raw reasoning-channel length in chars and
+        ``reasoning_has_json`` whether a JSON object was found there (diagnostics
+        for the reasoning-channel-salvage decision — no raw content is retained).
     Invariants: never escapes ``_ollama_post``.
     """
 
-    def __init__(self, finish_reason: str, has_reasoning: bool, content_len: int):
+    def __init__(
+        self,
+        finish_reason: str,
+        has_reasoning: bool,
+        content_len: int,
+        *,
+        reasoning_len: int = 0,
+        reasoning_has_json: bool = False,
+    ):
         super().__init__(
             f"empty response (finish_reason={finish_reason}, has_reasoning={has_reasoning})"
         )
         self.finish_reason = finish_reason
         self.has_reasoning = has_reasoning
         self.content_len = content_len
+        self.reasoning_len = reasoning_len
+        self.reasoning_has_json = reasoning_has_json
 
 
 def _parse_retry_config() -> tuple[int, float, float]:
@@ -818,12 +919,21 @@ class OllamaLLMClient(LLMClient):
             if msg.get("reasoning_content"):
                 envelope["__reasoning_content__"] = msg["reasoning_content"]
             return json.dumps(envelope)
-        has_reasoning = bool(msg.get("reasoning_content"))
+        reasoning_text = str(msg.get("reasoning_content") or "")
+        has_reasoning = bool(reasoning_text)
+        reasoning_len = len(reasoning_text)
+        reasoning_has_json = _reasoning_json_probe(reasoning_text)
         if finish_reason == "length":
             partial_content = msg.get("content", "")
             partial_content = str(partial_content) if partial_content else ""
             if not partial_content.strip():
-                raise _EmptyResponseSignal("length", has_reasoning, len(partial_content))
+                raise _EmptyResponseSignal(
+                    "length",
+                    has_reasoning,
+                    len(partial_content),
+                    reasoning_len=reasoning_len,
+                    reasoning_has_json=reasoning_has_json,
+                )
             logger.warning(
                 "LLM response truncated (rid=%s, %s, finish_reason=length). Partial content: %d chars",
                 current_request_id() or "-",
@@ -841,7 +951,11 @@ class OllamaLLMClient(LLMClient):
         content_str = str(content)
         if not content_str.strip():
             raise _EmptyResponseSignal(
-                str(finish_reason or "stop"), has_reasoning, len(content_str)
+                str(finish_reason or "stop"),
+                has_reasoning,
+                len(content_str),
+                reasoning_len=reasoning_len,
+                reasoning_has_json=reasoning_has_json,
             )
         return content_str
 
@@ -901,16 +1015,17 @@ class OllamaLLMClient(LLMClient):
         # always terminates by returning or raising.
         transient_attempt = 0
         rate_limit_attempt = 0
-        # Semantic-exhaustion state: `semantic_attempt > 0` means the one
-        # proof-of-change downgrade retry has been spent for this call.
+        # Semantic-exhaustion state: `semantic_attempt` counts the proof-of-change
+        # downgrade retries spent for this call. The ladder steps reasoning down
+        # (ending in thinking-off) up to `max_semantic_retries` times before the
+        # call is declared exhausted — one max->high notch alone often still
+        # exhausts, so a reduced tier is followed by a decisive thinking-off retry.
         semantic_attempt = 0
         active_think: "bool | str | None" = resolved_think
         any_content_bytes = False
-        # Log denominator: one slot for the first attempt plus every budget —
-        # the proof-of-change downgrade slot only exists when the feature is on.
-        max_total_attempts = (
-            max_retries + rate_limit_max_retries + (2 if _thinking_downgrade_enabled() else 1)
-        )
+        max_semantic_retries = _max_semantic_retries(self.model, resolved_think)
+        # Log denominator: one slot for the first attempt plus every budget.
+        max_total_attempts = max_retries + rate_limit_max_retries + 1 + max_semantic_retries
         rl_log_body: Optional[str] = None
         rl_log_headers: Any = None
         # Same capture-and-log-outside pattern as the 429 path, for HTTP 5xx: the
@@ -1271,9 +1386,9 @@ class OllamaLLMClient(LLMClient):
                 # receipt below, so only tracked on the downgrade path.
                 any_content_bytes = any_content_bytes or sig.content_len > 0
                 new_think = (
-                    None
-                    if (semantic_attempt or active_think is None)
-                    else llm_config.downgrade_think(self.model, active_think)
+                    _semantic_retry_think(self.model, active_think)
+                    if semantic_attempt < max_semantic_retries
+                    else None
                 )
                 if new_think is not None:
                     logger.warning(
@@ -1300,7 +1415,7 @@ class OllamaLLMClient(LLMClient):
                 logger.error(
                     "LLM semantic exhaustion: rid=%s %s failure_class=semantic_exhaustion attempts_used=%d "
                     "original_thinking_level=%r retry_thinking_level=%r content_bytes_seen=%s "
-                    "finish_reason=%s payload_fingerprint=%s",
+                    "finish_reason=%s reasoning_len=%d reasoning_has_json=%s payload_fingerprint=%s",
                     current_request_id() or "-",
                     _attribution_log_fields(),
                     attempt + 1,
@@ -1308,6 +1423,8 @@ class OllamaLLMClient(LLMClient):
                     retry_level,
                     any_content_bytes,
                     sig.finish_reason,
+                    sig.reasoning_len,
+                    sig.reasoning_has_json,
                     fingerprint,
                 )
                 # Raising inside this handler guarantees the sibling

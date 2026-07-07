@@ -787,6 +787,18 @@ def test_all_files_blank_short_circuits_with_info_findings() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _bisecting_failure(msg: str = "no content") -> LLMTruncatedError:
+    """A recoverable content failure that still LINE-splits and same-input-retries.
+
+    Used to exercise the generic recovery machinery (line-bisection, same-input
+    retry, degrade) independently of semantic exhaustion, which now takes a
+    fast-path: a single-file semantically-exhausted chunk degrades immediately
+    (no line-split, no retry). ``LLMTruncatedError`` (finish_reason=length) is the
+    canonical still-recoverable-via-smaller-input failure.
+    """
+    return LLMTruncatedError(msg, partial_content="", finish_reason="length")
+
+
 class _SelectiveRaiser(DummyLLMClient):
     """Raises for prompts containing a marker; otherwise delegates to Dummy.
 
@@ -796,7 +808,7 @@ class _SelectiveRaiser(DummyLLMClient):
     def __init__(self, marker: str, exc: Optional[Exception] = None) -> None:
         super().__init__()
         self.marker = marker
-        self.exc = exc or LLMSemanticExhaustionError("LLM returned reasoning only (no content)")
+        self.exc = exc or _bisecting_failure("LLM output truncated")
         self.prompts: List[str] = []
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
@@ -820,7 +832,7 @@ class _FailNTimes(DummyLLMClient):
             self.prompts.append(prompt)
             if self.remaining > 0:
                 self.remaining -= 1
-                raise LLMSemanticExhaustionError("transient")
+                raise _bisecting_failure("transient")
         return super().complete_json(prompt, **kwargs)
 
 
@@ -886,10 +898,10 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             self.calls += 1
             if "### a.py ###" in prompt and "### b.py ###" in prompt:
-                raise LLMSemanticExhaustionError("no content")  # force bisection
+                raise _bisecting_failure("no content")  # force bisection
             if "### a.py ###" in prompt and self.a_failures == 0:
                 self.a_failures += 1
-                raise LLMSemanticExhaustionError("transient child hiccup")
+                raise _bisecting_failure("transient child hiccup")
             return super().complete_json(prompt, **kwargs)
 
     client = _FailCombinedAndChildOnce()
@@ -905,6 +917,56 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
     # combined fail + a fail + a retry success + b success
     # + 1 reduce-phase synthesis pass (two recovered sub-reviews).
     assert client.calls == 5
+
+
+def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> None:
+    """A single-file chunk that semantically exhausts degrades straight to a
+    blocking not-reviewed finding — no line-split, no same-input retry (both would
+    only re-run the model's already-spent thinking ladder for the same doomed
+    result). Exactly one map call, unlike a line-splitting content failure."""
+    # Size the file above the bisect floor but within one map chunk: a
+    # line-splitting failure WOULD bisect it (see the LLMTruncatedError analogue
+    # in test_large_failing_file_bisects_then_raises_with_ranges), but semantic
+    # exhaustion must not.
+    budget = compute_code_review_map_chunk_chars(DummyLLMClient())
+    line_len = 41
+    n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
+    content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    client = _SelectiveRaiser(
+        "FAILME", exc=LLMSemanticExhaustionError("LLM returned reasoning only (no content)")
+    )
+    with pytest.raises(CodeReviewUnavailableError) as excinfo:
+        run_coordinator(
+            client,
+            CodeReviewInput(files={"big.py": content}, task_description="t", language="python"),
+        )
+    assert len(client.prompts) == 1  # no line-split, no retry
+    assert any("big.py" in r for r in excinfo.value.unreviewed)
+
+
+def test_semantic_exhaustion_multi_file_still_separates_files() -> None:
+    """A multi-file chunk that semantically exhausts on the combined review still
+    splits by FILE, so a clean sibling is reviewed while only the culprit degrades
+    — file separation is worthwhile even though line-splitting is not."""
+
+    class _FailWhenBadPresent(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if "### bad.py ###" in prompt:
+                raise LLMSemanticExhaustionError("no content")
+            return super().complete_json(prompt, **kwargs)
+
+    result = run_coordinator(
+        _FailWhenBadPresent(),
+        CodeReviewInput(
+            files={"bad.py": "def bad(): pass", "good.py": "def good(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
+    assert [i.file_path for i in not_reviewed] == ["bad.py"]  # good.py was reviewed
+    assert result.approved is False  # bad.py's blocking high finding rejects the merge
 
 
 def test_persistent_small_chunk_failure_raises_unavailable() -> None:

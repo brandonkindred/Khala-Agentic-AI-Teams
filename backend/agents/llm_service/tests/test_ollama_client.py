@@ -1248,21 +1248,20 @@ def test_reasoning_only_downgrades_one_thinking_level(monkeypatch: pytest.Monkey
     assert waits == []
 
 
-def test_second_empty_after_downgrade_fails_hard_with_receipt(
+def test_ladder_exhausts_after_downgrade_then_thinking_off(
     monkeypatch: pytest.MonkeyPatch, caplog: "pytest.LogCaptureFixture"
 ) -> None:
-    """A second reasoning-only response after the downgrade raises the receipt error —
-    the transient budget is never consumed, and the receipt is logged at ERROR."""
+    """Reasoning-only at every rung raises the receipt only after the full ladder
+    (max -> high -> thinking-off): one max->high notch is not enough, so a reduced
+    tier is followed by a decisive thinking-off retry. The transient budget is
+    never consumed, and the receipt is logged at ERROR."""
     import logging
 
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)  # default 10 must NOT be spent
     monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
     waits = _patch_no_sleep(monkeypatch)
-    cms = [
-        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
-        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
-    ]
+    cms = [_stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)) for _ in range(3)]
     with (
         patch("httpx.Client") as mock_client_cls,
         caplog.at_level(logging.ERROR, logger="llm_service.clients.ollama"),
@@ -1277,14 +1276,17 @@ def test_second_empty_after_downgrade_fails_hard_with_receipt(
     err = exc_info.value
     assert isinstance(err, LLMTemporaryError)  # outer pause/degrade handlers still work
     assert err.failure_class == "semantic_exhaustion"
-    assert err.attempts_used == 2
+    assert err.attempts_used == 3
     assert err.original_thinking_level == "max"
-    assert err.retry_thinking_level == "high"
+    assert err.retry_thinking_level is False  # the last rung disabled thinking entirely
     assert err.content_bytes_seen is False
     assert err.finish_reason == "stop"
     assert len(err.payload_fingerprint) == 16
     assert all(c in "0123456789abcdef" for c in err.payload_fingerprint)
-    assert len(captured) == 2  # exactly two HTTP attempts despite the default transient budget
+    # Ladder rungs: max -> high -> thinking-off, skipping the wire-redundant
+    # low/medium tiers; exactly three HTTP attempts despite the default transient budget.
+    assert [c["reasoning_effort"] for c in captured] == ["max", "high", "none"]
+    assert len(captured) == 3
     assert waits == []
     assert any("semantic_exhaustion" in r.getMessage() for r in caplog.records)
 
@@ -1314,41 +1316,74 @@ def test_downgrade_retry_logged_at_warning(
     assert any("proof-of-change retry" in m and "'max'" in m and "'high'" in m for m in warnings)
 
 
-@pytest.mark.parametrize(
-    ("model", "think", "sse_lines", "expected_original"),
-    [
-        # think=False leaves no proof of change at all.
-        (
-            "test",
-            False,
-            ['data: {"choices":[{"delta":{},"finish_reason":"stop"}]}', "data: [DONE]"],
-            False,
-        ),
-        # The lowest registered thinking level has no level below it.
-        ("deepseek-v4-pro:cloud", "low", list(_REASONING_ONLY_SSE), "low"),
-    ],
-    ids=["think-false", "lowest-registered-level"],
-)
 def test_no_downgrade_available_fails_fast_without_retry(
     monkeypatch: pytest.MonkeyPatch,
-    model: str,
-    think: "bool | str",
-    sse_lines: list[str],
-    expected_original: "bool | str",
 ) -> None:
-    """When no thinking downgrade exists, the first empty response fails hard: one attempt, no retry."""
+    """think=False leaves no proof of change at all: the first empty response fails
+    hard with one attempt and no retry (thinking is already off)."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    cms = [_stream_cm(200, sse_lines=sse_lines)]
+    cms = [_stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE))]
     with patch("httpx.Client") as mock_client_cls:
         mock_client, captured = _capturing_multi_client(cms)
         mock_client_cls.return_value = mock_client
-        client = OllamaLLMClient(model=model, base_url="http://localhost:9999", timeout=5)
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
         with pytest.raises(LLMSemanticExhaustionError) as exc_info:
-            client.complete_json("q", objective="test", temperature=0, think=think)
+            client.complete_json("q", objective="test", temperature=0, think=False)
     assert len(captured) == 1
     assert exc_info.value.attempts_used == 1
-    assert exc_info.value.original_thinking_level == expected_original
+    assert exc_info.value.original_thinking_level is False
     assert exc_info.value.retry_thinking_level is None
+
+
+def test_reduced_tier_retries_once_with_thinking_off_then_exhausts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Starting below the model's top tier (e.g. code_review's ``high``), a
+    reasoning-only turn skips the wire-redundant intermediate tiers and retries
+    exactly once with thinking disabled before exhausting."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    cms = [
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+            client.complete_json("q", objective="test", temperature=0, think="high")
+    assert [c["reasoning_effort"] for c in captured] == ["high", "none"]
+    assert exc_info.value.attempts_used == 2
+    assert exc_info.value.original_thinking_level == "high"
+    assert exc_info.value.retry_thinking_level is False
+
+
+def test_reduced_tier_recovers_on_thinking_off_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The thinking-off retry is what rescues a reduced-tier reasoning-only turn:
+    the model emits content once reasoning is disabled. This is the code_review
+    default-``high`` path — a completed review instead of semantic exhaustion."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    cms = [
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+        _stream_cm(200, sse_lines=list(_OK_SSE)),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        result = client.complete_json("q", objective="test", temperature=0, think="high")
+    assert result == {"ok": 1}
+    assert [c["reasoning_effort"] for c in captured] == ["high", "none"]
 
 
 def test_transient_5xx_before_downgrade_keeps_schedule_and_payload(
@@ -1438,10 +1473,7 @@ def test_length_empty_is_semantic_exhaustion_with_finish_reason(
     """finish_reason=length with zero content takes the semantic path and the receipt records it."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
-    cms = [
-        _stream_cm(200, sse_lines=list(_LENGTH_EMPTY_SSE)),
-        _stream_cm(200, sse_lines=list(_LENGTH_EMPTY_SSE)),
-    ]
+    cms = [_stream_cm(200, sse_lines=list(_LENGTH_EMPTY_SSE)) for _ in range(3)]
     with patch("httpx.Client") as mock_client_cls:
         mock_client, captured = _capturing_multi_client(cms)
         mock_client_cls.return_value = mock_client
@@ -1451,8 +1483,41 @@ def test_length_empty_is_semantic_exhaustion_with_finish_reason(
         with pytest.raises(LLMSemanticExhaustionError) as exc_info:
             client.complete_json("q", objective="test", temperature=0)
     assert exc_info.value.finish_reason == "length"
-    assert len(captured) == 2
-    assert captured[1]["reasoning_effort"] == "high"
+    assert [c["reasoning_effort"] for c in captured] == ["max", "high", "none"]
+
+
+def test_semantic_exhaustion_log_reports_reasoning_channel_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, caplog: "pytest.LogCaptureFixture"
+) -> None:
+    """The exhaustion ERROR log carries reasoning-channel diagnostics (length + a
+    JSON-presence probe) so operators can tell whether the answer was misrouted
+    into the reasoning channel — without logging any raw model output."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    # Reasoning channel carries a JSON object (the probe must detect it); no content.
+    reasoning_json_sse = [
+        'data: {"choices":[{"delta":{"reasoning":"weighing... {\\"approved\\": true} done"},'
+        '"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [_stream_cm(200, sse_lines=reasoning_json_sse)]
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.ERROR, logger="llm_service.clients.ollama"),
+    ):
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        # think=False → no downgrade retry, so exhaustion (and its log) fires on attempt 1.
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMSemanticExhaustionError):
+            client.complete_json("q", objective="test", temperature=0, think=False)
+    assert len(captured) == 1
+    receipts = [r.getMessage() for r in caplog.records if "semantic_exhaustion" in r.getMessage()]
+    assert receipts
+    assert "reasoning_has_json=True" in receipts[0]
+    assert "reasoning_len=0" not in receipts[0]  # a non-empty reasoning channel was seen
 
 
 @pytest.mark.parametrize(

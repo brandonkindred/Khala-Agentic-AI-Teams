@@ -38,7 +38,7 @@ from code_review_agent.models import (
     ReviewProfile,
 )
 
-from llm_service import LLMRateLimitError, LLMSemanticExhaustionError
+from llm_service import LLMRateLimitError, LLMSemanticExhaustionError, LLMTruncatedError
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
@@ -270,8 +270,10 @@ class _FailFullThenBisectClient(DummyLLMClient):
     """Fails the full chunk (both markers present) but approves each bisected half.
 
     Simulates a recoverable content failure on the full-chunk input that only
-    succeeds once _review_chunk_with_recovery bisects it: after the split, no
-    single half carries both markers, so each half is approved.
+    succeeds once _review_chunk_with_recovery line-splits it: after the split, no
+    single half carries both markers, so each half is approved. Uses
+    ``LLMTruncatedError`` (finish_reason=length) — the content failure that still
+    line-splits a single file; semantic exhaustion deliberately does not.
     """
 
     def __init__(self) -> None:
@@ -284,7 +286,7 @@ class _FailFullThenBisectClient(DummyLLMClient):
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
         if "S_MARK_START" in prompt and "E_MARK_END" in prompt:
-            raise LLMSemanticExhaustionError("full chunk too big")
+            raise LLMTruncatedError("full chunk too big", finish_reason="length")
         return dict(_APPROVED)
 
 

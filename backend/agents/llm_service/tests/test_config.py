@@ -33,6 +33,23 @@ def test_resolve_model_agent_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.resolve_model("backend") == "deepseek-v4-pro:cloud"
 
 
+def test_resolve_agent_default_think_code_review_is_reduced() -> None:
+    """code_review pins the reduced ``high`` tier so its first call avoids the
+    max-tier reasoning-only failure mode."""
+    assert config.resolve_agent_default_think("code_review") == "high"
+    # The pinned tier must be a real registered level for its model, or the wire
+    # resolution would fall back to max and defeat the point.
+    assert "high" in config.KNOWN_MODEL_THINKING_LEVELS["deepseek-v4-pro:cloud"]
+
+
+def test_resolve_agent_default_think_unlisted_and_none_are_none() -> None:
+    """Unlisted agents (and a None key) get no override — the model's platform
+    default tier is left intact."""
+    assert config.resolve_agent_default_think("backend") is None
+    assert config.resolve_agent_default_think(None) is None
+    assert config.resolve_agent_default_think("") is None
+
+
 def test_resolve_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     assert config.resolve_base_url() == "https://ollama.com"

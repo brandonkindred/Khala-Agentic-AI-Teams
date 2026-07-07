@@ -297,6 +297,41 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
 
 DEFAULT_FALLBACK_MODEL = "deepseek-v4-pro:cloud"
 
+# ---------------------------------------------------------------------------
+# Per-agent default thinking level
+# ---------------------------------------------------------------------------
+# Some agents run a reasoning model in forced JSON mode, where the model's top
+# "max" reasoning tier can burn the whole turn in the reasoning channel and emit
+# no assistant content ("reasoning-only" turns → semantic exhaustion). For those
+# agents we pin a reduced default thinking level so the FIRST call already runs
+# at a tier that reliably opens the content channel, instead of relying on the
+# client's post-hoc downgrade retry after a doomed max-tier call. Only agents
+# listed here override the model's platform-default (max) tier; every other agent
+# is unaffected.
+AGENT_DEFAULT_THINK: dict[str, str] = {
+    # code_review runs deepseek-v4-pro:cloud in JSON mode; at reasoning_effort
+    # "max" it frequently returns reasoning-only turns (semantic exhaustion), so
+    # it defaults to the reduced "high" tier — DeepSeek's other true wire tier —
+    # which opens the content channel far more reliably.
+    "code_review": "high",
+}
+
+
+def resolve_agent_default_think(agent_key: "str | None") -> "str | None":
+    """Return the pinned default thinking level for ``agent_key``, or None.
+
+    Preconditions:
+        - ``agent_key`` is an agent key string or None.
+    Postconditions:
+        - Returns the ``AGENT_DEFAULT_THINK`` level for the key when one is
+          registered, else None (the caller then falls back to the model's
+          platform-default tier). Pure function: no env reads, never raises.
+    """
+    if not agent_key:
+        return None
+    return AGENT_DEFAULT_THINK.get(agent_key)
+
+
 # Curated Ollama model ids surfaced as suggestions by the settings UI. Centralized
 # here (rather than inline in the unified_api route) so the UI suggestion list and
 # the rest of the model config share one home and can't silently drift, mirroring
