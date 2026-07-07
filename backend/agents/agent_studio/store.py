@@ -239,11 +239,21 @@ class AgentStudioConversationStore:
         store's own thread-safe methods. Unlike the Postgres store (whose writes
         share one transaction that rolls back atomically), each write here applies
         immediately — so an exception after a partial write is caught and the
-        pre-turn ``messages`` / ``definition`` are restored before re-raising,
-        giving the same "rolls back, never partially applied" guarantee.
+        pre-turn ``messages`` / ``definition`` are **fully restored** to the
+        turn-start snapshot before re-raising, giving the same "rolls back, never
+        partially applied" guarantee.
 
         Preconditions:
             * ``conversation_id`` exists (raises :class:`LookupError` → 404 if not).
+            * No direct :meth:`append_message` / :meth:`set_definition` call runs
+              on the *same* conversation while a turn is in flight. The turn holds
+              only the per-conversation ``turn_lock``, which the direct mutators do
+              not take, so a concurrent direct write racing a turn that then rolls
+              back would be discarded along with the turn's own writes (rollback
+              restores the whole turn-start snapshot). This is not a real usage
+              pattern — the service routes *all* message handling through
+              :meth:`turn`; direct ``append_message`` is used only for the initial
+              greeting, before any turn exists — so the invariant holds in practice.
         """
         with self._lock:
             record = self._records.get(conversation_id)

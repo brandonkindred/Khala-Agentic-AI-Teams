@@ -484,7 +484,8 @@ class AgentRegistry:
         Falls back to ``<agents_root>/<manifest.team>/...`` when the source
         path is unknown (e.g. tests that instantiate ``AgentRegistry`` manually).
         """
-        source = self._source_paths.get(agent_id)
+        with self._lock:
+            source = self._source_paths.get(agent_id)
         if source is not None:
             team_console_dir = source.parent.parent  # manifests/ → agent_console/
             return team_console_dir / "samples" / agent_id

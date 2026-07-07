@@ -710,12 +710,18 @@ async def test_run_container_cleans_up_on_inspect_failure(tmp_path: Path, monkey
         return 0, "", ""
 
     monkeypatch.setattr(pm, "_exec", fake_exec)
+    # Stub manifest resolution so the test reaches the compose-up → inspect-fail
+    # path (the cleanup branch under test) regardless of the on-disk registry's
+    # contents — otherwise an unresolvable agent id would fail fast in
+    # ``_resolve_manifest_json`` before the project dir is ever created, and the
+    # ``not project_dir.exists()`` assertion would pass vacuously (false positive).
+    from unittest.mock import AsyncMock as _AsyncMock
 
-    # Resolvable agent so run_container reaches the compose-up → inspect-fail path
-    # (the cleanup branch under test) rather than the earlier unknown-agent fail-fast.
+    monkeypatch.setattr(pm, "_resolve_manifest_json", _AsyncMock(return_value="{}"))
+
     with pytest.raises(pm.DockerError):
         await pm.run_container(
-            agent_id="blogging.planner", container_name="khala-sbx-inspect-fail", team="x"
+            agent_id="test.agent", container_name="khala-sbx-inspect-fail", team="x"
         )
 
     # Project dir must be removed on cleanup.
@@ -737,11 +743,14 @@ async def test_run_container_cleans_up_on_docker_error_in_exec(tmp_path: Path, m
         return 0, "", ""
 
     monkeypatch.setattr(pm, "_exec", boom)
+    # See the inspect-failure test above: stub manifest resolution so we reach the
+    # compose-up failure (the cleanup path) rather than the unknown-agent fail-fast.
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    monkeypatch.setattr(pm, "_resolve_manifest_json", _AsyncMock(return_value="{}"))
 
     with pytest.raises(pm.DockerError):
-        await pm.run_container(
-            agent_id="blogging.planner", container_name="khala-sbx-boom", team="x"
-        )
+        await pm.run_container(agent_id="test.agent", container_name="khala-sbx-boom", team="x")
 
     project_dir = tmp_path / "agent_provisioning" / "sandboxes" / "stacks" / "khala-sbx-boom"
     assert not project_dir.exists()
