@@ -25,7 +25,9 @@ from strands.models.model import Model as _StrandsModel
 from llm_service import LLMClient, get_strands_model
 
 
-def resolve_code_review_model(llm: LLMClient, think: Optional[Union[bool, str]] = None):
+def resolve_code_review_model(
+    llm: "Union[LLMClient, _StrandsModel]", think: Optional[Union[bool, str]] = None
+) -> "Union[LLMClient, _StrandsModel]":
     """Resolve the strands model a code-review agent should run on.
 
     Preconditions:
@@ -54,7 +56,7 @@ def resolve_code_review_model(llm: LLMClient, think: Optional[Union[bool, str]] 
     return get_strands_model("code_review", think=think)
 
 
-def thinking_override_supported(llm: LLMClient) -> bool:
+def thinking_override_supported(llm: "Union[LLMClient, _StrandsModel]") -> bool:
     """Whether the chunk reviewer can override the thinking level for ``llm``.
 
     Postconditions:

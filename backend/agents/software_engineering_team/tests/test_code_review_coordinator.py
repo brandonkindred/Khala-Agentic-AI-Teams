@@ -957,11 +957,12 @@ def test_partial_terminal_failure_degrades_gracefully_without_blocking(monkeypat
     assert not any("good.py" in r for r in result.not_reviewed_ranges)
 
 
-def test_degraded_pre_numbered_chunk_uses_embedded_line_numbers(monkeypatch) -> None:
+def test_fail_closed_pre_numbered_chunk_uses_embedded_line_numbers(monkeypatch) -> None:
     """For a pre-numbered (PR-diff) chunk, a not-reviewed finding must carry the
     real embedded line numbers — not the positional segment indices — so the
     finding anchors to the correct diff lines downstream. Anchoring only matters
-    when the finding is actually posted, i.e. under the fail-closed opt-out."""
+    when the finding is actually posted, i.e. under the fail-closed opt-out
+    (``CODE_REVIEW_BLOCK_ON_UNREVIEWED``), which this test exercises."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
     monkeypatch.setenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", "true")
     # Embedded original lines 4000-4004 carry the marker; positional indices

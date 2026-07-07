@@ -489,8 +489,23 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
         beat_first=True,
         on_error=lambda exc: logger.warning("review heartbeat error for job %s: %s", job_id, exc),
     )
-    with review_hb:
-        _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
+    # ``_run_pr_review_body`` already marks the job failed for exceptions raised
+    # inside the review itself. This outer guard is the last line of defense for
+    # anything that escapes it — heartbeat setup/teardown, or the body's own
+    # last-resort finalize failing — so this function honors its "never raises"
+    # contract and a hook exception can never leave the job wedged in "running".
+    # Fully self-protected: the fallback finalize is best-effort and swallowed.
+    try:
+        with review_hb:
+            _run_pr_review_body(job_id, request, token, owner, repo, pr_number, provider)
+    except Exception as exc:  # noqa: BLE001 - the daemon thread must never die with the job left running
+        logger.exception("PR review %s: unhandled exception escaped the review body", job_id)
+        try:
+            _finalize_review(job_id, "failed", error=scrub_token_from_text(str(exc)))
+        except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do, do not re-raise
+            logger.exception(
+                "PR review %s: last-resort finalize failed after escaped exception", job_id
+            )
 
 
 def _finalize_review(
@@ -941,15 +956,22 @@ def _run_pr_review_body(
                     client, owner, repo, pr_number, job_id, f"code review failed: {review_exc}"
                 )
         except Exception:  # noqa: BLE001 - the status update below is the last resort
-            # Safety net: ``_record_failure`` above may already have marked the
-            # job/review failed, but if it raised (e.g. the GitHub client itself
-            # failed) these direct updates ensure the job never wedges in
+            # Safety net: ``_record_review_outage`` above may already have marked
+            # the job/review failed, but if it raised (e.g. the GitHub client
+            # itself failed) these direct updates ensure the job never wedges in
             # "running". Both writes are idempotent, so a duplicate update here
-            # (when _record_failure had partly succeeded) is harmless.
+            # (when _record_review_outage had partly succeeded) is harmless.
             # ``review_exc`` is the original review failure (the inner except has
             # no exception of its own); surface it on both the job and review row.
+            # Wrapped so a failing store write (the very reason we reached this
+            # last resort) cannot escape and kill the daemon thread — the outer
+            # ``_run_pr_review`` guard would catch it, but keeping the body
+            # self-consistent means it never depends on that.
             safe_err = scrub_token_from_text(str(review_exc))
-            _finalize_review(job_id, "failed", error=safe_err)
+            try:
+                _finalize_review(job_id, "failed", error=safe_err)
+            except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do
+                logger.exception("PR review %s: last-resort finalize failed", job_id)
 
 
 def _react_to_pr(client: _main.GitHubClient, owner: str, repo: str, pr_number: int) -> None:

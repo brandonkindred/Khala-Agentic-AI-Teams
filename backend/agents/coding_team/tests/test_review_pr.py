@@ -671,13 +671,18 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
+        # The raw internal detail is preserved in the job store for operators...
+        assert "reviewer returned no output" in (job.get("error") or "")
         gh = review_app["github"]["client"]
-        # The raw internal detail is NEVER posted on the PR...
+        # ...but is NEVER posted on the PR...
         assert not any("reviewer returned no output" in body for _n, body in gh.comments)
-        # ...only a single neutral outage note (default PR_REVIEW_POST_OUTAGE_NOTICE on).
-        assert any(
-            "could not complete and did not post findings" in body for _n, body in gh.comments
-        )
+        # ...and EXACTLY ONE neutral, non-blocking note is posted (never multiple).
+        outage_notes = [
+            body
+            for _n, body in gh.comments
+            if "could not complete and did not post findings" in body
+        ]
+        assert len(outage_notes) == 1
 
     def test_reviewer_exception_does_not_post_raw_error(self, review_app) -> None:
         # A reviewer that RAISES must not leak the exception text onto the PR:
@@ -689,12 +694,19 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
+        # The detail is preserved in the job store for diagnosis...
+        assert "secret internal detail" in (job.get("error") or "")
         gh = review_app["github"]["client"]
+        # ...but never leaks onto the PR.
         assert not any("secret internal detail" in body for _n, body in gh.comments)
         assert not any("code review failed" in body for _n, body in gh.comments)
-        assert any(
-            "could not complete and did not post findings" in body for _n, body in gh.comments
-        )
+        # Exactly one neutral outage note, never multiple.
+        outage_notes = [
+            body
+            for _n, body in gh.comments
+            if "could not complete and did not post findings" in body
+        ]
+        assert len(outage_notes) == 1
 
     def test_outage_notice_suppressed_when_disabled(self, review_app, monkeypatch) -> None:
         # With PR_REVIEW_POST_OUTAGE_NOTICE off, a reviewer outage posts NOTHING on
@@ -705,7 +717,26 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
+        # Detail is still preserved in the store even though nothing is posted.
+        assert "llm down" in (job.get("error") or "")
         assert review_app["github"]["client"].comments == []
+
+    def test_run_pr_review_survives_body_exception(self, review_app, monkeypatch) -> None:
+        """Regression: an exception that escapes ``_run_pr_review_body`` (e.g. its
+        own last-resort finalize failing on a store outage) must never propagate
+        out of ``_run_pr_review`` — the daemon-thread hook must not die and the
+        job must still be marked failed, honoring the "never raises" contract."""
+        import coding_team.api.pr_review as prm
+
+        def _boom(*_a: Any, **_kw: Any) -> None:
+            raise RuntimeError("body blew up past its own handler")
+
+        monkeypatch.setattr(prm, "_run_pr_review_body", _boom)
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        # The outer guard caught the escape and finalized the job — no wedge.
+        assert job["status"] == "failed"
 
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -1298,10 +1329,18 @@ class TestReviewEndpoint:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
         # The error propagated before any degradation: no review was posted and no
-        # finding was quietly re-routed to a file-level comment. (A failure notice
-        # on the PR is expected and lives in gh.comments.)
+        # finding was quietly re-routed to a file-level comment.
         assert gh.submitted_reviews == []
         assert gh.review_comments == []
+        # The failure surfaces on the PR as the neutral outage note only — never
+        # the raw 403 / exception text (graceful degradation).
+        assert any(
+            "could not complete and did not post findings" in body for _n, body in gh.comments
+        )
+        assert not any(
+            "403" in body or "rate limited" in body or "code review failed" in body
+            for _n, body in gh.comments
+        )
 
     def test_non_422_file_comment_error_marks_job_failed_not_degraded(self, review_app) -> None:
         # A non-422 failure from the dedicated file-comment endpoint is likewise a
