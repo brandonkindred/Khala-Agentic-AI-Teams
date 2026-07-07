@@ -11,11 +11,38 @@ already-acyclic ``SE → coding_team`` direction, and this class needs no base.
 
 Every engine import is deferred to call time (they pull in strands / the v2 team
 stacks); constructing the provider itself is cheap and import-safe.
+
+sys.path invariant
+------------------
+SE's engines use bare, team-local absolute imports (``from code_review_agent
+import ...``, ``from quality_gate_tools import ...``) that resolve only when the
+SE team directory is on ``sys.path``. SE's own FastAPI app guarantees that via
+``software_engineering_team.api._paths``, but this provider is imported by
+out-of-package composition roots — the standalone coding-team service and the
+coding_team Temporal worker — that never import ``software_engineering_team.api``.
+Without the bootstrap below, the first deferred engine call (e.g. ``run_code_review``)
+raises ``ModuleNotFoundError: No module named 'code_review_agent'``, which the
+quality-gate tools swallow into a failed review — stalling the coding pipeline.
+So we restore SE's path invariant here, at the SE→coding_team bridge, once at
+import time. The insert is idempotent and triggers no engine import itself.
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
+
+# The two-insert idiom is inlined (rather than delegating to
+# ``shared_app.paths.bootstrap_syspath``) because importing ``shared_app`` runs its
+# package ``__init__``, which pulls in FastAPI — too heavy for a provider whose
+# contract is to be cheap and import-safe. ``__file__`` lives in the SE team root.
+_TEAM_DIR = Path(__file__).resolve().parent
+for _p in (_TEAM_DIR / "architect-agents", _TEAM_DIR):
+    if _p.exists():
+        _s = str(_p)
+        if _s not in sys.path:
+            sys.path.insert(0, _s)
 
 
 class SECodeEngineProvider:
