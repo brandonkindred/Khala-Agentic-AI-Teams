@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -44,6 +45,12 @@ from llm_service import (
 )
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+
+# Grace period for a buggy late progress notification to (wrongly) land before the
+# test asserts none arrived after a map failure. Small by design; the preceding
+# ``wait(timeout=10)`` already guarantees the worker finished, so this only guards
+# against a notification queued just after that.
+_LATE_NOTIFY_GRACE_PERIOD_S = 0.1
 
 # ---------------------------------------------------------------------------
 # Pure-function tests
@@ -1834,10 +1841,8 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
         release.set()
     # Let the abandoned worker finish, then confirm it reported nothing more
     # (the brief grace period lets a buggy late notify land before asserting).
-    import time
-
     assert client.slow_finished.wait(timeout=10), "abandoned worker must still complete"
-    time.sleep(0.1)
+    time.sleep(_LATE_NOTIFY_GRACE_PERIOD_S)
     assert calls == reports_at_failure
     assert not any("slow.py" in d for _s, d, _f in calls)
 
