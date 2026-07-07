@@ -35,6 +35,7 @@ from ..attribution import (
     caller_team as _caller_team,
 )
 from ..backoff import parse_rate_limit_retry_config, rate_limit_backoff_sleep
+from ..concurrency import get_llm_semaphore
 from ..interface import (
     LLMClient,
     LLMJsonParseError,
@@ -394,24 +395,6 @@ def _rate_limit_backoff_sleep(
         request_id=current_request_id() or "-",
         context=_attribution_log_fields(),
     )
-
-
-_ollama_semaphore: Optional[threading.BoundedSemaphore] = None
-_semaphore_lock = threading.Lock()
-
-
-def _get_ollama_semaphore() -> threading.BoundedSemaphore:
-    """Lazily create the global Ollama concurrency semaphore."""
-    global _ollama_semaphore
-    with _semaphore_lock:
-        if _ollama_semaphore is None:
-            raw = os.environ.get(llm_config.ENV_LLM_MAX_CONCURRENCY) or "4"
-            try:
-                limit = max(1, int(raw))
-            except ValueError:
-                limit = 4
-            _ollama_semaphore = threading.BoundedSemaphore(limit)
-        return _ollama_semaphore
 
 
 class OllamaLLMClient(LLMClient):
@@ -930,6 +913,12 @@ class OllamaLLMClient(LLMClient):
         )
         rl_log_body: Optional[str] = None
         rl_log_headers: Any = None
+        # Same capture-and-log-outside pattern as the 429 path, for HTTP 5xx: the
+        # body/headers are grabbed inside the stream context and logged on
+        # exhaustion by the outer ``except LLMTemporaryError`` handler, so the 5xx
+        # transient backoff sleep never runs while holding the shared gate.
+        srv_log_body: Optional[str] = None
+        srv_log_headers: Any = None
         attempt = 0
 
         def _retry_transient_step(detail: str, kind: str = "temporary error") -> bool:
@@ -1178,22 +1167,19 @@ class OllamaLLMClient(LLMClient):
                                     and "qwen3.5" in self.model.lower()
                                 ):
                                     hint = " If using Ollama Cloud with qwen3.5, try passing think=False."
-                                last_error = LLMTemporaryError(
+                                # Capture body/headers for the exhaustion log, then
+                                # raise so the transient backoff runs in the outer
+                                # ``except LLMTemporaryError`` handler — AFTER the
+                                # stream/client/semaphore contexts unwind. Sleeping
+                                # here would hold the process-global concurrency gate
+                                # through the backoff, blocking unrelated calls even
+                                # though no request is in flight (mirrors the 429 path).
+                                srv_log_body = response.text
+                                srv_log_headers = response.headers
+                                raise LLMTemporaryError(
                                     f"LLM server error {status} after {attempt + 1} attempt(s): {response.text}.{hint}",
                                     status_code=status,
                                 )
-                                if _retry_transient_step(
-                                    f"server error {status}", kind="server error"
-                                ):
-                                    continue
-                                self._log_llm_server_error(
-                                    status,
-                                    response.text,
-                                    response.headers,
-                                    attempt + 1,
-                                    reason="server error",
-                                )
-                                raise last_error
                             if 400 <= status < 500:
                                 err_text = response.text
                                 self._log_llm_server_error(
@@ -1340,6 +1326,18 @@ class OllamaLLMClient(LLMClient):
                 last_error = e
                 if _retry_transient_step(str(e)):
                     continue
+                # On exhaustion, emit the structured server-error log for a 5xx
+                # (its body/headers were captured inside the stream context before
+                # the gate was released); other transient errors carry their detail
+                # in the raised exception message.
+                if srv_log_body is not None:
+                    self._log_llm_server_error(
+                        getattr(e, "status_code", None) or 0,
+                        srv_log_body,
+                        srv_log_headers,
+                        attempt + 1,
+                        reason="server error",
+                    )
                 raise last_error
             except httpx.HTTPStatusError as e:
                 resp = e.response
@@ -1478,7 +1476,7 @@ class OllamaLLMClient(LLMClient):
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
-        sem = _get_ollama_semaphore()
+        sem = get_llm_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request: rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
@@ -1722,7 +1720,7 @@ class OllamaLLMClient(LLMClient):
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
-        sem = _get_ollama_semaphore()
+        sem = get_llm_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request (text): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
@@ -1909,7 +1907,7 @@ class OllamaLLMClient(LLMClient):
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
-        sem = _get_ollama_semaphore()
+        sem = get_llm_semaphore()
         caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request (chat): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s rf=%s",

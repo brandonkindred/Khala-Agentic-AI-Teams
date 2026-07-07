@@ -3,8 +3,10 @@
 A 429 from an LLM provider means the account/budget is exhausted and will not
 reset in seconds. Retrying it on the same fast schedule used for transient
 5xx/network faults (``LLM_BACKOFF_*``) just burns attempts against an exhausted
-budget. This module owns a SEPARATE, deliberately slow schedule whose first
-retry waits minutes (default 300s), doubling up to a cap (default 3600s).
+budget. This module owns a SEPARATE schedule whose first retry waits tens of
+seconds (default 30s), doubling up to a cap (default 120s) for a few retries,
+so a rate-limited call fails within a few minutes instead of hanging while the
+provider budget stays exhausted.
 
 Both retry layers consume this one policy:
   * ``llm_service.clients.ollama.OllamaLLMClient._ollama_post`` (every team's
@@ -34,11 +36,14 @@ __all__ = [
     "rate_limit_retry_delay",
 ]
 
-# Defaults: first 429 retry at 5 minutes, doubling, capped at 1 hour, 5 retries
-# (6 total attempts) => worst-case ~2h15m of waiting before raising.
-_DEFAULT_MAX_RETRIES = 5
-_DEFAULT_INITIAL_SECONDS = 300.0
-_DEFAULT_CAP_SECONDS = 3600.0
+# Defaults: first 429 retry at 30s, doubling, capped at 120s, 3 retries (4 total
+# attempts) => worst-case ~3.6 min of waiting before raising (hard ceiling
+# retries*cap = 6 min). Kept short so a rate-limited call fails fast and lets the
+# caller (failover / the review coordinator) take over instead of hanging; a
+# provider that truly needs long waits can raise the env overrides below.
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_INITIAL_SECONDS = 30.0
+_DEFAULT_CAP_SECONDS = 120.0
 
 
 def parse_rate_limit_retry_config() -> tuple[int, float, float]:
@@ -97,7 +102,7 @@ def rate_limit_retry_delay(
     Exponential: ``base = initial_seconds * 2**failed_attempt_index``. Jitter is
     strictly ADDITIVE (``uniform(0, ...)``, capped at 2s) — it can only lengthen
     the wait, so the first retry (``index == 0``) is always ``>= initial_seconds``
-    (the 300s floor is never violated). When ``retry_after_seconds`` is provided
+    (the initial floor is never violated). When ``retry_after_seconds`` is provided
     and positive (a provider ``Retry-After`` header), the wait is raised to at
     least that value. The result is finally capped at ``cap_seconds``.
 

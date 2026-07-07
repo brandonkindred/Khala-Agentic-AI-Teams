@@ -439,6 +439,44 @@ def test_transient_5xx_schedule_unaffected_by_rate_limit_env(
     assert 2.0 <= waits[0] <= 4.0  # fast transient schedule, not 300s
 
 
+def test_ollama_5xx_backoff_releases_concurrency_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The transient 5xx backoff sleep must run OUTSIDE the shared concurrency
+    gate: holding the process-global semaphore through an exponential backoff
+    would block unrelated calls (of any provider) even though no request is in
+    flight. The gate depth must be 0 at each sleep, and balanced at the end."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "1")
+    monkeypatch.setenv("LLM_BACKOFF_BASE", "2")
+    monkeypatch.setenv("LLM_BACKOFF_MAX", "120")
+
+    import llm_service.clients.ollama as ollama_mod
+
+    depth = {"n": 0}
+    depth_at_sleep: list[int] = []
+
+    class _ProbeSem:
+        def __enter__(self):
+            depth["n"] += 1
+            return self
+
+        def __exit__(self, *_a):
+            depth["n"] -= 1
+            return False
+
+    monkeypatch.setattr(ollama_mod, "get_llm_semaphore", lambda: _ProbeSem())
+    monkeypatch.setattr(ollama_mod.time, "sleep", lambda _s: depth_at_sleep.append(depth["n"]))
+
+    cms = [_stream_cm(500, body_text="server error"), _stream_cm(200, sse_lines=_OK_SSE)]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _multi_attempt_client(cms)
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("hello", objective="test", temperature=0)
+
+    assert result == {"ok": 1}
+    assert depth_at_sleep == [0]  # gate released before the 5xx backoff sleep
+    assert depth["n"] == 0  # balanced — no leaked slot
+
+
 def test_ollama_429_does_not_consume_transient_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """Interleaved 500 + 429 + 200: each schedule keeps its own independent counter."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")

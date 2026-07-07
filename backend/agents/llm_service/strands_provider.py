@@ -6,8 +6,8 @@ delegates to the centralized ``OllamaLLMClient`` — which means every Strands a
 automatically inherits:
 
 - **Retry with exponential backoff** for transient errors (500s, connection resets, timeouts)
-- **Rate-limit handling** (429s) on the slow, dedicated rate-limit backoff
-  schedule (`LLM_RATE_LIMIT_*`, 300s initial by default), separate from the fast
+- **Rate-limit handling** (429s) on the dedicated rate-limit backoff
+  schedule (`LLM_RATE_LIMIT_*`, 30s initial by default), separate from the fast
   transient schedule
 - **Concurrency limiting** via global semaphore
 - **Per-agent model routing** (``LLM_MODEL_<agent_key>``, agent defaults, etc.)
@@ -144,7 +144,7 @@ def get_strands_model(
     The returned ``LLMClientModel`` wraps ``OllamaLLMClient`` (or whichever
     provider ``LLM_PROVIDER`` selects) and inherits retry-with-exponential-
     backoff for transient LLM errors (500s, connection resets, timeouts) plus a
-    separate slow backoff for 429 rate limits (``LLM_RATE_LIMIT_*``, 300s initial
+    separate backoff for 429 rate limits (``LLM_RATE_LIMIT_*``, 30s initial
     by default), concurrency limiting, and per-agent model routing.
 
     ``response_format`` is forwarded to ``LLMClientModel``: ``"json"`` (default)
