@@ -109,37 +109,37 @@ class AgentStudioService:
         """Send a user message and return the updated conversation state.
 
         Preconditions:
-            * ``conversation_id`` names an existing conversation.
+            * ``conversation_id`` names an existing conversation — otherwise the
+              turn raises :class:`LookupError` (→ 404); the check lives in
+              ``store.turn`` so it's atomic with taking the turn lock rather than a
+              separate round trip that could race.
         """
-        if self._store.get(conversation_id) is None:
-            raise LookupError(f"Unknown conversation: {conversation_id}")
         return self._handle_message(conversation_id, message)
 
     def _handle_message(self, conversation_id: str, message: str) -> ConversationStateResponse:
         """Run one assistant turn: read state, call the LLM, persist user + reply.
 
-        ⚠️ CONCURRENCY — MUST be resolved before production. The store locks each
-        individual op, but this whole turn (read history+definition → LLM → append
-        → set_definition) is **not** serialized, so two concurrent sends on the
-        *same* conversation can interleave (last write wins → a lost definition
-        update or out-of-order messages). Proper per-conversation turn
-        serialization (a per-conversation lock, or a row lock) lands with the
-        durable store — until then **the frontend must strictly prevent concurrent
-        sends on one conversation**, and a multi-worker deployment compounds this
-        (the in-process store isn't shared across workers).
+        The whole turn (read history+definition → LLM → append → set_definition)
+        runs inside ``store.turn(...)``, which serializes it against a concurrent
+        send on the *same* conversation — a per-conversation lock in-memory, or a
+        ``SELECT … FOR UPDATE`` row lock with the durable store. A second concurrent
+        send blocks until this turn commits, then reads fresh state, so there is no
+        lost definition update or out-of-order transcript. Across the 4 uvicorn
+        workers the durable store makes this coherent (the in-memory store applies
+        within a single worker).
+
+        The assistant is called *before* any write, so if it raises, the
+        conversation isn't left with a dangling user message and no reply — the turn
+        rolls back / no-ops (consistent state on failure / retry).
         """
-        record = self._store.get(conversation_id)
-        if record is None:  # callers validate first; defensive guard
-            raise RuntimeError("Conversation record unexpectedly missing")  # pragma: no cover
-        history = [(m.role, m.content) for m in record.messages]
-        # Call the assistant first, then persist the user turn + reply together.
-        # If the assistant raises, the conversation isn't left with a dangling
-        # user message and no reply (consistent state on failure / retry).
-        reply, updated, suggestions = self._assistant.respond(history, record.definition, message)
-        self._store.append_message(conversation_id, "user", message)
-        self._store.append_message(conversation_id, "assistant", reply)
-        if updated is not None:
-            self._store.set_definition(conversation_id, updated)
+        with self._store.turn(conversation_id) as turn:
+            reply, updated, suggestions = self._assistant.respond(
+                turn.history, turn.definition, message
+            )
+            turn.append_message("user", message)
+            turn.append_message("assistant", reply)
+            if updated is not None:
+                turn.set_definition(updated)
         return self._state(conversation_id, suggestions=suggestions)
 
     # ── Clone / Save ───────────────────────────────────────────────────────────
