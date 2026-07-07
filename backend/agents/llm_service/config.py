@@ -15,8 +15,9 @@ working fallback and these resolvers never raise on a runtime-config problem.
 Key exports:
     - ``resolve_*`` functions — the effective provider, model (per-provider and
       via the :func:`resolve_model_for_provider` chokepoint), API keys, base URL,
-      timeout, context size, and ``max_tokens``; plus the thinking-level resolvers
-      (:func:`resolve_think_for_model` / :func:`downgrade_think`).
+      timeout, context size, and ``max_tokens``; plus the thinking-level resolver
+      (:func:`resolve_think_for_model`, which also applies the per-agent
+      ``AGENT_DEFAULT_THINK`` pin).
     - ``ENV_*`` constants — the canonical ``LLM_*`` environment-variable names.
     - Model-option/suggestion constants (``CLAUDE_MODEL_SUGGESTIONS``,
       ``OLLAMA_MODEL_SUGGESTIONS``) and the known context-window / thinking-level
@@ -185,6 +186,48 @@ def thinking_enabled_by_default() -> bool:
     return env_flag_enabled(ENV_LLM_ENABLE_THINKING)
 
 
+def _resolve_agent_think_pin(model: str) -> "str | None":
+    """Per-agent pinned thinking tier for the currently-attributed agent, or None.
+
+    Some agents run a reasoning model in JSON mode where the model's top tier
+    reliably produces content-free, reasoning-only turns; ``AGENT_DEFAULT_THINK``
+    pins a reduced tier so their FIRST call opens the content channel. Resolving
+    it here — the one chokepoint every provider path threads ``think`` through —
+    pins the strands path and the direct-client (compaction) path identically,
+    keyed off the agent bound on the attribution context.
+
+    The pin is only a *default*: None is returned (leaving the model's normal
+    resolution to run) when
+
+      - no agent is attributed, or the attributed agent has no pin;
+      - the operator disabled thinking (``LLM_ENABLE_THINKING``) or set a level
+        override (``LLM_THINKING_LEVEL``) — global knobs outrank the pin;
+      - ``model`` does not register the pinned level — pinning an effort level a
+        model never declared would put an unvalidated guess on the wire (the
+        reason unregistered models otherwise resolve to plain boolean think).
+
+    Preconditions:
+        - ``model`` is the resolved wire model id for the call.
+    Postconditions:
+        - Returns a level string registered for ``model``, or None. Reads the
+          attribution context and the thinking env vars; never raises.
+    """
+    from .attribution import current_attribution
+
+    level = resolve_agent_default_think(current_attribution().agent_key)
+    if level is None:
+        return None
+    # Operator global knobs outrank the per-agent default.
+    if not thinking_enabled_by_default():
+        return None
+    if (os.environ.get(ENV_LLM_THINKING_LEVEL) or "").strip():
+        return None
+    # Never send a level the resolved wire model does not register.
+    if level not in (KNOWN_MODEL_THINKING_LEVELS.get(model) or ()):
+        return None
+    return level
+
+
 def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | str":
     """Resolve a caller's think request into the wire value for ``model``.
 
@@ -199,13 +242,22 @@ def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | s
           Models with no registered levels resolve to plain True (level
           strings would be rejected on the wire). None with the global
           default disabled resolves to False.
+        - When ``think`` is None, a per-agent pin (``AGENT_DEFAULT_THINK`` for the
+          attributed agent, via :func:`_resolve_agent_think_pin`) takes effect
+          *before* the model-default tier — but ranked below the operator's
+          ``LLM_ENABLE_THINKING``/``LLM_THINKING_LEVEL`` knobs and only for a
+          level the model registers.
     """
     if isinstance(think, str):
         return think
     if think is False:
         return False
-    if think is None and not thinking_enabled_by_default():
-        return False
+    if think is None:
+        pinned = _resolve_agent_think_pin(model)
+        if pinned is not None:
+            return pinned
+        if not thinking_enabled_by_default():
+            return False
     levels = KNOWN_MODEL_THINKING_LEVELS.get(model)
     if not levels:
         return True
@@ -221,35 +273,6 @@ def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | s
             levels[-1],
         )
     return levels[-1]
-
-
-def downgrade_think(model: str, think: "bool | str") -> "bool | str | None":
-    """Next-lower thinking setting for ``model``, or None when no proof of change exists.
-
-    Used by the proof-of-change retry for semantically exhausted calls: the
-    retry payload must provably differ from the original, and reducing the
-    thinking level is the chosen change agent.
-
-    Preconditions:
-        - ``think`` is a resolved wire value (bool or level string, never None).
-    Postconditions:
-        - ``True`` -> ``False``; ``False`` -> ``None`` (already off — nothing
-          left to change).
-        - A level string registered in ``KNOWN_MODEL_THINKING_LEVELS[model]``
-          -> the previous (lower) level, or ``None`` when already the lowest.
-        - A level string not registered for the model -> ``False`` (disabling
-          reasoning is the only provable change available).
-        - Pure function: no env reads, never raises.
-    """
-    if think is True:
-        return False
-    if think is False:
-        return None
-    levels = KNOWN_MODEL_THINKING_LEVELS.get(model) or ()
-    if think in levels:
-        idx = levels.index(think)
-        return levels[idx - 1] if idx > 0 else None
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +319,41 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
 }
 
 DEFAULT_FALLBACK_MODEL = "deepseek-v4-pro:cloud"
+
+# ---------------------------------------------------------------------------
+# Per-agent default thinking level
+# ---------------------------------------------------------------------------
+# Some agents run a reasoning model in forced JSON mode, where the model's top
+# "max" reasoning tier can burn the whole turn in the reasoning channel and emit
+# no assistant content ("reasoning-only" turns → semantic exhaustion). For those
+# agents we pin a reduced default thinking level so the FIRST call already runs
+# at a tier that reliably opens the content channel, instead of relying on the
+# client's post-hoc downgrade retry after a doomed max-tier call. Only agents
+# listed here override the model's platform-default (max) tier; every other agent
+# is unaffected.
+AGENT_DEFAULT_THINK: dict[str, str] = {
+    # code_review runs deepseek-v4-pro:cloud in JSON mode; at reasoning_effort
+    # "max" it frequently returns reasoning-only turns (semantic exhaustion), so
+    # it defaults to the reduced "high" tier — DeepSeek's other true wire tier —
+    # which opens the content channel far more reliably.
+    "code_review": "high",
+}
+
+
+def resolve_agent_default_think(agent_key: "str | None") -> "str | None":
+    """Return the pinned default thinking level for ``agent_key``, or None.
+
+    Preconditions:
+        - ``agent_key`` is an agent key string or None.
+    Postconditions:
+        - Returns the ``AGENT_DEFAULT_THINK`` level for the key when one is
+          registered, else None (the caller then falls back to the model's
+          platform-default tier). Pure function: no env reads, never raises.
+    """
+    if not agent_key:
+        return None
+    return AGENT_DEFAULT_THINK.get(agent_key)
+
 
 # Curated Ollama model ids surfaced as suggestions by the settings UI. Centralized
 # here (rather than inline in the unified_api route) so the UI suggestion list and
