@@ -25,7 +25,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["shared", "backend_agent", "frontend_team", "qa_agent"]
+known-first-party = ["shared", "frontend_team", "qa_agent"]
 
 # Complexity gating (C901 / PLR0915). High-water-mark being ratcheted down over
 # time toward the ruff defaults (10 / 50). NOTE: this pyproject governs
@@ -90,14 +90,6 @@ omit = [
     # Thin uvicorn/CLI entrypoints for the SE team — invoke the api/main app
     # without adding any business logic of their own.
     "agents/software_engineering_team/agent_implementations/*",
-    # software_engineering_team: backend specialist agent — `run_workflow`
-    # drives the full per-task pipeline (LLM plan/code-gen, lint, build,
-    # code-review, security, QA, DbC, tech-lead-review, doc-update, merge)
-    # against a writable git workspace + LLM and is exercised only via the
-    # orchestrator's integration path. Pure helpers (validate_file_paths,
-    # extract_routes_from_tests, build_*_for_*) remain covered through
-    # focused unit tests in tests/test_backend_agent*.py.
-    "agents/software_engineering_team/backend_agent/agent.py",
     # software_engineering_team: PRA agent — the 8+ multi-phase prompt
     # pipeline (epic/story extraction → architecture inference → contract
     # tightening → confidence audit → loop) is end-to-end against the LLM

@@ -3103,3 +3103,67 @@ def test_single_review_exception_is_contained_and_fails_task_once(tmp_path, monk
     swarm._review_and_merge(lambda **kw: None)  # must not raise
 
     assert graph.get_task("t1").status == TaskStatus.FAILED
+
+
+# --------------------------------------------------------------------------- resume / retry_failed
+
+
+def _seed_snapshot_with_failed_task() -> Dict[str, Any]:
+    """Build a persisted job record (as a prior run leaves it) whose task graph has one FAILED task.
+
+    The snapshot is produced from a real graph so its shape matches what ``graph.restore`` expects.
+    """
+    src = TaskGraphService(job_id="resume-job")
+    src.add_task("t1", title="Backend task")
+    src.update_task("t1", status=TaskStatus.FAILED)
+    snap = src.snapshot()
+    return {
+        "repo_path": "/tmp/resume-repo",
+        "task_graph_snapshot": snap["tasks"],
+        "agent_task_map": snap["agent_task_map"],
+        "stack_specs": orch_mod._DEFAULT_STACK_SPECS,
+    }
+
+
+def _run_resume_capturing_graph(tmp_path, monkeypatch, *, retry_failed: bool):
+    """Drive run_coding_team_orchestrator down the resume branch with the swarm stubbed to a no-op,
+    returning the graph it built so the test can inspect task statuses after resume handling."""
+    record = _seed_snapshot_with_failed_task()
+    record["repo_path"] = str(tmp_path)
+    captured: Dict[str, Any] = {}
+
+    class _StubSwarm:
+        def __init__(self, *, graph, **kwargs):
+            captured["graph"] = graph
+            self.aborted = False
+
+        def run(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _StubSwarm)
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: object())
+    monkeypatch.setattr(orch_mod, "_build_implementation_worker", lambda *a, **k: object())
+
+    run_coding_team_orchestrator(
+        "resume-job",
+        str(tmp_path),
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: None,
+        get_job_fn=lambda _jid: record,
+        get_llm=lambda _key: object(),
+        engine_provider=object(),
+        retry_failed=retry_failed,
+    )
+    return captured["graph"]
+
+
+def test_resume_retry_failed_true_demotes_failed(tmp_path, monkeypatch):
+    """retry_failed=True demotes a snapshot's terminal FAILED task back to TO_DO on resume."""
+    graph = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=True)
+    assert graph.get_task("t1").status == TaskStatus.TO_DO
+
+
+def test_resume_default_preserves_failed(tmp_path, monkeypatch):
+    """The default resume (retry_failed=False) preserves a snapshot's FAILED task as terminal."""
+    graph = _run_resume_capturing_graph(tmp_path, monkeypatch, retry_failed=False)
+    assert graph.get_task("t1").status == TaskStatus.FAILED

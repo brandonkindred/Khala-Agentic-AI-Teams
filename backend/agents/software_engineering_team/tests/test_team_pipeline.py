@@ -1,7 +1,6 @@
 """Integration tests for the full software engineering team pipeline."""
 
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
-from backend_agent import BackendExpertAgent, BackendInput
 from qa_agent import QAExpertAgent, QAInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 from tech_lead_agent import TechLeadAgent, TechLeadInput
@@ -57,9 +56,9 @@ Build a REST API for task management.
     assert assignment.tasks
     assert assignment.execution_order
 
-    # Run each specialist for their assigned tasks
+    # Run each specialist for their assigned tasks. Backend/frontend code generation is now owned
+    # by the coding_team pipeline, so this pipeline test covers the remaining SE specialists.
     agent_map = {
-        "backend": BackendExpertAgent(llm),
         "security": CybersecurityExpertAgent(llm),
         "qa": QAExpertAgent(llm),
     }
@@ -70,17 +69,7 @@ Build a REST API for task management.
             continue
 
         agent = agent_map[task.assignee]
-        if task.assignee == "backend":
-            result = agent.run(
-                BackendInput(
-                    task_description=task.description,
-                    requirements=task.requirements,
-                    architecture=architecture,
-                    language="python",
-                )
-            )
-            assert result.language == "python"
-        elif task.assignee == "security":
+        if task.assignee == "security":
             result = agent.run(
                 SecurityInput(
                     code="",

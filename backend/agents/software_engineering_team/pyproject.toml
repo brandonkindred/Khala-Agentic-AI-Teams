@@ -51,7 +51,6 @@ omit = [
     "software_engineering_team/temporal/worker.py",
     "software_engineering_team/temporal/workflows.py",
     "software_engineering_team/agent_implementations/*",
-    "software_engineering_team/backend_agent/agent.py",
     "software_engineering_team/product_requirements_analysis_agent/agent.py",
     "software_engineering_team/backend_code_v2_team/phases/review.py",
     "software_engineering_team/backend_code_v2_team/phases/problem_solving.py",
@@ -109,7 +108,6 @@ include = [
     "architect-agents*",
     "tech_lead_agent*",
     "security_agent*",
-    "backend_agent*",
     "qa_agent*",
 ]
 namespaces = false

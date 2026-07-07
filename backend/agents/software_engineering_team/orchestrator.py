@@ -18,7 +18,6 @@ import logging
 
 # Path setup when run as module
 import sys
-import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -54,7 +53,6 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
-    JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
     JOB_STATUS_RUNNING,
     LLM_SEMANTIC_EXHAUSTION,
     LLM_UNREACHABLE_AFTER_RETRIES,
@@ -63,8 +61,6 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     is_cancel_requested,
     is_waiting_for_answers,
     update_job,
-    update_job_team_progress,
-    update_task_state,
 )
 from software_engineering_team.shared.models import TaskUpdate  # noqa: E402
 from software_engineering_team.shared.plan_dir import ensure_plan_dir  # noqa: E402
@@ -119,6 +115,17 @@ def _partition_tasks_by_completion(
 PROGRESS_BAND_PRODUCT_ANALYSIS = (0, 15)
 PROGRESS_BAND_PLANNING = (15, 15)
 PROGRESS_BAND_CODING = (30, 65)
+
+# Pytest node-id fragments that identify the generic-exception-handler test suite. When a build
+# verification failure matches one of these, `_run_build_verification` appends a canonical FIX hint
+# telling the fixer to preserve the /test-generic-error route and keep the handler returning a
+# JSONResponse. Kept here (rather than in the retired per-task pipeline) because the build
+# verification path is the sole remaining consumer.
+EXCEPTION_HANDLER_TEST_PATTERNS = (
+    "test-generic-error",
+    "test_generic_exception_handler",
+    "test_error_handlers",
+)
 
 
 def _scale_progress(pct: Any, band: "tuple[int, int]") -> Optional[int]:
@@ -905,8 +912,6 @@ def _run_build_verification(
                 else:
                     summary = test_result.pytest_error_summary()
                 # When failure matches exception-handler test patterns, append canonical FIX line
-                from backend_agent.agent import EXCEPTION_HANDLER_TEST_PATTERNS
-
                 if any(p in summary for p in EXCEPTION_HANDLER_TEST_PATTERNS):
                     summary += (
                         "\n\nFIX: Preserve the /test-generic-error route in app/main.py and "
@@ -1366,218 +1371,6 @@ def _pop_runnable_task(
             queue.pop(i)
             return task_id
     return None
-
-
-def _code_v2_worker(
-    *,
-    job_id: str,
-    queue: List[str],
-    all_tasks: Dict[str, Any],
-    completed: set,
-    failed: Dict[str, str],
-    completed_code_task_ids: List[str],
-    architecture: Any,
-    agents: Dict[str, Any],
-    repo_path: Path,
-    agents_key: str,
-    team_label: str,
-    label: str,
-    default_assignee: str,
-    forward_tech_lead: bool,
-    surface_rate_limit: bool,
-) -> None:
-    """Drain ``queue`` by calling a code-v2 team-lead's ``run_workflow``, one task at a time.
-
-    The backend (``backend_code_v2_team``) and frontend (``frontend_code_v2_team``) workers
-    are identical except for which team lead they invoke, their progress/log labels, and two
-    backend-only knobs — hence the parametrization. Designed to run in its own thread,
-    parallel with the sibling worker.
-
-    Preconditions:
-        - ``agents_key`` indexes the team lead in ``agents`` (``None`` ⇒ every queued task is
-          failed with "``label`` team not registered" and the worker returns immediately).
-        - ``forward_tech_lead`` forwards ``tech_lead``/``build_fix_specialist`` to
-          ``run_workflow`` (backend only); ``surface_rate_limit`` maps an
-          ``LLMRateLimitError`` to ``OLLAMA_WEEKLY_LIMIT_MESSAGE`` (backend only).
-    Postconditions:
-        - Each drained task ends in exactly one of ``completed`` (and
-          ``completed_code_task_ids``) or ``failed``; ``queue`` is left empty on normal exit.
-        - A ``TASK_MERGED`` event is recorded for every successful task.
-    """
-    from software_engineering_team.shared.models import SystemArchitecture
-
-    team_lead = agents.get(agents_key)
-    if team_lead is None:
-        for tid in queue:
-            failed[tid] = f"{label} team not registered"
-        return
-
-    # Carry the job's creation time on each TASK_MERGED so DORA lead time survives
-    # a metrics-window boundary even when the original task_created event predates
-    # the query window (mirrors _emit_coding_team_metrics on the coding-team path).
-    _job = get_job(job_id) or {}
-    _created_ts = _parse_iso(_job.get("created_at"))
-    _created_iso = _created_ts.isoformat() if _created_ts else None
-
-    while (
-        queue
-    ):  # pragma: no cover  # integration-only: drains queue by calling code-v2 run_workflow
-        # Check for cancellation before starting each task
-        if is_cancel_requested(job_id):
-            logger.info("%s worker: cancellation detected, stopping", label)
-            return
-
-        task_id = queue.pop(0)
-        task = all_tasks.get(task_id)
-        if not task:
-            continue
-
-        update_job(job_id, current_task=task_id)
-        update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
-        update_job_team_progress(job_id, team_label, current_task_id=task_id)
-        logger.info("[%s] >>> %s worker starting task", task_id, label)
-        task_start = time.monotonic()
-
-        def _job_updater(**kwargs: Any) -> None:
-            update_job_team_progress(job_id, team_label, **kwargs)
-
-        try:
-            arch = (
-                architecture
-                if isinstance(architecture, SystemArchitecture)
-                else (SystemArchitecture(overview=str(architecture)) if architecture else None)
-            )
-            workflow_kwargs: Dict[str, Any] = dict(
-                repo_path=repo_path,
-                task=task,
-                architecture=arch,
-                qa_agent=agents.get("qa"),
-                security_agent=agents.get("security"),
-                code_review_agent=agents.get("code_review"),
-                build_verifier=_run_build_verification,
-                doc_agent=agents.get("documentation"),
-                linting_tool_agent=agents.get("linting_tool_agent"),
-                job_updater=_job_updater,
-            )
-            if forward_tech_lead:
-                workflow_kwargs["tech_lead"] = agents.get("tech_lead")
-                workflow_kwargs["build_fix_specialist"] = agents.get("build_fix_specialist")
-            # Attribute every LLM call this task makes to the job/task/phase so
-            # telemetry spans and per-job cost accounting can slice by them.
-            with llm_attribution(
-                team="software_engineering",
-                job_id=job_id,
-                task_id=task_id,
-                phase="execution",
-            ):
-                result = team_lead.run_workflow(**workflow_kwargs)
-            elapsed = time.monotonic() - task_start
-            if result.success:
-                completed.add(task_id)
-                completed_code_task_ids.append(task_id)
-                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
-                se_events.record_event(
-                    se_events.TASK_MERGED,
-                    job_id=job_id,
-                    task_id=task_id,
-                    phase="execution",
-                    detail={"created_ts": _created_iso} if _created_iso else None,
-                )
-                _log_task_completion_banner(
-                    task_id=task_id,
-                    task_title=getattr(task, "title", "") or task_id,
-                    assignee=getattr(task, "assignee", default_assignee),
-                    elapsed_seconds=elapsed,
-                    description=getattr(task, "description", "") or "",
-                )
-            else:
-                reason = result.failure_reason or f"{label} workflow did not succeed"
-                failed[task_id] = reason
-                update_task_state(
-                    job_id, task_id, status="failed", finished_at=_iso_now(), error=reason
-                )
-                logger.warning("[%s] %s task failed: %s", task_id, label, reason)
-        except Exception as exc:
-            if surface_rate_limit and isinstance(exc, LLMRateLimitError):
-                failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
-                update_task_state(
-                    job_id,
-                    task_id,
-                    status="failed",
-                    finished_at=_iso_now(),
-                    error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
-                )
-                logger.warning("[%s] LLM rate limit exceeded in %s worker: %s", task_id, label, exc)
-            else:
-                failed[task_id] = f"{label} exception: {exc}"
-                update_task_state(
-                    job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc)
-                )
-                logger.exception("[%s] %s worker exception", task_id, label)
-
-
-def _backend_code_v2_worker(
-    *,
-    job_id: str,
-    backend_code_v2_queue: List[str],
-    all_tasks: Dict[str, Any],
-    completed: set,
-    failed: Dict[str, str],
-    completed_code_task_ids: List[str],
-    architecture: Any,
-    agents: Dict[str, Any],
-    repo_path: Path,
-) -> None:
-    """Drain ``backend_code_v2_queue`` via ``backend_code_v2_team.run_workflow`` (see ``_code_v2_worker``)."""
-    _code_v2_worker(
-        job_id=job_id,
-        queue=backend_code_v2_queue,
-        all_tasks=all_tasks,
-        completed=completed,
-        failed=failed,
-        completed_code_task_ids=completed_code_task_ids,
-        architecture=architecture,
-        agents=agents,
-        repo_path=repo_path,
-        agents_key="backend",
-        team_label="backend-code-v2",
-        label="backend",
-        default_assignee="backend",
-        forward_tech_lead=True,
-        surface_rate_limit=True,
-    )
-
-
-def _frontend_code_v2_worker(
-    *,
-    job_id: str,
-    frontend_code_v2_queue: List[str],
-    all_tasks: Dict[str, Any],
-    completed: set,
-    failed: Dict[str, str],
-    completed_code_task_ids: List[str],
-    architecture: Any,
-    agents: Dict[str, Any],
-    repo_path: Path,
-) -> None:
-    """Drain ``frontend_code_v2_queue`` via ``frontend_code_v2_team.run_workflow`` (see ``_code_v2_worker``)."""
-    _code_v2_worker(
-        job_id=job_id,
-        queue=frontend_code_v2_queue,
-        all_tasks=all_tasks,
-        completed=completed,
-        failed=failed,
-        completed_code_task_ids=completed_code_task_ids,
-        architecture=architecture,
-        agents=agents,
-        repo_path=repo_path,
-        agents_key="frontend_code_v2",
-        team_label="frontend-code-v2",
-        label="frontend_code_v2",
-        default_assignee="frontend-code-v2",
-        forward_tech_lead=False,
-        surface_rate_limit=False,
-    )
 
 
 def _maybe_ship_sprint_release(
@@ -2297,15 +2090,26 @@ def run_orchestrator(
 
 
 def run_failed_tasks(job_id: str) -> None:
-    """
-    Re-run only the failed tasks from a previous job.
+    """Retry the FAILED tasks of a prior coding-team run.
 
-    Reads the persisted failed task list and task objects from the job store,
-    re-queues them, and executes them through the same pipeline.
-    Runs in a background thread (same pattern as run_orchestrator).
+    Resumes the run's persisted task graph (``task_graph_snapshot``) with FAILED tasks demoted to
+    TO_DO, then delegates to ``run_coding_team_orchestrator`` — the same engine the main run uses,
+    with ``retry_failed=True`` the only difference. The coding-team orchestrator owns the terminal
+    job status on every success/partial/failure exit path (mirroring the main run), so this does not
+    finalize a success status itself; it only maps cancellation / unexpected errors to a terminal
+    status the way the main run does.
+
+    Runs in a background thread (same pattern as ``run_orchestrator``).
+
+    Preconditions:
+        - ``job_id`` refers to a stored job whose record carries ``repo_path`` and a
+          ``task_graph_snapshot`` (produced by a prior coding-team run). A job that never ran the
+          coding team — no snapshot — cannot be resumed and raises ``ValueError``.
+    Postconditions:
+        - The coding-team orchestrator has run to a terminal status for ``job_id`` (or a terminal
+          cancelled/failed status was written on interruption).
     """
     from software_engineering_team.shared.job_store import get_job
-    from software_engineering_team.shared.models import Task
 
     job_data = get_job(job_id)
     if not job_data:
@@ -2313,290 +2117,62 @@ def run_failed_tasks(job_id: str) -> None:
     repo_path = job_data.get("repo_path")
     if not repo_path:
         raise ValueError(f"Job {job_id} has no repo_path")
-    failed_tasks = job_data.get("failed_tasks") or []
-    if not failed_tasks:
-        raise ValueError(f"Job {job_id} has no failed tasks to retry")
-    all_tasks_data = job_data.get("_all_tasks") or {}
-    if not all_tasks_data:
-        raise ValueError(f"Job {job_id} has no stored task data for retry")
-
-    failed_ids = [ft["task_id"] for ft in failed_tasks]
-    logger.info(
-        "=== Retrying %s failed tasks for job %s: %s ===", len(failed_ids), job_id, failed_ids
-    )
+    if not (job_data.get("task_graph_snapshot") or []):
+        # The coding team persists a task-graph snapshot every round; its absence means this job
+        # never ran the coding team (or predates it) and so has no failed task graph to resume.
+        raise ValueError(f"Job {job_id} has no task graph snapshot to retry")
 
     path = Path(repo_path).resolve()
-    backend_dir = path / "backend"
-    frontend_dir = path / "frontend"
-    try:  # pragma: no cover  # integration-only: re-runs failed tasks through full per-task pipeline (LLM + git + subprocess)
-        # current_activity from the failed run is stale by definition here; clear it
-        # so the retry does not render the old run's frozen sub-bar.
+    logger.info("=== Retrying failed tasks for job %s (repo %s) ===", job_id, path)
+
+    from coding_team.models import CodingTeamPlanInput
+    from coding_team.orchestrator import run_coding_team_orchestrator
+    from software_engineering_team.coding_engine_provider import SECodeEngineProvider
+
+    # On the snapshot-resume path plan_input is barely used (repo_path + any HITL question folding);
+    # a PlanningAdapterResult is not available on retry, so build a minimal input from the stored
+    # job record. resolved_questions is folded so a prior decision-gate answer is not re-asked.
+    plan_input = CodingTeamPlanInput(
+        repo_path=str(path),
+        requirements_title=job_data.get("requirements_title") or "Project",
+        architecture_overview=(
+            job_data.get("architecture_overview") or job_data.get("_architecture_overview")
+        ),
+        resolved_questions=job_data.get("resolved_questions") or [],
+    )
+
+    base, span = PROGRESS_BAND_CODING
+    # current_activity from the failed run is stale by definition here; clear it so the retry does
+    # not render the old run's frozen sub-bar.
+    update_job(job_id, status=JOB_STATUS_RUNNING, error=None, current_activity=None)
+    try:
+        # Bind team/job_id attribution around the whole coding run so every LLM call it makes is
+        # attributed to this SE job — that is what the cost tracker keys on (see the main run).
+        with llm_attribution(team="software_engineering", job_id=job_id, phase="execution"):
+            run_coding_team_orchestrator(
+                job_id,
+                str(path),
+                plan_input,
+                update_job_fn=lambda **kw: update_job(job_id, **kw),
+                get_job_fn=lambda jid: get_job(jid),
+                progress_base=base,
+                progress_span=span,
+                engine_provider=SECodeEngineProvider(),
+                retry_failed=True,
+            )
+        # Emit DORA lifecycle events from the persisted task graph and flush final cost.
+        _emit_coding_team_metrics(job_id)
+        # run_coding_team_orchestrator owns its terminal status on every exit path (completed /
+        # completed_with_failures / already_complete / failed / cancelled), so there is nothing to
+        # finalize here.
+    except CancellationError:
+        logger.info("Retry orchestrator stopped due to job cancellation: %s", job_id)
         update_job(
             job_id,
-            status=JOB_STATUS_RUNNING,
-            failed_tasks=[],
-            error=None,
-            current_activity=None,
+            status=JOB_STATUS_CANCELLED,
+            status_text="Job cancelled by user",
+            phase="completed",
         )
-
-        agents = _get_agents()
-
-        # Reconstruct task objects from stored data
-        all_tasks: Dict[str, Task] = {}
-        for tid, tdata in all_tasks_data.items():
-            try:
-                all_tasks[tid] = Task(**tdata)
-            except Exception:
-                logger.warning("Could not reconstruct task %s from stored data - skipping", tid)
-
-        # Re-read spec for agents that need it
-        from spec_parser import get_latest_spec_content
-
-        spec_content = get_latest_spec_content(path)
-
-        # Reconstruct minimal architecture from stored overview
-        from software_engineering_team.shared.models import SystemArchitecture
-
-        arch_overview = (
-            job_data.get("_architecture_overview") or job_data.get("architecture_overview") or ""
-        )
-        architecture = SystemArchitecture(overview=arch_overview)
-
-        tech_lead = agents["tech_lead"]
-
-        # Partition failed tasks into backend/frontend queues; handle devops/git_setup in prefix
-        completed = set()
-        failed_retry: Dict[str, str] = {}
-        completed_code_task_ids: List[str] = []
-
-        retry_prefix = [
-            tid
-            for tid in failed_ids
-            if all_tasks.get(tid)
-            and (all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops")
-        ]
-        # All backend retries go through backend_code_v2_team; all frontend retries go through
-        # frontend_code_v2_team.
-        retry_backend_code_v2_queue = [
-            tid
-            for tid in failed_ids
-            if all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
-        ]
-        retry_frontend_code_v2_queue = [
-            tid
-            for tid in failed_ids
-            if all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
-        ]
-        total_tasks = (
-            len(retry_prefix) + len(retry_backend_code_v2_queue) + len(retry_frontend_code_v2_queue)
-        )
-
-        # Run prefix (devops, git_setup) sequentially
-        for task_id in retry_prefix:
-            task = all_tasks.get(task_id)
-            if not task:
-                continue
-            update_job(job_id, current_task=task_id)
-            if task.type.value == "git_setup":
-                completed.add(task_id)
-                _log_task_completion_banner(
-                    task_id=task_id,
-                    task_title=getattr(task, "title", "") or task_id,
-                    assignee="git_setup",
-                    elapsed_seconds=0.0,
-                    description=getattr(task, "description", "") or "",
-                )
-                continue
-            if task.assignee == "devops":
-                try:
-                    devops_start = time.monotonic()
-                    existing_pipeline = _read_repo_code(path, [".yml", ".yaml"])
-                    workflow_result = agents["devops"].run_workflow(
-                        repo_path=path,
-                        task_description=task.description,
-                        requirements=_task_requirements(task),
-                        architecture=architecture,
-                        existing_pipeline=existing_pipeline
-                        if existing_pipeline != "# No code files found"
-                        else None,
-                        tech_stack=["Python", "FastAPI", "PostgreSQL", "Docker"],
-                        build_verifier=_run_build_verification,
-                        task_id=task_id,
-                        subdir="devops",
-                    )
-                    devops_elapsed = time.monotonic() - devops_start
-                    if workflow_result.success:
-                        completed.add(task_id)
-                        _log_task_completion_banner(
-                            task_id=task_id,
-                            task_title=getattr(task, "title", "") or task_id,
-                            assignee="devops",
-                            elapsed_seconds=devops_elapsed,
-                            description=getattr(task, "description", "") or "",
-                        )
-                    else:
-                        failed_retry[task_id] = (
-                            workflow_result.failure_reason or "DevOps workflow failed"
-                        )
-                except Exception as e:
-                    failed_retry[task_id] = f"DevOps failed: {e}"
-
-        # Run backend-code-v2 retry in parallel
-        retry_bv2_thread = None
-        if retry_backend_code_v2_queue:
-            retry_bv2_thread = threading.Thread(
-                target=_backend_code_v2_worker,
-                kwargs=dict(
-                    job_id=job_id,
-                    backend_code_v2_queue=retry_backend_code_v2_queue,
-                    all_tasks=all_tasks,
-                    completed=completed,
-                    failed=failed_retry,
-                    completed_code_task_ids=completed_code_task_ids,
-                    architecture=None,
-                    agents=agents,
-                    repo_path=backend_dir,
-                ),
-            )
-            retry_bv2_thread.daemon = True
-            retry_bv2_thread.start()
-
-        # Run frontend-code-v2 retry in parallel
-        retry_fv2_thread = None
-        if retry_frontend_code_v2_queue:
-            retry_fv2_thread = threading.Thread(
-                target=_frontend_code_v2_worker,
-                kwargs=dict(
-                    job_id=job_id,
-                    frontend_code_v2_queue=retry_frontend_code_v2_queue,
-                    all_tasks=all_tasks,
-                    completed=completed,
-                    failed=failed_retry,
-                    completed_code_task_ids=completed_code_task_ids,
-                    architecture=None,
-                    agents=agents,
-                    repo_path=frontend_dir,
-                ),
-            )
-            retry_fv2_thread.daemon = True
-            retry_fv2_thread.start()
-
-        if retry_bv2_thread is not None:
-            retry_bv2_thread.join()
-        if retry_fv2_thread is not None:
-            retry_fv2_thread.join()
-
-        llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed_retry.values())
-        llm_connectivity_failed = any(
-            v in (LLM_UNREACHABLE_AFTER_RETRIES, LLM_SEMANTIC_EXHAUSTION)
-            for v in failed_retry.values()
-        )
-
-        # Final summary with task breakdown
-        logger.info(
-            "=== Retry finished: %s completed, %s still failed (of %s retried) ===",
-            len(completed),
-            len(failed_retry),
-            total_tasks,
-        )
-        _log_task_breakdown(
-            completed=completed,
-            all_tasks=all_tasks,
-            total_tasks=total_tasks,
-            failed_count=len(failed_retry),
-            job_id=job_id,
-        )
-        if failed_retry:
-            logger.warning(
-                "=== Still-failed task report. Recovery summary: re-attempted %d tasks, "
-                "%d completed successfully, %d remain failed ===",
-                total_tasks,
-                len(completed),
-                len(failed_retry),
-            )
-            for tid, reason in sorted(failed_retry.items()):
-                task_obj = all_tasks.get(tid)
-                title = task_obj.title if task_obj else tid
-                logger.warning("  [%s] %s — Reason: %s", tid, title, reason)
-
-        # DevOps: containerize every git repo that exists (same as main run)
-        devops_agent = agents.get("devops")
-        if devops_agent and backend_dir.is_dir() and (backend_dir / ".git").exists():
-            existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
-            tech_lead.trigger_devops_for_backend(
-                devops_agent,
-                backend_dir,
-                architecture,
-                spec_content,
-                existing_pipeline=existing_pipeline
-                if existing_pipeline != "# No code files found"
-                else None,
-                build_verifier=_run_build_verification,
-            )
-        if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
-            existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
-            tech_lead.trigger_devops_for_frontend(
-                devops_agent,
-                frontend_dir,
-                architecture,
-                spec_content,
-                existing_pipeline=existing_pipeline
-                if existing_pipeline != "# No code files found"
-                else None,
-                build_verifier=_run_build_verification,
-            )
-
-        failed_details = [
-            {
-                "task_id": tid,
-                "reason": reason,
-                "title": (all_tasks.get(tid).title if all_tasks.get(tid) else tid),
-            }
-            for tid, reason in failed_retry.items()
-        ]
-        if llm_connectivity_failed:
-            update_job(
-                job_id,
-                failed_tasks=failed_details,
-                status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
-                error=_llm_pause_error(failed_retry),
-            )
-        elif llm_limit_exceeded:
-            update_job(
-                job_id,
-                failed_tasks=failed_details,
-                status="paused_llm_limit",
-                error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
-                current_task=None,
-            )
-        else:
-            logger.info("")
-            logger.info("=" * BANNER_WIDTH)
-            logger.info("  ★★★  SOFTWARE ENGINEERING TEAM: DELIVERY COMPLETE (retry)  ★★★")
-            logger.info("  Job %s finished. All retried tasks executed.", job_id)
-            logger.info("=" * BANNER_WIDTH)
-            _log_task_breakdown(
-                completed=completed,
-                all_tasks=all_tasks,
-                total_tasks=total_tasks,
-                failed_count=len(failed_retry),
-                job_id=job_id,
-            )
-            update_job(
-                job_id,
-                failed_tasks=failed_details,
-                status=JOB_STATUS_COMPLETED,
-                current_task=None,
-                status_text="Retry completed",
-            )
-
-    except (
-        CancellationError
-    ):  # pragma: no cover  # integration-only: paired with integration-only try block
-        logger.info("Retry orchestrator stopped due to job cancellation: %s", job_id)
-        update_job(job_id, status=JOB_STATUS_CANCELLED, status_text="Job cancelled by user")
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:
         logger.exception("Retry orchestrator failed")
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")

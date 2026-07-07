@@ -173,6 +173,30 @@ class TaskGraphService:
                 task.assigned_agent_id = None
         self._maybe_persist()
 
+    def reset_failed(self) -> None:
+        """Demote every FAILED task to TO_DO and release its agent (explicit retry).
+
+        Symmetric to `reset_in_flight`, but for the "retry the failed tasks" action rather than
+        crash recovery: a genuinely-FAILED task (its implementation exhausted revisions or the LLM
+        call raised) is terminal, so a plain snapshot resume leaves it FAILED and never re-attempts
+        it. Demoting all FAILED tasks to unassigned TO_DO lets a fresh swarm re-plan and re-pick
+        them. A task cascade-FAILED because it depended on a FAILED task (`mark_dependents_failed`)
+        holds the same FAILED status, so it is reset here too and becomes eligible again once its
+        (now TO_DO) dependency re-merges. Any prior `revision_feedback` is left intact as history.
+        Only meaningful on the resume branch — a fresh run has no FAILED tasks yet.
+
+        Preconditions:
+            - Called on a graph (typically just restored from a snapshot).
+        Postconditions:
+            - No task is FAILED; no formerly-FAILED task retains an agent mapping.
+        """
+        for task in self._tasks.values():
+            if task.status == TaskStatus.FAILED:
+                task.status = TaskStatus.TO_DO
+                self._free_agent(task)  # uses task.assigned_agent_id — must run before we null it
+                task.assigned_agent_id = None
+        self._maybe_persist()
+
     def get_tasks(self) -> List[Task]:
         """Return all tasks (copy)."""
         return list(self._tasks.values())

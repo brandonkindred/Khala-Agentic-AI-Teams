@@ -285,3 +285,56 @@ def test_count_with_status() -> None:
     assert tg.count_with_status(TaskStatus.FAILED) == 1
     assert tg.count_with_status(TaskStatus.TO_DO) == 1
     assert tg.count_with_status(TaskStatus.IN_REVIEW) == 0
+
+
+def test_reset_failed_demotes_failed_to_todo_and_frees_agent() -> None:
+    """reset_failed demotes a terminal FAILED task to TO_DO and releases its agent so a fresh
+    swarm can re-pick it (the "retry the failed tasks" action)."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="T1")
+    tg.assign_task_to_agent("t1", "agent-a")
+    tg.update_task("t1", status=TaskStatus.FAILED, assigned_agent_id="agent-a")
+    assert tg.get_task("t1").status == TaskStatus.FAILED
+
+    tg.reset_failed()
+
+    task = tg.get_task("t1")
+    assert task.status == TaskStatus.TO_DO
+    assert task.assigned_agent_id is None
+    assert tg.get_task_for_agent("agent-a") is None
+    assert "agent-a" not in tg.snapshot()["agent_task_map"]
+
+
+def test_reset_failed_leaves_non_failed_untouched() -> None:
+    """reset_failed only touches FAILED tasks; MERGED/TO_DO/IN_PROGRESS are preserved."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="Merged")
+    tg.add_task("t2", title="Failed")
+    tg.add_task("t3", title="Todo")
+    tg.assign_task_to_agent("t1", "agent-a")
+    tg.mark_branch_merged("t1")
+    tg.update_task("t2", status=TaskStatus.FAILED)
+
+    tg.reset_failed()
+
+    assert tg.get_task("t1").status == TaskStatus.MERGED
+    assert tg.get_task("t2").status == TaskStatus.TO_DO
+    assert tg.get_task("t3").status == TaskStatus.TO_DO
+
+
+def test_reset_failed_recovers_cascade_failed_dependents() -> None:
+    """A dependent cascade-FAILED via mark_dependents_failed is reset alongside its root, so both
+    become eligible again once the (now TO_DO) dependency re-merges."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("root", title="Root")
+    tg.add_task("dep", title="Dependent", dependencies=["root"])
+    tg.update_task("root", status=TaskStatus.FAILED)
+    newly_failed = tg.mark_dependents_failed("root")
+    assert "dep" in newly_failed
+    assert tg.get_task("dep").status == TaskStatus.FAILED
+
+    tg.reset_failed()
+
+    assert tg.get_task("root").status == TaskStatus.TO_DO
+    assert tg.get_task("dep").status == TaskStatus.TO_DO
+    assert tg.count_with_status(TaskStatus.FAILED) == 0
