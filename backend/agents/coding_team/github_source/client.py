@@ -465,6 +465,30 @@ class GitHubClient:
             )
         )
 
+    def create_issue_reaction(
+        self, owner: str, repo: str, issue_number: int, content: str = "+1"
+    ) -> None:
+        """React to an issue or pull request itself (``POST .../issues/{n}/reactions``).
+
+        Preconditions:
+            - ``content`` is a valid GitHub reaction
+              (``+1``/``-1``/``laugh``/``confused``/``heart``/``hooray``/``rocket``/``eyes``).
+        Postconditions:
+            - Adds the reaction to the issue/PR's own conversation (not a specific
+              comment) — PRs are issues in GitHub's REST API, so this puts a
+              reaction pill directly on the PR. GitHub returns 200 when the
+              reaction already exists and 201 when newly created; both accepted by
+              ``_check``. Raises ``GitHubAPIError`` on any non-2xx — callers that
+              treat the reaction as best-effort must guard the call themselves.
+        """
+        self._check(
+            self._request(
+                "POST",
+                f"/repos/{owner}/{repo}/issues/{issue_number}/reactions",
+                json={"content": content},
+            )
+        )
+
     def find_existing_pr(self, owner: str, repo: str, head: str) -> Optional[PullRequest]:
         params = {"state": "open", "head": f"{owner}:{head}"}
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}/pulls", params=params))
