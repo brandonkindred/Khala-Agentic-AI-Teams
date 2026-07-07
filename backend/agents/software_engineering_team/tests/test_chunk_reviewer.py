@@ -261,6 +261,44 @@ def test_declared_language_reaches_prompt_without_heuristic() -> None:
     assert "**Language:** typescript" in fallback_client.prompts[0]
 
 
+def test_final_output_contract_note_follows_the_code_block() -> None:
+    """The output-contract nudge (emit only the JSON, no reasoning) is appended as
+    the last thing the model reads — after the code block — so a thinking model is
+    steered toward a final answer instead of reasoning-only output."""
+    from code_review_agent.chunk_reviewer import FINAL_OUTPUT_CONTRACT_NOTE
+
+    client = _RecorderClient()
+    ChunkReviewAgent(llm=client).run(_chunk_input())
+    prompt = client.prompts[0]
+    assert FINAL_OUTPUT_CONTRACT_NOTE.strip() in prompt
+    # It comes after the code-to-review section (last thing the model sees).
+    assert prompt.index("Code to review") < prompt.index("Respond with ONLY")
+
+
+def test_run_forwards_think_override(monkeypatch) -> None:
+    """``ChunkReviewAgent.run(think=...)`` threads the override to
+    ``resolve_code_review_model``; the default is ``None`` (model default)."""
+    from code_review_agent import chunk_reviewer
+
+    captured: Dict[str, Any] = {}
+    real = chunk_reviewer.resolve_code_review_model
+
+    def _spy(llm: Any, think: Any = None) -> Any:
+        captured["think"] = think
+        # Resolve against the injected Dummy (a strands Model) so the review still
+        # runs; the Dummy ignores think, so pass None to the real resolver.
+        return real(llm, think=None)
+
+    monkeypatch.setattr(chunk_reviewer, "resolve_code_review_model", _spy)
+
+    agent = ChunkReviewAgent(llm=DummyLLMClient())
+    agent.run(_chunk_input(), think=False)
+    assert captured["think"] is False
+    captured.clear()
+    agent.run(_chunk_input())
+    assert captured["think"] is None
+
+
 def test_shared_context_is_hard_capped_deterministically() -> None:
     """Spec/arch/existing excerpts are sliced to budget here — no LLM
     compaction calls — so an upstream compaction failure can never balloon the

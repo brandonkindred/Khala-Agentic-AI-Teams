@@ -179,13 +179,15 @@ class _FailOneFile(DummyLLMClient):
             return super().complete_json(prompt, **kwargs)
 
 
-def test_e2e_one_chunk_failure_degrades_without_passing_the_gate(monkeypatch) -> None:
+def test_e2e_one_chunk_failure_degrades_gracefully_without_blocking(monkeypatch) -> None:
     """A scripted client that exhausts one chunk's review (LLMSemanticExhaustionError)
-    while the rest succeed: the run completes (no exception escapes), but the
-    failed file is named by a blocking ``high`` "not reviewed" finding so the
-    merged review is rejected — unreviewed code must not pass the gate just
-    because the other chunks approved."""
+    while the rest succeed: by default the run completes and degrades gracefully —
+    the failed file is NOT posted as a "could not be reviewed" finding and does
+    NOT block the gate (a reviewer-side hiccup is not a code defect). Its ranges
+    are surfaced only via ``not_reviewed_ranges``, and the reviewed chunks drive
+    the approved verdict."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     files = _synthetic_files(num_files=6, chars_each=64_000)  # forces separate chunks
     bad_path = "pkg/mod_3.py"
     marker = f"### {bad_path} ###"
@@ -194,20 +196,23 @@ def test_e2e_one_chunk_failure_degrades_without_passing_the_gate(monkeypatch) ->
         CodeReviewInput(files=files, task_description="review", language="python")
     )
 
-    # The run completed (no exception); the failed file is named by blocking
-    # high findings, so the review is rejected rather than approved.
-    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
-    assert not_reviewed, "the failed chunk must surface a not-reviewed finding"
-    assert all(i.severity == "high" for i in not_reviewed)
-    assert result.approved is False
+    # The run completed (no exception), approved (the other chunks drive the
+    # verdict), and posted no "could not be reviewed" finding.
+    assert result.approved is True
+    assert not any("could not be reviewed" in i.description for i in result.issues)
 
-    # Recovery bisects the failed file's segment into sub-ranges, each
-    # degrading separately; together they must name the entire file. Every
-    # finding carries a structured range (start_line .. line, where `line` is
-    # the range end per the CodeReviewIssue multi-line convention).
-    bad_findings = [i for i in not_reviewed if i.file_path == bad_path]
-    assert bad_findings, "the failed file must be named by not-reviewed findings"
-    assert all(i.start_line is not None and i.line is not None for i in bad_findings)
-    assert all(i.start_line <= i.line for i in bad_findings)
-    assert min(i.start_line for i in bad_findings) == 1
-    assert max(i.line for i in bad_findings) == len(files[bad_path].splitlines())
+    # The failed file's ranges are recorded non-blockingly. Recovery bisects the
+    # segment into sub-ranges that together must name the entire file, so no
+    # covered line is silently dropped.
+    bad_ranges = [r for r in result.not_reviewed_ranges if r.startswith(bad_path)]
+    assert bad_ranges, "the failed file must be recorded in not_reviewed_ranges"
+
+    def _bounds(label: str) -> tuple[int, int]:
+        # Label form: "pkg/mod_3.py (lines A-B)"
+        a, b = label.split("(lines ")[1].rstrip(")").split("-")
+        return int(a), int(b)
+
+    bounds = [_bounds(r) for r in bad_ranges]
+    assert all(start <= end for start, end in bounds)
+    assert min(start for start, _ in bounds) == 1
+    assert max(end for _, end in bounds) == len(files[bad_path].splitlines())

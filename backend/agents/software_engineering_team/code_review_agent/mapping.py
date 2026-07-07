@@ -16,8 +16,12 @@ cache-key machinery; the coordinator imports the fingerprints it needs.
 
 Safety contract (see ``coordinator`` module docstring for the whole pipeline):
 - Infrastructure failures raise ``CodeReviewUnavailableError`` immediately.
-- Known content failures bisect/retry, then degrade to a blocking ``high`` "not
-  reviewed" finding rather than aborting the run.
+- Known content failures bisect/retry (and, for reasoning-only exhaustion or
+  truncation, get one last-resort thinking-off retry), then degrade to a "not
+  reviewed" coverage finding rather than aborting the run. By default that range
+  is surfaced non-blockingly (``CodeReviewOutput.not_reviewed_ranges``) — never
+  posted, never blocking; under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` it becomes a
+  blocking ``high`` finding instead.
 - Unexpected defects propagate unchanged (fail closed).
 - Only fully-reviewed outcomes are cached; degraded outcomes never are. A cache
   hit reproduces identical findings/verdicts (deep clone on store and retrieve),
@@ -61,6 +65,7 @@ from llm_service import (
     LLMUnreachableAfterRetriesError,
 )
 from shared_concurrency import parallel_map
+from shared_env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_sibling_surface_chars,
     parse_env_int,
@@ -77,9 +82,10 @@ from .chunking import (
     _segment_notes,
     _segment_range_label,
 )
-from .model_resolution import resolve_code_review_model
+from .model_resolution import resolve_code_review_model, thinking_override_supported
 from .models import (
     ChunkReviewInput,
+    ChunkReviewOutput,
     CodeReviewInput,
     CodeReviewIssue,
     CodeReviewUnavailableError,
@@ -152,13 +158,16 @@ class _ChunkOutcome:
     Invariants:
         - ``approved_flags`` holds one entry per successful LLM sub-review. A
           chunk that could not be reviewed (a known content failure surviving
-          recovery) contributes a degraded outcome — a blocking ``high`` "not
-          reviewed" finding and no ``approved_flags`` entry — rather than
-          aborting the run, so unreviewed code is rejected, not silently scored.
+          recovery) contributes a degraded outcome — a "not reviewed" coverage
+          finding and no ``approved_flags`` entry — rather than aborting the run,
+          so the range is recorded (surfaced as ``not_reviewed_ranges``, or as a
+          blocking finding under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED``), never
+          silently scored.
         - ``issues`` holds only genuine reviewer findings; the degraded "not
           reviewed" coverage findings live in ``not_reviewed_issues``. Keeping
           them apart lets the false-positive filter re-check the genuine
-          findings without ever being able to drop a coverage/safety finding.
+          findings without ever being able to drop a coverage/safety finding, and
+          lets the coordinator surface them non-blockingly by default.
     """
 
     issues: List[CodeReviewIssue] = field(default_factory=list)
@@ -167,6 +176,12 @@ class _ChunkOutcome:
     spec_notes: List[str] = field(default_factory=list)
     commit_messages: List[str] = field(default_factory=list)
     approved_flags: List[bool] = field(default_factory=list)
+    # True when this outcome came from a reduced-fidelity recovery (a thinking-off
+    # retry of a chunk whose default-thinking review exhausted). Like a bisected
+    # recovery it must not be frozen under the full-chunk cache key — the next
+    # identical cycle should re-attempt at full fidelity — so ``_cached_review_chunk``
+    # excludes it from the LRU.
+    degraded_recovery: bool = False
 
     def absorb(self, other: "_ChunkOutcome") -> None:
         """Append ``other``'s entries in order. Postcondition: no entry is lost."""
@@ -176,6 +191,7 @@ class _ChunkOutcome:
         self.spec_notes.extend(other.spec_notes)
         self.commit_messages.extend(other.commit_messages)
         self.approved_flags.extend(other.approved_flags)
+        self.degraded_recovery = self.degraded_recovery or other.degraded_recovery
 
     def clone(self) -> "_ChunkOutcome":
         """Return a deep, independent copy.
@@ -195,6 +211,7 @@ class _ChunkOutcome:
             spec_notes=list(self.spec_notes),
             commit_messages=list(self.commit_messages),
             approved_flags=list(self.approved_flags),
+            degraded_recovery=self.degraded_recovery,
         )
 
 
@@ -275,14 +292,82 @@ def _is_content_failure(exc: BaseException) -> bool:
     return False
 
 
+def _thinking_off_retry_enabled() -> bool:
+    """Whether the last-resort thinking-off retry is enabled (default: on).
+
+    Postconditions:
+        - Returns ``False`` only for an explicit falsy ``CODE_REVIEW_THINKING_OFF_RETRY``
+          (``false``/``0``/``no``/``off``); unset or anything else is ``True``.
+          Kill switch for the retry that turns a reasoning-only/truncated chunk
+          into a real review instead of a degraded not-reviewed range.
+    """
+    return env_bool("CODE_REVIEW_THINKING_OFF_RETRY", default=True)
+
+
+def _chain_has(exc: BaseException, types: Tuple[type, ...]) -> bool:
+    """Whether ``exc`` or its cause/context chain contains one of ``types``.
+
+    Postconditions:
+        - Walks the ``__cause__``/``__context__`` chain up to a bounded depth
+          (strands may wrap the client error) and returns True on the first match.
+          Never raises. Mirrors the traversal in ``_is_content_failure`` for a
+          narrower type check (used to gate the thinking-off retry to the failures
+          it can actually fix).
+    """
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen and len(seen) < 10:
+        seen.add(id(current))
+        if isinstance(current, types):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _outcome_from_output(chunk: ReviewChunk, output: ChunkReviewOutput) -> _ChunkOutcome:
+    """Build a successful chunk outcome from a completed reviewer output.
+
+    Postconditions:
+        - Returns one sub-review's worth of results (exactly one ``approved_flags``
+          entry). A rejection with no extractable issues but a non-empty summary
+          contributes one synthesized ``high`` issue built from that summary —
+          applied per sub-review because at the merged level other chunks'
+          findings would mask the empty-issues condition and the minor-only
+          auto-approve net would silently discard the rejection.
+    """
+    issues = _issues_from_chunk_output(chunk, output.issues)
+    if not output.approved and not issues and output.summary and output.summary.strip():
+        issues = [
+            CodeReviewIssue(
+                severity="high",
+                category="general",
+                file_path="",
+                description=f"Code review rejected: {output.summary}",
+                suggestion="Address the concerns described in the review summary. "
+                "Ensure the code meets all acceptance criteria and follows project conventions.",
+            )
+        ]
+    return _ChunkOutcome(
+        issues=issues,
+        summaries=[output.summary],
+        spec_notes=[output.spec_compliance_notes],
+        commit_messages=[output.suggested_commit_message],
+        approved_flags=[output.approved],
+    )
+
+
 def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
     """Build a degraded outcome for a chunk that survived recovery unreviewed.
 
-    A known LLM content failure that survives retry and bisection down to an
-    un-splittable chunk does not abort the whole run: the chunk's code is named
-    by a blocking "not reviewed" finding so the gate rejects the review and a
-    human is alerted, while sibling chunks that succeeded still contribute their
-    own verdicts.
+    A known LLM content failure that survives retry, bisection, and the
+    thinking-off retry does not abort the whole run: the chunk's code is recorded
+    as a "not reviewed" coverage finding while sibling chunks that succeeded still
+    contribute their own verdicts. By default (``CODE_REVIEW_BLOCK_ON_UNREVIEWED``
+    off) the coordinator surfaces that range non-blockingly via
+    ``CodeReviewOutput.not_reviewed_ranges`` — it is neither posted as a PR
+    comment nor allowed to block, because a reviewer-side hiccup is not a code
+    defect. With the opt-out on, the coordinator instead keeps the finding as a
+    blocking ``high`` issue so unreviewed code cannot pass the gate as approved.
 
     Preconditions:
         - The failure was already classified a known content failure
@@ -297,21 +382,21 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
           via the model's multi-line convention (``start_line`` = first line,
           ``line`` = last line — there is no ``end_line`` field) and names the
           range in its description, so no covered line is silently dropped and
-          downstream tools can highlight the full extent.
-        - The findings are ``high`` severity, so ``_reconcile_approval`` rejects
-          the merged review: unreviewed code can never pass the code-review gate
-          as approved (the backend only feeds issues back on rejection). The
-          chunk casts no LLM approve/reject vote (``approved_flags`` is empty);
-          the block comes from the finding's severity.
+          downstream tools can highlight the full extent. Whether these findings
+          block or are merely recorded is decided by the coordinator; the chunk
+          casts no LLM approve/reject vote (``approved_flags`` is empty).
+        - No ``summaries`` entry is produced, so the "not reviewed" condition
+          never leaks into the merged review summary/PR body and never forces an
+          extra synthesis LLM call on a partial run.
         - The finding text names only the failure *class*, never ``str(exc)``,
           so raw model output carried by parse/schema errors is never published
-          downstream (e.g. by the ``/review-pr`` flow).
+          downstream even under the ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` opt-out.
     """
     # Name only the failure *class*, never ``str(exc)``: parse/schema errors
     # embed raw model output (e.g. ``LLMJsonParseError`` carries a 500-char
-    # response preview), and this finding is published verbatim by the
-    # ``/review-pr`` flow — interpolating the message would leak arbitrary
-    # model output / code excerpts into PR comments.
+    # response preview). Under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` this finding is
+    # published verbatim by the ``/review-pr`` flow, so interpolating the message
+    # would leak arbitrary model output / code excerpts into PR comments.
     reason = type(exc).__name__
     issues = []
     for seg in chunk.segments:
@@ -331,10 +416,12 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
                 suggestion="Review this section manually; the automated reviewer could not process it.",
             )
         )
-    return _ChunkOutcome(
-        not_reviewed_issues=issues,
-        summaries=[f"Not reviewed: {', '.join(_chunk_ranges(chunk))} ({reason})."],
-    )
+    # No ``summaries`` entry: the "not reviewed" condition is carried by
+    # ``not_reviewed_issues`` (and surfaced non-blockingly as
+    # ``CodeReviewOutput.not_reviewed_ranges``), never by the merged review
+    # summary. Emitting a summary here would leak "Not reviewed: ..." text into
+    # the posted PR body and, on a partial run, force an extra synthesis LLM call.
+    return _ChunkOutcome(not_reviewed_issues=issues)
 
 
 def _review_chunk_with_recovery(
@@ -361,8 +448,8 @@ def _review_chunk_with_recovery(
 
     Postconditions:
         - Returns an outcome covering every line of the chunk — every line is
-          either reviewed or named by a blocking ``high`` "not reviewed"
-          finding — or raises. The chunk is never silently skipped or scored.
+          either reviewed or recorded as a "not reviewed" range — or raises. The
+          chunk is never silently skipped or scored.
         - Infrastructure failures raise ``CodeReviewUnavailableError``
           immediately, without retry or bisection.
         - Unexpected failures (anything not classified by ``_is_content_failure``
@@ -371,16 +458,22 @@ def _review_chunk_with_recovery(
           masked as a not-reviewed finding.
         - Known content failures bisect up to the depth cap; any chunk that
           cannot bisect further — the original or a bisected child — gets
-          exactly one same-input retry. A terminal content failure that survives
-          the retry degrades to a blocking ``high`` not-reviewed finding (via
-          ``_degraded_outcome``) rather than aborting the whole run; a one-off
-          transient error in a terminal child therefore never costs even that
-          child's review.
+          exactly one same-input retry. If the terminal failure is a
+          reasoning-only exhaustion or an output truncation, one further
+          thinking-off retry is attempted (env-gated, production path only) to
+          turn it into a real review. A terminal content failure that survives
+          all of that degrades via ``_degraded_outcome`` rather than aborting the
+          whole run: by default the range is surfaced non-blockingly (it becomes
+          ``CodeReviewOutput.not_reviewed_ranges``, not a posted finding and not a
+          block); under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` the coordinator turns
+          it into a blocking ``high`` finding. A one-off transient error in a
+          terminal child therefore never costs even that child's review.
         - A sub-review that rejects with no extractable issues but a non-empty
           summary contributes one synthesized high issue built from that
-          summary: applied here, per sub-review, because at the merged level
-          other chunks' findings would mask the empty-issues condition and the
-          minor-only auto-approve net would silently discard the rejection.
+          summary (see ``_outcome_from_output``): applied per sub-review, because
+          at the merged level other chunks' findings would mask the empty-issues
+          condition and the minor-only auto-approve net would silently discard
+          the rejection.
     """
     chunk_input = ChunkReviewInput(
         code_chunk=chunk.content,
@@ -447,40 +540,67 @@ def _review_chunk_with_recovery(
             return _review_chunk_with_recovery(
                 reviewer, chunk, base_input, sibling_surface, surface_by_path, depth, retried=True
             )
-        # Known content failure that cannot bisect further and survived its
-        # retry: degrade instead of aborting the whole run. The chunk's code is
-        # named by a blocking ``high`` "not reviewed" finding (which rejects the
-        # merged review, so unreviewed code is never approved), while the chunks
-        # that did succeed still contribute their verdicts. (A run in which *no*
-        # chunk succeeds is caught by ``run_coordinator``'s total-failure guard,
-        # which still raises.)
+        # Last resort before degrading: for the content failures a non-thinking
+        # pass can fix — a reasoning-only response (``LLMSemanticExhaustionError``)
+        # or an output-token truncation (``LLMTruncatedError``) — retry once with
+        # thinking forced OFF. This turns the common "the model thought but never
+        # answered" case into a real review instead of a not-reviewed range, which
+        # is what makes the degraded finding rare. Gated by env and only possible
+        # on the production path (an injected strands ``Model`` can't have its
+        # thinking level re-resolved, so tests skip this and keep their call
+        # counts). Any failure here falls through to the degrade below.
+        if (
+            _thinking_off_retry_enabled()
+            and thinking_override_supported(reviewer.llm)
+            and _chain_has(exc, (LLMSemanticExhaustionError, LLMTruncatedError))
+        ):
+            logger.warning(
+                "CodeReview: last-resort thinking-off retry after %s [%s]",
+                type(exc).__name__,
+                chunk.paths_label,
+            )
+            try:
+                recovered = reviewer.run(chunk_input, think=False)
+            except Exception as exc2:
+                # This best-effort retry runs while the original content failure is
+                # still being handled, so any exception it raises is already a real
+                # content failure (or is implicitly chained to one). An infra
+                # failure still surfaces as unavailable; anything else means the
+                # retry did not help, so fall through to degrade on the original
+                # failure — no worse than not having attempted the retry at all. A
+                # genuine reviewer-code bug is not masked here: it would have failed
+                # closed on the first attempt, before this last-resort retry.
+                if _is_infra_failure(exc2):
+                    raise CodeReviewUnavailableError(
+                        f"Review model unavailable ({type(exc2).__name__}: {exc2}); "
+                        "no verdict was produced for this submission.",
+                        unreviewed=_chunk_ranges(chunk),
+                    ) from exc2
+            else:
+                outcome = _outcome_from_output(chunk, recovered)
+                # Reduced-fidelity recovery: don't freeze it under the full-chunk
+                # cache key (see `_ChunkOutcome.degraded_recovery`).
+                outcome.degraded_recovery = True
+                return outcome
+        # Known content failure that cannot bisect further and survived its retry
+        # (and the thinking-off retry, if any): degrade instead of aborting the
+        # whole run. By default the chunk's range is surfaced non-blockingly via
+        # ``CodeReviewOutput.not_reviewed_ranges`` (no posted finding, no block);
+        # under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` it becomes a blocking ``high``
+        # "not reviewed" finding instead. Chunks that did succeed still contribute
+        # their verdicts. (A run in which *no* chunk succeeds is caught by
+        # ``run_coordinator``'s total-failure guard, which still raises.)
+        # Stable, greppable telemetry so operators can count how often the
+        # reviewer gives up on a chunk (the condition the user wants to be rare).
+        # ``exc`` is logged, never posted — the degraded finding names only the class.
         logger.warning(
-            "CodeReviewCoordinator: chunk unreviewable after recovery (%s: %s) — "
-            "degrading to a not-reviewed finding [%s]",
+            "CodeReview degrade: failure_class=%s ranges=%s detail=%s",
             type(exc).__name__,
+            _chunk_ranges(chunk),
             exc,
-            chunk.paths_label,
         )
         return _degraded_outcome(chunk, exc)
-    issues = _issues_from_chunk_output(chunk, output.issues)
-    if not output.approved and not issues and output.summary and output.summary.strip():
-        issues = [
-            CodeReviewIssue(
-                severity="high",
-                category="general",
-                file_path="",
-                description=f"Code review rejected: {output.summary}",
-                suggestion="Address the concerns described in the review summary. "
-                "Ensure the code meets all acceptance criteria and follows project conventions.",
-            )
-        ]
-    return _ChunkOutcome(
-        issues=issues,
-        summaries=[output.summary],
-        spec_notes=[output.spec_compliance_notes],
-        commit_messages=[output.suggested_commit_message],
-        approved_flags=[output.approved],
-    )
+    return _outcome_from_output(chunk, output)
 
 
 def _review_model_fingerprint(llm: LLMClient) -> str:
@@ -765,12 +885,14 @@ def _cached_review_chunk(
           *every* outcome, including the degraded/bisected ones that are never
           stored in the LRU.
         - On a leader miss, runs the real review and — only when the outcome came
-          from the exact full-chunk LLM input (no ``not_reviewed_issues`` and
-          *exactly one* ``approved_flags`` entry) — stores a clone under the
-          chunk key, evicting the oldest entry past capacity. Degraded outcomes
-          (a transient failure is retried for real next cycle) and bisected
-          recoveries (>= 2 sub-reviews, reduced context — re-attempted at full
-          context next cycle) are never cached.
+          from the exact full-chunk LLM input (no ``not_reviewed_issues``, not a
+          ``degraded_recovery``, and *exactly one* ``approved_flags`` entry) —
+          stores a clone under the chunk key, evicting the oldest entry past
+          capacity. Degraded outcomes (a transient failure is retried for real
+          next cycle), bisected recoveries (>= 2 sub-reviews, reduced context),
+          and thinking-off recoveries (reduced-fidelity — ``degraded_recovery``)
+          are never cached, so the next identical cycle re-attempts at full
+          context/fidelity.
         - Never suppresses ``_review_chunk_with_recovery``'s exceptions
           (infrastructure failure, unexpected defect): the leader re-raises them
           unchanged and hands the same exception to its waiters, so they fail the
@@ -828,7 +950,11 @@ def _cached_review_chunk(
         # would keep serving the reduced-fidelity result on later identical cycles
         # instead of retrying the full chunk — so we skip it and let the next cycle
         # re-attempt full context.
-        cacheable = not outcome.not_reviewed_issues and len(outcome.approved_flags) == 1
+        cacheable = (
+            not outcome.not_reviewed_issues
+            and not outcome.degraded_recovery
+            and len(outcome.approved_flags) == 1
+        )
         # Clone before taking the lock so the deep copy doesn't serialize other
         # workers; ``outcome`` is a local not yet shared, so this is race-free.
         stored = outcome.clone() if cacheable else None

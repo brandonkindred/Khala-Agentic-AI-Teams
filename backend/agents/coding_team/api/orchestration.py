@@ -32,6 +32,7 @@ from coding_team.job_store import (
 )
 from coding_team.models import CodingTeamPlanInput
 from coding_team.token_crypto import decrypt_token
+from shared_env_config import env_bool
 from shared_git.git_utils import DEVELOPMENT_BRANCH
 
 logger = logging.getLogger(__name__)
@@ -494,6 +495,57 @@ def _record_failure(
     # failure for review jobs so the Code Review page shows the failed outcome.
     _main.update_review(job_id, status="failed", error=safe, completed=True)
     _main._safe_comment(client, owner, repo, num, f"Coding team job `{job_id}` failed: {safe}")
+
+
+# Neutral, non-blocking note posted (at most once) when an automated review could
+# not complete. Deliberately carries no exception text, class name, or job id —
+# a reviewer-side outage is not a code defect, so the PR gets a calm "re-run it"
+# message while the real detail lives in the job/review store.
+_REVIEW_OUTAGE_NOTICE = (
+    "Automated code review could not complete and did not post findings; it can be re-run."
+)
+
+
+def _post_outage_notice_enabled() -> bool:
+    """Whether a review outage posts the neutral PR note (default: on).
+
+    Postconditions:
+        - Returns ``False`` only for an explicit falsy ``PR_REVIEW_POST_OUTAGE_NOTICE``
+          (``false``/``0``/``no``/``off``); unset or anything else is ``True``.
+          Setting it off makes a review outage completely silent on the PR (the
+          failure is still recorded in the job/review store).
+    """
+    return env_bool("PR_REVIEW_POST_OUTAGE_NOTICE", default=True)
+
+
+def _record_review_outage(
+    client: _main.GitHubClient, owner: str, repo: str, num: int, job_id: str, error: str
+) -> None:
+    """Mark a review job failed for a reviewer-side outage without posting the raw error.
+
+    The graceful-degradation counterpart to ``_record_failure``: instead of
+    posting the scrubbed error text as a ``Coding team job X failed: ...`` PR
+    comment, it records the real detail only in the job/review store — where
+    operators and the Code Review page can still see it — and posts at most a
+    single neutral, non-blocking note to the PR (gated by
+    ``PR_REVIEW_POST_OUTAGE_NOTICE``). Used for transient reviewer outages (the
+    LLM unavailable, a reasoning-only exhaustion the reviewer could not recover,
+    or a reviewer that returned no output) so a tooling hiccup never surfaces as a
+    raw exception / "job failed" comment on the pull request.
+
+    Postconditions:
+        - The job and review row are marked ``failed`` with the scrubbed ``error``
+          captured for diagnosis; ``status_text``/``current_activity`` are reset
+          (as in ``_record_failure``) so the failed job cannot keep claiming
+          mid-review progress. A neutral PR note is posted iff
+          ``PR_REVIEW_POST_OUTAGE_NOTICE`` is enabled; the raw error is never
+          posted to the PR.
+    """
+    safe = scrub_token_from_text(error)
+    _main.update_job(job_id, status="failed", error=safe, status_text=None, current_activity=None)
+    _main.update_review(job_id, status="failed", error=safe, completed=True)
+    if _post_outage_notice_enabled():
+        _main._safe_comment(client, owner, repo, num, _REVIEW_OUTAGE_NOTICE)
 
 
 def _has_merged_tasks(job: Dict[str, Any]) -> bool:

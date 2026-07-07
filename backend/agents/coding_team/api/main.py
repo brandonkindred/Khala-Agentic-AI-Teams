@@ -81,6 +81,7 @@ from coding_team.api.orchestration import (  # noqa: F401
     _format_failed_tasks,
     _has_merged_tasks,
     _record_failure,
+    _record_review_outage,
     _run_with_github_hooks,
     _running_job_for_issue,
     _schedule_resume_recheck,

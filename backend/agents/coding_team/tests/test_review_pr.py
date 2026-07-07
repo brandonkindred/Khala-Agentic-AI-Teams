@@ -648,18 +648,50 @@ class TestReviewEndpoint:
         assert job["review_summary"]["comment_findings"] == 0
 
     def test_reviewer_none_output_fails_job(self, review_app) -> None:
-        # A provider that returns None WITHOUT raising must fail the job (and post
-        # a PR notice), never leave it wedged in "running" with no terminal write.
-        # The pre-decomposition body reached the same failed state by dereferencing
-        # `output.issues` into the outer except; _run_reviewer must preserve it.
+        # A provider that returns None WITHOUT raising must fail the job, never
+        # leave it wedged in "running". It degrades to a quiet outage: the raw
+        # "reviewer returned no output" detail stays in the store, and only a
+        # neutral, non-blocking note is posted to the PR.
         review_app["github"]["agent_output"] = None
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
-        # The reviewer watches the PR, so the failure is surfaced there too.
         gh = review_app["github"]["client"]
-        assert any("reviewer returned no output" in body for _n, body in gh.comments)
+        # The raw internal detail is NEVER posted on the PR...
+        assert not any("reviewer returned no output" in body for _n, body in gh.comments)
+        # ...only a single neutral outage note (default PR_REVIEW_POST_OUTAGE_NOTICE on).
+        assert any(
+            "could not complete and did not post findings" in body for _n, body in gh.comments
+        )
+
+    def test_reviewer_exception_does_not_post_raw_error(self, review_app) -> None:
+        # A reviewer that RAISES must not leak the exception text onto the PR:
+        # the job is failed with the detail recorded in the store, but the PR only
+        # gets the neutral outage note — never "code review failed:" or the raw
+        # message.
+        review_app["github"]["agent_output"] = RuntimeError("secret internal detail")
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        gh = review_app["github"]["client"]
+        assert not any("secret internal detail" in body for _n, body in gh.comments)
+        assert not any("code review failed" in body for _n, body in gh.comments)
+        assert any(
+            "could not complete and did not post findings" in body for _n, body in gh.comments
+        )
+
+    def test_outage_notice_suppressed_when_disabled(self, review_app, monkeypatch) -> None:
+        # With PR_REVIEW_POST_OUTAGE_NOTICE off, a reviewer outage posts NOTHING on
+        # the PR but still marks the job failed (detail preserved in the store).
+        monkeypatch.setenv("PR_REVIEW_POST_OUTAGE_NOTICE", "false")
+        review_app["github"]["agent_output"] = RuntimeError("llm down")
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert review_app["github"]["client"].comments == []
 
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)

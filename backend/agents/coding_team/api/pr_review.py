@@ -637,7 +637,12 @@ def _run_reviewer(
         output = provider.run_pr_code_review(**common, **mode_kwargs)
     except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
         logger.exception("PR review agent failed: %s", e)
-        _main._record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
+        # A reviewer-side failure (LLM outage, unrecoverable exhaustion, etc.) is
+        # not a code defect: record the detail in the job store but never post the
+        # raw exception on the PR — degrade to a quiet, re-runnable outage.
+        _main._record_review_outage(
+            client, owner, repo, pr_number, job_id, f"code review failed: {e}"
+        )
         return None
     finally:
         # Clear so a stale sub-progress entry never outlives the review itself.
@@ -647,7 +652,7 @@ def _run_reviewer(
         # through as a silent success — the caller returns on None with no
         # terminal write, which would wedge the job in "running" forever.
         logger.error("PR review agent returned no output for PR #%s", pr_number)
-        _main._record_failure(
+        _main._record_review_outage(
             client,
             owner,
             repo,
@@ -928,7 +933,9 @@ def _run_pr_review_body(
         logger.exception("PR review hook failed: %s", review_exc)
         try:
             with _main.GitHubClient(token=token) as client:
-                _main._record_failure(
+                # Same graceful-degradation contract as the reviewer paths: record
+                # the detail in the store, keep the raw exception off the PR.
+                _main._record_review_outage(
                     client, owner, repo, pr_number, job_id, f"code review failed: {review_exc}"
                 )
         except Exception:  # noqa: BLE001 - the status update below is the last resort

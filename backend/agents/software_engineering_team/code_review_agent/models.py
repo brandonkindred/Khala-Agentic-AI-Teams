@@ -398,6 +398,14 @@ class CodeReviewOutput(BaseModel):
         default_factory=list,
         description="List of issues found during code review",
     )
+    not_reviewed_ranges: List[str] = Field(
+        default_factory=list,
+        description="Human-readable file/line ranges the reviewer could not process automatically "
+        "(e.g. after the model returned no usable output). Non-blocking observability metadata: "
+        "these are never rendered as a PR comment and never affect `approved`. When the "
+        "CODE_REVIEW_BLOCK_ON_UNREVIEWED opt-out is set, the same ranges also appear as blocking "
+        "high findings in `issues`.",
+    )
     summary: str = Field(
         default="",
         description="Overall summary of the code review",

@@ -27,6 +27,7 @@ from code_review_agent.coordinator import (
     split_block_into_segments,
 )
 from code_review_agent.models import (
+    ChunkReviewOutput,
     CodeReviewInput,
     CodeReviewOutput,
     CodeReviewUnavailableError,
@@ -924,12 +925,15 @@ def test_persistent_small_chunk_failure_raises_unavailable() -> None:
     assert any("only.py" in r for r in excinfo.value.unreviewed)
 
 
-def test_partial_terminal_failure_degrades_to_not_reviewed_finding(monkeypatch) -> None:
-    """One chunk keeps failing while another succeeds: the run completes (no
-    exception), but the unreviewable chunk produces a blocking ``high`` "not
-    reviewed" finding so the merged review is rejected — unreviewed code must
-    not pass the gate just because a sibling chunk approved."""
+def test_partial_terminal_failure_degrades_gracefully_without_blocking(monkeypatch) -> None:
+    """One chunk keeps failing while another succeeds: by default the run
+    completes and degrades gracefully — the unreviewable chunk is NOT posted as a
+    "could not be reviewed" finding and does NOT block (a reviewer-side hiccup is
+    not a code defect); its range is surfaced only via ``not_reviewed_ranges``,
+    and the sibling chunk drives the approved verdict."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    # Default graceful behavior (opt-out explicitly off, in case the env leaks).
+    monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     filler_size = cap - 2_000  # forces the two files into separate chunks
@@ -945,20 +949,21 @@ def test_partial_terminal_failure_degrades_to_not_reviewed_finding(monkeypatch) 
         CodeReviewInput(files=files, task_description="t", language="python"),
     )
 
-    # The run completed without raising, but bad.py is named by a blocking
-    # high "not reviewed" finding, so the review is rejected.
-    assert result.approved is False
-    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
-    assert len(not_reviewed) == 1
-    assert not_reviewed[0].severity == "high"
-    assert not_reviewed[0].file_path == "bad.py"
+    # The run completed without raising and approved (good.py drives the verdict);
+    # bad.py is recorded only as a non-blocking not-reviewed range, never posted.
+    assert result.approved is True
+    assert not any("could not be reviewed" in i.description for i in result.issues)
+    assert any("bad.py" in r for r in result.not_reviewed_ranges)
+    assert not any("good.py" in r for r in result.not_reviewed_ranges)
 
 
 def test_degraded_pre_numbered_chunk_uses_embedded_line_numbers(monkeypatch) -> None:
     """For a pre-numbered (PR-diff) chunk, a not-reviewed finding must carry the
     real embedded line numbers — not the positional segment indices — so the
-    finding anchors to the correct diff lines downstream."""
+    finding anchors to the correct diff lines downstream. Anchoring only matters
+    when the finding is actually posted, i.e. under the fail-closed opt-out."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    monkeypatch.setenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", "true")
     # Embedded original lines 4000-4004 carry the marker; positional indices
     # for this segment would be 1-5, which must NOT leak into the finding.
     bad = "\n".join(f"{4000 + i}: FAILME_{i}()" for i in range(5))
@@ -980,12 +985,42 @@ def test_degraded_pre_numbered_chunk_uses_embedded_line_numbers(monkeypatch) -> 
     assert not_reviewed[0].line == 4004
 
 
-def test_degraded_finding_does_not_leak_raw_exception_text(monkeypatch) -> None:
-    """A not-reviewed finding names only the failure class — never ``str(exc)``.
-    Parse/schema errors embed raw model output (response previews, failing
-    field values); since findings are published verbatim by /review-pr, the
-    degraded finding must not carry that text."""
+def test_degraded_finding_does_not_leak_raw_exception_text_default(monkeypatch) -> None:
+    """On the default (graceful) path, a chunk that fails with a parse error that
+    embeds raw model output must not leak that text anywhere observable: not in
+    the merged summary and not in the non-blocking ``not_reviewed_ranges``."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
+    secret = "leaked_password = 'hunter2'"
+    leaky = LLMJsonParseError(
+        f"Could not parse structured JSON. Response preview: '{secret}'...",
+        response_preview=secret,
+    )
+    files = {
+        "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
+        "good.py": "ok = 1",
+    }
+    assert len(files["bad.py"]) < 2 * MIN_SPLIT_SEGMENT_CHARS
+
+    result = run_coordinator(
+        _SelectiveRaiser("FAILME", exc=leaky),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+
+    # bad.py is recorded as a not-reviewed range (non-blocking), never posted.
+    assert any("bad.py" in r for r in result.not_reviewed_ranges)
+    assert not any("could not be reviewed" in i.description for i in result.issues)
+    # Neither the summary nor the range labels carry the raw model output.
+    assert secret not in result.summary
+    assert secret not in " ".join(result.not_reviewed_ranges)
+
+
+def test_degraded_finding_does_not_leak_raw_exception_text_when_blocking(monkeypatch) -> None:
+    """Under the fail-closed opt-out, the posted not-reviewed finding names only
+    the failure class — never ``str(exc)`` — so parse/schema errors that embed
+    raw model output (response previews) can never reach a PR comment."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    monkeypatch.setenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", "true")
     secret = "leaked_password = 'hunter2'"
     leaky = LLMJsonParseError(
         f"Could not parse structured JSON. Response preview: '{secret}'...",
@@ -1003,7 +1038,7 @@ def test_degraded_finding_does_not_leak_raw_exception_text(monkeypatch) -> None:
     )
 
     not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
-    assert not_reviewed, "the failed chunk must surface a not-reviewed finding"
+    assert not_reviewed, "the failed chunk must surface a not-reviewed finding when blocking"
     finding = not_reviewed[0]
     # The failure class is named (useful diagnostic); the raw message is not.
     assert "LLMJsonParseError" in finding.description
@@ -1054,9 +1089,10 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
 def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
     """The chunk reviewer parses model output with a bare ``json.loads``; bad
     JSON surfaces as a raw ``json.JSONDecodeError``. That is recoverable model
-    output, so it must take the degrade path (blocking high finding, run
-    completes) — not fail closed like a reviewer-code bug."""
+    output, so it must take the degrade path (run completes, graceful) — not fail
+    closed like a reviewer-code bug. By default the range is non-blocking."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     filler_size = cap - 2_000
@@ -1069,22 +1105,22 @@ def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
         _SelectiveRaiser("FAILME", exc=bad_json),
         CodeReviewInput(files=files, task_description="t", language="python"),
     )
-    # Completed (no exception), but bad.py is blocked by a high not-reviewed finding.
-    assert result.approved is False
-    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
-    assert not_reviewed and not_reviewed[0].severity == "high"
-    assert not_reviewed[0].file_path == "bad.py"
+    # Completed (no exception); bad.py degrades to a non-blocking not-reviewed range.
+    assert result.approved is True
+    assert not any("could not be reviewed" in i.description for i in result.issues)
+    assert any("bad.py" in r for r in result.not_reviewed_ranges)
 
 
 def test_truncated_chunk_review_degrades_not_fails_closed(monkeypatch) -> None:
     """A chunk whose review response hits the output-token limit
     (``LLMTruncatedError``, finish_reason=length) is recoverable model output:
-    it must take the degrade path (bisect/retry, then a blocking high
-    not-reviewed finding, run completes) rather than aborting the whole review
-    job with an unexpected exception. Regression test for a real @khala review
-    run that failed with 'code review failed: Response truncated due to token
-    limit (finish_reason=length)'."""
+    it must take the degrade path (bisect/retry, then graceful degradation, run
+    completes) rather than aborting the whole review job with an unexpected
+    exception. Regression test for a real @khala review run that failed with
+    'code review failed: Response truncated due to token limit
+    (finish_reason=length)'."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
     filler_size = cap - 2_000
@@ -1101,11 +1137,274 @@ def test_truncated_chunk_review_degrades_not_fails_closed(monkeypatch) -> None:
         _SelectiveRaiser("FAILME", exc=truncated),
         CodeReviewInput(files=files, task_description="t", language="python"),
     )
-    # Completed (no exception), but bad.py is blocked by a high not-reviewed finding.
+    # Completed (no exception); bad.py degrades to a non-blocking not-reviewed range.
+    assert result.approved is True
+    assert not any("could not be reviewed" in i.description for i in result.issues)
+    assert any("bad.py" in r for r in result.not_reviewed_ranges)
+
+
+def test_not_reviewed_ranges_populated_and_not_in_issues(monkeypatch) -> None:
+    """A degraded chunk populates ``not_reviewed_ranges`` (observability) while
+    contributing nothing to ``issues`` on the default (graceful) path."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    filler_size = cap - 2_000
+    files = {
+        "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
+        "good.py": "ok = 1\n".ljust(filler_size, "#"),
+    }
+    result = run_coordinator(
+        _SelectiveRaiser("FAILME"),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+    assert result.not_reviewed_ranges == ["bad.py (lines 1-51)"]
+    assert result.issues == []
+
+
+def test_block_on_unreviewed_env_restores_fail_closed(monkeypatch) -> None:
+    """With ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` set, a partial degrade restores the
+    legacy fail-closed behavior: the unreviewable chunk becomes a blocking ``high``
+    finding in ``issues`` and rejects the merged review."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    monkeypatch.setenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", "true")
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    filler_size = cap - 2_000
+    files = {
+        "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
+        "good.py": "ok = 1\n".ljust(filler_size, "#"),
+    }
+    result = run_coordinator(
+        _SelectiveRaiser("FAILME"),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
     assert result.approved is False
     not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
-    assert not_reviewed and not_reviewed[0].severity == "high"
+    assert len(not_reviewed) == 1
+    assert not_reviewed[0].severity == "high"
     assert not_reviewed[0].file_path == "bad.py"
+    # The range is still surfaced for observability even under the opt-out.
+    assert any("bad.py" in r for r in result.not_reviewed_ranges)
+
+
+def test_total_failure_still_raises_even_with_graceful_default(monkeypatch) -> None:
+    """When NO chunk can be reviewed, the run produced no verdict at all — the
+    total-failure guard must still raise ``CodeReviewUnavailableError`` even though
+    partial degradation is now non-blocking by default."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    filler_size = cap - 2_000
+    # Two separate chunks, BOTH carrying the failure marker → nothing reviewed.
+    files = {
+        "bad1.py": "FAILME = True\n" + ("x = 1\n" * 20),
+        "bad2.py": "FAILME = True\n".ljust(filler_size, "#"),
+    }
+    client = _SelectiveRaiser("FAILME")
+    with pytest.raises(CodeReviewUnavailableError) as excinfo:
+        run_coordinator(
+            client,
+            CodeReviewInput(files=files, task_description="t", language="python"),
+        )
+    unreviewed = " ".join(excinfo.value.unreviewed)
+    assert "bad1.py" in unreviewed and "bad2.py" in unreviewed
+
+
+# ---------------------------------------------------------------------------
+# Last-resort thinking-off retry (make semantic exhaustion rare)
+# ---------------------------------------------------------------------------
+
+
+class _ThinkAwareReviewer:
+    """A stand-in ``ChunkReviewAgent`` whose ``run`` reacts to the ``think`` kwarg.
+
+    Records every ``think`` value passed. Raises ``fail_exc`` unless
+    ``recover_on_think_off`` and ``think is False``, in which case it returns a
+    clean approved output. ``.llm`` is a plain object so
+    ``thinking_override_supported`` can be monkeypatched to gate the retry on.
+    """
+
+    def __init__(self, fail_exc: Exception, recover_on_think_off: bool = True) -> None:
+        self.llm = object()
+        self.fail_exc = fail_exc
+        self.recover_on_think_off = recover_on_think_off
+        self.think_calls: List[Any] = []
+
+    def run(self, chunk_input: Any, think: Any = None) -> ChunkReviewOutput:
+        self.think_calls.append(think)
+        if self.recover_on_think_off and think is False:
+            return ChunkReviewOutput(approved=True, issues=[], summary="ok (thinking off)")
+        raise self.fail_exc
+
+
+def _tiny_chunk() -> ReviewChunk:
+    return ReviewChunk(
+        segments=[FileSegment(path="b.py", content="x = 1\n", start_line=1, total_lines=1)]
+    )
+
+
+def test_thinking_off_retry_recovers_semantic_exhaustion(monkeypatch) -> None:
+    """A terminal chunk that keeps exhausting under default thinking is recovered
+    by the last-resort thinking-off retry, producing a real review (no
+    not-reviewed range). The retry is normally skipped for injected strands
+    models, so force the production-path gate on to exercise it."""
+    from code_review_agent import mapping
+
+    monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
+    monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
+
+    reviewer = _ThinkAwareReviewer(LLMSemanticExhaustionError("reasoning only"))
+    outcome = mapping._review_chunk_with_recovery(
+        reviewer, _tiny_chunk(), {"language": "python", "task_description": "t"}
+    )
+
+    assert outcome.approved_flags == [True]
+    assert not outcome.not_reviewed_issues
+    assert outcome.degraded_recovery is True  # reduced-fidelity → excluded from cache
+    # initial + one same-input retry (both default thinking), then thinking-off.
+    assert reviewer.think_calls == [None, None, False]
+
+
+def test_thinking_off_retry_that_also_fails_degrades(monkeypatch) -> None:
+    """When the thinking-off retry ALSO returns a content failure, the chunk
+    degrades to a not-reviewed outcome rather than raising."""
+    from code_review_agent import mapping
+
+    monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
+    reviewer = _ThinkAwareReviewer(
+        LLMSemanticExhaustionError("still nothing"), recover_on_think_off=False
+    )
+    outcome = mapping._review_chunk_with_recovery(
+        reviewer, _tiny_chunk(), {"language": "python", "task_description": "t"}
+    )
+    assert outcome.approved_flags == []
+    assert outcome.not_reviewed_issues  # degraded
+    assert reviewer.think_calls == [None, None, False]
+
+
+def test_thinking_off_retry_infra_failure_raises_unavailable(monkeypatch) -> None:
+    """An infrastructure failure DURING the thinking-off retry surfaces as
+    ``CodeReviewUnavailableError`` (not a silent degrade)."""
+    from code_review_agent import mapping
+
+    monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
+
+    class _InfraOnThinkOff(_ThinkAwareReviewer):
+        def run(self, chunk_input: Any, think: Any = None) -> ChunkReviewOutput:
+            self.think_calls.append(think)
+            if think is False:
+                raise LLMRateLimitError("429 during thinking-off retry")
+            raise LLMSemanticExhaustionError("reasoning only")
+
+    reviewer = _InfraOnThinkOff(LLMSemanticExhaustionError("x"))
+    with pytest.raises(CodeReviewUnavailableError):
+        mapping._review_chunk_with_recovery(
+            reviewer, _tiny_chunk(), {"language": "python", "task_description": "t"}
+        )
+
+
+def test_thinking_off_retry_non_infra_error_degrades_best_effort(monkeypatch) -> None:
+    """A non-infra error during the best-effort thinking-off retry does not fail
+    the whole run: the chunk degrades on its original content failure (a genuine
+    reviewer-code bug would already have failed closed on the first attempt,
+    before this last-resort retry)."""
+    from code_review_agent import mapping
+
+    monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
+
+    class _BugOnThinkOff(_ThinkAwareReviewer):
+        def run(self, chunk_input: Any, think: Any = None) -> ChunkReviewOutput:
+            self.think_calls.append(think)
+            if think is False:
+                raise KeyError("unexpected during thinking-off retry")
+            raise LLMSemanticExhaustionError("reasoning only")
+
+    reviewer = _BugOnThinkOff(LLMSemanticExhaustionError("x"))
+    outcome = mapping._review_chunk_with_recovery(
+        reviewer, _tiny_chunk(), {"language": "python", "task_description": "t"}
+    )
+    assert outcome.not_reviewed_issues  # degraded rather than raising
+    assert reviewer.think_calls == [None, None, False]
+
+
+def test_thinking_off_retry_disabled_by_env(monkeypatch) -> None:
+    """With ``CODE_REVIEW_THINKING_OFF_RETRY`` off, a terminal exhaustion degrades
+    without attempting a thinking-off retry (no ``think=False`` call)."""
+    from code_review_agent import mapping
+
+    monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "false")
+    monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
+    reviewer = _ThinkAwareReviewer(LLMSemanticExhaustionError("reasoning only"))
+    outcome = mapping._review_chunk_with_recovery(
+        reviewer, _tiny_chunk(), {"language": "python", "task_description": "t"}
+    )
+    assert outcome.not_reviewed_issues  # degraded
+    assert False not in reviewer.think_calls  # never attempted thinking-off
+
+
+def test_thinking_off_retry_only_for_exhaustion_and_truncation(monkeypatch) -> None:
+    """A JSON parse failure is a content failure but not one a thinking-off pass
+    fixes, so the retry does not fire for it (it degrades directly)."""
+    from code_review_agent import mapping
+
+    monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
+    reviewer = _ThinkAwareReviewer(LLMJsonParseError("bad json", response_preview="x"))
+    outcome = mapping._review_chunk_with_recovery(
+        reviewer, _tiny_chunk(), {"language": "python", "task_description": "t"}
+    )
+    assert outcome.not_reviewed_issues  # degraded
+    assert False not in reviewer.think_calls  # parse errors don't trigger thinking-off
+
+
+def test_resolve_code_review_model_think_override(monkeypatch) -> None:
+    """``resolve_code_review_model`` forwards ``think`` to ``get_strands_model`` on
+    the production path, omits it when None, and returns an injected strands model
+    unchanged (its thinking level can't be re-resolved)."""
+    from code_review_agent import model_resolution
+    from code_review_agent.model_resolution import (
+        resolve_code_review_model,
+        thinking_override_supported,
+    )
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_get(agent_key: str, **kw: Any) -> str:
+        captured["agent_key"] = agent_key
+        captured["think"] = kw.get("think", "OMITTED")
+        return "MODEL"
+
+    monkeypatch.setattr(model_resolution, "get_strands_model", _fake_get)
+
+    assert resolve_code_review_model(object(), think=False) == "MODEL"
+    assert captured == {"agent_key": "code_review", "think": False}
+    captured.clear()
+    assert resolve_code_review_model(object()) == "MODEL"
+    assert captured == {"agent_key": "code_review", "think": "OMITTED"}  # think not passed
+
+    dummy = DummyLLMClient()  # a strands Model — returned unchanged, think ignored
+    assert resolve_code_review_model(dummy, think=False) is dummy
+    assert thinking_override_supported(dummy) is False
+    assert thinking_override_supported(object()) is True
+
+
+def test_not_reviewed_range_label_edge_cases() -> None:
+    """The observability label handles a missing path and a missing line range."""
+    from code_review_agent.coordinator import _not_reviewed_range_label
+    from code_review_agent.models import CodeReviewIssue
+
+    assert (
+        _not_reviewed_range_label(
+            CodeReviewIssue(file_path="a.py", start_line=3, line=9, description="")
+        )
+        == "a.py (lines 3-9)"
+    )
+    # No line range → just the path.
+    assert _not_reviewed_range_label(CodeReviewIssue(file_path="a.py", description="")) == "a.py"
+    # Headerless finding with no path.
+    assert _not_reviewed_range_label(CodeReviewIssue(file_path="", description="")) == "(unknown)"
 
 
 def test_all_empty_files_completes_with_info_findings_not_raise() -> None:
