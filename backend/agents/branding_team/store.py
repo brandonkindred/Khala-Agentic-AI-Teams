@@ -34,6 +34,7 @@ from user_profile import ArtifactType, record_association_safe
 from .models import (
     Brand,
     BrandingMission,
+    BrandPhase,
     BrandStatus,
     BrandVersionSummary,
     Client,
@@ -321,6 +322,14 @@ class BrandingStore:
         patch: dict = {"updated_at": _now_iso()}
         if mission is not None:
             patch["mission"] = mission.model_dump(mode="json")
+            # A mission edit invalidates any previously generated output: it was
+            # produced from the *old* mission, so ``latest_output`` (and the
+            # phase progress it represents) no longer reflect this brand. Clear
+            # them so downstream consumers — notably the design-assets endpoint,
+            # which reuses ``latest_output.strategic_core`` — recompute from the
+            # current mission instead of serving stale positioning.
+            patch["latest_output"] = None
+            patch["current_phase"] = BrandPhase.STRATEGIC_CORE.value
         if status is not None:
             patch["status"] = status.value
         if name is not None:

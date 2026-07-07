@@ -367,6 +367,68 @@ def test_request_design_assets_reuses_cached_strategic_core() -> None:
     assert any("CACHED-POSITIONING" in a for a in resp.json()["artifacts"])
 
 
+def test_request_design_assets_recomputes_after_mission_edit() -> None:
+    """Editing the mission invalidates the cached core, so Phase 1 re-runs.
+
+    Guards against serving stale positioning from a strategic core generated for
+    a previous mission (the cache is only reused when it reflects the current
+    mission).
+    """
+    from branding_team.models import (
+        BrandPhase,
+        StrategicCoreOutput,
+        TeamOutput,
+        WorkflowStatus,
+    )
+
+    create_c = client.post("/clients", json={"name": "Edit Cache Client"})
+    client_id = create_c.json()["id"]
+    create_b = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "EditCo",
+            "company_description": "Original description for cache-invalidation test",
+            "target_audience": "designers",
+        },
+    )
+    brand_id = create_b.json()["id"]
+
+    # Persist a strategic core built from the original mission.
+    branding_store.append_brand_version(
+        client_id,
+        brand_id,
+        TeamOutput(
+            status=WorkflowStatus.READY_FOR_ROLLOUT,
+            mission_summary="cached",
+            current_phase=BrandPhase.STRATEGIC_CORE,
+            strategic_core=StrategicCoreOutput(positioning_statement="STALE-POSITIONING"),
+        ),
+    )
+
+    # Edit the mission — this must clear the now-stale latest_output.
+    edit = client.put(
+        f"/clients/{client_id}/brands/{brand_id}",
+        json={"company_description": "A substantially rewritten company description"},
+    )
+    assert edit.status_code == 200
+    assert edit.json()["latest_output"] is None
+
+    # With no valid cached core, the endpoint recomputes Phase 1 (patched here).
+    fresh = TeamOutput(
+        status=WorkflowStatus.NEEDS_HUMAN_DECISION,
+        mission_summary="fresh",
+        current_phase=BrandPhase.STRATEGIC_CORE,
+        strategic_core=StrategicCoreOutput(positioning_statement="FRESH-POSITIONING"),
+    )
+    with patch(
+        "branding_team.api.main.orchestrator.run_phase", return_value=fresh
+    ) as mock_run_phase:
+        resp = client.post(f"/clients/{client_id}/brands/{brand_id}/request-design-assets")
+        assert resp.status_code == 200
+        mock_run_phase.assert_called_once()
+    assert any("FRESH-POSITIONING" in a for a in resp.json()["artifacts"])
+
+
 def test_request_design_assets_unknown_brand_404() -> None:
     create_c = client.post("/clients", json={"name": "DA 404 Client"})
     client_id = create_c.json()["id"]

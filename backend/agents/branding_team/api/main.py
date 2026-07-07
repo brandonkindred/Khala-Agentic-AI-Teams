@@ -1185,13 +1185,17 @@ async def create_branding_conversation(
 ) -> ConversationStateResponse:
     """Create a conversation, optionally seeding it with an initial message.
 
-    The initial-message path runs the assistant (two LLM calls) and may run the
-    full ~40-agent pipeline, so the blocking body executes on the bounded
-    pipeline executor (see ``_run_in_pipeline_executor``) rather than holding a
-    worker thread — or the shared default executor — for the whole request.
+    Only the initial-message path runs the assistant (two LLM calls) and may run
+    the full ~40-agent pipeline, so it goes on the bounded pipeline executor
+    (see ``_run_in_pipeline_executor``). The no-initial-message path only creates
+    a conversation row and persists a greeting, so it stays off that pool — where
+    it could otherwise queue behind multi-minute pipeline runs and make opening a
+    fresh chat hang under load — and runs on the default executor instead.
     """
     req = body or CreateConversationRequest()
-    return await _run_in_pipeline_executor(_create_branding_conversation_impl, req)
+    if (req.initial_message or "").strip():
+        return await _run_in_pipeline_executor(_create_branding_conversation_impl, req)
+    return await asyncio.to_thread(_create_branding_conversation_impl, req)
 
 
 def _create_branding_conversation_impl(
