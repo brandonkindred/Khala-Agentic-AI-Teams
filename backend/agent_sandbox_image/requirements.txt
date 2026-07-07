@@ -8,6 +8,10 @@
 
 # Core web + data
 pydantic>=2.12,<3.0
+# Direct dep: the sandbox loads agent_registry.models (AgentManifest validation +
+# injected-manifest registration), which imports jsonschema at module load.
+# Currently satisfied transitively via strands-agents/mcp, but declared directly.
+jsonschema>=4.23,<5.0
 pyyaml>=6.0,<7.0
 httpx>=0.28,<1.0
 beautifulsoup4>=4.14,<5.0
