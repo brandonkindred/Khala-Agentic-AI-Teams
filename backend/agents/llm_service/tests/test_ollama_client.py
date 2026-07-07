@@ -1520,6 +1520,79 @@ def test_semantic_exhaustion_log_reports_reasoning_channel_diagnostic(
     assert "reasoning_len=0" not in receipts[0]  # a non-empty reasoning channel was seen
 
 
+def test_semantic_exhaustion_diagnostic_accumulates_across_ladder(
+    monkeypatch: pytest.MonkeyPatch, caplog: "pytest.LogCaptureFixture"
+) -> None:
+    """The receipt's reasoning diagnostic reflects any rung that held the answer —
+    not just the final thinking-off rung, which carries no reasoning. A first rung
+    with JSON in reasoning followed by an empty thinking-off rung still reports
+    reasoning_has_json=True."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    with_json = [
+        'data: {"choices":[{"delta":{"reasoning":"draft {\\"approved\\": false} end"},'
+        '"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    # Rung 1 (high) has JSON in reasoning; rung 2 (thinking-off) is truly empty.
+    cms = [_stream_cm(200, sse_lines=with_json), _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE))]
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.ERROR, logger="llm_service.clients.ollama"),
+    ):
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        with pytest.raises(LLMSemanticExhaustionError):
+            client.complete_json("q", objective="test", temperature=0, think="high")
+    assert [c["reasoning_effort"] for c in captured] == ["high", "none"]
+    receipt = next(r.getMessage() for r in caplog.records if "semantic_exhaustion" in r.getMessage())
+    # Accumulated from rung 1, not taken from the empty final rung.
+    assert "reasoning_has_json=True" in receipt
+
+
+def test_boolean_thinking_retries_once_with_thinking_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """think=True on a model with no registered levels retries exactly once with
+    thinking disabled (the ladder's boolean-on rung) before exhausting."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    cms = [
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+            client.complete_json("q", objective="test", temperature=0, think=True)
+    assert captured[0]["think"] is True
+    assert captured[1]["think"] is False
+    assert captured[1]["reasoning_effort"] == "none"
+    assert exc_info.value.attempts_used == 2
+    assert exc_info.value.retry_thinking_level is False
+
+
+def test_reasoning_json_probe_is_total_including_recursion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reasoning-channel JSON probe never raises — including on deeply nested
+    input, where ``json.loads`` raises ``RecursionError`` (not a ``ValueError``)."""
+    from llm_service.clients.ollama import _reasoning_json_probe
+
+    assert _reasoning_json_probe("") is False
+    assert _reasoning_json_probe("no braces here") is False
+    assert _reasoning_json_probe('prose {"a": 1} more prose') is True
+    assert _reasoning_json_probe("}{ closing before opening") is False
+    assert _reasoning_json_probe("{ never closed") is False
+    assert _reasoning_json_probe("{not: valid}") is False  # braces present but unparseable
+    # Deeply nested object → json.loads exceeds the recursion limit; must be caught.
+    deep = '{"a":' * 2000 + "1" + "}" * 2000
+    assert _reasoning_json_probe(deep) is False
+
+
 @pytest.mark.parametrize(
     "invoke",
     [

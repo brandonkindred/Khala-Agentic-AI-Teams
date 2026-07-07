@@ -81,10 +81,11 @@ skipped — e.g. `deepseek-v4-pro:cloud` collapses low/medium/high to one reason
 unregistered thinking goes straight to `think=False`. When the ladder is exhausted — or thinking is
 already off, leaving no provable change — the call fails hard with `LLMSemanticExhaustionError`,
 whose receipt carries `failure_class`, `attempts_used`, the original and last retry thinking levels,
-whether any raw (necessarily whitespace-only) content bytes were ever seen, the `finish_reason`, a
-diagnostic of the reasoning channel (its length and whether a JSON object was found there — to detect
-answers misrouted into reasoning), and a fingerprint of the last payload (also logged at ERROR; each
-downgrade is logged at WARNING). Transient 5xx/connection/timeout faults and 429s keep their own
+whether any raw (necessarily whitespace-only) content bytes were ever seen, the `finish_reason`, and a
+fingerprint of the last payload. The same ERROR log line additionally reports a diagnostic of the
+reasoning channel (its accumulated length across attempts and whether a JSON object was found there —
+to detect answers misrouted into reasoning); these two fields are logged only, not carried on the
+exception object. Each downgrade rung is logged at WARNING. Transient 5xx/connection/timeout faults and 429s keep their own
 independent schedules before and after the downgrades. Disabling the toggle restores the legacy
 behavior (empty 200s retried verbatim on the transient schedule).
 

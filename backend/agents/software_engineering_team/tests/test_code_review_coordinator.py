@@ -933,8 +933,13 @@ def test_semantic_exhaustion_single_file_degrades_without_bisect_or_retry() -> N
     n_lines = ((2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2) // line_len
     content = "\n".join(f"FAILME {i:05d}".ljust(40, "x") for i in range(1, n_lines + 1))
     assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
+    # retry_thinking_level set => the client actually spent its downgrade ladder,
+    # so re-sampling is futile and the fast-path degrades without retry.
     client = _SelectiveRaiser(
-        "FAILME", exc=LLMSemanticExhaustionError("LLM returned reasoning only (no content)")
+        "FAILME",
+        exc=LLMSemanticExhaustionError(
+            "LLM returned reasoning only (no content)", retry_thinking_level=False
+        ),
     )
     with pytest.raises(CodeReviewUnavailableError) as excinfo:
         run_coordinator(
@@ -953,7 +958,7 @@ def test_semantic_exhaustion_multi_file_still_separates_files() -> None:
     class _FailWhenBadPresent(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             if "### bad.py ###" in prompt:
-                raise LLMSemanticExhaustionError("no content")
+                raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
             return super().complete_json(prompt, **kwargs)
 
     result = run_coordinator(
@@ -967,6 +972,74 @@ def test_semantic_exhaustion_multi_file_still_separates_files() -> None:
     not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
     assert [i.file_path for i in not_reviewed] == ["bad.py"]  # good.py was reviewed
     assert result.approved is False  # bad.py's blocking high finding rejects the merge
+
+
+def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> None:
+    """A semantic exhaustion where the client ran NO downgrade ladder
+    (retry_thinking_level is None — e.g. thinking was already off) is a stochastic
+    empty, not a doomed reasoning loop: the coordinator still gives it one
+    same-input retry, recovering a single-file chunk a fast-path degrade would have
+    blocked."""
+
+    class _FailOnceNoLadder(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                # retry_thinking_level defaults to None: no proof-of-change rung ran.
+                raise LLMSemanticExhaustionError("reasoning only")
+            return super().complete_json(prompt, **kwargs)
+
+    client = _FailOnceNoLadder()
+    result = run_coordinator(
+        client,
+        CodeReviewInput(
+            files={"only.py": "def only(): pass"}, task_description="t", language="python"
+        ),
+    )
+    assert result.approved is True
+    assert client.calls == 2  # initial no-ladder exhaustion + successful same-input retry
+
+
+def test_context_chained_child_failure_is_not_misclassified_as_semantic() -> None:
+    """A child truncation raised while recovering a semantically-exhausted multi-file
+    chunk must keep its own line-bisect/retry recovery — recovery runs outside the
+    parent's ``except`` block, so the parent's exhaustion is never context-chained
+    onto the child (which would wrongly fast-path-degrade the truncation)."""
+
+    class _CombinedExhaustsChildTruncatesOnce(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bad_calls = 0
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if "### a.py ###" in prompt and "### b.py ###" in prompt:
+                # Combined chunk semantically exhausts → split by file.
+                raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
+            if "### a.py ###" in prompt:
+                self.bad_calls += 1
+                if self.bad_calls == 1:
+                    # a.py's own first attempt truncates; a same-input retry recovers
+                    # it — but only if it was NOT misclassified as semantic.
+                    raise LLMTruncatedError("truncated", finish_reason="length")
+            return super().complete_json(prompt, **kwargs)
+
+    client = _CombinedExhaustsChildTruncatesOnce()
+    result = run_coordinator(
+        client,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    # a.py recovered via its own retry (not degraded), so the review approves with
+    # no "not reviewed" findings — the context-chain misclassification is gone.
+    assert result.approved is True
+    assert not [i for i in result.issues if "could not be reviewed" in i.description]
 
 
 def test_persistent_small_chunk_failure_raises_unavailable() -> None:

@@ -3,6 +3,7 @@
 import pytest
 
 from llm_service import config
+from llm_service.attribution import llm_attribution
 
 
 def test_resolve_provider_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,30 +164,52 @@ def test_resolve_think_env_high_selects_documented_lower_level(
     assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "high"
 
 
-@pytest.mark.parametrize(
-    ("model", "think", "expected"),
-    [
-        # Registered-levels model: step down one level; lowest has nothing below.
-        ("deepseek-v4-pro:cloud", "max", "high"),
-        ("deepseek-v4-pro:cloud", "high", "medium"),
-        ("deepseek-v4-pro:cloud", "medium", "low"),
-        ("deepseek-v4-pro:cloud", "low", None),
-        # Boolean thinking: True -> False; False is already off.
-        ("unknown-model", True, False),
-        ("unknown-model", False, None),
-        ("deepseek-v4-pro:cloud", True, False),
-        # Unregistered level string: disabling reasoning is the only provable change.
-        ("unknown-model", "high", False),
-        ("deepseek-v4-pro:cloud", "xhigh", False),
-    ],
-)
-def test_downgrade_think(model: str, think: "bool | str", expected: "bool | str | None") -> None:
-    assert config.downgrade_think(model, think) == expected
+def test_agent_pin_applies_for_registered_model(clean_thinking_env) -> None:
+    """An agent in AGENT_DEFAULT_THINK (code_review) resolves think=None to its
+    pinned tier for a model that registers the level."""
+    with llm_attribution(agent_key="code_review"):
+        assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "high"
 
 
-def test_downgrade_think_lowest_level_returns_none_not_false() -> None:
-    """The lowest registered level must yield None (no proof of change), not False."""
-    assert config.downgrade_think("deepseek-v4-pro:cloud", "low") is None
+def test_agent_pin_dropped_for_unregistered_model(clean_thinking_env) -> None:
+    """The pin is never put on the wire for a model that does not register the
+    level: it falls back to that model's safe default (plain boolean think),
+    instead of sending an unvalidated reasoning_effort guess."""
+    with llm_attribution(agent_key="code_review"):
+        assert config.resolve_think_for_model("llama3.1", None) is True
+
+
+def test_agent_pin_defers_to_enable_thinking_kill_switch(monkeypatch) -> None:
+    """LLM_ENABLE_THINKING=false (the global kill switch) outranks the pin, so an
+    operator can still disable thinking for a pinned agent."""
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
+    with llm_attribution(agent_key="code_review"):
+        assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) is False
+
+
+def test_agent_pin_defers_to_level_override(monkeypatch) -> None:
+    """LLM_THINKING_LEVEL (the operator level override) outranks the pin."""
+    monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
+    monkeypatch.setenv("LLM_THINKING_LEVEL", "low")
+    with llm_attribution(agent_key="code_review"):
+        assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "low"
+
+
+def test_no_agent_pin_for_unlisted_agent_or_no_attribution(clean_thinking_env) -> None:
+    """An agent with no pin — or no attribution at all — resolves to the model's
+    platform-default (max) tier, unchanged by the pin machinery."""
+    with llm_attribution(agent_key="backend"):
+        assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "max"
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "max"
+
+
+def test_agent_pin_only_replaces_the_none_default(clean_thinking_env) -> None:
+    """An explicit caller think value still wins over the pin (the pin is only a
+    replacement for the None default)."""
+    with llm_attribution(agent_key="code_review"):
+        assert config.resolve_think_for_model("deepseek-v4-pro:cloud", "max") == "max"
+        assert config.resolve_think_for_model("deepseek-v4-pro:cloud", False) is False
 
 
 @pytest.mark.parametrize(

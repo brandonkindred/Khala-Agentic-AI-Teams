@@ -224,9 +224,10 @@ def _semantic_retry_think(model: str, active_think: "bool | str | None") -> "boo
     force such a model to open the content channel.
 
     The ladder, from ``active_think`` (the value the just-failed attempt used):
-      - the model's TOP registered tier       -> one notch down (e.g. ``max`` -> ``high``);
-      - any already-reduced tier / boolean-on  -> ``False`` (thinking disabled);
-      - already-off / unknown level            -> ``None`` (no further provable change).
+      - the model's TOP registered tier              -> one notch down (e.g. ``max`` -> ``high``);
+      - any already-reduced tier / unregistered
+        level string / boolean-on (``True``)         -> ``False`` (thinking disabled);
+      - already-off (``False``) / no value (``None``) -> ``None`` (no further provable change).
 
     Intermediate registered tiers are intentionally skipped once below the top
     tier: for the models in use (e.g. ``deepseek-v4-pro:cloud``, whose
@@ -260,11 +261,15 @@ def _max_semantic_retries(model: str, resolved_think: "bool | str | None") -> in
 
     Mirrors :func:`_semantic_retry_think`'s ladder length so the request loop's
     log denominator and its hard cap stay honest:
-      - top tier of a multi-tier model            -> 2 (one notch down, then off);
-      - any other on-thinking value               -> 1 (thinking-off);
-      - already-off / unknown / feature disabled  -> 0.
+      - top tier of a multi-tier model                     -> 2 (one notch down, then off);
+      - any other on-thinking value (reduced tier,
+        unregistered level string, boolean-on ``True``)    -> 1 (thinking-off);
+      - already-off (``False``) / no value (``None``) /
+        feature disabled                                   -> 0.
 
-    Postconditions: returns a non-negative int; pure function, never raises.
+    Postconditions: returns a non-negative int; never raises. Reads
+        ``LLM_THINKING_DOWNGRADE_RETRY`` (via ``_thinking_downgrade_enabled``), so
+        it is not a pure function.
     """
     if not _thinking_downgrade_enabled():
         return 0
@@ -287,7 +292,10 @@ def _reasoning_json_probe(reasoning: str) -> bool:
     salvage is worthwhile. Diagnostic only — never used as answer content here.
 
     Postconditions: True iff the first-``{``-to-last-``}`` slice parses as JSON;
-        never raises (any parse failure → False).
+        never raises (any parse failure → False). ``RecursionError`` is caught
+        explicitly: ``json.loads`` recurses per nesting level, so a degenerate
+        deeply-nested reasoning channel would otherwise escape a
+        ``ValueError``-only guard and crash the parse of an otherwise-valid call.
     """
     if not reasoning:
         return False
@@ -298,7 +306,7 @@ def _reasoning_json_probe(reasoning: str) -> bool:
     try:
         json.loads(reasoning[start : end + 1])
         return True
-    except (ValueError, TypeError):
+    except (ValueError, RecursionError):
         return False
 
 
@@ -919,10 +927,13 @@ class OllamaLLMClient(LLMClient):
             if msg.get("reasoning_content"):
                 envelope["__reasoning_content__"] = msg["reasoning_content"]
             return json.dumps(envelope)
+        # reasoning_len/has_reasoning are O(1); the JSON probe is O(n) + a parse,
+        # so it is computed lazily only on the two empty-content raise paths below
+        # (its result is consumed solely by the semantic-exhaustion receipt) — never
+        # on the hot path of a successful response.
         reasoning_text = str(msg.get("reasoning_content") or "")
         has_reasoning = bool(reasoning_text)
         reasoning_len = len(reasoning_text)
-        reasoning_has_json = _reasoning_json_probe(reasoning_text)
         if finish_reason == "length":
             partial_content = msg.get("content", "")
             partial_content = str(partial_content) if partial_content else ""
@@ -932,7 +943,7 @@ class OllamaLLMClient(LLMClient):
                     has_reasoning,
                     len(partial_content),
                     reasoning_len=reasoning_len,
-                    reasoning_has_json=reasoning_has_json,
+                    reasoning_has_json=_reasoning_json_probe(reasoning_text),
                 )
             logger.warning(
                 "LLM response truncated (rid=%s, %s, finish_reason=length). Partial content: %d chars",
@@ -955,7 +966,7 @@ class OllamaLLMClient(LLMClient):
                 has_reasoning,
                 len(content_str),
                 reasoning_len=reasoning_len,
-                reasoning_has_json=reasoning_has_json,
+                reasoning_has_json=_reasoning_json_probe(reasoning_text),
             )
         return content_str
 
@@ -984,9 +995,11 @@ class OllamaLLMClient(LLMClient):
         (``rate_limit_max_retries`` / ``rate_limit_initial`` / ``rate_limit_cap``).
 
         Semantic exhaustion (HTTP 200 with zero assistant content, typically a
-        reasoning-only response) is a THIRD failure class with its own budget:
-        at most ONE immediate proof-of-change retry with reduced thinking
-        (``downgrade_think``), after which the call fails hard with
+        reasoning-only response) is a THIRD failure class with its own budget: an
+        immediate proof-of-change retry ladder that steps reasoning down and ends
+        by disabling thinking entirely (see ``_semantic_retry_think`` /
+        ``_max_semantic_retries`` — up to two rungs from a top tier, e.g.
+        ``max`` -> ``high`` -> off), after which the call fails hard with
         ``LLMSemanticExhaustionError`` instead of re-sending the same payload on
         the transient schedule.
 
@@ -1001,8 +1014,8 @@ class OllamaLLMClient(LLMClient):
             The transient schedule is unaffected by the rate-limit schedule and
             vice versa. Raises ``LLMRateLimitError`` only after the rate-limit
             budget is exhausted, ``LLMTemporaryError`` after the transient budget,
-            ``LLMSemanticExhaustionError`` after the (at most one) thinking
-            downgrade, or ``LLMPermanentError``/``LLMTruncatedError`` immediately.
+            ``LLMSemanticExhaustionError`` after the thinking-downgrade ladder is
+            exhausted, or ``LLMPermanentError``/``LLMTruncatedError`` immediately.
         """
         url = f"{self.base_url}/v1/chat/completions"
         last_error: Optional[Exception] = None
@@ -1010,9 +1023,9 @@ class OllamaLLMClient(LLMClient):
         stream_payload = {**payload, "stream": True}
         # Three INDEPENDENT retry budgets share one loop: a 429 must never consume
         # a transient attempt and vice versa, and the semantic-exhaustion budget
-        # (at most one thinking-downgrade retry) is separate from both. The loop
-        # is bounded by the sum of all budgets (+1 for the first attempt) so it
-        # always terminates by returning or raising.
+        # (a thinking-downgrade ladder) is separate from both. The loop is bounded
+        # by the sum of all budgets (+1 for the first attempt) so it always
+        # terminates by returning or raising.
         transient_attempt = 0
         rate_limit_attempt = 0
         # Semantic-exhaustion state: `semantic_attempt` counts the proof-of-change
@@ -1023,6 +1036,12 @@ class OllamaLLMClient(LLMClient):
         semantic_attempt = 0
         active_think: "bool | str | None" = resolved_think
         any_content_bytes = False
+        # Reasoning-channel diagnostics accumulated ACROSS attempts (like
+        # any_content_bytes): the final thinking-off rung carries no reasoning, so
+        # taking these from the last signal alone would report 0/False even when an
+        # earlier reasoning-heavy rung held the misrouted answer.
+        reasoning_len_seen = 0
+        reasoning_has_json_seen = False
         max_semantic_retries = _max_semantic_retries(self.model, resolved_think)
         # Log denominator: one slot for the first attempt plus every budget.
         max_total_attempts = max_retries + rate_limit_max_retries + 1 + max_semantic_retries
@@ -1228,7 +1247,8 @@ class OllamaLLMClient(LLMClient):
                                     # Logged at INFO, not WARNING.
                                     logger.info(
                                         "LLM returned reasoning only (no content) for caller=%s; "
-                                        "the empty-response handler will retry once with reduced thinking.",
+                                        "the empty-response handler will retry with progressively "
+                                        "reduced thinking (ending in thinking-off).",
                                         caller,
                                     )
                                 tool_calls = None
@@ -1383,8 +1403,13 @@ class OllamaLLMClient(LLMClient):
                         continue
                     raise last_error
                 # Receipt state — only consumed by the semantic-exhaustion
-                # receipt below, so only tracked on the downgrade path.
+                # receipt below, so only tracked on the downgrade path. The
+                # reasoning diagnostics accumulate across rungs so the receipt
+                # reflects the reasoning-heavy early attempts, not the empty
+                # thinking-off rung that usually raises.
                 any_content_bytes = any_content_bytes or sig.content_len > 0
+                reasoning_len_seen = max(reasoning_len_seen, sig.reasoning_len)
+                reasoning_has_json_seen = reasoning_has_json_seen or sig.reasoning_has_json
                 new_think = (
                     _semantic_retry_think(self.model, active_think)
                     if semantic_attempt < max_semantic_retries
@@ -1423,8 +1448,8 @@ class OllamaLLMClient(LLMClient):
                     retry_level,
                     any_content_bytes,
                     sig.finish_reason,
-                    sig.reasoning_len,
-                    sig.reasoning_has_json,
+                    reasoning_len_seen,
+                    reasoning_has_json_seen,
                     fingerprint,
                 )
                 # Raising inside this handler guarantees the sibling

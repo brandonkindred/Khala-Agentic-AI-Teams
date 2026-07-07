@@ -188,13 +188,6 @@ def get_strands_model(
     # times; this collapses that to one.
     provider = llm_config.resolve_provider()
 
-    # Pin a reduced default thinking level for agents that would otherwise run
-    # the model's "max" reasoning tier (which can produce content-free,
-    # reasoning-only turns in JSON mode → semantic exhaustion). Derived from the
-    # agent key so it is deterministic per agent_key (already part of the cache
-    # key); None for unlisted agents, leaving the model's platform default intact.
-    resolved_think = llm_config.resolve_agent_default_think(agent_key)
-
     # Provider-aware model id: under LLM_PROVIDER=claude the Strands model_id /
     # cache key must use the Claude model, not the Ollama-resolved one, or
     # telemetry and the cache identity are tagged with the wrong model name.
@@ -223,7 +216,6 @@ def get_strands_model(
             agent_key=agent_key,
             model_id=client_model
             or llm_config.resolve_model_for_provider(agent_key, provider=provider),
-            think=resolved_think,
             response_format=response_format,
         )
 
@@ -264,7 +256,6 @@ def get_strands_model(
                 backing_client,
                 agent_key=agent_key,
                 model_id=model_id,
-                think=resolved_think,
                 response_format=response_format,
             )
             logger.info(
