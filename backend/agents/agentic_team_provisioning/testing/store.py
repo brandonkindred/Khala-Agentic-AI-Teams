@@ -265,18 +265,43 @@ class AgenticTestStore:
 
     @timed_query(store=_STORE, op="create_pipeline_run")
     def create_pipeline_run(
-        self, run_id: str, team_id: str, process_id: str, initial_input: Optional[str] = None
+        self,
+        run_id: str,
+        team_id: str,
+        process_id: str,
+        initial_input: Optional[str] = None,
+        temporal_owned: bool = False,
     ) -> dict:
+        """Insert a new pipeline run row.
+
+        Preconditions: ``run_id``/``team_id``/``process_id`` are non-empty strs;
+            ``temporal_owned`` is True iff a Temporal workflow (not the in-process
+            daemon thread) owns this run's execution and restart recovery.
+        Postconditions: a ``running`` row exists with ``heartbeat_at = now`` and
+            ``temporal_owned`` persisted; the returned dict mirrors the inserted row.
+            When ``temporal_owned`` is True the heartbeat-staleness reaper will skip
+            this row (Temporal owns liveness) — see ``reap_orphaned_pipeline_runs``.
+        """
         now = _now()
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO agentic_test_pipeline_runs "
                 "(run_id, team_id, process_id, status, initial_input, step_results, "
-                "started_at, heartbeat_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                "started_at, heartbeat_at, temporal_owned) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 # heartbeat_at is set at creation so the row is never mistaken for a
                 # stale orphan in the window before the runner's first heartbeat.
-                (run_id, team_id, process_id, "running", initial_input, Json([]), now, now),
+                (
+                    run_id,
+                    team_id,
+                    process_id,
+                    "running",
+                    initial_input,
+                    Json([]),
+                    now,
+                    now,
+                    temporal_owned,
+                ),
             )
         return {
             "run_id": run_id,
@@ -291,6 +316,27 @@ class AgenticTestStore:
             "started_at": now.isoformat(),
             "finished_at": None,
         }
+
+    @timed_query(store=_STORE, op="is_pipeline_run_temporal_owned")
+    def is_pipeline_run_temporal_owned(self, run_id: str) -> bool:
+        """Return whether a run's execution is owned by a Temporal workflow.
+
+        The submit/cancel endpoints branch on the run's *persisted* owner rather
+        than the current process's ``TEMPORAL_ADDRESS`` env, so a config flip
+        between dispatch and resume cannot misroute a resume/cancel.
+
+        Preconditions: ``run_id`` is a non-empty str.
+        Postconditions: returns the row's ``temporal_owned`` flag, or ``False`` if
+            the run does not exist.
+        """
+        assert run_id, "run_id must be non-empty"
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT temporal_owned FROM agentic_test_pipeline_runs WHERE run_id = %s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+        return bool(row["temporal_owned"]) if row else False
 
     @timed_query(store=_STORE, op="get_pipeline_run")
     def get_pipeline_run(self, run_id: str) -> Optional[dict]:
@@ -560,12 +606,17 @@ class AgenticTestStore:
         heartbeating and is reaped once it exceeds ``stale_seconds``. Rows with a NULL
         heartbeat (created before this feature) are treated as stale.
 
+        Temporal-owned runs (``temporal_owned = TRUE``) are excluded: they have no
+        heartbeat thread (a Temporal workflow drives them and resumes after a
+        service restart), so reaping them on heartbeat staleness would wrongly fail a
+        run Temporal is about to resume.
+
         Preconditions:
             ``error`` is a str; ``stale_seconds`` is a positive int.
         Postconditions:
             Returns the number of rows transitioned to ``failed`` (0 if the advisory
             lock was not acquired, i.e. another worker is reaping concurrently). Never
-            touches non-active or freshly-heartbeated rows.
+            touches non-active, freshly-heartbeated, or Temporal-owned rows.
         """
         assert stale_seconds > 0, "stale_seconds must be positive"
         now = _now()
@@ -580,6 +631,7 @@ class AgenticTestStore:
                 "UPDATE agentic_test_pipeline_runs "
                 "SET status = 'failed', error = %s, finished_at = %s "
                 "WHERE status IN ('running', 'waiting_for_input') "
+                "AND NOT temporal_owned "
                 "AND (heartbeat_at IS NULL OR heartbeat_at < %s)",
                 (error, now, _stale_cutoff(now, stale_seconds)),
             )

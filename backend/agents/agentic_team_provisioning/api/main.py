@@ -82,6 +82,35 @@ from shared_app import create_team_app
 
 logger = logging.getLogger(__name__)
 
+
+def _startup() -> None:
+    """Start the Temporal worker backstop (best-effort).
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this backstop
+    covers running the app standalone (``uvicorn ...:app``).
+
+    Preconditions:
+        - None (safe to call once at app startup).
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged as a
+          warning so it cannot abort app boot (this runs as an ``on_startup`` hook).
+    """
+    try:
+        from agentic_team_provisioning.temporal.worker import (
+            start_agentic_team_provisioning_temporal_worker_thread,
+        )
+
+        start_agentic_team_provisioning_temporal_worker_thread()
+    except Exception:
+        logger.warning(
+            "agentic_team_provisioning Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
+
 app = create_team_app(
     service_name="agentic-team-provisioning",
     team_key="agentic_team_provisioning",
@@ -89,6 +118,7 @@ app = create_team_app(
     description="Create agentic teams and define their processes through conversation",
     version="0.1.0",
     postgres_schema=AGENTIC_POSTGRES_SCHEMA,
+    on_startup=_startup,
 )
 
 _store = AgenticTeamStore()
@@ -1225,6 +1255,55 @@ def get_agent_quality_scores(team_id: str):
 # ---------------------------------------------------------------------------
 
 
+def _temporal_enabled() -> bool:
+    """Return whether Temporal dispatch is active (``TEMPORAL_ADDRESS`` set).
+
+    Preconditions: none.
+    Postconditions: ``True`` iff ``shared_temporal`` is importable and reports Temporal
+        enabled; ``False`` if Temporal is disabled or ``shared_temporal`` is absent (so
+        the daemon-thread path is always reachable).
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        return False
+    return is_temporal_enabled()
+
+
+def _dispatch_pipeline_run(
+    run_id: str,
+    team_agents: list[AgenticTeamAgent],
+    process_def: ProcessDefinition,
+    initial_input: Optional[str],
+) -> str:
+    """Dispatch a pipeline run via Temporal when enabled, else a daemon thread.
+
+    Preconditions:
+        - ``run_id`` refers to a run already created in the store (with
+          ``temporal_owned`` matching the dispatch path chosen here).
+
+    Postconditions:
+        - Starts exactly one execution path and returns its label ("Temporal" or
+          "thread"). With ``TEMPORAL_ADDRESS`` set the run is started as a durable
+          ``AgenticPipelineWorkflow``; otherwise the legacy daemon-thread path runs
+          unchanged.
+        - Any failure while starting the workflow propagates to the caller, which marks
+          the run FAILED — a Temporal-enabled run is never silently downgraded.
+    """
+    if _temporal_enabled():
+        from agentic_team_provisioning.temporal.start_workflow import (
+            start_agentic_pipeline_workflow,
+        )
+
+        team_agents_json = [a.model_dump(mode="json") for a in team_agents]
+        process_json = process_def.model_dump(mode="json")
+        start_agentic_pipeline_workflow(run_id, team_agents_json, process_json, initial_input)
+        return "Temporal"
+
+    _pipeline_runner.start_run(run_id, team_agents, process_def)
+    return "thread"
+
+
 @app.post("/teams/{team_id}/test-pipeline/runs", response_model=TestPipelineRun, status_code=201)
 def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
     """Start an end-to-end pipeline test run."""
@@ -1246,17 +1325,27 @@ def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
         process if isinstance(process, ProcessDefinition) else ProcessDefinition(**process)
     )
 
-    run_id = str(uuid.uuid4())
-    run_row = _test_store.create_pipeline_run(run_id, team_id, req.process_id, req.initial_input)
-
     # Gather team agents
     team_agents_raw = _store.list_team_agents(team_id)
     team_agents = [
         a if isinstance(a, AgenticTeamAgent) else AgenticTeamAgent(**a) for a in team_agents_raw
     ]
 
-    # Start the pipeline in a background thread
-    _pipeline_runner.start_run(run_id, team_agents, process_def)
+    temporal_owned = _temporal_enabled()
+    run_id = str(uuid.uuid4())
+    run_row = _test_store.create_pipeline_run(
+        run_id, team_id, req.process_id, req.initial_input, temporal_owned=temporal_owned
+    )
+
+    try:
+        dispatch_method = _dispatch_pipeline_run(
+            run_id, team_agents, process_def, req.initial_input
+        )
+    except Exception as exc:
+        logger.exception("Failed to dispatch agentic pipeline run %s", run_id)
+        _test_store.try_fail_pipeline_run(run_id, f"Dispatch failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to start pipeline run.") from exc
+    logger.info("Agentic pipeline run %s dispatched via %s", run_id, dispatch_method)
 
     return TestPipelineRun(**run_row)
 
@@ -1285,6 +1374,24 @@ def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputReq
         raise HTTPException(status_code=404, detail="Pipeline run not found")
     if row["status"] != "waiting_for_input":
         raise HTTPException(status_code=400, detail="Pipeline is not waiting for input")
+
+    if _test_store.is_pipeline_run_temporal_owned(run_id):
+        # Temporal-owned run: deliver the answer as a workflow signal. The workflow's
+        # wait_resume_activity flips the store row back to running and records the input
+        # on the WAIT step result — we re-read to return the updated row.
+        from agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
+        from shared_temporal import signal_workflow_sync
+
+        try:
+            signal_workflow_sync(f"{WORKFLOW_ID_PREFIX}{run_id}", "submit_input", req.input)
+        except Exception as exc:
+            logger.exception("Failed to signal agentic pipeline run %s", run_id)
+            raise HTTPException(
+                status_code=500, detail="Failed to submit input to pipeline run."
+            ) from exc
+        updated = _test_store.get_pipeline_run(run_id)
+        return TestPipelineRun(**(updated or row))
+
     # The terminal transition is decided by a DB compare-and-swap, so this is race-free
     # even if the run timed out or was reaped between the read above and here — and it
     # works regardless of which worker owns the run's thread. A False return means the
@@ -1307,6 +1414,25 @@ def cancel_pipeline_run(team_id: str, run_id: str):
         raise HTTPException(status_code=404, detail="Pipeline run not found")
     if row["status"] not in ("running", "waiting_for_input"):
         raise HTTPException(status_code=400, detail="Pipeline is not in a cancellable state")
+
+    if _test_store.is_pipeline_run_temporal_owned(run_id):
+        # Temporal-owned run: flip the store row first (immediate, consistent read for
+        # this response) then request workflow cancellation — its cancel_reconcile
+        # activity is then a CAS no-op. A cancel-signal failure is best-effort: the row
+        # is already cancelled and the workflow will observe it out-of-band.
+        from agentic_team_provisioning.temporal import WORKFLOW_ID_PREFIX
+        from shared_temporal import cancel_workflow_sync
+
+        _test_store.try_cancel_pipeline_run(run_id)
+        try:
+            cancel_workflow_sync(f"{WORKFLOW_ID_PREFIX}{run_id}")
+        except Exception:
+            logger.warning(
+                "Failed to cancel agentic pipeline workflow for run %s", run_id, exc_info=True
+            )
+        updated = _test_store.get_pipeline_run(run_id)
+        return TestPipelineRun(**(updated or row))
+
     _pipeline_runner.cancel_run(run_id)
     updated = _test_store.get_pipeline_run(run_id)
     return TestPipelineRun(**(updated or row))

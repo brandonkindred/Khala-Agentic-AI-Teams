@@ -28,13 +28,20 @@ from shared_temporal.client import (
     set_temporal_client,
     set_temporal_loop,
 )
-from shared_temporal.runner import run_team_job, start_workflow_sync
+from shared_temporal.runner import (
+    cancel_workflow_sync,
+    run_team_job,
+    signal_workflow_sync,
+    start_workflow_sync,
+)
 from shared_temporal.teams_registry import TEAM_TEMPORAL_MODULES, start_all_team_workers
 from shared_temporal.worker import start_team_worker
 
 __all__ = [
     "TEAM_TEMPORAL_MODULES",
+    "cancel_workflow_sync",
     "connect_temporal_client",
+    "signal_workflow_sync",
     "start_all_team_workers",
     "get_temporal_address",
     "get_temporal_client",

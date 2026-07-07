@@ -756,14 +756,15 @@ services:
     container_name: khala-agentic-team-provisioning-service
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
       <<: *team-env-base
       TEAM_MODULE: agentic_team_provisioning.api.main
       TEAM_NAME: agentic_team_provisioning
       TEAM_PORT: "8108"
-      TEAM_TEMPORAL_WORKER_MODULE: ""
-      TEAM_TEMPORAL_WORKER_FUNC: ""
+      TEAM_TEMPORAL_WORKER_MODULE: agentic_team_provisioning.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_agentic_team_provisioning_temporal_worker_thread
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
     ports: ["8108:8108"]
