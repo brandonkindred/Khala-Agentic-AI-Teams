@@ -130,7 +130,6 @@ class CodeReviewWorkflow:
                 "issues": prep["skipped_issues"],
                 "summary": "No code to review.",
                 "spec_compliance_notes": "",
-                "suggested_commit_message": "",
             }
 
         if self._cancel_requested:
@@ -166,14 +165,12 @@ class CodeReviewWorkflow:
         not_reviewed: List[Dict[str, Any]] = []
         summaries: List[str] = []
         spec_notes: List[str] = []
-        commit_messages: List[str] = []
         approved_flags: List[bool] = []
         for outcome in outcomes:
             issues.extend(outcome["issues"])
             not_reviewed.extend(outcome["not_reviewed_issues"])
             summaries.extend(outcome["summaries"])
             spec_notes.extend(outcome["spec_notes"])
-            commit_messages.extend(outcome["commit_messages"])
             approved_flags.extend(outcome["approved_flags"])
 
         # Total-failure guard: no chunk produced a verdict means the run reviewed
@@ -214,19 +211,12 @@ class CodeReviewWorkflow:
             review_input, approved, gated_issues, summaries, spec_notes
         )
 
-        # A commit message synthesized from a fraction of the change is misleading,
-        # so forward it only when a single chunk saw the whole submission at once.
-        commit_message = ""
-        if prep["single_chunk"] and len(commit_messages) == 1:
-            commit_message = commit_messages[0]
-
         self._advance("done", 1.0)
         return {
             "approved": approved,
             "issues": gated_issues,
             "summary": summary,
             "spec_compliance_notes": notes,
-            "suggested_commit_message": commit_message,
         }
 
     async def _narrative(

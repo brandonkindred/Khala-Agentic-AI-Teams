@@ -69,7 +69,6 @@ class ChunkOutcomeDTO(BaseModel):
     not_reviewed_issues: List[CodeReviewIssue] = Field(default_factory=list)
     summaries: List[str] = Field(default_factory=list)
     spec_notes: List[str] = Field(default_factory=list)
-    commit_messages: List[str] = Field(default_factory=list)
     approved_flags: List[bool] = Field(default_factory=list)
 
     @classmethod
@@ -77,7 +76,7 @@ class ChunkOutcomeDTO(BaseModel):
         """Build a DTO from a ``mapping._ChunkOutcome``.
 
         Preconditions:
-            - ``outcome`` exposes the six ``_ChunkOutcome`` list fields.
+            - ``outcome`` exposes the five ``_ChunkOutcome`` list fields.
 
         Postconditions:
             - Returns a DTO whose lists equal the outcome's, with issues copied
@@ -88,6 +87,5 @@ class ChunkOutcomeDTO(BaseModel):
             not_reviewed_issues=[i.model_copy(deep=True) for i in outcome.not_reviewed_issues],
             summaries=list(outcome.summaries),
             spec_notes=list(outcome.spec_notes),
-            commit_messages=list(outcome.commit_messages),
             approved_flags=list(outcome.approved_flags),
         )

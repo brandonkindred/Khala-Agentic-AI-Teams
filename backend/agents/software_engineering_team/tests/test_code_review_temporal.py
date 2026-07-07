@@ -109,7 +109,6 @@ def test_chunk_outcome_dto_round_trips_from_outcome() -> None:
         not_reviewed_issues=[CodeReviewIssue(severity="high", file_path="b.py", description="nr")],
         summaries=["s1"],
         spec_notes=["n1"],
-        commit_messages=["feat: x"],
         approved_flags=[False],
     )
     dto = pm.ChunkOutcomeDTO.from_outcome(outcome)
@@ -117,7 +116,7 @@ def test_chunk_outcome_dto_round_trips_from_outcome() -> None:
     assert reloaded.approved_flags == [False]
     assert reloaded.issues[0].description == "bug"
     assert reloaded.not_reviewed_issues[0].file_path == "b.py"
-    assert reloaded.commit_messages == ["feat: x"]
+    assert reloaded.summaries == ["s1"]
 
 
 def test_review_prep_dto_round_trips() -> None:
@@ -149,15 +148,12 @@ def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
         A.review_chunk_activity(c, prep["base_input"], prep["context_fp"], prep["surface_by_path"])
         for c in prep["chunks"]
     ]
-    issues, not_reviewed, summaries, spec_notes, commit_messages, approved_flags = (
-        [] for _ in range(6)
-    )
+    issues, not_reviewed, summaries, spec_notes, approved_flags = ([] for _ in range(5))
     for o in outcomes:
         issues += o["issues"]
         not_reviewed += o["not_reviewed_issues"]
         summaries += o["summaries"]
         spec_notes += o["spec_notes"]
-        commit_messages += o["commit_messages"]
         approved_flags += o["approved_flags"]
     assert approved_flags, "at least one chunk reviewed"
     verified = A.filter_false_positives_activity(
@@ -177,14 +173,12 @@ def _run_activity_pipeline(review_input: CodeReviewInput) -> CodeReviewOutput:
         else:
             summary = "\n\n".join(s for s in summaries if s.strip())
             notes = "\n\n".join(n for n in spec_notes if n.strip())
-    commit = commit_messages[0] if (prep["single_chunk"] and len(commit_messages) == 1) else ""
     return CodeReviewOutput.model_validate(
         {
             "approved": gate["approved"],
             "issues": gate["issues"],
             "summary": summary,
             "spec_compliance_notes": notes,
-            "suggested_commit_message": commit,
         }
     )
 
