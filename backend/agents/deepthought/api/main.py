@@ -104,6 +104,32 @@ def _run_deepthought_background(job_id: str, request: DeepthoughtRequest) -> Non
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
 
 
+def _dispatch_via_temporal(job_id: str, request: DeepthoughtRequest) -> bool:
+    """Dispatch a deepthought job to Temporal when enabled.
+
+    Preconditions:
+        - ``job_id`` refers to a job row already created by the caller.
+
+    Postconditions:
+        - Returns True if the job was started as a durable ``DeepthoughtWorkflow``
+          (Temporal enabled and reachable); returns False so the caller falls
+          back to the thread path when Temporal is disabled or its worker/client
+          module is unavailable.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        if not is_temporal_enabled():
+            return False
+        from deepthought.temporal.start_workflow import start_deepthought_workflow
+
+        start_deepthought_workflow(job_id, request.model_dump())
+        logger.info("Deepthought job %s started via Temporal", job_id)
+        return True
+    except ImportError:
+        return False
+
+
 @app.post("/deepthought/ask", response_model=DeepthoughtJobSubmission)
 def ask(request: DeepthoughtRequest) -> DeepthoughtJobSubmission:
     """Submit a question; returns a ``job_id`` to poll for the answer.
@@ -113,9 +139,16 @@ def ask(request: DeepthoughtRequest) -> DeepthoughtJobSubmission:
     knowledge entries, event log) lives in the ``result`` field. Clients
     that want live agent events should use ``POST /deepthought/ask/stream``
     (SSE) instead.
+
+    When ``TEMPORAL_ADDRESS`` is set the run is dispatched as a durable
+    ``DeepthoughtWorkflow`` (survives worker/process restart, visible in the
+    Temporal UI); otherwise it runs on a background thread. Either way the job
+    is tracked in the job store, so status polling is identical.
     """
     job_id = str(uuid4())
     create_job(job_id, message=request.message)
+    if _dispatch_via_temporal(job_id, request):
+        return DeepthoughtJobSubmission(job_id=job_id, status=JOB_STATUS_RUNNING)
     thread = threading.Thread(
         target=_run_deepthought_background, args=(job_id, request), daemon=True
     )
