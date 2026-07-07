@@ -16,9 +16,9 @@ Preconditions:
 
 Postconditions:
     - Returns the LLM's findings for this chunk only (``approved``, ``issues``,
-      ``summary``, and the ``spec_compliance_notes``/``suggested_commit_message``
-      passthroughs); it never re-anchors line numbers, dedupes, or applies the
-      approval gate — those are the reduce phase's job.
+      ``summary``, and the ``spec_compliance_notes`` passthrough); it never
+      re-anchors line numbers, dedupes, or applies the approval gate — those are
+      the reduce phase's job.
 
 Invariants:
     - Stateless apart from the injected ``llm`` handle: every call builds a
@@ -100,9 +100,9 @@ class ChunkReviewAgent:
     Output (``ChunkReviewOutput``):
         This chunk's findings only — ``approved`` (no critical/high issues),
         ``issues`` (raw dicts the coordinator normalizes and re-anchors),
-        ``summary``, and the ``spec_compliance_notes``/``suggested_commit_message``
-        passthroughs. It never re-anchors line numbers, dedupes, or applies the
-        approval gate — those are the coordinator's reduce phase.
+        ``summary``, and the ``spec_compliance_notes`` passthrough. It never
+        re-anchors line numbers, dedupes, or applies the approval gate — those
+        are the coordinator's reduce phase.
 
     Constraints:
         - Reviews a single chunk, not the whole codebase; cross-chunk and
@@ -128,9 +128,8 @@ class ChunkReviewAgent:
         """Review one chunk and return approved, issues, summary.
 
         Postconditions:
-            - ``spec_compliance_notes``/``suggested_commit_message`` from the
-              LLM are passed through so single-chunk reviews keep full output
-              fidelity.
+            - ``spec_compliance_notes`` from the LLM is passed through so
+              single-chunk reviews keep full output fidelity.
         """
         result = _run_chunk_review(self.llm, input_data)
         return ChunkReviewOutput(
@@ -138,14 +137,13 @@ class ChunkReviewAgent:
             issues=result["issues"],
             summary=result["summary"],
             spec_compliance_notes=result["spec_compliance_notes"],
-            suggested_commit_message=result["suggested_commit_message"],
         )
 
 
 def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     """
     Review one chunk of code. Returns dict with approved, issues, summary,
-    spec_compliance_notes, and suggested_commit_message.
+    and spec_compliance_notes.
 
     Preconditions:
         - ``input_data.code_chunk`` is already bounded by the coordinator
@@ -277,7 +275,6 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         "issues": issues,
         "summary": str(data.get("summary", "")),
         "spec_compliance_notes": str(data.get("spec_compliance_notes", "") or ""),
-        "suggested_commit_message": str(data.get("suggested_commit_message", "") or ""),
     }
 
 
