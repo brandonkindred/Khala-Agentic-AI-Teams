@@ -312,15 +312,29 @@ def test_inline_comment_to_timeline_body_file_level_has_path_only() -> None:
 
 
 def test_build_review_body_is_summary_only() -> None:
-    body = build_review_body("Summary text", "Spec notes")
+    # issue_count=1 keeps this test on the "findings exist" branch, which is
+    # what it means to test here — the zero-issue case always short-circuits
+    # to the fixed affirmational message regardless of summary/spec notes.
+    body = build_review_body("Summary text", "Spec notes", issue_count=1)
     assert "Summary text" in body
     assert "**Spec compliance:** Spec notes" in body
     # Findings are never folded into the body — each gets its own comment.
     assert "General findings" not in body
 
 
-def test_build_review_body_fallback_when_empty() -> None:
-    assert "No blocking issues" in build_review_body("", "")
+def test_build_review_body_zero_issues_is_short_and_affirmational() -> None:
+    assert (
+        build_review_body("", "", issue_count=0) == "No issues found — the code is of good quality."
+    )
+
+
+def test_build_review_body_zero_issues_ignores_summary() -> None:
+    # A clean review always gets the terse "all good" message, even when the
+    # LLM returned a real (long) narrative summary and spec-compliance notes.
+    body = build_review_body(
+        "A long LLM summary", "Meets every acceptance criterion", issue_count=0
+    )
+    assert body == "No issues found — the code is of good quality."
 
 
 def test_build_review_body_fallback_reflects_findings_when_summary_empty() -> None:

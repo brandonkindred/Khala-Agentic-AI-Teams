@@ -305,6 +305,38 @@ class TestClientCommentReaction:
             _client_with(handler).create_comment_reaction("acme", "widget", 555)
 
 
+class TestCreateIssueReaction:
+    def test_posts_plus_one_reaction_to_pr(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["method"] = req.method
+            seen["path"] = req.url.path
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(201, json={"id": 1, "content": "+1"})
+
+        client = _client_with(handler)
+        client.create_issue_reaction("acme", "widget", 555)
+        assert seen["method"] == "POST"
+        assert seen["path"] == "/repos/acme/widget/issues/555/reactions"
+        assert seen["body"] == {"content": "+1"}
+
+    def test_accepts_already_exists_200(self) -> None:
+        # GitHub returns 200 (not 201) when the reaction already exists; both are OK.
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"id": 1, "content": "+1"})
+
+        result = _client_with(handler).create_issue_reaction("acme", "widget", 555, content="+1")
+        assert result is None
+
+    def test_raises_on_error(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "Not Found"})
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).create_issue_reaction("acme", "widget", 555)
+
+
 class TestScrubTokenFromText:
     def test_redacts_user_at_url(self) -> None:
         # Build the credentialed URL at runtime so the literal `user:pwd@host`
