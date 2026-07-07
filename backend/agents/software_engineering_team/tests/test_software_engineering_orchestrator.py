@@ -291,6 +291,58 @@ def test_finalize_clears_failed_tasks_on_clean_run(tmp_path: Path) -> None:
     assert data.get("failed_tasks") == []
 
 
+def test_finalize_uses_build_and_review_feedback_shapes(tmp_path: Path) -> None:
+    """Build-gate ({type,error}) and review ({description}) feedback still yield an actionable
+    reason — not a blank string — even though neither uses the ``reason`` key."""
+    data = _finalize_job(
+        tmp_path,
+        "fin-build",
+        [
+            {
+                "id": "t1",
+                "status": "failed",
+                "title": "Build broke",
+                "revision_feedback": [{"type": "build", "error": "ng build failed: TS2304"}],
+            },
+            {
+                "id": "t2",
+                "status": "failed",
+                "title": "Review",
+                "revision_feedback": [{"description": "missing input validation"}],
+            },
+        ],
+    )
+    reasons = {ft["task_id"]: ft["reason"] for ft in data.get("failed_tasks")}
+    assert reasons == {"t1": "ng build failed: TS2304", "t2": "missing input validation"}
+    assert data.get("status") == "completed_with_failures"
+
+
+def test_finalize_ignores_stale_llm_marker_from_prior_attempt(tmp_path: Path) -> None:
+    """A weekly-limit marker left in history by an earlier attempt must NOT re-pause a retry whose
+    current (latest) failure is unrelated — only the latest reason per task drives the pause."""
+    from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE as WEEKLY
+
+    data = _finalize_job(
+        tmp_path,
+        "fin-stale-marker",
+        [
+            {
+                "id": "t1",
+                "status": "failed",
+                "title": "T1",
+                "revision_feedback": [
+                    {"reason": f"Implementation failed: {WEEKLY}"},  # stale, prior attempt
+                    {"type": "build", "error": "unrelated build failure"},  # current failure
+                ],
+            }
+        ],
+    )
+    assert data.get("status") == "completed_with_failures"  # not re-paused
+    assert data.get("failed_tasks") == [
+        {"task_id": "t1", "title": "T1", "reason": "unrelated build failure"}
+    ]
+
+
 def test_finalize_pauses_on_llm_weekly_limit(tmp_path: Path) -> None:
     """A failure reason carrying the Ollama weekly-limit marker overrides status to paused_llm_limit."""
     from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE as WEEKLY

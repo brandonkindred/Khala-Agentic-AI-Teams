@@ -2095,19 +2095,30 @@ def run_orchestrator(
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
 
 
-def _coding_snapshot_failure_reasons(task: Dict[str, Any]) -> List[str]:
-    """Return the recorded failure-reason strings for a snapshot task.
+def _latest_failure_reason(task: Dict[str, Any]) -> str:
+    """Return the most recent actionable failure reason recorded for a snapshot task.
+
+    ``revision_feedback`` entries are not uniform: an engineer/Tech-Lead bounce uses ``reason``, a
+    build-gate failure uses ``{"type": "build", "error": ...}``, and a review issue may use
+    ``description``. Scanning newest-first for the first meaningful string across those keys keeps the
+    public ``failed_tasks`` reason (and the LLM-pause detection) tied to the *current* failure — not a
+    blank entry, and not a stale marker from an earlier attempt whose history ``reset_failed``
+    preserved.
 
     Preconditions:
         - ``task`` is a task dict from a persisted ``task_graph_snapshot``.
     Postconditions:
-        - Returns the ``reason`` string of every ``revision_feedback`` entry (possibly empty).
+        - Returns the newest non-empty ``reason``/``description``/``error`` string, or ``""`` when the
+          task carries no actionable feedback.
     """
-    return [
-        str(fb.get("reason", ""))
-        for fb in (task.get("revision_feedback") or [])
-        if isinstance(fb, dict)
-    ]
+    for fb in reversed(task.get("revision_feedback") or []):
+        if not isinstance(fb, dict):
+            continue
+        for key in ("reason", "description", "error"):
+            val = fb.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+    return ""
 
 
 def _finalize_from_coding_snapshot(job_id: str) -> None:
@@ -2138,15 +2149,18 @@ def _finalize_from_coding_snapshot(job_id: str) -> None:
 
     failed = [t for t in snapshot if isinstance(t, dict) and t.get("status") == "failed"]
     failed_details: List[Dict[str, Any]] = []
-    all_reasons: List[str] = []
+    # Only the CURRENT (latest) failure reason per still-failed task drives the failed_tasks detail
+    # and the LLM-pause decision — never the preserved history — so a stale weekly-limit/connectivity
+    # marker from an earlier attempt cannot re-pause a retry that failed for an unrelated reason.
+    latest_reasons: List[str] = []
     for t in failed:
-        reasons = _coding_snapshot_failure_reasons(t)
-        all_reasons.extend(reasons)
+        reason = _latest_failure_reason(t)
+        latest_reasons.append(reason)
         failed_details.append(
             {
                 "task_id": str(t.get("id", "")),
                 "title": str(t.get("title") or t.get("id") or ""),
-                "reason": reasons[-1] if reasons else "Task failed during the coding run",
+                "reason": reason or "Task failed during the coding run",
             }
         )
 
@@ -2157,7 +2171,7 @@ def _finalize_from_coding_snapshot(job_id: str) -> None:
     # Restore the LLM-pause statuses the old retry path produced: a weekly-limit or connectivity
     # failure that recurred during the run should pause for recovery rather than read as a plain
     # completed-with-failures, so the documented resume-after-LLM-check flow still applies.
-    if any(OLLAMA_WEEKLY_LIMIT_MESSAGE in r for r in all_reasons):
+    if any(OLLAMA_WEEKLY_LIMIT_MESSAGE in r for r in latest_reasons):
         update_job(
             job_id,
             status="paused_llm_limit",
@@ -2165,11 +2179,11 @@ def _finalize_from_coding_snapshot(job_id: str) -> None:
             current_task=None,
         )
     elif any(
-        LLM_SEMANTIC_EXHAUSTION in r or LLM_UNREACHABLE_AFTER_RETRIES in r for r in all_reasons
+        LLM_SEMANTIC_EXHAUSTION in r or LLM_UNREACHABLE_AFTER_RETRIES in r for r in latest_reasons
     ):
         error = (
             LLM_SEMANTIC_EXHAUSTION
-            if any(LLM_SEMANTIC_EXHAUSTION in r for r in all_reasons)
+            if any(LLM_SEMANTIC_EXHAUSTION in r for r in latest_reasons)
             else LLM_UNREACHABLE_AFTER_RETRIES
         )
         update_job(job_id, status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY, error=error)
