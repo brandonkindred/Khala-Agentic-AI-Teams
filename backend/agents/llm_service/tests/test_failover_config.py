@@ -45,9 +45,9 @@ def test_ollama_rate_limit_override_applies(monkeypatch):
     c = OllamaLLMClient(model="m", base_url="http://localhost:11434", rate_limit_max_retries=0)
     max_retries, initial, cap = c._rate_limit_retry_config()
     assert max_retries == 0 and initial > 0 and cap >= initial
-    # No override → env schedule (default 5).
+    # No override → env schedule (default 3).
     c2 = OllamaLLMClient(model="m", base_url="http://localhost:11434")
-    assert c2._rate_limit_retry_config()[0] == 5
+    assert c2._rate_limit_retry_config()[0] == 3
 
 
 def test_ollama_override_negative_clamped_to_zero():

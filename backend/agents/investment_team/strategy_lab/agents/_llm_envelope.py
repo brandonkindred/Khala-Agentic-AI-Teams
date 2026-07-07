@@ -405,8 +405,8 @@ def invoke_agent(
         exception classifies as fatal.
       * Emits one structured ``logger.exception`` per failed attempt and one
         summary ``logger.error`` on terminal failure.
-      * A retriable 429 rate limit backs off on the SLOW rate-limit schedule
-        (first retry ~300s, ``STRATEGY_LAB_LLM_RATE_LIMIT_*`` /
+      * A retriable 429 rate limit backs off on the dedicated rate-limit schedule
+        (first retry ~30s, ``STRATEGY_LAB_LLM_RATE_LIMIT_*`` /
         ``LLM_RATE_LIMIT_*``); transient faults keep the fast backoff. A
         weekly-usage cap stays fatal (never retried). Each rate-limit delay is
         clamped to the remaining total budget.
@@ -452,7 +452,7 @@ def invoke_agent(
                     cause=exc,
                 ) from exc
             # Retriable: back off before the next attempt, clamped to budget. A
-            # 429 rate limit uses the SLOW schedule (first retry ~300s); transient
+            # 429 rate limit uses the dedicated schedule (first retry ~30s); transient
             # faults keep the fast schedule. The budget deadline is the terminator,
             # so a clamped rate-limit delay that overruns the budget ends the loop
             # with outcome="budget_exhausted" on the next iteration.
