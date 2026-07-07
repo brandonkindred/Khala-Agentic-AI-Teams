@@ -407,7 +407,6 @@ def run_coordinator(
             issues=skipped_issues,
             summary="No code to review.",
             spec_compliance_notes="",
-            suggested_commit_message="",
         )
 
     max_spec = compute_code_review_spec_excerpt_chars(llm)
@@ -512,13 +511,6 @@ def run_coordinator(
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
     merged_summary, spec_notes = _merge_narrative(llm, input_data, approved, deduped, outcome)
-    # A commit message synthesized from a fraction of the change is misleading,
-    # so it is only forwarded when a single sub-review saw the whole submission
-    # in one piece — a bisected recovery produces per-half messages and drops it.
-    commit_message = ""
-    if len(chunks) == 1 and len(outcome.commit_messages) == 1:
-        commit_message = outcome.commit_messages[0]
-        commit_message = commit_message if commit_message.strip() else ""
 
     logger.info(
         "CodeReviewCoordinator: done, approved=%s, issues=%s, chunks=%s (sub-reviews=%s)",
@@ -536,7 +528,6 @@ def run_coordinator(
         issues=deduped,
         summary=merged_summary,
         spec_compliance_notes=spec_notes,
-        suggested_commit_message=commit_message,
     )
     # Record only approved verdicts for the submission-level short-circuit: an
     # identical resubmission returns this output with no LLM work. A rejection is

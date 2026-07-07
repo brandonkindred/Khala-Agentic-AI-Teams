@@ -89,7 +89,6 @@ Return a single JSON object with:
   - "suggestion": string (concrete fix recommendation)
 - "summary": string (overall review summary - what's good, what needs work)
 - "spec_compliance_notes": string (how well the code meets the spec and acceptance criteria)
-- "suggested_commit_message": string (optional - suggest a better commit message if the current one is poor)
 
 **Severity definitions (consistent with QA and Security agents):**
 - **critical**: Code is broken, has security vulnerabilities, or fundamentally wrong (e.g., code won't compile, missing core logic, data loss risk)

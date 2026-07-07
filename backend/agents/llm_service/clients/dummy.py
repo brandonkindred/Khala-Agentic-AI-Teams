@@ -562,7 +562,6 @@ class DummyLLMClient(LLMClient, Model):
                 "issues": [],
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "Code aligns with task requirements.",
-                "suggested_commit_message": "",
             }
         elif (
             "code to review" in lowered or "review this code" in lowered or "chunk" in lowered
@@ -573,7 +572,6 @@ class DummyLLMClient(LLMClient, Model):
                 "issues": [],
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "",
-                "suggested_commit_message": "",
             }
         elif "security" in lowered and "vulnerabilities" in lowered:
             return {"vulnerabilities": [], "summary": "No security issues found (dummy)"}
