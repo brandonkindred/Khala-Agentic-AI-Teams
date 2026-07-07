@@ -309,13 +309,20 @@ def inline_comment_to_timeline_body(comment: dict[str, Any]) -> str:
     return f"{prefix}{comment.get('body', '') or ''}"
 
 
-def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int = 0) -> str:
+def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int) -> str:
     """Assemble the summary-only top-level review body.
 
     The body never lists findings: each finding is posted as its own comment
     (inline when anchorable, otherwise a standalone conversation comment), so the
     body carries only the overall summary and spec-compliance narrative.
 
+    Preconditions:
+        - ``issue_count`` (``>= 0``) is passed explicitly by every caller — it has
+          NO default. The zero-issue path returns a fixed "all good" message that
+          ignores ``summary``/``spec_compliance_notes``, so a caller that silently
+          fell back to a ``0`` default could post a false "no issues found" body
+          while change-requesting comments sit on the PR. Requiring the argument
+          forces the count to reflect the actual findings.
     Postconditions:
         - When ``issue_count`` is 0, always returns a short, fixed affirmational
           message — regardless of ``summary``/``spec_compliance_notes`` — so a

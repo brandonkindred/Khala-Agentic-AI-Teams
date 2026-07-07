@@ -323,7 +323,9 @@ def test_build_review_body_is_summary_only() -> None:
 
 
 def test_build_review_body_zero_issues_is_short_and_affirmational() -> None:
-    assert build_review_body("", "") == "No issues found — the code is of good quality."
+    assert (
+        build_review_body("", "", issue_count=0) == "No issues found — the code is of good quality."
+    )
 
 
 def test_build_review_body_zero_issues_ignores_summary() -> None:

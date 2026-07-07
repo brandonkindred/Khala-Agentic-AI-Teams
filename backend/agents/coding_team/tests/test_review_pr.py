@@ -28,6 +28,7 @@ from .test_github_source import _stub_heavy_modules
 
 
 def _client_with(handler: Callable[[httpx.Request], httpx.Response]) -> GitHubClient:
+    """Create a GitHubClient whose HTTP calls are served by an httpx.MockTransport handler."""
     transport = httpx.MockTransport(handler)
     client = GitHubClient(token="t", sleep=lambda _s: None)
     client._client.close()  # type: ignore[attr-defined]
@@ -36,6 +37,7 @@ def _client_with(handler: Callable[[httpx.Request], httpx.Response]) -> GitHubCl
 
 
 def _pr_payload(number: int = 7, **overrides: Any) -> dict[str, Any]:
+    """Return a dict mirroring GitHub's pull-request API payload, with optional field overrides."""
     payload = {
         "number": number,
         "html_url": f"https://example/pull/{number}",
@@ -344,6 +346,8 @@ class TestAuthenticatedLogin:
 
 
 class _FakeOutput:
+    """Stand-in for the code-review agent's output: issues, summary, and spec-compliance notes."""
+
     def __init__(self, issues: list[Any], summary: str = "S", spec: str = "SC") -> None:
         self.issues = issues
         self.summary = summary
