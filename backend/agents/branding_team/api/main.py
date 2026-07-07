@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -73,8 +74,38 @@ _run_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+async def _run_in_pipeline_executor(func, *args):
+    """Await *func(*args)* on the bounded ``_run_executor`` (not the loop's default).
+
+    Preconditions:
+        ``func`` is a synchronous callable that may run a branding pipeline
+        (or sub-pipeline); ``args`` are its positional arguments.
+    Postconditions:
+        Returns ``func(*args)``'s result, or propagates whatever it raises.
+
+    Note:
+        Deliberately routed through ``_run_executor`` — the same bounded pool
+        used for job-tracked pipeline runs — rather than ``asyncio.to_thread``,
+        which uses the process-wide default executor shared by any other code
+        in this (single, multi-team) process calling ``asyncio.to_thread`` /
+        ``loop.run_in_executor(None, ...)``. A handful of concurrent, multi-minute
+        pipeline runs on the shared default executor could starve unrelated
+        async-offloaded work elsewhere in the app; keeping pipeline work on its
+        own bounded pool avoids that.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_run_executor, func, *args)
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
+    """FastAPI startup/shutdown lifecycle for the branding app.
+
+    On startup: registers the team's Postgres schema (a no-op when
+    ``POSTGRES_HOST`` is unset). On shutdown: stops the bounded run executor
+    (cancelling queued runs) and closes the shared Postgres pool. Failures in
+    either phase are logged, not raised, so app startup/teardown is resilient.
+    """
     # Register Postgres schema (no-op when POSTGRES_HOST is unset).
     try:
         from shared_postgres import register_team_schemas
@@ -104,19 +135,28 @@ conversation_store = get_conversation_store()
 
 # Public name so tests can patch 'branding_team.api.main.assistant_agent'.
 assistant_agent: Optional[BrandingAssistantAgent] = None
+_assistant_agent_lock = threading.Lock()
 
 
 def _get_assistant_agent() -> BrandingAssistantAgent:
-    """Lazy-init the branding assistant so the app mounts even if llm_service is unavailable."""
+    """Lazy-init the branding assistant so the app mounts even if llm_service is unavailable.
+
+    Thread-safe: the chat endpoints run in worker threads (via
+    ``_run_in_pipeline_executor``), so first-use initialization is guarded by a
+    ``threading.Lock`` with double-checked locking to avoid constructing several
+    ``BrandingAssistantAgent`` instances under concurrent first requests.
+    """
     global assistant_agent
     if assistant_agent is None:
-        try:
-            assistant_agent = BrandingAssistantAgent()
-        except Exception:
-            raise HTTPException(
-                status_code=503,
-                detail="Branding assistant is temporarily unavailable. LLM service may not be configured.",
-            )
+        with _assistant_agent_lock:
+            if assistant_agent is None:
+                try:
+                    assistant_agent = BrandingAssistantAgent()
+                except Exception:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Branding assistant is temporarily unavailable. LLM service may not be configured.",
+                    )
     return assistant_agent
 
 
@@ -324,19 +364,59 @@ def _parse_target_phase(raw: Optional[str]) -> Optional[BrandPhase]:
         raise HTTPException(status_code=400, detail=f"Invalid target_phase: {raw}")
 
 
+# Sentinel strings the assistant/UI use for a field that has no real value yet.
+_MISSION_PLACEHOLDERS = ("TBD", "To be discussed.", "—", "")
+
+
+def _is_real_value(value: Optional[str]) -> bool:
+    """True when *value* is a real (non-placeholder) string.
+
+    Preconditions:
+        ``value`` is a string or None.
+    Postconditions:
+        Returns True iff the stripped value is non-empty and not one of the
+        known placeholder sentinels (``_MISSION_PLACEHOLDERS``).
+    """
+    return (value or "").strip() not in _MISSION_PLACEHOLDERS
+
+
 def _mission_has_brand_name(mission: BrandingMission) -> bool:
     """True if company_name is a real value (not a placeholder)."""
-    placeholders = ("TBD", "To be discussed.", "—", "")
-    return (mission.company_name or "").strip() not in placeholders
+    return _is_real_value(mission.company_name)
 
 
 def _mission_has_minimal_required_fields(mission: BrandingMission) -> bool:
     """True if we have real company name, description, and target audience (not placeholders)."""
-    placeholders = ("TBD", "To be discussed.", "—", "")
-    name_ok = (mission.company_name or "").strip() not in placeholders
-    desc_ok = (mission.company_description or "").strip() not in placeholders
-    audience_ok = (mission.target_audience or "").strip() not in placeholders
-    return name_ok and desc_ok and audience_ok
+    return (
+        _is_real_value(mission.company_name)
+        and _is_real_value(mission.company_description)
+        and _is_real_value(mission.target_audience)
+    )
+
+
+def _mission_from_payload(payload: Any) -> BrandingMission:
+    """Build a ``BrandingMission`` from a create/run request payload.
+
+    Preconditions:
+        ``payload`` exposes the eight mission fields (``company_name``,
+        ``company_description``, ``target_audience``, ``values``,
+        ``differentiators``, ``desired_voice``, ``existing_brand_material``,
+        ``wiki_path``) — satisfied by ``CreateBrandRequest`` and
+        ``RunBrandingTeamRequest``.
+    Postconditions:
+        Returns a ``BrandingMission`` populated from those fields; performs no
+        I/O and does not mutate ``payload``.
+    """
+    return BrandingMission(
+        company_name=payload.company_name,
+        company_description=payload.company_description,
+        target_audience=payload.target_audience,
+        values=payload.values,
+        differentiators=payload.differentiators,
+        desired_voice=payload.desired_voice,
+        existing_brand_material=payload.existing_brand_material,
+        wiki_path=payload.wiki_path,
+    )
 
 
 def _run_orchestrator_if_ready(
@@ -494,16 +574,7 @@ def list_brands(
 
 @app.post("/clients/{client_id}/brands", response_model=Brand, status_code=201)
 def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
-    mission = BrandingMission(
-        company_name=payload.company_name,
-        company_description=payload.company_description,
-        target_audience=payload.target_audience,
-        values=payload.values,
-        differentiators=payload.differentiators,
-        desired_voice=payload.desired_voice,
-        existing_brand_material=payload.existing_brand_material,
-        wiki_path=payload.wiki_path,
-    )
+    mission = _mission_from_payload(payload)
 
     brand = branding_store.create_brand(client_id=client_id, mission=mission, name=payload.name)
     if not brand:
@@ -570,6 +641,13 @@ def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> 
                 if v is not None
             }
         )
+        # A full-form PUT may resend unchanged mission fields alongside a
+        # status/name edit. Only forward a mission to the store when its content
+        # actually differs — passing an (unchanged) mission would needlessly
+        # invalidate the generated output there (see update_brand), making an
+        # otherwise idempotent update discard cached brand artifacts.
+        if mission == brand.mission:
+            mission = None
     from branding_team.models import BrandStatus
 
     status = None
@@ -810,17 +888,13 @@ def _submit_brand_run(
 
 
 @app.post("/clients/{client_id}/brands/{brand_id}/run", response_model=RunBrandJobResponse)
-def run_brand(
-    client_id: str, brand_id: str, payload: RunBrandRequest
-) -> RunBrandJobResponse:
+def run_brand(client_id: str, brand_id: str, payload: RunBrandRequest) -> RunBrandJobResponse:
     """Submit a branding run job. Poll GET /branding/status/{job_id} for results."""
     target_phase = _parse_target_phase(payload.target_phase)
     return _submit_brand_run(client_id, brand_id, payload, target_phase)
 
 
-@app.post(
-    "/clients/{client_id}/brands/{brand_id}/run/{phase}", response_model=RunBrandJobResponse
-)
+@app.post("/clients/{client_id}/brands/{brand_id}/run/{phase}", response_model=RunBrandJobResponse)
 def run_brand_phase(
     client_id: str, brand_id: str, phase: str, payload: RunBrandRequest
 ) -> RunBrandJobResponse:
@@ -929,21 +1003,37 @@ async def request_market_research_for_brand(client_id: str, brand_id: str) -> Co
     "/clients/{client_id}/brands/{brand_id}/request-design-assets",
     response_model=DesignAssetRequestResult,
 )
-def request_design_assets_for_brand(client_id: str, brand_id: str) -> DesignAssetRequestResult:
-    brand = branding_store.get_brand(client_id, brand_id)
+async def request_design_assets_for_brand(
+    client_id: str, brand_id: str
+) -> DesignAssetRequestResult:
+    """Request design assets for a brand's strategic core.
+
+    Reuses the strategic core persisted by a prior pipeline run when present
+    (``brand.latest_output.strategic_core``) — the design-asset request only
+    reads the positioning statement — and falls back to running Phase 1 only
+    when no cached core exists. Async so the blocking store read and the (rare)
+    Phase 1 fallback run off the event loop instead of holding a worker thread.
+    404 if the brand is unknown.
+    """
+    brand = await asyncio.to_thread(branding_store.get_brand, client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
     from branding_team.adapters.design_assets import request_design_assets
 
-    # Run Phase 1 to get strategic core for design asset request
-    from branding_team.models import HumanReview
-
-    phase1_result = orchestrator.run_phase(
-        mission=brand.mission,
-        phase=BrandPhase.STRATEGIC_CORE,
-        human_review=HumanReview(approved=True),
-    )
-    return request_design_assets(phase1_result.strategic_core, brand.mission.company_name)
+    cached = brand.latest_output.strategic_core if brand.latest_output else None
+    if cached is not None:
+        strategic_core = cached
+    else:
+        # No persisted strategic core yet: run Phase 1 once, off the event loop
+        # and on the bounded pipeline executor (not the shared default one).
+        phase1_result = await _run_in_pipeline_executor(
+            orchestrator.run_phase,
+            brand.mission,
+            BrandPhase.STRATEGIC_CORE,
+            HumanReview(approved=True),
+        )
+        strategic_core = phase1_result.strategic_core
+    return request_design_assets(strategic_core, brand.mission.company_name)
 
 
 # ---------------------------------------------------------------------------
@@ -953,16 +1043,7 @@ def request_design_assets_for_brand(client_id: str, brand_id: str) -> DesignAsse
 
 @app.post("/run", response_model=TeamOutput)
 def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
-    mission = BrandingMission(
-        company_name=payload.company_name,
-        company_description=payload.company_description,
-        target_audience=payload.target_audience,
-        values=payload.values,
-        differentiators=payload.differentiators,
-        desired_voice=payload.desired_voice,
-        existing_brand_material=payload.existing_brand_material,
-        wiki_path=payload.wiki_path,
-    )
+    mission = _mission_from_payload(payload)
     human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
     store = branding_store if (payload.client_id and payload.brand_id) else None
     target_phase = _parse_target_phase(payload.target_phase)
@@ -984,16 +1065,7 @@ def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
 
 @app.post("/sessions", response_model=BrandingSessionResponse)
 def create_branding_session(payload: RunBrandingTeamRequest) -> BrandingSessionResponse:
-    mission = BrandingMission(
-        company_name=payload.company_name,
-        company_description=payload.company_description,
-        target_audience=payload.target_audience,
-        values=payload.values,
-        differentiators=payload.differentiators,
-        desired_voice=payload.desired_voice,
-        existing_brand_material=payload.existing_brand_material,
-        wiki_path=payload.wiki_path,
-    )
+    mission = _mission_from_payload(payload)
     target_phase = _parse_target_phase(payload.target_phase)
     output = orchestrator.run(
         mission=mission,
@@ -1091,6 +1163,16 @@ def _conversation_to_response(
     latest_output: Optional[TeamOutput],
     suggested_questions: List[str],
 ) -> ConversationStateResponse:
+    """Assemble the ``ConversationStateResponse`` API model from in-memory state.
+
+    Preconditions:
+        ``messages`` is a list of ``_StoredMessage``-like objects (each with
+        ``role``/``content``/``timestamp``); the rest are already-validated
+        conversation fields.
+    Postconditions:
+        Returns a ``ConversationStateResponse`` with ``messages`` mapped 1:1 to
+        ``ConversationMessage`` and ``suggested_questions`` defaulted to ``[]``.
+    """
     msg_list = [
         ConversationMessage(role=m.role, content=m.content, timestamp=m.timestamp) for m in messages
     ]
@@ -1105,10 +1187,35 @@ def _conversation_to_response(
 
 
 @app.post("/conversations", response_model=ConversationStateResponse)
-def create_branding_conversation(
+async def create_branding_conversation(
     body: Optional[CreateConversationRequest] = Body(default=None),
 ) -> ConversationStateResponse:
+    """Create a conversation, optionally seeding it with an initial message.
+
+    Only the initial-message path runs the assistant (two LLM calls) and may run
+    the full ~40-agent pipeline, so it goes on the bounded pipeline executor
+    (see ``_run_in_pipeline_executor``). The no-initial-message path only creates
+    a conversation row and persists a greeting, so it stays off that pool — where
+    it could otherwise queue behind multi-minute pipeline runs and make opening a
+    fresh chat hang under load — and runs on the default executor instead.
+    """
     req = body or CreateConversationRequest()
+    if (req.initial_message or "").strip():
+        return await _run_in_pipeline_executor(_create_branding_conversation_impl, req)
+    return await asyncio.to_thread(_create_branding_conversation_impl, req)
+
+
+def _create_branding_conversation_impl(
+    req: CreateConversationRequest,
+) -> ConversationStateResponse:
+    """Synchronous body of :func:`create_branding_conversation` (see its docstring).
+
+    Preconditions:
+        ``req`` is a validated ``CreateConversationRequest``.
+    Postconditions:
+        Same as the endpoint; runs entirely with blocking calls and is meant to
+        be dispatched via ``asyncio.to_thread``.
+    """
     brand_id = (req.brand_id or "").strip() or None
     if brand_id:
         if not _brand_exists(brand_id):
@@ -1127,13 +1234,18 @@ def create_branding_conversation(
 
     if initial_message:
         # Freshly created conversation: no prior history, mission is the default.
-        conversation_store.append_message(conversation_id, "user", initial_message)
+        # conversation_id was just minted above in this same synchronous call, so
+        # append failing here (conversation vanished) isn't reachable in practice;
+        # checked anyway for consistency with send_branding_conversation_message.
+        if not conversation_store.append_message(conversation_id, "user", initial_message):
+            raise HTTPException(status_code=404, detail="Conversation not found")
         messages.append(_local_message("user", initial_message))
         reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
             [], _default_mission(), initial_message
         )
         conversation_store.update_mission(conversation_id, updated_mission)
-        conversation_store.append_message(conversation_id, "assistant", reply)
+        if not conversation_store.append_message(conversation_id, "assistant", reply):
+            logger.warning("Assistant reply not persisted for conversation %s", conversation_id)
         messages.append(_local_message("assistant", reply))
         output = _run_orchestrator_if_ready(updated_mission)
         if output is not None:
@@ -1150,7 +1262,8 @@ def create_branding_conversation(
             "Hi! I'm your branding lead. I'll guide you through our 5-phase brand development framework — "
             "starting with your Strategic Core. Let's begin: what's your company or product name?"
         )
-        conversation_store.append_message(conversation_id, "assistant", reply)
+        if not conversation_store.append_message(conversation_id, "assistant", reply):
+            logger.warning("Greeting not persisted for conversation %s", conversation_id)
         messages.append(_local_message("assistant", reply))
         suggested_questions = [
             "What's your company name?",
@@ -1240,7 +1353,7 @@ def _auto_create_brand_from_conversation(
 
 
 @app.post("/conversations/{conversation_id}/messages", response_model=ConversationStateResponse)
-def send_branding_conversation_message(
+async def send_branding_conversation_message(
     conversation_id: str, payload: SendMessageRequest
 ) -> ConversationStateResponse:
     """Append a user message, get the assistant's reply, and return updated state.
@@ -1248,6 +1361,28 @@ def send_branding_conversation_message(
     Runs the assistant on the latest turn, persists the mission/output it
     derives, auto-creates and links a brand once enough info is present (unless
     ``skip_save``), and returns the refreshed conversation (404 if unknown).
+
+    The assistant (two LLM calls) and any pipeline run are blocking, so the body
+    executes on the bounded pipeline executor (see ``_run_in_pipeline_executor``)
+    to keep the request from holding a worker thread — or the shared default
+    executor — for the full pipeline duration.
+    """
+    return await _run_in_pipeline_executor(
+        _send_branding_conversation_message_impl, conversation_id, payload
+    )
+
+
+def _send_branding_conversation_message_impl(
+    conversation_id: str, payload: SendMessageRequest
+) -> ConversationStateResponse:
+    """Synchronous body of :func:`send_branding_conversation_message`.
+
+    Preconditions:
+        ``conversation_id`` is a string; ``payload`` is a validated
+        ``SendMessageRequest``.
+    Postconditions:
+        Same as the endpoint; runs entirely with blocking calls and is meant to
+        be dispatched via ``asyncio.to_thread``.
     """
     state = conversation_store.get_state(conversation_id)
     if state is None:
