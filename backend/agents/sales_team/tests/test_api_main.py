@@ -213,6 +213,63 @@ def test_run_pipeline_job_failure_branch(monkeypatch: pytest.MonkeyPatch, fake_j
     assert job["current_stage"] == "failed"
 
 
+def _minimal_request() -> "api_main.SalesPipelineRequest":
+    return api_main.SalesPipelineRequest(
+        product_name="P",
+        value_proposition="A valid value proposition.",
+        icp={"industry": ["SaaS"]},
+    )
+
+
+def test_run_pipeline_job_skips_when_already_cancelled(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """A job that reached a terminal state before the runner starts (e.g. a
+    Temporal workflow that sat queued while the user cancelled the job) must
+    NOT be resurrected — the orchestrator is never constructed and the
+    terminal status is preserved."""
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
+    fake_job_client.create_job("j-cancelled", status="cancelled")
+
+    class _NeverRunOrch:
+        def __init__(self, **_kw):  # pragma: no cover - must not be constructed
+            raise AssertionError("orchestrator must not run for a terminal job")
+
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _NeverRunOrch)
+
+    api_main._run_pipeline_job("j-cancelled", _minimal_request())
+
+    job = fake_job_client.get_job("j-cancelled")
+    assert job["status"] == "cancelled"  # untouched
+
+
+def test_run_pipeline_job_does_not_clobber_cancel_landing_mid_run(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """A cancel that lands while the orchestrator is running must not be
+    overwritten by the COMPLETED write."""
+    monkeypatch.setattr(job_runner, "job_manager", fake_job_client)
+    fake_job_client.create_job("j-midcancel", status="pending")
+
+    class _CancellingOrch:
+        def __init__(self, **_kw):
+            pass
+
+        def run(self, request, job_id, update_cb=None):
+            # Simulate a cancel landing while the pipeline runs.
+            fake_job_client.update_job(job_id, status="cancelled")
+            return SalesPipelineResult(
+                job_id=job_id, entry_stage=request.entry_stage, product_name=request.product_name
+            )
+
+    monkeypatch.setattr(job_runner, "SalesPodOrchestrator", _CancellingOrch)
+
+    api_main._run_pipeline_job("j-midcancel", _minimal_request())
+
+    job = fake_job_client.get_job("j-midcancel")
+    assert job["status"] == "cancelled"  # not overwritten with completed
+
+
 # ---------------------------------------------------------------------------
 # /sales/pipeline/status
 # ---------------------------------------------------------------------------

@@ -43,13 +43,25 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
           (e.g. missing required fields), the job store row is marked
           ``FAILED`` here — before ``run_pipeline_job`` would otherwise ever
           be reached — so the job never sits stuck in PENDING.
-        - On any other genuine failure, the job store row ends in ``FAILED``
-          (via ``run_pipeline_job``'s own exception handling) and this
-          activity re-raises so the failure surfaces as a failed Temporal
-          workflow rather than a silently-"completed" one. Auto-retry is
-          bounded by the workflow's ``RetryPolicy`` (see ``SalesWorkflow.run``).
+        - A job that was already terminal when ``run_pipeline_job`` started
+          (e.g. ``CANCELLED`` by the user, or ``INTERRUPTED``) is left
+          untouched and returns cleanly without raising — a cancelled run is
+          terminal, not a workflow failure to retry.
+        - On any genuine failure the activity re-raises so the failure
+          surfaces as a failed Temporal workflow rather than a
+          silently-"completed" one. Failure is inferred from the final job
+          status: only a confirmed ``COMPLETED``/``CANCELLED``/``INTERRUPTED``
+          status returns cleanly; a ``FAILED``, missing, or otherwise
+          unconfirmed status raises, so a transient job-store read glitch can
+          never mask a real failure as success. Auto-retry is bounded by the
+          workflow's ``RetryPolicy`` (see ``SalesWorkflow.run``).
     """
-    from job_service_client import JOB_STATUS_FAILED
+    from job_service_client import (
+        JOB_STATUS_CANCELLED,
+        JOB_STATUS_COMPLETED,
+        JOB_STATUS_FAILED,
+        JOB_STATUS_INTERRUPTED,
+    )
     from sales_team.job_runner import job_manager, run_pipeline_job
     from sales_team.models import SalesPipelineRequest
 
@@ -69,10 +81,22 @@ def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any
         raise
 
     run_pipeline_job(job_id, pipeline_request)
+
+    # Infer the outcome from the final job status. ``run_pipeline_job`` records
+    # its own terminal status and never raises, so we key off the store — but
+    # only an explicitly-confirmed non-FAILED terminal status returns cleanly.
+    # A FAILED status, a missing job, or any non-terminal/unreadable snapshot
+    # raises, so a job-store read hiccup can't be misreported as a succeeded
+    # workflow.
     job = job_manager.get_job(job_id)
-    if job and job.get("status") == JOB_STATUS_FAILED:
-        raise RuntimeError(job.get("error") or "Sales pipeline failed")
-    return {"job_id": job_id}
+    status = job.get("status") if job else None
+    if status == JOB_STATUS_COMPLETED:
+        return {"job_id": job_id}
+    if status in (JOB_STATUS_CANCELLED, JOB_STATUS_INTERRUPTED):
+        # Terminal, but not a failure — do not raise (no retry for a cancel).
+        return {"job_id": job_id}
+    error = (job or {}).get("error")
+    raise RuntimeError(error or f"Sales pipeline job {job_id} did not complete (status={status})")
 
 
 @workflow.defn(name="SalesWorkflow")
