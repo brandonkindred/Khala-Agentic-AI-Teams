@@ -49,3 +49,10 @@ def test_think_bypasses_cache_default_path(monkeypatch):
     d = get_strands_model("code_review")
     assert c is d
     assert c.get_config().get("think") is None
+
+
+def test_think_incompatible_with_lazy():
+    """``think`` is not threaded through the lazy stand-in, so combining them is a
+    caller contract violation (mirrors the existing ``client`` guard)."""
+    with pytest.raises(AssertionError):
+        get_strands_model("code_review", lazy=True, think=False)

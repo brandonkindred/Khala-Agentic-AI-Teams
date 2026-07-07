@@ -535,14 +535,22 @@ def _record_review_outage(
 
     Postconditions:
         - The job and review row are marked ``failed`` with the scrubbed ``error``
-          captured for diagnosis; ``status_text``/``current_activity`` are reset
-          (as in ``_record_failure``) so the failed job cannot keep claiming
-          mid-review progress. A neutral PR note is posted iff
-          ``PR_REVIEW_POST_OUTAGE_NOTICE`` is enabled; the raw error is never
-          posted to the PR.
+          captured for diagnosis; ``phase`` is set to the terminal ``completed``
+          (matching the success/provider-abort paths) and
+          ``status_text``/``current_activity`` are reset (as in ``_record_failure``)
+          so the failed job cannot keep claiming a mid-review phase or progress. A
+          neutral PR note is posted iff ``PR_REVIEW_POST_OUTAGE_NOTICE`` is enabled;
+          the raw error is never posted to the PR.
     """
     safe = scrub_token_from_text(error)
-    _main.update_job(job_id, status="failed", error=safe, status_text=None, current_activity=None)
+    _main.update_job(
+        job_id,
+        status="failed",
+        phase="completed",
+        error=safe,
+        status_text=None,
+        current_activity=None,
+    )
     _main.update_review(job_id, status="failed", error=safe, completed=True)
     if _post_outage_notice_enabled():
         _main._safe_comment(client, owner, repo, num, _REVIEW_OUTAGE_NOTICE)

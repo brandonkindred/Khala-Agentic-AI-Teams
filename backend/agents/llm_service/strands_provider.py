@@ -89,12 +89,18 @@ class _LazyLLMClientModel(Model):
         self._agent_key = agent_key
         self._response_format = response_format
         self._delegate: Optional[LLMClientModel] = None
+        self._resolve_lock = threading.Lock()
 
     def _resolve(self) -> LLMClientModel:
+        # Double-checked locking: the first concurrent caller builds the delegate
+        # while the rest block, so exactly one ``LLMClientModel`` is ever created
+        # (the fast path after resolution takes no lock).
         if self._delegate is None:
-            self._delegate = get_strands_model(
-                self._agent_key, response_format=self._response_format
-            )
+            with self._resolve_lock:
+                if self._delegate is None:
+                    self._delegate = get_strands_model(
+                        self._agent_key, response_format=self._response_format
+                    )
         return self._delegate
 
     def update_config(self, **model_config: Any) -> None:
@@ -191,6 +197,7 @@ def get_strands_model(
     """
     if lazy:
         assert client is None, "lazy=True is incompatible with an explicit client"
+        assert think is None, "lazy=True is incompatible with an explicit think override"
         return _LazyLLMClientModel(agent_key, response_format=response_format)
 
     from . import config as llm_config

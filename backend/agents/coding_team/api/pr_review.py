@@ -501,7 +501,11 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
     except Exception as exc:  # noqa: BLE001 - the daemon thread must never die with the job left running
         logger.exception("PR review %s: unhandled exception escaped the review body", job_id)
         try:
-            _finalize_review(job_id, "failed", error=scrub_token_from_text(str(exc)))
+            # phase="completed" (terminal), matching the success and provider-abort
+            # paths — a failed job must not keep a mid-review "reviewing" phase.
+            _finalize_review(
+                job_id, "failed", phase="completed", error=scrub_token_from_text(str(exc))
+            )
         except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do, do not re-raise
             logger.exception(
                 "PR review %s: last-resort finalize failed after escaped exception", job_id
@@ -969,7 +973,7 @@ def _run_pr_review_body(
             # self-consistent means it never depends on that.
             safe_err = scrub_token_from_text(str(review_exc))
             try:
-                _finalize_review(job_id, "failed", error=safe_err)
+                _finalize_review(job_id, "failed", phase="completed", error=safe_err)
             except Exception:  # noqa: BLE001 - store unreachable; nothing more we can do
                 logger.exception("PR review %s: last-resort finalize failed", job_id)
 
