@@ -11,7 +11,7 @@ profile's own ``role_line`` and ``criteria_block``.
 This mirrors the Part-2 ``shared/security_service.py`` precedent (a profile enum
 + profile-keyed criteria + a prompt composer), and keeps the **JSON output
 contract identical across every profile** (the ``approved``/``issues[]``/
-``summary``/``spec_compliance_notes``/``suggested_commit_message`` schema), so the
+``summary``/``spec_compliance_notes`` schema), so the
 coordinator's parser and the ``DummyLLMClient`` test stubs work unchanged no
 matter which profile is in effect.
 
@@ -113,8 +113,7 @@ _SHARED_OUTPUT_SECTION = (
     '  - "description": string (clear description of the issue)\n'
     '  - "suggestion": string (concrete fix recommendation)\n'
     '- "summary": string (overall review summary - what\'s good, what needs work)\n'
-    '- "spec_compliance_notes": string (how well the code meets the spec and acceptance criteria)\n'
-    '- "suggested_commit_message": string (optional - suggest a better commit message if the current one is poor)\n\n'
+    '- "spec_compliance_notes": string (how well the code meets the spec and acceptance criteria)\n\n'
     "**Severity definitions (consistent with QA and Security agents):**\n"
     "- **critical**: Code is broken, has security vulnerabilities, or fundamentally wrong (e.g., "
     "code won't compile, missing core logic, data loss risk)\n"

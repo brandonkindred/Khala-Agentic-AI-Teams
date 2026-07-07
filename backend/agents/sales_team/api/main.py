@@ -12,13 +12,13 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
 from job_service_client import (
-    JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JobServiceClient,
     start_stale_job_monitor,
 )
+from sales_team.job_runner import run_pipeline_job as _run_pipeline_job
 from sales_team.learning_engine import LearningEngine
 from sales_team.models import (
     CoachingRequest,
@@ -51,6 +51,33 @@ from sales_team.postgres import SCHEMA as SALES_POSTGRES_SCHEMA
 from shared_agent_invoke import mount_invoke_shim
 from shared_app import create_team_app
 
+logger = logging.getLogger(__name__)
+
+
+def _startup() -> None:
+    """Start the Temporal worker backstop (best-effort).
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this
+    backstop covers running the app standalone (``uvicorn ...:app``).
+
+    Preconditions:
+        - None (safe to call once at app startup).
+
+    Postconditions:
+        - Starts the worker thread when Temporal is enabled; a no-op when
+          ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged
+          as a warning so it cannot abort app boot (this runs as an
+          ``on_startup`` hook).
+    """
+    try:
+        from sales_team.temporal.worker import start_sales_temporal_worker_thread
+
+        start_sales_temporal_worker_thread()
+    except Exception:
+        logger.warning("sales_team Temporal worker start (lifespan backstop) failed", exc_info=True)
+
+
 app = create_team_app(
     service_name="sales-team",
     team_key="sales_team",
@@ -63,10 +90,10 @@ app = create_team_app(
         "HubSpot, Anthony Iannarino, Jill Konrath, Sales Hacker, Salesfolk, and Zig Ziglar."
     ),
     postgres_schema=SALES_POSTGRES_SCHEMA,
+    on_startup=_startup,
 )
 mount_invoke_shim(app)
 
-logger = logging.getLogger(__name__)
 _job_manager = JobServiceClient(team="sales_team")
 _stale_monitor_stop = start_stale_job_monitor(
     _job_manager,
@@ -139,51 +166,46 @@ def mark_all_running_jobs_failed(reason: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Background job runner
-# ---------------------------------------------------------------------------
-
-
-def _run_pipeline_job(job_id: str, request: SalesPipelineRequest) -> None:
-    try:
-        _update_job(
-            job_id,
-            status=JOB_STATUS_RUNNING,
-            current_stage="initializing",
-            progress=2,
-            eta_hint="Starting pipeline...",
-        )
-
-        orchestrator = SalesPodOrchestrator(config=request.config)
-
-        def on_update(stage: str, pct: int) -> None:
-            _update_job(job_id, current_stage=stage, progress=pct, last_updated_at=_now())
-
-        result = orchestrator.run(request, job_id=job_id, update_cb=on_update)
-
-        _update_job(
-            job_id,
-            status=JOB_STATUS_COMPLETED,
-            current_stage="completed",
-            progress=100,
-            eta_hint="done",
-            result=result.model_dump(),
-            last_updated_at=_now(),
-        )
-    except Exception as exc:
-        logger.error("Sales pipeline job %s failed: %s", job_id, exc, exc_info=True)
-        _update_job(
-            job_id,
-            status=JOB_STATUS_FAILED,
-            current_stage="failed",
-            error=str(exc),
-            eta_hint=None,
-            last_updated_at=_now(),
-        )
-
-
-# ---------------------------------------------------------------------------
 # Pipeline endpoints (async, job-based)
 # ---------------------------------------------------------------------------
+#
+# The actual orchestrator run + job-status bookkeeping (RUNNING -> COMPLETED
+# or FAILED) lives in ``sales_team.job_runner.run_pipeline_job`` (imported
+# above as ``_run_pipeline_job``), shared unchanged by the thread-dispatch
+# path below and the Temporal activity in ``sales_team/temporal/workflows.py``.
+
+
+def _dispatch_pipeline_job(job_id: str, request: SalesPipelineRequest) -> str:
+    """Dispatch a sales pipeline run via Temporal when enabled, else a daemon thread.
+
+    Preconditions:
+        - ``job_id`` refers to a job already created in the job store.
+
+    Postconditions:
+        - Starts exactly one execution path and returns its label
+          ("Temporal" or "thread"). With ``TEMPORAL_ADDRESS`` set the run is
+          started as a durable ``SalesWorkflow``; otherwise the legacy thread
+          path runs unchanged.
+        - A missing ``shared_temporal`` (Temporal not installed) falls through
+          to the thread path; any *other* failure while starting the workflow
+          (broken import in the team's own Temporal stack, or a client that
+          never connected) propagates to the caller, which marks the job
+          FAILED — a Temporal-enabled run is never silently downgraded.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError:
+        is_temporal_enabled = None
+
+    if is_temporal_enabled is not None and is_temporal_enabled():
+        from sales_team.temporal.start_workflow import start_sales_workflow
+
+        start_sales_workflow(job_id, request.model_dump(mode="json"))
+        return "Temporal"
+
+    thread = threading.Thread(target=_run_pipeline_job, args=(job_id, request), daemon=True)
+    thread.start()
+    return "thread"
 
 
 @app.post("/sales/pipeline/run", response_model=SalesPipelineRunResponse, tags=["pipeline"])
@@ -209,11 +231,16 @@ def run_pipeline(request: SalesPipelineRequest) -> SalesPipelineRunResponse:
         created_at=now,
         last_updated_at=now,
     )
-    thread = threading.Thread(target=_run_pipeline_job, args=(job_id, request), daemon=True)
-    thread.start()
+    try:
+        dispatch_method = _dispatch_pipeline_job(job_id, request)
+    except Exception as exc:
+        logger.exception("Failed to dispatch sales pipeline job %s", job_id)
+        _update_job(job_id, status=JOB_STATUS_FAILED, error=f"Dispatch failed: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to start sales pipeline run.") from exc
+    logger.info("Sales pipeline job %s dispatched via %s", job_id, dispatch_method)
     return SalesPipelineRunResponse(
         job_id=job_id,
-        status=JOB_STATUS_RUNNING,
+        status=JOB_STATUS_PENDING,
         message=(
             f"Sales pipeline started (entry: {request.entry_stage.value}). "
             f"Poll GET /sales/pipeline/status/{job_id} for updates."

@@ -1,41 +1,30 @@
-"""Temporal workflow + activity wrapping the sales pod orchestrator."""
+"""Temporal workflow + activity wrapping the sales pod orchestrator.
+
+The workflow class and activity live in :mod:`workflows` (sandbox-safe —
+no top-level non-deterministic calls). Worker startup lives in
+:mod:`worker` and is invoked by the team_service entrypoint at boot
+(``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC``), with the
+API lifespan as a standalone-dev backstop, so the Temporal client is
+connected before the API serves its first request. This package
+``__init__`` must stay free of import-time side effects (no worker boot,
+no ``os.getenv``) — the temporalio sandbox replays it during workflow
+registration.
+"""
 
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import Any
-
-from temporalio import activity, workflow
-
-
-@activity.defn(name="sales_run_pipeline")
-def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
-    from sales_team.api.main import SalesPipelineRequest
-    from sales_team.orchestrator import SalesPodOrchestrator
-
-    req = SalesPipelineRequest(**request)
-    job_id = request.get("job_id") or f"temporal_{activity.info().activity_id}"
-    result = SalesPodOrchestrator(config=req.config).run(req, job_id=job_id)
-    if hasattr(result, "model_dump"):
-        return result.model_dump()
-    return result if isinstance(result, dict) else {"result": result}
-
-
-@workflow.defn(name="SalesWorkflow")
-class SalesWorkflow:
-    @workflow.run
-    async def run(self, request: dict[str, Any]) -> dict[str, Any]:
-        return await workflow.execute_activity(
-            run_pipeline_activity,
-            request,
-            start_to_close_timeout=timedelta(hours=2),
-        )
-
+from sales_team.temporal.workflows import SalesWorkflow, run_pipeline_activity
 
 WORKFLOWS = [SalesWorkflow]
 ACTIVITIES = [run_pipeline_activity]
+TASK_QUEUE = "sales-queue"
+WORKFLOW_ID_PREFIX = "sales-"
 
-from shared_temporal import is_temporal_enabled, start_team_worker  # noqa: E402
-
-if is_temporal_enabled():
-    start_team_worker("sales", WORKFLOWS, ACTIVITIES, task_queue="sales-queue")
+__all__ = [
+    "ACTIVITIES",
+    "SalesWorkflow",
+    "TASK_QUEUE",
+    "WORKFLOWS",
+    "WORKFLOW_ID_PREFIX",
+    "run_pipeline_activity",
+]
