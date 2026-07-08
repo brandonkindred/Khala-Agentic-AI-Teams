@@ -14,9 +14,9 @@ from typing import cast, get_args
 
 from devops_team.models import GateStatus
 from qa_agent import QAExpertAgent, QAInput
-from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient, get_strands_model
+from llm_service.strands_model import resolve_strands_model
 
 from .models import (
     DevOpsTestValidationInput,
@@ -63,10 +63,9 @@ class DevOpsTestValidationAgent:
         # Preserve the pre-refactor model-routing key: this validation call
         # resolves under "devops", not the QA agent's default "qa". A directly
         # supplied Strands model (tests/dummy) is passed through unchanged.
-        if isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("devops")
+        self._model = resolve_strands_model(
+            llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
+        )
         self._qa = QAExpertAgent(self._model)
 
     def run(self, input_data: DevOpsTestValidationInput) -> DevOpsTestValidationOutput:

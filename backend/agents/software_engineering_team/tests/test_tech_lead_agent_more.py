@@ -45,7 +45,7 @@ class _StubAgent:
 def stub_agent(monkeypatch) -> _StubAgent:
     stub = _StubAgent()
     monkeypatch.setattr(tla_mod, "Agent", lambda *a, **kw: stub)
-    monkeypatch.setattr(tla_mod, "get_strands_model", lambda key=None: object())
+    monkeypatch.setattr(tla_mod, "get_strands_model", lambda key=None, **_kw: object())
     return stub
 
 
@@ -519,7 +519,7 @@ def test_trigger_documentation_update_llm_says_no(monkeypatch, tmp_path: Path) -
     stub = _StubAgent()
     stub.queue.append({"should_update_docs": False, "rationale": "fine"})
     monkeypatch.setattr(tla_mod, "Agent", lambda *a, **kw: stub)
-    monkeypatch.setattr(tla_mod, "get_strands_model", lambda key=None: object())
+    monkeypatch.setattr(tla_mod, "get_strands_model", lambda key=None, **_kw: object())
 
     doc_agent = MagicMock()
     a = TechLeadAgent(llm_client=ConfigurableLLM())
@@ -533,7 +533,7 @@ def test_trigger_documentation_update_llm_says_yes(monkeypatch, tmp_path: Path) 
     stub = _StubAgent()
     stub.queue.append({"should_update_docs": True, "rationale": "needed"})
     monkeypatch.setattr(tla_mod, "Agent", lambda *a, **kw: stub)
-    monkeypatch.setattr(tla_mod, "get_strands_model", lambda key=None: object())
+    monkeypatch.setattr(tla_mod, "get_strands_model", lambda key=None, **_kw: object())
 
     doc_agent = MagicMock()
     doc_agent.run_full_workflow.return_value = MagicMock(summary="updated")
@@ -548,7 +548,7 @@ def test_trigger_documentation_update_swallows_errors(monkeypatch, tmp_path: Pat
     stub = _StubAgent()
     stub.queue.append({"should_update_docs": True})
     monkeypatch.setattr(tla_mod, "Agent", lambda *a, **kw: stub)
-    monkeypatch.setattr(tla_mod, "get_strands_model", lambda key=None: object())
+    monkeypatch.setattr(tla_mod, "get_strands_model", lambda key=None, **_kw: object())
 
     doc_agent = MagicMock()
     doc_agent.run_full_workflow.side_effect = RuntimeError("doc failed")

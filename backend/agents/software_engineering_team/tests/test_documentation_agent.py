@@ -38,13 +38,13 @@ def _patch_agent(monkeypatch, payloads):
         return fake
 
     monkeypatch.setattr(doc_agent_mod, "Agent", _factory)
-    monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda _key=None: object())
+    monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda _key=None, **_kw: object())
     return fake
 
 
 def test_doc_agent_init_uses_strands_model(monkeypatch) -> None:
     sentinel = object()
-    monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda key: sentinel)
+    monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda key, **_kw: sentinel)
     a = DocumentationAgent()
     assert a._model is sentinel
 
@@ -207,7 +207,7 @@ def test_doc_agent_run_readme_llm_error_returns_partial(monkeypatch) -> None:
 
     fake = _ErrorReadmeFake()
     monkeypatch.setattr(doc_agent_mod, "Agent", lambda *a, **kw: fake)
-    monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda _k=None: object())
+    monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda _k=None, **_kw: object())
 
     a = DocumentationAgent()
     out = a.run(DocumentationInput(repo_path="/tmp/x", task_id="t1"))
@@ -234,7 +234,7 @@ def test_doc_agent_run_contributors_llm_error(monkeypatch) -> None:
 
     fake = _ErrFake()
     monkeypatch.setattr(doc_agent_mod, "Agent", lambda *a, **kw: fake)
-    monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda _k=None: object())
+    monkeypatch.setattr(doc_agent_mod, "get_strands_model", lambda _k=None, **_kw: object())
 
     a = DocumentationAgent()
     out = a.run(DocumentationInput(repo_path="/tmp/x", task_id="t1"))
@@ -279,15 +279,11 @@ def test_doc_agent_run_full_workflow_no_changes(monkeypatch, tmp_path: Path) -> 
         ],
     )
 
-    monkeypatch.setattr(
-        doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1")
-    )
+    monkeypatch.setattr(doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1"))
     monkeypatch.setattr(doc_agent_mod, "checkout_branch", lambda *a, **kw: (True, ""))
     monkeypatch.setattr(doc_agent_mod, "delete_branch", lambda *a, **kw: (True, ""))
     monkeypatch.setattr(doc_agent_mod, "merge_branch", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(
-        doc_agent_mod, "write_files_and_commit", lambda *a, **kw: (True, "")
-    )
+    monkeypatch.setattr(doc_agent_mod, "write_files_and_commit", lambda *a, **kw: (True, ""))
 
     statuses = []
 
@@ -356,14 +352,12 @@ def test_doc_agent_run_full_workflow_writes_and_merges(monkeypatch, tmp_path: Pa
     (tmp_path / "backend").mkdir()
     (tmp_path / "devops").mkdir()
 
-    monkeypatch.setattr(
-        doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1")
-    )
+    monkeypatch.setattr(doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1"))
     write_calls = []
     monkeypatch.setattr(
         doc_agent_mod,
         "write_files_and_commit",
-        lambda path, files, msg: (write_calls.append((files, msg)) or (True, "")),
+        lambda path, files, msg: write_calls.append((files, msg)) or (True, ""),
     )
     monkeypatch.setattr(doc_agent_mod, "merge_branch", lambda *a, **kw: (True, ""))
     monkeypatch.setattr(doc_agent_mod, "delete_branch", lambda *a, **kw: (True, ""))
@@ -397,9 +391,7 @@ def test_doc_agent_run_full_workflow_commit_fails(monkeypatch, tmp_path: Path) -
             {"contributors_content": "", "contributors_changed": False, "summary": "ok"},
         ],
     )
-    monkeypatch.setattr(
-        doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1")
-    )
+    monkeypatch.setattr(doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1"))
     monkeypatch.setattr(
         doc_agent_mod, "write_files_and_commit", lambda *a, **kw: (False, "no diff")
     )
@@ -427,13 +419,9 @@ def test_doc_agent_run_full_workflow_merge_fails(monkeypatch, tmp_path: Path) ->
             {"contributors_content": "", "contributors_changed": False, "summary": "ok"},
         ],
     )
-    monkeypatch.setattr(
-        doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1")
-    )
+    monkeypatch.setattr(doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1"))
     monkeypatch.setattr(doc_agent_mod, "write_files_and_commit", lambda *a, **kw: (True, ""))
-    monkeypatch.setattr(
-        doc_agent_mod, "merge_branch", lambda *a, **kw: (False, "conflict")
-    )
+    monkeypatch.setattr(doc_agent_mod, "merge_branch", lambda *a, **kw: (False, "conflict"))
     monkeypatch.setattr(doc_agent_mod, "checkout_branch", lambda *a, **kw: (True, ""))
     monkeypatch.setattr(doc_agent_mod, "delete_branch", lambda *a, **kw: (True, ""))
 
@@ -452,9 +440,9 @@ def test_doc_agent_run_full_workflow_merge_fails(monkeypatch, tmp_path: Path) ->
 
 def test_doc_agent_run_full_workflow_exception(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
-        doc_agent_mod, "create_feature_branch", lambda *a, **kw: (_ for _ in ()).throw(
-            RuntimeError("git exploded")
-        )
+        doc_agent_mod,
+        "create_feature_branch",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("git exploded")),
     )
     a = DocumentationAgent()
     out = a.run_full_workflow(
@@ -471,9 +459,7 @@ def test_doc_agent_run_full_workflow_exception(monkeypatch, tmp_path: Path) -> N
 
 def test_doc_agent_run_full_workflow_timeout(monkeypatch, tmp_path: Path) -> None:
     """If the workflow exceeds MAX_WORKFLOW_SECONDS, it bails out cleanly."""
-    monkeypatch.setattr(
-        doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1")
-    )
+    monkeypatch.setattr(doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/t1"))
     monkeypatch.setattr(doc_agent_mod, "checkout_branch", lambda *a, **kw: (True, ""))
     monkeypatch.setattr(doc_agent_mod, "delete_branch", lambda *a, **kw: (True, ""))
 
@@ -517,9 +503,9 @@ def test_doc_agent_read_file_oserror(monkeypatch, tmp_path: Path) -> None:
 
 def test_doc_agent_cleanup_branch_swallows_errors(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
-        doc_agent_mod, "checkout_branch", lambda *a, **kw: (_ for _ in ()).throw(
-            RuntimeError("nope")
-        )
+        doc_agent_mod,
+        "checkout_branch",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("nope")),
     )
     monkeypatch.setattr(doc_agent_mod, "delete_branch", lambda *a, **kw: (True, ""))
     a = DocumentationAgent()
@@ -537,9 +523,7 @@ def test_doc_agent_run_final_review_uses_extensions(monkeypatch, tmp_path: Path)
 
     monkeypatch.setattr(doc_agent_mod, "_read_repo_code", _fake_read_repo_code)
     # Stub the rest so the workflow is a no-op
-    monkeypatch.setattr(
-        doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/f")
-    )
+    monkeypatch.setattr(doc_agent_mod, "create_feature_branch", lambda *a, **kw: (True, "docs/f"))
     monkeypatch.setattr(doc_agent_mod, "checkout_branch", lambda *a, **kw: (True, ""))
     monkeypatch.setattr(doc_agent_mod, "delete_branch", lambda *a, **kw: (True, ""))
     _patch_agent(

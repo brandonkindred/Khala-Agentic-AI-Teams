@@ -26,6 +26,7 @@ from software_engineering_team.shared.phases.execution import (
     ReviewDependencies,
     _run_general_microtask_impl,
     _write_microtask_files,
+    generate_microtask_files,
     run_execution_impl,
     write_microtask_output_or_fail,
 )
@@ -238,29 +239,18 @@ def run_execution_with_review_gates(
 
         # ── Phase 1: Coding ───────────────────────────────────────────────────
         try:
-            runner = runners.get(mt.tool_agent)
-            if runner is not None:
-                inp = ToolAgentInput(
-                    microtask=mt,
-                    repo_path=str(repo_path),
-                    existing_code=existing_code[:6000] if existing_code else "",
-                    language=planning_result.language,
-                )
-                out = runner(inp)
-                mt.output_files = out.files
-                mt.notes = out.summary
-            else:
-                files = _run_general_microtask(
-                    llm=llm,
-                    microtask=mt,
-                    task=task,
-                    language=planning_result.language,
-                    existing_code=existing_code,
-                    architecture=architecture,
-                )
-                mt.output_files = files
-
-            microtask_files = dict(mt.output_files)
+            microtask_files = generate_microtask_files(
+                llm=llm,
+                mt=mt,
+                task=task,
+                planning_result=planning_result,
+                repo_path=repo_path,
+                existing_code=existing_code,
+                architecture=architecture,
+                runners=runners,
+                models=_models,
+                run_general_microtask=_run_general_microtask,
+            )
             # Track files this microtask introduced for rollback on failure.
             microtask_file_keys = set(microtask_files.keys())
             # Route the initial write through the same guarded helper the review

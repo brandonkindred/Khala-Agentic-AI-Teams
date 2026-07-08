@@ -8,6 +8,7 @@ import logging
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
 
 from .models import ProblemSolverInput, ProblemSolverOutput
 from .prompts import PROBLEM_SOLVER_PROMPT
@@ -19,12 +20,9 @@ class ProblemSolverAgent:
     """Specialist that provides plan/execute/review/test guidance for bug fixing."""
 
     def __init__(self, llm_client=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            _model = llm_client
-        else:
-            _model = get_strands_model("problem_solver")
+        _model = resolve_strands_model(
+            llm_client, agent_key="problem_solver", get_strands_model_fn=get_strands_model
+        )
         self._agent = Agent(model=_model, system_prompt=PROBLEM_SOLVER_PROMPT)
 
     def run(self, input_data: ProblemSolverInput) -> ProblemSolverOutput:
