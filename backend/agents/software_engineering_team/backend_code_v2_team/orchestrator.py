@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
 from shared_repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 
 from .models import (
     BackendCodeV2WorkflowResult,
@@ -77,13 +78,7 @@ class BackendDevelopmentAgent:
         self, tool_agents: Dict[ToolAgentKind, Any]
     ) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
         """Build run callables from tool agent instances (for Execution phase)."""
-        runners = {}
-        for k, ag in tool_agents.items():
-            if hasattr(ag, "run"):
-                runners[k] = ag.run
-            elif hasattr(ag, "execute"):
-                runners[k] = ag.execute
-        return runners
+        return build_tool_runners(tool_agents)
 
     @staticmethod
     def _read_repo_code(repo_path: Path, max_chars: int = 30_000) -> str:
@@ -111,17 +106,6 @@ class BackendDevelopmentAgent:
         build_verifier: Optional[Callable[..., Tuple[bool, str]]] = None,
         doc_agent: Any = None,
         linting_tool_agent: Any = None,
-        tech_lead: Any = None,
-        completed_tasks: Optional[List[Task]] = None,
-        remaining_tasks: Optional[List[Task]] = None,
-        all_tasks: Optional[Dict[str, Task]] = None,
-        execution_queue: Optional[List[str]] = None,
-        append_task_fn: Optional[Callable[[Task], None]] = None,
-        build_fix_specialist: Any = None,
-        git_operations_tool_agent: Any = None,
-        acceptance_verifier_agent: Any = None,
-        dbc_agent: Any = None,
-        problem_solver_agent: Any = None,
         job_updater: Optional[Callable[..., None]] = None,
         review_config: Optional[MicrotaskReviewConfig] = None,
         merge_to_development: bool = True,
@@ -492,17 +476,6 @@ class BackendCodeV2TeamLead:
         build_verifier: Optional[Callable[..., Tuple[bool, str]]] = None,
         doc_agent: Any = None,
         linting_tool_agent: Any = None,
-        tech_lead: Any = None,
-        completed_tasks: Optional[List[Task]] = None,
-        remaining_tasks: Optional[List[Task]] = None,
-        all_tasks: Optional[Dict[str, Task]] = None,
-        execution_queue: Optional[List[str]] = None,
-        append_task_fn: Optional[Callable[[Task], None]] = None,
-        build_fix_specialist: Any = None,
-        git_operations_tool_agent: Any = None,
-        acceptance_verifier_agent: Any = None,
-        dbc_agent: Any = None,
-        problem_solver_agent: Any = None,
         job_updater: Optional[Callable[..., None]] = None,
         review_config: Optional[MicrotaskReviewConfig] = None,
         merge_to_development: bool = True,
@@ -581,17 +554,6 @@ class BackendCodeV2TeamLead:
             build_verifier=build_verifier,
             doc_agent=doc_agent,
             linting_tool_agent=linting_tool_agent,
-            tech_lead=tech_lead,
-            completed_tasks=completed_tasks,
-            remaining_tasks=remaining_tasks,
-            all_tasks=all_tasks,
-            execution_queue=execution_queue,
-            append_task_fn=append_task_fn,
-            build_fix_specialist=build_fix_specialist,
-            git_operations_tool_agent=git_operations_tool_agent,
-            acceptance_verifier_agent=acceptance_verifier_agent,
-            dbc_agent=dbc_agent,
-            problem_solver_agent=problem_solver_agent,
             job_updater=job_updater,
             review_config=review_config,
             merge_to_development=merge_to_development,

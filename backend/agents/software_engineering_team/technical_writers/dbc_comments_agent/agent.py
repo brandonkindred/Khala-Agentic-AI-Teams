@@ -9,6 +9,7 @@ from typing import Callable, Optional
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
 
 from .models import DbcCommentsInput, DbcCommentsOutput, DbcCommentsStatus
 from .prompts import DBC_COMMENTS_PROMPT
@@ -39,12 +40,9 @@ class DbcCommentsAgent:
         Postconditions:
             - self._agent is set to a Strands Agent
         """
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            _model = llm_client
-        else:
-            _model = get_strands_model("dbc_comments")
+        _model = resolve_strands_model(
+            llm_client, agent_key="dbc_comments", get_strands_model_fn=get_strands_model
+        )
         self._agent = Agent(model=_model, system_prompt=DBC_COMMENTS_PROMPT)
 
     def run(

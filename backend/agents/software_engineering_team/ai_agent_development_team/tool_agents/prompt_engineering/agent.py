@@ -7,6 +7,7 @@ import json
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
 
 from ...models import ToolAgentInput, ToolAgentOutput
 
@@ -20,9 +21,7 @@ Return JSON with files/recommendations/summary.
 
 class PromptEngineeringToolAgent:
     def __init__(self, llm=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-
-        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
+        self._model = resolve_strands_model(llm, get_strands_model_fn=get_strands_model)
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         agent = Agent(model=self._model)

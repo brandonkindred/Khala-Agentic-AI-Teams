@@ -9,6 +9,7 @@ from typing import List
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
 
 from ...models import (
     ToolAgentInput,
@@ -63,9 +64,7 @@ class UiDesignToolAgent:
     """UI Design tool agent: visual system, layout, typography, component specs."""
 
     def __init__(self, llm=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-
-        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
+        self._model = resolve_strands_model(llm, get_strands_model_fn=get_strands_model)
         self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:

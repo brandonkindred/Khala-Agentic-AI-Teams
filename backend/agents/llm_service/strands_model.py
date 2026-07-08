@@ -24,7 +24,13 @@ from typing import Any, Callable
 from llm_service import get_strands_model
 
 
-def resolve_strands_model(llm: Any, *, response_format: str = "json") -> Any:
+def resolve_strands_model(
+    llm: Any,
+    *,
+    response_format: str = "json",
+    agent_key: str | None = None,
+    get_strands_model_fn: Callable[..., Any] | None = None,
+) -> Any:
     """Resolve an injectable LLM handle to a Strands ``Model``.
 
     Resolution rules:
@@ -36,7 +42,7 @@ def resolve_strands_model(llm: Any, *, response_format: str = "json") -> Any:
        ``response_format``. Callers' retries / telemetry / rate-limit guard
        continue to flow through the injected client.
     3. Otherwise (``None`` or anything unrecognized), construct a default
-       Strands model via ``get_strands_model(response_format=...)``.
+       Strands model via ``get_strands_model(agent_key, response_format=...)``.
 
     Parameters
     ----------
@@ -46,6 +52,19 @@ def resolve_strands_model(llm: Any, *, response_format: str = "json") -> Any:
         ``"json"`` (default) or ``"text"``. Selects the JSON / text branch of
         ``LLMClient.chat`` on the wire. See ``llm_service/strands_adapter.py``
         for details.
+    agent_key:
+        Forwarded to ``get_strands_model`` (branches 2 and 3) so per-agent
+        model overrides (``LLM_MODEL_<agent_key>``) and cost/telemetry
+        tagging keep working for callers that previously called
+        ``get_strands_model("<agent_key>")`` directly. ``None`` (default)
+        preserves the untagged behavior existing callers already rely on.
+    get_strands_model_fn:
+        Override for ``get_strands_model`` (branches 2 and 3). Many persona
+        ``agent.py`` modules import ``get_strands_model`` themselves and tests
+        do ``monkeypatch.setattr(<agent_module>, "get_strands_model", fake)`` —
+        passing that module's own (possibly monkeypatched) name through here
+        preserves that seam. ``None`` (default) uses this module's own
+        ``get_strands_model``.
     """
     # Local imports keep the optional ``strands`` and ``LLMClient`` imports off
     # the module-level path — this helper is imported at import time by the
@@ -55,11 +74,13 @@ def resolve_strands_model(llm: Any, *, response_format: str = "json") -> Any:
 
     from llm_service import LLMClient as _LLMClient  # noqa: PLC0415
 
+    _get_strands_model = get_strands_model_fn or get_strands_model
+
     if llm is not None and isinstance(llm, _StrandsModel):
         return llm
     if llm is not None and isinstance(llm, _LLMClient):
-        return get_strands_model(client=llm, response_format=response_format)
-    return get_strands_model(response_format=response_format)
+        return _get_strands_model(agent_key, client=llm, response_format=response_format)
+    return _get_strands_model(agent_key, response_format=response_format)
 
 
 def resolve_text_mode_strands_model(llm: Any) -> Any:

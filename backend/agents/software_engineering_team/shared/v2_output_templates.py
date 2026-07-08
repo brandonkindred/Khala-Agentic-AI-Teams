@@ -17,7 +17,9 @@ normalization and language config, so existing import paths keep working.
 
 from __future__ import annotations
 
+import functools
 import re
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Tuple
 
 # ---------------------------------------------------------------------------
@@ -486,3 +488,65 @@ def parse_documentation_self_review_template(
         "files": files,
         "summary": summary,
     }
+
+
+def make_output_templates(
+    *,
+    path_prefixes: Tuple[str, ...],
+    allowed_languages: Tuple[str, ...],
+    default_language: str,
+    coerce_unknown: bool,
+) -> SimpleNamespace:
+    """
+    Build a team-bound set of output-template parsers.
+
+    Every team's ``output_templates.py`` binds the same section-delimited
+    parsing engine above to two team-specific things: the file-path prefix(es)
+    to strip during normalization, and the planning ``LANGUAGE`` config
+    (default/allowed values and whether an unknown value is coerced). This
+    factory captures that binding once so each team's module reduces to a
+    single call site.
+
+    Preconditions: ``path_prefixes`` is a non-empty tuple of str; ``default_language``
+    is a non-empty str.
+    Postconditions: returns a namespace exposing ``normalize_file_path`` plus every
+    ``parse_*`` function above, bound to the given path/language config.
+    """
+
+    def normalize_file_path(path: str) -> str:
+        for prefix in path_prefixes:
+            if path.startswith(prefix):
+                return path[len(prefix) :]
+        return path
+
+    def parse_planning(text: str) -> Dict[str, Any]:
+        return parse_planning_template(
+            text,
+            default_language=default_language,
+            allowed_languages=allowed_languages,
+            coerce_unknown=coerce_unknown,
+        )
+
+    return SimpleNamespace(
+        normalize_file_path=normalize_file_path,
+        parse_files_and_summary_template=functools.partial(
+            parse_files_and_summary_template, normalize=normalize_file_path
+        ),
+        parse_files_with_validation=functools.partial(
+            parse_files_with_validation, normalize=normalize_file_path
+        ),
+        parse_planning_template=parse_planning,
+        parse_review_template=parse_review_template,
+        parse_problem_solving_template=functools.partial(
+            parse_problem_solving_template, normalize=normalize_file_path
+        ),
+        parse_problem_solving_single_issue_template=functools.partial(
+            parse_problem_solving_single_issue_template, normalize=normalize_file_path
+        ),
+        parse_batch_fix_template=functools.partial(
+            parse_batch_fix_template, normalize=normalize_file_path
+        ),
+        parse_documentation_self_review_template=functools.partial(
+            parse_documentation_self_review_template, normalize=normalize_file_path
+        ),
+    )

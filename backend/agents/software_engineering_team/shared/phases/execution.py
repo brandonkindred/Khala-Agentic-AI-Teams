@@ -3,14 +3,20 @@ Shared Execution-phase leaf helpers for the code-v2 teams.
 
 Holds the pieces that were byte-identical between the backend and frontend
 execution phases — issue dedup, the review-dependency container, the
-microtask-file writer, the general (non-specialist) microtask coder, and the
-non-gated ``run_execution`` loop. The stack-specific ``EXECUTION_PROMPT``
-divergence (backend injects ``{language_conventions}``, frontend does not) is
-handled via the team's
+microtask-file writer, ``generate_microtask_files`` (produce one microtask's
+output via its tool-runner or the general coder), the general (non-specialist)
+microtask coder, and the non-gated ``run_execution`` loop. The stack-specific
+``EXECUTION_PROMPT`` divergence (backend injects ``{language_conventions}``,
+frontend does not) is handled via the team's
 :class:`~software_engineering_team.shared.stack_profile.StackProfile`.
 
-The gated ``run_execution_with_review_gates`` orchestration stays per-team: its
-review-gate loop interlocks with each team's ``review.py`` (out of scope).
+The gated ``run_execution_with_review_gates`` orchestration stays per-team:
+its review-gate loop interlocks with each team's ``review.py``, which still
+diverges architecturally (backend calls three separate
+``run_{code_review,qa,security}_testing_phase`` functions returning a
+``PhaseReviewResult``; frontend calls one unified ``run_microtask_review()``
+three times and filters issues by ``source``). Reconciling that architecture
+fork is a separate, larger effort and is intentionally not attempted here.
 """
 
 from __future__ import annotations
@@ -158,6 +164,55 @@ def _run_general_microtask_impl(
     return files
 
 
+def generate_microtask_files(
+    *,
+    llm: LLMClient,
+    mt: Any,
+    task: Task,
+    planning_result: Any,
+    repo_path: Path,
+    existing_code: str,
+    architecture: Optional[SystemArchitecture],
+    runners: Dict[Any, Any],
+    models: PhaseModels,
+    run_general_microtask: Callable[..., Dict[str, str]],
+) -> Dict[str, str]:
+    """Produce a microtask's output files via its tool-runner or the general coder.
+
+    Was duplicated as a standalone helper in backend's execution.py and inlined
+    directly in frontend's review-gated loop; both bodies were identical.
+
+    Preconditions:
+        ``runners`` maps tool-agent-kind → callable(ToolAgentInput); a microtask
+        whose ``tool_agent`` has no runner falls back to ``run_general_microtask``.
+        ``models`` exposes ``ToolAgentInput`` (see ``run_execution_impl``).
+    Postconditions:
+        Returns the ``{path: content}`` map and sets ``mt.output_files`` (and
+        ``mt.notes`` on the tool-runner path). Never writes to disk.
+    """
+    runner = runners.get(mt.tool_agent)
+    if runner is not None:
+        inp = models.ToolAgentInput(
+            microtask=mt,
+            repo_path=str(repo_path),
+            existing_code=existing_code[:6000] if existing_code else "",
+            language=planning_result.language,
+        )
+        out = runner(inp)
+        mt.output_files = out.files
+        mt.notes = out.summary
+    else:
+        mt.output_files = run_general_microtask(
+            llm=llm,
+            microtask=mt,
+            task=task,
+            language=planning_result.language,
+            existing_code=existing_code,
+            architecture=architecture,
+        )
+    return dict(mt.output_files)
+
+
 def run_execution_impl(
     *,
     llm: LLMClient,
@@ -189,7 +244,6 @@ def run_execution_impl(
     """
     microtask_status_enum = models.MicrotaskStatus
     execution_result_cls = models.ExecutionResult
-    tool_agent_input_cls = models.ToolAgentInput
 
     runners = tool_runners or {}
     all_files: Dict[str, str] = {}
@@ -231,27 +285,18 @@ def run_execution_impl(
             )
 
         try:
-            runner = runners.get(mt.tool_agent)
-            if runner is not None:
-                inp = tool_agent_input_cls(
-                    microtask=mt,
-                    repo_path=str(repo_path),
-                    existing_code=existing_code[:6000] if existing_code else "",
-                    language=planning_result.language,
-                )
-                out = runner(inp)
-                mt.output_files = out.files
-                mt.notes = out.summary
-            else:
-                files = run_general_microtask(
-                    llm=llm,
-                    microtask=mt,
-                    task=task,
-                    language=planning_result.language,
-                    existing_code=existing_code,
-                    architecture=architecture,
-                )
-                mt.output_files = files
+            generate_microtask_files(
+                llm=llm,
+                mt=mt,
+                task=task,
+                planning_result=planning_result,
+                repo_path=repo_path,
+                existing_code=existing_code,
+                architecture=architecture,
+                runners=runners,
+                models=models,
+                run_general_microtask=run_general_microtask,
+            )
 
             all_files.update(mt.output_files)
             mt.status = microtask_status_enum.COMPLETED

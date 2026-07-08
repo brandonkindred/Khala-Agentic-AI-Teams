@@ -13,6 +13,8 @@ import logging
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.persona_agent_base import run_structured_persona
 from software_engineering_team.shared.security_service import derive_approved
 
 from .models import SecurityInput, SecurityOutput
@@ -35,12 +37,9 @@ class CybersecurityExpertAgent:
         Postconditions: ``self._model`` is a usable Strands model — the passed
         client when it is already a Strands ``Model``, else the ``security`` model.
         """
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("security")
+        self._model = resolve_strands_model(
+            llm_client, agent_key="security", get_strands_model_fn=get_strands_model
+        )
 
     def run(self, input_data: SecurityInput) -> SecurityOutput:
         """Review code for security vulnerabilities.
@@ -60,19 +59,7 @@ class CybersecurityExpertAgent:
 
         user_prompt = self._build_user_prompt(input_data)
 
-        # A fresh Strands Agent per call — reusing the same instance across
-        # calls breaks structured_output forced-tool-choice on the second
-        # call (Strands accumulates message history).
-        agent = Agent(model=self._model, system_prompt=SECURITY_PROMPT)
-
-        try:
-            agent_result = agent(user_prompt, structured_output_model=SecurityOutput)
-            result = agent_result.structured_output
-            if not isinstance(result, SecurityOutput):
-                raise TypeError(
-                    f"Expected SecurityOutput, got {type(result).__name__ if result else 'None'}"
-                )
-        except Exception as exc:  # noqa: BLE001 — LLM/validation failures must not crash the run
+        def _fallback(exc: Exception) -> SecurityOutput:
             logger.warning("Security: structured_output failed (%s); returning fallback", exc)
             return SecurityOutput(
                 vulnerabilities=[],
@@ -81,6 +68,18 @@ class CybersecurityExpertAgent:
                 remediations=[],
                 suggested_commit_message="",
             )
+
+        # A fresh Strands Agent per call — reusing the same instance across
+        # calls breaks structured_output forced-tool-choice on the second
+        # call (Strands accumulates message history).
+        result = run_structured_persona(
+            model=self._model,
+            system_prompt=SECURITY_PROMPT,
+            user_prompt=user_prompt,
+            output_model=SecurityOutput,
+            fallback_factory=_fallback,
+            agent_factory=Agent,
+        )
 
         # Re-derive ``approved`` via the unified rule so a disagreement between
         # the LLM's ``approved`` flag and the reported vulnerability list is
