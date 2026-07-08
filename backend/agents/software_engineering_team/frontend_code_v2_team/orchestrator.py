@@ -17,6 +17,7 @@ from llm_service import LLMClient
 from shared_repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
+from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 
 from .models import (
     FrontendCodeV2WorkflowResult,
@@ -91,13 +92,7 @@ class FrontendDevelopmentAgent:
     def _build_tool_runners(
         self, tool_agents: Dict[ToolAgentKind, Any]
     ) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
-        runners = {}
-        for k, ag in tool_agents.items():
-            if hasattr(ag, "run"):
-                runners[k] = ag.run
-            elif hasattr(ag, "execute"):
-                runners[k] = ag.execute
-        return runners
+        return build_tool_runners(tool_agents)
 
     @staticmethod
     def _read_repo_code(repo_path: Path, max_chars: int = 30_000) -> str:

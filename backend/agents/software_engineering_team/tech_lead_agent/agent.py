@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Dict, List
 from strands import Agent
 
 from llm_service import compact_text, get_client, get_strands_model
+from llm_service.strands_model import resolve_strands_model
 from software_engineering_team.shared.env_config import env_int
 from software_engineering_team.shared.models import (
     Task,
@@ -65,12 +66,9 @@ class TechLeadAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("tech_lead")
+        self._model = resolve_strands_model(
+            llm_client, agent_key="tech_lead", get_strands_model_fn=get_strands_model
+        )
         # Keep an LLMClient reference for context_sizing utilities
         self.llm = llm_client if llm_client is not None else get_client("tech_lead")
 
@@ -144,9 +142,7 @@ class TechLeadAgent:
         # Header with project info
         parts.append(f"# Development Plan: {requirements.title}\n")
         parts.append("\n## Overview\n")
-        parts.append(
-            f"This development plan covers {requirements.description}\n"
-        )
+        parts.append(f"This development plan covers {requirements.description}\n")
 
         # Hierarchy summary
         parts.append("\n## Planning Hierarchy Summary\n")
@@ -437,13 +433,9 @@ class TechLeadAgent:
                 task_lines.append(
                     f"- **id:** {t.id} | **type:** {t.type} | **title:** {t.title} | **status:** {t.status} | **assignee:** {t.assignee}"
                 )
-                task_lines.append(
-                    f"  **description:** {t.description}"
-                )
+                task_lines.append(f"  **description:** {t.description}")
                 if t.requirements:
-                    task_lines.append(
-                        f"  **requirements:** {t.requirements}"
-                    )
+                    task_lines.append(f"  **requirements:** {t.requirements}")
                 if t.acceptance_criteria:
                     task_lines.append(
                         "  **acceptance_criteria:** " + "; ".join(t.acceptance_criteria[:5])

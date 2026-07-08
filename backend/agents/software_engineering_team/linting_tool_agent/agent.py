@@ -11,6 +11,7 @@ from build_fix_specialist.models import CodeEdit
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
 
 from .linter_runner import detect_linter, execute_linter
 from .models import LintIssue, LintToolInput, LintToolOutput
@@ -37,12 +38,9 @@ class LintingToolAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            _model = llm_client
-        else:
-            _model = get_strands_model("linting_tool_agent")
+        _model = resolve_strands_model(
+            llm_client, agent_key="linting_tool_agent", get_strands_model_fn=get_strands_model
+        )
         self._agent = Agent(model=_model, system_prompt=LINT_FIX_PROMPT)
 
     def run(self, input_data: LintToolInput) -> LintToolOutput:

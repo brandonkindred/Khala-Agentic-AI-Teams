@@ -4,16 +4,21 @@ Prompts for the backend-code-v2 team.
 Written from scratch — no reuse of ``backend_agent`` prompts.
 """
 
-from software_engineering_team.shared.coding_standards import (
-    PRIORITY_FRAMEWORK as _PRIORITY_FRAMEWORK,
-)
-from software_engineering_team.shared.coding_standards import (
-    REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
+from software_engineering_team.shared.prompts import (
+    DELIVER_COMMIT_MSG_TEMPLATE as DELIVER_COMMIT_MSG_TEMPLATE,
 )
 from software_engineering_team.shared.prompts import (
+    DOCUMENTATION_PROBLEM_SOLVE_PROMPT as DOCUMENTATION_PROBLEM_SOLVE_PROMPT,
+)
+from software_engineering_team.shared.prompts import (
+    build_batch_fix_prompt,
+    build_code_review_prompt,
+    build_documentation_self_review_prompt,
     build_execution_prompt,
     build_planning_prompt,
+    build_problem_solving_prompt,
     build_problem_solving_single_issue_prompt,
+    build_qa_review_prompt,
 )
 from software_engineering_team.shared.security_service import (
     CODE_BACKEND_FOCUS,
@@ -141,94 +146,16 @@ EXECUTION_PROMPT = build_execution_prompt(
 # Review phase
 # ---------------------------------------------------------------------------
 
-REVIEW_PROMPT = (
-    """You are an expert Code Review Agent for a backend project.
-
-"""
-    + _REVIEW_PRIORITY_FRAMEWORK
-    + """
-After checking these priorities, also verify: correctness against requirements and acceptance criteria, testing coverage, and build/lint readiness.
-
-**Requirements:**
-{requirements}
-
-**Acceptance criteria:**
-{acceptance_criteria}
-
-**Code to review:**
-{code}
-
-**Output format (template – use exactly these section headers):**
-
-## PASSED ##
-true
-## END PASSED ##
-## ISSUES ##
----
-source: code_review
-severity: critical|high|medium|low|info
-description: what is wrong
-file_path: which file
-recommendation: how to fix it
----
-## END ISSUES ##
-## SUMMARY ##
-overall assessment
-## END SUMMARY ##
-
-- Use "---" to separate each issue block. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
-)
+REVIEW_PROMPT = build_code_review_prompt(project_kind="backend")
 
 # ---------------------------------------------------------------------------
 # Problem-solving phase
 # ---------------------------------------------------------------------------
 
-PROBLEM_SOLVING_PROMPT = (
-    """You are an expert Problem-Solving Specialist for a backend project.
-
-Given the issues found during review, produce fixes. Each fix should be a complete
-updated file that resolves the issue.
-
-"""
-    + _PRIORITY_FRAMEWORK
-    + """
-"""
-    + CODING_STANDARDS
-    + """
-
-{language_conventions}
-
-**Issues to resolve:**
-{issues}
-
-**Current code:**
-{current_code}
-
-**Output format (template – use exactly these markers):**
-
-Files (same as execution): for each updated file:
-## FILE path/to/file.ext ##
-<full updated file content>
-## FILE path/to/next.ext ##
-...
-## FIXES_APPLIED ##
----
-issue: summary of the issue
-fix: what was changed
----
-## END FIXES_APPLIED ##
-## RESOLVED ##
-true
-## END RESOLVED ##
-## SUMMARY ##
-overview of all fixes
-## END SUMMARY ##
-
-- Use "## FILE <path> ##" for each file; "---" to separate each fix block.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+PROBLEM_SOLVING_PROMPT = build_problem_solving_prompt(
+    project_kind="backend",
+    coding_standards=CODING_STANDARDS,
+    files_line="Files (same as execution): for each updated file:",
 )
 
 # Single-issue problem-solving: one issue at a time to keep prompts small.
@@ -249,42 +176,10 @@ PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = build_problem_solving_single_issue_prompt(
 # QA tool agent: review (find issues from testing/QA perspective)
 # ---------------------------------------------------------------------------
 
-QA_TOOL_AGENT_REVIEW_PROMPT = """You are an expert QA/Testing specialist. Review the code from a testing and quality perspective only.
-
-Focus on:
-1. Missing or weak unit tests, integration tests, or test coverage.
-2. Edge cases and error paths not covered.
-3. Flaky or brittle test patterns (e.g. non-determinism, poor isolation).
-4. Assertions that are too weak or missing.
-5. Test data or mocks that don't reflect real behaviour.
-
-**Task context:**
-{task_description}
-
-**Code to review:**
-{code}
-
-**Output format (template – use exactly these section headers):**
-
-## PASSED ##
-true
-## END PASSED ##
-## ISSUES ##
----
-source: qa
-severity: critical|high|medium|low|info
-description: what is wrong from a QA/testing perspective
-file_path: which file
-recommendation: how to fix it
----
-## END ISSUES ##
-## SUMMARY ##
-brief QA assessment
-## END SUMMARY ##
-
-- Use "---" to separate each issue block. Use source: qa for every issue. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+QA_TOOL_AGENT_REVIEW_PROMPT = build_qa_review_prompt(
+    second_test_kind="integration tests",
+    flakiness_examples="non-determinism, poor isolation",
+)
 
 # ---------------------------------------------------------------------------
 # Security tool agent: review (find issues from security perspective)
@@ -393,147 +288,31 @@ brief documentation assessment
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
 
-DOCUMENTATION_PROBLEM_SOLVE_PROMPT = """You are an expert Documentation Specialist fixing a specific documentation issue.
-
-{language_conventions}
-
-**Issue to fix:**
-- Source: {source}
-- Severity: {severity}
-- Description: {description}
-- File: {file_path}
-- Recommendation: {recommendation}
-
-**Current code:**
-{current_code}
-
-**Your task:** Fix ONLY this documentation issue. Do not change any code logic — only add or improve documentation.
-
-**Output format (template – use exactly these markers):**
-## FILE path/to/file.ext ##
-<full file content with documentation fix>
-## SUMMARY ##
-what documentation you fixed
-## END SUMMARY ##
-
-- Output the complete file content with the documentation fix.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+# DOCUMENTATION_PROBLEM_SOLVE_PROMPT is byte-identical between backend and
+# frontend; imported from shared above and re-exported here (no local override).
 
 # ---------------------------------------------------------------------------
 # Batch fix prompt: all issues from a review phase at once
 # ---------------------------------------------------------------------------
 
-BATCH_FIX_PROMPT = (
-    """You are an expert Senior Backend Software Engineer responsible for fixing all issues identified by the review team.
-
-"""
-    + CODING_STANDARDS
-    + """
-
-{language_conventions}
-
-**You have been given {issue_count} issues from the {phase_name} phase.**
-
-Your task is to address ALL of these issues in a single pass. Review each issue carefully, understand the root causes, and implement comprehensive fixes.
-
-## Issues to Fix
-
-{formatted_issues}
-
-## Current Code
-
-{current_code}
-
-## Instructions
-
-1. Analyze all issues to understand their root causes
-2. Identify any issues that can be fixed together with a single code change
-3. Plan your fixes strategically to avoid introducing new problems
-4. Implement ALL fixes - do not leave any issue unaddressed
-5. Ensure your changes maintain code quality and don't break existing functionality
-
-You decide how to organize the work internally. The key requirement is that ALL issues must be addressed.
-
-**Output format (template – use exactly these markers):**
-
-For each file you modify or create:
-## FILE path/to/file.ext ##
-<full file content>
-## FILE path/to/next.ext ##
-<full file content>
-## ISSUES_ADDRESSED ##
----
-issue_index: 1
-description: brief description of what was fixed
----
-issue_index: 2
-description: brief description of what was fixed
----
-## END ISSUES_ADDRESSED ##
-## SUMMARY ##
-Overview of all fixes applied
-## END SUMMARY ##
-
-- Use "## FILE <path> ##" at the start of each file; the next "## FILE " or "## ISSUES_ADDRESSED ##" ends the previous file.
-- List each issue you addressed with its index (1-based) and a brief description.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+BATCH_FIX_PROMPT = build_batch_fix_prompt(
+    role_title="Senior Backend Software Engineer",
+    coding_standards=CODING_STANDARDS,
 )
 
 # ---------------------------------------------------------------------------
 # Documentation self-review prompt: iterative refinement
 # ---------------------------------------------------------------------------
 
-DOCUMENTATION_SELF_REVIEW_PROMPT = """You are an expert Documentation Quality Specialist performing a self-review pass on documentation.
-
-**Iteration:** {iteration} of {max_iterations}
-
-**Task Context:** {task_description}
-
-**Current Documentation:**
-
-{documentation}
-
-**Current Code:**
-
-{code}
-
-**Review criteria:**
-1. Clarity: Is the documentation easy to understand?
-2. Completeness: Does it cover all important aspects?
-3. Accuracy: Does it correctly describe the code behavior?
-4. Structure: Is it well-organized with appropriate sections?
-5. Grammar and style: Is it professionally written?
-
-**Your task:**
-1. Review the documentation against the criteria above
-2. Identify specific improvements needed
-3. Apply those improvements and output the refined documentation
-
-**Output format (template – use exactly these markers):**
-
-## QUALITY_SCORE ##
-0.0-1.0 (your assessment of current documentation quality)
-## END QUALITY_SCORE ##
-## IMPROVEMENTS ##
-- List of specific improvements you are making
-- Each on its own line
-## END IMPROVEMENTS ##
-## FILE path/to/doc.md ##
-<full refined documentation content>
-## FILE path/to/next.md ##
-<content if multiple files>
-## SUMMARY ##
-Brief summary of refinements made in this iteration
-## END SUMMARY ##
-
-- Only output documentation files that you actually improved.
-- Do not use JSON. Use only the template above. No explanatory text before or after.
-"""
+DOCUMENTATION_SELF_REVIEW_PROMPT = build_documentation_self_review_prompt(
+    project_kind_suffix="",
+    completeness_clause="",
+    accuracy_target="code",
+)
 
 # ---------------------------------------------------------------------------
 # Deliver phase (no LLM prompt needed — this is procedural git work)
 # ---------------------------------------------------------------------------
 
-DELIVER_COMMIT_MSG_TEMPLATE = "feat({scope}): {summary}"
+# DELIVER_COMMIT_MSG_TEMPLATE is byte-identical between backend and frontend;
+# imported from shared above and re-exported here (no local override).

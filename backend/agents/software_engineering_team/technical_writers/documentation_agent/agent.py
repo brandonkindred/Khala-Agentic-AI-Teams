@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
 from shared_repo_context.repo_utils import DOCUMENTATION_EXTENSIONS, read_repo_code
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
@@ -68,12 +69,9 @@ class DocumentationAgent:
         Postconditions:
             - self._model is set to a Strands model
         """
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("documentation")
+        self._model = resolve_strands_model(
+            llm_client, agent_key="documentation", get_strands_model_fn=get_strands_model
+        )
 
     def run(self, input_data: DocumentationInput) -> DocumentationOutput:
         """

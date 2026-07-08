@@ -27,6 +27,9 @@ from typing import Dict
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.persona_agent_base import run_structured_persona
+from software_engineering_team.shared.security_service import derive_approved
 
 from .models import QAInput, QAOutput
 from .prompts import (
@@ -54,12 +57,9 @@ class QAExpertAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("qa")
+        self._model = resolve_strands_model(
+            llm_client, agent_key="qa", get_strands_model_fn=get_strands_model
+        )
         # One system prompt per request mode. A fresh Strands Agent is
         # constructed per ``run()`` call in :meth:`run` using the selected
         # persona; see the note there for why agents are not cached.
@@ -84,21 +84,7 @@ class QAExpertAgent:
 
         user_prompt = self._build_user_prompt(input_data)
 
-        # A fresh Strands Agent per call. Strands' Agent accumulates
-        # message history across invocations; reusing the same instance
-        # breaks the forced-tool-choice mechanism used by
-        # ``structured_output_model`` on the second call. Construction is
-        # cheap — it just wraps the cached model + system_prompt.
-        agent = Agent(model=self._model, system_prompt=self._system_prompts[mode])
-
-        try:
-            agent_result = agent(user_prompt, structured_output_model=QAOutput)
-            result = agent_result.structured_output
-            if not isinstance(result, QAOutput):
-                raise TypeError(
-                    f"Expected QAOutput, got {type(result).__name__ if result else 'None'}"
-                )
-        except Exception as exc:  # noqa: BLE001 — LLM/validation errors must not crash the run
+        def _fallback(exc: Exception) -> QAOutput:
             logger.warning("QA: structured_output failed (%s); returning fallback", exc)
             return QAOutput(
                 bugs_found=[],
@@ -112,19 +98,37 @@ class QAExpertAgent:
                 suggested_commit_message="",
             )
 
-        # Re-derive ``approved``. The rule differs by mode and the two must not
-        # be unified: in acceptance_evidence mode a failing quality gate is the
-        # blocking signal (mirroring the former DevOpsTestValidationAgent),
-        # whereas the bug-review modes block on critical/high bug severities.
-        if mode == "acceptance_evidence":
-            # ``.strip().lower()`` mirrors ``DevOpsTestValidationAgent._coerce_gate_status``
-            # so a whitespace-padded ``" fail "`` from the model still blocks approval.
-            result.approved = bool(result.approved) and not any(
-                (v or "").strip().lower() == "fail" for v in result.quality_gates.values()
-            )
-        else:
-            critical_or_high = [b for b in result.bugs_found if b.severity in ("critical", "high")]
-            result.approved = len(critical_or_high) == 0
+        def _finalize(result: QAOutput) -> QAOutput:
+            # Re-derive ``approved``. The rule differs by mode and the two must not
+            # be unified: in acceptance_evidence mode a failing quality gate is the
+            # blocking signal (mirroring the former DevOpsTestValidationAgent),
+            # whereas the bug-review modes block on critical/high bug severities.
+            # Only applied to a genuine model result — the fallback above is
+            # already a final, safe ``approved=False``.
+            if mode == "acceptance_evidence":
+                # ``.strip().lower()`` mirrors ``DevOpsTestValidationAgent._coerce_gate_status``
+                # so a whitespace-padded ``" fail "`` from the model still blocks approval.
+                result.approved = bool(result.approved) and not any(
+                    (v or "").strip().lower() == "fail" for v in result.quality_gates.values()
+                )
+            else:
+                result.approved = derive_approved(result.bugs_found, llm_approved=None)
+            return result
+
+        # A fresh Strands Agent per call. Strands' Agent accumulates
+        # message history across invocations; reusing the same instance
+        # breaks the forced-tool-choice mechanism used by
+        # ``structured_output_model`` on the second call. Construction is
+        # cheap — it just wraps the cached model + system_prompt.
+        result = run_structured_persona(
+            model=self._model,
+            system_prompt=self._system_prompts[mode],
+            user_prompt=user_prompt,
+            output_model=QAOutput,
+            fallback_factory=_fallback,
+            agent_factory=Agent,
+            on_success=_finalize,
+        )
 
         logger.info(
             "QA: done, %s issues found, approved=%s",
