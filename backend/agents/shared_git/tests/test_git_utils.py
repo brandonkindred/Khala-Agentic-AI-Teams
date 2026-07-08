@@ -120,24 +120,87 @@ def test_create_feature_branch_succeeds_in_worktree_while_development_checked_ou
     assert result.stdout.strip() == DEVELOPMENT_BRANCH
 
 
-def test_ensure_development_branch_would_conflict_in_a_second_worktree(repo: Path) -> None:
-    """Documents the conflict this design avoids: calling
-    ``ensure_development_branch`` (what the old ``_ensure_development_ready``
-    path did unconditionally) fails in a second worktree while `development`
-    is checked out at the main path. ``git branch -a`` marks a branch checked
-    out in *another* worktree with a ``+`` prefix (not `*`/plain), which this
-    function's existing parsing does not strip, so it fails to recognize
-    development as existing and attempts to recreate it — colliding with the
-    ref that already exists. Either way the call fails here, which is exactly
-    why callers must use ``development_branch_exists`` to skip it entirely
-    once the branch is already present, rather than fix this parsing.
+def test_ensure_development_branch_succeeds_without_attaching_in_a_second_worktree(
+    repo: Path,
+) -> None:
+    """``ensure_development_branch`` must not fail (or hang trying to attach
+    development) when called from a linked worktree while ``development``
+    stays checked out at the main repo path — the real-v2-team-lead setup
+    phase (``software_engineering_team/shared/phases/setup.py``) calls this
+    unconditionally on a worker's worktree that already has a feature branch
+    checked out. ``git branch -a`` marks development ``+`` there (checked out
+    in *another* worktree), which naive ``.lstrip("* ")`` parsing collapses
+    into "not the current branch", previously causing a doomed
+    ``checkout -b development`` that collided with the existing ref. This
+    must instead report success and leave the worktree's own checkout alone.
     """
     wt_path = repo.parent / "wt-conflict"
     ok, msg = add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
     assert ok, msg
+    ok, branch = create_feature_branch(wt_path, DEVELOPMENT_BRANCH, "t4-setup")
+    assert ok, branch
 
     ok, msg = ensure_development_branch(wt_path)
-    assert not ok, msg
+
+    assert ok, msg
+    # The worktree's own checkout (the feature branch) is untouched.
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=wt_path, capture_output=True, text=True
+    )
+    assert result.stdout.strip() == branch
+    # development is still attached at the main repo path, unaffected.
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
+    )
+    assert result.stdout.strip() == DEVELOPMENT_BRANCH
+
+
+def test_ensure_development_branch_checks_out_development_when_not_attached_elsewhere(
+    repo: Path,
+) -> None:
+    """The normal (single-worktree) case is unchanged: switching off development
+    onto a feature branch and back is a plain, successful checkout — no other
+    worktree has development attached, so the new elsewhere-check is a no-op."""
+    ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t5-normal")
+    assert ok, branch
+
+    ok, msg = ensure_development_branch(repo)
+
+    assert ok, msg
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
+    )
+    assert result.stdout.strip() == DEVELOPMENT_BRANCH
+
+
+def test_ensure_development_branch_fails_closed_when_worktree_list_query_fails(
+    repo: Path, monkeypatch
+) -> None:
+    """A ``git worktree list`` failure must not be silently treated as "not
+    attached elsewhere" and skip the checkout — it falls back to attempting
+    the normal checkout, surfacing any real conflict through that call's own
+    error instead of masking the query failure."""
+    import shared_git.git_utils as git_utils_mod
+
+    ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t6-query-fails")
+    assert ok, branch
+
+    real_run_git = git_utils_mod._run_git
+
+    def _flaky_run_git(path, cmd, *a, **k):
+        if cmd[:3] == ["git", "worktree", "list"]:
+            return 1, "boom"
+        return real_run_git(path, cmd, *a, **k)
+
+    monkeypatch.setattr(git_utils_mod, "_run_git", _flaky_run_git)
+
+    ok, msg = ensure_development_branch(repo)
+
+    assert ok, msg
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
+    )
+    assert result.stdout.strip() == DEVELOPMENT_BRANCH
 
 
 def test_checkout_branch_is_idempotent_on_worktree_already_on_that_branch(repo: Path) -> None:

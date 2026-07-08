@@ -1055,6 +1055,43 @@ def development_branch_exists(repo_path: str | Path) -> bool:
     return code == 0
 
 
+def _branch_attached_elsewhere(repo_path: Path, branch: str) -> bool:
+    """True iff *branch* is currently attached (checked out) in a linked
+    worktree of this repository OTHER than repo_path.
+
+    ``git branch -a`` marks a branch checked out in another worktree with a
+    ``+`` prefix (not the ``*`` used for the current worktree, and not blank),
+    a distinction naive prefix-stripping (``.lstrip("* ")``) collapses — the
+    branch then appears simply "not the current branch" and its existence can
+    be missed entirely. This reads ``git worktree list --porcelain`` instead,
+    which unambiguously pairs each worktree's absolute path with its attached
+    branch (or omits one for a detached HEAD), so the comparison is exact
+    rather than string-fragile.
+
+    Preconditions:
+        - repo_path is an existing git repository (checked by the caller).
+    Postconditions:
+        - Returns True only when another worktree (not repo_path) has
+          ``refs/heads/<branch>`` attached. Returns False when unattached
+          anywhere, attached at repo_path itself, or the query fails for any
+          reason — failing closed toward "attempt the checkout", so a query
+          failure surfaces as the checkout's own error rather than a silent,
+          unverified skip.
+    """
+    code, out = _run_git(repo_path, ["git", "worktree", "list", "--porcelain"], merge_stderr=False)
+    if code != 0:
+        return False
+    target_ref = f"refs/heads/{branch}"
+    current_wt: Path | None = None
+    for line in (out or "").splitlines():
+        if line.startswith("worktree "):
+            current_wt = Path(line[len("worktree ") :].strip()).resolve()
+        elif line.startswith("branch ") and current_wt is not None:
+            if line[len("branch ") :].strip() == target_ref and current_wt != repo_path:
+                return True
+    return False
+
+
 def ensure_development_branch(repo_path: str | Path) -> Tuple[bool, str]:
     """
     Ensure the development branch exists. Create it from main if it does not.
@@ -1066,18 +1103,28 @@ def ensure_development_branch(repo_path: str | Path) -> Tuple[bool, str]:
     if not (path / ".git").exists():
         return False, "Not a git repository"
 
-    # Check if development branch exists
-    code, out = _run_git(path, ["git", "branch", "-a"])
-    if code != 0:
-        return False, f"git branch failed: {out}"
-    branches = [b.strip().lstrip("* ").split("/")[-1] for b in out.splitlines() if b.strip()]
-    if DEVELOPMENT_BRANCH in branches:
+    if development_branch_exists(path):
+        if _branch_attached_elsewhere(path, DEVELOPMENT_BRANCH):
+            # development is attached in a different linked worktree of this same
+            # repository (e.g. a coding-team worker's worktree calling this while
+            # the swarm's shared checkout has development attached for merge/diff
+            # operations). Attaching it here too is impossible — git allows a
+            # branch to be attached in at most one worktree at a time — and
+            # unneeded: every caller reaching this branch from a linked worktree
+            # has already checked out the branch it actually wants there (e.g. a
+            # feature branch via create_feature_branch), so leaving HEAD as the
+            # caller set it up is exactly what's expected.
+            return True, f"'{DEVELOPMENT_BRANCH}' branch exists (checked out in another worktree)"
         code, out = _run_git(path, ["git", "checkout", DEVELOPMENT_BRANCH])
         if code != 0:
             return False, f"Failed to checkout {DEVELOPMENT_BRANCH}: {out}"
         return True, f"Checked out existing branch '{DEVELOPMENT_BRANCH}'"
 
-    # Ensure we have main or master
+    # development does not exist yet: create it from main/master.
+    code, out = _run_git(path, ["git", "branch", "-a"])
+    if code != 0:
+        return False, f"git branch failed: {out}"
+    branches = [b.strip().lstrip("* +").split("/")[-1] for b in out.splitlines() if b.strip()]
     if MAIN_BRANCH not in branches and "master" not in branches:
         return False, "Neither 'main' nor 'master' branch found; create an initial commit first"
 
