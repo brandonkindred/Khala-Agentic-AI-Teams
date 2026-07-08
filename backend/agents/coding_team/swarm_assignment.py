@@ -51,13 +51,69 @@ class _AssignmentMixin:
             logger.warning("Failed to assign task %s to agent %s: %s", task_id, agent_id, exc)
             return False
 
+    def _pinned_agent_for(self, task: Task) -> Optional[str]:
+        """The agent this task's feature branch is pinned to, or None if unpinned.
+
+        A task with a recorded ``feature_branch_agent_id`` (set once, on first reaching
+        review — see ``swarm_implementation._implement_and_verify``) must be reassigned to
+        that SAME agent on any later round: the branch only exists checked out in that
+        agent's isolated git worktree, and git refuses to check it out (or delete/recreate
+        it) from any other worktree while it stays attached there — routing the task to a
+        different agent would make branch preparation fail every round until the task
+        exhausts its revisions.
+
+        Postconditions:
+            - Returns the pinned agent id when the task has one and that agent is still a
+              member of this swarm's roster. Returns None when the task has never reached
+              review (no branch exists yet) or the pinned agent has left the roster (e.g. a
+              roster change across a retry) — a pin to an agent that no longer exists is not
+              enforceable and is treated as unpinned.
+        """
+        agent_id = task.feature_branch_agent_id
+        if agent_id and agent_id in self.agent_ids:
+            return agent_id
+        return None
+
+    def _reserve_pinned_tasks(
+        self, ready: List[Task], free_agents: List[str], used_agents: set[str]
+    ) -> set[str]:
+        """Claim each pinned task's agent before any Tech-Lead or guardrail assignment runs.
+
+        Reservation must happen first, not merely be enforced as a rejection rule inside the
+        later loops: if an unrelated proposal in the SAME Tech-Lead response claims a pinned
+        task's only eligible agent before that pinned task's own (rejected, mismatched)
+        proposal is processed, the guardrail pass would then find the agent already in
+        ``used_agents`` and leave the pinned task idle for the round — a revision that must
+        return to its branch owner could starve if that assignment pattern recurs.
+
+        Preconditions:
+            - ``used_agents`` is empty (called once, before any other assignment this round).
+        Postconditions:
+            - Every pinned task in ``ready`` whose pinned agent is free and target-matching is
+              assigned to that agent. Returns the set of newly-assigned task ids; callers must
+              skip these in their own passes.
+        """
+        assigned: set[str] = set()
+        for task in ready:
+            pinned = self._pinned_agent_for(task)
+            if not pinned or pinned not in free_agents or pinned in used_agents:
+                continue
+            if not _target_matches_agent(
+                task.target_team, self.agent_team_keys.get(pinned, pinned)
+            ):
+                continue
+            if self._try_assign(task.id, pinned):
+                used_agents.add(pinned)
+                assigned.add(task.id)
+        return assigned
+
     def _assign_tasks(self, ready: List[Task], free_agents: List[str]) -> None:
         """Coordinator decides which tasks go to which workers."""
         if not free_agents or not ready:
             return
         ready_by_id = {t.id: t for t in ready}
         used_agents: set[str] = set()
-        assigned_tasks: set[str] = set()
+        assigned_tasks: set[str] = self._reserve_pinned_tasks(ready, free_agents, used_agents)
         assignments = self.tech_lead.run_assignments(
             agent_ids=self.agent_ids,
             ready_tasks=[
@@ -77,6 +133,16 @@ class _AssignmentMixin:
             task = ready_by_id.get(task_id)
             if not agent_id or not task or agent_id not in free_agents or agent_id in used_agents:
                 continue
+            pinned = self._pinned_agent_for(task)
+            if pinned and agent_id != pinned:
+                logger.warning(
+                    "Ignoring assignment of task %s to agent %s; its feature branch is "
+                    "pinned to %s",
+                    task.id,
+                    agent_id,
+                    pinned,
+                )
+                continue
             if not _target_matches_agent(
                 task.target_team,
                 self.agent_team_keys.get(agent_id, agent_id),
@@ -92,14 +158,22 @@ class _AssignmentMixin:
                 used_agents.add(agent_id)
                 assigned_tasks.add(task.id)
 
-        # Deterministic guardrail: if the Tech Lead already labeled a ready task for a v2 team but
-        # the assignment call omitted it, assign it to a matching free worker rather than leaving it
-        # idle or routing it to the wrong specialist.
+        # Deterministic guardrail: if the Tech Lead already labeled a ready task for a v2 team
+        # (or the task is pinned to a specific agent) but the assignment call omitted it, assign
+        # it to a matching free worker rather than leaving it idle or routing it to the wrong
+        # specialist.
         for task in ready:
-            if not task.target_team or task.id in assigned_tasks:
+            if task.id in assigned_tasks:
                 continue
-            for agent_id in free_agents:
-                if agent_id in used_agents:
+            pinned = self._pinned_agent_for(task)
+            if not task.target_team and not pinned:
+                continue
+            # A pinned task has exactly one eligible candidate — its own agent, or nobody this
+            # round if that agent isn't free yet. Never fall back to a different free worker,
+            # which is exactly the reassignment this pin exists to prevent.
+            candidates = [pinned] if pinned else free_agents
+            for agent_id in candidates:
+                if agent_id not in free_agents or agent_id in used_agents:
                     continue
                 if not _target_matches_agent(
                     task.target_team, self.agent_team_keys.get(agent_id, agent_id)

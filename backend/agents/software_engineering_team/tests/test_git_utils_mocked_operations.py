@@ -409,9 +409,11 @@ def test_ensure_development_branch_already_exists(monkeypatch, _fake_git_repo) -
     """Existing development branch returns success after checkout."""
     from software_engineering_team.shared import git_utils
 
-    def fake_git(path, cmd, timeout=30):
-        if cmd[:3] == ["git", "branch", "-a"]:
-            return 0, "* main\n  development\n"
+    def fake_git(path, cmd, timeout=30, **kwargs):
+        if cmd[:2] == ["git", "show-ref"]:
+            return 0, ""  # refs/heads/development resolves: branch exists
+        if cmd[:3] == ["git", "worktree", "list"]:
+            return 0, ""  # not attached in any other worktree
         return 0, ""
 
     monkeypatch.setattr(git_utils, "_run_git", fake_git)
@@ -423,7 +425,9 @@ def test_ensure_development_branch_already_exists(monkeypatch, _fake_git_repo) -
 def test_ensure_development_branch_creates(monkeypatch, _fake_git_repo) -> None:
     from software_engineering_team.shared import git_utils
 
-    def fake_git(path, cmd, timeout=30):
+    def fake_git(path, cmd, timeout=30, **kwargs):
+        if cmd[:2] == ["git", "show-ref"]:
+            return 1, ""  # refs/heads/development does not resolve yet
         if cmd[:3] == ["git", "branch", "-a"]:
             return 0, "* main\n"
         return 0, ""
@@ -437,7 +441,9 @@ def test_ensure_development_branch_creates(monkeypatch, _fake_git_repo) -> None:
 def test_ensure_development_branch_no_base(monkeypatch, _fake_git_repo) -> None:
     from software_engineering_team.shared import git_utils
 
-    def fake_git(path, cmd, timeout=30):
+    def fake_git(path, cmd, timeout=30, **kwargs):
+        if cmd[:2] == ["git", "show-ref"]:
+            return 1, ""  # refs/heads/development does not resolve yet
         if cmd[:3] == ["git", "branch", "-a"]:
             return 0, ""
         return 0, ""

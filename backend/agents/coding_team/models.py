@@ -75,6 +75,17 @@ class Task(BaseModel):
         default=None,
         description="Git feature branch for this task",
     )
+    feature_branch_agent_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Agent whose isolated git worktree created feature_branch. Set once and never "
+            "cleared (unlike assigned_agent_id, which a quality-gate rejection clears): a task "
+            "sent back to TO_DO for revision must be pinned to this same agent on reassignment, "
+            "since the branch is only checked out in that agent's worktree and git refuses to "
+            "check it out (or delete/recreate it) from any other worktree while it stays "
+            "attached there."
+        ),
+    )
     merged_at: Optional[datetime] = Field(
         default=None,
         description="When the feature branch was merged",
