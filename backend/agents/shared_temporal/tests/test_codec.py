@@ -82,6 +82,34 @@ async def test_encode_passes_through_when_compression_does_not_shrink_payload():
 
 
 @pytest.mark.asyncio
+async def test_encode_is_a_no_op_when_encoding_disabled():
+    """encode_enabled=False must return payloads completely untouched — this
+    is the "deploy decode support everywhere first" half of the rollout: a
+    process not yet cleared to write compressed payloads must not do so."""
+    codec = GzipPayloadCodec(min_size_bytes=0, encode_enabled=False)
+    original = _payload(b"x" * 5000)
+
+    encoded = await codec.encode([original])
+    assert encoded == [original]
+
+
+@pytest.mark.asyncio
+async def test_decode_works_regardless_of_encode_enabled():
+    """A process with encoding disabled must still be able to decode a
+    payload some other (encoding-enabled) process compressed — decode is
+    never gated, only encode is (see the module's rollout-safety rationale)."""
+    writer = GzipPayloadCodec(min_size_bytes=0, encode_enabled=True)
+    reader = GzipPayloadCodec(min_size_bytes=0, encode_enabled=False)
+    original = _payload(b"x" * 5000)
+
+    encoded = await writer.encode([original])
+    assert encoded[0].metadata[b"encoding"] == b"binary/gzip"
+
+    decoded = await reader.decode(encoded)
+    assert decoded == [original]
+
+
+@pytest.mark.asyncio
 async def test_decode_passes_through_payload_not_tagged_by_this_codec():
     """A payload lacking the gzip encoding marker (e.g. written before
     compression was enabled) must decode to itself unchanged, never raise."""
@@ -108,19 +136,22 @@ def test_gzip_payload_codec_is_a_real_payload_codec():
     assert isinstance(GzipPayloadCodec(), PayloadCodec)
 
 
-def test_compression_enabled_defaults_true(monkeypatch):
+def test_compression_enabled_defaults_false(monkeypatch):
+    """Encoding is opt-in: an unset env var must not start writing the new
+    wire format, so a fleet can roll out decode support first (see the
+    module's rollout-safety rationale)."""
     monkeypatch.delenv("TEMPORAL_PAYLOAD_COMPRESSION", raising=False)
-    assert compression_enabled() is True
-
-
-def test_compression_enabled_respects_false_override(monkeypatch):
-    monkeypatch.setenv("TEMPORAL_PAYLOAD_COMPRESSION", "false")
     assert compression_enabled() is False
+
+
+def test_compression_enabled_respects_true_override(monkeypatch):
+    monkeypatch.setenv("TEMPORAL_PAYLOAD_COMPRESSION", "true")
+    assert compression_enabled() is True
 
 
 def test_compression_enabled_falls_back_to_default_on_garbage(monkeypatch):
     monkeypatch.setenv("TEMPORAL_PAYLOAD_COMPRESSION", "not-a-bool")
-    assert compression_enabled() is True
+    assert compression_enabled() is False
 
 
 def test_min_compress_bytes_default(monkeypatch):
@@ -133,11 +164,17 @@ def test_min_compress_bytes_clamped_to_zero_floor(monkeypatch):
     assert min_compress_bytes() == 0
 
 
-def test_build_data_converter_returns_default_when_disabled(monkeypatch):
+def test_build_data_converter_installs_codec_with_encode_disabled_by_default(monkeypatch):
+    """Even with encoding disabled, the codec must still be installed (not
+    None) so this process can decode a payload some other, encoding-enabled
+    process already wrote — only writing is opt-in."""
     monkeypatch.setenv("TEMPORAL_PAYLOAD_COMPRESSION", "false")
     converter = build_data_converter()
-    assert converter is DataConverter.default
-    assert converter.payload_codec is None
+    assert isinstance(converter.payload_codec, GzipPayloadCodec)
+    assert converter.payload_codec._encode_enabled is False
+    # Everything else about the default converter (payload/failure converter
+    # classes) must be preserved — only the codec is added.
+    assert converter.payload_converter_class is DataConverter.default.payload_converter_class
 
 
 def test_build_data_converter_installs_gzip_codec_when_enabled(monkeypatch):
@@ -145,6 +182,7 @@ def test_build_data_converter_installs_gzip_codec_when_enabled(monkeypatch):
     monkeypatch.setenv("TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES", "2048")
     converter = build_data_converter()
     assert isinstance(converter.payload_codec, GzipPayloadCodec)
+    assert converter.payload_codec._encode_enabled is True
     assert converter.payload_codec._min_size_bytes == 2048
     # Everything else about the default converter (payload/failure converter
     # classes) must be preserved — only the codec is added.

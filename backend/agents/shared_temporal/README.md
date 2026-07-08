@@ -92,15 +92,25 @@ back to `30`).
 ## Payload compression
 
 `connect_temporal_client` builds its `Client`'s `DataConverter` via
-`shared_temporal.codec.build_data_converter`, which installs a gzip
-`PayloadCodec` by default. A team whose activities move large, highly
-compressible payloads — e.g. `code_review_agent`'s map-reduce chunks, which
-carry the full, untruncated diff by design — can otherwise trip Temporal's
-512 KiB `PayloadSizeWarning` (`TMPRL1103`) well before hitting any real gRPC
-message limit. The codec runs transparently underneath every team's client and
-worker (they share this one `connect_temporal_client` call), so no team needs
-its own opt-in; see `docs/ENV_VARS.md` for the toggle/threshold env vars and
-`shared_temporal/codec.py` for the implementation.
+`shared_temporal.codec.build_data_converter`, which always installs a gzip
+`PayloadCodec`. A team whose activities move large, highly compressible
+payloads — e.g. `code_review_agent`'s map-reduce chunks, which carry the full,
+untruncated diff by design — can otherwise trip Temporal's 512 KiB
+`PayloadSizeWarning` (`TMPRL1103`) well before hitting any real gRPC message
+limit. The codec runs transparently underneath every team's client and worker
+(they share this one `connect_temporal_client` call), so no team needs its own
+opt-in.
+
+Only *writing* compressed payloads is gated by `TEMPORAL_PAYLOAD_COMPRESSION`
+(default off) — decoding is unconditional. This split exists because several
+teams here are independently deployable services sharing one Temporal cluster
+through this same client: a process built before this codec existed can never
+decode a payload a newer, compression-enabled process already wrote, so a
+staggered fleet rollout could strand in-flight workflows if writing defaulted
+on. Roll out safely by deploying this code everywhere first (decode-only,
+nothing changes), then flipping the env var on once every service on the
+cluster is confirmed upgraded. See `docs/ENV_VARS.md` for the toggle/threshold
+env vars and `shared_temporal/codec.py` for the implementation.
 
 ## See also
 

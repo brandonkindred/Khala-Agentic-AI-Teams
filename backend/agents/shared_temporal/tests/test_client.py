@@ -41,12 +41,16 @@ async def test_connect_temporal_client_passes_shared_data_converter(monkeypatch)
     converter = kwargs["data_converter"]
     assert isinstance(converter.payload_codec, GzipPayloadCodec)
     assert converter.payload_codec._min_size_bytes == min_compress_bytes()
+    # Encoding defaults off (rollout safety); decode is unconditional either way.
+    assert converter.payload_codec._encode_enabled is False
 
 
 @pytest.mark.asyncio
-async def test_connect_temporal_client_honors_compression_disabled(monkeypatch):
-    """When compression is disabled, Client.connect must get the plain default
-    converter (no codec) — not merely a codec that happens to no-op."""
+async def test_connect_temporal_client_keeps_codec_installed_when_encoding_disabled(monkeypatch):
+    """Explicitly disabling compression must still install the codec (for
+    decode) — only its encode side is gated. A bare `payload_codec is None`
+    would mean this process can't read a payload another, encoding-enabled
+    process already compressed."""
     monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")
     monkeypatch.setenv("TEMPORAL_PAYLOAD_COMPRESSION", "false")
     fake_client = object()
@@ -57,7 +61,24 @@ async def test_connect_temporal_client_honors_compression_disabled(monkeypatch):
         await client_mod.connect_temporal_client()
 
     _, kwargs = mock_connect.call_args
-    assert kwargs["data_converter"].payload_codec is None
+    codec = kwargs["data_converter"].payload_codec
+    assert isinstance(codec, GzipPayloadCodec)
+    assert codec._encode_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_connect_temporal_client_honors_compression_enabled(monkeypatch):
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")
+    monkeypatch.setenv("TEMPORAL_PAYLOAD_COMPRESSION", "true")
+    fake_client = object()
+
+    with patch(
+        "temporalio.client.Client.connect", new=AsyncMock(return_value=fake_client)
+    ) as mock_connect:
+        await client_mod.connect_temporal_client()
+
+    _, kwargs = mock_connect.call_args
+    assert kwargs["data_converter"].payload_codec._encode_enabled is True
 
 
 @pytest.mark.asyncio

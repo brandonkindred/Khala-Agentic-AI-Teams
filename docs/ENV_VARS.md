@@ -190,18 +190,28 @@ Temporal mode despite the `pytest`/`dummy` guards, provided an address still
 resolves. Not load-bearing outside integration tests.
 
 ### TEMPORAL_PAYLOAD_COMPRESSION
-Boolean (default `true`). The shared Temporal client (`shared_temporal.client`,
-used by every team's client and worker) installs a gzip `PayloadCodec` on its
-`DataConverter` unless this is set falsy. Source code and JSON compress well, so
-this transparently keeps large activity/workflow payloads — e.g. the code review
+Boolean (default `false` — opt-in). The shared Temporal client
+(`shared_temporal.client`, used by every team's client and worker) always
+installs a gzip `PayloadCodec` on its `DataConverter`; this var gates only
+whether that codec *writes* compressed payloads — decoding an already-compressed
+payload is never gated, so any process running this codec can always read what
+another process wrote. Source code and JSON compress well, so turning this on
+transparently keeps large activity/workflow payloads — e.g. the code review
 agent's map-reduce chunks, which deliberately carry the full, untruncated diff —
 under Temporal's 512 KiB `PayloadSizeWarning` (`TMPRL1103`) threshold instead of
 just alerting on it; smaller payloads (below `TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES`)
-pass through uncompressed either way. Client and worker must agree on this
-setting (both resolve it through the same `shared_temporal.codec.build_data_converter`
-call), so set it identically everywhere a team's process runs. Turn it off if you
-need the Temporal Web UI to render raw, human-readable payloads without a codec
-server configured there.
+pass through uncompressed either way, and compression that wouldn't actually
+shrink a payload (already-compressed/high-entropy binary data) is skipped too.
+
+**Rollout**: many teams here are independently deployable services sharing one
+Temporal cluster, so a fleet-wide upgrade is not atomic — a process built
+*before* this codec existed can never decode a payload one running it already
+compressed. That's why encoding defaults off: deploy this code everywhere first
+(every process can now decode, but nothing compresses yet, so behavior is
+unchanged), then set this to `true` once every service on that cluster is
+confirmed running a build with the codec. Turn it off again (or never turn it
+on) if you need the Temporal Web UI to render raw, human-readable payloads
+without a codec server configured there.
 
 ### TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES
 Int (default `1024`, floor `0`). Serialized payloads smaller than this many bytes
