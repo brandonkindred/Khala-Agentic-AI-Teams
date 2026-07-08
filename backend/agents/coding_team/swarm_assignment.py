@@ -74,13 +74,46 @@ class _AssignmentMixin:
             return agent_id
         return None
 
+    def _reserve_pinned_tasks(
+        self, ready: List[Task], free_agents: List[str], used_agents: set[str]
+    ) -> set[str]:
+        """Claim each pinned task's agent before any Tech-Lead or guardrail assignment runs.
+
+        Reservation must happen first, not merely be enforced as a rejection rule inside the
+        later loops: if an unrelated proposal in the SAME Tech-Lead response claims a pinned
+        task's only eligible agent before that pinned task's own (rejected, mismatched)
+        proposal is processed, the guardrail pass would then find the agent already in
+        ``used_agents`` and leave the pinned task idle for the round — a revision that must
+        return to its branch owner could starve if that assignment pattern recurs.
+
+        Preconditions:
+            - ``used_agents`` is empty (called once, before any other assignment this round).
+        Postconditions:
+            - Every pinned task in ``ready`` whose pinned agent is free and target-matching is
+              assigned to that agent. Returns the set of newly-assigned task ids; callers must
+              skip these in their own passes.
+        """
+        assigned: set[str] = set()
+        for task in ready:
+            pinned = self._pinned_agent_for(task)
+            if not pinned or pinned not in free_agents or pinned in used_agents:
+                continue
+            if not _target_matches_agent(
+                task.target_team, self.agent_team_keys.get(pinned, pinned)
+            ):
+                continue
+            if self._try_assign(task.id, pinned):
+                used_agents.add(pinned)
+                assigned.add(task.id)
+        return assigned
+
     def _assign_tasks(self, ready: List[Task], free_agents: List[str]) -> None:
         """Coordinator decides which tasks go to which workers."""
         if not free_agents or not ready:
             return
         ready_by_id = {t.id: t for t in ready}
         used_agents: set[str] = set()
-        assigned_tasks: set[str] = set()
+        assigned_tasks: set[str] = self._reserve_pinned_tasks(ready, free_agents, used_agents)
         assignments = self.tech_lead.run_assignments(
             agent_ids=self.agent_ids,
             ready_tasks=[

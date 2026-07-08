@@ -836,6 +836,14 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         self.pause_for_questions = pause_for_questions
 
         try:
+            # Check before doing any work — including worktree setup, which is neither free
+            # nor guaranteed to succeed — so a job cancelled before run() was even entered
+            # (or between phases) is honored immediately rather than reported "failed" if
+            # prepare() happens to error, or made to wait out a setup it will just discard.
+            if check_cancel and check_cancel():
+                _update(status="cancelled", status_text="Cancelled by user")
+                return
+
             try:
                 self._worktrees.prepare()
             except Exception as exc:  # noqa: BLE001 - a broken worktree setup fails the job, not the process

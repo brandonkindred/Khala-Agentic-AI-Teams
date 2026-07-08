@@ -891,6 +891,41 @@ def test_quality_gate_rejection_preserves_pin_for_reassignment(tmp_path):
     assert graph.get_task("t1").assigned_agent_id == "backend_v2"  # pinned, not reassigned
 
 
+def test_pinned_agent_reserved_before_unrelated_tech_lead_assignment(tmp_path):
+    """A pinned task's agent is reserved BEFORE any Tech-Lead proposal is processed, so an
+    unrelated task's assignment in the same response can never claim it first and starve the
+    pinned task — even when the Tech Lead's own (wrong) proposal for the pinned task is listed
+    before a proposal that would otherwise legitimately claim the pinned agent for something
+    else."""
+
+    class AdversarialOrderingTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {
+                "assignments": [
+                    # Wrong agent for the pinned task, listed first...
+                    {"agent_id": "frontend_v2", "task_id": "pinned_task"},
+                    # ...followed by a claim on the pinned agent for an unrelated task, which
+                    # must NOT be allowed to steal it out from under the pinned task.
+                    {"agent_id": "backend_v2", "task_id": "other_task"},
+                ]
+            }
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, AdversarialOrderingTL(approved=True), workers)
+    graph.add_task("pinned_task", title="Pinned")
+    graph.update_task(
+        "pinned_task", feature_branch="feature/pinned", feature_branch_agent_id="backend_v2"
+    )
+    graph.add_task("other_task", title="Other")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    assert graph.get_task("pinned_task").assigned_agent_id == "backend_v2"
+    # other_task lost the race for backend_v2 and stays unassigned this round rather than
+    # starving the pinned task — it will be picked up once an agent frees up.
+    assert graph.get_task("other_task").assigned_agent_id is None
+
+
 def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
     """Backend-owned target aliases such as devops route to the backend v2 worker."""
 
@@ -3314,6 +3349,41 @@ def test_run_reports_failure_and_cleans_up_when_worktree_prepare_fails(tmp_path)
     assert swarm.aborted is True
     assert updates[-1]["status"] == "failed"
     assert swarm._worktrees.cleanup_calls == 1
+    assert graph.get_task("t1").status == TaskStatus.TO_DO  # never even attempted
+
+
+def test_run_checks_cancellation_before_preparing_worktrees(tmp_path):
+    """A job already cancelled before run() starts is honored immediately — it must not run
+    (neither free nor guaranteed to succeed) worktree setup first, nor risk reporting
+    status=failed instead of cancelled if that setup happens to error."""
+    worker = StubWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+
+    class _PrepareCalledError(AssertionError):
+        pass
+
+    class _AssertNeverPreparedWorktrees:
+        def prepare(self):
+            raise _PrepareCalledError("prepare() must not be called when already cancelled")
+
+        def path_for(self, agent_id):
+            raise AssertionError("must not be reached")
+
+        def cleanup(self):
+            pass
+
+    swarm._worktrees = _AssertNeverPreparedWorktrees()
+    updates: List[Dict[str, Any]] = []
+
+    swarm.run(
+        max_rounds=5,
+        check_cancel=lambda: True,
+        update_fn=lambda **kw: updates.append(kw),
+    )
+
+    assert updates[-1]["status"] == "cancelled"
+    assert swarm.aborted is False  # cancellation is not the same as an abort
     assert graph.get_task("t1").status == TaskStatus.TO_DO  # never even attempted
 
 
