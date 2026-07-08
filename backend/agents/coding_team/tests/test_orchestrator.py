@@ -2990,6 +2990,63 @@ def test_implementation_fanout_runs_concurrently(tmp_path, monkeypatch):
     assert graph.get_task("t2").status == TaskStatus.MERGED
 
 
+def test_implementation_fanout_serializes_hitl_pauses(tmp_path, monkeypatch):
+    """Two workers escalating a decision in the same round never call pause_for_questions
+    concurrently. The pause cycle stores exactly one outstanding question batch in job-level
+    state (pending_questions/waiting_for_answers) — a second concurrent pause would overwrite
+    the first's batch and a single answer submission would (mis)resolve both waiters. The lock
+    around the pause call must serialize the round-trip so each escalation is fully posted,
+    answered, and resolved before the next one starts."""
+    import threading
+    import time
+
+    _patch_git(monkeypatch)
+
+    class _DecisionWorker:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+            self.stack_spec = StackSpec(name=agent_id, tools_services=[])
+
+        def run_implement(self, task, path, repo_context=""):
+            return {
+                "status": "needs_decision",
+                "open_questions": [{"question_text": f"Q for {task.id}?"}],
+                "feature_branch": f"feature/{task.id}",
+                "changes_summary": "",
+                "error": None,
+            }
+
+    workers = [_DecisionWorker("a1"), _DecisionWorker("a2")]
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), workers)
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.assign_task_to_agent("t2", "a2")
+
+    lock = threading.Lock()
+    concurrency = {"current": 0, "max": 0}
+
+    def _pause_for_questions(questions, source):
+        with lock:
+            concurrency["current"] += 1
+            concurrency["max"] = max(concurrency["max"], concurrency["current"])
+        try:
+            # Give a badly-serialized implementation a real chance to overlap.
+            time.sleep(0.05)
+            return [{"question_text": questions[0]["question_text"], "answer": "ok"}], True
+        finally:
+            with lock:
+                concurrency["current"] -= 1
+
+    swarm.run(max_rounds=1, pause_for_questions=_pause_for_questions)
+
+    assert concurrency["max"] == 1  # never more than one pause round-trip in flight at once
+    for tid in ("t1", "t2"):
+        task = graph.get_task(tid)
+        assert task.status == TaskStatus.IN_PROGRESS
+        assert task.revision_feedback[-1]["source"] == "user_decision"
+
+
 def test_implementation_fanout_uses_distinct_worktree_paths(tmp_path):
     """Each worker's run_implement receives its own worktree path — never self.path or another
     worker's path — proving branch/file isolation holds under the concurrent fan-out."""

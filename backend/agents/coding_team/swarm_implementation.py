@@ -381,6 +381,19 @@ class _ImplementationMixin:
               and the same engineer, so the answer is implemented next round (revision count
               unchanged). On an unanswered pause ``self.aborted`` is set. With no answer channel the
               task is FAILED (fail closed).
+
+        Concurrency:
+            The pause cycle stores exactly one outstanding batch in job-level
+            ``pending_questions``/``waiting_for_answers`` fields (see
+            ``coding_team.pause_cycle._run_pause_cycle``) — it has no per-caller isolation. If two
+            workers running concurrently (see the round fan-out in ``orchestrator.run``) both called
+            ``pause_for_questions`` at once, the second call's questions would overwrite the
+            first's, and a single answer submission would release both waiters even though only one
+            batch's answers were actually recorded — the other would resume with an empty/mismatched
+            resolution. ``self._pause_lock`` (held only around the ``pause_for_questions`` call, not
+            this whole method) serializes the pause-and-resume round-trip across workers so each
+            escalation's questions are posted, answered, and resolved before the next one starts;
+            workers that never escalate a decision are unaffected and keep running fully concurrently.
         """
         from coding_team import orchestrator as _orch
 
@@ -407,9 +420,13 @@ class _ImplementationMixin:
             self._cascade_fail_dependents(task.id)
             return
         update_fn(status_text=f"Awaiting user decision: {task.title}")
-        resolved, ok = self.pause_for_questions(
-            questions, f"engineer:{task.assigned_agent_id or task.id}"
-        )
+        # Serialize the pause round-trip itself (see the Concurrency note above) — a concurrent
+        # second escalation blocks here until this one is fully answered and resolved, then runs
+        # its own pause cycle from a clean slate.
+        with self._pause_lock:
+            resolved, ok = self.pause_for_questions(
+                questions, f"engineer:{task.assigned_agent_id or task.id}"
+            )
         if not ok:
             self.aborted = True
             return

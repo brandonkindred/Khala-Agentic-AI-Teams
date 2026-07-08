@@ -251,7 +251,9 @@ def test_remove_worktree_reports_failure_when_fallback_cannot_remove_it(
     untracked_dir = repo.parent / "stuck-worktree"
     untracked_dir.mkdir()
 
-    monkeypatch.setattr(git_utils_mod.shutil, "rmtree", lambda *a, **k: None)  # no-op: never removes
+    monkeypatch.setattr(
+        git_utils_mod.shutil, "rmtree", lambda *a, **k: None
+    )  # no-op: never removes
 
     ok, msg = remove_worktree(repo, untracked_dir)
 
@@ -288,3 +290,54 @@ def test_multiple_worktrees_have_independent_feature_branches(repo: Path) -> Non
     (wt_b / "b.txt").write_text("b", encoding="utf-8")
     assert not (wt_a / "b.txt").exists()
     assert not (wt_b / "a.txt").exists()
+
+
+def test_create_feature_branch_retry_reuses_branch_already_checked_out_here(repo: Path) -> None:
+    """A retry against a worktree that's still on the branch a prior (crashed) attempt created
+    reuses it instead of trying to delete it — which would fail in a worktree (deleting the
+    branch currently checked out here is refused) after also failing to check out base_branch
+    (refused because it's attached in another linked worktree, i.e. the shared checkout)."""
+    wt_path = repo.parent / "wt-retry"
+    add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    ok, branch = create_feature_branch(wt_path, DEVELOPMENT_BRANCH, "t1-my-task")
+    assert ok, branch
+    # Simulate a partial implementation attempt that crashed after branch creation, leaving
+    # uncommitted work — the worktree is still on the feature branch (never left it).
+    (wt_path / "partial.txt").write_text("wip", encoding="utf-8")
+
+    # Retry: repo (self.path) still has `development` checked out throughout.
+    ok2, branch2 = create_feature_branch(wt_path, DEVELOPMENT_BRANCH, "t1-my-task")
+
+    assert ok2, branch2
+    assert branch2 == branch
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=wt_path, capture_output=True, text=True
+    )
+    assert result.stdout.strip() == branch
+    # The prior attempt's uncommitted file was preserved (committed on the reused branch), not
+    # wiped by a delete+recreate.
+    result = subprocess.run(
+        ["git", "log", "--all", "--name-only", "--pretty=format:"],
+        cwd=wt_path,
+        capture_output=True,
+        text=True,
+    )
+    assert "partial.txt" in result.stdout
+
+
+def test_create_feature_branch_stale_elsewhere_still_deletes_and_recreates(repo: Path) -> None:
+    """A branch that exists but is NOT checked out in this path (a genuinely stale leftover, e.g.
+    from an earlier job run against the same clone) still goes through the delete+recreate path —
+    the reuse short-circuit must not mask this case."""
+    ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t2-stale")
+    assert ok, branch
+    checkout_branch(repo, DEVELOPMENT_BRANCH)  # leave the branch (repo is on development again)
+
+    ok2, branch2 = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t2-stale")
+
+    assert ok2, branch2
+    assert branch2 == branch
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
+    )
+    assert result.stdout.strip() == branch  # recreated and checked out fresh

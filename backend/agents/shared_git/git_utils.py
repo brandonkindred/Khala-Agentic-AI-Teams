@@ -176,7 +176,18 @@ def create_feature_branch(
                     return True, branch_name
             return False, f"Failed to create branch {branch_name}: {out}"
         if "already exists" in out:
-            # Stale branch from a previous run — delete and recreate
+            # If path is already sitting on branch_name, reuse it rather than delete+recreate:
+            # this is the common retry-after-a-transient-failure case (the branch was created
+            # here on a prior attempt against this same path and never left), and the
+            # delete+recreate path below would fail here regardless — it checks out base_branch
+            # first, which git refuses when base_branch is attached in another linked worktree
+            # (e.g. the swarm's shared checkout, which stays on base_branch for merge/diff), and
+            # git also refuses to delete a branch that is currently checked out in THIS path.
+            current_code, current_out = _run_git(path, ["git", "branch", "--show-current"])
+            if current_code == 0 and current_out.strip() == branch_name:
+                logger.info("Branch '%s' already checked out at %s; reusing it", branch_name, path)
+                return True, branch_name
+            # Stale branch from elsewhere (not checked out here) — delete and recreate.
             logger.warning(
                 "Branch '%s' already exists, deleting and recreating from '%s'",
                 branch_name,

@@ -784,6 +784,11 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         self.resolved_questions: List[Dict[str, Any]] = list(resolved_questions or [])
         # Bound pause cycle (set in run()) used to escalate a worker-raised decision to the user.
         self.pause_for_questions: Optional[PauseCycle] = None
+        # Serializes the pause_for_questions round-trip across concurrently-running workers: the
+        # pause cycle stores exactly one outstanding question batch in job-level state (see
+        # swarm_implementation._escalate_decision's Concurrency note), so two workers escalating a
+        # decision at once must not race it.
+        self._pause_lock = threading.Lock()
         # Set True when a pause ended without answers (terminal/timeout); aborts the loop and tells
         # the orchestrator not to overwrite the failure status with "completed".
         self.aborted = False
