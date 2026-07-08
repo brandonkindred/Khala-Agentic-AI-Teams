@@ -175,6 +175,7 @@ class _ReviewMixin:
                 changes_summary=evidence,
                 user_decisions=self._user_decisions_for(task),
                 progress_callback=progress_callback,
+                spec_content=self.spec_content,
             )
             return diff, review
         except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm

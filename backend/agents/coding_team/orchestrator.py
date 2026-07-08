@@ -751,8 +751,9 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
     """Coordinator (Tech Lead) + frontend/backend v2 implementation-worker swarm pattern.
 
     The coordinator assigns ready tasks to free workers. Each worker implements
-    the task, runs quality gates (build, lint, code review), and signals
-    completion. The coordinator reviews and merges approved tasks.
+    the task and runs quality gates (build, lint), and signals completion. The
+    coordinator reviews (the swarm's sole code-review pass) and merges approved
+    tasks.
 
     Behavior is spread across three mixins by responsibility (assignment,
     implementation, review) — see coding_team/swarm_assignment.py,
@@ -778,11 +779,13 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         self.agent_ids = agent_ids
         self.agent_team_keys = {w.agent_id: _worker_team_key(w) for w in workers}
         self.llm_getter = llm_getter
-        # Injected implementation engines (build/lint/review); None → quality gates are skipped.
+        # Injected implementation engines (build/lint); None → quality gates are skipped.
         self.engine_provider = engine_provider
         # The plan's final spec content (CodingTeamPlanInput.final_spec_content), forwarded to the
-        # per-task code-review quality gate (see swarm_implementation._run_quality_gates) so the
-        # reviewer can check compliance against the actual spec, not just the task's own summary.
+        # Tech Lead's per-task code review (see swarm_review._compute_review) so the reviewer can
+        # check compliance against the actual spec, not just the task's own description/acceptance
+        # criteria — this is the swarm's sole code-review call, so it is the only place spec
+        # constraints outside a task's own summary can be caught.
         self.spec_content = spec_content
         # Plan-level decisions the user already answered (entry gate + Tech Lead planning), folded
         # into plan_input.resolved_questions before the swarm is built. Surfaced to both review
