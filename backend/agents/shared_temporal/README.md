@@ -86,8 +86,10 @@ back to `30`).
 - `TEMPORAL_ADDRESS` — required; Temporal is mandatory for all teams.
 - `TEMPORAL_NAMESPACE` — default `default`.
 - `TEMPORAL_TASK_QUEUE` — default `khala`.
-- `TEMPORAL_PAYLOAD_COMPRESSION` / `TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES` —
-  gzip payload codec toggle/threshold (see below).
+- `TEMPORAL_PAYLOAD_COMPRESSION` — gzip payload codec write-toggle, default
+  `false`/off (see below).
+- `TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES` — gzip compression size floor in
+  bytes, default `1024` (see below).
 
 ## Payload compression
 

@@ -97,6 +97,14 @@ class GzipPayloadCodec(PayloadCodec):
         min_size_bytes: int = DEFAULT_MIN_COMPRESS_BYTES,
         encode_enabled: bool = True,
     ) -> None:
+        """Configure the size floor and encode toggle this codec instance uses.
+
+        Preconditions:
+            - ``min_size_bytes >= 0``.
+        Postconditions:
+            - ``self._min_size_bytes == min_size_bytes``.
+            - ``self._encode_enabled == encode_enabled``.
+        """
         assert min_size_bytes >= 0, "min_size_bytes must be >= 0"
         self._min_size_bytes = min_size_bytes
         self._encode_enabled = encode_enabled
@@ -104,6 +112,9 @@ class GzipPayloadCodec(PayloadCodec):
     async def encode(self, payloads: Sequence[Payload]) -> List[Payload]:
         """Gzip-compress each payload at or above the size floor.
 
+        Preconditions:
+            - ``payloads`` is a sequence of well-formed ``Payload`` messages
+              (guaranteed by the Temporal SDK, the only caller of this method).
         Postconditions:
             - Returns ``payloads`` unchanged when ``encode_enabled`` is False.
             - A payload whose serialized size is ``< min_size_bytes`` is
@@ -141,6 +152,11 @@ class GzipPayloadCodec(PayloadCodec):
     async def decode(self, payloads: Sequence[Payload]) -> List[Payload]:
         """Inverse of :meth:`encode`. Always active — see the class invariant.
 
+        Preconditions:
+            - ``payloads`` is a sequence of well-formed ``Payload`` messages;
+              any payload tagged with this codec's gzip encoding metadata must
+              carry valid gzip data in ``data`` (guaranteed by ``encode`` and
+              by Temporal never altering payload bytes in transit/storage).
         Postconditions:
             - A payload not carrying this codec's ``encoding`` metadata is
               returned unchanged (covers payloads below the compression floor

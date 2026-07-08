@@ -153,6 +153,38 @@ async def test_encode_is_lossless_for_binary_data():
     assert decoded == [original]
 
 
+@pytest.mark.asyncio
+async def test_encode_handles_multiple_payloads_independently():
+    """Each payload in a single encode() call must be evaluated against the
+    size floor and compression-shrinks-it check independently — a batch must
+    not short-circuit on, or leak state between, its individual payloads."""
+    codec = GzipPayloadCodec(min_size_bytes=1024)
+    small = _payload(b"tiny")
+    large = _payload(b"x" * 5000)
+    incompressible = _payload(os.urandom(4096))
+
+    encoded = await codec.encode([small, large, incompressible])
+
+    assert len(encoded) == 3
+    assert encoded[0] == small
+    assert encoded[1].metadata[b"encoding"] == b"binary/gzip"
+    assert encoded[2] == incompressible
+
+    decoded = await codec.decode(encoded)
+    assert decoded == [small, large, incompressible]
+
+
+@pytest.mark.asyncio
+async def test_decode_raises_on_corrupted_gzip_data():
+    """A payload tagged as gzip-encoded but carrying invalid gzip bytes must
+    surface a decompression error, not silently return corrupted data."""
+    codec = GzipPayloadCodec()
+    corrupted = Payload(metadata={b"encoding": b"binary/gzip"}, data=b"not valid gzip data")
+
+    with pytest.raises(gzip.BadGzipFile):
+        await codec.decode([corrupted])
+
+
 def test_gzip_payload_codec_is_a_real_payload_codec():
     assert isinstance(GzipPayloadCodec(), PayloadCodec)
 
