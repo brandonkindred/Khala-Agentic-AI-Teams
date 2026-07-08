@@ -29,12 +29,12 @@ class _FakeAgent:
 
 def _build_agent(monkeypatch, fake):
     monkeypatch.setattr(dbc_mod, "Agent", lambda *a, **kw: fake)
-    monkeypatch.setattr(dbc_mod, "get_strands_model", lambda _k=None: object())
+    monkeypatch.setattr(dbc_mod, "get_strands_model", lambda _k=None, **_kw: object())
     return DbcCommentsAgent()
 
 
 def test_dbc_init_uses_strands_model(monkeypatch) -> None:
-    monkeypatch.setattr(dbc_mod, "get_strands_model", lambda key: object())
+    monkeypatch.setattr(dbc_mod, "get_strands_model", lambda key, **_kw: object())
     monkeypatch.setattr(dbc_mod, "Agent", lambda *a, **kw: object())
     a = DbcCommentsAgent()
     assert a._agent is not None

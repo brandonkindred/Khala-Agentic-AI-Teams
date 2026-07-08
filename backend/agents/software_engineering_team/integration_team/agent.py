@@ -13,6 +13,9 @@ import logging
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
+from software_engineering_team.shared.persona_agent_base import run_structured_persona
+from software_engineering_team.shared.security_service import derive_approved
 
 from .models import IntegrationInput, IntegrationOutput
 from .prompts import INTEGRATION_PROMPT
@@ -27,11 +30,9 @@ class IntegrationAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("integration")
+        self._model = resolve_strands_model(
+            llm_client, agent_key="integration", get_strands_model_fn=get_strands_model
+        )
 
     def run(self, input_data: IntegrationInput) -> IntegrationOutput:
         """Analyze backend and frontend code for integration/contract issues."""
@@ -43,21 +44,7 @@ class IntegrationAgent:
 
         user_prompt = self._build_user_prompt(input_data)
 
-        # A fresh Strands Agent per call. Strands' Agent accumulates message
-        # history across invocations; reusing the same instance breaks the
-        # forced-tool-choice mechanism used by ``structured_output_model``
-        # on the second call. Construction is cheap — it just wraps the
-        # cached model reference with a system_prompt.
-        agent = Agent(model=self._model, system_prompt=INTEGRATION_PROMPT)
-
-        try:
-            agent_result = agent(user_prompt, structured_output_model=IntegrationOutput)
-            result = agent_result.structured_output
-            if not isinstance(result, IntegrationOutput):
-                raise TypeError(
-                    f"Expected IntegrationOutput, got {type(result).__name__ if result else 'None'}"
-                )
-        except Exception as exc:  # noqa: BLE001 — agent failures should not crash the run
+        def _fallback(exc: Exception) -> IntegrationOutput:
             logger.warning(
                 "Integration: structured_output failed (%s); returning failed result", exc
             )
@@ -68,16 +55,35 @@ class IntegrationAgent:
                 fix_task_suggestions=[],
             )
 
-        # Trust the returned issues but re-derive ``passed`` from severities so a
-        # disagreement between the LLM's ``passed`` flag and the reported issues
-        # is resolved in favor of the issue list.
-        critical_or_high = [i for i in result.issues if i.severity in ("critical", "high")]
-        result.passed = len(critical_or_high) == 0
+        def _finalize(result: IntegrationOutput) -> IntegrationOutput:
+            # Trust the returned issues but re-derive ``passed`` from severities so a
+            # disagreement between the LLM's ``passed`` flag and the reported issues
+            # is resolved in favor of the issue list. Only applied to a genuine
+            # model result — the fallback above is already a final, safe
+            # ``passed=False``.
+            result.passed = derive_approved(result.issues, llm_approved=None)
+            return result
+
+        # A fresh Strands Agent per call. Strands' Agent accumulates message
+        # history across invocations; reusing the same instance breaks the
+        # forced-tool-choice mechanism used by ``structured_output_model``
+        # on the second call. Construction is cheap — it just wraps the
+        # cached model reference with a system_prompt.
+        result = run_structured_persona(
+            model=self._model,
+            system_prompt=INTEGRATION_PROMPT,
+            user_prompt=user_prompt,
+            output_model=IntegrationOutput,
+            fallback_factory=_fallback,
+            agent_factory=Agent,
+            on_success=_finalize,
+        )
+        critical_or_high_count = sum(1 for i in result.issues if i.severity in ("critical", "high"))
 
         logger.info(
             "Integration: done, %s issues (%s critical/high), passed=%s",
             len(result.issues),
-            len(critical_or_high),
+            critical_or_high_count,
             result.passed,
         )
         return result

@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import get_client, get_strands_model
+from llm_service.strands_model import resolve_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_pra_spec_review_spec_chars,
     compute_prd_snippet_chars,
@@ -1991,14 +1992,12 @@ class ProductRequirementsAnalysisAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            # Always use a proper Strands Model — raw LLMClient (e.g. OllamaLLMClient)
-            # doesn't implement the Strands Model interface (stream/update_config/get_config).
-            self._model = get_strands_model("product_analysis")
+        # A raw LLMClient (e.g. OllamaLLMClient) doesn't implement the Strands
+        # Model interface (stream/update_config/get_config) directly, so it is
+        # wrapped in an LLMClientModel rather than used as-is.
+        self._model = resolve_strands_model(
+            llm_client, agent_key="product_analysis", get_strands_model_fn=get_strands_model
+        )
         # Keep LLMClient for context_sizing utilities
         self.llm = llm_client if llm_client is not None else get_client("product_analysis")
 
@@ -3653,9 +3652,7 @@ Previously Answered Questions:
 
             return False, follow_ups
         except Exception as exc:
-            logger.error(
-                "Sub-phase gap analysis failed for '%s': %s", sub_phase.value, str(exc)
-            )
+            logger.error("Sub-phase gap analysis failed for '%s': %s", sub_phase.value, str(exc))
             return True, []  # On failure, consider complete to avoid blocking
 
     def _run_sop_phase1(
