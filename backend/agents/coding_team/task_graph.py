@@ -390,6 +390,7 @@ class TaskGraphService:
                         "assigned_agent_id": t.assigned_agent_id,
                         "target_team": t.target_team,
                         "feature_branch": t.feature_branch,
+                        "feature_branch_agent_id": t.feature_branch_agent_id,
                         "merged_at": t.merged_at.isoformat() if t.merged_at else None,
                         "acceptance_criteria": t.acceptance_criteria,
                         "out_of_scope": t.out_of_scope,
@@ -447,6 +448,7 @@ class TaskGraphService:
                     assigned_agent_id=tdata.get("assigned_agent_id"),
                     target_team=tdata.get("target_team"),
                     feature_branch=tdata.get("feature_branch"),
+                    feature_branch_agent_id=tdata.get("feature_branch_agent_id"),
                     merged_at=datetime.fromisoformat(tdata["merged_at"].replace("Z", "+00:00"))
                     if tdata.get("merged_at")
                     else None,

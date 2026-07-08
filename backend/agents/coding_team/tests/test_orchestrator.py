@@ -803,6 +803,94 @@ def test_assignment_respects_target_team_and_falls_back_to_matching_v2_worker(tm
     assert graph.get_task_for_agent("backend_v2") is None
 
 
+def test_pinned_task_reassigned_only_to_originating_agent(tmp_path):
+    """A task whose feature branch is pinned to an agent (feature_branch_agent_id) is
+    reassigned ONLY to that agent — never to a different free agent — even for a
+    target_team-less task that would otherwise match anyone. This is what prevents a
+    revision-rejected task's branch (checked out only in the pinned agent's worktree) from
+    being handed to a different worker, which git would refuse."""
+
+    class MismatchingTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            # Proposes the WRONG (unpinned) agent — the pin must override this.
+            return {"assignments": [{"agent_id": "frontend_v2", "task_id": "t1"}]}
+
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, MismatchingTL(approved=True), workers)
+    # No target_team: _target_matches_agent would otherwise permit ANY agent.
+    graph.add_task("t1", title="T1")
+    graph.update_task("t1", feature_branch="feature/t1", feature_branch_agent_id="backend_v2")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    task = graph.get_task("t1")
+    assert task.assigned_agent_id == "backend_v2"  # pinned agent, not the LLM's proposal
+    assert graph.get_task_for_agent("frontend_v2") is None
+
+
+def test_pinned_task_stays_unassigned_when_pinned_agent_not_free(tmp_path):
+    """A pinned task never falls back to a different free agent — it waits for its own."""
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), workers)
+    graph.add_task("t1", title="T1")
+    graph.update_task("t1", feature_branch="feature/t1", feature_branch_agent_id="backend_v2")
+
+    # Only frontend_v2 is free this round; backend_v2 (the pin) is not.
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2"])
+
+    assert graph.get_task("t1").assigned_agent_id is None
+    assert graph.get_task_for_agent("frontend_v2") is None
+
+
+def test_pinned_task_falls_back_to_unpinned_when_pinned_agent_leaves_roster(tmp_path):
+    """A pin to an agent no longer in the roster (e.g. after a roster change across a retry)
+    is unenforceable and treated as unpinned, so the task can still be assigned."""
+    workers = [StubWorker("frontend_v2")]  # backend_v2 no longer in the roster
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), workers)
+    graph.add_task("t1", title="T1")
+    graph.update_task("t1", feature_branch="feature/t1", feature_branch_agent_id="backend_v2")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2"])
+
+    assert graph.get_task("t1").assigned_agent_id == "frontend_v2"
+
+
+def test_quality_gate_rejection_preserves_pin_for_reassignment(tmp_path):
+    """A task rejected by quality gates keeps its feature_branch_agent_id pin — only
+    assigned_agent_id is cleared by unassign_task — so the next round's assignment sends it
+    back to the SAME agent even when a different one is free and the Tech Lead proposes it.
+    Proves the pin survives the exact demotion path (_return_for_revision) that originally
+    motivated it."""
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2")]
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), workers)
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "backend_v2")
+
+    # Round 1: implement (records feature_branch + pin; _run_quality_gates is stubbed to pass
+    # in _make_swarm, so the task reaches review here).
+    swarm._implement_and_verify(swarm.workers[1], lambda **kw: None)  # workers[1] == backend_v2
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.IN_REVIEW
+    assert task.feature_branch_agent_id == "backend_v2"
+
+    # A quality-gate rejection demotes it back to TO_DO/unassigned.
+    swarm._return_for_revision(task, [{"type": "build", "error": "boom"}])
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.TO_DO
+    assert task.assigned_agent_id is None  # unassigned
+    assert task.feature_branch_agent_id == "backend_v2"  # pin survives
+
+    # Round 2: both workers free; a mismatching Tech Lead tries to hand it to frontend_v2.
+    class MismatchingTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "frontend_v2", "task_id": "t1"}]}
+
+    swarm.tech_lead = MismatchingTL(approved=True)
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2"])
+
+    assert graph.get_task("t1").assigned_agent_id == "backend_v2"  # pinned, not reassigned
+
+
 def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
     """Backend-owned target aliases such as devops route to the backend v2 worker."""
 

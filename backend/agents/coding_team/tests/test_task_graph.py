@@ -140,6 +140,20 @@ def test_snapshot_restore_preserves_target_team() -> None:
     assert tg2.get_task("t1").target_team == "frontend_v2"
 
 
+def test_snapshot_restore_preserves_feature_branch_agent_id() -> None:
+    """feature_branch_agent_id survives persistence so a resumed job still pins a task's
+    branch to the worktree that actually holds it."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="T1")
+    tg.update_task("t1", feature_branch="feature/t1", feature_branch_agent_id="backend_v2")
+    snap = tg.snapshot()
+
+    tg2 = TaskGraphService(job_id="j1")
+    tg2.restore(snap)
+
+    assert tg2.get_task("t1").feature_branch_agent_id == "backend_v2"
+
+
 def test_persist_callback_called() -> None:
     """Persist callback is invoked after mutations."""
     calls = []

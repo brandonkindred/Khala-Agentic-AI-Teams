@@ -85,10 +85,14 @@ class _ImplementationMixin:
             if result.get("status") == "in_review":
                 # Record the branch/summary BEFORE the gates so a gate-triggered revision (and its
                 # no-change check) reads the branch the engineer actually used, not a stale/absent
-                # one.
+                # one. feature_branch_agent_id pins this task to swe on any later reassignment
+                # (see _assign_tasks) — the branch only exists checked out in swe's own worktree,
+                # and git refuses to check it out (or delete/recreate it) from any other worktree
+                # while it stays attached there.
                 self.graph.update_task(
                     task.id,
                     feature_branch=result.get("feature_branch"),
+                    feature_branch_agent_id=swe.agent_id,
                     changes_summary=result.get("changes_summary"),
                 )
                 # Run quality gates as tools, against this worker's own worktree.

@@ -187,15 +187,22 @@ def create_feature_branch(
             if current_code == 0 and current_out.strip() == branch_name:
                 logger.info("Branch '%s' already checked out at %s; reusing it", branch_name, path)
                 return True, branch_name
-            # Stale branch from elsewhere (not checked out here) — delete and recreate.
+            # Stale branch from elsewhere (not checked out here) — delete and recreate. No
+            # intermediate `git checkout base_branch` first: deleting a branch only requires
+            # that it not be attached in ANY worktree (this one included, already ruled out
+            # above) — it does not require this worktree to be on any particular branch first.
+            # Attaching base_branch here would itself fail whenever base_branch (development) is
+            # already attached in another linked worktree (the swarm's shared checkout).
             logger.warning(
                 "Branch '%s' already exists, deleting and recreating from '%s'",
                 branch_name,
                 base_branch,
             )
-            _run_git(path, ["git", "checkout", base_branch])
             del_code, del_out = _run_git(path, ["git", "branch", "-D", branch_name])
             if del_code != 0:
+                # Most commonly: branch_name is attached in a DIFFERENT worktree right now (e.g.
+                # another worker still owns it) — genuinely not recoverable from here without
+                # detaching it there first, so fail honestly rather than silently succeed.
                 return False, f"Failed to delete stale branch {branch_name}: {del_out}"
             code2, out2 = _run_git(path, ["git", "checkout", "-b", branch_name, base_branch])
             if code2 != 0:

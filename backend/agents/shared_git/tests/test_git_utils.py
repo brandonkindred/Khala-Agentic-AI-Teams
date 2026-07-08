@@ -341,3 +341,29 @@ def test_create_feature_branch_stale_elsewhere_still_deletes_and_recreates(repo:
         ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
     )
     assert result.stdout.strip() == branch  # recreated and checked out fresh
+
+
+def test_create_feature_branch_fails_honestly_when_branch_owned_by_another_worktree(
+    repo: Path,
+) -> None:
+    """A branch actively checked out in a DIFFERENT worktree (e.g. another worker still owns it)
+    cannot be recovered from here — git refuses to delete a branch checked out anywhere. This must
+    fail with a clear message, not silently succeed or hang trying to attach development first."""
+    owner_wt = repo.parent / "wt-owner"
+    add_worktree(repo, owner_wt, ref=DEVELOPMENT_BRANCH)
+    ok, branch = create_feature_branch(owner_wt, DEVELOPMENT_BRANCH, "t3-shared")
+    assert ok, branch
+    # owner_wt is still checked out on `branch` — never left it.
+
+    other_wt = repo.parent / "wt-other"
+    add_worktree(repo, other_wt, ref=DEVELOPMENT_BRANCH)
+
+    ok2, msg2 = create_feature_branch(other_wt, DEVELOPMENT_BRANCH, "t3-shared")
+
+    assert not ok2
+    assert "Failed to delete stale branch" in msg2
+    # Neither worktree's state was corrupted by the failed attempt.
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=owner_wt, capture_output=True, text=True
+    )
+    assert result.stdout.strip() == branch

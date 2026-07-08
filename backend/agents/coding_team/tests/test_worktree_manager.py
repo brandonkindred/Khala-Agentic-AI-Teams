@@ -153,6 +153,76 @@ def test_prepare_raises_worktree_prepare_error_on_git_failure(repo: Path, monkey
         manager.prepare()
 
 
+@pytest.mark.parametrize(
+    "unsafe_agent_id",
+    [
+        "../../evil",
+        "..",
+        "a/../../evil",
+        "",
+    ],
+)
+def test_prepare_rejects_unsafe_agent_id_as_path_component(
+    repo: Path, unsafe_agent_id: str
+) -> None:
+    """An agent id that would escape the worktree root via traversal, or is empty, is rejected
+    before any worktree is created — agent ids ultimately trace back to Tech-Lead-generated or
+    persisted stack names, not a fully trusted source."""
+    manager = WorktreeManager(repo, [unsafe_agent_id])
+
+    with pytest.raises(WorktreePrepareError, match="Unsafe agent id"):
+        manager.prepare()
+
+    # Nothing was created outside the intended worktree root.
+    assert not (repo.parent / "evil").exists()
+    assert not (repo.parent.parent / "evil").exists()
+
+
+def test_prepare_accepts_agent_id_that_normalizes_safely_under_root(repo: Path) -> None:
+    """A leading-slash agent id is neutralized to a safe relative path under the worktree root
+    (mirrors resolve_safe_repo_path's existing contract for repo-relative writes) rather than
+    being treated as an absolute filesystem path."""
+    manager = WorktreeManager(repo, ["/backend_v2"])
+
+    manager.prepare()
+
+    wt_path = manager.path_for("/backend_v2")
+    assert wt_path.exists()
+    assert wt_path.parent == repo.parent / f".{repo.name}.worktrees"
+
+
+def test_prepare_records_partial_worktrees_for_cleanup_on_mid_loop_failure(
+    repo: Path, monkeypatch
+) -> None:
+    """If the first agent's worktree is created successfully but a later agent's fails, the
+    first one must still be tracked so cleanup() can remove it — not silently left behind as an
+    orphaned worktree + admin-area entry."""
+    import coding_team.worktree_manager as wm_mod
+
+    real_add_worktree = wm_mod.add_worktree
+    calls = {"n": 0}
+
+    def _fail_on_second(repo_path, worktree_path, ref=None):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return False, "boom on second agent"
+        return real_add_worktree(repo_path, worktree_path, ref=ref)
+
+    monkeypatch.setattr(wm_mod, "add_worktree", _fail_on_second)
+    manager = WorktreeManager(repo, ["backend_v2", "frontend_v2"])
+
+    with pytest.raises(WorktreePrepareError, match="boom on second agent"):
+        manager.prepare()
+
+    first_agent_path = repo.parent / f".{repo.name}.worktrees" / "backend_v2"
+    assert first_agent_path.exists()  # the first worktree really was created
+    assert manager._paths == {"backend_v2": first_agent_path}  # and IS tracked
+
+    manager.cleanup()
+
+    assert not first_agent_path.exists()  # cleanup actually found and removed it
+
+
 def test_prepare_raises_when_root_repo_initialization_fails(tmp_path: Path, monkeypatch) -> None:
     import coding_team.worktree_manager as wm_mod
 

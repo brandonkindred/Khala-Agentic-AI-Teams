@@ -36,12 +36,14 @@ from typing import Dict, Optional, Sequence
 
 from shared_git.git_utils import (
     DEVELOPMENT_BRANCH,
+    UnsafeRepoPathError,
     add_worktree,
     development_branch_exists,
     ensure_development_branch,
     initialize_new_repo,
     prune_worktrees,
     remove_worktree,
+    resolve_safe_repo_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,7 +115,8 @@ class WorktreeManager:
               no-op.
         Raises:
             - :class:`WorktreePrepareError` if the shared repo cannot be
-              initialized, or any individual worktree fails to create — fails
+              initialized, an agent id is unsafe to use as a worktree path
+              component, or any individual worktree fails to create — fails
               closed rather than silently falling a worker back onto the
               shared repo_path, which would reintroduce the corruption this
               class exists to prevent.
@@ -126,19 +129,45 @@ class WorktreeManager:
         # never discovered mid-round by whichever worker happens to touch it.
         prune_worktrees(self._repo_path)
         node_modules_src = self._node_modules_source()
-        created: Dict[str, Path] = {}
         for agent_id in self._agent_ids:
-            wt_path = self._root / agent_id
+            wt_path = self._worktree_path_for(agent_id)
             ok, msg = add_worktree(self._repo_path, wt_path, ref=DEVELOPMENT_BRANCH)
             if not ok:
                 raise WorktreePrepareError(
                     f"Failed to create worktree for agent {agent_id!r} at {wt_path}: {msg}"
                 )
-            created[agent_id] = wt_path
+            # Recorded immediately (not only after the whole loop completes): if a LATER
+            # agent's worktree fails to create, this one must still be found by cleanup()
+            # rather than left behind as an orphaned worktree + admin-area entry.
+            self._paths[agent_id] = wt_path
             if node_modules_src is not None:
                 self._symlink_node_modules(wt_path, node_modules_src)
-        self._paths = created
         self._prepared = True
+
+    def _worktree_path_for(self, agent_id: str) -> Path:
+        """Resolve agent_id's worktree path, failing closed if it would escape self._root.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - Returns the resolved worktree path when agent_id is a safe single path
+              component under self._root.
+        Raises:
+            - :class:`WorktreePrepareError` when agent_id is empty or would place the
+              resulting path outside self._root (path separators, ``..`` traversal, or an
+              absolute path) — agent ids ultimately trace back to Tech-Lead-generated or
+              persisted stack names, not a fully trusted source, so this is validated the
+              same way ``shared_git.resolve_safe_repo_path`` guards repo-relative file
+              writes elsewhere: without it, a malformed agent id could route
+              ``add_worktree``/``remove_worktree`` to create or delete an arbitrary
+              filesystem path outside the intended worktree root.
+        """
+        try:
+            return resolve_safe_repo_path(self._root, agent_id)
+        except UnsafeRepoPathError as exc:
+            raise WorktreePrepareError(
+                f"Unsafe agent id {agent_id!r} for worktree path: {exc}"
+            ) from exc
 
     def _ensure_root_repo_ready(self) -> None:
         """Ensure repo_path itself is an initialized git repo with development.
