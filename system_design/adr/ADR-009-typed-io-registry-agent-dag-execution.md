@@ -48,12 +48,32 @@ Facts this ADR reasons from (confirmed in the current codebase):
 
 ## Decision
 
-Registry agents whose manifest advertises a **custom `source.entrypoint`** (not the shared
-generated-agent entrypoint) get real typed-IO DAG execution. Registry agents that still resolve to the
-shared generated-agent entrypoint — which includes *all* LLM-generated agents and, today, *all*
-Studio-authored agents regardless of whether they carry an authored schema — continue to execute
-through the unchanged free-text persona path. This is the single gate a future implementation checks
+A `ProcessStep` gets typed-IO DAG execution only when **both** of the following hold; either one
+missing keeps it on the unchanged free-text persona path:
+
+1. Its registry agent's manifest advertises a **custom `source.entrypoint`** (not the shared
+   generated-agent entrypoint) — which includes *all* LLM-generated agents and, today, *all*
+   Studio-authored agents regardless of whether they carry an authored schema.
+2. The step **explicitly opts in** via a new `ProcessStep.typed_io: bool = False` field.
+
+Both conditions are required — see the opt-in rationale below. A future implementation checks both
 before choosing between the existing persona branch and a new typed branch.
+
+**Why the opt-in flag is required, not just the entrypoint check.** An entrypoint-only gate would
+silently reinterpret *already-persisted* processes: any existing `ProcessStep` roster entry that
+already references a custom-entrypoint manifest (e.g. `blogging.researcher` →
+`ResearchBriefInput.brief: str`, `blogging.publication` → `SubmitDraftInput.draft: str`,
+`job_matching.scanner` → `ScannerInvokeRequest.queries: list[str]` — none of which accept a generic
+`input` key) would flip from working persona execution to typed execution the moment this ADR's
+implementation lands, and immediately fail schema validation under the default `{"input": prev_output}`
+binding, because old step documents cannot carry `input_field`/`output_field` (they predate this ADR).
+Gating on `typed_io` (default `False`, so every existing `ProcessStep` deserializes to the unchanged
+persona behavior) makes typed execution something a process author turns on deliberately, for a step
+they've verified carries a compatible `input_field`/`output_field` — never something that happens to a
+persisted process as a side effect of this ADR landing.
+
+Rejected: entrypoint-only gating (the originally proposed single gate). It is not backward-compatible
+with existing rostered processes and has no migration path — see the concrete failures above.
 
 ### 1. Boundary marshalling
 
@@ -64,11 +84,14 @@ schema the DAG's one free-text channel binds to.
 
 - **Inbound:** the runner builds `{step.input_field or "input": prev_output}` and validates/coerces it
   against the manifest's resolved input schema before dispatch.
-- **Outbound:** after a successful invoke, if the output object has a string property named
-  `step.output_field or "output"`, that string becomes the next `prev_output`; otherwise the whole
-  output object is JSON-serialized and *that* string becomes `prev_output`. A `str` is always produced,
-  so any downstream consumer — a `WAIT` step's display, a persona step's prompt, the pipeline's final
-  result — degrades gracefully to reading structured output as text.
+- **Outbound:** after a successful invoke, the returned object is **first validated against the
+  manifest's resolved `outputs` schema** (§2) — an entrypoint that returns something not conforming to
+  its own advertised output contract fails the step; it is never passed downstream unchecked. Only once
+  validation passes: if the output object has a string property named `step.output_field or "output"`,
+  that string becomes the next `prev_output`; otherwise the whole output object is JSON-serialized and
+  *that* string becomes `prev_output`. A `str` is always produced, so any downstream consumer — a
+  `WAIT` step's display, a persona step's prompt, the pipeline's final result — degrades gracefully to
+  reading structured output as text.
 - **Typed↔free-text `WAIT` transitions** need no special-casing under this model: a `WAIT` answer and a
   typed step's serialized output are both just free-text producers feeding the same binding path
   described above and in §5.
@@ -90,10 +113,14 @@ entrypoint:
   will: resolve the `AgentManifest` via `agent_registry.get_registry()` → resolve its input schema via
   the existing `agent_registry/schema_resolver.py` (the same resolution the catalog's `/schema/input`
   endpoint already performs — no new resolution logic) → validate the bound body with
-  `jsonschema.Draft202012Validator` → on success, dispatch via
-  `shared_agent_invoke/dispatch.py:invoke_entrypoint` in-process.
+  `jsonschema.Draft202012Validator` → on success, dispatch through the **existing sandboxed invoke
+  surface** (`POST /api/agents/{agent_id}/invoke`, `backend/unified_api/routes/agents.py`) rather than
+  calling `shared_agent_invoke/dispatch.py:invoke_entrypoint` directly — see "Preserve the registry
+  invoke boundary" below — then resolve `outputs` via the same `schema_resolver.py` and validate the
+  returned object against it before handing it to §1's outbound extraction.
 
-**Failure mode: fail the step.** A validation failure or entrypoint exception routes to the existing
+**Failure mode: fail the step.** A validation failure (inbound *or* outbound), a 409 from the
+`requires-live-integration` gate, or any other entrypoint/sandbox exception routes to the existing
 `try_fail_pipeline_run` CAS path — the same mechanism `_execute`'s blanket exception handler already
 uses today.
 
@@ -103,10 +130,29 @@ uses today.
   like `StepType.WAIT`, breaking the DAG author's declared step-type invariant that ADR-007's adapter
   relies on to detect `WAIT` steps.
 
+**Preserve the registry invoke boundary.** The typed branch must not call
+`shared_agent_invoke/dispatch.py:invoke_entrypoint` directly in-process. That primitive is the sandbox
+shim's internal dispatch call (`shared_agent_invoke/README.md`: "the shim does not run inside production
+team services; it lives only inside the sandbox container") and carries no guardrail logic of its own —
+the `requires-live-integration` 409 gate and the ephemeral-sandbox-acquire lifecycle live solely in the
+HTTP route layer (`backend/unified_api/routes/agents.py`). Calling `invoke_entrypoint` directly would
+execute a manifest like `job_matching.scanner` or `blogging.publication` (both tagged
+`requires-live-integration`) in the wrong process, with none of the guardrails that route enforces
+today, and would silently swap that manifest's documented "409 — invoke through your team's production
+API instead" contract for an unguarded direct call. Routing dispatch through the existing route instead
+(an in-process HTTP call, since the DAG runner and Agent Console already share the Unified API process)
+preserves that contract unchanged: a `requires-live-integration` manifest still 409s and the typed step
+still fails per the policy above, exactly as a direct Agent Console invoke does today.
+
+Rejected: calling `invoke_entrypoint` directly, as the earlier draft of this ADR proposed. It reproduces
+exactly the guardrail bypass this section exists to prevent.
+
 ### 3. Schema fidelity (the runtime-binding-caveat prerequisite)
 
-The exclusion gate above — restricting typed execution to manifests with a custom `source.entrypoint`
-— is how this ADR resolves schema fidelity **without** first fixing the runtime-binding caveat. A
+The entrypoint half of the gate above — restricting typed execution to manifests with a custom
+`source.entrypoint` — is how this ADR resolves schema fidelity **without** first fixing the
+runtime-binding caveat (the `typed_io` opt-in half is a separate, backward-compatibility concern — see
+Decision). A
 custom-entrypoint manifest's advertised schema is exactly what its entrypoint code was written
 against, so validation can happen entirely at the DAG/dispatch boundary (§2) with **no change** to
 `shared_agent_invoke/dispatch.py`'s `invoke_entrypoint(entrypoint, body)` calling convention.
@@ -158,7 +204,8 @@ ADR-007's `test_adapter_agentic_team_contract_drift.py`) should assert these sha
   `manifest_id` remains the sole join key from a roster row to its `AgentManifest`.
 - `AgentManifest.inputs` / `outputs: IOSchema | None`, `AgentManifest.source.entrypoint: str`
   (`agent_registry/models.py`) — the runner's gate compares `source.entrypoint` against the shared
-  generated-agent entrypoint constant.
+  generated-agent entrypoint constant; both `inputs` and `outputs` are resolved and validated against
+  (inbound before dispatch, outbound before extraction), per §1/§2.
 - The shared generated-agent entrypoint, currently a private `_GEN_ENTRYPOINT` in
   `agent_studio/registration.py`, **must be exported** from a shared, importable location (e.g.
   `agent_registry/models.py` or a small new module) so `agent_studio` and the pipeline runner reference
@@ -167,12 +214,16 @@ ADR-007's `test_adapter_agentic_team_contract_drift.py`) should assert these sha
   `IOSchema.schema_ref` into JSON Schema for validation; `IOSchema.inline_schema` (already validated at
   model-construction time via `Draft202012Validator.check_schema`) is used verbatim when present, per
   existing precedence rules.
-- `shared_agent_invoke/dispatch.py:invoke_entrypoint(entrypoint: str, body: Any) -> Any` — the
-  sanctioned in-process dispatch primitive the new typed branch calls directly; `AgentNotRunnableError`
-  (or a validation failure) is the typed-step failure signal, routed to `try_fail_pipeline_run`.
-- New `ProcessStep.input_field: Optional[str]`, `output_field: Optional[str]`
-  (`agentic_team_provisioning/models.py`) — the only new persisted step fields; both default `None`, so
-  every existing `ProcessStep` document deserializes unchanged.
+- `POST /api/agents/{agent_id}/invoke` (`backend/unified_api/routes/agents.py`) — the sanctioned
+  dispatch surface the new typed branch calls (in-process HTTP, same Unified API process); **not**
+  `shared_agent_invoke/dispatch.py:invoke_entrypoint` directly (see "Preserve the registry invoke
+  boundary" in §2). Its existing 404/409 (`requires-live-integration`)/503/sandbox-acquire contract is
+  inherited unchanged; any non-2xx response or an output-schema validation failure is the typed-step
+  failure signal, routed to `try_fail_pipeline_run`.
+- New `ProcessStep.input_field: Optional[str]`, `output_field: Optional[str]`,
+  `typed_io: bool = False` (`agentic_team_provisioning/models.py`) — the only new persisted step
+  fields; all default to values (`None`/`False`) under which every existing `ProcessStep` document
+  deserializes to, and keeps running as, the unchanged persona path.
 - `PipelineRunStatus`, `TestPipelineRun.status` / `current_step_id` / `human_prompt` / `error`
   (`agentic_team_provisioning/models.py`) — **unchanged**; this is exactly the surface ADR-007's
   existing drift tripwire already protects, and this ADR asserts no member/field here changes.
@@ -192,15 +243,27 @@ ADR-007's `test_adapter_agentic_team_contract_drift.py`) should assert these sha
   into an explicit, falsifiable scope exclusion with its own stated revisit trigger, rather than left
   open-ended.
 - **A real typed-IO execution path becomes buildable**, but only for hand-authored specialist agents
-  with a custom `source.entrypoint`. LLM-generated and Studio-authored agents are explicitly excluded
-  until the runtime-binding caveat has its own follow-up fix — this is a known, accepted limitation of
-  this decision, not an oversight.
-- **The DAG's data model gains two small, additive fields** (`ProcessStep.input_field`/`output_field`)
-  and one small, additive result field (`PipelineStepResult.agent_kind`) — no breaking change to any
-  persisted document or existing contract.
+  with a custom `source.entrypoint`, and only for `ProcessStep`s that explicitly opt in via
+  `typed_io=True`. LLM-generated and Studio-authored agents are explicitly excluded until the
+  runtime-binding caveat has its own follow-up fix — this is a known, accepted limitation of this
+  decision, not an oversight.
+- **No existing persisted process changes behavior.** Because typed execution requires an explicit
+  per-step opt-in (`typed_io=True`), no `ProcessStep` written before this ADR's implementation lands can
+  be silently reinterpreted from persona to typed execution — adopting typed execution for an existing
+  roster entry is a deliberate migration (author sets `typed_io`, `input_field`, `output_field` to match
+  the target manifest's real schema), not an automatic side effect.
+- **Registry invoke guardrails are preserved.** Dispatch goes through the existing
+  `POST /api/agents/{agent_id}/invoke` route rather than the sandbox shim's internal dispatch primitive,
+  so a manifest tagged `requires-live-integration` (e.g. `job_matching.scanner`, `blogging.publication`)
+  still 409s instead of running unguarded inside the DAG runner's process — it simply fails the typed
+  step, per the same fail-fast policy as any other validation failure.
+- **The DAG's data model gains three small, additive fields** (`ProcessStep.input_field`/`output_field`/
+  `typed_io`) and one small, additive result field (`PipelineStepResult.agent_kind`) — no breaking
+  change to any persisted document or existing contract.
 - **ADR-007's adapter contract is confirmed unaffected** — no follow-up work is required there beyond
   an optional test case exercising a typed-step failure round-tripping through the adapter's terminal-
   status mapping, to make the "no adapter change" claim falsifiable.
-- **This ADR does not itself implement anything.** A future implementation PR must still: add the two
-  `ProcessStep` fields, export the shared entrypoint constant, add the new runner branch and validation
-  path, and update the two ADR-008 docstring markers accordingly.
+- **This ADR does not itself implement anything.** A future implementation PR must still: add the three
+  `ProcessStep` fields, export the shared entrypoint constant, add the new runner branch (dispatching
+  through the existing invoke route, validating both `inputs` and `outputs`), and update the two ADR-008
+  docstring markers accordingly.
