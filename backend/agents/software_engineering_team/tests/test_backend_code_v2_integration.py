@@ -138,8 +138,3 @@ class TestOrchestratorRegistration:
         assert isinstance(agents["backend"], BackendCodeV2TeamLead)
         # Replaced standalone backend_code_v2 key with backend
         assert "backend_code_v2" not in agents
-
-    def test_backend_code_v2_worker_exists(self):
-        import orchestrator
-
-        assert hasattr(orchestrator, "_backend_code_v2_worker")
