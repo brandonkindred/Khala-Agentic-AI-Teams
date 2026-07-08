@@ -16,6 +16,7 @@ from shared_git.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
     create_feature_branch,
+    development_branch_exists,
     ensure_development_branch,
     initialize_new_repo,
 )
@@ -238,17 +239,43 @@ def _prepare_feature_branch(path: Path, task: Any) -> tuple[bool, str]:
 def _ensure_development_ready(path: Path) -> tuple[bool, str]:
     """Ensure git and development exist before creating a no-merge handoff branch.
 
-    Args:
-        path: Repository path to initialize or normalize.
+    Short-circuits to a no-op success when ``development`` already exists as a
+    branch: the caller's subsequent ``create_feature_branch(path,
+    DEVELOPMENT_BRANCH, ...)`` only reads development's tip commit as a start
+    point (``git checkout -b <new> development``), so it never needs
+    development attached to *this* path's HEAD. Actively attaching it here
+    first (the previous unconditional ``ensure_development_branch`` call) is
+    harmless when path is always the single shared checkout, but collides
+    ("already checked out" / a stale-branch-listing parse miss for a branch
+    marked ``+`` as checked out elsewhere) once path may be a worker's own
+    linked git worktree while development stays attached at the shared
+    checkout for merge/diff operations.
 
-    Returns:
-        ``(True, message)`` when the repository can branch from development,
-        otherwise ``(False, reason)``.
+    Args:
+        path: Repository path to initialize or normalize — the shared
+            checkout on a fresh repo, or a worker's linked worktree once
+            development is already established.
+
+    Preconditions:
+        - path exists or is creatable.
+    Postconditions:
+        - Not yet a git repo: initializes one (``initialize_new_repo`` —
+          creates and checks out development on a genuinely fresh path; this
+          only ever occurs for the shared checkout, never a linked worktree,
+          since worktrees are only ever created from an already-initialized
+          repository).
+        - Already a git repo with ``development`` present: no-op success;
+          HEAD is left exactly as the caller set it up.
+        - Already a git repo without ``development``: falls back to
+          ``ensure_development_branch``, preserving the create-from-main
+          behavior for a first run against a non-worktree checkout.
     """
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
     if not (path / ".git").exists():
         return initialize_new_repo(path)
+    if development_branch_exists(path):
+        return True, f"'{DEVELOPMENT_BRANCH}' branch already exists"
     return ensure_development_branch(path)
 
 
