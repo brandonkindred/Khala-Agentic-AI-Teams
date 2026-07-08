@@ -61,12 +61,16 @@ async def connect_temporal_client() -> Optional["Client"]:
     """Connect to Temporal using env vars. Returns None if not configured."""
     from temporalio.client import Client
 
+    from shared_temporal.codec import build_data_converter
+
     address = get_temporal_address()
     if not address:
         return None
     namespace = get_temporal_namespace()
     try:
-        client = await Client.connect(address, namespace=namespace)
+        client = await Client.connect(
+            address, namespace=namespace, data_converter=build_data_converter()
+        )
         logger.info("Temporal client connected to %s namespace %s", address, namespace)
         return client
     except Exception as e:

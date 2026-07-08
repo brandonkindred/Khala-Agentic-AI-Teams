@@ -86,6 +86,21 @@ back to `30`).
 - `TEMPORAL_ADDRESS` — required; Temporal is mandatory for all teams.
 - `TEMPORAL_NAMESPACE` — default `default`.
 - `TEMPORAL_TASK_QUEUE` — default `khala`.
+- `TEMPORAL_PAYLOAD_COMPRESSION` / `TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES` —
+  gzip payload codec toggle/threshold (see below).
+
+## Payload compression
+
+`connect_temporal_client` builds its `Client`'s `DataConverter` via
+`shared_temporal.codec.build_data_converter`, which installs a gzip
+`PayloadCodec` by default. A team whose activities move large, highly
+compressible payloads — e.g. `code_review_agent`'s map-reduce chunks, which
+carry the full, untruncated diff by design — can otherwise trip Temporal's
+512 KiB `PayloadSizeWarning` (`TMPRL1103`) well before hitting any real gRPC
+message limit. The codec runs transparently underneath every team's client and
+worker (they share this one `connect_temporal_client` call), so no team needs
+its own opt-in; see `docs/ENV_VARS.md` for the toggle/threshold env vars and
+`shared_temporal/codec.py` for the implementation.
 
 ## See also
 

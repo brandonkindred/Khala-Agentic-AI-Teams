@@ -189,6 +189,25 @@ Test-only escape hatch (truthy: `1`/`true`/`yes`/`on`) that re-enables code-revi
 Temporal mode despite the `pytest`/`dummy` guards, provided an address still
 resolves. Not load-bearing outside integration tests.
 
+### TEMPORAL_PAYLOAD_COMPRESSION
+Boolean (default `true`). The shared Temporal client (`shared_temporal.client`,
+used by every team's client and worker) installs a gzip `PayloadCodec` on its
+`DataConverter` unless this is set falsy. Source code and JSON compress well, so
+this transparently keeps large activity/workflow payloads — e.g. the code review
+agent's map-reduce chunks, which deliberately carry the full, untruncated diff —
+under Temporal's 512 KiB `PayloadSizeWarning` (`TMPRL1103`) threshold instead of
+just alerting on it; smaller payloads (below `TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES`)
+pass through uncompressed either way. Client and worker must agree on this
+setting (both resolve it through the same `shared_temporal.codec.build_data_converter`
+call), so set it identically everywhere a team's process runs. Turn it off if you
+need the Temporal Web UI to render raw, human-readable payloads without a codec
+server configured there.
+
+### TEMPORAL_PAYLOAD_COMPRESSION_MIN_BYTES
+Int (default `1024`, floor `0`). Serialized payloads smaller than this many bytes
+skip gzip entirely (compression overhead outweighs the benefit below this size,
+and small payloads are nowhere near the warning threshold anyway).
+
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
 
