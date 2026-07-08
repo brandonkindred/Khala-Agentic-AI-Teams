@@ -967,6 +967,14 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             # is aligned. Emit a single info finding citing the
             # satisfied rule.
             satisfied = next(o for o in rule_evaluations if o["status"] == "satisfied")
+            # ``lhs`` / ``rhs`` are populated for a leaf predicate and ``None``
+            # for a combinator (``all_of`` / ``any_of`` — no single scalar
+            # pair); render the scalar tail only when both are available.
+            scalar_tail = (
+                f" → lhs={satisfied['lhs']:.6g}, rhs={satisfied['rhs']:.6g}."
+                if satisfied["lhs"] is not None and satisfied["rhs"] is not None
+                else "."
+            )
             finding = AlignmentFinding(
                 trade_num=trade.trade_num,
                 rule_id=satisfied["rule_id"],
@@ -975,8 +983,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 severity="info",
                 details=(
                     f"Trade #{trade.trade_num} entry satisfied by "
-                    f"{satisfied['rule_id']}: {satisfied['predicate_repr']} → "
-                    f"lhs={satisfied['lhs']:.6g}, rhs={satisfied['rhs']:.6g}."
+                    f"{satisfied['rule_id']}: {satisfied['predicate_repr']}{scalar_tail}"
                 ),
                 computed_value=satisfied.get("lhs"),
                 expected_value=satisfied.get("rhs"),
@@ -1034,10 +1041,17 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 "indicator was ready."
             )
         else:
+            # ``lhs`` / ``rhs`` are populated for a leaf predicate and ``None``
+            # for a combinator (``all_of`` / ``any_of`` — no single scalar
+            # pair); render the scalar tail only when both are available.
+            scalar_tail = (
+                f" (lhs={primary['lhs']:.6g}, rhs={primary['rhs']:.6g})."
+                if primary["lhs"] is not None and primary["rhs"] is not None
+                else "."
+            )
             details = (
                 f"Trade #{trade.trade_num} entry predicate not satisfied for "
-                f"{primary['rule_id']}: {primary['predicate_repr']} "
-                f"(lhs={primary['lhs']:.6g}, rhs={primary['rhs']:.6g})."
+                f"{primary['rule_id']}: {primary['predicate_repr']}{scalar_tail}"
             )
         finding = AlignmentFinding(
             trade_num=trade.trade_num,

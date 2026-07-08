@@ -22,6 +22,7 @@ from investment_team.strategy_lab.quality_gates.alignment_checks import (
 )
 from investment_team.strategy_lab.spec_dsl import (
     DEFAULT_SIZING_PAYLOAD,
+    AllOf,
     EntryRule,
     FixedFractionSizing,
     FixedNotionalSizing,
@@ -790,6 +791,127 @@ def test_entry_signal_cross_below_satisfied_only_on_real_transition() -> None:
     )
     entry = next(f for f in result.findings if f.check_name == "entry_signal")
     assert entry.passed is True
+
+
+def test_entry_signal_satisfied_by_combinator_has_no_scalar_tail() -> None:
+    """A confirmation-stacked (``all_of``) entry rule that fires produces
+    ``lhs``/``rhs`` of ``None`` (a combinator has no single scalar pair).
+
+    Regression: the "satisfied" finding formatted ``lhs``/``rhs`` with
+    ``:.6g`` unconditionally, so a satisfied combinator rule raised
+    ``TypeError: unsupported format string passed to NoneType.__format__``
+    and failed the whole strategy-generation cycle. The scalar tail must
+    be omitted, not formatted, when the pair is absent.
+    """
+    gate = DeterministicAlignmentChecker()
+    rule = EntryRule(
+        side="long",
+        when=AllOf(
+            of=[
+                Predicate(lhs="bar.close", op="cross_above", rhs=100.0),
+                Predicate(lhs="bar.volume", op=">", rhs=500_000.0),
+            ]
+        ),
+    )
+    spec = _spec(entry_rules=[rule])
+    md = {
+        "AAPL": [
+            OHLCVBar(  # T-1: below threshold
+                date="2023-01-01",
+                open=98.0,
+                high=99.5,
+                low=98.0,
+                close=99.0,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T (signal — cross fires and volume confirms)
+                date="2023-01-02",
+                open=99.5,
+                high=101.5,
+                low=99.5,
+                close=101.0,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T+1 (fill — entry_date)
+                date="2023-01-03",
+                open=101.0,
+                high=102.0,
+                low=100.5,
+                close=101.5,
+                volume=1_000_000,
+            ),
+        ]
+    }
+    trade = _trade(entry_date="2023-01-03")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    entry = next(f for f in result.findings if f.check_name == "entry_signal")
+    assert entry.passed is True
+    # Combinator → no scalar pair → tail is a bare period, never "lhs=".
+    assert "lhs=" not in entry.details
+    assert entry.details.rstrip().endswith(".")
+
+
+def test_entry_signal_missed_combinator_has_no_scalar_tail() -> None:
+    """The hard-miss path shares the same latent bug: a combinator that
+    does NOT fire has ``lhs``/``rhs`` of ``None`` too. The critical
+    finding must render without a scalar tail rather than crash.
+    """
+    gate = DeterministicAlignmentChecker()
+    rule = EntryRule(
+        side="long",
+        when=AllOf(
+            of=[
+                Predicate(lhs="bar.close", op="cross_above", rhs=100.0),
+                Predicate(lhs="bar.volume", op=">", rhs=500_000.0),
+            ]
+        ),
+    )
+    spec = _spec(entry_rules=[rule])
+    md = {
+        "AAPL": [
+            OHLCVBar(  # T-1: already above — no crossover possible
+                date="2023-01-01",
+                open=101.0,
+                high=102.0,
+                low=100.5,
+                close=101.5,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T (signal): still above — cross_above misses
+                date="2023-01-02",
+                open=101.5,
+                high=103.0,
+                low=101.0,
+                close=102.5,
+                volume=1_000_000,
+            ),
+            OHLCVBar(  # T+1 (fill — entry_date)
+                date="2023-01-03",
+                open=102.5,
+                high=103.5,
+                low=101.5,
+                close=103.0,
+                volume=1_000_000,
+            ),
+        ]
+    }
+    trade = _trade(entry_date="2023-01-03")
+    result = gate.check(
+        spec=spec,
+        trades=[trade],
+        market_data=md,
+        initial_capital=100_000.0,
+    )
+    entry = next(f for f in result.findings if f.check_name == "entry_signal")
+    assert entry.passed is False
+    assert entry.severity == "critical"
+    assert "lhs=" not in entry.details
+    assert entry.details.rstrip().endswith(".")
 
 
 def test_entry_signal_cross_falls_closed_when_entry_is_first_bar() -> None:
