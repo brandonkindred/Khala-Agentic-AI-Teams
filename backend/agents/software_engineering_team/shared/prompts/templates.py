@@ -24,6 +24,9 @@ from __future__ import annotations
 from software_engineering_team.shared.coding_standards import (
     PRIORITY_FRAMEWORK as _PRIORITY_FRAMEWORK,
 )
+from software_engineering_team.shared.coding_standards import (
+    REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
+)
 
 # ---------------------------------------------------------------------------
 # Planning prompt
@@ -206,3 +209,248 @@ def build_problem_solving_single_issue_prompt(
         + '- Output only the file(s) you change. Use "## FILE <path> ##" for each.\n'
         + "- Do not use JSON. Use only the template above. No explanatory text before or after.\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Code review prompt
+# ---------------------------------------------------------------------------
+
+
+def build_code_review_prompt(*, project_kind: str, extra_verify_clause: str = "") -> str:
+    """Assemble a team's REVIEW_PROMPT from the shared skeleton.
+
+    Preconditions:
+        ``project_kind`` is a bare noun (e.g. "backend"); ``extra_verify_clause``
+        (if non-empty) ends with ", " so it reads inline before "correctness...".
+    Postconditions:
+        Returns the prompt preserving the ``{requirements}``,
+        ``{acceptance_criteria}``, ``{code}`` slots.
+    """
+    return (
+        f"You are an expert Code Review Agent for a {project_kind} project.\n\n"
+        + _REVIEW_PRIORITY_FRAMEWORK
+        + "\n"
+        + f"After checking these priorities, also verify: {extra_verify_clause}correctness against "
+        + "requirements and acceptance criteria, testing coverage, and build/lint readiness.\n\n"
+        + "**Requirements:**\n{requirements}\n\n"
+        + "**Acceptance criteria:**\n{acceptance_criteria}\n\n"
+        + "**Code to review:**\n{code}\n\n"
+        + "**Output format (template – use exactly these section headers):**\n\n"
+        + "## PASSED ##\ntrue\n## END PASSED ##\n"
+        + "## ISSUES ##\n---\nsource: code_review\nseverity: critical|high|medium|low|info\n"
+        + "description: what is wrong\nfile_path: which file\nrecommendation: how to fix it\n---\n"
+        + "## END ISSUES ##\n"
+        + "## SUMMARY ##\noverall assessment\n## END SUMMARY ##\n\n"
+        + '- Use "---" to separate each issue block. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.\n'
+        + "- Do not use JSON. Use only the template above. No explanatory text before or after.\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Problem-solving prompt (multi-issue)
+# ---------------------------------------------------------------------------
+
+
+def build_problem_solving_prompt(
+    *,
+    project_kind: str,
+    coding_standards: str,
+    files_line: str,
+    has_language_conventions: bool = True,
+) -> str:
+    """Assemble a team's PROBLEM_SOLVING_PROMPT from the shared skeleton.
+
+    Preconditions:
+        ``coding_standards`` starts and ends with a newline; ``files_line`` is the
+        one-line intro before the FILE blocks (backend calls out "same as execution").
+    Postconditions:
+        Returns the prompt preserving the ``{issues}``/``{current_code}`` slots
+        (and ``{language_conventions}`` iff ``has_language_conventions``).
+    """
+    lang_block = "{language_conventions}\n\n" if has_language_conventions else ""
+    return (
+        f"You are an expert Problem-Solving Specialist for a {project_kind} project.\n\n"
+        "Given the issues found during review, produce fixes. Each fix should be a complete\n"
+        "updated file that resolves the issue.\n\n"
+        + _PRIORITY_FRAMEWORK
+        + "\n"
+        + coding_standards
+        + "\n\n"
+        + lang_block
+        + "**Issues to resolve:**\n{issues}\n\n"
+        + "**Current code:**\n{current_code}\n\n"
+        + "**Output format (template – use exactly these markers):**\n\n"
+        + f"{files_line}\n"
+        + "## FILE path/to/file.ext ##\n<full updated file content>\n## FILE path/to/next.ext ##\n...\n"
+        + "## FIXES_APPLIED ##\n---\nissue: summary of the issue\nfix: what was changed\n---\n"
+        + "## END FIXES_APPLIED ##\n"
+        + "## RESOLVED ##\ntrue\n## END RESOLVED ##\n"
+        + "## SUMMARY ##\noverview of all fixes\n## END SUMMARY ##\n\n"
+        + '- Use "## FILE <path> ##" for each file; "---" to separate each fix block.\n'
+        + "- Do not use JSON. Use only the template above. No explanatory text before or after.\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# QA tool-agent review prompt
+# ---------------------------------------------------------------------------
+
+
+def build_qa_review_prompt(*, second_test_kind: str, flakiness_examples: str) -> str:
+    """Assemble a team's QA_TOOL_AGENT_REVIEW_PROMPT from the shared skeleton.
+
+    Preconditions:
+        ``second_test_kind`` / ``flakiness_examples`` are short noun phrases with
+        no surrounding punctuation (e.g. "integration tests", "non-determinism,
+        poor isolation").
+    Postconditions:
+        Returns the prompt preserving the ``{task_description}``, ``{code}`` slots.
+    """
+    return (
+        "You are an expert QA/Testing specialist. Review the code from a testing and quality perspective only.\n\n"
+        "Focus on:\n"
+        f"1. Missing or weak unit tests, {second_test_kind}, or test coverage.\n"
+        "2. Edge cases and error paths not covered.\n"
+        f"3. Flaky or brittle test patterns (e.g. {flakiness_examples}).\n"
+        "4. Assertions that are too weak or missing.\n"
+        "5. Test data or mocks that don't reflect real behaviour.\n\n"
+        "**Task context:**\n{task_description}\n\n"
+        "**Code to review:**\n{code}\n\n"
+        "**Output format (template – use exactly these section headers):**\n\n"
+        "## PASSED ##\ntrue\n## END PASSED ##\n"
+        "## ISSUES ##\n---\nsource: qa\nseverity: critical|high|medium|low|info\n"
+        "description: what is wrong from a QA/testing perspective\nfile_path: which file\n"
+        "recommendation: how to fix it\n---\n## END ISSUES ##\n"
+        "## SUMMARY ##\nbrief QA assessment\n## END SUMMARY ##\n\n"
+        '- Use "---" to separate each issue block. Use source: qa for every issue. '
+        "Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.\n"
+        "- Do not use JSON. Use only the template above. No explanatory text before or after.\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Batch fix prompt
+# ---------------------------------------------------------------------------
+
+
+def build_batch_fix_prompt(*, role_title: str, coding_standards: str) -> str:
+    """Assemble a team's BATCH_FIX_PROMPT from the shared skeleton.
+
+    Preconditions:
+        ``role_title`` is e.g. "Senior Backend Software Engineer"; ``coding_standards``
+        starts and ends with a newline.
+    Postconditions:
+        Returns the prompt preserving the ``{language_conventions}``, ``{issue_count}``,
+        ``{phase_name}``, ``{formatted_issues}``, ``{current_code}`` slots.
+    """
+    return (
+        f"You are an expert {role_title} responsible for fixing all issues identified by the review team.\n\n"
+        + coding_standards
+        + "\n\n{language_conventions}\n\n"
+        + "**You have been given {issue_count} issues from the {phase_name} phase.**\n\n"
+        + "Your task is to address ALL of these issues in a single pass. Review each issue carefully, "
+        + "understand the root causes, and implement comprehensive fixes.\n\n"
+        + "## Issues to Fix\n\n{formatted_issues}\n\n"
+        + "## Current Code\n\n{current_code}\n\n"
+        + "## Instructions\n\n"
+        + "1. Analyze all issues to understand their root causes\n"
+        + "2. Identify any issues that can be fixed together with a single code change\n"
+        + "3. Plan your fixes strategically to avoid introducing new problems\n"
+        + "4. Implement ALL fixes - do not leave any issue unaddressed\n"
+        + "5. Ensure your changes maintain code quality and don't break existing functionality\n\n"
+        + "You decide how to organize the work internally. The key requirement is that ALL issues must be addressed.\n\n"
+        + "**Output format (template – use exactly these markers):**\n\n"
+        + "For each file you modify or create:\n"
+        + "## FILE path/to/file.ext ##\n<full file content>\n## FILE path/to/next.ext ##\n<full file content>\n"
+        + "## ISSUES_ADDRESSED ##\n---\nissue_index: 1\ndescription: brief description of what was fixed\n"
+        + "---\nissue_index: 2\ndescription: brief description of what was fixed\n---\n"
+        + "## END ISSUES_ADDRESSED ##\n"
+        + "## SUMMARY ##\nOverview of all fixes applied\n## END SUMMARY ##\n\n"
+        + '- Use "## FILE <path> ##" at the start of each file; the next "## FILE " or '
+        + '"## ISSUES_ADDRESSED ##" ends the previous file.\n'
+        + "- List each issue you addressed with its index (1-based) and a brief description.\n"
+        + "- Do not use JSON. Use only the template above. No explanatory text before or after.\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Documentation self-review prompt
+# ---------------------------------------------------------------------------
+
+
+def build_documentation_self_review_prompt(
+    *, project_kind_suffix: str, completeness_clause: str, accuracy_target: str
+) -> str:
+    """Assemble a team's DOCUMENTATION_SELF_REVIEW_PROMPT from the shared skeleton.
+
+    Preconditions:
+        ``project_kind_suffix`` is "" or " frontend" (inserted before "documentation."
+        in the title); ``completeness_clause`` is "" or a parenthetical like
+        " (props, usage, examples)"; ``accuracy_target`` is e.g. "code" or
+        "component/function".
+    Postconditions:
+        Returns the prompt preserving the ``{iteration}``, ``{max_iterations}``,
+        ``{task_description}``, ``{documentation}``, ``{code}`` slots.
+    """
+    return (
+        "You are an expert Documentation Quality Specialist performing a self-review pass on"
+        f"{project_kind_suffix} documentation.\n\n"
+        "**Iteration:** {iteration} of {max_iterations}\n\n"
+        "**Task Context:** {task_description}\n\n"
+        "**Current Documentation:**\n\n{documentation}\n\n"
+        "**Current Code:**\n\n{code}\n\n"
+        "**Review criteria:**\n"
+        "1. Clarity: Is the documentation easy to understand?\n"
+        f"2. Completeness: Does it cover all important aspects{completeness_clause}?\n"
+        f"3. Accuracy: Does it correctly describe the {accuracy_target} behavior?\n"
+        "4. Structure: Is it well-organized with appropriate sections?\n"
+        "5. Grammar and style: Is it professionally written?\n\n"
+        "**Your task:**\n"
+        "1. Review the documentation against the criteria above\n"
+        "2. Identify specific improvements needed\n"
+        "3. Apply those improvements and output the refined documentation\n\n"
+        "**Output format (template – use exactly these markers):**\n\n"
+        "## QUALITY_SCORE ##\n0.0-1.0 (your assessment of current documentation quality)\n"
+        "## END QUALITY_SCORE ##\n"
+        "## IMPROVEMENTS ##\n- List of specific improvements you are making\n- Each on its own line\n"
+        "## END IMPROVEMENTS ##\n"
+        "## FILE path/to/doc.md ##\n<full refined documentation content>\n"
+        "## FILE path/to/next.md ##\n<content if multiple files>\n"
+        "## SUMMARY ##\nBrief summary of refinements made in this iteration\n## END SUMMARY ##\n\n"
+        "- Only output documentation files that you actually improved.\n"
+        "- Do not use JSON. Use only the template above. No explanatory text before or after.\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Byte-identical constants (zero divergence between backend/frontend)
+# ---------------------------------------------------------------------------
+
+DOCUMENTATION_PROBLEM_SOLVE_PROMPT = """You are an expert Documentation Specialist fixing a specific documentation issue.
+
+{language_conventions}
+
+**Issue to fix:**
+- Source: {source}
+- Severity: {severity}
+- Description: {description}
+- File: {file_path}
+- Recommendation: {recommendation}
+
+**Current code:**
+{current_code}
+
+**Your task:** Fix ONLY this documentation issue. Do not change any code logic — only add or improve documentation.
+
+**Output format (template – use exactly these markers):**
+## FILE path/to/file.ext ##
+<full file content with documentation fix>
+## SUMMARY ##
+what documentation you fixed
+## END SUMMARY ##
+
+- Output the complete file content with the documentation fix.
+- Do not use JSON. Use only the template above. No explanatory text before or after.
+"""
+
+DELIVER_COMMIT_MSG_TEMPLATE = "feat({scope}): {summary}"

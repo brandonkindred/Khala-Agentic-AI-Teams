@@ -782,7 +782,7 @@ class TestDevOpsTestValidationAgent:
 
         captured: Dict[str, Any] = {}
 
-        def _fake_get_strands_model(key: str) -> Any:
+        def _fake_get_strands_model(key: str, **_kwargs: Any) -> Any:
             captured["key"] = key
             return DummyLLMClient()  # a Strands Model — used directly downstream
 

@@ -7,6 +7,7 @@ import json
 from strands import Agent
 
 from llm_service import get_strands_model
+from llm_service.strands_model import resolve_strands_model
 
 from ...models import ToolAgentInput, ToolAgentOutput
 
@@ -33,11 +34,11 @@ class MCPServerConnectivityToolAgent:
     """Generates MCP discovery/setup/connectivity artifacts for AI agent systems."""
 
     def __init__(self, llm=None) -> None:
-        from strands.models.model import Model as _StrandsModel
+        self._model = resolve_strands_model(llm, get_strands_model_fn=get_strands_model)
 
-        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
-
-    def run(self, inp: ToolAgentInput) -> ToolAgentOutput:  # pragma: no cover  # integration-only: runs live LLM agent
+    def run(
+        self, inp: ToolAgentInput
+    ) -> ToolAgentOutput:  # pragma: no cover  # integration-only: runs live LLM agent
         agent = Agent(model=self._model)
         prompt = PROMPT.format(
             microtask=inp.microtask.description or inp.microtask.title,
