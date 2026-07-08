@@ -1,44 +1,51 @@
-"""Temporal workflow + activity wrapping the agentic team provisioning handler."""
+"""Temporal workflow + activities wrapping the agentic pipeline runner.
+
+The workflow class and activities live in :mod:`workflows` (sandbox-safe — no
+top-level non-deterministic calls). Worker startup lives in :mod:`worker` and is
+invoked by the team_service entrypoint at boot (``TEAM_TEMPORAL_WORKER_MODULE`` /
+``TEAM_TEMPORAL_WORKER_FUNC``), with the API lifespan as a standalone-dev backstop, so
+the Temporal client is connected before the API serves its first request. This package
+``__init__`` must stay free of import-time side effects (no worker boot, no
+``os.getenv``) — the temporalio sandbox replays it during workflow registration.
+"""
 
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import Any
+from agentic_team_provisioning.temporal.workflows import (
+    AgenticPipelineWorkflow,
+    advance_step_activity,
+    cancel_reconcile_activity,
+    complete_activity,
+    fail_activity,
+    run_step_activity,
+    wait_finalize_activity,
+    wait_setup_activity,
+)
 
-from temporalio import activity, workflow
+WORKFLOWS = [AgenticPipelineWorkflow]
+ACTIVITIES = [
+    advance_step_activity,
+    run_step_activity,
+    wait_setup_activity,
+    wait_finalize_activity,
+    complete_activity,
+    cancel_reconcile_activity,
+    fail_activity,
+]
+TASK_QUEUE = "agentic_team_provisioning-queue"
+WORKFLOW_ID_PREFIX = "agentic-pipeline-"
 
-
-@activity.defn(name="agentic_team_provisioning_run_pipeline")
-def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
-    from agentic_team_provisioning.api.main import CreateTeamRequest, create_team
-
-    req = CreateTeamRequest(**request)
-    result = create_team(req)
-    if hasattr(result, "model_dump"):
-        return result.model_dump()
-    return result if isinstance(result, dict) else {"result": result}
-
-
-@workflow.defn(name="AgenticTeamProvisioningWorkflow")
-class AgenticTeamProvisioningWorkflow:
-    @workflow.run
-    async def run(self, request: dict[str, Any]) -> dict[str, Any]:
-        return await workflow.execute_activity(
-            run_pipeline_activity,
-            request,
-            start_to_close_timeout=timedelta(hours=2),
-        )
-
-
-WORKFLOWS = [AgenticTeamProvisioningWorkflow]
-ACTIVITIES = [run_pipeline_activity]
-
-from shared_temporal import is_temporal_enabled, start_team_worker  # noqa: E402
-
-if is_temporal_enabled():
-    start_team_worker(
-        "agentic_team_provisioning",
-        WORKFLOWS,
-        ACTIVITIES,
-        task_queue="agentic_team_provisioning-queue",
-    )
+__all__ = [
+    "ACTIVITIES",
+    "TASK_QUEUE",
+    "WORKFLOWS",
+    "WORKFLOW_ID_PREFIX",
+    "AgenticPipelineWorkflow",
+    "advance_step_activity",
+    "cancel_reconcile_activity",
+    "complete_activity",
+    "fail_activity",
+    "run_step_activity",
+    "wait_finalize_activity",
+    "wait_setup_activity",
+]

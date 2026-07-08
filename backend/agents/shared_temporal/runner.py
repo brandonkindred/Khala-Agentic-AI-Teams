@@ -101,7 +101,78 @@ def start_workflow_sync(
     asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=start_timeout_s)
 
 
+def signal_workflow_sync(
+    workflow_id: str,
+    signal_name: str,
+    *args: Any,
+    client_ready_timeout_s: float | None = None,
+    timeout_s: float = START_WORKFLOW_TIMEOUT_S,
+) -> None:
+    """Signal a running Temporal workflow from synchronous code.
+
+    The signal companion to :func:`start_workflow_sync`: wait (briefly, polling)
+    for the worker's connected client + loop, resolve the workflow handle by id,
+    then schedule ``handle.signal`` on the worker loop and block until delivery is
+    accepted. Does NOT touch the job store — the workflow's own signal handler +
+    activities own any resulting state change.
+
+    Preconditions:
+        - ``workflow_id`` and ``signal_name`` are non-empty.
+        - ``args`` are Temporal-serializable (the same codec the workflow uses).
+
+    Postconditions:
+        - The signal is delivered to the workflow with id ``workflow_id`` (raises
+          ``RuntimeError`` if the worker client never becomes available within
+          ``client_ready_timeout_s``, defaulting to ``CLIENT_READY_TIMEOUT_S``).
+    """
+    assert workflow_id, "workflow_id must be non-empty"
+    assert signal_name, "signal_name must be non-empty"
+    client, loop = _await_client(client_ready_timeout_s)
+    handle = client.get_workflow_handle(workflow_id)
+    asyncio.run_coroutine_threadsafe(handle.signal(signal_name, *args), loop).result(
+        timeout=timeout_s
+    )
+
+
+def cancel_workflow_sync(
+    workflow_id: str,
+    *,
+    client_ready_timeout_s: float | None = None,
+    timeout_s: float = START_WORKFLOW_TIMEOUT_S,
+) -> None:
+    """Request cancellation of a running Temporal workflow from synchronous code.
+
+    The cancel companion to :func:`start_workflow_sync`: wait (briefly, polling)
+    for the worker's connected client + loop, resolve the workflow handle by id,
+    then schedule ``handle.cancel`` on the worker loop and block until the request
+    is accepted. The workflow observes an ``asyncio.CancelledError`` at its next
+    await point; any store reconciliation is the workflow's responsibility.
+
+    Preconditions:
+        - ``workflow_id`` is non-empty.
+
+    Postconditions:
+        - Cancellation is requested for the workflow with id ``workflow_id``
+          (raises ``RuntimeError`` if the worker client never becomes available
+          within ``client_ready_timeout_s``, defaulting to
+          ``CLIENT_READY_TIMEOUT_S``). Requesting cancel on an already-terminal
+          workflow is a no-op accepted by the server.
+    """
+    assert workflow_id, "workflow_id must be non-empty"
+    client, loop = _await_client(client_ready_timeout_s)
+    handle = client.get_workflow_handle(workflow_id)
+    asyncio.run_coroutine_threadsafe(handle.cancel(), loop).result(timeout=timeout_s)
+
+
 def _get_job_manager(team: str) -> Any:
+    # Import lazily (not at module top) on purpose: only ``run_team_job`` — the
+    # job-store-backed dispatch path — needs ``JobServiceClient`` (and its transitive
+    # ``httpx`` dependency). The lightweight bridges in this module
+    # (``start_workflow_sync`` / ``signal_workflow_sync`` / ``cancel_workflow_sync``),
+    # which many callers use without ever touching the job store, must not pull that in
+    # just by importing ``shared_temporal.runner``. There is no circular-import concern
+    # (``job_service_client`` does not import ``shared_temporal``); this is purely to
+    # keep the import surface of the bridge path minimal.
     from job_service_client import JobServiceClient
 
     return JobServiceClient(team=team)
