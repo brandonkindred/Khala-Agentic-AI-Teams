@@ -95,6 +95,40 @@ def test_try_resume_rejects_stale_orphan(fake_pg: dict) -> None:
     assert store.try_resume_pipeline_run("r1", "answer", 30) is False
 
 
+def test_try_resume_temporal_is_a_compare_and_swap_without_heartbeat_guard(fake_pg: dict) -> None:
+    """The Temporal resume CAS flips waiting -> running + persists the input, wins for
+    exactly one caller, ignores heartbeat freshness (Temporal owns liveness), and never
+    revives a terminal run."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1", temporal_owned=True)
+
+    # Not waiting yet -> CAS loses.
+    assert store.try_resume_pipeline_run_temporal("r1", "answer") is False
+
+    # Waiting with a STALE heartbeat is still resumable (no freshness guard).
+    store.update_pipeline_run(
+        "r1",
+        status="waiting_for_input",
+        heartbeat_at=datetime.now(tz=timezone.utc) - timedelta(seconds=3600),
+    )
+    assert store.try_resume_pipeline_run_temporal("r1", "answer") is True
+    row = store.get_pipeline_run("r1")
+    assert row["status"] == "running"
+    assert row["human_prompt"] is None
+    assert store.get_pipeline_status("r1")["human_input"] == "answer"
+
+    # Second resume loses (already left waiting_for_input).
+    assert store.try_resume_pipeline_run_temporal("r1", "again") is False
+
+    # A cancelled run cannot be revived by resume.
+    store.create_pipeline_run("r2", "t1", "p1", temporal_owned=True)
+    store.update_pipeline_run("r2", status="waiting_for_input")
+    store.try_cancel_pipeline_run("r2")
+    assert store.try_resume_pipeline_run_temporal("r2", "answer") is False
+    assert store.get_pipeline_run("r2")["status"] == "cancelled"
+
+
 def test_try_expire_is_a_compare_and_swap(fake_pg: dict) -> None:
     _seed_team(fake_pg)
     store = AgenticTestStore()
@@ -228,3 +262,35 @@ def test_reap_rejects_nonpositive_stale_seconds(fake_pg: dict) -> None:
     store = AgenticTestStore()
     with pytest.raises(AssertionError):
         store.reap_orphaned_pipeline_runs("x", stale_seconds=0)
+
+
+def test_reaper_skips_temporal_owned_runs(fake_pg: dict) -> None:
+    """A Temporal-owned run has no heartbeat thread — Temporal owns its recovery, so
+    the DB reaper must never fail it on staleness, while a stale thread-owned run in the
+    same sweep is still reaped."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    stale = datetime.now(tz=timezone.utc) - timedelta(seconds=3600)
+
+    store.create_pipeline_run("temporal", "t1", "p1", temporal_owned=True)
+    store.update_pipeline_run("temporal", status="running", heartbeat_at=stale)
+    store.create_pipeline_run("thread", "t1", "p1")  # temporal_owned defaults False
+    store.update_pipeline_run("thread", status="running", heartbeat_at=stale)
+
+    reaped = store.reap_orphaned_pipeline_runs("orphaned: restart", stale_seconds=30)
+
+    assert reaped == 1
+    assert store.get_pipeline_run("temporal")["status"] == "running"  # untouched
+    assert store.get_pipeline_run("thread")["status"] == "failed"
+
+
+def test_temporal_owned_flag_persists_and_defaults(fake_pg: dict) -> None:
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+
+    store.create_pipeline_run("owned", "t1", "p1", temporal_owned=True)
+    store.create_pipeline_run("plain", "t1", "p1")
+
+    assert store.is_pipeline_run_temporal_owned("owned") is True
+    assert store.is_pipeline_run_temporal_owned("plain") is False
+    assert store.is_pipeline_run_temporal_owned("missing") is False

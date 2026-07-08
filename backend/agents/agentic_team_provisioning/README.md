@@ -20,6 +20,24 @@ Each team has a **roster** (`AgenticTeamAgent`): `agent_name`, `role`, `skills`,
 
 Validation logic lives in `roster_validation.py`.
 
+## Pipeline test runs (execution)
+
+Agent Studio's **pipeline test run** (`POST /teams/{team_id}/test-pipeline/runs`) walks a
+process DAG, running each step's agent and pausing at WAIT steps for human input
+(`POST .../input`), cancellable via `POST .../cancel`. There are two runtime modes:
+
+- **Thread mode** (default, `TEMPORAL_ADDRESS` unset): the `PipelineRunner` runs the DAG
+  in a daemon thread; WAIT steps poll the Postgres run store, and an advisory-locked
+  reaper fails orphaned runs whose heartbeat went stale.
+- **Temporal mode** (`TEMPORAL_ADDRESS` set): the run dispatches to a durable
+  `AgenticPipelineWorkflow` (`temporal/`), each step runs as an activity reusing the same
+  `PipelineRunner` handlers, WAIT steps pause on a `submit_input` **signal** +
+  `workflow.wait_condition`, and the run survives a worker/process restart. Such runs are
+  marked `temporal_owned` and skipped by the DB reaper (Temporal owns their recovery).
+
+Both modes write the same run-store rows, so the status/list endpoints and UI polling
+are identical. See `docs/ENV_VARS.md` for the WAIT-timeout/poll/stale knobs.
+
 ## Agent Provisioning bridge
 
 When enabled (`AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED`), saving a process can schedule background provisioning via `agent_provisioning_team` for step agents. See `agent_env_provisioning.py`.

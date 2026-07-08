@@ -120,6 +120,14 @@ SCHEMA = TeamSchema(
         # so existing databases pick up the new columns.
         "ALTER TABLE agentic_test_pipeline_runs ADD COLUMN IF NOT EXISTS human_input TEXT",
         "ALTER TABLE agentic_test_pipeline_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
+        # temporal_owned marks a run whose durability + restart recovery is owned by a
+        # Temporal workflow (dispatched when TEMPORAL_ADDRESS is set) rather than the
+        # in-process daemon thread. Such a run has no heartbeat thread, so the
+        # heartbeat-staleness reaper must skip it (Temporal resumes it after a restart);
+        # the thread path leaves this FALSE and keeps its existing heartbeat/reaper
+        # semantics. Added via ALTER so existing databases pick up the new column.
+        "ALTER TABLE agentic_test_pipeline_runs ADD COLUMN IF NOT EXISTS "
+        "temporal_owned BOOLEAN NOT NULL DEFAULT FALSE",
     ],
     table_names=[
         "agentic_teams",
