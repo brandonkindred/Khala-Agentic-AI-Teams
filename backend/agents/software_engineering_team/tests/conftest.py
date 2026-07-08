@@ -176,7 +176,7 @@ class ConfigurableLLM(DummyLLMClient):
 
         llm = ConfigurableLLM()
         llm.complete_json_mock.return_value = {"code": "...", "files": {...}}
-        agent = BackendExpertAgent(llm_client=llm)
+        agent = SomeSpecialistAgent(llm_client=llm)
         # ...
         assert llm.complete_json_mock.call_count == 1
     """

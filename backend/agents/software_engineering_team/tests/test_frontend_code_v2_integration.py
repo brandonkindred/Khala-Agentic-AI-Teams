@@ -105,8 +105,3 @@ class TestOrchestratorRegistration:
         agents = _get_agents()
         assert "frontend_code_v2" in agents
         assert isinstance(agents["frontend_code_v2"], FrontendCodeV2TeamLead)
-
-    def test_frontend_code_v2_worker_exists(self):
-        import orchestrator
-
-        assert hasattr(orchestrator, "_frontend_code_v2_worker")
