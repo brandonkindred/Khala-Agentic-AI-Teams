@@ -503,6 +503,7 @@ class _FakeCursor:
                 step_results,
                 started_at,
                 heartbeat_at,
+                temporal_owned,
             ) = params
             self._db["pipeline_runs"][run_id] = {
                 "run_id": run_id,
@@ -518,8 +519,18 @@ class _FakeCursor:
                 "started_at": started_at,
                 "finished_at": None,
                 "heartbeat_at": heartbeat_at,
+                "temporal_owned": temporal_owned,
             }
             self.rowcount = 1
+            return
+
+        # is_pipeline_run_temporal_owned (single-column read).
+        if norm.startswith("select temporal_owned from agentic_test_pipeline_runs"):
+            (run_id,) = params
+            row = self._db["pipeline_runs"].get(run_id)
+            self._last_fetch_one = (
+                {"temporal_owned": row.get("temporal_owned", False)} if row else None
+            )
             return
 
         # get_pipeline_status (lightweight status + pending answer read).
@@ -557,6 +568,22 @@ class _FakeCursor:
                     reverse=True,
                 )
                 self._last_fetch_all = rows[:limit]
+            return
+
+        # try_resume_pipeline_run_temporal (CAS into 'running', NO heartbeat guard).
+        # Must precede the heartbeat-guarded resume below; distinguished by the absence
+        # of a heartbeat_at clause in the SET (Temporal owns liveness).
+        if (
+            norm.startswith("update agentic_test_pipeline_runs set status = 'running'")
+            and "heartbeat_at" not in norm
+        ):
+            human_input, run_id = params
+            row = self._db["pipeline_runs"].get(run_id)
+            if row and row["status"] == "waiting_for_input":
+                row.update(status="running", human_prompt=None, human_input=human_input)
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
             return
 
         # try_resume_pipeline_run (compare-and-swap into 'running', fresh-heartbeat).
@@ -642,6 +669,9 @@ class _FakeCursor:
             n = 0
             for row in self._db["pipeline_runs"].values():
                 if row["status"] not in ("running", "waiting_for_input"):
+                    continue
+                if row.get("temporal_owned"):
+                    # Temporal owns liveness/recovery for these runs — never reaped.
                     continue
                 hb = row["heartbeat_at"]
                 if hb is None or hb < cutoff:

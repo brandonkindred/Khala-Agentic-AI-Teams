@@ -326,6 +326,14 @@ WAIT-state reliability for Agent Studio pipeline test runs
 defensively (garbage → default) and are read once when the `PipelineRunner`
 singleton is constructed.
 
+When `TEMPORAL_ADDRESS` is set, a pipeline test run dispatches to a durable
+`AgenticPipelineWorkflow` instead of the in-process daemon thread: each step runs
+as an activity, WAIT steps pause on a `submit_input` Temporal **signal** (bounded by
+`AGENTIC_TEAM_PIPELINE_WAIT_TIMEOUT_S` as a workflow timer, not a DB poll), and the
+run survives a worker/process restart. Temporal-owned runs are excluded from the
+heartbeat-staleness reaper below (Temporal owns their recovery); the poll/stale knobs
+apply only to the daemon-thread fallback when Temporal is unset.
+
 ### AGENTIC_TEAM_PIPELINE_WAIT_TIMEOUT_S
 Maximum time a pipeline test run blocks at a WAIT step for human input before it
 fails cleanly (default `259200` = 72h; clamped to `[60, 604800]` — floor 60s,
