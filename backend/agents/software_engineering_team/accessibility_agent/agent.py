@@ -48,6 +48,14 @@ class AccessibilityExpertAgent:
                 summary=f"Accessibility analysis failed: {exc}",
             )
 
+        def _finalize(result: AccessibilityOutput) -> AccessibilityOutput:
+            # Re-derive ``approved`` from severities so a disagreement between the
+            # LLM's ``approved`` flag and the reported issue list is resolved in
+            # favor of the issue list. Only applied to a genuine model result —
+            # the fallback above is already a final, safe ``approved=False``.
+            result.approved = derive_approved(result.issues, llm_approved=None)
+            return result
+
         # A fresh Strands Agent per call — reusing the same instance across
         # calls breaks structured_output forced-tool-choice on the second
         # call (Strands accumulates message history).
@@ -58,12 +66,8 @@ class AccessibilityExpertAgent:
             output_model=AccessibilityOutput,
             fallback_factory=_fallback,
             agent_factory=Agent,
+            on_success=_finalize,
         )
-
-        # Re-derive ``approved`` from severities so a disagreement between the
-        # LLM's ``approved`` flag and the reported issue list is resolved in
-        # favor of the issue list.
-        result.approved = derive_approved(result.issues, llm_approved=None)
 
         logger.info(
             "Accessibility: done, %s issues found, approved=%s",

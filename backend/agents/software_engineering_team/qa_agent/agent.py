@@ -98,6 +98,23 @@ class QAExpertAgent:
                 suggested_commit_message="",
             )
 
+        def _finalize(result: QAOutput) -> QAOutput:
+            # Re-derive ``approved``. The rule differs by mode and the two must not
+            # be unified: in acceptance_evidence mode a failing quality gate is the
+            # blocking signal (mirroring the former DevOpsTestValidationAgent),
+            # whereas the bug-review modes block on critical/high bug severities.
+            # Only applied to a genuine model result — the fallback above is
+            # already a final, safe ``approved=False``.
+            if mode == "acceptance_evidence":
+                # ``.strip().lower()`` mirrors ``DevOpsTestValidationAgent._coerce_gate_status``
+                # so a whitespace-padded ``" fail "`` from the model still blocks approval.
+                result.approved = bool(result.approved) and not any(
+                    (v or "").strip().lower() == "fail" for v in result.quality_gates.values()
+                )
+            else:
+                result.approved = derive_approved(result.bugs_found, llm_approved=None)
+            return result
+
         # A fresh Strands Agent per call. Strands' Agent accumulates
         # message history across invocations; reusing the same instance
         # breaks the forced-tool-choice mechanism used by
@@ -110,20 +127,8 @@ class QAExpertAgent:
             output_model=QAOutput,
             fallback_factory=_fallback,
             agent_factory=Agent,
+            on_success=_finalize,
         )
-
-        # Re-derive ``approved``. The rule differs by mode and the two must not
-        # be unified: in acceptance_evidence mode a failing quality gate is the
-        # blocking signal (mirroring the former DevOpsTestValidationAgent),
-        # whereas the bug-review modes block on critical/high bug severities.
-        if mode == "acceptance_evidence":
-            # ``.strip().lower()`` mirrors ``DevOpsTestValidationAgent._coerce_gate_status``
-            # so a whitespace-padded ``" fail "`` from the model still blocks approval.
-            result.approved = bool(result.approved) and not any(
-                (v or "").strip().lower() == "fail" for v in result.quality_gates.values()
-            )
-        else:
-            result.approved = derive_approved(result.bugs_found, llm_approved=None)
 
         logger.info(
             "QA: done, %s issues found, approved=%s",

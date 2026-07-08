@@ -55,6 +55,15 @@ class IntegrationAgent:
                 fix_task_suggestions=[],
             )
 
+        def _finalize(result: IntegrationOutput) -> IntegrationOutput:
+            # Trust the returned issues but re-derive ``passed`` from severities so a
+            # disagreement between the LLM's ``passed`` flag and the reported issues
+            # is resolved in favor of the issue list. Only applied to a genuine
+            # model result — the fallback above is already a final, safe
+            # ``passed=False``.
+            result.passed = derive_approved(result.issues, llm_approved=None)
+            return result
+
         # A fresh Strands Agent per call. Strands' Agent accumulates message
         # history across invocations; reusing the same instance breaks the
         # forced-tool-choice mechanism used by ``structured_output_model``
@@ -67,12 +76,8 @@ class IntegrationAgent:
             output_model=IntegrationOutput,
             fallback_factory=_fallback,
             agent_factory=Agent,
+            on_success=_finalize,
         )
-
-        # Trust the returned issues but re-derive ``passed`` from severities so a
-        # disagreement between the LLM's ``passed`` flag and the reported issues
-        # is resolved in favor of the issue list.
-        result.passed = derive_approved(result.issues, llm_approved=None)
         critical_or_high_count = sum(1 for i in result.issues if i.severity in ("critical", "high"))
 
         logger.info(

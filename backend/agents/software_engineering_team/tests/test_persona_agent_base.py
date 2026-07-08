@@ -123,6 +123,56 @@ def test_agent_factory_exception_is_not_caught() -> None:
         )
 
 
+def test_on_success_applied_to_genuine_result() -> None:
+    expected = _Output(issues=[], approved=True)
+    agent_factory = lambda *, model, system_prompt: _FakeAgent(expected)  # noqa: E731
+
+    def _finalize(result: _Output) -> _Output:
+        result.approved = False  # e.g. a severity-derived override
+        return result
+
+    result = run_structured_persona(
+        model=object(),
+        system_prompt="persona",
+        user_prompt="do the thing",
+        output_model=_Output,
+        fallback_factory=_fallback,
+        agent_factory=agent_factory,
+        on_success=_finalize,
+    )
+
+    assert result is expected
+    assert result.approved is False
+
+
+def test_on_success_is_not_applied_to_fallback() -> None:
+    """Regression test: a severity-derivation on_success must never run on
+    the fallback path, or an empty-findings fallback (already approved=False)
+    gets silently flipped back to approved=True by a naive
+    'no findings => approved' rule."""
+
+    class _RaisingAgent:
+        def __call__(self, *a: Any, **kw: Any) -> Any:
+            raise RuntimeError("boom")
+
+    agent_factory = lambda *, model, system_prompt: _RaisingAgent()  # noqa: E731
+
+    def _finalize_should_not_run(result: _Output) -> _Output:
+        raise AssertionError("on_success must not be called on the fallback path")
+
+    result = run_structured_persona(
+        model=object(),
+        system_prompt="persona",
+        user_prompt="do the thing",
+        output_model=_Output,
+        fallback_factory=_fallback,
+        agent_factory=agent_factory,
+        on_success=_finalize_should_not_run,
+    )
+
+    assert result.approved is False
+
+
 def test_fallback_factory_exception_propagates() -> None:
     """A buggy fallback_factory that itself raises is not swallowed."""
 

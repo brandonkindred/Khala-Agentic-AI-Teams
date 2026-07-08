@@ -69,6 +69,17 @@ class CybersecurityExpertAgent:
                 suggested_commit_message="",
             )
 
+        def _finalize(result: SecurityOutput) -> SecurityOutput:
+            # Re-derive ``approved`` via the unified rule so a disagreement between
+            # the LLM's ``approved`` flag and the reported vulnerability list is
+            # resolved in favor of the vulnerability list. ``SecurityVulnerability``
+            # has no ``blocking`` attribute, so this reduces to "no critical/high".
+            # Only applied to a genuine model result — the fallback above is
+            # already a final, safe ``approved=False`` and must not be
+            # reinterpreted as "no vulnerabilities reported => approved".
+            result.approved = derive_approved(result.vulnerabilities, llm_approved=None)
+            return result
+
         # A fresh Strands Agent per call — reusing the same instance across
         # calls breaks structured_output forced-tool-choice on the second
         # call (Strands accumulates message history).
@@ -79,13 +90,8 @@ class CybersecurityExpertAgent:
             output_model=SecurityOutput,
             fallback_factory=_fallback,
             agent_factory=Agent,
+            on_success=_finalize,
         )
-
-        # Re-derive ``approved`` via the unified rule so a disagreement between
-        # the LLM's ``approved`` flag and the reported vulnerability list is
-        # resolved in favor of the vulnerability list. ``SecurityVulnerability``
-        # has no ``blocking`` attribute, so this reduces to "no critical/high".
-        result.approved = derive_approved(result.vulnerabilities, llm_approved=None)
 
         logger.info(
             "Security: done, %s issues found, approved=%s",

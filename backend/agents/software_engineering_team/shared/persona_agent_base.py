@@ -28,18 +28,26 @@ def run_structured_persona(
     output_model: type[OutputT],
     fallback_factory: Callable[[Exception], OutputT],
     agent_factory: Callable[..., Any],
+    on_success: Callable[[OutputT], OutputT] | None = None,
 ) -> OutputT:
     """Run a one-shot structured-output Strands ``Agent`` call with a safe fallback.
 
     Preconditions:
         ``agent_factory(model=model, system_prompt=system_prompt)`` returns a
-        callable Strands ``Agent``; ``fallback_factory(exc)`` returns a valid
-        instance of ``output_model`` and may itself log a warning.
+        callable Strands ``Agent``; ``fallback_factory(exc)`` returns a valid,
+        already-final instance of ``output_model`` (e.g. ``approved=False``)
+        and may itself log a warning; ``on_success``, if given, returns a
+        valid instance of ``output_model``.
     Postconditions:
-        Returns ``agent_result.structured_output`` when it is an instance of
-        ``output_model``; otherwise returns ``fallback_factory(exc)``. Never
-        raises — any exception from building/calling the agent or an
-        unexpected structured-output type is routed to ``fallback_factory``.
+        On a successful call whose ``structured_output`` is an instance of
+        ``output_model``, returns ``on_success(result)`` (or ``result``
+        unchanged if ``on_success`` is ``None``). On any failure — building
+        the agent, calling it, or an unexpected ``structured_output`` type —
+        returns ``fallback_factory(exc)`` **without** passing it through
+        ``on_success``: callers derive an approval/pass flag from the
+        *reported findings* in ``on_success`` (e.g. "no critical/high
+        severities"), and an empty findings list from the safe fallback must
+        not be reinterpreted as a clean approval. Never raises.
     """
     agent = agent_factory(model=model, system_prompt=system_prompt)
     try:
@@ -49,6 +57,6 @@ def run_structured_persona(
             raise TypeError(
                 f"Expected {output_model.__name__}, got {type(result).__name__ if result else 'None'}"
             )
-        return result
+        return on_success(result) if on_success is not None else result
     except Exception as exc:  # noqa: BLE001 — LLM/validation failures must not crash the run
         return fallback_factory(exc)
