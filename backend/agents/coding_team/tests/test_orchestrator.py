@@ -41,6 +41,7 @@ class StubTechLead:
         self.requested_changes = requested_changes if requested_changes is not None else ["fix X"]
         self.review_calls: List[str] = []
         self.decision_calls: List[Any] = []
+        self.spec_content_calls: List[str] = []
         self.adjudication_verdict = adjudication_verdict
         self.adjudication_calls: List[Any] = []
 
@@ -52,9 +53,11 @@ class StubTechLead:
         changes_summary,
         user_decisions=None,
         progress_callback=None,
+        spec_content="",
     ):
         self.review_calls.append(changes_summary)
         self.decision_calls.append(user_decisions)
+        self.spec_content_calls.append(spec_content)
         return {
             "approved": self.approved,
             "reason": self.reason,
@@ -123,7 +126,7 @@ class _FakeWorktreeManager:
         self.cleanup_calls += 1
 
 
-def _make_swarm(tmp_path, tech_lead, workers):
+def _make_swarm(tmp_path, tech_lead, workers, *, spec_content=""):
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
         tech_lead=tech_lead,
@@ -132,6 +135,7 @@ def _make_swarm(tmp_path, tech_lead, workers):
         path=Path(tmp_path),
         agent_ids=[w.agent_id for w in workers],
         llm_getter=lambda key: None,
+        spec_content=spec_content,
     )
     # Real worktree creation is exercised in test_worktree_manager.py; give these
     # stub-worker tests a git-free stand-in instead (see _FakeWorktreeManager).
@@ -235,6 +239,7 @@ def test_review_error_fails_task_once_without_revision_loop(tmp_path, monkeypatc
             changes_summary,
             user_decisions=None,
             progress_callback=None,
+            spec_content="",
         ):
             self.review_calls.append(changes_summary)
             return {
@@ -499,6 +504,25 @@ def test_full_evidence_reaches_reviewer(tmp_path, monkeypatch):
     assert "See implementation summary." not in evidence
     assert "MY REAL SUMMARY" in evidence
     assert big_diff in evidence  # full diff passed through, uncut
+
+
+def test_tech_lead_review_receives_spec_content(tmp_path, monkeypatch):
+    """The swarm's plan-level spec content reaches the Tech Lead's review — this is now the
+    swarm's sole code-review call (the quality gate's duplicate review was removed), so it is
+    the only place spec constraints outside a task's own description/acceptance criteria can be
+    checked."""
+    _patch_git(monkeypatch)
+    tech_lead = StubTechLead(approved=True)
+    swarm, graph = _make_swarm(
+        tmp_path, tech_lead, [StubWorker("a1")], spec_content="THE FULL PROJECT SPEC"
+    )
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert tech_lead.spec_content_calls == ["THE FULL PROJECT SPEC"]
 
 
 def test_implement_persists_changes_summary(tmp_path):
@@ -2286,6 +2310,7 @@ def test_tech_lead_review_reports_progress_and_clears_activity(tmp_path, monkeyp
             changes_summary,
             user_decisions=None,
             progress_callback=None,
+            spec_content="",
         ):
             if progress_callback is not None:
                 progress_callback("reviewing", "attempt 1/3", 0.1)
@@ -2662,6 +2687,32 @@ def test_review_prompt_omits_decisions_block_when_none(monkeypatch):
     assert "User decisions already made" not in captured["prompt"]
 
 
+def test_review_prompt_includes_spec_content(monkeypatch):
+    """The plan's spec content is rendered into the review prompt — this is the swarm's sole
+    code-review call, so it is the only place spec constraints outside the task's own
+    description/acceptance criteria can be checked."""
+    tl, captured = _capture_review_prompt(monkeypatch)
+
+    out = tl.run_code_review("t", "d", [], "evidence", spec_content="All endpoints require auth.")
+
+    assert out["approved"] is True
+    assert "Project specification" in captured["prompt"]
+    assert "All endpoints require auth." in captured["prompt"]
+
+
+def test_review_prompt_omits_spec_content_block_when_empty(monkeypatch):
+    """No spec content → prompt is unchanged from the pre-feature behavior (no stray header)."""
+    tl, captured = _capture_review_prompt(monkeypatch)
+
+    tl.run_code_review("t", "d", [], "evidence")
+    assert "Project specification" not in captured["prompt"]
+
+    # Whitespace-only spec content is treated as absent, not rendered as an empty block.
+    captured.clear()
+    tl.run_code_review("t", "d", [], "evidence", spec_content="   ")
+    assert "Project specification" not in captured["prompt"]
+
+
 def test_user_decisions_for_combines_plan_and_task_levels(tmp_path):
     """_user_decisions_for merges plan-level resolved questions with task-level escalations
     and de-duplicates by normalized question text (case-insensitively)."""
@@ -2897,6 +2948,7 @@ class _PerTaskTechLead(StubTechLead):
         changes_summary,
         user_decisions=None,
         progress_callback=None,
+        spec_content="",
     ):
         with self._lock:
             self.review_calls.append(task_title)
@@ -2946,6 +2998,7 @@ def test_review_fanout_runs_concurrently(tmp_path, monkeypatch):
             changes_summary,
             user_decisions=None,
             progress_callback=None,
+            spec_content="",
         ):
             # Blocks until every concurrent review reaches here; serial execution never releases it.
             barrier.wait()
@@ -3016,6 +3069,7 @@ def test_review_fanout_exception_fails_only_that_task_once(tmp_path, monkeypatch
             changes_summary,
             user_decisions=None,
             progress_callback=None,
+            spec_content="",
         ):
             with self._lock:
                 self.calls[task_title] += 1
@@ -3536,6 +3590,7 @@ def test_review_fanout_propagates_llm_attribution(tmp_path, monkeypatch):
             changes_summary,
             user_decisions=None,
             progress_callback=None,
+            spec_content="",
         ):
             with lock:
                 seen_team.append(current_attribution().team)
@@ -3568,6 +3623,7 @@ def test_single_review_exception_is_contained_and_fails_task_once(tmp_path, monk
             changes_summary,
             user_decisions=None,
             progress_callback=None,
+            spec_content="",
         ):
             raise RuntimeError("reviewer blew up")
 

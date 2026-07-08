@@ -674,6 +674,7 @@ def run_coding_team_orchestrator(
         llm_getter=llm_getter,
         resolved_questions=plan_input.resolved_questions,
         engine_provider=engine_provider,
+        spec_content=plan_input.final_spec_content or "",
     )
     # Flush captured "thinking" to the job record on an interval for the UI poll.
     # beat_first surfaces any planning-phase reasoning immediately; the final flush
@@ -769,6 +770,7 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         llm_getter: Callable[[str], Any],
         resolved_questions: Optional[List[Dict[str, Any]]] = None,
         engine_provider: Any = None,
+        spec_content: str = "",
     ) -> None:
         self.tech_lead = tech_lead
         self.workers = workers
@@ -779,6 +781,12 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         self.llm_getter = llm_getter
         # Injected implementation engines (build/lint); None → quality gates are skipped.
         self.engine_provider = engine_provider
+        # The plan's final spec content (CodingTeamPlanInput.final_spec_content), forwarded to the
+        # Tech Lead's per-task code review (see swarm_review._compute_review) so the reviewer can
+        # check compliance against the actual spec, not just the task's own description/acceptance
+        # criteria — this is the swarm's sole code-review call, so it is the only place spec
+        # constraints outside a task's own summary can be caught.
+        self.spec_content = spec_content
         # Plan-level decisions the user already answered (entry gate + Tech Lead planning), folded
         # into plan_input.resolved_questions before the swarm is built. Surfaced to both review
         # gates so a reviewer never re-raises a question the user has settled.
