@@ -618,12 +618,8 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
 # ----------------------------------------------------- real quality-gate path
 
 
-def _gate_provider(*, build_ok=True, review_ok=True, build_raises=False, review_kwargs=None):
-    """A fake CodeEngineProvider exposing just the quality-gate methods the swarm calls.
-
-    ``review_kwargs``, when given a dict, is updated with the exact kwargs
-    ``run_code_review`` was called with, so a caller can assert on ``code``/``spec_content``.
-    """
+def _gate_provider(*, build_ok=True, build_raises=False):
+    """A fake CodeEngineProvider exposing just the quality-gate methods the swarm calls."""
     import types
 
     class _FakeGateProvider:
@@ -635,21 +631,13 @@ def _gate_provider(*, build_ok=True, review_ok=True, build_raises=False, review_
         def run_linting(self, *a, **k):
             return None
 
-        def run_code_review(self, **k):
-            if review_kwargs is not None:
-                review_kwargs.update(k)
-            return types.SimpleNamespace(
-                approved=review_ok,
-                issues=[] if review_ok else [{"type": "review", "error": "x"}],
-            )
-
     return _FakeGateProvider()
 
 
-def _make_real_swarm(tmp_path, provider, *, spec_content=""):
+def _make_real_swarm(tmp_path, provider):
     """A swarm WITHOUT the _run_quality_gates bypass, with one task already assigned to a1.
 
-    ``provider`` supplies the build/lint/review engines (see ``_gate_provider``).
+    ``provider`` supplies the build/lint engines (see ``_gate_provider``).
     """
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
@@ -660,7 +648,6 @@ def _make_real_swarm(tmp_path, provider, *, spec_content=""):
         agent_ids=["a1"],
         llm_getter=lambda k: None,
         engine_provider=provider,
-        spec_content=spec_content,
     )
     swarm._worktrees = _FakeWorktreeManager(swarm.path, ["a1"])
     swarm._worktrees.prepare()
@@ -670,78 +657,20 @@ def _make_real_swarm(tmp_path, provider, *, spec_content=""):
 
 
 def test_quality_gates_pass_sets_in_review(tmp_path):
-    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True, review_ok=True))
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True))
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
-
-
-def test_quality_gate_review_receives_actual_diff_not_just_summary(tmp_path):
-    """CRITICAL: the code review gate must see the real branch diff, not merely the engineer's own
-    human-readable changes_summary — a summary alone lets unreviewed (or mismatched) code pass."""
-    from shared_git.git_utils import DEVELOPMENT_BRANCH, create_feature_branch, initialize_new_repo
-
-    repo = tmp_path / "real_repo"
-    ok, msg = initialize_new_repo(repo)
-    assert ok, msg
-    ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t1")
-    assert ok, branch
-    assert branch == "feature/t1"  # matches StubWorker's deterministic feature_branch
-    (repo / "feature.txt").write_text("UNIQUE_DIFF_MARKER_12345\n", encoding="utf-8")
-    from shared_git.git_utils import commit_working_tree
-
-    ok, msg = commit_working_tree(repo, "add feature file")
-    assert ok, msg
-
-    captured: Dict[str, Any] = {}
-    swarm, graph = _make_real_swarm(
-        tmp_path, _gate_provider(review_kwargs=captured), spec_content="THE SPEC"
-    )
-    swarm._worktrees._paths["a1"] = repo  # point the worker's worktree at the real git repo
-
-    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
-
-    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
-    assert "UNIQUE_DIFF_MARKER_12345" in captured["code"]  # the real diff content
-    assert "did t1" in captured["code"]  # StubWorker's changes_summary is still included
-    assert (
-        captured["spec_content"] == "THE SPEC"
-    )  # MEDIUM: threaded from the plan, not hardcoded ""
-
-
-def test_quality_gate_review_falls_back_to_summary_when_diff_unavailable(tmp_path):
-    """A non-git worktree (branch_diff returns "") must not silently review an empty string —
-    it falls back to the engineer's changes_summary."""
-    captured: Dict[str, Any] = {}
-    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(review_kwargs=captured))
-    # _FakeWorktreeManager's worktree has no .git — branch_diff is a defined no-op ("").
-
-    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
-
-    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
-    assert captured["code"] == "did t1"  # StubWorker's changes_summary, unchanged
-    assert captured["spec_content"] == ""  # default when the plan carries no spec
 
 
 def test_quality_gates_skip_with_warning_when_no_engine_provider(tmp_path):
     """No engine_provider configured (an embedder wired the swarm directly, without injecting
-    build/lint/review engines) → gates are skipped, not silently: a SKIPPED status is reported
+    build/lint engines) → gates are skipped, not silently: a SKIPPED status is reported
     and the task still proceeds straight to review."""
     swarm, graph = _make_real_swarm(tmp_path, None)
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
-
-    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
-
-
-def test_quality_gates_suppress_code_review_bridge_when_live_progress_false(tmp_path):
-    """live_progress=False (the concurrent fan-out path) uses a no-op code-review progress
-    bridge — it must never construct a live ActivityBridge, which would race the one
-    sub-progress slot against other concurrently-running workers' bridges."""
-    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True, review_ok=True))
-
-    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None, live_progress=False)
 
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
 
@@ -754,14 +683,6 @@ def test_quality_gate_build_failure_returns_for_revision(tmp_path):
     task = graph.get_task("t1")
     assert task.status == TaskStatus.TO_DO  # returned for revision
     assert task.assigned_agent_id is None  # and unassigned
-
-
-def test_quality_gate_review_rejection_returns_for_revision(tmp_path):
-    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(review_ok=False))
-
-    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
-
-    assert graph.get_task("t1").status == TaskStatus.TO_DO
 
 
 def test_quality_gate_tool_exception_proceeds_to_review(tmp_path):
@@ -794,25 +715,6 @@ def test_quality_gate_tool_exception_logs_full_traceback(tmp_path, caplog):
     assert record.exc_info is not None
     exc = record.exc_info[1]
     assert isinstance(exc, RuntimeError) and exc.args[0] == "tool crashed"
-
-
-def test_code_review_runs_even_if_progress_bridge_fails(tmp_path, monkeypatch):
-    """A failure constructing the ActivityBridge (observability only) must NOT skip
-    the code review and silently pass the gate. The review still runs: a rejecting
-    review returns the task for revision (TO_DO), not IN_REVIEW."""
-
-    def _boom(*_a, **_k):
-        raise RuntimeError("bridge down")
-
-    # review rejects
-    monkeypatch.setattr(orch_mod, "ActivityBridge", _boom)
-    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(review_ok=False))
-
-    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
-
-    # Review ran (and rejected) despite the bridge failure → returned for revision.
-    # Before the fix the bridge error was swallowed and the gate passed (IN_REVIEW).
-    assert graph.get_task("t1").status == TaskStatus.TO_DO
 
 
 # ----------------------------------------------------- un-assignment / double-assignment guard
@@ -2350,50 +2252,6 @@ def test_build_review_evidence_no_diff():
     assert orch_mod._build_review_evidence("ONLY SUMMARY", "") == "ONLY SUMMARY"
 
 
-# ----------------------------------------------------- live progress reporting (code review)
-
-
-def test_quality_gate_code_review_reports_live_progress(tmp_path):
-    """The quality-gate code review must surface the agent's sub-step reports as
-    status_text + structured current_activity (rising fraction), then clear the
-    activity on completion so a stale sub-bar never lingers."""
-    import types
-
-    class _Provider:
-        def run_build_verification(self, *a, **k):
-            return types.SimpleNamespace(success=True, error="")
-
-        def run_linting(self, *a, **k):
-            return None
-
-        def run_code_review(self, **kwargs):
-            cb = kwargs.get("progress_callback")
-            assert cb is not None, "orchestrator must pass a progress callback"
-            cb("reviewing", "chunk 1/2: a.py", 0.3)
-            cb("reviewing", "chunk 2/2: b.py", 0.7)
-            cb("done", "approved=True, issues=0", 1.0)
-            return types.SimpleNamespace(approved=True, issues=[])
-
-    updates: List[Dict[str, Any]] = []
-    swarm, graph = _make_real_swarm(tmp_path, _Provider())
-    swarm._implement_and_verify(swarm.workers[0], lambda **kw: updates.append(kw))
-
-    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
-
-    review_updates = [u for u in updates if "Code review (" in (u.get("status_text") or "")]
-    assert review_updates, f"expected code-review status updates, got {updates}"
-    assert any("chunk 1/2" in u["status_text"] for u in review_updates)
-
-    activities = [u["current_activity"] for u in updates if u.get("current_activity")]
-    assert all(a["agent"] == "code_review" for a in activities)
-    fractions = [a["fraction"] for a in activities]
-    assert fractions == sorted(fractions), "fractions must be non-decreasing"
-
-    # The final activity-bearing update must be followed by an explicit clear.
-    clears = [u for u in updates if "current_activity" in u and u["current_activity"] is None]
-    assert clears, "current_activity must be cleared after the review"
-
-
 def test_tech_lead_review_reports_progress_and_clears_activity(tmp_path, monkeypatch):
     """_review_and_merge bridges Tech Lead reports into the job record and clears
     current_activity after each task's review (success and rejection alike)."""
@@ -2988,40 +2846,6 @@ def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):
     swarm._review_and_merge(lambda **kw: None)
 
     assert tech_lead.decision_calls[-1] == ["Which DB? → Postgres", "Use TLS? → Yes"]
-
-
-def test_quality_gate_review_receives_user_decisions(tmp_path):
-    """The per-task quality-gate code review is also told the user's settled decisions."""
-    import types
-
-    captured: Dict[str, Any] = {}
-
-    class _Provider:
-        def run_build_verification(self, *a, **k):
-            return types.SimpleNamespace(success=True, error="")
-
-        def run_linting(self, *a, **k):
-            return None
-
-        def run_code_review(self, **kw):
-            captured["user_decisions"] = kw.get("user_decisions")
-            return types.SimpleNamespace(approved=True, issues=[])
-
-    swarm, graph = _make_real_swarm(tmp_path, _Provider())
-    swarm.resolved_questions = [{"question_text": "Which DB?", "answer": "Postgres"}]
-    graph.update_task(
-        "t1",
-        revision_feedback=[
-            {
-                "source": "user_decision",
-                "decisions": [{"question_text": "Use TLS?", "answer": "Yes"}],
-            }
-        ],
-    )
-
-    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
-
-    assert captured["user_decisions"] == ["Which DB? → Postgres", "Use TLS? → Yes"]
 
 
 # ----------------------------------------------------- concurrent review fan-out

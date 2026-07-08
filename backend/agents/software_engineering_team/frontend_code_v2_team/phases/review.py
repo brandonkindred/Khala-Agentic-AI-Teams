@@ -157,6 +157,186 @@ def _run_security_agent(
     )
 
 
+def _code_review_step(
+    *,
+    llm: LLMClient,
+    task: Task,
+    files: Dict[str, str],
+    repo_path: Path,
+    code_review_agent: Any,
+    language: str,
+    task_id: str,
+    task_description: str,
+    detail_callback: Optional[Callable[[str], None]] = None,
+) -> List[ReviewIssue]:
+    """Independent code-review step: external agent (with LLM fallback), or LLM review alone.
+
+    Preconditions:
+        - ``files`` maps file paths to their full source text. ``task_description`` is the
+          description surfaced to the external agent (the caller scopes this to the task or a
+          single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
+
+    Postconditions:
+        - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
+          to the LLM reviewer, matching this step's long-standing solo behavior — this must stay
+          true when fanned out concurrently alongside the QA/security steps (see
+          ``_review_steps_run_sequentially``'s caller), since one step raising must never drop
+          the other two steps' issues.
+    """
+    if code_review_agent is None:
+        return _run_llm_review(llm=llm, task=task, files=files)
+    try:
+        from code_review_agent.models import CodeReviewInput as _CRInput
+
+        # files= keeps per-file attribution and lets the coordinator bound
+        # its own prompts — no header parsing, no upstream truncation.
+        cr_input = _CRInput(
+            files=files,
+            task_description=task_description,
+            task_requirements=task.requirements or "",
+            acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
+            language=language,
+        )
+        cr_result = call_code_review_agent(
+            code_review_agent,
+            cr_input,
+            detail_callback,
+            repo_reader=build_disk_repo_reader(repo_path),
+        )
+        return [
+            ReviewIssue(
+                source="code_review",
+                severity=getattr(item, "severity", "medium"),
+                description=getattr(item, "description", str(item)),
+                file_path=getattr(item, "file_path", ""),
+                recommendation=getattr(item, "recommendation", ""),
+            )
+            for item in getattr(cr_result, "issues", [])
+        ]
+    except Exception as exc:
+        logger.warning(
+            "[%s] Code review agent failed: %s. Next step -> Using LLM fallback for code review",
+            task_id,
+            exc,
+        )
+        return _run_llm_review(llm=llm, task=task, files=files)
+
+
+def _qa_review_step(
+    *,
+    qa_agent: Any,
+    files: Dict[str, str],
+    language: str,
+    task_description: str,
+    task_id: str,
+    context: str = "",
+) -> List[ReviewIssue]:
+    """Independent QA step.
+
+    Postconditions:
+        - Returns ``[]`` when ``qa_agent`` is None. Otherwise never raises: an outright QA-agent
+          failure is reported as a synthetic high-severity issue rather than propagating — a bare
+          exception here would previously have aborted the whole review; fanning this step out
+          concurrently with code review/security must not make that worse.
+    """
+    if qa_agent is None:
+        return []
+    try:
+        return _run_qa_agent(
+            qa_agent=qa_agent,
+            files=files,
+            language=language,
+            task_description=task_description,
+            task_id=task_id,
+            context=context,
+        )
+    except Exception as exc:
+        logger.warning("[%s] QA agent step failed outright: %s", task_id, exc)
+        return [
+            ReviewIssue(
+                source="qa",
+                severity="high",
+                description=f"QA agent failed and could not complete review: {exc}",
+                recommendation="Investigate and re-run the QA agent; findings from this run are incomplete.",
+            )
+        ]
+
+
+def _security_review_step(
+    *,
+    security_agent: Any,
+    files: Dict[str, str],
+    language: str,
+    task_description: str,
+    task_id: str,
+    context: str = "",
+) -> List[ReviewIssue]:
+    """Independent security step.
+
+    Postconditions:
+        - Returns ``[]`` when ``security_agent`` is None. Otherwise never raises: an outright
+          security-agent failure is reported as a synthetic critical-severity issue rather than
+          propagating (see ``_qa_review_step`` for the identical rationale).
+    """
+    if security_agent is None:
+        return []
+    try:
+        return _run_security_agent(
+            security_agent=security_agent,
+            files=files,
+            language=language,
+            task_description=task_description,
+            task_id=task_id,
+            context=context,
+        )
+    except Exception as exc:
+        logger.warning("[%s] Security agent step failed outright: %s", task_id, exc)
+        return [
+            ReviewIssue(
+                source="security",
+                severity="critical",
+                description=f"Security agent failed and could not complete review: {exc}",
+                recommendation=(
+                    "Investigate and re-run the security agent; findings from this run are incomplete."
+                ),
+            )
+        ]
+
+
+def _review_steps_run_sequentially(llm: LLMClient) -> bool:
+    """True when the code-review/QA/security fan-out must run one step at a time.
+
+    Scripted test doubles (a ``DummyLLMClient`` subclass returning canned responses from a shared,
+    non-thread-safe index counter — e.g. ``test_microtask_review_gates._ScriptedTextClient``) are
+    not safe to call from concurrent threads. Mirrors ``devops_team.orchestrator``'s identical
+    ``use_parallel = not isinstance(self.llm, _Dummy)`` guard.
+    """
+    from llm_service.clients.dummy import DummyLLMClient
+
+    return isinstance(llm, DummyLLMClient)
+
+
+def _run_review_steps(
+    step_fns: List[Callable[[], List[ReviewIssue]]], *, llm: LLMClient
+) -> List[ReviewIssue]:
+    """Run the code-review/QA/security step thunks, fanned out unless ``llm`` requires sequencing.
+
+    Preconditions:
+        - Each element of ``step_fns`` never raises (see ``_code_review_step``/``_qa_review_step``/
+          ``_security_review_step``) — required because ``parallel_map`` fast-fails (cancels the
+          round's other pending steps and re-raises) on the first worker exception.
+    Postconditions:
+        - Returns every step's issues concatenated in ``step_fns`` order, regardless of which
+          step's underlying call actually completed first.
+    """
+    if _review_steps_run_sequentially(llm) or len(step_fns) <= 1:
+        return [issue for step in step_fns for issue in step()]
+    from shared_concurrency import parallel_map
+
+    results = parallel_map(step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False)
+    return [issue for step_issues in results for issue in step_issues]
+
+
 def _run_build_verification(
     repo_path: Path,
     build_verifier: Optional[Callable[..., Tuple[bool, str]]],
@@ -230,63 +410,41 @@ def run_review(
         except Exception as exc:
             logger.warning("[%s] Linting tool agent failed: %s", task_id, exc)
 
-    if code_review_agent is not None:
-        try:
-            from code_review_agent.models import CodeReviewInput as _CRInput
-
-            # files= keeps per-file attribution and lets the coordinator bound
-            # its own prompts — no header parsing, no upstream truncation.
-            cr_input = _CRInput(
-                files=execution_result.files,
-                task_description=task.description or "",
-                task_requirements=task.requirements or "",
-                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
-                language=language,
-            )
-            cr_result = call_code_review_agent(
-                code_review_agent, cr_input, None, repo_reader=build_disk_repo_reader(repo_path)
-            )
-            for item in getattr(cr_result, "issues", []):
-                issues.append(
-                    ReviewIssue(
-                        source="code_review",
-                        severity=getattr(item, "severity", "medium"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "file_path", ""),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Code review agent failed: %s. Next step -> Using LLM fallback for code review",
-                task_id,
-                exc,
-            )
-            issues.extend(_run_llm_review(llm=llm, task=task, files=execution_result.files))
-    else:
-        issues.extend(_run_llm_review(llm=llm, task=task, files=execution_result.files))
-
-    if qa_agent is not None:
-        issues.extend(
-            _run_qa_agent(
-                qa_agent=qa_agent,
-                files=execution_result.files,
-                language=language,
-                task_description=task.description or "",
-                task_id=task_id,
-            )
+    # Code review, QA, and security are independent LLM-backed checks — none reads another's
+    # output, they only contribute to the shared `issues` list — so fan them out concurrently
+    # (unless `llm` requires sequential calls; see _review_steps_run_sequentially). The
+    # tool-agent pass below depends on the combined result of these three and must run after.
+    issues.extend(
+        _run_review_steps(
+            [
+                lambda: _code_review_step(
+                    llm=llm,
+                    task=task,
+                    files=execution_result.files,
+                    repo_path=repo_path,
+                    code_review_agent=code_review_agent,
+                    language=language,
+                    task_id=task_id,
+                    task_description=task.description or "",
+                ),
+                lambda: _qa_review_step(
+                    qa_agent=qa_agent,
+                    files=execution_result.files,
+                    language=language,
+                    task_description=task.description or "",
+                    task_id=task_id,
+                ),
+                lambda: _security_review_step(
+                    security_agent=security_agent,
+                    files=execution_result.files,
+                    language=language,
+                    task_description=task.description or "",
+                    task_id=task_id,
+                ),
+            ],
+            llm=llm,
         )
-
-    if security_agent is not None:
-        issues.extend(
-            _run_security_agent(
-                security_agent=security_agent,
-                files=execution_result.files,
-                language=language,
-                task_description=task.description or "",
-                task_id=task_id,
-            )
-        )
+    )
 
     if tool_agents:
         phase_inp = ToolAgentPhaseInput(
@@ -408,80 +566,58 @@ def run_microtask_review(
                 "[%s] Linting tool agent failed for microtask %s: %s", task_id, microtask_id, exc
             )
 
-    if code_review_agent is not None:
-        if detail_callback:
-            detail_callback("Running code review...")
-        try:
-            from code_review_agent.models import CodeReviewInput as _CRInput
-
-            # files= keeps per-file attribution and lets the coordinator bound
-            # its own prompts — no header parsing, no upstream truncation.
-            cr_input = _CRInput(
-                files=files,
-                task_description=f"Microtask: {microtask.description or microtask.title}",
-                task_requirements=task.requirements or "",
-                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
-                language=language,
-            )
-            cr_result = call_code_review_agent(
-                code_review_agent,
-                cr_input,
-                detail_callback,
-                repo_reader=build_disk_repo_reader(repo_path),
-            )
-            for item in getattr(cr_result, "issues", []):
-                issues.append(
-                    ReviewIssue(
-                        source="code_review",
-                        severity=getattr(item, "severity", "medium"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "file_path", ""),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Code review agent failed for microtask %s: %s. Next step -> Using LLM fallback for code review",
-                task_id,
-                microtask_id,
-                exc,
-            )
-            issues.extend(_run_llm_review(llm=llm, task=task, files=files))
-    else:
-        if detail_callback:
-            detail_callback("Running code review...")
-        issues.extend(_run_llm_review(llm=llm, task=task, files=files))
+    # Code review, QA, and security are independent LLM-backed checks — none reads another's
+    # output — so fan them out concurrently (unless `llm` requires sequential calls; see
+    # _review_steps_run_sequentially). Progress messages are announced up front, in their
+    # original order, rather than from inside each step: decoupling "announce" from "complete"
+    # means the messages appear in a stable order regardless of which step's call finishes
+    # first. Code review's own detail_callback (chunk-level progress during the agent's
+    # multi-chunk execution) still threads through — it is the only step that reports granular
+    # progress, so there is no concurrent writer to race.
+    if detail_callback:
+        detail_callback("Running code review...")
+    if qa_agent is not None and detail_callback:
+        detail_callback("Running QA check...")
+    if security_agent is not None and detail_callback:
+        detail_callback("Running security scan...")
 
     microtask_desc = f"Microtask: {microtask.description or microtask.title}"
     microtask_ctx = f" for microtask {microtask_id}"
 
-    if qa_agent is not None:
-        if detail_callback:
-            detail_callback("Running QA check...")
-        issues.extend(
-            _run_qa_agent(
-                qa_agent=qa_agent,
-                files=files,
-                language=language,
-                task_description=microtask_desc,
-                task_id=task_id,
-                context=microtask_ctx,
-            )
+    issues.extend(
+        _run_review_steps(
+            [
+                lambda: _code_review_step(
+                    llm=llm,
+                    task=task,
+                    files=files,
+                    repo_path=repo_path,
+                    code_review_agent=code_review_agent,
+                    language=language,
+                    task_id=task_id,
+                    task_description=microtask_desc,
+                    detail_callback=detail_callback,
+                ),
+                lambda: _qa_review_step(
+                    qa_agent=qa_agent,
+                    files=files,
+                    language=language,
+                    task_description=microtask_desc,
+                    task_id=task_id,
+                    context=microtask_ctx,
+                ),
+                lambda: _security_review_step(
+                    security_agent=security_agent,
+                    files=files,
+                    language=language,
+                    task_description=microtask_desc,
+                    task_id=task_id,
+                    context=microtask_ctx,
+                ),
+            ],
+            llm=llm,
         )
-
-    if security_agent is not None:
-        if detail_callback:
-            detail_callback("Running security scan...")
-        issues.extend(
-            _run_security_agent(
-                security_agent=security_agent,
-                files=files,
-                language=language,
-                task_description=microtask_desc,
-                task_id=task_id,
-                context=microtask_ctx,
-            )
-        )
+    )
 
     if tool_agents:
         phase_inp = ToolAgentPhaseInput(

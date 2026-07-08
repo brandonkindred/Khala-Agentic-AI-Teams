@@ -99,7 +99,6 @@ class _ImplementationMixin:
                 if not self._run_quality_gates(
                     swe,
                     task,
-                    result,
                     update_fn,
                     worktree_path=worktree_path,
                     live_progress=live_progress,
@@ -486,43 +485,44 @@ class _ImplementationMixin:
         self,
         swe: Any,
         task: Task,
-        result: Dict[str, Any],
         update_fn: Any,
         *,
         worktree_path: Path,
         live_progress: bool = True,
     ) -> bool:
-        """Run build, lint, code review against the worker's own worktree.
+        """Run build and lint against the worker's own worktree.
+
+        The Tech Lead's diff-grounded review (``swarm_review._compute_review``) is the swarm's
+        sole code-review signal — this gate previously also ran its own LLM code review here
+        (on the same summary+diff evidence ``_compute_review`` builds), which was pure redundant
+        cost: two full review calls over the same evidence, only one of which (the Tech Lead's)
+        actually gates merge. Removed; build/lint remain because they are cheap, mechanical, and
+        not redundant with anything downstream.
 
         Preconditions:
             - ``worktree_path`` is this worker's prepared git worktree (the same path
               ``run_implement`` just wrote to and checked out its feature branch on) — build and
               lint must read the files this worker actually produced, not the shared checkout.
-            - ``live_progress=False`` suppresses both the direct ``update_fn`` status-text calls and
-              the code-review sub-progress bridge (a ``_NoopBridge`` is used instead of constructing
-              a real ``ActivityBridge``) — required when this call is part of a concurrent round
-              fan-out, where concurrent bridges/status writes would race the one sub-progress slot
-              (mirrors ``_review_and_merge``'s fan-out suppression). ``True`` (default) keeps
-              today's live per-phase progress for the serial/solo path.
+            - ``live_progress=False`` suppresses the direct ``update_fn`` status-text calls —
+              required when this call is part of a concurrent round fan-out, where concurrent
+              status writes would race (mirrors ``_review_and_merge``'s fan-out suppression).
+              ``True`` (default) keeps today's live per-phase progress for the serial/solo path.
         Postconditions:
             - Returns True if passed, False if returned for revision.
         """
-        from coding_team import orchestrator as _orch
-
-        # The gate *tools* (build/lint/review) run inside the try so a tool crash
-        # never aborts the swarm. The revision bookkeeping (_return_for_revision,
-        # which mutates the task graph) is deliberately kept OUT of that try: if it
-        # raised inside the broad except, a build/review REJECTION would be
-        # swallowed and reported as a gate PASS, merging unreviewed code. We only
-        # record the verdict here and act on it after the try/except.
+        # The gate *tools* (build/lint) run inside the try so a tool crash never aborts the
+        # swarm. The revision bookkeeping (_return_for_revision, which mutates the task graph)
+        # is deliberately kept OUT of that try: if it raised inside the broad except, a build
+        # REJECTION would be swallowed and reported as a gate PASS, merging unverified code. We
+        # only record the verdict here and act on it after the try/except.
         revision_feedback: Optional[List[Dict[str, Any]]] = None
         try:
             provider = self.engine_provider
             if provider is None:
-                # Skipping build/lint/review is never a silent event: production paths always
-                # inject a provider (worker construction fails without one), so reaching this
-                # branch means an embedder wired the swarm directly — surface it in the log AND
-                # the job record so unreviewed merges are visible, not discovered post-hoc.
+                # Skipping build/lint is never a silent event: production paths always inject a
+                # provider (worker construction fails without one), so reaching this branch means
+                # an embedder wired the swarm directly — surface it in the log AND the job record
+                # so unverified merges are visible, not discovered post-hoc.
                 logger.warning(
                     "No engine provider configured; skipping quality gates for %s", task.id
                 )
@@ -533,7 +533,6 @@ class _ImplementationMixin:
                 return True
             run_build_verification = provider.run_build_verification
             run_linting = provider.run_linting
-            run_code_review = provider.run_code_review
 
             agent_type = _quality_gate_agent_type(swe.stack_spec.name)
 
@@ -551,71 +550,6 @@ class _ImplementationMixin:
                 if live_progress:
                     update_fn(status_text=f"Linting: {task.title}")
                 run_linting(worktree_path, task.id, llm_getter=self.llm_getter)
-
-                # Code review — bridge the agent's sub-step reports into the job record so
-                # the UI shows live review progress instead of a frozen "Code review: ..." line.
-                # Suppressed (a no-op bridge) during a concurrent fan-out: progress reporting is
-                # observability only, and concurrent bridges would race the one sub-progress slot.
-                # Otherwise built defensively so a construction failure degrades to "no live
-                # progress" and can never skip the review (which would let unreviewed code
-                # through the gate).
-                if not live_progress:
-                    cr_bridge: Any = _orch._NoopBridge()
-                else:
-                    try:
-                        cr_bridge = _orch.ActivityBridge(
-                            update_fn,
-                            agent="code_review",
-                            label="Code review",
-                            task_id=task.id,
-                            task_title=task.title,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "code-review progress bridge unavailable for task %s; "
-                            "reviewing without live progress",
-                            task.id,
-                        )
-                        cr_bridge = _orch._NoopBridge()
-                try:
-                    cr_bridge("preparing", "starting code review", 0.0)
-                    from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
-
-                    # The reviewer must see the actual change, not just the engineer's own
-                    # human-readable summary of it — a summary alone lets unreviewed code
-                    # (or code that doesn't match its own summary) pass the gate. Mirrors
-                    # swarm_review._compute_review's identical branch_diff +
-                    # _build_review_evidence pairing for the Tech-Lead-level review;
-                    # _build_review_evidence falls back to the summary alone when the diff
-                    # is unavailable (e.g. a non-git worktree in tests) rather than reviewing
-                    # nothing.
-                    diff = branch_diff(
-                        worktree_path, DEVELOPMENT_BRANCH, _orch._feature_branch_name(task)
-                    )
-                    evidence = _orch._build_review_evidence(result.get("changes_summary", ""), diff)
-                    review = run_code_review(
-                        code=evidence,
-                        spec_content=self.spec_content,
-                        task_description=task.description or task.title,
-                        language="python" if agent_type == "backend" else "typescript",
-                        acceptance_criteria=task.acceptance_criteria or [],
-                        user_decisions=self._user_decisions_for(task),
-                        llm_getter=self.llm_getter,
-                        progress_callback=cr_bridge,
-                    )
-                finally:
-                    # Clear on every exit path so a stale sub-progress bar never lingers
-                    # into the next gate — a frozen bar masquerading as progress is the
-                    # exact failure mode this reporting exists to fix.
-                    cr_bridge.clear()
-                if not review.approved:
-                    logger.info(
-                        "[%s] Code review rejected task %s (%d issues); returning for revision",
-                        swe.agent_id,
-                        task.id,
-                        len(review.issues),
-                    )
-                    revision_feedback = review.issues
 
         except Exception:
             # Log the full traceback, not a one-line summary: a real bug in the

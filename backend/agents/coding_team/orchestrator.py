@@ -674,7 +674,6 @@ def run_coding_team_orchestrator(
         llm_getter=llm_getter,
         resolved_questions=plan_input.resolved_questions,
         engine_provider=engine_provider,
-        spec_content=plan_input.final_spec_content or "",
     )
     # Flush captured "thinking" to the job record on an interval for the UI poll.
     # beat_first surfaces any planning-phase reasoning immediately; the final flush
@@ -751,8 +750,9 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
     """Coordinator (Tech Lead) + frontend/backend v2 implementation-worker swarm pattern.
 
     The coordinator assigns ready tasks to free workers. Each worker implements
-    the task, runs quality gates (build, lint, code review), and signals
-    completion. The coordinator reviews and merges approved tasks.
+    the task and runs quality gates (build, lint), and signals completion. The
+    coordinator reviews (the swarm's sole code-review pass) and merges approved
+    tasks.
 
     Behavior is spread across three mixins by responsibility (assignment,
     implementation, review) — see coding_team/swarm_assignment.py,
@@ -769,7 +769,6 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         llm_getter: Callable[[str], Any],
         resolved_questions: Optional[List[Dict[str, Any]]] = None,
         engine_provider: Any = None,
-        spec_content: str = "",
     ) -> None:
         self.tech_lead = tech_lead
         self.workers = workers
@@ -778,12 +777,8 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         self.agent_ids = agent_ids
         self.agent_team_keys = {w.agent_id: _worker_team_key(w) for w in workers}
         self.llm_getter = llm_getter
-        # Injected implementation engines (build/lint/review); None → quality gates are skipped.
+        # Injected implementation engines (build/lint); None → quality gates are skipped.
         self.engine_provider = engine_provider
-        # The plan's final spec content (CodingTeamPlanInput.final_spec_content), forwarded to the
-        # per-task code-review quality gate (see swarm_implementation._run_quality_gates) so the
-        # reviewer can check compliance against the actual spec, not just the task's own summary.
-        self.spec_content = spec_content
         # Plan-level decisions the user already answered (entry gate + Tech Lead planning), folded
         # into plan_input.resolved_questions before the swarm is built. Surfaced to both review
         # gates so a reviewer never re-raises a question the user has settled.
