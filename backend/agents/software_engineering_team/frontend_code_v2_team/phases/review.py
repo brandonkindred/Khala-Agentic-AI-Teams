@@ -357,6 +357,9 @@ def _run_review_steps(
     """
     if _review_steps_run_sequentially(llm) or len(step_fns) <= 1:
         return [issue for step in step_fns for issue in step()]
+    # Imported lazily, matching coding_team.swarm_review/coding_team.orchestrator's identical
+    # parallel_map import — keeps the module import light for callers that never hit the
+    # concurrent branch (e.g. every DummyLLMClient-backed test).
     from shared_concurrency import parallel_map
 
     results = parallel_map(step_fns, lambda fn: fn(), max_workers=len(step_fns), skip_none=False)
@@ -492,7 +495,10 @@ def run_review(
                     for r in out.recommendations:
                         issues.append(
                             ReviewIssue(
-                                source=kind.value, severity="info", description=r, recommendation=""
+                                source=f"tool_{kind.value}",
+                                severity="info",
+                                description=r,
+                                recommendation="",
                             )
                         )
             except Exception as exc:
@@ -667,7 +673,10 @@ def run_microtask_review(
                     for r in out.recommendations:
                         issues.append(
                             ReviewIssue(
-                                source=kind.value, severity="info", description=r, recommendation=""
+                                source=f"tool_{kind.value}",
+                                severity="info",
+                                description=r,
+                                recommendation="",
                             )
                         )
             except Exception as exc:
