@@ -37,17 +37,16 @@ from agentic_team_provisioning.models import (
 from agentic_team_provisioning.runtime.agent_builder import build_agent, call_agent
 from agentic_team_provisioning.step_ordering import order_step_ids
 from agentic_team_provisioning.testing.store import AgenticTestStore
+from agentic_team_provisioning.wait_timeout import resolve_wait_timeout_s
 from shared_concurrency import BackgroundHeartbeat
 from shared_env import parse_int
 from shared_postgres import is_postgres_enabled
 
 logger = logging.getLogger(__name__)
 
-# Default bounds for the WAIT-state timeout/liveness knobs. See docs/ENV_VARS.md.
-_DEFAULT_WAIT_TIMEOUT_S = 259200  # 72h — tolerates runs left overnight/weekend.
-_MIN_WAIT_TIMEOUT_S = 60
-_MAX_WAIT_TIMEOUT_S = 604800  # 7d — an upper clamp so a fat-fingered value can't
-#                              recreate the original unbounded-wait bug.
+# Default bounds for the WAIT-state liveness knobs. See docs/ENV_VARS.md. The WAIT
+# human-input timeout itself lives in ``agentic_team_provisioning.wait_timeout`` so the
+# thread and Temporal dispatch paths resolve it from one place.
 _DEFAULT_WAIT_POLL_S = 5
 _MIN_WAIT_POLL_S = 1
 _MAX_WAIT_POLL_S = 60
@@ -77,12 +76,7 @@ class PipelineRunner:
         self._store = store
         self._resume_events: dict[str, threading.Event] = {}
 
-        self._wait_timeout_s = parse_int(
-            "AGENTIC_TEAM_PIPELINE_WAIT_TIMEOUT_S",
-            _DEFAULT_WAIT_TIMEOUT_S,
-            minimum=_MIN_WAIT_TIMEOUT_S,
-            maximum=_MAX_WAIT_TIMEOUT_S,
-        )
+        self._wait_timeout_s = resolve_wait_timeout_s()
         self._wait_poll_s = parse_int(
             "AGENTIC_TEAM_PIPELINE_WAIT_POLL_S",
             _DEFAULT_WAIT_POLL_S,

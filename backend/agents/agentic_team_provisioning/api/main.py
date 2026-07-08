@@ -16,7 +16,11 @@ from agent_registry.models import AgentManifest
 from agentic_team_provisioning.agent_env_provisioning import schedule_provision_step_agents
 from agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
-from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
+from agentic_team_provisioning.infrastructure import (
+    TeamInfrastructure,
+    get_team_infrastructure,
+    provision_team,
+)
 from agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     is_generated_manifest,
@@ -872,7 +876,7 @@ def list_team_agent_environments(team_id: str):
 # ---------------------------------------------------------------------------
 
 
-def _get_infra_or_404(team_id: str):  # noqa: ANN202
+def _get_infra_or_404(team_id: str) -> TeamInfrastructure:
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")

@@ -21,16 +21,10 @@ from agentic_team_provisioning.temporal import (
     WORKFLOW_ID_PREFIX,
     AgenticPipelineWorkflow,
 )
-from shared_env import parse_int
+from agentic_team_provisioning.wait_timeout import resolve_wait_timeout_s
 from shared_temporal import start_workflow_sync
 
 logger = logging.getLogger(__name__)
-
-# Mirror the daemon-thread runner's WAIT-timeout bounds (pipeline_runner.py) so both
-# dispatch paths honour the same env knob and clamps.
-_DEFAULT_WAIT_TIMEOUT_S = 259200  # 72h
-_MIN_WAIT_TIMEOUT_S = 60
-_MAX_WAIT_TIMEOUT_S = 604800  # 7d
 
 
 def start_agentic_pipeline_workflow(
@@ -52,12 +46,7 @@ def start_agentic_pipeline_workflow(
           task queue (raises ``RuntimeError`` if the worker client never becomes
           available within the wait window).
     """
-    wait_timeout_s = parse_int(
-        "AGENTIC_TEAM_PIPELINE_WAIT_TIMEOUT_S",
-        _DEFAULT_WAIT_TIMEOUT_S,
-        minimum=_MIN_WAIT_TIMEOUT_S,
-        maximum=_MAX_WAIT_TIMEOUT_S,
-    )
+    wait_timeout_s = resolve_wait_timeout_s()
     workflow_id = f"{WORKFLOW_ID_PREFIX}{run_id}"
     start_workflow_sync(
         AgenticPipelineWorkflow.run,
