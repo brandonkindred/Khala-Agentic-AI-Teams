@@ -6,6 +6,7 @@ Enforces one active task per agent and next task only after merge.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -23,6 +24,19 @@ class TaskGraphService:
     """
     In-memory Task Graph for a single job. Tracks tasks and which agent has which (non-merged) task.
     Assign: allowed only if agent has no current task or current task is merged, and task deps satisfied.
+
+    Invariants:
+        - Every public method acquires ``self._lock`` for its entire body, so
+          reads and writes are serialized across threads — required once
+          multiple implementation workers (each on its own git worktree) can
+          mutate the graph concurrently. ``threading.RLock`` (not a plain
+          ``Lock``) because ``_maybe_persist``'s injected ``persist_callback``
+          may call back into ``snapshot()`` on the same thread that already
+          holds the lock from the outer mutator; a plain ``Lock`` would
+          self-deadlock there. Private helpers (``_free_agent``,
+          ``_dependencies_satisfied``, ``_maybe_persist``) do not acquire the
+          lock themselves — they are only ever invoked from within an
+          already-locked public method.
     """
 
     def __init__(
@@ -34,6 +48,7 @@ class TaskGraphService:
         self._tasks: Dict[str, Task] = {}
         self._agent_to_task: Dict[str, str] = {}  # agent_id -> task_id (only non-merged)
         self._persist = persist_callback
+        self._lock = threading.RLock()
         # Bumped on every mutation (and restore). Lets a persister detect a no-op
         # call and skip a redundant snapshot+write — the swarm loop persists several
         # times per round, often with no change in between.
@@ -58,23 +73,24 @@ class TaskGraphService:
             target_team: Optional implementation-team routing hint, for example
                 ``frontend_v2`` or ``backend_v2``.
         """
-        if task_id in self._tasks:
-            raise ValueError(f"Task {task_id} already exists")
-        task = Task(
-            id=task_id,
-            title=title or task_id,
-            description=description,
-            dependencies=dependencies or [],
-            status=TaskStatus.TO_DO,
-            acceptance_criteria=acceptance_criteria or [],
-            out_of_scope=out_of_scope,
-            priority=priority,
-            subtasks=subtasks or [],
-            target_team=target_team,
-        )
-        self._tasks[task_id] = task
-        self._maybe_persist()
-        return task
+        with self._lock:
+            if task_id in self._tasks:
+                raise ValueError(f"Task {task_id} already exists")
+            task = Task(
+                id=task_id,
+                title=title or task_id,
+                description=description,
+                dependencies=dependencies or [],
+                status=TaskStatus.TO_DO,
+                acceptance_criteria=acceptance_criteria or [],
+                out_of_scope=out_of_scope,
+                priority=priority,
+                subtasks=subtasks or [],
+                target_team=target_team,
+            )
+            self._tasks[task_id] = task
+            self._maybe_persist()
+            return task
 
     def _free_agent(self, task: Task) -> None:
         """Release the agent currently mapped to *task*, if it still points back at this task.
@@ -109,32 +125,34 @@ class TaskGraphService:
         free the agent->task mapping too — nulling only the back-reference would leave the agent
         marked busy, which is the silent-no-op bug this sentinel design removes.
         """
-        task = self._tasks.get(task_id)
-        if not task:
-            return None
-        if status is not None:
-            task.status = status
-            # A task transitioning to FAILED frees its agent immediately — symmetric with
-            # `mark_branch_merged`/`mark_dependents_failed`. Without this the mapping lingers
-            # until the next `get_task_for_agent` lazily prunes it, so a terminal snapshot
-            # persisted right after the failure would still report the agent as occupied.
-            if status == TaskStatus.FAILED:
-                self._free_agent(task)
-        if assigned_agent_id is not _UNSET:
-            if assigned_agent_id is None:
-                self._free_agent(task)  # uses task.assigned_agent_id — must run before we null it
-                task.assigned_agent_id = None
-            else:
-                task.assigned_agent_id = assigned_agent_id
-        if feature_branch is not None:
-            task.feature_branch = feature_branch
-        if merged_at is not None:
-            task.merged_at = merged_at
-        for k, v in kwargs.items():
-            if hasattr(task, k):
-                setattr(task, k, v)
-        self._maybe_persist()
-        return task
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return None
+            if status is not None:
+                task.status = status
+                # A task transitioning to FAILED frees its agent immediately — symmetric with
+                # `mark_branch_merged`/`mark_dependents_failed`. Without this the mapping lingers
+                # until the next `get_task_for_agent` lazily prunes it, so a terminal snapshot
+                # persisted right after the failure would still report the agent as occupied.
+                if status == TaskStatus.FAILED:
+                    self._free_agent(task)
+            if assigned_agent_id is not _UNSET:
+                if assigned_agent_id is None:
+                    # uses task.assigned_agent_id — must run before we null it
+                    self._free_agent(task)
+                    task.assigned_agent_id = None
+                else:
+                    task.assigned_agent_id = assigned_agent_id
+            if feature_branch is not None:
+                task.feature_branch = feature_branch
+            if merged_at is not None:
+                task.merged_at = merged_at
+            for k, v in kwargs.items():
+                if hasattr(task, k):
+                    setattr(task, k, v)
+            self._maybe_persist()
+            return task
 
     def unassign_task(self, task_id: str) -> None:
         """Clear a task's agent assignment and release the agent that held it.
@@ -150,7 +168,8 @@ class TaskGraphService:
         Postconditions:
             - `task.assigned_agent_id is None` and no agent in `_agent_to_task` maps to `task_id`.
         """
-        self.update_task(task_id, assigned_agent_id=None)
+        with self._lock:
+            self.update_task(task_id, assigned_agent_id=None)
 
     def reset_in_flight(self) -> None:
         """Demote every non-terminal in-flight task to TO_DO and release its agent.
@@ -166,12 +185,14 @@ class TaskGraphService:
         Postconditions:
             - No task is IN_PROGRESS or IN_REVIEW; no in-flight task retains an agent mapping.
         """
-        for task in self._tasks.values():
-            if task.status in (TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW):
-                task.status = TaskStatus.TO_DO
-                self._free_agent(task)  # uses task.assigned_agent_id — must run before we null it
-                task.assigned_agent_id = None
-        self._maybe_persist()
+        with self._lock:
+            for task in self._tasks.values():
+                if task.status in (TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW):
+                    task.status = TaskStatus.TO_DO
+                    # uses task.assigned_agent_id — must run before we null it
+                    self._free_agent(task)
+                    task.assigned_agent_id = None
+            self._maybe_persist()
 
     def reset_failed(self) -> None:
         """Demote every FAILED task to TO_DO and release its agent (explicit retry).
@@ -198,28 +219,33 @@ class TaskGraphService:
               formerly-FAILED task has a fresh revision budget (counters 0) with its feedback
               history preserved.
         """
-        for task in self._tasks.values():
-            if task.status == TaskStatus.FAILED:
-                task.status = TaskStatus.TO_DO
-                self._free_agent(task)  # uses task.assigned_agent_id — must run before we null it
-                task.assigned_agent_id = None
-                # Fresh revision window for the retry; keep revision_feedback as history.
-                task.revision_count = 0
-                task.no_change_revisits = 0
-                task.last_change_digest = ""
-        self._maybe_persist()
+        with self._lock:
+            for task in self._tasks.values():
+                if task.status == TaskStatus.FAILED:
+                    task.status = TaskStatus.TO_DO
+                    # uses task.assigned_agent_id — must run before we null it
+                    self._free_agent(task)
+                    task.assigned_agent_id = None
+                    # Fresh revision window for the retry; keep revision_feedback as history.
+                    task.revision_count = 0
+                    task.no_change_revisits = 0
+                    task.last_change_digest = ""
+            self._maybe_persist()
 
     def get_tasks(self) -> List[Task]:
         """Return all tasks (copy)."""
-        return list(self._tasks.values())
+        with self._lock:
+            return list(self._tasks.values())
 
     def get_task(self, task_id: str) -> Optional[Task]:
         """Return task by id."""
-        return self._tasks.get(task_id)
+        with self._lock:
+            return self._tasks.get(task_id)
 
     def count_with_status(self, status: TaskStatus) -> int:
         """Number of tasks currently in *status*. Single source of truth for status tallies."""
-        return sum(1 for t in self._tasks.values() if t.status == status)
+        with self._lock:
+            return sum(1 for t in self._tasks.values() if t.status == status)
 
     def _dependencies_satisfied(self, task_id: str) -> bool:
         """True if all dependency tasks are merged."""
@@ -240,56 +266,60 @@ class TaskGraphService:
         - T exists and is in TO_DO or not yet assigned
         Returns True if assigned, False otherwise.
         """
-        task = self._tasks.get(task_id)
-        if not task:
-            logger.warning("Task %s not found", task_id)
-            return False
-        current = self._agent_to_task.get(agent_id)
-        if current:
-            current_task = self._tasks.get(current)
-            if current_task and current_task.status != TaskStatus.MERGED:
-                logger.warning("Agent %s already has active task %s", agent_id, current)
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                logger.warning("Task %s not found", task_id)
                 return False
-            self._agent_to_task.pop(agent_id, None)
-        if not self._dependencies_satisfied(task_id):
-            logger.warning("Task %s dependencies not satisfied", task_id)
-            return False
-        task.status = TaskStatus.IN_PROGRESS
-        task.assigned_agent_id = agent_id
-        self._agent_to_task[agent_id] = task_id
-        self._maybe_persist()
-        return True
+            current = self._agent_to_task.get(agent_id)
+            if current:
+                current_task = self._tasks.get(current)
+                if current_task and current_task.status != TaskStatus.MERGED:
+                    logger.warning("Agent %s already has active task %s", agent_id, current)
+                    return False
+                self._agent_to_task.pop(agent_id, None)
+            if not self._dependencies_satisfied(task_id):
+                logger.warning("Task %s dependencies not satisfied", task_id)
+                return False
+            task.status = TaskStatus.IN_PROGRESS
+            task.assigned_agent_id = agent_id
+            self._agent_to_task[agent_id] = task_id
+            self._maybe_persist()
+            return True
 
     def get_task_for_agent(self, agent_id: str) -> Optional[Task]:
         """Return the single task assigned to this agent that is not merged (in_progress or in_review)."""
-        task_id = self._agent_to_task.get(agent_id)
-        if not task_id:
-            return None
-        task = self._tasks.get(task_id)
-        if not task or task.status in (TaskStatus.MERGED, TaskStatus.FAILED):
-            self._agent_to_task.pop(agent_id, None)
-            return None
-        return task
+        with self._lock:
+            task_id = self._agent_to_task.get(agent_id)
+            if not task_id:
+                return None
+            task = self._tasks.get(task_id)
+            if not task or task.status in (TaskStatus.MERGED, TaskStatus.FAILED):
+                self._agent_to_task.pop(agent_id, None)
+                return None
+            return task
 
     def mark_branch_merged(self, task_id: str) -> bool:
         """Set task status to merged and merged_at = now; agent is then free for next assignment."""
-        task = self._tasks.get(task_id)
-        if not task:
-            return False
-        task.status = TaskStatus.MERGED
-        task.merged_at = datetime.now(timezone.utc)
-        self._free_agent(task)
-        self._maybe_persist()
-        return True
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return False
+            task.status = TaskStatus.MERGED
+            task.merged_at = datetime.now(timezone.utc)
+            self._free_agent(task)
+            self._maybe_persist()
+            return True
 
     def set_task_in_review(self, task_id: str) -> bool:
         """Mark task as In Review after an implementation worker hands off a feature branch."""
-        task = self._tasks.get(task_id)
-        if not task:
-            return False
-        task.status = TaskStatus.IN_REVIEW
-        self._maybe_persist()
-        return True
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return False
+            task.status = TaskStatus.IN_REVIEW
+            self._maybe_persist()
+            return True
 
     def mark_dependents_failed(self, task_id: str) -> List[str]:
         """Cascade-FAIL every task that (transitively) depends on a FAILED task.
@@ -306,132 +336,146 @@ class TaskGraphService:
             - No non-FAILED task has a FAILED task among its dependencies.
         Returns the ids newly marked FAILED (excludes `task_id` itself).
         """
-        newly_failed: List[str] = []
-        changed = True
-        while changed:
-            changed = False
-            for t in self._tasks.values():
-                if t.status == TaskStatus.FAILED or not t.dependencies:
-                    continue
-                if any(
-                    (dep := self._tasks.get(d)) is not None and dep.status == TaskStatus.FAILED
-                    for d in t.dependencies
-                ):
-                    t.status = TaskStatus.FAILED
-                    t.revision_feedback = list(t.revision_feedback or []) + [
-                        {"source": "system", "reason": "Blocked: a required dependency failed"}
-                    ]
-                    self._free_agent(t)
-                    newly_failed.append(t.id)
-                    changed = True
-        if newly_failed:
-            self._maybe_persist()
-        return newly_failed
+        with self._lock:
+            newly_failed: List[str] = []
+            changed = True
+            while changed:
+                changed = False
+                for t in self._tasks.values():
+                    if t.status == TaskStatus.FAILED or not t.dependencies:
+                        continue
+                    if any(
+                        (dep := self._tasks.get(d)) is not None and dep.status == TaskStatus.FAILED
+                        for d in t.dependencies
+                    ):
+                        t.status = TaskStatus.FAILED
+                        t.revision_feedback = list(t.revision_feedback or []) + [
+                            {"source": "system", "reason": "Blocked: a required dependency failed"}
+                        ]
+                        self._free_agent(t)
+                        newly_failed.append(t.id)
+                        changed = True
+            if newly_failed:
+                self._maybe_persist()
+            return newly_failed
 
     def get_next_eligible_subtask(self, task_id: str) -> Optional[Any]:
         """Return the next subtask that does not depend on an incomplete subtask, or None."""
-        task = self._tasks.get(task_id)
-        if not task or not task.subtasks:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task or not task.subtasks:
+                return None
+            completed_ids = {s.id for s in task.subtasks if s.status == TaskStatus.MERGED}
+            for st in task.subtasks:
+                if st.status == TaskStatus.MERGED:
+                    continue
+                if all(dep in completed_ids for dep in st.dependencies):
+                    return st
             return None
-        completed_ids = {s.id for s in task.subtasks if s.status == TaskStatus.MERGED}
-        for st in task.subtasks:
-            if st.status == TaskStatus.MERGED:
-                continue
-            if all(dep in completed_ids for dep in st.dependencies):
-                return st
-        return None
 
     def snapshot(self) -> Dict[str, Any]:
         """Return serializable snapshot for persistence."""
         from coding_team.models import TaskStatus as TS
 
-        tasks_data = []
-        for t in self._tasks.values():
-            tasks_data.append(
-                {
-                    "id": t.id,
-                    "title": t.title,
-                    "description": t.description,
-                    "dependencies": t.dependencies,
-                    "status": t.status.value if isinstance(t.status, TS) else str(t.status),
-                    "assigned_agent_id": t.assigned_agent_id,
-                    "target_team": t.target_team,
-                    "feature_branch": t.feature_branch,
-                    "merged_at": t.merged_at.isoformat() if t.merged_at else None,
-                    "acceptance_criteria": t.acceptance_criteria,
-                    "out_of_scope": t.out_of_scope,
-                    "priority": t.priority,
-                    "changes_summary": t.changes_summary,
-                    "revision_count": t.revision_count,
-                    "revision_feedback": t.revision_feedback,
-                    "no_change_revisits": t.no_change_revisits,
-                    "last_change_digest": t.last_change_digest,
-                    "resolved_without_changes": t.resolved_without_changes,
-                    "subtasks": [
-                        {
-                            "id": s.id,
-                            "title": s.title,
-                            "description": s.description,
-                            "dependencies": s.dependencies,
-                            "status": s.status.value if isinstance(s.status, TS) else str(s.status),
-                        }
-                        for s in t.subtasks
-                    ],
-                }
-            )
-        return {
-            "job_id": self.job_id,
-            "tasks": tasks_data,
-            "agent_task_map": dict(self._agent_to_task),
-        }
+        with self._lock:
+            tasks_data = []
+            for t in self._tasks.values():
+                tasks_data.append(
+                    {
+                        "id": t.id,
+                        "title": t.title,
+                        "description": t.description,
+                        "dependencies": t.dependencies,
+                        "status": t.status.value if isinstance(t.status, TS) else str(t.status),
+                        "assigned_agent_id": t.assigned_agent_id,
+                        "target_team": t.target_team,
+                        "feature_branch": t.feature_branch,
+                        "feature_branch_agent_id": t.feature_branch_agent_id,
+                        "merged_at": t.merged_at.isoformat() if t.merged_at else None,
+                        "acceptance_criteria": t.acceptance_criteria,
+                        "out_of_scope": t.out_of_scope,
+                        "priority": t.priority,
+                        "changes_summary": t.changes_summary,
+                        "revision_count": t.revision_count,
+                        "revision_feedback": t.revision_feedback,
+                        "no_change_revisits": t.no_change_revisits,
+                        "last_change_digest": t.last_change_digest,
+                        "resolved_without_changes": t.resolved_without_changes,
+                        "subtasks": [
+                            {
+                                "id": s.id,
+                                "title": s.title,
+                                "description": s.description,
+                                "dependencies": s.dependencies,
+                                "status": s.status.value
+                                if isinstance(s.status, TS)
+                                else str(s.status),
+                            }
+                            for s in t.subtasks
+                        ],
+                    }
+                )
+            return {
+                "job_id": self.job_id,
+                "tasks": tasks_data,
+                "agent_task_map": dict(self._agent_to_task),
+            }
 
     def restore(self, snapshot: Dict[str, Any]) -> None:
         """Restore from a snapshot (e.g. from job store)."""
         from coding_team.models import Subtask
 
-        self._tasks.clear()
-        self._agent_to_task.clear()
-        for tdata in snapshot.get("tasks", []):
-            subtasks = []
-            for s in tdata.get("subtasks", []):
-                st = Subtask(
-                    id=s["id"],
-                    title=s.get("title", ""),
-                    description=s.get("description", ""),
-                    dependencies=s.get("dependencies", []),
-                    status=TaskStatus(s.get("status", "to_do")),
+        with self._lock:
+            self._tasks.clear()
+            self._agent_to_task.clear()
+            for tdata in snapshot.get("tasks", []):
+                subtasks = []
+                for s in tdata.get("subtasks", []):
+                    st = Subtask(
+                        id=s["id"],
+                        title=s.get("title", ""),
+                        description=s.get("description", ""),
+                        dependencies=s.get("dependencies", []),
+                        status=TaskStatus(s.get("status", "to_do")),
+                    )
+                    subtasks.append(st)
+                task = Task(
+                    id=tdata["id"],
+                    title=tdata.get("title", ""),
+                    description=tdata.get("description", ""),
+                    dependencies=tdata.get("dependencies", []),
+                    status=TaskStatus(tdata.get("status", "to_do")),
+                    assigned_agent_id=tdata.get("assigned_agent_id"),
+                    target_team=tdata.get("target_team"),
+                    feature_branch=tdata.get("feature_branch"),
+                    feature_branch_agent_id=tdata.get("feature_branch_agent_id"),
+                    merged_at=datetime.fromisoformat(tdata["merged_at"].replace("Z", "+00:00"))
+                    if tdata.get("merged_at")
+                    else None,
+                    acceptance_criteria=tdata.get("acceptance_criteria", []),
+                    out_of_scope=tdata.get("out_of_scope", ""),
+                    priority=tdata.get("priority", "medium"),
+                    subtasks=subtasks,
+                    changes_summary=tdata.get("changes_summary"),
+                    revision_count=tdata.get("revision_count", 0),
+                    revision_feedback=tdata.get("revision_feedback", []),
+                    no_change_revisits=tdata.get("no_change_revisits", 0),
+                    last_change_digest=tdata.get("last_change_digest", ""),
+                    resolved_without_changes=tdata.get("resolved_without_changes", False),
                 )
-                subtasks.append(st)
-            task = Task(
-                id=tdata["id"],
-                title=tdata.get("title", ""),
-                description=tdata.get("description", ""),
-                dependencies=tdata.get("dependencies", []),
-                status=TaskStatus(tdata.get("status", "to_do")),
-                assigned_agent_id=tdata.get("assigned_agent_id"),
-                target_team=tdata.get("target_team"),
-                feature_branch=tdata.get("feature_branch"),
-                merged_at=datetime.fromisoformat(tdata["merged_at"].replace("Z", "+00:00"))
-                if tdata.get("merged_at")
-                else None,
-                acceptance_criteria=tdata.get("acceptance_criteria", []),
-                out_of_scope=tdata.get("out_of_scope", ""),
-                priority=tdata.get("priority", "medium"),
-                subtasks=subtasks,
-                changes_summary=tdata.get("changes_summary"),
-                revision_count=tdata.get("revision_count", 0),
-                revision_feedback=tdata.get("revision_feedback", []),
-                no_change_revisits=tdata.get("no_change_revisits", 0),
-                last_change_digest=tdata.get("last_change_digest", ""),
-                resolved_without_changes=tdata.get("resolved_without_changes", False),
-            )
-            self._tasks[task.id] = task
-        self._agent_to_task = dict(snapshot.get("agent_task_map", {}))
-        # A wholesale state replacement — bump so a subsequent persist isn't
-        # mistaken for a no-op and skipped.
-        self.revision += 1
+                self._tasks[task.id] = task
+            self._agent_to_task = dict(snapshot.get("agent_task_map", {}))
+            # A wholesale state replacement — bump so a subsequent persist isn't
+            # mistaken for a no-op and skipped.
+            self.revision += 1
 
     def _maybe_persist(self) -> None:
+        """Bump the revision counter and invoke the persist callback, if any.
+
+        Preconditions:
+            - Always called from within a method already holding ``self._lock``
+              (never acquires it itself — see the class invariant docstring).
+        """
         self.revision += 1
         if self._persist:
             try:

@@ -293,6 +293,116 @@ def test_v2_worker_initializes_empty_repo_before_task_branch(tmp_path) -> None:
     assert "development" in branches.stdout
 
 
+def test_ensure_development_ready_skips_checkout_when_development_exists(
+    tmp_path, monkeypatch
+) -> None:
+    """When `development` already exists, no checkout is attempted.
+
+    create_feature_branch's own `git checkout -b <new> development` only
+    reads development's tip as a start point, so ensure_development_branch's
+    explicit checkout is unnecessary once development is present — and, once
+    `path` may be a worker's own linked worktree while development stays
+    checked out elsewhere, that checkout would fail. Regression test for the
+    short-circuit added to _ensure_development_ready.
+    """
+    called = {"ensure_development_branch": False}
+
+    def _fail_if_called(repo_path):
+        called["ensure_development_branch"] = True
+        return False, "should not be called"
+
+    monkeypatch.setattr(worker_mod, "development_branch_exists", lambda repo_path: True)
+    monkeypatch.setattr(worker_mod, "ensure_development_branch", _fail_if_called)
+
+    ok, msg = worker_mod._ensure_development_ready(tmp_path)
+
+    assert ok, msg
+    assert called["ensure_development_branch"] is False
+
+
+def test_ensure_development_ready_falls_back_when_development_missing(
+    tmp_path, monkeypatch
+) -> None:
+    """When development does not yet exist, the existing create-from-main
+    fallback still runs (unchanged behavior for a first run)."""
+    _init_main_repo(tmp_path)
+    calls = {"ensure_development_branch": 0}
+    real_ensure = worker_mod.ensure_development_branch
+
+    def _tracking_ensure(repo_path):
+        calls["ensure_development_branch"] += 1
+        return real_ensure(repo_path)
+
+    monkeypatch.setattr(worker_mod, "development_branch_exists", lambda repo_path: False)
+    monkeypatch.setattr(worker_mod, "ensure_development_branch", _tracking_ensure)
+
+    ok, msg = worker_mod._ensure_development_ready(tmp_path)
+
+    assert ok, msg
+    assert calls["ensure_development_branch"] == 1
+
+
+def test_v2_worker_runs_implement_in_worktree_while_development_checked_out_elsewhere(
+    tmp_path,
+) -> None:
+    """The real crux scenario at the V2TeamWorker level: run_implement against a
+    linked git worktree succeeds even while `development` remains checked out
+    (attached) at the main repo path — proving the worktree parallelization
+    design works through the actual worker entry point, not just git_utils.
+    """
+    from shared_git.git_utils import DEVELOPMENT_BRANCH, add_worktree
+
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _init_main_repo(main_repo)
+    subprocess.run(
+        ["git", "checkout", "-b", DEVELOPMENT_BRANCH],
+        cwd=main_repo,
+        capture_output=True,
+        check=True,
+    )
+
+    worktree_path = tmp_path / "worker-wt"
+    ok, msg = add_worktree(main_repo, worktree_path, ref=DEVELOPMENT_BRANCH)
+    assert ok, msg
+
+    # development is STILL checked out at main_repo throughout.
+    current = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=main_repo, capture_output=True, text=True
+    )
+    assert current.stdout.strip() == DEVELOPMENT_BRANCH
+
+    class _Lead:
+        def run_workflow(self, **kwargs: Any) -> Any:
+            branch = kwargs["task"].feature_branch_name
+            return SimpleNamespace(
+                success=True,
+                summary="Implemented API.",
+                deliver_result=SimpleNamespace(branch_name=branch, branch_ready=True),
+                failure_reason="",
+            )
+
+    worker = V2TeamWorker(
+        agent_id="backend_v2",
+        stack_spec=StackSpec(name="backend_v2", tools_services=["Python"]),
+        team_kind="backend",
+        team_lead=_Lead(),
+    )
+
+    out = worker.run_implement(
+        Task(id="api", title="Build API", description="Build API"), worktree_path
+    )
+
+    assert out["status"] == "in_review"
+    assert out["feature_branch"].startswith("feature/api-build-api")
+
+    # main_repo's own checkout is untouched.
+    current = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=main_repo, capture_output=True, text=True
+    )
+    assert current.stdout.strip() == DEVELOPMENT_BRANCH
+
+
 def test_v2_worker_rejects_malformed_task_before_v2_handoff(tmp_path) -> None:
     """Malformed task objects fail before branch or workflow side effects."""
 

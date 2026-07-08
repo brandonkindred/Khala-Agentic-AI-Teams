@@ -405,6 +405,49 @@ def test_run_setup_impl_on_existing_repo(tmp_path: Path):
     assert result.linting_configured and result.testing_configured
 
 
+def test_run_setup_impl_succeeds_in_worktree_with_development_checked_out_elsewhere(
+    tmp_path: Path,
+):
+    """Reproduces the coding-team worktree handoff: a worker's linked git
+    worktree already has its feature branch checked out (development stays
+    attached in the shared checkout) when the real v2 team lead's setup phase
+    runs there. ``run_setup_impl``'s ``ensure_development_branch(path)`` call
+    must not fail trying to attach a branch that's exclusively held elsewhere.
+    """
+    from shared_git.git_utils import add_worktree, create_feature_branch
+
+    repo = tmp_path / "shared-checkout"
+    repo.mkdir()
+    init_repo_with_existing_development(repo)
+    subprocess.run(["git", "checkout", "development"], cwd=repo, capture_output=True, check=True)
+
+    worktree = tmp_path / "worker-worktree"
+    ok, msg = add_worktree(repo, worktree, ref="development")
+    assert ok, msg
+    ok, branch = create_feature_branch(worktree, "development", "t1-worker-task")
+    assert ok, branch
+
+    def _cqt(_path: Path):
+        return True, True
+
+    result = sh_setup.run_setup_impl(
+        repo_path=worktree, task_title="Demo", configure_quality_tooling=_cqt
+    )
+
+    assert result.linting_configured and result.testing_configured
+    assert "Setup failed" not in result.summary
+    # The worktree's own feature-branch checkout is untouched; development
+    # stays attached in the shared checkout, unaffected.
+    wt_branch = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=worktree, capture_output=True, text=True
+    )
+    assert wt_branch.stdout.strip() == branch
+    repo_branch = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
+    )
+    assert repo_branch.stdout.strip() == "development"
+
+
 def test_ensure_readme_logs_when_commit_raises(tmp_path: Path, monkeypatch, caplog):
     """Ensure readme logs when commit raises."""
 
