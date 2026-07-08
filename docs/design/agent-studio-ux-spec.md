@@ -599,7 +599,11 @@ sequenceDiagram
   the provisioning process) — a reliability risk for autonomous no‑human persona runs across service restarts.
 - **Typed‑IO registry agents in a free‑text DAG** — deepest unknown; **scope v1 to Phase‑1
   LLM‑persona execution — typed‑IO registry‑agent DAG execution is out of scope for v1.** The scope
-  boundary and the deferred follow‑up spike are recorded in `system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md`.
+  boundary is recorded in `system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md`;
+  the deferred follow‑up spike is **resolved** in
+  `system_design/adr/ADR-009-typed-io-registry-agent-dag-execution.md` — typed DAG execution is scoped
+  to registry agents with a custom `source.entrypoint` (LLM‑generated and Studio‑authored agents keep
+  running the free‑text persona path pending a separate runtime‑binding‑caveat follow‑up).
 - **Persona run timing** — 15–30s founder poll intervals make autonomous runs feel slow; the UI must set
   expectations (progress, "persona is thinking…", elapsed time).
 
@@ -618,7 +622,7 @@ sequenceDiagram
 | # | Question | Disposition | Owner | Resolves at |
 |---|---|---|---|---|
 | 1 | **Cross‑process persistence of authored agents** — registration via `manifest_generation` is **in‑process** only (same as generated team agents). Should saved Studio agents also write durable on‑disk manifests so they survive restarts and are visible cross‑process? | Deferred — in‑process registration is enough for the build → test → compose loop within a session; durable persistence is the same tracked follow‑up generated team agents already carry (§5 item 7). | Backend lead | First implementation PR that registers an authored agent |
-| 2 | **Typed‑IO registry‑agent DAG execution** — the §6 "deepest unknown." Should the DAG execute a registry agent through its declared typed input/output schema instead of the free‑text persona projection? | **Out of scope for v1** — registry roster entries run as Phase‑1 LLM personas via the free‑text projection; typed IO is not marshalled through the DAG. Decision + deferred follow‑up spike recorded in `ADR‑008`. | Agentic Team Provisioning | The first phase that attempts registry‑agent invocation in `pipeline_runner.py` (ADR‑008 revisit trigger) |
+| 2 | **Typed‑IO registry‑agent DAG execution** — the §6 "deepest unknown." Should the DAG execute a registry agent through its declared typed input/output schema instead of the free‑text persona projection? | **Out of scope for v1** — registry roster entries run as Phase‑1 LLM personas via the free‑text projection; typed IO is not marshalled through the DAG. `ADR‑008` records that decision; the deferred spike is **resolved** in `ADR‑009`, which scopes typed DAG execution to registry agents with a custom `source.entrypoint` (boundary marshalling via new `ProcessStep.input_field`/`output_field`, fail‑fast validation, `WAIT` staying free‑text‑only, no change to the ADR‑007 adapter contract). Implementation is a separate, still‑future PR gated on `ADR‑009`. | Agentic Team Provisioning | Implementation PR that adds the `source == "registry"` execution branch in `pipeline_runner.py` (per `ADR‑009`) |
 
 Both are tracked here so approval of this spec is not gated on them; each has a named role‑owner and a concrete
 point at which it must be decided.

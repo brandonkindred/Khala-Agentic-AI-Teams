@@ -1,6 +1,9 @@
 # ADR-008 — Agent Studio v1: run registry agents as free-text LLM personas; defer typed-IO DAG execution
 
-- **Status**: Accepted
+- **Status**: Accepted — the "Follow-up design spike" below is resolved by
+  `system_design/adr/ADR-009-typed-io-registry-agent-dag-execution.md`. This ADR's v1-boundary
+  decision and its historical context remain accurate and unchanged; read ADR-009 for the spike's
+  resolution.
 - **Date**: 2026-07-04
 - **Owner**: Agentic Team Provisioning / Agent Studio
 - **Related**:
@@ -8,6 +11,8 @@
     registry-agent invocation) and §6 (Risks: "Typed-IO registry agents in a free-text DAG").
   - `system_design/adr/ADR-007-founder-agentic-team-adapter-collapse.md` — owns the founder→pipeline
     adapter contract that a typed-IO execution path would extend.
+  - `system_design/adr/ADR-009-typed-io-registry-agent-dag-execution.md` — resolves the follow-up
+    design spike deferred below.
 
 ## Context
 
@@ -75,10 +80,19 @@ Concretely, for v1:
 The two boundary sites above carry a short docstring marker pointing at this ADR, so a contributor who
 reaches the place a typed-IO branch would go sees the boundary before writing one.
 
-### Follow-up design spike (deferred)
+### Follow-up design spike (resolved — see ADR-009)
 
 Before any later phase attempts real typed-IO registry-agent invocation, a design spike must resolve the
 contract. It is deferred, not dropped. Questions it must answer:
+
+> **Resolved by `system_design/adr/ADR-009-typed-io-registry-agent-dag-execution.md`.** Summary: typed
+> DAG execution is scoped to registry agents whose manifest advertises a custom `source.entrypoint`
+> (excluding LLM-generated and Studio-authored agents, which keep running the free-text persona path
+> until the separate runtime-binding-caveat follow-up lands); boundary marshalling binds the DAG's one
+> free-text channel to a named schema property via new `ProcessStep.input_field`/`output_field`;
+> validation/coercion happens in a new runner-owned path and fails the step on error; `WAIT` stays
+> free-text-only; and ADR-007's adapter contract is unaffected. The questions below are retained here
+> for historical context.
 
 - **Boundary marshalling.** How does structured input reach a registry agent when the only thing the DAG
   has is the previous step's free text? How is the agent's structured output turned back into the `str`
