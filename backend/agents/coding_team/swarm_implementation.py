@@ -579,9 +579,23 @@ class _ImplementationMixin:
                         cr_bridge = _orch._NoopBridge()
                 try:
                     cr_bridge("preparing", "starting code review", 0.0)
+                    from shared_git.git_utils import DEVELOPMENT_BRANCH, branch_diff
+
+                    # The reviewer must see the actual change, not just the engineer's own
+                    # human-readable summary of it — a summary alone lets unreviewed code
+                    # (or code that doesn't match its own summary) pass the gate. Mirrors
+                    # swarm_review._compute_review's identical branch_diff +
+                    # _build_review_evidence pairing for the Tech-Lead-level review;
+                    # _build_review_evidence falls back to the summary alone when the diff
+                    # is unavailable (e.g. a non-git worktree in tests) rather than reviewing
+                    # nothing.
+                    diff = branch_diff(
+                        worktree_path, DEVELOPMENT_BRANCH, _orch._feature_branch_name(task)
+                    )
+                    evidence = _orch._build_review_evidence(result.get("changes_summary", ""), diff)
                     review = run_code_review(
-                        code=result.get("changes_summary", ""),
-                        spec_content="",
+                        code=evidence,
+                        spec_content=self.spec_content,
                         task_description=task.description or task.title,
                         language="python" if agent_type == "backend" else "typescript",
                         acceptance_criteria=task.acceptance_criteria or [],

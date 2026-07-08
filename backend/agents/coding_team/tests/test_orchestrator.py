@@ -618,8 +618,12 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
 # ----------------------------------------------------- real quality-gate path
 
 
-def _gate_provider(*, build_ok=True, review_ok=True, build_raises=False):
-    """A fake CodeEngineProvider exposing just the quality-gate methods the swarm calls."""
+def _gate_provider(*, build_ok=True, review_ok=True, build_raises=False, review_kwargs=None):
+    """A fake CodeEngineProvider exposing just the quality-gate methods the swarm calls.
+
+    ``review_kwargs``, when given a dict, is updated with the exact kwargs
+    ``run_code_review`` was called with, so a caller can assert on ``code``/``spec_content``.
+    """
     import types
 
     class _FakeGateProvider:
@@ -632,6 +636,8 @@ def _gate_provider(*, build_ok=True, review_ok=True, build_raises=False):
             return None
 
         def run_code_review(self, **k):
+            if review_kwargs is not None:
+                review_kwargs.update(k)
             return types.SimpleNamespace(
                 approved=review_ok,
                 issues=[] if review_ok else [{"type": "review", "error": "x"}],
@@ -640,7 +646,7 @@ def _gate_provider(*, build_ok=True, review_ok=True, build_raises=False):
     return _FakeGateProvider()
 
 
-def _make_real_swarm(tmp_path, provider):
+def _make_real_swarm(tmp_path, provider, *, spec_content=""):
     """A swarm WITHOUT the _run_quality_gates bypass, with one task already assigned to a1.
 
     ``provider`` supplies the build/lint/review engines (see ``_gate_provider``).
@@ -654,6 +660,7 @@ def _make_real_swarm(tmp_path, provider):
         agent_ids=["a1"],
         llm_getter=lambda k: None,
         engine_provider=provider,
+        spec_content=spec_content,
     )
     swarm._worktrees = _FakeWorktreeManager(swarm.path, ["a1"])
     swarm._worktrees.prepare()
@@ -668,6 +675,53 @@ def test_quality_gates_pass_sets_in_review(tmp_path):
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+
+
+def test_quality_gate_review_receives_actual_diff_not_just_summary(tmp_path):
+    """CRITICAL: the code review gate must see the real branch diff, not merely the engineer's own
+    human-readable changes_summary — a summary alone lets unreviewed (or mismatched) code pass."""
+    from shared_git.git_utils import DEVELOPMENT_BRANCH, create_feature_branch, initialize_new_repo
+
+    repo = tmp_path / "real_repo"
+    ok, msg = initialize_new_repo(repo)
+    assert ok, msg
+    ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t1")
+    assert ok, branch
+    assert branch == "feature/t1"  # matches StubWorker's deterministic feature_branch
+    (repo / "feature.txt").write_text("UNIQUE_DIFF_MARKER_12345\n", encoding="utf-8")
+    from shared_git.git_utils import commit_working_tree
+
+    ok, msg = commit_working_tree(repo, "add feature file")
+    assert ok, msg
+
+    captured: Dict[str, Any] = {}
+    swarm, graph = _make_real_swarm(
+        tmp_path, _gate_provider(review_kwargs=captured), spec_content="THE SPEC"
+    )
+    swarm._worktrees._paths["a1"] = repo  # point the worker's worktree at the real git repo
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+    assert "UNIQUE_DIFF_MARKER_12345" in captured["code"]  # the real diff content
+    assert "did t1" in captured["code"]  # StubWorker's changes_summary is still included
+    assert (
+        captured["spec_content"] == "THE SPEC"
+    )  # MEDIUM: threaded from the plan, not hardcoded ""
+
+
+def test_quality_gate_review_falls_back_to_summary_when_diff_unavailable(tmp_path):
+    """A non-git worktree (branch_diff returns "") must not silently review an empty string —
+    it falls back to the engineer's changes_summary."""
+    captured: Dict[str, Any] = {}
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(review_kwargs=captured))
+    # _FakeWorktreeManager's worktree has no .git — branch_diff is a defined no-op ("").
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+    assert captured["code"] == "did t1"  # StubWorker's changes_summary, unchanged
+    assert captured["spec_content"] == ""  # default when the plan carries no spec
 
 
 def test_quality_gates_skip_with_warning_when_no_engine_provider(tmp_path):
