@@ -25,7 +25,6 @@ max-statements = 130
 # per-rule (paths are relative to agents/); refactor and remove to ratchet down.
 "software_engineering_team/orchestrator.py" = ["C901", "PLR0915"]
 "llm_service/clients/ollama.py" = ["C901", "PLR0915"]
-"software_engineering_team/backend_agent/agent.py" = ["C901", "PLR0915"]
 "team_assistant/api.py" = ["C901", "PLR0915"]
 "investment_team/api/main.py" = ["PLR0915"]
 "software_engineering_team/backend_code_v2_team/phases/execution.py" = ["PLR0915"]

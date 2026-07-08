@@ -1201,6 +1201,7 @@ def run_coding_team_orchestrator(
     progress_base: int = _DEFAULT_PROGRESS_BASE,
     progress_span: int = _DEFAULT_PROGRESS_SPAN,
     engine_provider: Optional[Any] = None,
+    retry_failed: bool = False,
 ) -> None:
     """
     Run the coding_team pipeline: plan → Task Graph → groom/assign → implement → review → merge.
@@ -1209,6 +1210,9 @@ def run_coding_team_orchestrator(
     progress_base / progress_span: the slice of the job progress bar this run owns
     (see _coding_progress); a parent pipeline passes its coding-phase band, standalone
     jobs use the full bar.
+    retry_failed: on the snapshot-resume branch, also demote terminal FAILED tasks back to TO_DO
+    (via graph.reset_failed) so the swarm re-attempts them. This is the "retry the failed tasks"
+    entry point; default False preserves FAILED for a plain crash-recovery resume.
 
     ``last_activity_at`` (read by the UI's stall warning) is stamped centrally by the
     job service on every real update — see job_service/db.py — so plain ``_update``
@@ -1323,6 +1327,10 @@ def run_coding_team_orchestrator(
         # In-flight tasks from the dead attempt may be half-done and their agent mapping is stale,
         # so demote them to unassigned TO_DO; MERGED/FAILED are preserved (no re-work).
         graph.reset_in_flight()
+        if retry_failed:
+            # Explicit "retry the failed tasks" entry (e.g. the SE retry path): also demote terminal
+            # FAILED tasks to TO_DO so the swarm re-attempts them. Default resume leaves them FAILED.
+            graph.reset_failed()
         stacks_raw = existing.get("stack_specs") or _DEFAULT_STACK_SPECS
     else:
         # Plan the task graph, pausing for the user if the Tech Lead raises a decision it must not

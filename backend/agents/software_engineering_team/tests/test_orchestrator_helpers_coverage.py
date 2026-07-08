@@ -324,49 +324,6 @@ def test_pop_runnable_task_skips_missing_task_objects():
     assert "ghost" in queue  # unchanged
 
 
-def test_frontend_code_v2_worker_marks_failed_when_team_missing():
-    """When the frontend_code_v2 team isn't registered, all queued tasks
-    are marked failed with a clear reason and the worker returns
-    without entering the integration loop."""
-
-    queue = ["t1", "t2"]
-    failed: dict = {}
-    orchestrator._frontend_code_v2_worker(
-        job_id="job-x",
-        frontend_code_v2_queue=queue,
-        all_tasks={},
-        completed=set(),
-        failed=failed,
-        completed_code_task_ids=[],
-        architecture=None,
-        agents={},  # no frontend_code_v2 key
-        repo_path=__import__("pathlib").Path("/tmp"),
-    )
-    assert failed == {
-        "t1": "frontend_code_v2 team not registered",
-        "t2": "frontend_code_v2 team not registered",
-    }
-
-
-def test_backend_code_v2_worker_marks_failed_when_team_missing():
-    """Mirror coverage for the backend-code-v2 worker's no-team early-exit."""
-
-    queue = ["t1"]
-    failed: dict = {}
-    orchestrator._backend_code_v2_worker(
-        job_id="job-y",
-        backend_code_v2_queue=queue,
-        all_tasks={},
-        completed=set(),
-        failed=failed,
-        completed_code_task_ids=[],
-        architecture=None,
-        agents={},  # no backend key
-        repo_path=__import__("pathlib").Path("/tmp"),
-    )
-    assert failed == {"t1": "backend team not registered"}
-
-
 def test_log_task_breakdown_does_not_raise():
     """Log task breakdown does not raise."""
 

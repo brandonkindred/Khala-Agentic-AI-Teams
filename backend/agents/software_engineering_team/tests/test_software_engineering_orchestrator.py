@@ -89,75 +89,310 @@ def test_run_orchestrator_pauses_on_llm_rate_limit_in_spec_parsing(
     assert paused_calls[0][1]["error"] == OLLAMA_WEEKLY_LIMIT_MESSAGE
 
 
-def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
-    """When backend run_workflow raises LLMRateLimitError during retry, job is paused with paused_llm_limit."""
-    (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
-    backend_dir = tmp_path / "backend"
-    backend_dir.mkdir()
-    (backend_dir / ".git").mkdir()
-    frontend_dir = tmp_path / "frontend"
-    frontend_dir.mkdir()
-
-    job_id = "test-retry-llm-limit"
-    task = Task(
-        id="backend-task-1",
-        type=TaskType.BACKEND,
-        title="Backend task",
-        description="Implement API",
-        assignee="backend",
-    )
-    task_data = task.model_dump() if hasattr(task, "model_dump") else task.dict()
+def _seed_retry_job(tmp_path: Path, job_id: str) -> None:
+    """Seed a job record as a prior coding-team run leaves it: a task_graph_snapshot plus the
+    requirements/architecture fields ``run_failed_tasks`` reads to rebuild its plan input."""
     from software_engineering_team.shared.job_store import create_job, update_job
 
     create_job(job_id, str(tmp_path))
     update_job(
         job_id,
-        failed_tasks=[
-            {"task_id": "backend-task-1", "reason": "previous fail", "title": "Backend task"}
-        ],
-        _all_tasks={"backend-task-1": task_data},
-        _architecture_overview="API + frontend",
-        _spec_content="# Test\n\nSpec.",
+        task_graph_snapshot=[{"id": "t1", "status": "failed", "title": "Backend task"}],
+        failed_tasks=[{"task_id": "t1", "reason": "prior fail", "title": "Backend task"}],
+        requirements_title="Task Manager API",
+        architecture_overview="API + frontend",
+        resolved_questions=[{"question": "q?", "answer": "a"}],
     )
+
+
+def test_run_failed_tasks_delegates_to_coding_team(tmp_path: Path) -> None:
+    """The retry path rebuilds a plan input from the stored record and delegates to
+    run_coding_team_orchestrator with retry_failed=True, then emits coding-team metrics."""
+    job_id = "test-retry-delegates"
+    _seed_retry_job(tmp_path, job_id)
+
+    captured = {}
+
+    def fake_delegate(jid, repo_path, plan_input, **kwargs):
+        captured["job_id"] = jid
+        captured["repo_path"] = repo_path
+        captured["plan_input"] = plan_input
+        captured["kwargs"] = kwargs
+        # Simulate a fully successful retry: the coding-team run merges the task and updates the
+        # persisted snapshot via the injected callback.
+        kwargs["update_job_fn"](task_graph_snapshot=[{"id": "t1", "status": "merged"}])
+
+    emit_called = MagicMock()
+
+    with patch("coding_team.orchestrator.run_coding_team_orchestrator", side_effect=fake_delegate):
+        with patch("orchestrator._emit_coding_team_metrics", emit_called):
+            orchestrator.run_failed_tasks(job_id)
+
+    assert captured["job_id"] == job_id
+    assert captured["repo_path"] == str(tmp_path.resolve())
+    assert captured["kwargs"]["retry_failed"] is True
+    plan_input = captured["plan_input"]
+    assert plan_input.repo_path == str(tmp_path.resolve())
+    assert plan_input.requirements_title == "Task Manager API"
+    assert plan_input.architecture_overview == "API + frontend"
+    assert plan_input.resolved_questions == [{"question": "q?", "answer": "a"}]
+    emit_called.assert_called_once_with(job_id)
+
+    # A fully successful retry leaves no FAILED tasks in the snapshot, so failed_tasks is cleared —
+    # the status endpoint and retry gate no longer report the pre-retry failures.
+    from software_engineering_team.shared.job_store import get_job
+
+    assert get_job(job_id).get("failed_tasks") == []
+
+
+def test_run_failed_tasks_repopulates_failed_from_snapshot(tmp_path: Path) -> None:
+    """A retry that still leaves a FAILED task repopulates failed_tasks from the snapshot so the
+    job stays visible/retryable (the coding-team run itself never writes failed_tasks)."""
+    job_id = "test-retry-still-failing"
+    _seed_retry_job(tmp_path, job_id)
+
+    def fake_delegate(jid, repo_path, plan_input, **kwargs):
+        kwargs["update_job_fn"](
+            status="completed_with_failures",
+            task_graph_snapshot=[
+                {
+                    "id": "t1",
+                    "status": "failed",
+                    "title": "Backend task",
+                    "revision_feedback": [{"source": "engineer", "reason": "still broken"}],
+                }
+            ],
+        )
+
+    with patch("coding_team.orchestrator.run_coding_team_orchestrator", side_effect=fake_delegate):
+        with patch("orchestrator._emit_coding_team_metrics", MagicMock()):
+            orchestrator.run_failed_tasks(job_id)
+
+    from software_engineering_team.shared.job_store import get_job
+
+    failed = get_job(job_id).get("failed_tasks")
+    assert failed == [{"task_id": "t1", "title": "Backend task", "reason": "still broken"}]
+
+
+def test_run_failed_tasks_marks_failed_on_delegate_error(tmp_path: Path) -> None:
+    """An unexpected error from the coding-team run is mapped to a terminal failed status."""
+    job_id = "test-retry-delegate-error"
+    _seed_retry_job(tmp_path, job_id)
 
     update_job_calls = []
 
     def capture_update_job(jid, cache_dir=None, **kwargs):
         update_job_calls.append((jid, kwargs))
 
-    mock_backend = MagicMock()
-    mock_backend.run_workflow.side_effect = LLMRateLimitError("429 rate limited", status_code=429)
-    mock_git_setup = MagicMock()
-    mock_git_setup.run.return_value = MagicMock(success=True)
-    mock_agents = {
-        "backend": mock_backend,
-        "frontend": MagicMock(),
-        "git_setup": mock_git_setup,
-        "tech_lead": MagicMock(),
-        "devops": MagicMock(),
-        "qa": MagicMock(),
-        "security": MagicMock(),
-        "dbc_comments": MagicMock(),
-        "code_review": MagicMock(),
-        "accessibility": MagicMock(),
-    }
+    with patch("orchestrator.update_job", side_effect=capture_update_job):
+        with patch(
+            "coding_team.orchestrator.run_coding_team_orchestrator",
+            side_effect=RuntimeError("boom"),
+        ):
+            orchestrator.run_failed_tasks(job_id)
 
-    mock_init_result = MagicMock()
-    mock_init_result.success = True
+    failed_calls = [
+        kw for _jid, kw in update_job_calls if kw.get("status") == orchestrator.JOB_STATUS_FAILED
+    ]
+    assert failed_calls
+    assert failed_calls[-1]["error"] == "boom"
+
+
+def test_run_failed_tasks_cancelled_on_cancellation(tmp_path: Path) -> None:
+    """A CancellationError from the coding-team run yields a terminal cancelled status."""
+    job_id = "test-retry-cancelled"
+    _seed_retry_job(tmp_path, job_id)
+
+    update_job_calls = []
+
+    def capture_update_job(jid, cache_dir=None, **kwargs):
+        update_job_calls.append((jid, kwargs))
 
     with patch("orchestrator.update_job", side_effect=capture_update_job):
-        with patch("orchestrator._get_agents", return_value=mock_agents):
-            with patch(
-                "shared_command_runner.runner.ensure_backend_project_initialized",
-                return_value=mock_init_result,
-            ):
-                orchestrator.run_failed_tasks(job_id)
+        with patch(
+            "coding_team.orchestrator.run_coding_team_orchestrator",
+            side_effect=orchestrator.CancellationError("cancelled"),
+        ):
+            orchestrator.run_failed_tasks(job_id)
 
-    paused_calls = [
-        (jid, kw) for jid, kw in update_job_calls if kw.get("status") == "paused_llm_limit"
+    cancelled_calls = [
+        kw for _jid, kw in update_job_calls if kw.get("status") == orchestrator.JOB_STATUS_CANCELLED
     ]
-    assert len(paused_calls) >= 1
-    assert paused_calls[-1][1]["error"] == OLLAMA_WEEKLY_LIMIT_MESSAGE
+    assert cancelled_calls
+
+
+def test_run_failed_tasks_raises_when_job_missing() -> None:
+    """A retry for an unknown job raises rather than silently no-op'ing."""
+    with pytest.raises(ValueError, match="not found"):
+        orchestrator.run_failed_tasks("no-such-job")
+
+
+def test_run_failed_tasks_raises_without_repo_path(tmp_path: Path) -> None:
+    """A job record with no repo_path cannot be resumed."""
+    from software_engineering_team.shared.job_store import create_job, get_job, update_job
+
+    job_id = "test-retry-no-repo"
+    create_job(job_id, str(tmp_path))
+    # Clear repo_path to simulate a malformed record.
+    update_job(job_id, repo_path=None, task_graph_snapshot=[{"id": "t1", "status": "failed"}])
+    assert get_job(job_id) is not None
+    with pytest.raises(ValueError, match="no repo_path"):
+        orchestrator.run_failed_tasks(job_id)
+
+
+def test_run_failed_tasks_raises_without_snapshot(tmp_path: Path) -> None:
+    """A job that never ran the coding team has no task graph snapshot to resume."""
+    from software_engineering_team.shared.job_store import create_job
+
+    job_id = "test-retry-no-snapshot"
+    create_job(job_id, str(tmp_path))
+    with pytest.raises(ValueError, match="no task graph snapshot"):
+        orchestrator.run_failed_tasks(job_id)
+
+
+def _finalize_job(tmp_path: Path, job_id: str, snapshot: list) -> dict:
+    """Seed a job with a snapshot, run the finalize reconciliation, and return the job record."""
+    from software_engineering_team.shared.job_store import create_job, get_job, update_job
+
+    create_job(job_id, str(tmp_path))
+    update_job(job_id, task_graph_snapshot=snapshot, status="completed_with_failures")
+    orchestrator._finalize_from_coding_snapshot(job_id)
+    return get_job(job_id)
+
+
+def test_finalize_repopulates_failed_tasks_from_snapshot(tmp_path: Path) -> None:
+    """FAILED tasks in the snapshot become failed_tasks entries with task_id/title/reason."""
+    data = _finalize_job(
+        tmp_path,
+        "fin-failed",
+        [
+            {"id": "t1", "status": "merged", "title": "OK"},
+            {
+                "id": "t2",
+                "status": "failed",
+                "title": "Broken",
+                "revision_feedback": [
+                    {"reason": "first attempt"},
+                    {"reason": "gave up after revisions"},
+                ],
+            },
+        ],
+    )
+    assert data.get("failed_tasks") == [
+        {"task_id": "t2", "title": "Broken", "reason": "gave up after revisions"}
+    ]
+    # No LLM markers → the coding-team terminal status is left intact.
+    assert data.get("status") == "completed_with_failures"
+
+
+def test_finalize_clears_failed_tasks_on_clean_run(tmp_path: Path) -> None:
+    """A snapshot with no FAILED tasks yields an empty failed_tasks list."""
+    data = _finalize_job(tmp_path, "fin-clean", [{"id": "t1", "status": "merged", "title": "OK"}])
+    assert data.get("failed_tasks") == []
+
+
+def test_finalize_uses_build_and_review_feedback_shapes(tmp_path: Path) -> None:
+    """Build-gate ({type,error}) and review ({description}) feedback still yield an actionable
+    reason — not a blank string — even though neither uses the ``reason`` key."""
+    data = _finalize_job(
+        tmp_path,
+        "fin-build",
+        [
+            {
+                "id": "t1",
+                "status": "failed",
+                "title": "Build broke",
+                "revision_feedback": [{"type": "build", "error": "ng build failed: TS2304"}],
+            },
+            {
+                "id": "t2",
+                "status": "failed",
+                "title": "Review",
+                "revision_feedback": [{"description": "missing input validation"}],
+            },
+        ],
+    )
+    reasons = {ft["task_id"]: ft["reason"] for ft in data.get("failed_tasks")}
+    assert reasons == {"t1": "ng build failed: TS2304", "t2": "missing input validation"}
+    assert data.get("status") == "completed_with_failures"
+
+
+def test_finalize_ignores_stale_llm_marker_from_prior_attempt(tmp_path: Path) -> None:
+    """A weekly-limit marker left in history by an earlier attempt must NOT re-pause a retry whose
+    current (latest) failure is unrelated — only the latest reason per task drives the pause."""
+    from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE as WEEKLY
+
+    data = _finalize_job(
+        tmp_path,
+        "fin-stale-marker",
+        [
+            {
+                "id": "t1",
+                "status": "failed",
+                "title": "T1",
+                "revision_feedback": [
+                    {"reason": f"Implementation failed: {WEEKLY}"},  # stale, prior attempt
+                    {"type": "build", "error": "unrelated build failure"},  # current failure
+                ],
+            }
+        ],
+    )
+    assert data.get("status") == "completed_with_failures"  # not re-paused
+    assert data.get("failed_tasks") == [
+        {"task_id": "t1", "title": "T1", "reason": "unrelated build failure"}
+    ]
+
+
+def test_finalize_pauses_on_llm_weekly_limit(tmp_path: Path) -> None:
+    """A failure reason carrying the Ollama weekly-limit marker overrides status to paused_llm_limit."""
+    from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE as WEEKLY
+
+    data = _finalize_job(
+        tmp_path,
+        "fin-llm-limit",
+        [
+            {
+                "id": "t1",
+                "status": "failed",
+                "title": "T1",
+                "revision_feedback": [{"reason": f"Implementation failed: {WEEKLY}"}],
+            }
+        ],
+    )
+    assert data.get("status") == "paused_llm_limit"
+    assert data.get("error") == WEEKLY
+    assert data.get("failed_tasks")  # still recorded
+
+
+def test_finalize_pauses_on_llm_connectivity(tmp_path: Path) -> None:
+    """A connectivity marker overrides status to paused_llm_connectivity."""
+    from software_engineering_team.shared.job_store import LLM_UNREACHABLE_AFTER_RETRIES
+
+    data = _finalize_job(
+        tmp_path,
+        "fin-llm-conn",
+        [
+            {
+                "id": "t1",
+                "status": "failed",
+                "title": "T1",
+                "revision_feedback": [{"reason": f"Implementation failed: {LLM_UNREACHABLE_AFTER_RETRIES}"}],
+            }
+        ],
+    )
+    assert data.get("status") == orchestrator.JOB_STATUS_PAUSED_LLM_CONNECTIVITY
+    assert data.get("error") == LLM_UNREACHABLE_AFTER_RETRIES
+
+
+def test_finalize_noop_without_snapshot(tmp_path: Path) -> None:
+    """No snapshot (or no job) → the helper does nothing and does not raise."""
+    from software_engineering_team.shared.job_store import create_job, get_job
+
+    create_job("fin-nosnap", str(tmp_path))
+    orchestrator._finalize_from_coding_snapshot("fin-nosnap")
+    assert "failed_tasks" not in get_job("fin-nosnap") or get_job("fin-nosnap").get("failed_tasks") in (None, [])
+    # Unknown job is a clean no-op.
+    orchestrator._finalize_from_coding_snapshot("fin-does-not-exist")
 
 
 def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: Path) -> None:
