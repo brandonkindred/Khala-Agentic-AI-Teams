@@ -35,7 +35,6 @@ from strands import Agent  # noqa: E402
 
 from llm_service import (  # noqa: E402
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
-    LLMRateLimitError,
     get_client,
     get_strands_model,
     llm_attribution,
@@ -43,6 +42,11 @@ from llm_service import (  # noqa: E402
 from shared_repo_context.repo_utils import (  # noqa: E402
     read_repo_code,
     truncate_for_context,
+)
+from software_engineering_team.discovery import (  # noqa: E402
+    _load_requirements_from_sprint,  # noqa: F401 - re-exported for tests
+    resolve_spec_source,
+    run_product_requirements_analysis,
 )
 from software_engineering_team.shared import (  # noqa: E402
     cost_tracker,
@@ -1508,99 +1512,6 @@ def _maybe_ship_sprint_release(
             )
 
 
-def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
-    """Synthesize ``(ProductRequirements, spec_markdown)`` from a sprint's stories.
-
-    Phase 2 of #243. Imports are lazy so the SE team doesn't take an
-    import-time dependency on product_delivery (the two are sibling
-    teams). Raises ``UnknownProductDeliveryEntity`` when the sprint id
-    is missing, ``ValueError`` when the sprint has no planned stories
-    (we never silently fall back to repo spec parsing — the caller asked
-    for a sprint run).
-    """
-    from product_delivery import (  # noqa: PLC0415 — lazy to avoid cross-team import at module load
-        TERMINAL_STORY_STATUSES,
-        UnknownProductDeliveryEntity,
-        get_store,
-    )
-    from software_engineering_team.shared.models import ProductRequirements
-
-    sprint_view = get_store().get_sprint_with_stories(sprint_id)
-    if sprint_view is None:
-        raise UnknownProductDeliveryEntity(f"unknown sprint: {sprint_id}")
-    if not sprint_view.stories:
-        raise ValueError(
-            f"sprint {sprint_id!r} has no planned stories; run "
-            "POST /api/product-delivery/sprints/{id}/plan first."
-        )
-    sprint = sprint_view.sprint
-    # Filter terminal-status stories before synthesis so the SE
-    # pipeline doesn't re-execute work that's already done /
-    # cancelled / closed (Codex review on PR #396). Stories may be
-    # marked terminal *after* planning — the planner only excludes
-    # them at *selection* time, so without this filter execution and
-    # planning would diverge. Uses the same `TERMINAL_STORY_STATUSES`
-    # set the planner does, with case-insensitive compare so a row
-    # stored as ``Done`` doesn't smuggle past the lowercase set.
-    executable_stories = [
-        s
-        for s in sprint_view.stories
-        if (s.status or "").strip().lower() not in TERMINAL_STORY_STATUSES
-    ]
-    if not executable_stories:
-        raise ValueError(
-            f"sprint {sprint_id!r} has no executable stories — every planned "
-            "story is in a terminal status (done/completed/cancelled/closed)."
-        )
-    story_ids = [s.id for s in executable_stories]
-
-    # Markdown synthesis: per-story heading + user_story + bulleted ACs.
-    # `acceptance_criteria_by_story_id` was populated by
-    # `get_sprint_with_stories` inside the same REPEATABLE READ
-    # transaction as the story fetch (Codex review on PR #396), so the
-    # AC rows we render here are guaranteed consistent with the story
-    # rows — no risk of a stale stories + fresh ACs mix from
-    # concurrent backlog edits.
-    flat_ac_strings: list[str] = []
-    sections: list[str] = [f"# Sprint: {sprint.name}", ""]
-    if sprint.starts_at or sprint.ends_at:
-        window = []
-        if sprint.starts_at:
-            window.append(f"start={sprint.starts_at.isoformat()}")
-        if sprint.ends_at:
-            window.append(f"end={sprint.ends_at.isoformat()}")
-        sections.append("> " + ", ".join(window))
-        sections.append("")
-    acs_by_story = sprint_view.acceptance_criteria_by_story_id or {}
-    for story in executable_stories:
-        sections.append(f"## {story.title}")
-        if story.user_story:
-            sections.append(f"**User Story:** {story.user_story}")
-        ac_rows = acs_by_story.get(story.id, [])
-        if ac_rows:
-            sections.append("")
-            sections.append("**Acceptance criteria:**")
-            for ac in ac_rows:
-                sections.append(f"- {ac.text}")
-                flat_ac_strings.append(ac.text)
-        sections.append("")
-    spec_markdown = "\n".join(sections).rstrip() + "\n"
-
-    requirements = ProductRequirements(
-        title=sprint.name,
-        description=spec_markdown,
-        acceptance_criteria=flat_ac_strings or ["Deliver according to planned story scope."],
-        constraints=[],
-        priority="medium",
-        metadata={
-            "sprint_id": sprint_id,
-            "story_ids": story_ids,
-            "synthesized_from_sprint": True,
-        },
-    )
-    return requirements, spec_markdown
-
-
 def _parse_iso(value: Any) -> Optional[datetime]:
     """Parse an ISO-8601 string to an aware datetime, or None when absent/invalid."""
     if not isinstance(value, str) or not value:
@@ -1703,6 +1614,17 @@ def _emit_coding_team_metrics(job_id: str) -> None:
         cost_tracker.flush(job_id)
 
 
+def _fail_job(job_id: str, error: str, *, phase: str = "completed") -> None:
+    """Mark ``job_id`` FAILED with ``error``.
+
+    Collapses the ``update_job(status=JOB_STATUS_FAILED, error=..., phase="completed")``
+    shape shared by several of ``run_orchestrator``'s failure paths. Callers keep their
+    own ``logger.error``/``logger.exception`` call (the message differs per site)
+    immediately before invoking this.
+    """
+    update_job(job_id, status=JOB_STATUS_FAILED, error=error, phase=phase)
+
+
 def run_orchestrator(
     job_id: str,
     repo_path: str | Path,
@@ -1742,80 +1664,18 @@ def run_orchestrator(
 
         agents = _get_agents()
 
-        # 1. Read spec from work path or use override (no git required at root)
-        from spec_parser import (
-            gather_context_files,
-            get_newest_spec_content,
-            get_newest_spec_path,
-            parse_spec_with_llm,
+        # 1. Resolve the spec source (sprint / override / newest-on-disk) and parse it.
+        source = resolve_spec_source(
+            job_id,
+            path,
+            sprint_id=sprint_id,
+            spec_content_override=spec_content_override,
+            update_job_fn=update_job,
         )
+        if source is None:
+            return
+        requirements = source.requirements
 
-        initial_spec_path = None
-        # Sprint path (#370): when sprint_id is set, the synthesized spec
-        # comes from the product_delivery sprint's planned stories. Both
-        # the LLM spec-parse and the PRA agent are skipped — the spec is
-        # already structured (per-story user_story + ACs) and validated
-        # by the upstream Sprint Planner.
-        if sprint_id is not None:
-            from product_delivery import UnknownProductDeliveryEntity  # noqa: PLC0415
-
-            if spec_content_override is not None:
-                err = (
-                    "run_orchestrator received both sprint_id and spec_content_override; "
-                    "they are mutually exclusive."
-                )
-                logger.error(err)
-                update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
-                return
-            try:
-                requirements, spec_content = _load_requirements_from_sprint(sprint_id)
-            except UnknownProductDeliveryEntity as e:
-                logger.error("Sprint %s not found: %s", sprint_id, e)
-                update_job(
-                    job_id,
-                    status=JOB_STATUS_FAILED,
-                    error=f"Sprint scope load failed: {e}",
-                    phase="completed",
-                )
-                return
-            except ValueError as e:
-                logger.error("Sprint %s scope is empty: %s", sprint_id, e)
-                update_job(
-                    job_id,
-                    status=JOB_STATUS_FAILED,
-                    error=f"Sprint scope load failed: {e}",
-                    phase="completed",
-                )
-                return
-        elif spec_content_override is not None:
-            spec_content = spec_content_override
-        else:
-            initial_spec_path = get_newest_spec_path(path)
-            spec_content = get_newest_spec_content(path)
-
-        # Gather all context files from the repo for PRA agent
-        context_files = gather_context_files(path)
-        if context_files:
-            logger.info("Gathered %d context files for PRA agent", len(context_files))
-
-        if sprint_id is None:
-            try:
-                requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
-            except LLMRateLimitError:
-                logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
-                update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
-                return
-            except Exception as e:
-                logger.error(
-                    "Spec parsing failed (LLM unavailable or returned invalid output): %s", e
-                )
-                update_job(
-                    job_id,
-                    status=JOB_STATUS_FAILED,
-                    error=f"Spec parsing failed: {e}",
-                    phase="completed",
-                )
-                return
         update_job(
             job_id,
             requirements_title=requirements.title,
@@ -1829,56 +1689,18 @@ def run_orchestrator(
         plan_dir = ensure_plan_dir(path)
         logger.info("Plan folder ensured at %s", plan_dir)
 
-        if sprint_id is not None:
-            # Sprint path: the spec is already structured + validated, so
-            # PRA's review/communicate/update/cleanup loop has nothing to
-            # do. Use the synthesized spec directly as the validated spec
-            # for downstream stages.
-            validated_spec = spec_content
-            logger.info(
-                "Sprint %s: skipped Product Requirements Analysis; using synthesized spec",
-                sprint_id,
-            )
-        else:
-            # ── Step 1: Product Requirements Analysis Agent ───────────────────────
-            # Validates spec, asks user questions, produces validated_spec.md
-            from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
-
-            _pra_job_updater = _make_pra_job_updater(job_id)
-
-            update_job(
-                job_id,
-                phase="product_analysis",
-                message="Starting product requirements analysis...",
-                status_text="Starting product requirements analysis",
-            )
-            logger.info(
-                "Next step -> Running Product Requirements Analysis agent to validate spec and gather clarifications"
-            )
-            pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
-            pra_result = pra_agent.run_workflow(
-                spec_content=spec_content,
-                repo_path=path,
-                job_id=job_id,
-                job_updater=_pra_job_updater,
-                context_files=context_files,
-                initial_spec_path=initial_spec_path,
-            )
-            if not pra_result.success:
-                err = (
-                    pra_result.failure_reason
-                    or "Product Requirements Analysis did not complete successfully."
-                )
-                logger.error("Product Requirements Analysis failed: %s", err)
-                update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
-                return
-
-            # Use validated spec for all downstream agents
-            validated_spec = pra_result.final_spec_content or spec_content
-            logger.info(
-                "Product Requirements Analysis complete: %d iterations, validated spec ready",
-                pra_result.iterations,
-            )
+        # ── Step 1: Product Requirements Analysis Agent (skipped on the sprint path) ──
+        _pra_job_updater = _make_pra_job_updater(job_id)
+        validated_spec = run_product_requirements_analysis(
+            job_id,
+            path,
+            source,
+            sprint_id=sprint_id,
+            pra_job_updater=_pra_job_updater,
+            update_job_fn=update_job,
+        )
+        if validated_spec is None:
+            return
 
         # Check for cancellation after PRA
         _check_cancellation(job_id)
@@ -1987,8 +1809,7 @@ def run_orchestrator(
                 or "Planning workflow did not complete successfully."
             )
             logger.error("Planning failed: %s", err)
-            update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
-            return
+            return _fail_job(job_id, err)
 
         try:
             adapter_result: PlanningAdapterResult = adapt_planning_result(
@@ -1996,8 +1817,7 @@ def run_orchestrator(
             )
         except ValueError as e:
             logger.error("Planning adapter failed: %s", e)
-            update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
-            return
+            return _fail_job(job_id, str(e))
 
         adapter_result.shared_planning_doc_path = str(
             Path(path) / "plan" / "planning_team" / "planning_document.md"
@@ -2092,7 +1912,7 @@ def run_orchestrator(
         Exception
     ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Orchestrator failed")
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
+        _fail_job(job_id, str(e))
 
 
 def _latest_failure_reason(task: Dict[str, Any]) -> str:
