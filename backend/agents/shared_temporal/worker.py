@@ -30,7 +30,7 @@ _activity_executors: dict[str, ThreadPoolExecutor] = {}
 
 
 def _build_workflow_runner() -> Any:
-    """Build a SandboxedWorkflowRunner that passes through pydantic and boto3/strands.
+    """Build a SandboxedWorkflowRunner that passes through pydantic, boto3/strands, and httpx.
 
     Without ``pydantic``/``pydantic_core`` passthrough, schema generation for
     models that reference ``datetime.datetime`` (e.g. ``Optional[datetime]``
@@ -39,21 +39,25 @@ def _build_workflow_runner() -> Any:
     different ``datetime.datetime`` reference than pydantic-core's compiled
     one, raising ``PydanticSchemaGenerationError``.
 
-    ``strands``/``boto3``/``botocore``/``urllib3`` need the same treatment for a
-    different reason: registering any team's workflow class requires Python to
-    first import its ancestor packages, and several of those ``__init__.py``
-    modules eagerly import agent code that imports ``strands`` at module scope
-    (e.g. ``software_engineering_team.code_review_agent``'s ``__init__`` pulls
-    in ``chunk_reviewer``/``false_positive_filter``). ``strands`` unconditionally
-    imports its Bedrock model provider (``strands.models.bedrock``), which does
-    a top-level ``import boto3`` regardless of which LLM provider is actually
-    configured. botocore does thread-lock and dynamic-class-generation work at
-    import time that is not safe to replay in the sandbox's isolated module
-    namespace, surfacing as an import failure inside
-    ``botocore.compat``/``urllib3`` during workflow registration. None of these
-    packages are used by workflow ``run()`` bodies in this repo (only by code
-    that executes inside activities), so passing them through sacrifices no
-    real determinism checking.
+    ``strands``/``boto3``/``botocore``/``urllib3``/``httpx`` need the same
+    treatment for a different reason: registering any team's workflow class
+    requires Python to first import its ancestor packages, and several teams'
+    top-level ``__init__.py`` eagerly imports agent/orchestrator code that
+    imports ``strands`` and/or ``llm_service`` at module scope (e.g.
+    ``market_research_team``, ``branding_team``, ``sales_team``). ``strands``
+    unconditionally imports its Bedrock model provider
+    (``strands.models.bedrock``), which does a top-level ``import boto3``
+    regardless of which LLM provider is actually configured; botocore does
+    thread-lock and dynamic-class-generation work at import time that is not
+    safe to replay in the sandbox's isolated module namespace, surfacing as an
+    import failure inside ``botocore.compat``/``urllib3``. Separately,
+    ``llm_service.clients.ollama`` imports ``httpx`` at module scope, and
+    ``httpx._models`` defines ``class _CookieCompatRequest(urllib.request.Request)``
+    at import time — accessing ``__mro_entries__`` on the sandbox-restricted
+    ``urllib.request.Request`` raises ``RestrictedWorkflowAccessError``. None of
+    these packages are used by workflow ``run()`` bodies in this repo (only by
+    code that executes inside activities), so passing them through sacrifices
+    no real determinism checking.
     """
     from temporalio.worker.workflow_sandbox import (
         SandboxedWorkflowRunner,
@@ -67,6 +71,7 @@ def _build_workflow_runner() -> Any:
         "boto3",
         "botocore",
         "urllib3",
+        "httpx",
     )
     return SandboxedWorkflowRunner(restrictions=restrictions)
 
