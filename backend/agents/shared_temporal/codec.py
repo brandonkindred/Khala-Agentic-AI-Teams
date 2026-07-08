@@ -85,9 +85,13 @@ class GzipPayloadCodec(PayloadCodec):
         Postconditions:
             - A payload whose serialized size is ``< min_size_bytes`` is
               returned unchanged (no metadata added).
-            - Otherwise returns a new ``Payload`` whose ``data`` is the gzip
-              compression of the original payload's serialized bytes, tagged
-              with ``encoding=binary/gzip`` metadata.
+            - Otherwise gzip-compresses the payload's serialized bytes; when the
+              compressed, tagged result is not actually smaller than the
+              original (already-compressed or high-entropy binary data, where
+              gzip's own header/table overhead can lose), the original payload
+              is returned unchanged instead — this codec must never make a
+              payload larger, which would defeat its purpose of staying under
+              Temporal's payload size limits.
         """
         result: List[Payload] = []
         for payload in payloads:
@@ -95,12 +99,14 @@ class GzipPayloadCodec(PayloadCodec):
             if len(serialized) < self._min_size_bytes:
                 result.append(payload)
                 continue
-            result.append(
-                Payload(
-                    metadata={_ENCODING_METADATA_KEY: _GZIP_ENCODING},
-                    data=gzip.compress(serialized),
-                )
+            candidate = Payload(
+                metadata={_ENCODING_METADATA_KEY: _GZIP_ENCODING},
+                data=gzip.compress(serialized),
             )
+            if len(candidate.SerializeToString()) >= len(serialized):
+                result.append(payload)
+                continue
+            result.append(candidate)
         return result
 
     async def decode(self, payloads: Sequence[Payload]) -> List[Payload]:

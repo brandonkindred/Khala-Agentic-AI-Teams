@@ -8,6 +8,7 @@ threshold, round-trip losslessly, and stay a no-op for small payloads.
 from __future__ import annotations
 
 import gzip
+import os
 
 import pytest
 from temporalio.api.common.v1 import Payload
@@ -54,6 +55,24 @@ async def test_small_payload_passes_through_uncompressed():
     metadata added, no gzip overhead) and decode() must be a no-op for it."""
     original = _payload(b"tiny")
     codec = GzipPayloadCodec(min_size_bytes=DEFAULT_MIN_COMPRESS_BYTES)
+
+    encoded = await codec.encode([original])
+    assert encoded == [original]
+
+    decoded = await codec.decode(encoded)
+    assert decoded == [original]
+
+
+@pytest.mark.asyncio
+async def test_encode_passes_through_when_compression_does_not_shrink_payload():
+    """High-entropy/already-compressed data above the size floor must not be
+    wrapped in gzip if doing so would make the payload larger — this codec is
+    installed globally, so it must never push a payload that already fit
+    Temporal's limits over them."""
+    codec = GzipPayloadCodec(min_size_bytes=1024)
+    # os.urandom output is incompressible; gzip's header/table overhead makes
+    # the "compressed" result larger than the input.
+    original = _payload(os.urandom(4096))
 
     encoded = await codec.encode([original])
     assert encoded == [original]
