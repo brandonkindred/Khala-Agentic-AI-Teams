@@ -21,6 +21,7 @@ that patch, while a late-bound module attribute lookup does.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from coding_team.models import Task, TaskStatus
@@ -33,8 +34,31 @@ logger = logging.getLogger(__name__)
 class _ImplementationMixin:
     """Worker implementation, quality gates, and no-change/Tech-Lead escalation."""
 
-    def _implement_and_verify(self, swe: Any, update_fn: Any) -> None:
-        """Worker implements its assigned task, then runs quality gate tools."""
+    def _implement_and_verify(
+        self, swe: Any, update_fn: Any, *, live_progress: bool = True
+    ) -> None:
+        """Worker implements its assigned task in its own git worktree, then runs quality gates.
+
+        Preconditions:
+            - ``self._worktrees.prepare()`` has already completed — ``run()`` calls it once, up
+              front, before any worker runs this round — so ``swe.agent_id`` has a prepared
+              worktree.
+            - ``live_progress=False`` when this call is part of a concurrent round fan-out (direct
+              ``update_fn`` status-text calls and the code-review sub-progress bridge are both
+              suppressed — concurrent live progress would race the one sub-progress slot, mirroring
+              ``_review_and_merge``'s fan-out suppression); ``True`` (default) for the serial/solo
+              path, which keeps today's live per-phase status text unchanged.
+        Postconditions:
+            - Never raises: any exception — including a failure to resolve this worker's worktree,
+              or from ``run_implement`` itself — is contained and routed through
+              ``_handle_incomplete_implementation`` exactly like a ``status="failed"`` result, so
+              one worker's crash fails only its own task and never aborts the round. This is
+              required, not defensive: ``shared_concurrency.parallel_map`` re-raises a worker
+              exception to its caller and cancels the round's other pending tasks, so without this
+              containment one worker crashing would abort every other concurrently-running
+              worker's round too — worse than the prior serial loop, where a crash only prevented
+              workers later in the loop from running this round.
+        """
         task = self.graph.get_task_for_agent(swe.agent_id)
         if not task:
             return
@@ -45,42 +69,58 @@ class _ImplementationMixin:
         if task.status != TaskStatus.IN_PROGRESS:
             return
 
-        update_fn(status_text=f"Implementing: {task.title}")
-        result = swe.run_implement(task, self.path, repo_context=self.repo_context)
+        try:
+            worktree_path = self._worktrees.path_for(swe.agent_id)
+            if live_progress:
+                update_fn(status_text=f"Implementing: {task.title}")
+            result = swe.run_implement(task, worktree_path, repo_context=self.repo_context)
 
-        if result.get("status") == "needs_decision":
-            # The engineer hit a product/design decision it must not make. Escalate to the user
-            # (never decide it here); thread the answer back so the next round implements it.
-            self._escalate_decision(task, result, update_fn)
-            return
+            if result.get("status") == "needs_decision":
+                # The engineer hit a product/design decision it must not make. Escalate to the
+                # user (never decide it here); thread the answer back so the next round
+                # implements it.
+                self._escalate_decision(task, result, update_fn)
+                return
 
-        if result.get("status") == "in_review":
-            # Record the branch/summary BEFORE the gates so a gate-triggered revision (and its
-            # no-change check) reads the branch the engineer actually used, not a stale/absent one.
-            self.graph.update_task(
-                task.id,
-                feature_branch=result.get("feature_branch"),
-                changes_summary=result.get("changes_summary"),
-            )
-            # Run quality gates as tools
-            if not self._run_quality_gates(swe, task, result, update_fn):
-                return  # task returned to TODO for revision (or escalated to the Tech Lead)
-            self.graph.set_task_in_review(task.id)
-        else:
-            # Any non-review outcome — status="failed" (the LLM call raised) or status="in_progress"
-            # (the model set ready_for_review=false / asked for another pass) or any unexpected
-            # status — must be bounded. Otherwise the task stays IN_PROGRESS and assigned, its
-            # revision_count never advances, and the same full implement call repeats every round to
-            # the round cap, after which the task is neither MERGED nor FAILED and the job is reported
-            # a clean success despite incomplete work.
-            logger.warning(
-                "Worker %s task %s did not reach review (status=%s): %s",
-                swe.agent_id,
-                task.id,
-                result.get("status"),
-                result.get("error"),
-            )
-            self._handle_incomplete_implementation(task, result)
+            if result.get("status") == "in_review":
+                # Record the branch/summary BEFORE the gates so a gate-triggered revision (and its
+                # no-change check) reads the branch the engineer actually used, not a stale/absent
+                # one.
+                self.graph.update_task(
+                    task.id,
+                    feature_branch=result.get("feature_branch"),
+                    changes_summary=result.get("changes_summary"),
+                )
+                # Run quality gates as tools, against this worker's own worktree.
+                if not self._run_quality_gates(
+                    swe,
+                    task,
+                    result,
+                    update_fn,
+                    worktree_path=worktree_path,
+                    live_progress=live_progress,
+                ):
+                    return  # task returned to TODO for revision (or escalated to the Tech Lead)
+                self.graph.set_task_in_review(task.id)
+            else:
+                # Any non-review outcome — status="failed" (the LLM call raised) or
+                # status="in_progress" (the model set ready_for_review=false / asked for another
+                # pass) or any unexpected status — must be bounded. Otherwise the task stays
+                # IN_PROGRESS and assigned, its revision_count never advances, and the same full
+                # implement call repeats every round to the round cap, after which the task is
+                # neither MERGED nor FAILED and the job is reported a clean success despite
+                # incomplete work.
+                logger.warning(
+                    "Worker %s task %s did not reach review (status=%s): %s",
+                    swe.agent_id,
+                    task.id,
+                    result.get("status"),
+                    result.get("error"),
+                )
+                self._handle_incomplete_implementation(task, result)
+        except Exception as exc:  # noqa: BLE001 - one worker's crash must fail only its own task
+            logger.exception("Worker %s implementation raised for task %s", swe.agent_id, task.id)
+            self._handle_incomplete_implementation(task, {"status": "failed", "error": str(exc)})
 
     def _branch_digest(self, task: Task, diff: Optional[str] = None) -> str:
         """Hash of the task's branch diff — the truthful 'did this round change anything' signal.
@@ -411,9 +451,30 @@ class _ImplementationMixin:
         )
 
     def _run_quality_gates(
-        self, swe: Any, task: Task, result: Dict[str, Any], update_fn: Any
+        self,
+        swe: Any,
+        task: Task,
+        result: Dict[str, Any],
+        update_fn: Any,
+        *,
+        worktree_path: Path,
+        live_progress: bool = True,
     ) -> bool:
-        """Run build, lint, code review. Returns True if passed, False if returned for revision."""
+        """Run build, lint, code review against the worker's own worktree.
+
+        Preconditions:
+            - ``worktree_path`` is this worker's prepared git worktree (the same path
+              ``run_implement`` just wrote to and checked out its feature branch on) — build and
+              lint must read the files this worker actually produced, not the shared checkout.
+            - ``live_progress=False`` suppresses both the direct ``update_fn`` status-text calls and
+              the code-review sub-progress bridge (a ``_NoopBridge`` is used instead of constructing
+              a real ``ActivityBridge``) — required when this call is part of a concurrent round
+              fan-out, where concurrent bridges/status writes would race the one sub-progress slot
+              (mirrors ``_review_and_merge``'s fan-out suppression). ``True`` (default) keeps
+              today's live per-phase progress for the serial/solo path.
+        Postconditions:
+            - Returns True if passed, False if returned for revision.
+        """
         from coding_team import orchestrator as _orch
 
         # The gate *tools* (build/lint/review) run inside the try so a tool crash
@@ -433,7 +494,10 @@ class _ImplementationMixin:
                 logger.warning(
                     "No engine provider configured; skipping quality gates for %s", task.id
                 )
-                update_fn(status_text=f"Quality gates SKIPPED (no engine provider): {task.title}")
+                if live_progress:
+                    update_fn(
+                        status_text=f"Quality gates SKIPPED (no engine provider): {task.title}"
+                    )
                 return True
             run_build_verification = provider.run_build_verification
             run_linting = provider.run_linting
@@ -442,8 +506,9 @@ class _ImplementationMixin:
             agent_type = _quality_gate_agent_type(swe.stack_spec.name)
 
             # Build verification
-            update_fn(status_text=f"Build verification: {task.title}")
-            build = run_build_verification(self.path, agent_type, task.id)
+            if live_progress:
+                update_fn(status_text=f"Build verification: {task.title}")
+            build = run_build_verification(worktree_path, agent_type, task.id)
             if not build.success:
                 logger.warning(
                     "[%s] Build failed for task %s: %s", swe.agent_id, task.id, build.error
@@ -451,29 +516,35 @@ class _ImplementationMixin:
                 revision_feedback = [{"type": "build", "error": build.error}]
             else:
                 # Linting
-                update_fn(status_text=f"Linting: {task.title}")
-                run_linting(self.path, task.id, llm_getter=self.llm_getter)
+                if live_progress:
+                    update_fn(status_text=f"Linting: {task.title}")
+                run_linting(worktree_path, task.id, llm_getter=self.llm_getter)
 
                 # Code review — bridge the agent's sub-step reports into the job record so
                 # the UI shows live review progress instead of a frozen "Code review: ..." line.
-                # Progress reporting is observability only: build the bridge defensively so a
-                # construction failure degrades to "no live progress" and can never skip the
-                # review (which would let unreviewed code through the gate).
-                try:
-                    cr_bridge: Any = _orch.ActivityBridge(
-                        update_fn,
-                        agent="code_review",
-                        label="Code review",
-                        task_id=task.id,
-                        task_title=task.title,
-                    )
-                except Exception:
-                    logger.exception(
-                        "code-review progress bridge unavailable for task %s; "
-                        "reviewing without live progress",
-                        task.id,
-                    )
-                    cr_bridge = _orch._NoopBridge()
+                # Suppressed (a no-op bridge) during a concurrent fan-out: progress reporting is
+                # observability only, and concurrent bridges would race the one sub-progress slot.
+                # Otherwise built defensively so a construction failure degrades to "no live
+                # progress" and can never skip the review (which would let unreviewed code
+                # through the gate).
+                if not live_progress:
+                    cr_bridge: Any = _orch._NoopBridge()
+                else:
+                    try:
+                        cr_bridge = _orch.ActivityBridge(
+                            update_fn,
+                            agent="code_review",
+                            label="Code review",
+                            task_id=task.id,
+                            task_title=task.title,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "code-review progress bridge unavailable for task %s; "
+                            "reviewing without live progress",
+                            task.id,
+                        )
+                        cr_bridge = _orch._NoopBridge()
                 try:
                     cr_bridge("preparing", "starting code review", 0.0)
                     review = run_code_review(

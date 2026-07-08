@@ -93,6 +93,36 @@ class StubWorker:
         }
 
 
+class _FakeWorktreeManager:
+    """Test double for coding_team.worktree_manager.WorktreeManager.
+
+    These orchestrator tests stub the implementation workers entirely
+    (StubWorker never touches git), so a real WorktreeManager would pay for
+    (and, for the ~20 call sites with no _patch_git, actually attempt) real
+    `git worktree add` calls against a plain tmp_path with no `.git`. This
+    double gives each agent_id a distinct child directory under the swarm's
+    own tmp_path instead — no git, no filesystem writes outside tmp_path's own
+    pytest-managed cleanup. Real worktree mechanics are covered by
+    test_worktree_manager.py against WorktreeManager itself.
+    """
+
+    def __init__(self, repo_path: Path, agent_ids):
+        self._paths = {aid: Path(repo_path) / f"_wt_{aid}" for aid in agent_ids}
+        self.prepare_calls = 0
+        self.cleanup_calls = 0
+
+    def prepare(self) -> None:
+        self.prepare_calls += 1
+        for path in self._paths.values():
+            path.mkdir(parents=True, exist_ok=True)
+
+    def path_for(self, agent_id: str) -> Path:
+        return self._paths[agent_id]
+
+    def cleanup(self) -> None:
+        self.cleanup_calls += 1
+
+
 def _make_swarm(tmp_path, tech_lead, workers):
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
@@ -103,6 +133,10 @@ def _make_swarm(tmp_path, tech_lead, workers):
         agent_ids=[w.agent_id for w in workers],
         llm_getter=lambda key: None,
     )
+    # Real worktree creation is exercised in test_worktree_manager.py; give these
+    # stub-worker tests a git-free stand-in instead (see _FakeWorktreeManager).
+    swarm._worktrees = _FakeWorktreeManager(swarm.path, [w.agent_id for w in workers])
+    swarm._worktrees.prepare()
     # Bypass the external quality-gate tools (build/lint/code-review) — not under test here.
     swarm._run_quality_gates = lambda *a, **k: True  # type: ignore[method-assign]
     return swarm, graph
@@ -621,6 +655,8 @@ def _make_real_swarm(tmp_path, provider):
         llm_getter=lambda k: None,
         engine_provider=provider,
     )
+    swarm._worktrees = _FakeWorktreeManager(swarm.path, ["a1"])
+    swarm._worktrees.prepare()
     graph.add_task("t1", title="T1")
     graph.assign_task_to_agent("t1", "a1")
     return swarm, graph
@@ -630,6 +666,28 @@ def test_quality_gates_pass_sets_in_review(tmp_path):
     swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True, review_ok=True))
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+
+
+def test_quality_gates_skip_with_warning_when_no_engine_provider(tmp_path):
+    """No engine_provider configured (an embedder wired the swarm directly, without injecting
+    build/lint/review engines) → gates are skipped, not silently: a SKIPPED status is reported
+    and the task still proceeds straight to review."""
+    swarm, graph = _make_real_swarm(tmp_path, None)
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+
+
+def test_quality_gates_suppress_code_review_bridge_when_live_progress_false(tmp_path):
+    """live_progress=False (the concurrent fan-out path) uses a no-op code-review progress
+    bridge — it must never construct a live ActivityBridge, which would race the one
+    sub-progress slot against other concurrently-running workers' bridges."""
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True, review_ok=True))
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None, live_progress=False)
 
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
 
@@ -2887,6 +2945,231 @@ def test_review_concurrency_env_parsing(monkeypatch):
     assert orch_mod._review_concurrency() == 1  # floored so review always progresses
     monkeypatch.setenv("CODING_TEAM_REVIEW_CONCURRENCY", "7")
     assert orch_mod._review_concurrency() == 7
+
+
+# --------------------------------------------------- implementation-worker fan-out (worktrees)
+
+
+def test_implementation_fanout_runs_concurrently(tmp_path, monkeypatch):
+    """Workers in a round overlap: a barrier that only releases when both run at once must be
+    crossed. A serial loop would time out the barrier, the exception would be contained, and
+    the tasks would end up bounced for revision instead of reaching review/merge."""
+    import threading
+
+    _patch_git(monkeypatch)
+    barrier = threading.Barrier(2, timeout=10)
+
+    class _BarrierWorker:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+            self.stack_spec = StackSpec(name=agent_id, tools_services=[])
+
+        def run_implement(self, task, path, repo_context=""):
+            # Blocks until both workers reach here; serial execution never releases it.
+            barrier.wait()
+            return {
+                "status": "in_review",
+                "feature_branch": f"feature/{task.id}",
+                "changes_summary": f"did {task.id}",
+                "files_to_create_or_edit": [],
+                "error": None,
+            }
+
+    workers = [_BarrierWorker("a1"), _BarrierWorker("a2")]
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), workers)
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.assign_task_to_agent("t2", "a2")
+
+    swarm.run(max_rounds=1)
+
+    # Both merged in the same round ⇒ both crossed the barrier ⇒ implementation genuinely ran
+    # concurrently (a serial loop would have left at least one task bounced for revision).
+    assert graph.get_task("t1").status == TaskStatus.MERGED
+    assert graph.get_task("t2").status == TaskStatus.MERGED
+
+
+def test_implementation_fanout_uses_distinct_worktree_paths(tmp_path):
+    """Each worker's run_implement receives its own worktree path — never self.path or another
+    worker's path — proving branch/file isolation holds under the concurrent fan-out."""
+
+    class _PathRecordingWorker:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+            self.stack_spec = StackSpec(name=agent_id, tools_services=[])
+            self.paths_seen: List[Any] = []
+
+        def run_implement(self, task, path, repo_context=""):
+            self.paths_seen.append(path)
+            return {
+                "status": "in_review",
+                "feature_branch": f"feature/{task.id}",
+                "changes_summary": f"did {task.id}",
+                "files_to_create_or_edit": [],
+                "error": None,
+            }
+
+    workers = [_PathRecordingWorker("a1"), _PathRecordingWorker("a2")]
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), workers)
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.assign_task_to_agent("t2", "a2")
+
+    swarm.run(max_rounds=1)
+
+    path_a1 = workers[0].paths_seen[0]
+    path_a2 = workers[1].paths_seen[0]
+    assert path_a1 != path_a2
+    assert path_a1 == swarm._worktrees.path_for("a1")
+    assert path_a2 == swarm._worktrees.path_for("a2")
+    assert path_a1 != swarm.path
+    assert path_a2 != swarm.path
+
+
+def test_implementation_fanout_exception_fails_only_that_task_once(tmp_path, monkeypatch):
+    """An exception raised by one worker's run_implement is contained: that task is bounced for
+    another attempt (not crashed/aborted), while the other worker's task still reaches review and
+    merges normally in the same round."""
+    _patch_git(monkeypatch)
+
+    class _BoomWorker:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+            self.stack_spec = StackSpec(name=agent_id, tools_services=[])
+            self.calls = 0
+
+        def run_implement(self, task, path, repo_context=""):
+            self.calls += 1
+            raise RuntimeError("implementation blew up")
+
+    class _OkWorker:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+            self.stack_spec = StackSpec(name=agent_id, tools_services=[])
+
+        def run_implement(self, task, path, repo_context=""):
+            return {
+                "status": "in_review",
+                "feature_branch": f"feature/{task.id}",
+                "changes_summary": f"did {task.id}",
+                "files_to_create_or_edit": [],
+                "error": None,
+            }
+
+    boom = _BoomWorker("a1")
+    ok = _OkWorker("a2")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [boom, ok])
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.assign_task_to_agent("t2", "a2")
+
+    swarm.run(max_rounds=1)
+
+    # t1's worker crashed: bounced for another attempt, not aborted, and did not corrupt the round.
+    assert graph.get_task("t1").status == TaskStatus.IN_PROGRESS
+    assert graph.get_task("t1").revision_count == 1
+    assert boom.calls == 1
+    # t2's worker succeeded normally, reached review, and merged (Tech Lead approves).
+    assert graph.get_task("t2").status == TaskStatus.MERGED
+
+
+def test_implementation_fanout_suppresses_per_task_progress(tmp_path):
+    """Concurrent workers don't emit per-task 'Implementing: ...' status text (it would race); one
+    aggregate message is emitted before the round fans out instead."""
+    workers = [StubWorker("a1"), StubWorker("a2")]
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), workers)
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.assign_task_to_agent("t2", "a2")
+
+    updates: List[Dict[str, Any]] = []
+    swarm.run(max_rounds=1, update_fn=lambda **kw: updates.append(kw))
+
+    per_task_texts = [
+        u.get("status_text")
+        for u in updates
+        if (u.get("status_text") or "").startswith("Implementing: ")
+    ]
+    assert per_task_texts == []  # suppressed in the concurrent path
+    assert any("Implementing 2 task(s)" in (u.get("status_text") or "") for u in updates)
+
+
+def test_solo_worker_implementation_keeps_live_progress(tmp_path, monkeypatch):
+    """With only one active worker this round, implementation still runs inline with live
+    per-phase status text — unchanged from the pre-fanout behavior."""
+    _patch_git(monkeypatch)
+    worker = StubWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+
+    updates: List[Dict[str, Any]] = []
+    swarm.run(max_rounds=1, update_fn=lambda **kw: updates.append(kw))
+
+    assert any(u.get("status_text") == "Implementing: T1" for u in updates)
+    assert graph.get_task("t1").status == TaskStatus.MERGED
+
+
+def test_implementation_concurrency_env_parsing(monkeypatch):
+    """CODING_TEAM_IMPLEMENTATION_CONCURRENCY: default when unset/garbage, floored at 1, honored
+    otherwise."""
+    monkeypatch.delenv("CODING_TEAM_IMPLEMENTATION_CONCURRENCY", raising=False)
+    assert orch_mod._implementation_concurrency() == orch_mod.IMPLEMENTATION_CONCURRENCY
+    monkeypatch.setenv("CODING_TEAM_IMPLEMENTATION_CONCURRENCY", "not-a-number")
+    assert orch_mod._implementation_concurrency() == orch_mod.IMPLEMENTATION_CONCURRENCY
+    monkeypatch.setenv("CODING_TEAM_IMPLEMENTATION_CONCURRENCY", "0")
+    assert (
+        orch_mod._implementation_concurrency() == 1
+    )  # floored so implementation always progresses
+    monkeypatch.setenv("CODING_TEAM_IMPLEMENTATION_CONCURRENCY", "7")
+    assert orch_mod._implementation_concurrency() == 7
+
+
+def test_run_cleans_up_worktrees_on_normal_completion(tmp_path, monkeypatch):
+    _patch_git(monkeypatch)
+    worker = StubWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+
+    swarm.run(max_rounds=5)
+
+    assert graph.get_task("t1").status == TaskStatus.MERGED
+    assert swarm._worktrees.cleanup_calls >= 1
+
+
+def test_run_reports_failure_and_cleans_up_when_worktree_prepare_fails(tmp_path):
+    """A WorktreeManager.prepare() failure fails the job cleanly (status=failed, aborted=True)
+    instead of propagating an unhandled exception out of run(), and still cleans up."""
+    worker = StubWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+
+    class _ExplodingWorktrees:
+        def __init__(self):
+            self.cleanup_calls = 0
+
+        def prepare(self):
+            raise RuntimeError("disk full")
+
+        def path_for(self, agent_id):
+            raise AssertionError("must not be reached")
+
+        def cleanup(self):
+            self.cleanup_calls += 1
+
+    swarm._worktrees = _ExplodingWorktrees()
+    updates: List[Dict[str, Any]] = []
+
+    swarm.run(max_rounds=5, update_fn=lambda **kw: updates.append(kw))
+
+    assert swarm.aborted is True
+    assert updates[-1]["status"] == "failed"
+    assert swarm._worktrees.cleanup_calls == 1
+    assert graph.get_task("t1").status == TaskStatus.TO_DO  # never even attempted
 
 
 # ----------------------------------------------------- repo-context incremental cache

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -619,6 +620,111 @@ def delete_branch(repo_path: str | Path, branch: str) -> Tuple[bool, str]:
     return True, f"Deleted branch {branch}"
 
 
+def add_worktree(
+    repo_path: str | Path, worktree_path: str | Path, ref: str = DEVELOPMENT_BRANCH
+) -> Tuple[bool, str]:
+    """Create a linked worktree at worktree_path, detached at ref's current commit.
+
+    ``--detach`` checks out ref's commit without attaching HEAD to ref's branch
+    name, so this never contends with ref already being attached (checked out)
+    in repo_path or any other linked worktree of the same repository — git only
+    refuses to *attach* HEAD to a branch name that is attached elsewhere;
+    reading its tip commit as a start point (as this, and a caller's subsequent
+    ``create_feature_branch``, do) is not restricted.
+
+    Preconditions:
+        - repo_path is an existing, non-bare git repository; ref names an
+          existing branch or commit-ish reachable in repo_path.
+    Postconditions:
+        - On success: worktree_path is a linked worktree of repo_path with a
+          detached HEAD at ref's current commit; returns (True, str(worktree_path)).
+          A stale worktree_path left by a prior abnormal exit (directory and/or
+          admin-area registration lingering from a crashed run) is pruned and
+          one retry is attempted before failing, so this call is idempotent
+          against crash residue.
+        - On failure returns (False, message); repo_path's own HEAD and
+          working tree are never modified.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    wt_path = Path(worktree_path).resolve()
+    wt_path.parent.mkdir(parents=True, exist_ok=True)
+
+    code, out = _run_git(path, ["git", "worktree", "add", "--detach", str(wt_path), ref])
+    if code == 0:
+        return True, str(wt_path)
+
+    # Stale registration/directory from a crashed prior run — clear any leftover
+    # directory first, THEN prune (pruning before removing a directory that still
+    # exists is a no-op, since git only prunes registrations whose directory is
+    # already gone; the order here matters), then retry once before giving up.
+    if wt_path.exists():
+        shutil.rmtree(wt_path, ignore_errors=True)
+    _run_git(path, ["git", "worktree", "prune"])
+    code, out = _run_git(path, ["git", "worktree", "add", "--detach", str(wt_path), ref])
+    if code != 0:
+        return False, f"Failed to add worktree at {wt_path}: {out}"
+    return True, str(wt_path)
+
+
+def remove_worktree(
+    repo_path: str | Path, worktree_path: str | Path, *, force: bool = True
+) -> Tuple[bool, str]:
+    """Remove a linked worktree and prune its administrative-area entry.
+
+    Preconditions:
+        - repo_path is any worktree (main or linked) of the repository whose
+          ``.git/worktrees/`` area tracks worktree_path.
+    Postconditions:
+        - worktree_path no longer exists on disk and is no longer listed by
+          ``git worktree list``; returns (True, message). A worktree_path that
+          is already gone is treated as success (idempotent — safe to call
+          from a best-effort cleanup path). ``force=True`` (default) removes
+          even with uncommitted changes in the worktree (any real task work is
+          already a commit on its feature branch; worktree-local scratch is
+          disposable). Never raises: a failed ``git worktree remove`` falls
+          back to a filesystem ``rmtree`` plus ``git worktree prune``.
+    """
+    path = Path(repo_path).resolve()
+    wt_path = Path(worktree_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    if not wt_path.exists():
+        _run_git(path, ["git", "worktree", "prune"])
+        return True, f"{wt_path} already removed"
+    cmd = ["git", "worktree", "remove"]
+    if force:
+        cmd.append("--force")
+    cmd.append(str(wt_path))
+    code, out = _run_git(path, cmd)
+    if code == 0:
+        return True, f"Removed worktree {wt_path}"
+    # Fall back to a plain filesystem removal + prune so cleanup never blocks on git.
+    shutil.rmtree(wt_path, ignore_errors=True)
+    _run_git(path, ["git", "worktree", "prune"])
+    if wt_path.exists():
+        return False, f"Failed to remove worktree {wt_path}: {out}"
+    return True, f"Removed worktree {wt_path} via filesystem fallback"
+
+
+def prune_worktrees(repo_path: str | Path) -> Tuple[bool, str]:
+    """Run ``git worktree prune`` to drop admin-area entries for missing worktrees.
+
+    Postconditions:
+        - Returns (True, message) on success or when repo_path is not a git
+          repository (no-op); (False, message) only on an actual git failure.
+          Never raises.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return True, "Not a git repository (no-op)"
+    code, out = _run_git(path, ["git", "worktree", "prune"])
+    if code != 0:
+        return False, f"git worktree prune failed: {out}"
+    return True, "Pruned stale worktree entries"
+
+
 # Cap on referrers listed per deletion before an explicit truncation marker is
 # appended (the count is always shown, so nothing is silently hidden).
 _MAX_REFERRERS_LISTED = 25
@@ -909,6 +1015,26 @@ def initialize_new_repo(
         return False, f"Create development branch failed: {out}"
     logger.info("Initialized new repo at %s with development branch", path)
     return True, f"Initialized repo at {path}; on branch {DEVELOPMENT_BRANCH}"
+
+
+def development_branch_exists(repo_path: str | Path) -> bool:
+    """True iff DEVELOPMENT_BRANCH resolves as a local branch in repo_path.
+
+    A pure ref read (``git show-ref --verify --quiet refs/heads/<branch>``);
+    never checks out or mutates anything, so it is safe to call from any
+    worktree regardless of what branch is attached (checked out) elsewhere.
+
+    Postconditions:
+        - Returns True iff the ref resolves; False when absent or repo_path is
+          not a git repository. Never raises.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False
+    code, _ = _run_git(
+        path, ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{DEVELOPMENT_BRANCH}"]
+    )
+    return code == 0
 
 
 def ensure_development_branch(repo_path: str | Path) -> Tuple[bool, str]:

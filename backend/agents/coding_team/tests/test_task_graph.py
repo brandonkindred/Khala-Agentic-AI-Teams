@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from coding_team.models import TaskStatus
@@ -363,3 +366,83 @@ def test_reset_failed_recovers_cascade_failed_dependents() -> None:
     assert tg.get_task("root").status == TaskStatus.TO_DO
     assert tg.get_task("dep").status == TaskStatus.TO_DO
     assert tg.count_with_status(TaskStatus.FAILED) == 0
+
+
+def test_concurrent_assign_to_same_agent_never_double_assigns() -> None:
+    """N threads racing assign_task_to_agent for the SAME free agent must leave exactly one
+    winner — the lock closes the read-then-write window in assign_task_to_agent (check
+    self._agent_to_task, then mutate it) that would otherwise let two threads both observe
+    "no current task" and both succeed.
+    """
+    tg = TaskGraphService(job_id="j1")
+    n = 20
+    for i in range(n):
+        tg.add_task(f"t{i}", title=f"T{i}")
+    barrier = threading.Barrier(n)
+
+    def _assign(i: int) -> bool:
+        barrier.wait(timeout=10)
+        return tg.assign_task_to_agent(f"t{i}", "agent-a")
+
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        results = list(pool.map(_assign, range(n)))
+
+    assert sum(results) == 1
+    # The graph itself must be self-consistent: exactly one task IN_PROGRESS and mapped to
+    # agent-a; the rest remain untouched TO_DO.
+    in_progress = [t for t in tg.get_tasks() if t.status == TaskStatus.IN_PROGRESS]
+    assert len(in_progress) == 1
+    assert tg.get_task_for_agent("agent-a").id == in_progress[0].id
+    assert sum(1 for t in tg.get_tasks() if t.status == TaskStatus.TO_DO) == n - 1
+
+
+def test_concurrent_update_task_across_distinct_tasks_loses_no_updates() -> None:
+    """N threads each mutating a DIFFERENT task concurrently must all land — proves the lock
+    serializes dict mutation (self._tasks) without silently dropping a concurrent writer's
+    update, which an unsynchronized dict could under contended insert/update patterns.
+    """
+    tg = TaskGraphService(job_id="j1")
+    n = 50
+    for i in range(n):
+        tg.add_task(f"t{i}", title=f"T{i}")
+    barrier = threading.Barrier(n)
+
+    def _update(i: int) -> None:
+        barrier.wait(timeout=10)
+        tg.update_task(f"t{i}", changes_summary=f"summary-{i}", revision_count=i)
+
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        list(pool.map(_update, range(n)))
+
+    for i in range(n):
+        task = tg.get_task(f"t{i}")
+        assert task.changes_summary == f"summary-{i}"
+        assert task.revision_count == i
+
+
+def test_concurrent_mark_branch_merged_and_mark_dependents_failed_stay_consistent() -> None:
+    """A cascade-fail racing concurrently with an unrelated task's merge must never corrupt
+    the agent->task map or leave an inconsistent status for either task.
+    """
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("root", title="Root")
+    tg.add_task("dep", title="Dependent", dependencies=["root"])
+    tg.add_task("unrelated", title="Unrelated")
+    tg.assign_task_to_agent("unrelated", "agent-b")
+    tg.update_task("root", status=TaskStatus.FAILED)
+    barrier = threading.Barrier(2)
+
+    def _cascade() -> None:
+        barrier.wait(timeout=10)
+        tg.mark_dependents_failed("root")
+
+    def _merge_unrelated() -> None:
+        barrier.wait(timeout=10)
+        tg.mark_branch_merged("unrelated")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda fn: fn(), [_cascade, _merge_unrelated]))
+
+    assert tg.get_task("dep").status == TaskStatus.FAILED
+    assert tg.get_task("unrelated").status == TaskStatus.MERGED
+    assert tg.get_task_for_agent("agent-b") is None

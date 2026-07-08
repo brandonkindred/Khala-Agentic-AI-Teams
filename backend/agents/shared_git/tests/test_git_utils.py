@@ -1,0 +1,290 @@
+"""Tests for the git-worktree primitives added to :mod:`shared_git.git_utils`.
+
+These exercise real ``git`` subprocesses against a ``tmp_path`` repository
+rather than mocking git calls: worktree isolation is the entire point of the
+feature these helpers support (issue: parallelize coding_team implementation
+workers via per-worker git worktrees), so the tests need to prove real git
+checkout-exclusivity semantics hold, not just that the expected subprocess
+command string was built.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from shared_git.git_utils import (
+    DEVELOPMENT_BRANCH,
+    add_worktree,
+    checkout_branch,
+    create_feature_branch,
+    development_branch_exists,
+    ensure_development_branch,
+    initialize_new_repo,
+    prune_worktrees,
+    remove_worktree,
+)
+
+
+def _init_repo(path: Path) -> None:
+    ok, msg = initialize_new_repo(path)
+    assert ok, msg
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    path = tmp_path / "repo"
+    _init_repo(path)
+    return path
+
+
+def test_development_branch_exists_true_after_init(repo: Path) -> None:
+    assert development_branch_exists(repo) is True
+
+
+def test_development_branch_exists_false_before_creation(tmp_path: Path) -> None:
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    subprocess.run(["git", "init"], cwd=fresh, capture_output=True, check=True)
+    assert development_branch_exists(fresh) is False
+
+
+def test_development_branch_exists_false_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    assert development_branch_exists(not_a_repo) is False
+
+
+def test_add_worktree_creates_linked_worktree_detached_at_ref(repo: Path) -> None:
+    wt_path = repo.parent / "wt1"
+    ok, msg = add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    assert ok, msg
+    assert wt_path.exists()
+    assert (wt_path / ".git").exists()
+    # Detached HEAD, not attached to development: `git symbolic-ref` fails.
+    result = subprocess.run(
+        ["git", "symbolic-ref", "-q", "HEAD"], cwd=wt_path, capture_output=True, text=True
+    )
+    assert result.returncode != 0
+
+
+def test_add_worktree_fails_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    ok, msg = add_worktree(not_a_repo, tmp_path / "wt")
+    assert not ok
+    assert "Not a git repository" in msg
+
+
+def test_add_worktree_self_heals_stale_directory(repo: Path) -> None:
+    """A leftover directory from a crashed prior run (unregistered with git)
+    is cleared and the worktree is created fresh on retry."""
+    wt_path = repo.parent / "wt-stale"
+    wt_path.mkdir(parents=True)
+    (wt_path / "leftover.txt").write_text("stale", encoding="utf-8")
+
+    ok, msg = add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    assert ok, msg
+    assert (wt_path / ".git").exists()
+    assert not (wt_path / "leftover.txt").exists()
+
+
+def test_create_feature_branch_succeeds_in_worktree_while_development_checked_out_elsewhere(
+    repo: Path,
+) -> None:
+    """The crux claim this whole design rests on: creating a feature branch in
+    a linked worktree (via ``git checkout -b <new> development``) succeeds even
+    while ``development`` remains attached (checked out) at the main repo path.
+    """
+    # repo is already on `development` (initialize_new_repo leaves it checked out).
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
+    )
+    assert result.stdout.strip() == DEVELOPMENT_BRANCH
+
+    wt_path = repo.parent / "wt-feature"
+    ok, msg = add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    assert ok, msg
+
+    # development is STILL checked out at repo while we branch in the worktree.
+    ok, branch_name = create_feature_branch(wt_path, DEVELOPMENT_BRANCH, "t1-my-task")
+    assert ok, branch_name
+    assert branch_name == "feature/t1-my-task"
+
+    # repo's own checkout is untouched.
+    result = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True
+    )
+    assert result.stdout.strip() == DEVELOPMENT_BRANCH
+
+
+def test_ensure_development_branch_would_conflict_in_a_second_worktree(repo: Path) -> None:
+    """Documents the conflict this design avoids: calling
+    ``ensure_development_branch`` (what the old ``_ensure_development_ready``
+    path did unconditionally) fails in a second worktree while `development`
+    is checked out at the main path. ``git branch -a`` marks a branch checked
+    out in *another* worktree with a ``+`` prefix (not `*`/plain), which this
+    function's existing parsing does not strip, so it fails to recognize
+    development as existing and attempts to recreate it — colliding with the
+    ref that already exists. Either way the call fails here, which is exactly
+    why callers must use ``development_branch_exists`` to skip it entirely
+    once the branch is already present, rather than fix this parsing.
+    """
+    wt_path = repo.parent / "wt-conflict"
+    ok, msg = add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    assert ok, msg
+
+    ok, msg = ensure_development_branch(wt_path)
+    assert not ok, msg
+
+
+def test_checkout_branch_is_idempotent_on_worktree_already_on_that_branch(repo: Path) -> None:
+    wt_path = repo.parent / "wt-idempotent"
+    add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    ok, _ = create_feature_branch(wt_path, DEVELOPMENT_BRANCH, "t2")
+    assert ok
+    # Re-checking-out the branch the worktree is already on is a harmless no-op.
+    ok, msg = checkout_branch(wt_path, "feature/t2")
+    assert ok, msg
+
+
+def test_remove_worktree_deletes_directory_and_deregisters(repo: Path) -> None:
+    wt_path = repo.parent / "wt-remove"
+    add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    assert wt_path.exists()
+
+    ok, msg = remove_worktree(repo, wt_path)
+    assert ok, msg
+    assert not wt_path.exists()
+
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"], cwd=repo, capture_output=True, text=True
+    )
+    assert str(wt_path) not in result.stdout
+
+
+def test_remove_worktree_is_idempotent_when_already_gone(repo: Path) -> None:
+    wt_path = repo.parent / "wt-gone"
+    ok, msg = remove_worktree(repo, wt_path)
+    assert ok, msg
+
+
+def test_remove_worktree_force_removes_dirty_worktree(repo: Path) -> None:
+    wt_path = repo.parent / "wt-dirty"
+    add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    (wt_path / "scratch.txt").write_text("uncommitted", encoding="utf-8")
+
+    ok, msg = remove_worktree(repo, wt_path, force=True)
+    assert ok, msg
+    assert not wt_path.exists()
+
+
+def test_prune_worktrees_clears_stale_registration_after_manual_rmtree(repo: Path) -> None:
+    import shutil
+
+    wt_path = repo.parent / "wt-manual-remove"
+    add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    shutil.rmtree(wt_path)  # simulate an external deletion, bypassing git
+
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"], cwd=repo, capture_output=True, text=True
+    )
+    assert str(wt_path) in result.stdout  # still registered (prunable) before prune
+
+    ok, msg = prune_worktrees(repo)
+    assert ok, msg
+
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"], cwd=repo, capture_output=True, text=True
+    )
+    assert str(wt_path) not in result.stdout
+
+
+def test_prune_worktrees_noop_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    ok, msg = prune_worktrees(not_a_repo)
+    assert ok, msg
+
+
+def test_add_worktree_fails_after_retry_when_ref_does_not_exist(repo: Path) -> None:
+    """A genuinely bad ref fails both the first attempt and the self-heal retry."""
+    wt_path = repo.parent / "wt-bad-ref"
+    ok, msg = add_worktree(repo, wt_path, ref="no-such-branch")
+    assert not ok
+    assert "Failed to add worktree" in msg
+
+
+def test_remove_worktree_fails_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    ok, msg = remove_worktree(not_a_repo, tmp_path / "wt")
+    assert not ok
+    assert "Not a git repository" in msg
+
+
+def test_remove_worktree_falls_back_to_filesystem_when_git_does_not_recognize_it(
+    repo: Path,
+) -> None:
+    """A directory git doesn't track as one of its worktrees still gets cleaned up via the
+    filesystem-rmtree fallback (git worktree remove fails, but removal still succeeds)."""
+    untracked_dir = repo.parent / "not-a-real-worktree"
+    untracked_dir.mkdir()
+    (untracked_dir / "file.txt").write_text("x", encoding="utf-8")
+
+    ok, msg = remove_worktree(repo, untracked_dir)
+
+    assert ok, msg
+    assert "filesystem fallback" in msg
+    assert not untracked_dir.exists()
+
+
+def test_remove_worktree_reports_failure_when_fallback_cannot_remove_it(
+    repo: Path, monkeypatch
+) -> None:
+    """If even the filesystem fallback can't remove the directory, remove_worktree reports failure
+    rather than claiming success."""
+    import shared_git.git_utils as git_utils_mod
+
+    untracked_dir = repo.parent / "stuck-worktree"
+    untracked_dir.mkdir()
+
+    monkeypatch.setattr(git_utils_mod.shutil, "rmtree", lambda *a, **k: None)  # no-op: never removes
+
+    ok, msg = remove_worktree(repo, untracked_dir)
+
+    assert not ok
+    assert "Failed to remove worktree" in msg
+
+
+def test_prune_worktrees_reports_git_failure(repo: Path, monkeypatch) -> None:
+    import shared_git.git_utils as git_utils_mod
+
+    monkeypatch.setattr(git_utils_mod, "_run_git", lambda *a, **k: (1, "boom"))
+
+    ok, msg = prune_worktrees(repo)
+
+    assert not ok
+    assert "git worktree prune failed" in msg
+
+
+def test_multiple_worktrees_have_independent_feature_branches(repo: Path) -> None:
+    """Two workers' worktrees can each create and hold a distinct feature
+    branch concurrently-in-spirit (sequential here, but proving no shared
+    working-tree state leaks between them)."""
+    wt_a = repo.parent / "wt-a"
+    wt_b = repo.parent / "wt-b"
+    add_worktree(repo, wt_a, ref=DEVELOPMENT_BRANCH)
+    add_worktree(repo, wt_b, ref=DEVELOPMENT_BRANCH)
+
+    ok_a, branch_a = create_feature_branch(wt_a, DEVELOPMENT_BRANCH, "task-a")
+    ok_b, branch_b = create_feature_branch(wt_b, DEVELOPMENT_BRANCH, "task-b")
+    assert ok_a and ok_b
+    assert branch_a != branch_b
+
+    (wt_a / "a.txt").write_text("a", encoding="utf-8")
+    (wt_b / "b.txt").write_text("b", encoding="utf-8")
+    assert not (wt_a / "b.txt").exists()
+    assert not (wt_b / "a.txt").exists()

@@ -62,6 +62,7 @@ from coding_team.worker_factory import (
     _build_implementation_worker,
     _v2_text_mode_llm,  # noqa: F401 - re-exported, test-imported
 )
+from coding_team.worktree_manager import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,32 @@ def _review_concurrency() -> int:
     from shared_env import parse_int
 
     return parse_int("CODING_TEAM_REVIEW_CONCURRENCY", REVIEW_CONCURRENCY, minimum=1)
+
+
+# Max implementation workers dispatched concurrently in one round. Each worker operates in its
+# own git worktree (see coding_team.worktree_manager), so concurrent workers no longer share (and
+# corrupt) a single working tree. The effective pool is min(this, number of workers with an
+# assigned task this round) — the default 2-worker roster (frontend_v2/backend_v2) rarely reaches
+# this ceiling.
+IMPLEMENTATION_CONCURRENCY = 4
+
+
+def _implementation_concurrency() -> int:
+    """Max concurrent implementation workers per round.
+
+    Configurable via CODING_TEAM_IMPLEMENTATION_CONCURRENCY (default 4; garbage/empty → default;
+    floored at 1 so implementation always makes progress even if the value is set to 0/negative).
+
+    Preconditions:
+        - None (reads only the optional environment variable).
+    Postconditions:
+        - Returns an int >= 1.
+    """
+    from shared_env import parse_int
+
+    return parse_int(
+        "CODING_TEAM_IMPLEMENTATION_CONCURRENCY", IMPLEMENTATION_CONCURRENCY, minimum=1
+    )
 
 
 class _NoopBridge:
@@ -767,6 +794,10 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         # Repo context only changes when merged work lands new files on the working tree, so cache
         # the merged-task count the context reflects and re-read only when it advances (see run()).
         self._context_merged_count = self._merged_count()
+        # One isolated git worktree per worker (see coding_team.worktree_manager) — created up
+        # front in run(), never lazily from inside a worker thread. Construction itself does no
+        # filesystem/git I/O.
+        self._worktrees = WorktreeManager(path, agent_ids)
 
     def _is_complete(self) -> bool:
         tasks = self.graph.get_tasks()
@@ -788,48 +819,91 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         ``pause_for_questions`` is the bound HITL gate used to escalate a worker-raised decision to
         the user; when omitted, a worker that raises a decision fails its task closed (no silent
         decide). The loop stops early if a pause ends without answers (``self.aborted``).
+
+        Postconditions:
+            - Every worker's git worktree (see WorktreeManager) is removed before this method
+              returns, on every exit path (normal completion, cancellation, abort, a worktree-setup
+              failure, or an unexpected exception) — the worktree lifecycle is scoped exactly to
+              one run() call.
         """
         _update = update_fn or (lambda **kw: None)
         _persist = persist_fn or (lambda: None)
         self.pause_for_questions = pause_for_questions
 
-        for round_num in range(max_rounds):
-            if check_cancel and check_cancel():
-                _update(status="cancelled", status_text="Cancelled by user")
+        try:
+            try:
+                self._worktrees.prepare()
+            except Exception as exc:  # noqa: BLE001 - a broken worktree setup fails the job, not the process
+                logger.exception("Failed to prepare implementation-worker git worktrees")
+                _update(
+                    status="failed",
+                    phase="completed",
+                    status_text="Could not prepare implementation-worker git worktrees",
+                    error=str(exc),
+                )
+                self.aborted = True
                 return
 
-            # Refresh the repo context when merged work has landed since the last read. The merged
-            # count is the right signal here: a task's files become part of the shared/integrated
-            # tree only once it merges (work in progress lives on per-worker feature branches), and
-            # a dependent task is not assignable until its dependencies are MERGED — so it always
-            # sees its prerequisites' code. This avoids a full repo walk on every idle round (e.g.
-            # while tasks sit in review or blocked); a one-time snapshot at construction would make a
-            # worker blind to earlier merged work and recreate it.
-            merged_now = self._merged_count()
-            if merged_now != self._context_merged_count:
-                self.repo_context = self._repo_context_cache.read(self.path)
-                self._context_merged_count = merged_now
+            for round_num in range(max_rounds):
+                if check_cancel and check_cancel():
+                    _update(status="cancelled", status_text="Cancelled by user")
+                    return
 
-            # Coordinator: assign ready tasks to free workers
-            ready = self._find_ready_tasks()
-            free = self._find_free_agents()
-            self._assign_tasks(ready, free)
-            _persist()
+                # Refresh the repo context when merged work has landed since the last read. The
+                # merged count is the right signal here: a task's files become part of the
+                # shared/integrated tree only once it merges (work in progress lives on per-worker
+                # feature branches), and a dependent task is not assignable until its dependencies
+                # are MERGED — so it always sees its prerequisites' code. This avoids a full repo
+                # walk on every idle round (e.g. while tasks sit in review or blocked); a one-time
+                # snapshot at construction would make a worker blind to earlier merged work.
+                merged_now = self._merged_count()
+                if merged_now != self._context_merged_count:
+                    self.repo_context = self._repo_context_cache.read(self.path)
+                    self._context_merged_count = merged_now
 
-            # Workers: implement + quality gates
-            for swe in self.workers:
-                self._implement_and_verify(swe, _update)
+                # Coordinator: assign ready tasks to free workers
+                ready = self._find_ready_tasks()
+                free = self._find_free_agents()
+                self._assign_tasks(ready, free)
+                _persist()
+
+                # Workers: implement + quality gates, each isolated to its own git worktree.
+                # Reviews already fan out this way (see _review_and_merge) — compute concurrently
+                # when there is more than one active worker this round, run inline with live
+                # progress when there is at most one (the common case: the roster is usually
+                # 2 workers with disjoint stacks, and a round rarely has both active at once).
+                active = [
+                    swe
+                    for swe in self.workers
+                    if (task := self.graph.get_task_for_agent(swe.agent_id)) is not None
+                    and task.status == TaskStatus.IN_PROGRESS
+                ]
+                if len(active) <= 1:
+                    for swe in active:
+                        self._implement_and_verify(swe, _update)
+                        if self.aborted:
+                            break
+                else:
+                    from shared_concurrency import parallel_map
+
+                    _update(status_text=f"Implementing {len(active)} task(s)")
+                    parallel_map(
+                        active,
+                        lambda swe: self._implement_and_verify(swe, _update, live_progress=False),
+                        max_workers=_implementation_concurrency(),
+                        skip_none=False,
+                    )
+                _persist()
+                # A worker escalation that ended without answers aborts the loop; the orchestrator
+                # sees self.aborted and does not report the job as completed.
                 if self.aborted:
+                    return
+
+                # Coordinator: review and merge
+                self._review_and_merge(_update)
+                _persist()
+
+                if self._is_complete():
                     break
-            _persist()
-            # A worker escalation that ended without answers aborts the loop; the orchestrator sees
-            # self.aborted and does not report the job as completed.
-            if self.aborted:
-                return
-
-            # Coordinator: review and merge
-            self._review_and_merge(_update)
-            _persist()
-
-            if self._is_complete():
-                break
+        finally:
+            self._worktrees.cleanup()

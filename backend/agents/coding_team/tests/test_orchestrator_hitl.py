@@ -750,6 +750,32 @@ def test_already_resolved_entry_questions_do_not_pause(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- swarm escalation (real swarm)
 
 
+class _FakeWorktreeManager:
+    """Test double for coding_team.worktree_manager.WorktreeManager.
+
+    These orchestrator tests stub the implementation workers entirely (they
+    never touch git), so a real WorktreeManager would pay for (and, without
+    _patch_git, actually attempt) real `git worktree add` calls against a
+    plain tmp_path with no `.git`. This double gives each agent_id a distinct
+    child directory under the swarm's own tmp_path instead — no git, no
+    filesystem writes outside tmp_path's own pytest-managed cleanup. Real
+    worktree mechanics are covered by test_worktree_manager.py.
+    """
+
+    def __init__(self, repo_path: Path, agent_ids):
+        self._paths = {aid: Path(repo_path) / f"_wt_{aid}" for aid in agent_ids}
+
+    def prepare(self) -> None:
+        for path in self._paths.values():
+            path.mkdir(parents=True, exist_ok=True)
+
+    def path_for(self, agent_id: str) -> Path:
+        return self._paths[agent_id]
+
+    def cleanup(self) -> None:
+        pass
+
+
 def _make_swarm(tmp_path, tech_lead, workers):
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
@@ -760,6 +786,8 @@ def _make_swarm(tmp_path, tech_lead, workers):
         agent_ids=[w.agent_id for w in workers],
         llm_getter=lambda k: None,
     )
+    swarm._worktrees = _FakeWorktreeManager(swarm.path, [w.agent_id for w in workers])
+    swarm._worktrees.prepare()
     swarm._run_quality_gates = lambda *a, **k: True  # type: ignore[method-assign]
     return swarm, graph
 
