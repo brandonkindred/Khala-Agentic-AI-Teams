@@ -181,48 +181,62 @@ def _code_review_step(
 
     Postconditions:
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
-          to the LLM reviewer, matching this step's long-standing solo behavior — this must stay
+          to the LLM reviewer, matching this step's long-standing solo behavior. The LLM fallback
+          itself (used both here and when ``code_review_agent`` is None) is also guarded — any
+          outright failure there is reported as a synthetic high-severity issue rather than
+          propagating, mirroring ``_qa_review_step``/``_security_review_step``. This must stay
           true when fanned out concurrently alongside the QA/security steps (see
           ``_review_steps_run_sequentially``'s caller), since one step raising must never drop
           the other two steps' issues.
     """
-    if code_review_agent is None:
-        return _run_llm_review(llm=llm, task=task, files=files)
     try:
-        from code_review_agent.models import CodeReviewInput as _CRInput
+        if code_review_agent is None:
+            return _run_llm_review(llm=llm, task=task, files=files)
+        try:
+            from code_review_agent.models import CodeReviewInput as _CRInput
 
-        # files= keeps per-file attribution and lets the coordinator bound
-        # its own prompts — no header parsing, no upstream truncation.
-        cr_input = _CRInput(
-            files=files,
-            task_description=task_description,
-            task_requirements=task.requirements or "",
-            acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
-            language=language,
-        )
-        cr_result = call_code_review_agent(
-            code_review_agent,
-            cr_input,
-            detail_callback,
-            repo_reader=build_disk_repo_reader(repo_path),
-        )
+            # files= keeps per-file attribution and lets the coordinator bound
+            # its own prompts — no header parsing, no upstream truncation.
+            cr_input = _CRInput(
+                files=files,
+                task_description=task_description,
+                task_requirements=task.requirements or "",
+                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
+                language=language,
+            )
+            cr_result = call_code_review_agent(
+                code_review_agent,
+                cr_input,
+                detail_callback,
+                repo_reader=build_disk_repo_reader(repo_path),
+            )
+            return [
+                ReviewIssue(
+                    source="code_review",
+                    severity=getattr(item, "severity", "medium"),
+                    description=getattr(item, "description", str(item)),
+                    file_path=getattr(item, "file_path", ""),
+                    recommendation=getattr(item, "recommendation", ""),
+                )
+                for item in getattr(cr_result, "issues", [])
+            ]
+        except Exception as exc:
+            logger.warning(
+                "[%s] Code review agent failed: %s. Next step -> Using LLM fallback for code review",
+                task_id,
+                exc,
+            )
+            return _run_llm_review(llm=llm, task=task, files=files)
+    except Exception as exc:
+        logger.warning("[%s] Code review step failed outright: %s", task_id, exc)
         return [
             ReviewIssue(
                 source="code_review",
-                severity=getattr(item, "severity", "medium"),
-                description=getattr(item, "description", str(item)),
-                file_path=getattr(item, "file_path", ""),
-                recommendation=getattr(item, "recommendation", ""),
+                severity="high",
+                description=f"Code review could not complete: {exc}",
+                recommendation="Investigate and re-run code review; findings from this run are incomplete.",
             )
-            for item in getattr(cr_result, "issues", [])
         ]
-    except Exception as exc:
-        logger.warning(
-            "[%s] Code review agent failed: %s. Next step -> Using LLM fallback for code review",
-            task_id,
-            exc,
-        )
-        return _run_llm_review(llm=llm, task=task, files=files)
 
 
 def _qa_review_step(
@@ -313,10 +327,20 @@ def _review_steps_run_sequentially(llm: LLMClient) -> bool:
     non-thread-safe index counter — e.g. ``test_microtask_review_gates._ScriptedTextClient``) are
     not safe to call from concurrent threads. Mirrors ``devops_team.orchestrator``'s identical
     ``use_parallel = not isinstance(self.llm, _Dummy)`` guard.
+
+    ``llm`` is not always the raw client: the coding team's default ``llm_getter`` (used by every
+    production caller of ``run_coding_team_orchestrator``) wraps it in a Strands ``LLMClientModel``
+    for reasoning-stream capture (``coding_team.reasoning_capture._make_reasoning_llm_getter``), and
+    that wrapper survives unchanged through ``worker_factory._v2_text_mode_llm``'s clone path all the
+    way to this module's ``llm`` parameter — so a bare ``isinstance(llm, DummyLLMClient)`` misses a
+    dummy client reached through that (default) path. Unwrap via the model's public ``client``
+    accessor (``LLMClientModel.client``) before checking.
     """
     from llm_service.clients.dummy import DummyLLMClient
 
-    return isinstance(llm, DummyLLMClient)
+    if isinstance(llm, DummyLLMClient):
+        return True
+    return isinstance(getattr(llm, "client", None), DummyLLMClient)
 
 
 def _run_review_steps(

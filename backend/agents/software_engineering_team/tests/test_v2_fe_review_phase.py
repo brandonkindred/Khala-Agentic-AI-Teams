@@ -723,6 +723,23 @@ def test_fe_review_steps_run_sequentially_for_dummy_llm():
     assert _review_steps_run_sequentially(MagicMock()) is False
 
 
+def test_fe_review_steps_run_sequentially_for_wrapped_dummy_llm():
+    """The coding team's default llm_getter wraps clients in a Strands LLMClientModel
+    (exposing the backing client via a `.client` property) before they reach review.py — a
+    DummyLLMClient reached only through that wrapper must still force sequential execution."""
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        _review_steps_run_sequentially,
+    )
+
+    class _FakeStrandsModelWrapper:
+        def __init__(self, client):
+            self.client = client
+
+    assert _review_steps_run_sequentially(_FakeStrandsModelWrapper(DummyLLMClient())) is True
+    assert _review_steps_run_sequentially(_FakeStrandsModelWrapper(MagicMock())) is False
+
+
 def test_fe_run_review_steps_run_concurrently(monkeypatch, tmp_path: Path):
     """code_review/QA/security must fan out — a 3-way barrier only releases if all three
     run in parallel worker threads; a sequential loop would deadlock and time out."""
@@ -815,3 +832,40 @@ def test_fe_run_review_qa_failure_does_not_drop_other_steps_issues(monkeypatch, 
 
     assert any(i.source == "security" and i.description == "sec issue" for i in result.issues)
     assert any(i.source == "qa" and i.severity == "high" for i in result.issues)
+
+
+def test_fe_run_review_code_review_llm_fallback_failure_does_not_drop_other_steps_issues(
+    monkeypatch, tmp_path: Path
+):
+    """The LLM fallback inside _code_review_step (used when there is no code_review_agent, or
+    when the external agent itself fails) must be guarded too — an outright failure there is
+    reported as a synthetic issue rather than propagating and cancelling the QA/security steps
+    still running in the same fan-out."""
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+
+    def _boom(**_kw):
+        raise RuntimeError("llm fallback exploded")
+
+    monkeypatch.setattr(review_mod, "_run_llm_review", _boom)
+
+    class _Bug:
+        severity = "low"
+        description = "qa issue"
+        location = "x.ts"
+        recommendation = "fix"
+
+    qa_agent = MagicMock()
+    qa_agent.run.return_value = MagicMock(bugs_found=[_Bug()])
+
+    result = run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.ts": "code"}),
+        repo_path=tmp_path,
+        qa_agent=qa_agent,
+        # No code_review_agent: run_review falls straight into the guarded LLM fallback.
+    )
+
+    assert any(i.source == "qa" and i.description == "qa issue" for i in result.issues)
+    assert any(i.source == "code_review" and i.severity == "high" for i in result.issues)

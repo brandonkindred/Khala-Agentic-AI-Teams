@@ -549,7 +549,22 @@ class _ImplementationMixin:
                 # Linting
                 if live_progress:
                     update_fn(status_text=f"Linting: {task.title}")
-                run_linting(worktree_path, task.id, llm_getter=self.llm_getter)
+                lint_result = run_linting(worktree_path, task.id, llm_getter=self.llm_getter)
+                if not lint_result.passed:
+                    logger.warning(
+                        "[%s] Lint failed for task %s: %d issue(s)",
+                        swe.agent_id,
+                        task.id,
+                        len(lint_result.issues),
+                    )
+                    revision_feedback = [
+                        {
+                            "type": "lint",
+                            "error": issue.get("message", str(issue)),
+                            "file_path": issue.get("file_path", ""),
+                        }
+                        for issue in lint_result.issues
+                    ] or [{"type": "lint", "error": "Linting failed with no reported issues"}]
 
         except Exception:
             # Log the full traceback, not a one-line summary: a real bug in the

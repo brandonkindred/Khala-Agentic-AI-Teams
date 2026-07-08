@@ -618,7 +618,7 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
 # ----------------------------------------------------- real quality-gate path
 
 
-def _gate_provider(*, build_ok=True, build_raises=False):
+def _gate_provider(*, build_ok=True, build_raises=False, lint_ok=True):
     """A fake CodeEngineProvider exposing just the quality-gate methods the swarm calls."""
     import types
 
@@ -629,7 +629,11 @@ def _gate_provider(*, build_ok=True, build_raises=False):
             return types.SimpleNamespace(success=build_ok, error="" if build_ok else "boom build")
 
         def run_linting(self, *a, **k):
-            return None
+            if lint_ok:
+                return types.SimpleNamespace(passed=True, issues=[])
+            return types.SimpleNamespace(
+                passed=False, issues=[{"message": "line too long", "file_path": "x.py"}]
+            )
 
     return _FakeGateProvider()
 
@@ -683,6 +687,22 @@ def test_quality_gate_build_failure_returns_for_revision(tmp_path):
     task = graph.get_task("t1")
     assert task.status == TaskStatus.TO_DO  # returned for revision
     assert task.assigned_agent_id is None  # and unassigned
+
+
+def test_quality_gate_lint_failure_returns_for_revision(tmp_path):
+    """A failing lint result (build OK) must not be silently ignored — the task is bounced for
+    revision with the lint issues recorded, exactly like a build failure."""
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True, lint_ok=False))
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.TO_DO  # returned for revision, not merged silently
+    assert task.assigned_agent_id is None
+    assert any(
+        e.get("type") == "lint" and "line too long" in e.get("error", "")
+        for e in task.revision_feedback or []
+    )
 
 
 def test_quality_gate_tool_exception_proceeds_to_review(tmp_path):
