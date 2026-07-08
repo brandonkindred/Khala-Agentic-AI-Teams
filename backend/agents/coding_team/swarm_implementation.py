@@ -245,20 +245,31 @@ class _ImplementationMixin:
                 )
                 self.graph.mark_branch_merged(task.id)
                 return
-            try:
-                merged_ok, _ = merge_branch(self.path, branch, DEVELOPMENT_BRANCH)
-            except Exception as e:  # noqa: BLE001 — a raised merge is a failed merge, handled below
-                logger.warning("Merge of adjudicated-done branch %s raised: %s", task.id, e)
-                merged_ok = False
+            # merge_branch/abort_merge mutate the SHARED checkout (self.path) — a concurrent
+            # `git checkout`+`git merge` from another worker's own no-change escalation in the
+            # same round's fan-out (see orchestrator.run's parallel_map over active workers)
+            # would race against this one on the same working directory/index. self._merge_lock
+            # serializes only this git-mutating span so unrelated workers keep running fully
+            # concurrently; _review_and_merge's own merges never overlap this fan-out (the round
+            # loop runs it only after parallel_map returns), so it does not need this lock too.
+            with self._merge_lock:
+                try:
+                    merged_ok, _ = merge_branch(self.path, branch, DEVELOPMENT_BRANCH)
+                except Exception as e:  # noqa: BLE001 — a raised merge is a failed merge, handled below
+                    logger.warning("Merge of adjudicated-done branch %s raised: %s", task.id, e)
+                    merged_ok = False
+                if not merged_ok:
+                    # The Tech Lead judged the work done, but its branch will not integrate (merge
+                    # conflict / checkout failure). A failed `git merge` leaves DEVELOPMENT_BRANCH
+                    # mid-merge (conflict markers / MERGE_HEAD), so abort it first — otherwise later
+                    # tasks and the GitHub publish step would run on a dirty, conflicted checkout.
+                    # abort_merge is best-effort: a harmless no-op when no merge is in progress
+                    # (e.g. the checkout failed). Stays inside the lock — it mutates the same
+                    # shared checkout the merge attempt just did.
+                    abort_merge(self.path)
             if not merged_ok:
-                # The Tech Lead judged the work done, but its branch will not integrate (merge
-                # conflict / checkout failure). A failed `git merge` leaves DEVELOPMENT_BRANCH
-                # mid-merge (conflict markers / MERGE_HEAD), so abort it first — otherwise later
-                # tasks and the GitHub publish step would run on a dirty, conflicted checkout.
                 # Then FAIL the task (and cascade to dependents) to surface the gap rather than
-                # claim a success that never landed on ``development``. abort_merge is best-effort:
-                # it is a harmless no-op when no merge is in progress (e.g. the checkout failed).
-                abort_merge(self.path)
+                # claim a success that never landed on ``development``.
                 logger.warning(
                     "Adjudicated-done branch %s failed to merge into %s; aborted the merge and "
                     "marking FAILED, not merged",

@@ -789,6 +789,12 @@ class CodingTeamSwarm(_AssignmentMixin, _ImplementationMixin, _ReviewMixin):
         # swarm_implementation._escalate_decision's Concurrency note), so two workers escalating a
         # decision at once must not race it.
         self._pause_lock = threading.Lock()
+        # Serializes merge_branch/abort_merge calls against the shared checkout (self.path) made
+        # from within a worker's own no-change escalation (see
+        # swarm_implementation._escalate_to_tech_lead's Concurrency note) — two workers in the same
+        # round's fan-out can each independently hit their no-change cap and get a "done" verdict,
+        # and without this lock their merges would race the same working directory/index.
+        self._merge_lock = threading.Lock()
         # Set True when a pause ended without answers (terminal/timeout); aborts the loop and tells
         # the orchestrator not to overwrite the failure status with "completed".
         self.aborted = False

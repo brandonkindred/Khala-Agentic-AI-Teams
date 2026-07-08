@@ -1892,6 +1892,84 @@ def test_escalate_done_failed_merge_marks_failed_not_merged(tmp_path, monkeypatc
     assert aborted  # the conflicted merge was aborted before cascading
 
 
+def test_escalate_done_merge_raises_marks_failed_not_merged(tmp_path, monkeypatch):
+    """A merge_branch call that raises (rather than returning a clean failure) is treated exactly
+    like a failed merge — FAILED, cascaded, and aborted — not left to propagate out of
+    _escalate_to_tech_lead uncaught."""
+    aborted: list[Any] = []
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
+
+    def _raising_merge(*a, **k):
+        raise RuntimeError("git merge blew up")
+
+    monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", _raising_merge)
+    monkeypatch.setattr(
+        f"{GIT_UTILS}.abort_merge", lambda p, *a, **k: aborted.append(p) or (True, "aborted")
+    )
+    swarm, graph = _make_swarm(
+        tmp_path, StubTechLead(approved=False, adjudication_verdict="done"), [StubWorker("a1")]
+    )
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", feature_branch="feature/t1")
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+
+    assert graph.get_task("t1").status == TaskStatus.FAILED  # not merged
+    assert aborted  # the half-applied merge was aborted before cascading
+
+
+def test_escalate_to_tech_lead_serializes_concurrent_merges(tmp_path, monkeypatch):
+    """Two tasks independently hitting the no-change cap with a 'done' verdict in the same round
+    (see orchestrator.run's parallel_map fan-out over active workers) must not call
+    merge_branch/abort_merge on the shared checkout (self.path) concurrently — a `git checkout` +
+    `git merge` from one task racing another's on the same working directory/index could corrupt
+    it. self._merge_lock must serialize the git-mutating span so at most one merge is ever in
+    flight, mirroring the existing HITL-pause serialization (self._pause_lock)."""
+    import threading
+    import time
+
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
+
+    lock = threading.Lock()
+    concurrency = {"current": 0, "max": 0}
+
+    def _merge_branch(*a, **k):
+        with lock:
+            concurrency["current"] += 1
+            concurrency["max"] = max(concurrency["max"], concurrency["current"])
+        try:
+            time.sleep(0.05)  # give a badly-serialized implementation a real chance to overlap
+            return True, "ok"
+        finally:
+            with lock:
+                concurrency["current"] -= 1
+
+    monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", _merge_branch)
+
+    tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1"), StubWorker("a2")])
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.assign_task_to_agent("t2", "a2")
+    graph.update_task("t1", feature_branch="feature/t1")
+    graph.update_task("t2", feature_branch="feature/t2")
+
+    threads = [
+        threading.Thread(target=swarm._escalate_to_tech_lead, args=(graph.get_task(tid),))
+        for tid in ("t1", "t2")
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert concurrency["max"] == 1  # never more than one merge in flight at once
+    assert graph.get_task("t1").status == TaskStatus.MERGED
+    assert graph.get_task("t2").status == TaskStatus.MERGED
+
+
 def test_escalate_fail_marks_failed_and_cascades(tmp_path, monkeypatch):
     _patch_git(monkeypatch)
     swarm, graph = _make_swarm(
