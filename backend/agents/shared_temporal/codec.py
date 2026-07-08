@@ -126,7 +126,11 @@ class GzipPayloadCodec(PayloadCodec):
                 continue
             candidate = Payload(
                 metadata={_ENCODING_METADATA_KEY: _GZIP_ENCODING},
-                data=gzip.compress(serialized),
+                # mtime=0: gzip.compress() otherwise embeds the current wall-clock
+                # time in the header, so compressing identical bytes twice would
+                # produce different on-the-wire payloads and leak the worker's
+                # clock into workflow history.
+                data=gzip.compress(serialized, mtime=0),
             )
             if len(candidate.SerializeToString()) >= len(serialized):
                 result.append(payload)

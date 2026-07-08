@@ -50,6 +50,19 @@ async def test_large_payload_round_trips_and_shrinks_below_temporal_warning_thre
 
 
 @pytest.mark.asyncio
+async def test_encode_output_is_deterministic_across_calls():
+    """Compressing identical content twice must produce byte-identical wire
+    output — gzip embeds a wall-clock mtime by default, which would otherwise
+    make retries/replays of the same payload leak timing and vary on disk."""
+    codec = GzipPayloadCodec(min_size_bytes=0)
+    original = _payload(b"x" * 5000)
+
+    first = await codec.encode([original])
+    second = await codec.encode([original])
+    assert first[0].data == second[0].data
+
+
+@pytest.mark.asyncio
 async def test_small_payload_passes_through_uncompressed():
     """Below the size floor, encode() must return the payload unchanged (no
     metadata added, no gzip overhead) and decode() must be a no-op for it."""
@@ -121,15 +134,23 @@ async def test_decode_passes_through_payload_not_tagged_by_this_codec():
 
 
 @pytest.mark.asyncio
-async def test_encode_is_lossless_for_binary_data_and_empty_payloads():
+async def test_encode_is_lossless_for_empty_payload():
     codec = GzipPayloadCodec(min_size_bytes=0)
-    empty = _payload(b"")
-    binary = _payload(bytes(range(256)) * 10)
+    original = _payload(b"")
 
-    for original in (empty, binary):
-        encoded = await codec.encode([original])
-        decoded = await codec.decode(encoded)
-        assert decoded == [original]
+    encoded = await codec.encode([original])
+    decoded = await codec.decode(encoded)
+    assert decoded == [original]
+
+
+@pytest.mark.asyncio
+async def test_encode_is_lossless_for_binary_data():
+    codec = GzipPayloadCodec(min_size_bytes=0)
+    original = _payload(bytes(range(256)) * 10)
+
+    encoded = await codec.encode([original])
+    decoded = await codec.decode(encoded)
+    assert decoded == [original]
 
 
 def test_gzip_payload_codec_is_a_real_payload_codec():
