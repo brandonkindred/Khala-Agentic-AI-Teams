@@ -8,7 +8,7 @@ verify the contracts each surface exposes.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -117,7 +117,11 @@ def test_connect_temporal_client_connects_when_address_set(monkeypatch) -> None:
         result = asyncio.run(_run())
 
     assert result is fake_client
-    mock_client_cls.connect.assert_awaited_once_with("localhost:7233", namespace="myns")
+    # data_converter is the shared gzip-codec DataConverter every team's client
+    # now gets (see shared_temporal.codec) — not this test's concern.
+    mock_client_cls.connect.assert_awaited_once_with(
+        "localhost:7233", namespace="myns", data_converter=ANY
+    )
 
 
 def test_connect_temporal_client_raises_on_failure(monkeypatch) -> None:
