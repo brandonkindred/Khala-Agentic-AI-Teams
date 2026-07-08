@@ -13,6 +13,7 @@ from temporalio.worker import Worker
 from personal_assistant_team.temporal.activities import run_assistant_activity
 from personal_assistant_team.temporal.client import (
     connect_temporal_client,
+    get_temporal_loop,
     is_temporal_enabled,
     set_temporal_client,
     set_temporal_loop,
@@ -74,8 +75,14 @@ def _worker_thread_target() -> None:
     except Exception as e:
         logger.exception("PA Temporal worker failed: %s", e)
     finally:
-        set_temporal_client(None)
-        set_temporal_loop(None)
+        # client.py now re-exports shared_temporal.client's process-wide slots
+        # (shared with every other team on the same shim), so guard on
+        # identity: only clear if this worker's loop is still the registered
+        # one, never clobbering a different worker that has since taken
+        # ownership. See shared_temporal/worker.py's identical guard.
+        if get_temporal_loop() is loop:
+            set_temporal_loop(None)
+            set_temporal_client(None)
         loop.close()
 
 

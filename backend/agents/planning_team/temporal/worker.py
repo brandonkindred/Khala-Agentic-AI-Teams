@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from planning_team.temporal.activities import run_planning_activity
 from planning_team.temporal.client import (
     connect_temporal_client,
+    get_temporal_loop,
     is_temporal_enabled,
     set_temporal_client,
     set_temporal_loop,
@@ -73,7 +74,14 @@ async def _run_worker_async() -> None:
 
 
 def _worker_thread_target() -> None:
-    """Run `_run_worker_async` on a fresh event loop in this thread; clears client/loop on exit."""
+    """Run `_run_worker_async` on a fresh event loop in this thread; clears client/loop on exit.
+
+    The clear is identity-guarded: client.py re-exports shared_temporal.client's
+    process-wide slots (shared with every other team on the same shim), so this
+    only clears them if this worker's loop is still the registered one — never
+    clobbering a different worker that has since taken ownership. See
+    shared_temporal/worker.py's identical guard.
+    """
     global _worker_thread
     if not is_temporal_enabled():
         return
@@ -86,8 +94,9 @@ def _worker_thread_target() -> None:
     except Exception as e:
         logger.exception("Planning Temporal worker failed: %s", e)
     finally:
-        set_temporal_client(None)
-        set_temporal_loop(None)
+        if get_temporal_loop() is loop:
+            set_temporal_loop(None)
+            set_temporal_client(None)
         loop.close()
 
 
