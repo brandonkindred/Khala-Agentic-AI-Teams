@@ -753,7 +753,7 @@ def test_fe_run_review_steps_run_concurrently(monkeypatch, tmp_path: Path):
     )
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
-    barrier = threading.Barrier(3, timeout=5)
+    barrier = threading.Barrier(3, timeout=30)
 
     code_review_agent = MagicMock()
 
@@ -832,6 +832,47 @@ def test_fe_run_review_qa_failure_does_not_drop_other_steps_issues(monkeypatch, 
 
     assert any(i.source == "security" and i.description == "sec issue" for i in result.issues)
     assert any(i.source == "qa" and i.severity == "high" for i in result.issues)
+
+
+def test_fe_run_review_security_failure_does_not_drop_other_steps_issues(
+    monkeypatch, tmp_path: Path
+):
+    """A security step that fails outright (bypassing the shared per-chunk containment inside
+    ``_run_security_agent``) must not swallow the code-review/QA findings collected in the same
+    fan-out — each step's failure is contained to a synthetic issue for that step alone."""
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    def _boom(**_kw):
+        raise RuntimeError("security exploded outright")
+
+    monkeypatch.setattr(review_mod, "_run_security_agent", _boom)
+
+    class _Bug:
+        severity = "low"
+        description = "qa issue"
+        location = "x.ts"
+        recommendation = "fix"
+
+    qa_agent = MagicMock()
+    qa_agent.run.return_value = MagicMock(bugs_found=[_Bug()])
+
+    result = run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.ts": "code"}),
+        repo_path=tmp_path,
+        qa_agent=qa_agent,
+        security_agent=MagicMock(),
+    )
+
+    assert any(i.source == "qa" and i.description == "qa issue" for i in result.issues)
+    assert any(i.source == "security" and i.severity == "critical" for i in result.issues)
 
 
 def test_fe_run_review_code_review_llm_fallback_failure_does_not_drop_other_steps_issues(

@@ -812,49 +812,24 @@ def run_code_review_phase(
                 "[%s] Linting tool agent failed for microtask %s: %s", task_id, microtask_id, exc
             )
 
-    if code_review_agent is not None:
-        if detail_callback:
-            detail_callback("Running code review...")
-        try:
-            from code_review_agent.models import CodeReviewInput as _CRInput
-
-            # files= keeps per-file attribution and lets the coordinator bound
-            # its own prompts — no header parsing, no upstream truncation.
-            cr_input = _CRInput(
-                files=files,
-                task_description=f"Microtask: {microtask.description or microtask.title}",
-                task_requirements=task.requirements or "",
-                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
-                language=language,
-            )
-            cr_result = call_code_review_agent(
-                code_review_agent,
-                cr_input,
-                detail_callback,
-                repo_reader=build_disk_repo_reader(repo_path),
-            )
-            for item in getattr(cr_result, "issues", []):
-                issues.append(
-                    ReviewIssue(
-                        source="code_review",
-                        severity=getattr(item, "severity", "medium"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "file_path", ""),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Code review agent failed for microtask %s: %s. Next step -> Using LLM fallback for code review",
-                task_id,
-                microtask_id,
-                exc,
-            )
-            issues.extend(_run_llm_review(llm=llm, task=task, files=files))
-    else:
-        if detail_callback:
-            detail_callback("Running code review...")
-        issues.extend(_run_llm_review(llm=llm, task=task, files=files))
+    if detail_callback:
+        detail_callback("Running code review...")
+    # Delegates to the shared code-review step (agent call + LLM fallback + outright-failure
+    # containment) instead of reimplementing it, so this phase never diverges from run_review's/
+    # run_microtask_review's behavior.
+    issues.extend(
+        _code_review_step(
+            llm=llm,
+            task=task,
+            files=files,
+            repo_path=repo_path,
+            code_review_agent=code_review_agent,
+            language=language,
+            task_id=task_id,
+            task_description=f"Microtask: {microtask.description or microtask.title}",
+            detail_callback=detail_callback,
+        )
+    )
 
     critical_or_high = [i for i in issues if is_blocking(i.severity)]
     passed = build_ok and lint_ok and len(critical_or_high) == 0
@@ -912,7 +887,10 @@ def _run_agent_testing_phase(
     over ``files`` and returns ``ReviewIssue``s.
     Postconditions: returns a :class:`PhaseReviewResult` that fails on any
     critical/high issue, including a synthesised "gate skipped" issue when
-    neither ``review_agent`` nor the spec's tool agent is available.
+    neither ``review_agent`` nor the spec's tool agent is available. An
+    outright ``agent_runner`` failure never propagates: it is reported as a
+    synthetic issue at ``spec.missing_severity`` instead, mirroring
+    ``_qa_review_step``/``_security_review_step``'s identical containment.
     """
     task_id = task.id
     microtask_id = microtask.id
@@ -929,15 +907,35 @@ def _run_agent_testing_phase(
     if review_agent is not None:
         if detail_callback:
             detail_callback(spec.detail_run_msg)
-        issues.extend(
-            agent_runner(
-                files=files,
-                language=language,
-                task_description=f"Microtask: {microtask.description or microtask.title}",
-                task_id=task_id,
-                context=f" for microtask {microtask_id}",
+        try:
+            issues.extend(
+                agent_runner(
+                    files=files,
+                    language=language,
+                    task_description=f"Microtask: {microtask.description or microtask.title}",
+                    task_id=task_id,
+                    context=f" for microtask {microtask_id}",
+                )
             )
-        )
+        except Exception as exc:
+            logger.warning(
+                "[%s] %s failed outright for microtask %s: %s",
+                task_id,
+                spec.missing_agent_label,
+                microtask_id,
+                exc,
+            )
+            issues.append(
+                ReviewIssue(
+                    source=spec.phase_name,
+                    severity=spec.missing_severity,
+                    description=f"{spec.missing_agent_label} failed and could not complete review: {exc}",
+                    recommendation=(
+                        f"Investigate and re-run the {spec.missing_agent_label.lower()}; "
+                        "findings from this run are incomplete."
+                    ),
+                )
+            )
 
     has_tool_agent = bool(tool_agents and spec.tool_kind in tool_agents)
     if has_tool_agent:

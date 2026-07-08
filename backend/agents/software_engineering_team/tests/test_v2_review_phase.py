@@ -913,7 +913,7 @@ def test_run_review_steps_run_concurrently(monkeypatch, tmp_path: Path):
     )
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
-    barrier = threading.Barrier(3, timeout=5)
+    barrier = threading.Barrier(3, timeout=30)
 
     code_review_agent = MagicMock()
 
@@ -994,6 +994,47 @@ def test_run_review_qa_failure_does_not_drop_other_steps_issues(monkeypatch, tmp
     assert any(i.source == "qa" and i.severity == "high" for i in result.issues)
 
 
+def test_run_review_security_failure_does_not_drop_other_steps_issues(
+    monkeypatch, tmp_path: Path
+):
+    """A security step that fails outright (bypassing the shared per-chunk containment inside
+    ``_run_security_agent``) must not swallow the code-review/QA findings collected in the same
+    fan-out — each step's failure is contained to a synthetic issue for that step alone."""
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import run_review
+
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    def _boom(**_kw):
+        raise RuntimeError("security exploded outright")
+
+    monkeypatch.setattr(review_mod, "_run_security_agent", _boom)
+
+    class _Bug:
+        severity = "low"
+        description = "qa issue"
+        location = "x.py"
+        recommendation = "fix"
+
+    qa_agent = MagicMock()
+    qa_agent.run.return_value = MagicMock(bugs_found=[_Bug()])
+
+    result = run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        qa_agent=qa_agent,
+        security_agent=MagicMock(),
+    )
+
+    assert any(i.source == "qa" and i.description == "qa issue" for i in result.issues)
+    assert any(i.source == "security" and i.severity == "critical" for i in result.issues)
+
+
 def test_run_review_code_review_llm_fallback_failure_does_not_drop_other_steps_issues(
     monkeypatch, tmp_path: Path
 ):
@@ -1029,3 +1070,73 @@ def test_run_review_code_review_llm_fallback_failure_does_not_drop_other_steps_i
 
     assert any(i.source == "qa" and i.description == "qa issue" for i in result.issues)
     assert any(i.source == "code_review" and i.severity == "high" for i in result.issues)
+
+
+# ---------------------------------------------------------------------------
+# Phase-specific testing gates (run_qa_testing_phase / run_security_testing_phase)
+# ---------------------------------------------------------------------------
+
+
+def test_run_qa_testing_phase_agent_failure_is_contained(monkeypatch):
+    """An outright QA-agent failure inside the standalone testing-phase gate must not
+    propagate — it becomes a synthetic high-severity issue instead of raising, mirroring
+    ``_qa_review_step``'s identical containment in the fan-out path.
+
+    ``_run_qa_agent`` itself is patched (rather than ``qa_agent.run``) because
+    ``run_chunked_agent_review`` already catches and skips a per-chunk ``qa_agent.run``
+    failure — the guard under test here is for a failure in the step itself, not a chunk.
+    """
+    from software_engineering_team.backend_code_v2_team.models import Microtask
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import run_qa_testing_phase
+
+    def _boom(**_kw):
+        raise RuntimeError("qa agent exploded")
+
+    monkeypatch.setattr(review_mod, "_run_qa_agent", _boom)
+
+    result = run_qa_testing_phase(
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        files={"x.py": "code"},
+        qa_agent=MagicMock(),
+    )
+
+    assert result.passed is False
+    assert any(
+        i.source == "qa" and i.severity == "high" and "qa agent exploded" in i.description
+        for i in result.issues
+    )
+
+
+def test_run_security_testing_phase_agent_failure_is_contained(monkeypatch):
+    """An outright security-agent failure inside the standalone testing-phase gate must not
+    propagate — it becomes a synthetic critical-severity issue instead of raising, mirroring
+    ``_security_review_step``'s identical containment in the fan-out path. See
+    ``test_run_qa_testing_phase_agent_failure_is_contained`` for why the step function itself
+    (not ``security_agent.run``) is patched."""
+    from software_engineering_team.backend_code_v2_team.models import Microtask
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import (
+        run_security_testing_phase,
+    )
+
+    def _boom(**_kw):
+        raise RuntimeError("security agent exploded")
+
+    monkeypatch.setattr(review_mod, "_run_security_agent", _boom)
+
+    result = run_security_testing_phase(
+        task=_task(),
+        microtask=Microtask(id="mt-1"),
+        files={"x.py": "code"},
+        security_agent=MagicMock(),
+    )
+
+    assert result.passed is False
+    assert any(
+        i.source == "security"
+        and i.severity == "critical"
+        and "security agent exploded" in i.description
+        for i in result.issues
+    )
