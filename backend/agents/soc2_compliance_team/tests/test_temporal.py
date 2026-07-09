@@ -104,7 +104,7 @@ def test_connect_temporal_client_connects_when_address_set(
 
     sentinel = object()
 
-    async def _fake_connect(address, namespace):  # noqa: ANN001
+    async def _fake_connect(address, namespace, **kwargs):  # noqa: ANN001
         assert address == "temporal:7233"
         assert namespace == "soc2"
         return sentinel
@@ -122,7 +122,7 @@ def test_connect_temporal_client_connects_when_address_set(
 def test_connect_temporal_client_raises_on_failure(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     monkeypatch.setenv("TEMPORAL_ADDRESS", "temporal:7233")
 
-    async def _bad_connect(address, namespace):  # noqa: ANN001
+    async def _bad_connect(address, namespace, **kwargs):  # noqa: ANN001
         raise RuntimeError("boom")
 
     import temporalio.client as tc

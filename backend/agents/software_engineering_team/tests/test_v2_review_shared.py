@@ -14,6 +14,11 @@ Preconditions:
     - The synthetic ``ReviewConfig`` uses a ``tool_phase_input_factory`` that
       accepts arbitrary kwargs, so both the context and no-context variants are
       callable without binding a per-team ``ToolAgentPhaseInput``.
+    - ``llm`` is a ``DummyLLMClient`` so ``_review_steps_run_sequentially`` forces
+      the sequential branch: these tests drive the shared body's branch logic
+      deterministically (no worker threads), not the concurrent fan-out, which is
+      pinned by the per-team ``test_*_run_review_steps_run_concurrently`` barrier
+      tests.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional, Tuple
 from unittest.mock import MagicMock
 
+from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.v2_models import ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,
@@ -122,7 +128,7 @@ def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path) -> No
 
     result = run_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         execution_result=_execution_result({"x.py": "code"}),
         repo_path=tmp_path,
@@ -151,7 +157,7 @@ def test_run_review_lint_fail_with_remap_blocks(tmp_path: Path) -> None:
 
     result = run_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         execution_result=_execution_result({"x.py": "code"}),
         repo_path=tmp_path,
@@ -173,7 +179,7 @@ def test_run_review_log_summary_branch(tmp_path: Path, caplog) -> None:
 
     run_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         execution_result=_execution_result({"x.py": "code"}),
         repo_path=tmp_path,
@@ -211,7 +217,7 @@ def test_run_review_tool_agents_recommendations_and_raise(tmp_path: Path) -> Non
 
     result = run_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         execution_result=_execution_result({"x.py": "code"}),
         repo_path=tmp_path,
@@ -252,7 +258,7 @@ def test_run_review_threads_repo_path_into_tool_agents(tmp_path: Path) -> None:
 
     run_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         execution_result=_execution_result({"x.py": "code"}),
         repo_path=tmp_path,
@@ -273,7 +279,7 @@ def test_microtask_build_fail(tmp_path: Path) -> None:
     config = _build_config()
     result = run_microtask_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
@@ -312,7 +318,7 @@ def test_microtask_lint_fail_and_raise_and_detail_callback(tmp_path: Path) -> No
     details: list[str] = []
     result = run_microtask_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
@@ -338,7 +344,7 @@ def test_microtask_lint_agent_raises_is_swallowed(tmp_path: Path) -> None:
 
     result = run_microtask_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
@@ -366,7 +372,7 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
     details: list[str] = []
     result = run_microtask_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
@@ -388,7 +394,7 @@ def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
     cr_agent.run.side_effect = RuntimeError("crash")
     result2 = run_microtask_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
@@ -412,7 +418,7 @@ def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
     details: list[str] = []
     result = run_microtask_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
@@ -454,7 +460,7 @@ def test_microtask_tool_agents_no_context_variant(tmp_path: Path) -> None:
 
     result = run_microtask_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
@@ -480,7 +486,7 @@ def test_microtask_tool_agent_raises_is_skipped(tmp_path: Path) -> None:
 
     result = run_microtask_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
@@ -501,7 +507,7 @@ def test_microtask_intro_logged(tmp_path: Path, caplog) -> None:
 
     run_microtask_review(
         config=config,
-        llm=MagicMock(),
+        llm=DummyLLMClient(),
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
