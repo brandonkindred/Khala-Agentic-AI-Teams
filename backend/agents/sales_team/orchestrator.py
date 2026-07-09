@@ -54,20 +54,16 @@ from .models import (
     StageOutcome,
 )
 from .outcome_store import load_current_insights, record_stage_outcome
+from .routing import PIPELINE_STAGE_ORDER, partition_qualified, stage_should_run
 
 logger = logging.getLogger(__name__)
 
 UpdateCallback = Callable[[str, int], None]
 
-_STAGE_ORDER = [
-    PipelineStage.PROSPECTING,
-    PipelineStage.OUTREACH,
-    PipelineStage.QUALIFICATION,
-    PipelineStage.NURTURING,
-    PipelineStage.DISCOVERY,
-    PipelineStage.PROPOSAL,
-    PipelineStage.NEGOTIATION,
-]
+# Re-exported from ``routing`` (the single source of truth) so existing imports
+# of ``orchestrator._STAGE_ORDER`` keep working while the ordering itself is
+# shared with the Temporal workflow.
+_STAGE_ORDER = PIPELINE_STAGE_ORDER
 
 # Default length of a generated nurture sequence, in days. A 90-day (one quarter)
 # cadence is the standard B2B nurture window; named here so it isn't an inline
@@ -103,6 +99,44 @@ class _RunContext:
     insights_ctx: str
     config: SalesPipelineConfig
     update: UpdateCallback
+
+
+def build_run_context(
+    request: SalesPipelineRequest,
+    job_id: str,
+    insights_ctx: str = "",
+    update: Optional[UpdateCallback] = None,
+) -> _RunContext:
+    """Build the per-run context threaded through every stage helper.
+
+    This is the single constructor for ``_RunContext``, shared by ``run()``
+    (thread mode) and every Temporal per-stage activity, so both paths derive
+    the exact same request-scoped fields (``icp_json``, ``cases``, ``entry`` …)
+    and cannot drift.
+
+    Preconditions:
+        - ``request`` is a validated ``SalesPipelineRequest``.
+        - ``job_id`` is the id of a job already created in the job store.
+
+    Postconditions:
+        - Returns a ``_RunContext`` whose fields are pure functions of
+          ``request`` plus the supplied ``insights_ctx`` and ``update``.
+        - ``update`` defaults to the no-op callback when omitted, so an
+          activity that reports progress out-of-band passes nothing here.
+    """
+    return _RunContext(
+        request=request,
+        job_id=job_id,
+        icp_json=request.icp.model_dump_json(indent=2),
+        product=request.product_name,
+        vp=request.value_proposition,
+        company_context=request.company_context,
+        cases="\n".join(request.case_study_snippets) if request.case_study_snippets else "",
+        entry=request.entry_stage,
+        insights_ctx=insights_ctx,
+        config=request.config,
+        update=update or _noop_update,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -298,10 +332,7 @@ class SalesPodOrchestrator:
         self.proposal_critic = ProposalCriticAgent()
 
     def _should_run(self, stage: PipelineStage, entry: PipelineStage) -> bool:
-        try:
-            return _STAGE_ORDER.index(stage) >= _STAGE_ORDER.index(entry)
-        except ValueError:
-            return False
+        return stage_should_run(stage, entry)
 
     # ------------------------------------------------------------------
     # Critic-gated emit helpers (configurable refinement budget)
@@ -512,6 +543,36 @@ class SalesPodOrchestrator:
         """
         return parallel_map(prospects, fn, max_workers=self.config.pipeline_stage_workers)
 
+    def outreach_one(
+        self, p: Prospect, dossier: ProspectDossier, ctx: _RunContext
+    ) -> OutreachSequence:
+        """Generate one prospect's critic-gated outreach sequence.
+
+        The per-prospect unit of outreach work, shared by the thread-pool
+        fan-out (``_run_outreach``) and the ``sales_outreach_one`` Temporal
+        activity. Raises on failure — callers decide whether to skip (thread
+        mode returns ``None``; the activity re-raises so Temporal can retry).
+
+        Preconditions:
+            - ``dossier`` is the (non-``None``) dossier for ``p``; the caller
+              handles the missing-dossier skip.
+
+        Postconditions:
+            - Returns a fully-wrapped ``OutreachSequence`` for ``p`` or raises.
+        """
+        return self._generate_outreach_with_critic(
+            p,
+            dossier,
+            ctx.product,
+            ctx.vp,
+            ctx.cases,
+            ctx.company_context,
+            ctx.insights_ctx,
+            ctx.request.icp,
+            max_refinements=ctx.config.critic_max_refinements,
+            confidence_threshold=ctx.config.dossier_confidence_threshold,
+        )
+
     def _run_outreach(
         self,
         ctx: _RunContext,
@@ -531,18 +592,7 @@ class SalesPodOrchestrator:
                 )
                 return None
             try:
-                return self._generate_outreach_with_critic(
-                    p,
-                    dossier,
-                    ctx.product,
-                    ctx.vp,
-                    ctx.cases,
-                    ctx.company_context,
-                    ctx.insights_ctx,
-                    ctx.request.icp,
-                    max_refinements=ctx.config.critic_max_refinements,
-                    confidence_threshold=ctx.config.dossier_confidence_threshold,
-                )
+                return self.outreach_one(p, dossier, ctx)
             except Exception:
                 logger.exception(
                     "sales.outreach.failed prospect_id=%s company=%s",
@@ -555,6 +605,23 @@ class SalesPodOrchestrator:
         ctx.update("outreach", 35)
         return sequences, dossier_map
 
+    def qualify_one(self, p: Prospect, ctx: _RunContext) -> QualificationScore:
+        """Qualify one prospect (BANT/MEDDIC scoring). Raises on failure.
+
+        Shared by ``_run_qualification`` and the ``sales_qualify_one`` activity.
+
+        Postconditions:
+            - Returns a ``QualificationScore`` whose ``prospect`` is ``p``.
+        """
+        body = self.qualifier.qualify(
+            p.model_dump_json(indent=2),
+            ctx.product,
+            ctx.vp,
+            "",
+            ctx.insights_ctx,
+        )
+        return QualificationScore(prospect=p, **body.model_dump())
+
     def _run_qualification(
         self,
         ctx: _RunContext,
@@ -565,14 +632,7 @@ class SalesPodOrchestrator:
 
         def _one(p: Prospect) -> Optional[QualificationScore]:
             try:
-                body = self.qualifier.qualify(
-                    p.model_dump_json(indent=2),
-                    ctx.product,
-                    ctx.vp,
-                    "",
-                    ctx.insights_ctx,
-                )
-                return QualificationScore(prospect=p, **body.model_dump())
+                return self.qualify_one(p, ctx)
             except Exception:
                 logger.exception("sales.qualify.failed prospect_id=%s", p.id)
                 return None
@@ -580,6 +640,23 @@ class SalesPodOrchestrator:
         qualified = self._map_prospects_parallel(prospects, _one)
         ctx.update("qualification", 50)
         return qualified
+
+    def nurture_one(self, p: Prospect, ctx: _RunContext) -> NurtureSequence:
+        """Build one prospect's nurture sequence. Raises on failure.
+
+        Shared by ``_run_nurture`` and the ``sales_nurture_one`` activity.
+
+        Postconditions:
+            - Returns a ``NurtureSequence`` whose ``prospect`` is ``p``.
+        """
+        body = self.nurture.build_sequence(
+            p.model_dump_json(indent=2),
+            ctx.product,
+            ctx.vp,
+            _DEFAULT_NURTURE_DURATION_DAYS,
+            ctx.insights_ctx,
+        )
+        return NurtureSequence(prospect=p, **body.model_dump())
 
     def _run_nurture(
         self,
@@ -591,14 +668,7 @@ class SalesPodOrchestrator:
 
         def _one(p: Prospect) -> Optional[NurtureSequence]:
             try:
-                body = self.nurture.build_sequence(
-                    p.model_dump_json(indent=2),
-                    ctx.product,
-                    ctx.vp,
-                    _DEFAULT_NURTURE_DURATION_DAYS,
-                    ctx.insights_ctx,
-                )
-                return NurtureSequence(prospect=p, **body.model_dump())
+                return self.nurture_one(p, ctx)
             except Exception:
                 logger.exception("sales.nurture.failed prospect_id=%s", p.id)
                 return None
@@ -606,6 +676,31 @@ class SalesPodOrchestrator:
         nurture_seqs = self._map_prospects_parallel(nurture_prospects, _one)
         ctx.update("nurturing", 62)
         return nurture_seqs
+
+    def discovery_one(
+        self, p: Prospect, qual: Optional[QualificationScore], ctx: _RunContext
+    ) -> DiscoveryPlan:
+        """Prepare one prospect's discovery plan. Raises on failure.
+
+        Shared by ``_run_discovery`` and the ``sales_discovery_one`` activity.
+
+        Preconditions:
+            - ``qual`` is the matching ``QualificationScore`` for ``p`` or
+              ``None`` (an empty ``"{}"`` is passed to the agent in that case,
+              preserving the prior behaviour).
+
+        Postconditions:
+            - Returns a ``DiscoveryPlan`` whose ``prospect`` is ``p``.
+        """
+        qual_json = qual.model_dump_json(indent=2) if qual else "{}"
+        body = self.discovery.prepare(
+            p.model_dump_json(indent=2),
+            qual_json,
+            ctx.product,
+            ctx.vp,
+            ctx.insights_ctx,
+        )
+        return DiscoveryPlan(prospect=p, **body.model_dump())
 
     def _run_discovery(
         self,
@@ -640,17 +735,8 @@ class SalesPodOrchestrator:
         qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect and q.prospect.id}
 
         def _one(p: Prospect) -> Optional[DiscoveryPlan]:
-            q = qual_by_prospect_id.get(p.id)
-            qual_json = q.model_dump_json(indent=2) if q else "{}"
             try:
-                body = self.discovery.prepare(
-                    p.model_dump_json(indent=2),
-                    qual_json,
-                    ctx.product,
-                    ctx.vp,
-                    ctx.insights_ctx,
-                )
-                return DiscoveryPlan(prospect=p, **body.model_dump())
+                return self.discovery_one(p, qual_by_prospect_id.get(p.id), ctx)
             except Exception:
                 logger.exception("sales.discovery.failed prospect_id=%s", p.id)
                 return None
@@ -658,6 +744,36 @@ class SalesPodOrchestrator:
         plans = self._map_prospects_parallel(qualified_prospects, _one)
         ctx.update("discovery", 75)
         return plans
+
+    def proposal_one(
+        self,
+        p: Prospect,
+        dossier: Optional[ProspectDossier],
+        qual: Optional[QualificationScore],
+        ctx: _RunContext,
+    ) -> SalesProposal:
+        """Write one prospect's critic-gated proposal. Raises on failure.
+
+        Shared by ``_run_proposal`` and the ``sales_proposal_one`` activity.
+        Uses the default annual contract value (``_DEFAULT_ANNUAL_COST``) and an
+        empty discovery-notes seed, matching the pre-decomposition behaviour.
+
+        Postconditions:
+            - Returns a ``SalesProposal`` whose ``prospect`` is ``p``.
+        """
+        return self._generate_proposal_with_critic(
+            p,
+            ctx.product,
+            ctx.vp,
+            _DEFAULT_ANNUAL_COST,
+            "",
+            ctx.cases,
+            ctx.company_context,
+            ctx.insights_ctx,
+            dossier,
+            qual,
+            max_refinements=ctx.config.critic_max_refinements,
+        )
 
     def _run_proposal(
         self,
@@ -672,25 +788,14 @@ class SalesPodOrchestrator:
             ctx.job_id,
             len(qualified_prospects),
         )
-        annual_cost = _DEFAULT_ANNUAL_COST
         qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect and q.prospect.id}
         if not dossier_map:
             dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
 
         def _one(p: Prospect) -> Optional[SalesProposal]:
             try:
-                return self._generate_proposal_with_critic(
-                    p,
-                    ctx.product,
-                    ctx.vp,
-                    annual_cost,
-                    "",
-                    ctx.cases,
-                    ctx.company_context,
-                    ctx.insights_ctx,
-                    dossier_map.get(p.id),
-                    qual_by_prospect_id.get(p.id),
-                    max_refinements=ctx.config.critic_max_refinements,
+                return self.proposal_one(
+                    p, dossier_map.get(p.id), qual_by_prospect_id.get(p.id), ctx
                 )
             except Exception:
                 logger.exception("sales.proposal.failed prospect_id=%s", p.id)
@@ -699,6 +804,31 @@ class SalesPodOrchestrator:
         proposals = self._map_prospects_parallel(qualified_prospects, _one)
         ctx.update("proposal", 87)
         return proposals
+
+    def close_one(
+        self, p: Prospect, proposal: Optional[SalesProposal], ctx: _RunContext
+    ) -> ClosingStrategy:
+        """Develop one prospect's closing strategy. Raises on failure.
+
+        Shared by ``_run_negotiation`` and the ``sales_close_one`` activity.
+
+        Preconditions:
+            - ``proposal`` is the matching ``SalesProposal`` for ``p`` or
+              ``None`` (an empty ``"{}"`` is passed to the agent in that case,
+              preserving the prior behaviour).
+
+        Postconditions:
+            - Returns a ``ClosingStrategy`` whose ``prospect`` is ``p``.
+        """
+        prop_json = proposal.model_dump_json(indent=2) if proposal else "{}"
+        body = self.closer.develop_strategy(
+            p.model_dump_json(indent=2),
+            prop_json,
+            ctx.product,
+            ctx.vp,
+            ctx.insights_ctx,
+        )
+        return ClosingStrategy(prospect=p, **body.model_dump())
 
     def _run_negotiation(
         self,
@@ -731,17 +861,8 @@ class SalesPodOrchestrator:
         }
 
         def _one(p: Prospect) -> Optional[ClosingStrategy]:
-            prop = proposal_by_prospect_id.get(p.id)
-            prop_json = prop.model_dump_json(indent=2) if prop else "{}"
             try:
-                body = self.closer.develop_strategy(
-                    p.model_dump_json(indent=2),
-                    prop_json,
-                    ctx.product,
-                    ctx.vp,
-                    ctx.insights_ctx,
-                )
-                return ClosingStrategy(prospect=p, **body.model_dump())
+                return self.close_one(p, proposal_by_prospect_id.get(p.id), ctx)
             except Exception:
                 logger.exception("sales.close.failed prospect_id=%s", p.id)
                 return None
@@ -785,19 +906,7 @@ class SalesPodOrchestrator:
                 current_insights.win_rate * 100,
             )
 
-        ctx = _RunContext(
-            request=request,
-            job_id=job_id,
-            icp_json=request.icp.model_dump_json(indent=2),
-            product=request.product_name,
-            vp=request.value_proposition,
-            company_context=request.company_context,
-            cases="\n".join(request.case_study_snippets) if request.case_study_snippets else "",
-            entry=request.entry_stage,
-            insights_ctx=insights_ctx,
-            config=request.config,
-            update=update_cb or _noop_update,
-        )
+        ctx = build_run_context(request, job_id, insights_ctx, update_cb)
         result = SalesPipelineResult(
             job_id=job_id,
             entry_stage=ctx.entry,
@@ -827,18 +936,7 @@ class SalesPodOrchestrator:
             qualified = self._run_qualification(ctx, prospects)
             result.qualified_leads = qualified
 
-        if qualified:
-            advance = [q for q in qualified if q.recommended_action.lower().startswith("advance")]
-            nurture_prospects = [
-                q.prospect
-                for q in qualified
-                if not q.recommended_action.lower().startswith("advance")
-                and not q.recommended_action.lower().startswith("disqualify")
-            ]
-            qualified_prospects = [q.prospect for q in advance]
-        else:
-            nurture_prospects = []
-            qualified_prospects = prospects
+        nurture_prospects, qualified_prospects = partition_qualified(qualified, prospects)
 
         # Stage 4 — Nurturing
         if self._should_run(PipelineStage.NURTURING, ctx.entry) and nurture_prospects:

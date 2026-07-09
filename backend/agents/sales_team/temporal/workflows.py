@@ -1,102 +1,65 @@
-"""Temporal workflow + activity for the sales_team.
+"""Temporal workflow for the sales_team — fine-grained per-agent orchestration.
 
-Kept in its own module (separate from the package ``__init__``) so the
-temporalio workflow sandbox can re-import the workflow class without
-executing any non-deterministic top-level code (e.g. ``os.getenv``,
-worker bootstrap). Co-locating ``start_team_worker``/``is_temporal_enabled``
-with the workflow class trips the sandbox with
-``__call__ on os.getenv restricted`` during workflow registration.
+``SalesWorkflow`` runs the full sales pipeline as a graph of Temporal
+activities: a single-shot ``sales_prepare`` opens the run, then **each pipeline
+stage fans out one activity per prospect** (outreach, qualification, nurture,
+discovery, proposal, negotiation) via ``asyncio.gather``, replacing the thread
+pools of the in-process orchestrator. Every specialist agent invocation is now
+its own durable, individually-retryable Temporal activity, visible in the
+Temporal UI. A single-shot ``sales_finalize`` records outcomes and writes the
+terminal job status.
 
-The activity delegates to ``sales_team.job_runner.run_pipeline_job`` so the
-job-store bookkeeping (RUNNING → COMPLETED or FAILED) lives in exactly one
-place, shared with the thread-dispatch path in ``sales_team.api.main``.
-``job_runner`` has no import of ``sales_team.api.main`` (no FastAPI app
-creation, stale-job monitor, or invoke shim), so this activity stays cheap
-to import even if a worker process never imports the API module. Status is
-written to the durable ``JobServiceClient`` store, so a completed run
-survives a worker/process restart.
+The workflow body is **deterministic**: no clock, no randomness, no I/O — only
+pure dict/string computation (stage gating, advance/nurture routing, per-id
+lookups) plus scheduling of activities. All LLM / Postgres / job-store work
+happens inside activities. The activities module and the pure routing helpers
+are imported under ``workflow.unsafe.imports_passed_through()`` so the sandbox
+does not re-execute them.
+
+This package ``__init__`` and this module stay free of import-time side effects
+(no worker boot, no ``os.getenv``) — the temporalio sandbox replays them during
+workflow registration (guarded by ``test_temporal_bootstrap``).
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
 
-from temporalio import activity, workflow
+from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+with workflow.unsafe.imports_passed_through():
+    from sales_team.models import PipelineStage
+    from sales_team.routing import is_advance, is_disqualify, stage_should_run
+    from sales_team.temporal import activities as _act
 
-@activity.defn(name="sales_run_pipeline")
-def run_pipeline_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """Reconstruct the request, run the sales pipeline orchestrator, and record job status.
+# Per-prospect + coach + prospecting are non-idempotent LLM calls, but a single
+# call is cheap to re-run and the ``llm_service`` layer also retries transient
+# provider errors; a small bounded retry gives crash/transient durability — the
+# whole point of the fine-grained decomposition.
+LLM_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=30),
+    maximum_interval=timedelta(minutes=2),
+    backoff_coefficient=2.0,
+)
+# Cheap, idempotent job-store / DB activities: safe to retry aggressively so a
+# transient job-service blip never fails the whole workflow.
+IO_RETRY = RetryPolicy(
+    maximum_attempts=3,
+    initial_interval=timedelta(seconds=5),
+    maximum_interval=timedelta(seconds=30),
+    backoff_coefficient=2.0,
+)
 
-    Preconditions:
-        - ``job_id`` refers to a job already created in the job store
-          (the API endpoint calls ``_job_manager.create_job`` before dispatch).
-        - ``request`` is the serialized ``SalesPipelineRequest``
-          (i.e. ``payload.model_dump(mode="json")``).
-
-    Postconditions:
-        - On success the job store row ends in ``COMPLETED`` with the
-          orchestrator result and the activity returns ``{"job_id": job_id}``.
-        - If ``request`` fails to validate as a ``SalesPipelineRequest``
-          (e.g. missing required fields), the job store row is marked
-          ``FAILED`` here — before ``run_pipeline_job`` would otherwise ever
-          be reached — so the job never sits stuck in PENDING.
-        - A job that was already terminal when ``run_pipeline_job`` started
-          (e.g. ``CANCELLED`` by the user, or ``INTERRUPTED``) is left
-          untouched and returns cleanly without raising — a cancelled run is
-          terminal, not a workflow failure to retry.
-        - On any genuine failure the activity re-raises so the failure
-          surfaces as a failed Temporal workflow rather than a
-          silently-"completed" one. Failure is inferred from the final job
-          status: only a confirmed ``COMPLETED``/``CANCELLED``/``INTERRUPTED``
-          status returns cleanly; a ``FAILED``, missing, or otherwise
-          unconfirmed status raises, so a transient job-store read glitch can
-          never mask a real failure as success. Auto-retry is bounded by the
-          workflow's ``RetryPolicy`` (see ``SalesWorkflow.run``).
-    """
-    from job_service_client import (
-        JOB_STATUS_CANCELLED,
-        JOB_STATUS_COMPLETED,
-        JOB_STATUS_FAILED,
-        JOB_STATUS_INTERRUPTED,
-    )
-    from sales_team.job_runner import job_manager, run_pipeline_job
-    from sales_team.models import SalesPipelineRequest
-
-    try:
-        pipeline_request = SalesPipelineRequest(**request)
-    except Exception as exc:
-        # Best-effort mark FAILED, but the original validation error must
-        # always be what propagates — a failing update_job (e.g. transient
-        # job-service outage) should not mask it, or Temporal would surface a
-        # misleading error and the real cause would be lost.
-        try:
-            job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
-        except Exception:
-            activity.logger.exception(
-                "Failed to mark job %s FAILED after request validation error", job_id
-            )
-        raise
-
-    run_pipeline_job(job_id, pipeline_request)
-
-    # Infer the outcome from the final job status. ``run_pipeline_job`` records
-    # its own terminal status and never raises, so we key off the store — but
-    # only an explicitly-confirmed non-FAILED terminal status returns cleanly.
-    # A FAILED status, a missing job, or any non-terminal/unreadable snapshot
-    # raises, so a job-store read hiccup can't be misreported as a succeeded
-    # workflow.
-    job = job_manager.get_job(job_id)
-    status = job.get("status") if job else None
-    if status == JOB_STATUS_COMPLETED:
-        return {"job_id": job_id}
-    if status in (JOB_STATUS_CANCELLED, JOB_STATUS_INTERRUPTED):
-        # Terminal, but not a failure — do not raise (no retry for a cancel).
-        return {"job_id": job_id}
-    error = (job or {}).get("error")
-    raise RuntimeError(error or f"Sales pipeline job {job_id} did not complete (status={status})")
+_IO_TIMEOUT = timedelta(minutes=5)
+_PREPARE_TIMEOUT = timedelta(minutes=5)
+_FINALIZE_TIMEOUT = timedelta(minutes=15)
+_PROSPECTING_TIMEOUT = timedelta(minutes=45)
+_PER_PROSPECT_TIMEOUT = timedelta(minutes=30)
+_HEARTBEAT_TIMEOUT = timedelta(minutes=3)
 
 
 @workflow.defn(name="SalesWorkflow")
@@ -111,19 +74,192 @@ class SalesWorkflow:
               (``payload.model_dump(mode="json")``).
 
         Postconditions:
-            - Delegates to ``run_pipeline_activity`` (which owns job-store
-              status bookkeeping) and returns its ``{"job_id": job_id}`` result.
+            - Schedules ``sales_prepare`` → per-stage fan-out → ``sales_finalize``.
+            - Returns ``{"job_id": job_id}``; the terminal job-store status is
+              owned by the activities (RUNNING in prepare, COMPLETED/skip in
+              finalize, FAILED on a fatal activity error).
         """
-        return await workflow.execute_activity(
-            run_pipeline_activity,
+        entry = request.get("entry_stage", PipelineStage.PROSPECTING.value)
+
+        ctx = await workflow.execute_activity(
+            _act.prepare_sales_pipeline_activity,
             args=[job_id, request],
-            start_to_close_timeout=timedelta(hours=2),
-            # The orchestrator is a long, non-idempotent LLM pipeline. Cap at a
-            # single attempt: a failure surfaces as a failed workflow + a FAILED
-            # job-store row for explicit resubmission rather than being
-            # auto-retried. A worker crash mid-activity leaves an orphaned
-            # RUNNING job that team_service's startup/shutdown recovery
-            # reconciles to "interrupted" instead of silently re-running the
-            # expensive pipeline.
-            retry_policy=RetryPolicy(maximum_attempts=1),
+            schedule_to_close_timeout=_PREPARE_TIMEOUT,
+            retry_policy=IO_RETRY,
         )
+        if ctx["stopped"]:
+            return {"job_id": job_id}
+
+        result: dict[str, Any] = {
+            "job_id": job_id,
+            "entry_stage": entry,
+            "product_name": request["product_name"],
+            "prospects": [],
+            "outreach_sequences": [],
+            "qualified_leads": [],
+            "nurture_sequences": [],
+            "discovery_plans": [],
+            "proposals": [],
+            "closing_strategies": [],
+            "coaching_report": None,
+            "summary": "",
+        }
+
+        async def _gate(stage: str, pct: int) -> bool:
+            """Write stage progress; return False if the job has gone terminal."""
+            return await workflow.execute_activity(
+                _act.report_progress_activity,
+                args=[job_id, stage, pct],
+                schedule_to_close_timeout=_IO_TIMEOUT,
+                retry_policy=IO_RETRY,
+            )
+
+        async def _finalize() -> dict[str, Any]:
+            await workflow.execute_activity(
+                _act.finalize_sales_pipeline_activity,
+                args=[ctx, result],
+                schedule_to_close_timeout=_FINALIZE_TIMEOUT,
+                retry_policy=IO_RETRY,
+            )
+            return {"job_id": job_id}
+
+        async def _fan(act, items, arg_fn):
+            """Run ``act`` once per item concurrently, dropping items that fail.
+
+            ``gather(return_exceptions=True)`` mirrors the thread path's
+            per-prospect skip: a prospect whose activity fails after its retries
+            is dropped, not fatal to the run.
+            """
+            tasks = [
+                workflow.execute_activity(
+                    act,
+                    args=arg_fn(item),
+                    start_to_close_timeout=_PER_PROSPECT_TIMEOUT,
+                    heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                    retry_policy=LLM_RETRY,
+                )
+                for item in items
+            ]
+            out = await asyncio.gather(*tasks, return_exceptions=True)
+            return [r for r in out if not isinstance(r, BaseException)]
+
+        # Stage 1 — Prospecting (single activity; resolves existing_prospects
+        # internally). Defaults to any supplied existing prospects when the
+        # prospecting stage is gated off (entry past prospecting) or skipped
+        # because the job was cancelled.
+        prospects = request.get("existing_prospects", [])
+        if stage_should_run(PipelineStage.PROSPECTING, entry) and await _gate("prospecting", 5):
+            prospects = await workflow.execute_activity(
+                _act.prospect_activity,
+                args=[ctx],
+                start_to_close_timeout=_PROSPECTING_TIMEOUT,
+                heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                retry_policy=LLM_RETRY,
+            )
+        result["prospects"] = prospects
+
+        if not prospects:
+            return await _finalize()
+
+        dossier_map = await workflow.execute_activity(
+            _act.load_dossiers_activity,
+            args=[ctx, prospects],
+            schedule_to_close_timeout=_IO_TIMEOUT,
+            retry_policy=IO_RETRY,
+        )
+
+        # Stage 2 — Outreach (only prospects that have a dossier; the rest have
+        # no personalization basis, exactly as the thread path skips them).
+        if stage_should_run(PipelineStage.OUTREACH, entry) and await _gate("outreach", 20):
+            targets = [p for p in prospects if dossier_map.get(p["id"]) is not None]
+            result["outreach_sequences"] = await _fan(
+                _act.outreach_one_activity,
+                targets,
+                lambda p: [ctx, p, dossier_map[p["id"]]],
+            )
+
+        # Stage 3 — Qualification + advance/nurture routing
+        qualified: list[dict[str, Any]] = []
+        if stage_should_run(PipelineStage.QUALIFICATION, entry) and await _gate(
+            "qualification", 40
+        ):
+            qualified = await _fan(_act.qualify_one_activity, prospects, lambda p: [ctx, p])
+            result["qualified_leads"] = qualified
+
+        if qualified:
+            advance = [q for q in qualified if is_advance(q["recommended_action"])]
+            nurture_prospects = [
+                q["prospect"]
+                for q in qualified
+                if not is_advance(q["recommended_action"])
+                and not is_disqualify(q["recommended_action"])
+            ]
+            qualified_prospects = [q["prospect"] for q in advance]
+        else:
+            nurture_prospects, qualified_prospects = [], prospects
+
+        # Stage 4 — Nurturing
+        if (
+            stage_should_run(PipelineStage.NURTURING, entry)
+            and nurture_prospects
+            and await _gate("nurturing", 55)
+        ):
+            result["nurture_sequences"] = await _fan(
+                _act.nurture_one_activity, nurture_prospects, lambda p: [ctx, p]
+            )
+
+        # Id-keyed lookups deliberately mirror the orchestrator's ``.get(p.id)``
+        # (empty-id collision preserved) so behaviour matches the thread path.
+        qual_by_id = {q["prospect"]["id"]: q for q in qualified if q["prospect"]["id"]}
+
+        # Stage 5 — Discovery
+        if (
+            stage_should_run(PipelineStage.DISCOVERY, entry)
+            and qualified_prospects
+            and await _gate("discovery", 65)
+        ):
+            result["discovery_plans"] = await _fan(
+                _act.discovery_one_activity,
+                qualified_prospects,
+                lambda p: [ctx, p, qual_by_id.get(p["id"])],
+            )
+
+        # Stage 6 — Proposal
+        if (
+            stage_should_run(PipelineStage.PROPOSAL, entry)
+            and qualified_prospects
+            and await _gate("proposal", 78)
+        ):
+            result["proposals"] = await _fan(
+                _act.proposal_one_activity,
+                qualified_prospects,
+                lambda p: [ctx, p, dossier_map.get(p["id"]), qual_by_id.get(p["id"])],
+            )
+
+        prop_by_id = {
+            pr["prospect"]["id"]: pr for pr in result["proposals"] if pr["prospect"]["id"]
+        }
+
+        # Stage 7 — Negotiation / Closing
+        if (
+            stage_should_run(PipelineStage.NEGOTIATION, entry)
+            and qualified_prospects
+            and await _gate("negotiation", 90)
+        ):
+            result["closing_strategies"] = await _fan(
+                _act.close_one_activity,
+                qualified_prospects,
+                lambda p: [ctx, p, prop_by_id.get(p["id"])],
+            )
+
+        # Coaching (best-effort) then finalize (records outcomes + COMPLETED).
+        if await _gate("coaching", 97):
+            result["coaching_report"] = await workflow.execute_activity(
+                _act.coach_activity,
+                args=[ctx, prospects],
+                start_to_close_timeout=_PER_PROSPECT_TIMEOUT,
+                heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                retry_policy=LLM_RETRY,
+            )
+
+        return await _finalize()

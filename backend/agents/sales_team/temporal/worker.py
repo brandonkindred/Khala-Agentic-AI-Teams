@@ -14,11 +14,33 @@ hook in docker-compose.
 from __future__ import annotations
 
 import logging
+import os
 
 from sales_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
 from shared_temporal import is_temporal_enabled, start_team_worker
 
 logger = logging.getLogger(__name__)
+
+# Default concurrent-activity ceiling for the sales worker. The pipeline now
+# fans each stage out into one activity per prospect, so throughput is bounded
+# by this rather than the old in-process thread pool; the default matches
+# ``SalesPipelineConfig.pipeline_stage_workers`` (8) so wall-clock is preserved.
+_DEFAULT_MAX_CONCURRENT_ACTIVITIES = 8
+
+
+def _max_concurrent_activities() -> int:
+    """Resolve the worker's concurrent-activity ceiling from the environment.
+
+    Postconditions: returns ``SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES`` when it
+    parses to a positive int, else the documented default (garbage/≤0 →
+    default).
+    """
+    raw = os.getenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", "")
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_CONCURRENT_ACTIVITIES
+    return val if val > 0 else _DEFAULT_MAX_CONCURRENT_ACTIVITIES
 
 
 def start_sales_temporal_worker_thread() -> bool:
@@ -39,4 +61,5 @@ def start_sales_temporal_worker_thread() -> bool:
         WORKFLOWS,
         ACTIVITIES,
         task_queue=TASK_QUEUE,
+        max_concurrent_activities=_max_concurrent_activities(),
     )
