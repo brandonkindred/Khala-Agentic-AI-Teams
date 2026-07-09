@@ -624,6 +624,42 @@ def compute_regime_summary_activity() -> Optional[Dict[str, Any]]:
     return summary.model_dump(mode="json")
 
 
+@activity.defn(name="strategy_lab_resolve_workflow_config")
+def resolve_workflow_config_activity() -> Dict[str, Any]:
+    """Resolve every env var the cycle-workflow control flow needs, once.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns ``{"design_review_rounds": int, "design_review_stall_rounds":
+        int, "mechanical_repair_enabled": bool, "code_conformance_retries":
+        int, "design_max_llm_calls": int, "regime_summary_enabled": bool}``.
+        A workflow may never read these env vars itself (``os.*`` is
+        restricted at workflow runtime by the temporalio sandbox) — it calls
+        this activity once and threads the resolved values through
+        ``cycle_input`` instead of re-reading env vars in any loop body.
+    """
+    from investment_team.strategy_lab.orchestrator import (
+        _design_max_llm_calls,
+        _design_review_rounds,
+        _design_review_stall_rounds,
+        _env_flag,
+        _mechanical_repair_enabled,
+    )
+    from investment_team.strategy_lab.quality_gates.predicate_conformance import (
+        _code_conformance_retries,
+    )
+
+    return {
+        "design_review_rounds": _design_review_rounds(),
+        "design_review_stall_rounds": _design_review_stall_rounds(),
+        "mechanical_repair_enabled": _mechanical_repair_enabled(),
+        "code_conformance_retries": _code_conformance_retries(),
+        "design_max_llm_calls": _design_max_llm_calls(),
+        "regime_summary_enabled": _env_flag("STRATEGY_LAB_REGIME_SUMMARY_ENABLED"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
@@ -1058,6 +1094,7 @@ ACTIVITIES = [
     run_verification_and_analysis_activity,
     assemble_record_activity,
     build_short_circuit_record_activity,
+    resolve_workflow_config_activity,
 ]
 
 __all__ = [
@@ -1078,6 +1115,7 @@ __all__ = [
     "refinement_activity",
     "resolve_readiness_prices_activity",
     "resolve_symbols_activity",
+    "resolve_workflow_config_activity",
     "run_alignment_audit_activity",
     "run_strategy_code_activity",
     "run_verification_and_analysis_activity",

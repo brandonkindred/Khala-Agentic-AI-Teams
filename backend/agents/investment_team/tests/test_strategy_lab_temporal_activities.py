@@ -486,6 +486,25 @@ def test_compute_regime_summary_activity_reuses_compute_regime_summary(monkeypat
     assert result["degraded"] is True
 
 
+def test_resolve_workflow_config_activity_resolves_every_expected_key(monkeypatch):
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", raising=False)
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", raising=False)
+    monkeypatch.delenv("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", raising=False)
+    monkeypatch.delenv("STRATEGY_LAB_CODE_CONFORMANCE_RETRIES", raising=False)
+    monkeypatch.delenv("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", raising=False)
+    monkeypatch.delenv("STRATEGY_LAB_REGIME_SUMMARY_ENABLED", raising=False)
+
+    result = act.resolve_workflow_config_activity()
+    assert result == {
+        "design_review_rounds": 20,
+        "design_review_stall_rounds": 3,
+        "mechanical_repair_enabled": True,
+        "code_conformance_retries": 2,
+        "design_max_llm_calls": 120,
+        "regime_summary_enabled": True,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
@@ -743,7 +762,7 @@ def test_build_short_circuit_record_activity_reuses_orchestrator_method(monkeypa
 
 
 def test_activities_list_contains_every_activity():
-    assert len(act.ACTIVITIES) == 21
+    assert len(act.ACTIVITIES) == 22
     assert act.design_generate_activity in act.ACTIVITIES
     assert act.persist_record_activity in act.ACTIVITIES
     assert act.resolve_readiness_prices_activity in act.ACTIVITIES
@@ -751,3 +770,4 @@ def test_activities_list_contains_every_activity():
     assert act.run_verification_and_analysis_activity in act.ACTIVITIES
     assert act.assemble_record_activity in act.ACTIVITIES
     assert act.build_short_circuit_record_activity in act.ACTIVITIES
+    assert act.resolve_workflow_config_activity in act.ACTIVITIES
