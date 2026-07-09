@@ -608,6 +608,68 @@ def read_repo_files_as_dict(
     )
 
 
+def find_repo_files(
+    repo_path: Path,
+    *,
+    suffixes: Iterable[str] = (),
+    names: Iterable[str] = (),
+    exclude_dirs: Iterable[str] = REPO_INSPECT_EXCLUDE_DIRS,
+) -> List[Path]:
+    """Return regular files under *repo_path* matching *suffixes* and/or *names*.
+
+    The pruned-walk counterpart of :func:`read_repo_code_budgeted` for callers
+    that need *paths* (not concatenated content): stack-language detection
+    (``_detect_language``) and the build-fix file collector. A streamed
+    ``os.walk`` prunes *exclude_dirs* in place via ``dirnames[:]``, so a checkout
+    with a huge ``node_modules`` / ``.git`` / ``.venv`` is never descended into —
+    the same I/O discipline ``read_repo_code_budgeted`` established, replacing the
+    ``rglob`` calls that materialized those excluded subtrees before filtering.
+
+    Preconditions:
+        - *repo_path* is a ``Path`` (may not exist). A non-directory yields ``[]``
+          rather than raising, so best-effort detectors (``_detect_language``)
+          can call this unconditionally.
+        - *suffixes* are file suffixes including the leading dot (``.py``);
+          *names* are exact basenames (``pom.xml``). Either may be empty (no
+          filter on that axis). A file matches when it satisfies either axis.
+    Postconditions:
+        - Returns paths for regular files matching a requested suffix or name,
+          in walk order; ``[]`` when none match or *repo_path* is not a
+          directory. Never raises: a mid-walk ``OSError`` degrades to the entries
+          found so far, mirroring :func:`read_repo_code_budgeted`.
+    """
+    try:
+        if not repo_path.is_dir():
+            return []
+    except OSError:
+        return []
+    suffix_set = frozenset(suffixes)
+    name_set = frozenset(names)
+    excl_set = frozenset(exclude_dirs)
+    matched: List[Path] = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(repo_path):
+            dirnames[:] = [d for d in dirnames if d not in excl_set]
+            for name in filenames:
+                f = Path(dirpath) / name
+                # is_file() guards against special files (FIFO/socket/device) the
+                # way read_repo_code_budgeted's does; a name match alone is not
+                # enough since a dir could be named e.g. ``pom.xml``.
+                if not f.is_file():
+                    continue
+                if (suffix_set and f.suffix in suffix_set) or (name_set and name in name_set):
+                    matched.append(f)
+    except OSError as exc:
+        logger.warning(
+            "find_repo_files walk under %s aborted early (%s); using %d entries found so far",
+            repo_path,
+            exc,
+            len(matched),
+            exc_info=True,
+        )
+    return matched
+
+
 def truncate_for_context(
     text: str, max_chars: int, llm: object = None, content_description: str = "content"
 ) -> str:

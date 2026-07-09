@@ -41,7 +41,13 @@ from shared_repo_context.repo_utils import (  # noqa: E402
     truncate_for_context,
 )
 from software_engineering_team.discovery import (  # noqa: E402
-    _load_requirements_from_sprint,  # noqa: F401 - re-exported for tests
+    # Re-exported (F401) for ``tests/test_orchestrator_sprint_path.py``, which
+    # imports it off the orchestrator module (``_orchestrator._load_requirements_
+    # from_sprint``) at six call sites. The sprint path itself calls it via
+    # ``resolve_spec_source``/``discovery``; this re-export exists solely so the
+    # test patch surface ``from orchestrator import _load_requirements_from_sprint``
+    # keeps working without the tests reaching into ``discovery`` directly.
+    _load_requirements_from_sprint,  # noqa: F401
     resolve_spec_source,
     run_product_requirements_analysis,
 )
@@ -428,10 +434,28 @@ def _parse_traceback_for_crash(
 
 
 def _get_agents() -> Dict[str, Any]:
-    """Lazy init agents including the code review, documentation, and DbC comments agents.
-    Each agent uses get_client(key) for per-agent model configuration.
-    Main pipeline uses planning_team for planning; spec_intake/project_planning/domain planning agents
-    are not used in the main flow (clarification_store may still use Spec Intake elsewhere)."""
+    """Build the SE agent fleet, keyed by role.
+
+    Each agent uses ``get_client(key)`` for per-agent model configuration. The
+    main pipeline uses ``planning_team`` for planning; the spec-intake /
+    project-planning / domain-planning agents are not used in the main flow
+    (``clarification_store`` may still use Spec Intake elsewhere).
+
+    Audit (kept honest here so future readers do not assume the dict is fully
+    consumed): the two production callers of ``_get_agents`` — the thread-mode
+    orchestrator below and ``temporal/activities.py`` — currently read only
+    ``agents["architecture"]`` from the returned dict. Per-task backend/frontend
+    work is delegated to the coding-team / code-v2 sub-teams, which construct
+    their own tool agents via ``_build_tool_agents`` rather than reading them
+    from this dict. The remaining entries are retained because the integration
+    tests in ``test_backend_code_v2_integration.py`` and
+    ``test_frontend_code_v2_integration.py`` pin the presence of the v2 team
+    leads, and this function is the canonical fleet factory for the thread-mode
+    pipeline. Eagerly constructing every agent on each call is real startup
+    overhead (each entry calls ``get_client``); converting the unused entries to
+    lazy handles is tracked as a follow-up rather than a behavioral change for
+    this refactor PR.
+    """
     from acceptance_verifier_agent import AcceptanceVerifierAgent
     from accessibility_agent import AccessibilityExpertAgent
     from architecture_expert import ArchitectureExpertAgent

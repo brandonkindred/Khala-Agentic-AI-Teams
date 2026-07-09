@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from shared_repo_context.repo_utils import find_repo_files
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_review import ReviewConfig
@@ -43,9 +44,14 @@ def _detect_language(repo_path: Path, task: Task) -> str:
                     return "react"
             except Exception:
                 pass
-        if any(repo_path.rglob("tsconfig.json")):
+        # Pruned os.walk (find_repo_files) so a checkout with a large
+        # node_modules/.git/dist/.angular is never descended into while probing
+        # for tsconfig / *.ts / *.tsx — the same I/O discipline as
+        # read_repo_code_budgeted, replacing the rglob calls that enumerated
+        # those excluded subtrees before filtering.
+        if find_repo_files(repo_path, names={"tsconfig.json"}):
             return "typescript"
-        if any(repo_path.rglob("*.tsx")) or any(repo_path.rglob("*.ts")):
+        if find_repo_files(repo_path, suffixes={".tsx", ".ts"}):
             return "typescript"
     desc = (task.description or "").lower() + " " + (task.requirements or "").lower()
     if "angular" in desc:
@@ -74,17 +80,42 @@ PROFILE = StackProfile(
 # ---------------------------------------------------------------------------
 
 
-def _frontend_summary_review(passed: bool, build_ok: bool, lint_ok: bool, n_issues: int, n_critical: int) -> str:
+def _frontend_summary_review(
+    passed: bool, build_ok: bool, lint_ok: bool, n_issues: int, n_critical: int
+) -> str:
+    """One-line result summary for the frontend full-Review phase.
+
+    Preconditions: all args are the booleans/ints the shared reviewer computes.
+    Postconditions: returns a single human-readable line naming pass/fail and
+    the issue count; ignores ``build_ok``/``lint_ok``/``n_critical`` (frontend
+    keeps its summary terse — the per-gate status is logged separately).
+    """
     return f"Review {'passed' if passed else 'failed'}; {n_issues} issue(s)."
 
 
 def _frontend_summary_microtask(
     microtask_id: str, passed: bool, build_ok: bool, lint_ok: bool, n_issues: int, n_critical: int
 ) -> str:
-    return f"Microtask {microtask_id} review {'passed' if passed else 'failed'}; {n_issues} issue(s)."
+    """One-line result summary for a frontend microtask review.
+
+    Preconditions: ``microtask_id`` is the microtask's id; the rest are the
+    reviewer-computed booleans/ints.
+    Postconditions: returns a single line naming the microtask, pass/fail, and
+    issue count; ignores ``build_ok``/``lint_ok``/``n_critical`` (terse summary).
+    """
+    return (
+        f"Microtask {microtask_id} review {'passed' if passed else 'failed'}; {n_issues} issue(s)."
+    )
 
 
 def _frontend_microtask_intro(microtask_id: str, n_files: int) -> str:
+    """Intro line emitted when a frontend microtask review begins.
+
+    Preconditions: ``microtask_id`` is the microtask's id; ``n_files`` >= 0 is
+    the number of files scoped into the review.
+    Postconditions: returns a single line naming the microtask, its file count,
+    and the next quality-gate step.
+    """
     return (
         f"Microtask review for {microtask_id} ({n_files} files). "
         "Next step -> Build verification, lint, code review"

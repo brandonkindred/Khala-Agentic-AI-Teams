@@ -1,4 +1,4 @@
-"""read_repo_code_budgeted is best-effort: mid-walk errors degrade, never raise."""
+"""read_repo_code_budgeted / find_repo_files are best-effort: mid-walk errors degrade, never raise."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 import shared_repo_context.repo_utils as repo_utils_mod
-from shared_repo_context import read_repo_code_budgeted
+from shared_repo_context import find_repo_files, read_repo_code_budgeted
 
 
 def test_unreadable_file_is_skipped_not_raised(tmp_path: Path, monkeypatch) -> None:
@@ -104,3 +104,59 @@ def test_streaming_walk_matches_sorted_output(tmp_path: Path) -> None:
     )
     # Sorted by path: a.py, b.py, sub/c.py.
     assert out == "--- a.py ---\nA = 1\n\n--- b.py ---\nB = 2\n\n--- sub/c.py ---\nC = 3\n"
+
+
+def test_find_repo_files_matches_suffix_and_name_with_pruning(tmp_path: Path, monkeypatch) -> None:
+    """find_repo_files returns regular files by suffix or exact basename, and
+    prunes excluded dirs in place so a node_modules/.git subtree is never
+    descended into (the I/O win over rglob that motivated the helper)."""
+    (tmp_path / "keep.py").write_text("K = 1")
+    (tmp_path / "pom.xml").write_text("<project/>")
+    deep = tmp_path / "node_modules" / "deep"
+    deep.mkdir(parents=True)
+    (deep / "ignored.py").write_text("X = 1")
+    (deep / "pom.xml").write_text("<project/>")
+
+    visited: list[str] = []
+    real_walk = os.walk
+
+    def _walk(top, *a, **k):
+        for dirpath, dirnames, filenames in real_walk(top, *a, **k):
+            visited.append(dirpath)
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(repo_utils_mod.os, "walk", _walk)
+    matched = {f.name for f in find_repo_files(tmp_path, suffixes={".py"}, names={"pom.xml"})}
+    assert matched == {"keep.py", "pom.xml"}
+    # os.walk never yielded a frame under node_modules — pruned, not filtered.
+    assert not any("node_modules" in p for p in visited)
+
+
+def test_find_repo_files_non_directory_returns_empty(tmp_path: Path) -> None:
+    """A non-directory repo_path yields [] rather than raising, so the
+    best-effort _detect_language callers can call this unconditionally."""
+    missing = tmp_path / "does-not-exist"
+    assert find_repo_files(missing, suffixes={".py"}) == []
+
+
+def test_find_repo_files_mid_walk_error_degrades_to_partial(tmp_path: Path, monkeypatch) -> None:
+    """A filesystem race mid-scan must not escape; the helper degrades to the
+    entries enumerated before the error, mirroring read_repo_code_budgeted."""
+    (tmp_path / "a.py").write_text("A = 1")
+
+    def _boom(_top: Path):
+        yield (str(tmp_path), [], ["a.py"])
+        raise FileNotFoundError("directory vanished mid-walk")
+
+    monkeypatch.setattr(repo_utils_mod.os, "walk", _boom)
+    matched = {f.name for f in find_repo_files(tmp_path, suffixes={".py"})}
+    assert matched == {"a.py"}
+
+
+def test_find_repo_files_requires_is_file(tmp_path: Path) -> None:
+    """A directory whose name happens to end in a requested suffix is not
+    returned: the is_file() guard keeps directory entries out of the result."""
+    (tmp_path / "src.py").mkdir()  # a directory named src.py
+    (tmp_path / "real.py").write_text("R = 1")
+    matched = {f.name for f in find_repo_files(tmp_path, suffixes={".py"}, exclude_dirs=set())}
+    assert matched == {"real.py"}

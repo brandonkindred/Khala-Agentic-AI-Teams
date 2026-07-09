@@ -131,7 +131,8 @@ class FrontendDevelopmentAgent:
         Preconditions: ``repo_path`` is an existing directory.
         Postconditions: returns a briefing byte-identical to
           ``_read_repo_code(repo_path)`` for the current on-disk state; when a
-          cache is present it re-reads only changed eligible files.
+          cache is present it re-reads only changed eligible files. Raises
+          ``AssertionError`` if the precondition is violated (caller bug).
         Invariants: with no cache the fresh walk runs each call; with a cache the
           output never differs from the fresh walk, only the amount of file I/O.
 
@@ -140,6 +141,7 @@ class FrontendDevelopmentAgent:
         signature, and the cache carries its own char budget, so forwarding one
         here would both break that patch surface and be ignored.
         """
+        assert repo_path.is_dir(), "repo_path must be an existing directory"
         if self._repo_context_cache is not None:
             return self._repo_context_cache.read(repo_path)
         return self._read_repo_code(repo_path)
@@ -153,8 +155,11 @@ class FrontendDevelopmentAgent:
         just means no test script was found.
 
         Preconditions: ``repo_path`` is a directory.
-        Postconditions: returns two booleans; never raises.
+        Postconditions: returns two booleans. Raises ``AssertionError`` if the
+          precondition is violated (a non-directory ``repo_path`` is a caller
+          bug, not a runtime failure mode this method recovers from).
         """
+        assert repo_path.is_dir(), "repo_path must be a directory"
         has_lint = bool(
             list(repo_path.glob("eslint.config.*"))
             or list(repo_path.glob(".eslintrc*"))
@@ -525,8 +530,10 @@ class FrontendCodeV2TeamLead:
         Preconditions: ``repo_path`` is a directory the development agent will scan.
         Postconditions: returns a ``RepoContextCache`` configured with the frontend
           repo-briefing contract (extensions / exclude dirs / char budget); the same
-          instance is returned for the same resolved repo across calls.
+          instance is returned for the same resolved repo across calls. Raises
+          ``AssertionError`` if the precondition is violated (caller bug).
         """
+        assert repo_path.is_dir(), "repo_path must be a directory"
         key = repo_path.resolve()
         cache = self._repo_context_caches.get(key)
         if cache is None:

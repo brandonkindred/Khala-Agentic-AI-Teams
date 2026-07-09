@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from shared_repo_context.repo_utils import find_repo_files
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_review import ReviewConfig
@@ -30,11 +31,16 @@ def _detect_language(repo_path: Path, task: Task) -> str:
         precedence over task-text heuristics; ``"python"`` is the default.
     """
     if repo_path.is_dir():
-        if any(repo_path.rglob("pom.xml")) or any(repo_path.rglob("build.gradle")):
+        # Pruned os.walk (find_repo_files) so a checkout with a large
+        # node_modules/.git/.venv is never descended into while probing for
+        # build files / *.java — the same I/O discipline as
+        # read_repo_code_budgeted, replacing the rglob calls that enumerated
+        # those excluded subtrees before filtering.
+        if find_repo_files(repo_path, names={"pom.xml", "build.gradle"}):
             return "java"
-        if any(repo_path.rglob("requirements.txt")) or any(repo_path.rglob("pyproject.toml")):
+        if find_repo_files(repo_path, names={"requirements.txt", "pyproject.toml"}):
             return "python"
-        if any(repo_path.rglob("*.java")):
+        if find_repo_files(repo_path, suffixes={".java"}):
             return "java"
     desc = (task.description or "").lower() + " " + (task.requirements or "").lower()
     if "spring" in desc or "java" in desc or "maven" in desc or "gradle" in desc:
@@ -62,7 +68,9 @@ PROFILE = StackProfile(
 _BACKEND_LINT_SEVERITY_MAP = {"error": "high", "warning": "medium", "info": "low"}
 
 
-def _backend_summary_review(passed: bool, build_ok: bool, lint_ok: bool, n_issues: int, n_critical: int) -> str:
+def _backend_summary_review(
+    passed: bool, build_ok: bool, lint_ok: bool, n_issues: int, n_critical: int
+) -> str:
     return (
         f"Review: build={'OK' if build_ok else 'FAIL'}, lint={'OK' if lint_ok else 'FAIL'}, "
         f"{n_issues} issues ({n_critical} critical/high)."

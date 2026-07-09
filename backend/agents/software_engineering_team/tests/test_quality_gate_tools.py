@@ -112,8 +112,13 @@ def test_run_code_review_default_task_requirements_list(monkeypatch) -> None:
         language="python",
         llm_getter=lambda k: MagicMock(),
     )
-    # Either succeeds (if Pydantic ever accepts list) or fails gracefully —
-    # both are valid behaviour the tool currently exposes.
+    # Intentionally tolerant: the ``or []`` fall-through means the outcome
+    # depends on whether the installed Pydantic accepts a list for the field
+    # the wrapper forwards — a version-dependent detail. Asserting ``is False``
+    # would be fragile across Pydantic releases; the contract this test pins is
+    # the weaker one that holds in all versions: the wrapper never crashes and
+    # always returns a well-formed result (``approved`` is a bool), whether the
+    # underlying validation passed or failed gracefully.
     assert isinstance(result.approved, bool)
 
 

@@ -28,6 +28,7 @@ if str(_team_dir) not in sys.path:
 from strands import Agent  # noqa: E402
 
 from llm_service import get_strands_model  # noqa: E402
+from shared_repo_context.repo_utils import find_repo_files  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,18 @@ EXCEPTION_HANDLER_TEST_PATTERNS = (
 # sourced; both are integration-only (this module runs the live build/LLM loop).
 _MAX_BUILD_FIX_ATTEMPTS = 15
 _BUILD_FIX_MAX_CODE_CHARS = 30_000
+
+# Directories pruned from the build-fix LLM-context file collection. Kept as an
+# explicit set (rather than reusing REPO_INSPECT_EXCLUDE_DIRS) so the collection
+# preserves the exact pre-refactor exclusion semantics: ``build/`` is excluded
+# (artifact output for backend projects) while venvs are not, matching the
+# original ``rglob`` post-filter. The win over ``rglob`` is that ``os.walk``
+# prunes these in place — the traversal never descends into ``node_modules`` /
+# ``.git`` / ``dist`` / ``build`` / ``__pycache__`` / ``.angular`` — instead of
+# enumerating every entry under them and discarding after the fact.
+_BUILD_FIX_EXCLUDE_DIRS = frozenset(
+    {"node_modules", ".git", "dist", "build", "__pycache__", ".angular"}
+)
 
 
 def _run_build_verification(
@@ -390,24 +403,22 @@ def _try_build_fix_one_at_a_time(
     exts = ext_map.get(agent_type, (".py",))
     max_chars = _BUILD_FIX_MAX_CODE_CHARS
     total = 0
-    for ext in exts:
-        for f in project_dir.rglob(f"*{ext}"):
-            if not f.is_file() or any(
-                p in f.parts
-                for p in ("node_modules", ".git", "dist", "build", "__pycache__", ".angular")
-            ):
-                continue
-            try:
-                rel = str(f.relative_to(project_dir))
-                content = f.read_text(encoding="utf-8", errors="replace")
-                current_files[rel] = content
-                total += len(content) + len(rel)
-                if total > max_chars:
-                    break
-            except Exception:
-                continue
-        if total > max_chars:
-            break
+    # Pruned os.walk (find_repo_files) so excluded subtrees are never descended
+    # into — the prior ``rglob("*{ext}")`` materialized every entry under
+    # node_modules/.git/dist/build/__pycache__/.angular before the post-filter
+    # discarded them, the same redundant I/O the streamed repo-walk refactor
+    # removed elsewhere. ``find_repo_files`` returns regular files only, so the
+    # old ``is_file()`` guard is now handled inside it.
+    for f in find_repo_files(project_dir, suffixes=exts, exclude_dirs=_BUILD_FIX_EXCLUDE_DIRS):
+        try:
+            rel = str(f.relative_to(project_dir))
+            content = f.read_text(encoding="utf-8", errors="replace")
+            current_files[rel] = content
+            total += len(content) + len(rel)
+            if total > max_chars:
+                break
+        except Exception:
+            continue
 
     try:
         # response_format="text": the build-fix loop parses the assistant

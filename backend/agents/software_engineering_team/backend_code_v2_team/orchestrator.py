@@ -125,7 +125,8 @@ class BackendDevelopmentAgent:
         Preconditions: ``repo_path`` is an existing directory.
         Postconditions: returns a briefing byte-identical to
           ``_read_repo_code(repo_path)`` for the current on-disk state; when a
-          cache is present it re-reads only changed eligible files.
+          cache is present it re-reads only changed eligible files. Raises
+          ``AssertionError`` if the precondition is violated (caller bug).
         Invariants: with no cache the fresh walk runs each call; with a cache the
           output never differs from the fresh walk, only the amount of file I/O.
 
@@ -134,6 +135,7 @@ class BackendDevelopmentAgent:
         signature, and the cache carries its own char budget, so forwarding one
         here would both break that patch surface and be ignored.
         """
+        assert repo_path.is_dir(), "repo_path must be an existing directory"
         if self._repo_context_cache is not None:
             return self._repo_context_cache.read(repo_path)
         return self._read_repo_code(repo_path)
@@ -147,20 +149,35 @@ class BackendDevelopmentAgent:
         ``[tool.pytest`` block in ``pyproject.toml``) as testing. Reads
         ``pyproject.toml`` once and reuses it for both probes.
 
+        The ``[tool.ruff]`` / ``[tool.pytest`` checks are deliberate substring
+        probes, not a TOML parse: the target runtime is Python 3.10 (no
+        ``tomllib``) and ``tomli`` is not a dependency, so pulling in a parser
+        for a pre-flight best-effort gate is not worth the cost. The known
+        limitation is a false positive when that literal substring appears inside
+        a string or comment in ``pyproject.toml`` — contrived in practice for
+        these specific section headers, and the pre-flight only decides whether
+        to fail the task early for missing tooling, so a false positive errs
+        toward proceeding (a real build/lint gate still enforces correctness).
+
         Preconditions: ``repo_path`` is a directory.
-        Postconditions: returns two booleans; never raises.
+        Postconditions: returns two booleans. Raises ``AssertionError`` if the
+          precondition is violated (a non-directory ``repo_path`` is a caller
+          bug, not a runtime failure mode this method recovers from).
         """
-        _pyproject = repo_path / "pyproject.toml"
-        _pyproject_text = (
-            _pyproject.read_text(encoding="utf-8", errors="replace") if _pyproject.exists() else ""
+        assert repo_path.is_dir(), "repo_path must be a directory"
+        pyproject_path = repo_path / "pyproject.toml"
+        pyproject_text = (
+            pyproject_path.read_text(encoding="utf-8", errors="replace")
+            if pyproject_path.exists()
+            else ""
         )
         has_lint = (
             (repo_path / "ruff.toml").exists()
             or (repo_path / ".flake8").exists()
-            or "[tool.ruff]" in _pyproject_text
+            or "[tool.ruff]" in pyproject_text
         )
         has_test = (repo_path / "tests").is_dir() and (
-            (repo_path / "pytest.ini").exists() or "[tool.pytest" in _pyproject_text
+            (repo_path / "pytest.ini").exists() or "[tool.pytest" in pyproject_text
         )
         return has_lint, has_test
 
@@ -531,8 +548,10 @@ class BackendCodeV2TeamLead:
         Preconditions: ``repo_path`` is a directory the development agent will scan.
         Postconditions: returns a ``RepoContextCache`` configured with the backend
           repo-briefing contract (extensions / exclude dirs / char budget); the same
-          instance is returned for the same resolved repo across calls.
+          instance is returned for the same resolved repo across calls. Raises
+          ``AssertionError`` if the precondition is violated (caller bug).
         """
+        assert repo_path.is_dir(), "repo_path must be a directory"
         key = repo_path.resolve()
         cache = self._repo_context_caches.get(key)
         if cache is None:
