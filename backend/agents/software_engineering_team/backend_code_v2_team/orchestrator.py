@@ -286,12 +286,12 @@ class BackendDevelopmentAgent:
         # ── Pre-flight: verify linting & testing are configured ───────
         # Runs after the feature-branch checkout so it validates the branch that
         # will actually be edited, not whatever branch setup last left checked out.
-        _has_lint, _has_test = self._detect_tooling(repo_path)
-        if not _has_lint or not _has_test:
+        has_lint, has_test = self._detect_tooling(repo_path)
+        if not has_lint or not has_test:
             missing = []
-            if not _has_lint:
+            if not has_lint:
                 missing.append("linting")
-            if not _has_test:
+            if not has_test:
                 missing.append("testing")
             logger.error(
                 "[%s] Pre-flight check failed: %s not configured at %s",

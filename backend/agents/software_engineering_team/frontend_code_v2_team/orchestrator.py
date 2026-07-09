@@ -1,8 +1,8 @@
 """
-Frontend-Code-V2 team orchestrator: Setup + 5-phase state machine.
+Frontend-Code-V2 team orchestrator: 5-phase state machine (Setup → Planning →
+Execution → Documentation → Deliver) for frontend code-generation tasks.
 
 Entry point used by the main orchestrator and by the frontend-code-v2 API.
-No code from frontend_team or feature_agent is imported or reused.
 """
 
 from __future__ import annotations
@@ -52,7 +52,15 @@ _REPO_BRIEFING_MAX_CHARS = 30_000
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
-    """Build team-owned tool agent instances with LLM support where applicable."""
+    """Build team-owned tool agent instances with LLM support where applicable.
+
+    The tool-agent imports are deferred to call time on purpose: each adapter
+    module pulls in heavy strands/llm_service machinery and several import the
+    orchestrator's own package, so hoisting them to module top would both make
+    this module expensive to import and reintroduce a circular import. Keeping
+    them lazy bounds the import cost to actual runs, so they are not hoisted to
+    module scope.
+    """
     from software_engineering_team.shared.tool_agent_git_branch import (
         GitBranchManagementToolAgent,
     )
@@ -160,15 +168,15 @@ class FrontendDevelopmentAgent:
           bug, not a runtime failure mode this method recovers from).
         """
         assert repo_path.is_dir(), "repo_path must be a directory"
-        has_lint = bool(
-            list(repo_path.glob("eslint.config.*"))
-            or list(repo_path.glob(".eslintrc*"))
+        has_lint = (
+            next(repo_path.glob("eslint.config.*"), None) is not None
+            or next(repo_path.glob(".eslintrc*"), None) is not None
             or (repo_path / "angular.json").exists()
         )
         has_test = False
-        if bool(
-            list(repo_path.glob("vitest.config.*"))
-            or list(repo_path.glob("jest.config.*"))
+        if (
+            next(repo_path.glob("vitest.config.*"), None) is not None
+            or next(repo_path.glob("jest.config.*"), None) is not None
             or (repo_path / "karma.conf.js").exists()
         ):
             has_test = True
@@ -180,8 +188,11 @@ class FrontendDevelopmentAgent:
                     test_script = pkg.get("scripts", {}).get("test", "")
                     if test_script and "no test" not in test_script and "exit 1" not in test_script:
                         has_test = True
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # A malformed package.json means no test script was found;
+                    # log at DEBUG so a real config problem is observable during
+                    # debugging without failing the best-effort pre-flight gate.
+                    logger.debug("[%s] failed to parse package.json: %s", repo_path, exc)
         return has_lint, has_test
 
     def run_workflow(
@@ -220,8 +231,11 @@ class FrontendDevelopmentAgent:
             if job_updater:
                 try:
                     job_updater(**kwargs)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # A job-update failure must not crash the workflow, but log it
+                    # at DEBUG so a persistently broken updater callback stays
+                    # observable during debugging instead of vanishing silently.
+                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
 
         logger.info(
             "[%s] WORKFLOW START: Frontend Development Agent (per-microtask review gates)", task_id
@@ -573,8 +587,8 @@ class FrontendCodeV2TeamLead:
             if job_updater:
                 try:
                     job_updater(**kwargs)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("[%s] job_updater failed: %s", task_id, exc)
 
         result.current_phase = Phase.SETUP
         _update_job(current_phase="setup", progress=2)
@@ -633,6 +647,15 @@ class FrontendCodeV2TeamLead:
             merge_to_development=merge_to_development,
             repo_context_cache=self._repo_context_cache_for(repo_path),
         )
+        # Overlay the dev agent's execution-stage fields onto the team-lead
+        # result. This copy is deliberately selective: ``setup_result`` is NOT
+        # copied, so the team-lead's own setup phase (run above) is preserved
+        # rather than replaced by the dev agent's internal setup. Because the
+        # two results share the same Pydantic model, a blanket ``model_copy``
+        # would clobber ``setup_result`` — so the fields are listed explicitly.
+        # Maintenance contract: any new field ``FrontendCodeV2WorkflowResult``
+        # gains that the dev agent populates must be added here, or it will be
+        # dropped on the team-lead path.
         result.success = inner.success
         result.current_phase = inner.current_phase
         result.iterations_used = inner.iterations_used
