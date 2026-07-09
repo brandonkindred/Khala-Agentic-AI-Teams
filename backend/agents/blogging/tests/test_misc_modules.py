@@ -621,7 +621,10 @@ def test_temporal_constants_loaded() -> None:
     assert constants.TASK_QUEUE  # non-empty
     assert constants.WORKFLOW_ID_PREFIX_FULL_PIPELINE
     assert constants.WORKFLOW_FULL_PIPELINE
-    assert constants.ACTIVITY_FULL_PIPELINE
+    assert constants.ACTIVITY_PLAN_STAGE
+    assert constants.ACTIVITY_DRAFT_STAGE
+    assert constants.ACTIVITY_GATES_STAGE
+    assert constants.ACTIVITY_FINALIZE
 
 
 def test_connect_temporal_client_no_address(monkeypatch) -> None:

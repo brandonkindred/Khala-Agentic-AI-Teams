@@ -11,6 +11,7 @@ Supports job_updater callback for UI phase tracking.
 import logging
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, List, Literal, Optional, Tuple, Union
 
@@ -684,6 +685,76 @@ def _run_title_selection(
     return None
 
 
+def _make_update(job_updater: Optional[JobUpdater]) -> Callable[..., None]:
+    """Build the phase-progress ``_update`` callback bound to a job_updater.
+
+    Preconditions:
+        - ``job_updater`` is either a callable ``(**kwargs) -> None`` or None.
+    Postconditions:
+        - Returns a callable ``(phase, sub_progress=0.0, status_text="", **kwargs)``
+          that forwards a computed overall progress to ``job_updater`` (no-op when
+          ``job_updater`` is None). Re-raises CancelledError; swallows other
+          job-update failures (identical to the pipeline's former inline closure).
+    """
+
+    def _update(
+        phase: BlogPhase,
+        sub_progress: float = 0.0,
+        status_text: str = "",
+        **kwargs: Any,
+    ) -> None:
+        if job_updater:
+            try:
+                progress = get_phase_progress(phase, sub_progress)
+                job_updater(
+                    phase=phase.value,
+                    progress=progress,
+                    status_text=status_text,
+                    **kwargs,
+                )
+            except CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("Failed to update job status: %s", e)
+
+    return _update
+
+
+@dataclass
+class _PipelineContext:
+    """Mutable state threaded across the blogging pipeline stages.
+
+    Split out so each stage (planning -> draft -> gates) can run as its own Temporal
+    activity: the activity seeds a context from the previous stage's serialized DTO,
+    runs the stage, and serializes the produced fields. In thread mode a single
+    context is threaded through all three stages in-process.
+
+    Invariants:
+        - ``llm_client`` and ``length_policy`` are resolved (non-None) before any
+          stage runs.
+        - ``planning_phase_result``/``plan``/``elicited_stories_text`` are populated
+          by the planning stage before the draft stage reads them.
+        - ``draft_result`` is populated by the draft stage before the gates stage
+          reads it.
+    """
+
+    brief: ResearchBriefInput
+    work_dir: Optional[Union[str, Path]]
+    llm_client: Any
+    length_policy: LengthPolicy
+    series_context: Optional[SeriesContext]
+    job_id: Optional[str]
+    job_updater: Optional[JobUpdater]
+    draft_editor_iterations: int
+    max_rewrite_iterations: int
+    run_gates: bool
+    planning_phase_result: Optional[PlanningPhaseResult] = None
+    plan: Any = None
+    elicited_stories_text: Optional[str] = None
+    draft_result: Any = None
+    status: PipelineStatus = "PASS"
+
+
 def run_pipeline(
     brief: ResearchBriefInput,
     *,
@@ -734,27 +805,6 @@ def run_pipeline(
         FactCheckError: If fact check fails unrecoverably.
     """
 
-    def _update(
-        phase: BlogPhase,
-        sub_progress: float = 0.0,
-        status_text: str = "",
-        **kwargs: Any,
-    ) -> None:
-        """Update job status if job_updater is provided."""
-        if job_updater:
-            try:
-                progress = get_phase_progress(phase, sub_progress)
-                job_updater(
-                    phase=phase.value,
-                    progress=progress,
-                    status_text=status_text,
-                    **kwargs,
-                )
-            except CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("Failed to update job status: %s", e)
-
     if llm_client is None:
         llm_client = get_strands_model("blog")
 
@@ -770,6 +820,51 @@ def run_pipeline(
         work_path = Path(work_dir).resolve()
         work_path.mkdir(parents=True, exist_ok=True)
         logger.info("Artifact work_dir: %s", work_path)
+
+    ctx = _PipelineContext(
+        brief=brief,
+        work_dir=work_dir,
+        llm_client=llm_client,
+        length_policy=length_policy,
+        series_context=series_context,
+        job_id=job_id,
+        job_updater=job_updater,
+        draft_editor_iterations=draft_editor_iterations,
+        max_rewrite_iterations=max_rewrite_iterations,
+        run_gates=run_gates,
+    )
+
+    planning_abort = run_planning_stage(ctx)
+    if planning_abort is not None:
+        return planning_abort
+    draft_abort = run_draft_stage(ctx)
+    if draft_abort is not None:
+        return draft_abort
+    run_gates_stage(ctx)
+    return ctx.planning_phase_result, ctx.draft_result, ctx.status
+
+
+def run_planning_stage(
+    ctx: "_PipelineContext",
+) -> Optional[Tuple[PlanningPhaseResult, Any, PipelineStatus]]:
+    """Planning stage: content planning, story elicitation, and outline approval.
+
+    Preconditions:
+        - ``ctx.llm_client`` and ``ctx.length_policy`` are resolved.
+    Postconditions:
+        - On success sets ``ctx.planning_phase_result``/``ctx.plan``/
+          ``ctx.elicited_stories_text`` and returns None.
+        - Returns a terminal ``(planning_phase_result, None, "FAIL")`` tuple if the
+          job was cancelled/failed while awaiting outline approval.
+    """
+    brief = ctx.brief
+    work_dir = ctx.work_dir
+    llm_client = ctx.llm_client
+    length_policy = ctx.length_policy
+    series_context = ctx.series_context
+    job_id = ctx.job_id
+    job_updater = ctx.job_updater
+    _update = _make_update(job_updater)
 
     planning_phase_result = run_planning(
         brief,
@@ -1037,6 +1132,38 @@ def run_pipeline(
             raise
         except Exception as e:
             logger.warning("Outline approval phase error (skipping): %s", e)
+
+    ctx.planning_phase_result = planning_phase_result
+    ctx.plan = plan
+    ctx.elicited_stories_text = elicited_stories_text
+    return None
+
+
+def run_draft_stage(
+    ctx: "_PipelineContext",
+) -> Optional[Tuple[PlanningPhaseResult, Any, PipelineStatus]]:
+    """Draft stage: initial draft, interactive review, and the copy-edit loop.
+
+    Preconditions:
+        - The planning stage populated ``ctx.plan``/``ctx.planning_phase_result``/
+          ``ctx.elicited_stories_text``.
+    Postconditions:
+        - On success sets ``ctx.draft_result`` (and the possibly-updated
+          ``ctx.elicited_stories_text``) and returns None.
+        - Returns a terminal ``(planning_phase_result, draft_result, "FAIL")`` tuple
+          if the job was cancelled/failed while awaiting user review.
+    """
+    brief = ctx.brief
+    work_dir = ctx.work_dir
+    llm_client = ctx.llm_client
+    length_policy = ctx.length_policy
+    job_id = ctx.job_id
+    job_updater = ctx.job_updater
+    draft_editor_iterations = ctx.draft_editor_iterations
+    planning_phase_result = ctx.planning_phase_result
+    plan = ctx.plan
+    elicited_stories_text = ctx.elicited_stories_text
+    _update = _make_update(job_updater)
 
     # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
@@ -1597,6 +1724,36 @@ def run_pipeline(
             draft_iterations=draft_editor_iterations,
         )
 
+    ctx.draft_result = draft_result
+    ctx.elicited_stories_text = elicited_stories_text
+    return None
+
+
+def run_gates_stage(
+    ctx: "_PipelineContext",
+) -> Optional[Tuple[PlanningPhaseResult, Any, PipelineStatus]]:
+    """Gates stage: validators, fact-check, compliance, rewrite loop, and finalize.
+
+    Preconditions:
+        - The draft stage populated ``ctx.draft_result``/``ctx.plan``/
+          ``ctx.elicited_stories_text``.
+    Postconditions:
+        - Sets ``ctx.draft_result`` (final) and ``ctx.status`` (PASS or
+          NEEDS_HUMAN_REVIEW). Always returns None (no early aborts).
+    """
+    brief = ctx.brief
+    work_dir = ctx.work_dir
+    llm_client = ctx.llm_client
+    length_policy = ctx.length_policy
+    job_id = ctx.job_id
+    job_updater = ctx.job_updater
+    max_rewrite_iterations = ctx.max_rewrite_iterations
+    run_gates = ctx.run_gates
+    plan = ctx.plan
+    elicited_stories_text = ctx.elicited_stories_text
+    draft_result = ctx.draft_result
+    _update = _make_update(job_updater)
+
     status: PipelineStatus = "PASS"
     if work_dir is not None:
         write_artifact(work_dir, "final.md", draft_result.draft)
@@ -1607,6 +1764,18 @@ def run_pipeline(
         compliance_agent = BlogComplianceAgent(llm_client=llm_client)
         fact_check_agent = BlogFactCheckAgent(llm_client=llm_client)
         require_disclaimer_for = ["medical", "legal", "financial"]
+
+        # Reconstruct the draft agent for gate-driven rewrites. Guideline edits made
+        # during the draft stage are persisted to STYLE_GUIDE_PATH, so re-loading here
+        # picks them up — this also makes the gates stage self-contained when it runs
+        # as its own Temporal activity (a fresh process with no in-memory draft agent).
+        writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
+        brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
+        draft_agent = BlogWriterAgent(
+            llm_client=llm_client,
+            writing_style_guide_content=writing_style_content,
+            brand_spec_content=brand_spec_content,
+        )
 
         for rewrite_iter in range(max_rewrite_iterations):
             # Fact check phase
@@ -1862,7 +2031,9 @@ def run_pipeline(
             status_text="Pipeline complete (gates skipped)",
         )
 
-    return planning_phase_result, draft_result, status
+    ctx.draft_result = draft_result
+    ctx.status = status
+    return None
 
 
 def main() -> None:

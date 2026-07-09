@@ -313,47 +313,286 @@ def test_run_async_executes(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# temporal.activities.run_full_pipeline_activity
+# temporal.activities — fine-grained pipeline-phase activities
 # ---------------------------------------------------------------------------
 
 
-def test_temporal_activity_run_full_pipeline_delegates(monkeypatch) -> None:
-    """run_full_pipeline_activity calls run_blog_full_pipeline_job."""
+class _Dumpable:
+    """Stand-in for a pydantic model at an activity boundary.
+
+    ``model_dump`` returns the wrapped dict and ``content_plan`` exposes it so it can
+    double as a ``PlanningPhaseResult`` stub in the draft/gates activities.
+    """
+
+    def __init__(self, data):
+        self._data = data
+        self.content_plan = data
+
+    def model_dump(self, mode=None):
+        return self._data
+
+
+def _fake_ctx(tmp_path):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        job_updater=lambda **kw: None,
+        work_dir=tmp_path,
+        planning_phase_result=None,
+        plan=None,
+        elicited_stories_text=None,
+        draft_result=None,
+        status="PASS",
+    )
+
+
+def _patch_context(monkeypatch, tmp_path):
+    """Patch the shared context builder + job-store/heartbeat side effects to no-ops."""
+    import importlib
+
     from blogging.temporal import activities as acts
 
+    bjs = importlib.import_module("blogging.shared.blog_job_store")
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    ctx = _fake_ctx(tmp_path)
+    monkeypatch.setattr(acts, "_build_pipeline_context", lambda job_id, req: ctx)
+    monkeypatch.setattr(bjs, "start_blog_job", lambda job_id: None)
+    monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: None)
+    return acts, ctx
+
+
+def _v2():
+    import importlib
+
+    return importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+
+
+def test_plan_stage_activity_returns_planning_dto(monkeypatch, tmp_path) -> None:
+    """plan_stage_activity runs the planning stage and serializes the result."""
+    acts, ctx = _patch_context(monkeypatch, tmp_path)
+
+    def fake_planning(c):
+        c.planning_phase_result = _Dumpable({"content_plan": {"x": 1}})
+        c.elicited_stories_text = "story"
+        return None
+
+    monkeypatch.setattr(_v2(), "run_planning_stage", fake_planning)
+
+    out = acts.plan_stage_activity("j1", {"brief": "x"})
+    assert out["status"] == "PASS"
+    assert out["planning_phase_result"] == {"content_plan": {"x": 1}}
+    assert out["elicited_stories_text"] == "story"
+
+
+def test_plan_stage_activity_abort_returns_fail(monkeypatch, tmp_path) -> None:
+    """A planning abort (cancel/failed job) yields a FAIL DTO, not a raise."""
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    monkeypatch.setattr(_v2(), "run_planning_stage", lambda c: (None, None, "FAIL"))
+
+    out = acts.plan_stage_activity("j1", {"brief": "x"})
+    assert out["status"] == "FAIL"
+
+
+def test_plan_stage_activity_error_fails_job_and_reraises(monkeypatch, tmp_path) -> None:
+    """A hard stage error fails the job and re-raises so Temporal retries."""
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+
+    def boom(c):
+        raise ValueError("kaboom")
+
+    monkeypatch.setattr(_v2(), "run_planning_stage", boom)
+    failed: dict = {}
+    monkeypatch.setattr(
+        acts,
+        "_fail_activity",
+        lambda job_id, exc, failed_phase: failed.update(job_id=job_id, phase=failed_phase) or False,
+    )
+
+    with pytest.raises(ValueError):
+        acts.plan_stage_activity("j1", {"brief": "x"})
+    assert failed == {"job_id": "j1", "phase": "planning"}
+
+
+def test_draft_stage_activity_returns_draft_dto(monkeypatch, tmp_path) -> None:
+    """draft_stage_activity rebuilds the plan, runs the draft stage, serializes it."""
+    import importlib
+
+    acts, ctx = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+
+    def fake_draft(c):
+        c.draft_result = _Dumpable({"draft": "hello"})
+        c.elicited_stories_text = "s2"
+        return None
+
+    monkeypatch.setattr(_v2(), "run_draft_stage", fake_draft)
+
+    planning = {"planning_phase_result": {"content_plan": {}}, "status": "PASS"}
+    out = acts.draft_stage_activity("j1", {"brief": "x"}, planning)
+    assert out["status"] == "PASS"
+    assert out["draft"] == {"draft": "hello"}
+    assert out["elicited_stories_text"] == "s2"
+
+
+def test_gates_stage_activity_returns_gates_dto(monkeypatch, tmp_path) -> None:
+    """gates_stage_activity rebuilds plan+draft, runs the gates stage, serializes it."""
+    import importlib
+
+    acts, ctx = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    wm = importlib.import_module("blog_writer_agent.models")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(wm.WriterOutput, "model_validate", classmethod(lambda cls, d: _Dumpable(d)))
+
+    def fake_gates(c):
+        c.draft_result = _Dumpable({"draft": "final"})
+        c.status = "NEEDS_HUMAN_REVIEW"
+        return None
+
+    monkeypatch.setattr(_v2(), "run_gates_stage", fake_gates)
+
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    draft = {"draft": {"draft": "d"}, "status": "PASS"}
+    out = acts.gates_stage_activity("j1", {"brief": "x"}, planning, draft)
+    assert out["status"] == "NEEDS_HUMAN_REVIEW"
+    assert out["draft"] == {"draft": "final"}
+
+
+def test_finalize_job_activity_delegates(monkeypatch, tmp_path) -> None:
+    """finalize_job_activity reconstructs models and calls finalize_blog_job."""
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    cp = importlib.import_module("blogging.shared.content_plan")
+    wm = importlib.import_module("blog_writer_agent.models")
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(wm.WriterOutput, "model_validate", classmethod(lambda cls, d: _Dumpable(d)))
     seen: dict = {}
+    monkeypatch.setattr(
+        rpj,
+        "finalize_blog_job",
+        lambda job_id, ppr, draft, status: seen.update(job_id=job_id, status=status),
+    )
 
-    def fake(job_id, req):
-        seen["job_id"] = job_id
-        seen["req"] = req
-
-    monkeypatch.setattr(acts, "run_blog_full_pipeline_job", fake)
-    acts.run_full_pipeline_activity("j1", {"brief": "x"})
-    assert seen == {"job_id": "j1", "req": {"brief": "x"}}
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    gates = {"draft": {"draft": "final"}, "status": "PASS"}
+    acts.finalize_job_activity("j1", planning, gates)
+    assert seen == {"job_id": "j1", "status": "PASS"}
 
 
-def test_temporal_activity_run_full_pipeline_reraises_cancelled(monkeypatch) -> None:
+class _FakeHeartbeat:
+    def __init__(self):
+        self.stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_path) -> None:
+    """External cancellation -> _fail_activity True -> FAIL DTO (not a raise); hb stopped."""
+    import importlib
+
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    hb = _FakeHeartbeat()
+    monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: hb)
+    monkeypatch.setattr(acts, "_fail_activity", lambda job_id, exc, failed_phase: True)
+
+    def boom(c):
+        raise RuntimeError("wrapped cancel")
+
+    monkeypatch.setattr(_v2(), "run_planning_stage", boom)
+    out = acts.plan_stage_activity("j1", {"brief": "x"})
+    assert out["status"] == "FAIL"
+    assert hb.stopped is True
+
+
+def test_draft_stage_activity_abort_returns_fail_with_partial_draft(monkeypatch, tmp_path) -> None:
+    """A draft abort tuple carries the partial draft into a FAIL DTO."""
+    import importlib
+
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(
+        _v2(), "run_draft_stage", lambda c: (None, _Dumpable({"draft": "partial"}), "FAIL")
+    )
+
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    out = acts.draft_stage_activity("j1", {"brief": "x"}, planning)
+    assert out["status"] == "FAIL"
+    assert out["draft"] == {"draft": "partial"}
+
+
+def test_draft_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
+    import importlib
+
     from temporalio.exceptions import CancelledError
 
-    from blogging.temporal import activities as acts
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
 
-    def fake(job_id, req):
-        raise CancelledError("nope")
+    def boom(c):
+        raise CancelledError("cancel")
 
-    monkeypatch.setattr(acts, "run_blog_full_pipeline_job", fake)
+    monkeypatch.setattr(_v2(), "run_draft_stage", boom)
     with pytest.raises(CancelledError):
-        acts.run_full_pipeline_activity("j", {})
+        acts.draft_stage_activity("j1", {"brief": "x"}, {"planning_phase_result": {}})
 
 
-def test_temporal_activity_run_full_pipeline_reraises_other(monkeypatch) -> None:
+def test_gates_stage_activity_reraises_hard_error(monkeypatch, tmp_path) -> None:
+    """A hard gates error (not swallowed) re-raises after failing the job."""
+    import importlib
+
+    acts, _ = _patch_context(monkeypatch, tmp_path)
+    cp = importlib.import_module("blogging.shared.content_plan")
+    wm = importlib.import_module("blog_writer_agent.models")
+    monkeypatch.setattr(
+        cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
+    )
+    monkeypatch.setattr(wm.WriterOutput, "model_validate", classmethod(lambda cls, d: _Dumpable(d)))
+    monkeypatch.setattr(acts, "_fail_activity", lambda job_id, exc, failed_phase: False)
+
+    def boom(c):
+        raise ValueError("gate blew up")
+
+    monkeypatch.setattr(_v2(), "run_gates_stage", boom)
+    planning = {"planning_phase_result": {"content_plan": {}}}
+    draft = {"draft": {"draft": "d"}}
+    with pytest.raises(ValueError):
+        acts.gates_stage_activity("j1", {"brief": "x"}, planning, draft)
+
+
+def test_finalize_job_activity_reraises_on_error(monkeypatch, tmp_path) -> None:
+    """finalize failing (non-cancellation) fails the job and re-raises."""
+    import importlib
+
     from blogging.temporal import activities as acts
 
-    def fake(job_id, req):
-        raise ValueError("oops")
+    cp = importlib.import_module("blogging.shared.content_plan")
 
-    monkeypatch.setattr(acts, "run_blog_full_pipeline_job", fake)
+    def boom(cls, d):
+        raise ValueError("bad model")
+
+    monkeypatch.setattr(cp.PlanningPhaseResult, "model_validate", classmethod(boom))
+    monkeypatch.setattr(acts, "_fail_activity", lambda job_id, exc, failed_phase: False)
+
     with pytest.raises(ValueError):
-        acts.run_full_pipeline_activity("j", {})
+        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": None})
 
 
 # ---------------------------------------------------------------------------

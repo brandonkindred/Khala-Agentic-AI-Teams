@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from temporalio.exceptions import CancelledError
 
@@ -84,79 +84,58 @@ def _is_external_cancellation(exc: BaseException) -> bool:
     return False
 
 
-def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> None:
-    """
-    Run the full blog pipeline and update the job store. Used by API and Temporal activity.
-    request_dict: brief, title_concept (optional), audience (str or dict), tone_or_purpose,
-                  max_results, run_gates, max_rewrite_iterations,
-                  content_profile, series_context, length_notes, target_word_count (all optional).
+def build_brief_input(request_dict: Dict[str, Any]) -> Any:
+    """Build a ``ResearchBriefInput`` from a serialized request dict.
+
+    Preconditions:
+        - ``request_dict`` carries a ``brief`` string; ``title_concept``,
+          ``audience`` (str or dict), ``tone_or_purpose``, and ``max_results`` are
+          optional.
+    Postconditions:
+        - Returns a ``ResearchBriefInput`` with brief/audience/tone/max_results
+          populated (title concept appended to the brief text when present).
     """
     try:
-        from agent_implementations.blog_writing_process_v2 import run_pipeline
         from blog_research_agent.models import ResearchBriefInput
-
-        from shared.content_plan import content_plan_summary_text, content_plan_to_outline_markdown
-        from shared.content_profile import resolve_length_policy_from_request_dict
-    except ImportError:  # pragma: no cover - fallback for legacy 'blogging.*' import path; not exercised when running from the blogging package root.
-        try:
-            from blog_research_agent.models import ResearchBriefInput
-
-            from blogging.agent_implementations.blog_writing_process_v2 import run_pipeline
-            from blogging.shared.content_plan import content_plan_to_outline_markdown
-            from blogging.shared.content_profile import resolve_length_policy_from_request_dict
-        except ImportError as e:
-            logger.exception("Import failed for pipeline job %s", job_id)
-            _fail_job(job_id, str(e))
-            return
-
-    try:
-        from blogging.shared.blog_job_store import (
-            JOB_STATUS_CANCELLED,
-            JOB_STATUS_COMPLETED,
-            JOB_STATUS_NEEDS_REVIEW,
-            complete_blog_job,
-            fail_blog_job,
-            start_blog_job,
-            update_blog_job,
-        )
-        from blogging.shared.errors import BloggingError, PlanningError
-    except ImportError:  # pragma: no cover - fallback for sibling-import path used when running from inside blogging/; first branch already covers the package case.
-        try:
-            from shared.blog_job_store import (
-                JOB_STATUS_CANCELLED,
-                JOB_STATUS_COMPLETED,
-                JOB_STATUS_NEEDS_REVIEW,
-                complete_blog_job,
-                fail_blog_job,  # noqa: F401
-                start_blog_job,
-                update_blog_job,
-            )
-            from shared.errors import BloggingError, PlanningError
-        except ImportError:
-            logger.warning("Blog job store not available; pipeline will run without job updates")
-            update_blog_job = None
-            start_blog_job = None
-            complete_blog_job = None
-            JOB_STATUS_CANCELLED = "cancelled"
-            JOB_STATUS_COMPLETED = "completed"
-            JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
-            BloggingError = Exception
-            PlanningError = Exception
-
-    work_dir = _get_run_artifacts_base() / job_id
-    work_dir.mkdir(parents=True, exist_ok=True)
+    except ImportError:  # pragma: no cover - package-path fallback; sibling path covers tests.
+        from blogging.blog_research_agent.models import ResearchBriefInput
 
     brief_text = (request_dict.get("brief") or "").strip()
     if request_dict.get("title_concept"):
         brief_text = f"{brief_text}. Title concept: {request_dict['title_concept'].strip()}"
     audience_str = _format_audience_from_dict(request_dict.get("audience"))
 
-    brief_input = ResearchBriefInput(
+    return ResearchBriefInput(
         brief=brief_text,
         audience=audience_str,
         tone_or_purpose=request_dict.get("tone_or_purpose"),
         max_results=int(request_dict.get("max_results", 20)),
     )
+
+
+def _resolve_update_blog_job() -> Optional[Callable[..., Any]]:
+    """Resolve ``update_blog_job`` across the package/sibling import paths (None if absent)."""
+    try:
+        from blogging.shared.blog_job_store import update_blog_job
+    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution.
+        try:
+            from shared.blog_job_store import update_blog_job
+        except ImportError:
+            return None
+    return update_blog_job
+
+
+def make_job_updater(job_id: str) -> Callable[..., None]:
+    """Build the ``job_updater(**kwargs)`` callback for a pipeline run.
+
+    Preconditions:
+        - ``job_id`` identifies a created job record.
+    Postconditions:
+        - Returns a callable that writes ``kwargs`` to the job store (no-op when the
+          store is unavailable) and broadcasts them to SSE subscribers. Re-raises
+          CancelledError; swallows other job-update and SSE failures.
+    """
+    update_blog_job = _resolve_update_blog_job()
 
     def job_updater(**kwargs: Any) -> None:
         if update_blog_job is not None:
@@ -180,19 +159,31 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
             except Exception:  # pragma: no cover - defensive guard around SSE bus; failures here must not break the pipeline.
                 pass
 
-    if start_blog_job is not None:
-        start_blog_job(job_id)
-    job_updater(work_dir=str(work_dir))
+    return job_updater
+
+
+def start_pipeline_heartbeat(job_id: str) -> Optional[BackgroundHeartbeat]:
+    """Start the background heartbeat that keeps the job (and Temporal activity) alive.
+
+    Preconditions:
+        - ``job_id`` identifies a running job.
+    Postconditions:
+        - Returns a started ``BackgroundHeartbeat`` (or None when the job store is
+          unavailable) whose beat refreshes ``last_heartbeat_at`` and calls
+          ``activity.heartbeat()`` when inside a Temporal activity.
+    """
+    update_blog_job = _resolve_update_blog_job()
+    if update_blog_job is None:
+        return None
 
     def _pipeline_beat() -> (
         None
     ):  # pragma: no cover - background thread driven by a 30s timer; exercising the beat body in unit tests requires faking threading + temporalio, which provides no signal beyond what targeted heartbeat tests already cover.
         """One heartbeat tick: keep last_heartbeat_at fresh and beat Temporal."""
-        if update_blog_job is not None:
-            try:
-                update_blog_job(job_id)
-            except Exception:
-                pass
+        try:
+            update_blog_job(job_id)
+        except Exception:
+            pass
         # Send Temporal activity heartbeat if running inside a Temporal activity.
         # RuntimeError means we're not in an activity context (e.g. local dev).
         try:
@@ -202,35 +193,157 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
         except RuntimeError:
             pass
 
-    hb: Optional[BackgroundHeartbeat] = None
-    if update_blog_job is not None:
-        # copy_context=True carries the Temporal activity ContextVar into the beater
-        # thread; without it activity.heartbeat() silently no-ops (the ContextVar is
-        # not auto-inherited by a new thread) and Temporal cancels the activity after
-        # heartbeat_timeout expires.
-        hb = BackgroundHeartbeat(
-            _pipeline_beat,
-            30.0,
-            name=f"blog-pipeline-hb-{job_id[:12]}",
-            copy_context=True,
-            join_timeout=2.0,
-        ).start()
+    # copy_context=True carries the Temporal activity ContextVar into the beater
+    # thread; without it activity.heartbeat() silently no-ops (the ContextVar is
+    # not auto-inherited by a new thread) and Temporal cancels the activity after
+    # heartbeat_timeout expires.
+    return BackgroundHeartbeat(
+        _pipeline_beat,
+        30.0,
+        name=f"blog-pipeline-hb-{job_id[:12]}",
+        copy_context=True,
+        join_timeout=2.0,
+    ).start()
 
-    def _mark_cancelled() -> bool:
-        """Mark job as cancelled and return True, for use in except handlers."""
-        logger.info("Pipeline cancelled for job %s", job_id)
-        if update_blog_job is not None:
-            try:
-                update_blog_job(
-                    job_id,
-                    status=JOB_STATUS_CANCELLED,
-                    status_text="Pipeline cancelled",
-                    error="Cancelled",
-                )
-            except Exception:
-                pass
-        _publish_terminal(job_id, "cancelled")
-        return True
+
+def mark_job_cancelled(job_id: str) -> bool:
+    """Mark a job as cancelled and publish the terminal SSE event.
+
+    Postconditions:
+        - The job store entry (when available) is set to CANCELLED and a terminal
+          ``cancelled`` SSE event is published. Always returns True (for use in
+          ``except`` handlers).
+    """
+    logger.info("Pipeline cancelled for job %s", job_id)
+    try:
+        from blogging.shared.blog_job_store import JOB_STATUS_CANCELLED
+    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution.
+        try:
+            from shared.blog_job_store import JOB_STATUS_CANCELLED
+        except ImportError:
+            JOB_STATUS_CANCELLED = "cancelled"
+    update_blog_job = _resolve_update_blog_job()
+    if update_blog_job is not None:
+        try:
+            update_blog_job(
+                job_id,
+                status=JOB_STATUS_CANCELLED,
+                status_text="Pipeline cancelled",
+                error="Cancelled",
+            )
+        except Exception:
+            pass
+    _publish_terminal(job_id, "cancelled")
+    return True
+
+
+def finalize_blog_job(
+    job_id: str,
+    planning_phase_result: Any,
+    draft_result: Any,
+    status: str,
+) -> str:
+    """Complete the job-store entry from a finished pipeline run.
+
+    Shared by the thread-mode whole-run path (``run_blog_full_pipeline_job``) and the
+    Temporal ``finalize`` activity so completion logic lives in one place.
+
+    Preconditions:
+        - ``planning_phase_result`` is a ``PlanningPhaseResult`` and ``draft_result``
+          a ``WriterOutput`` from a completed run.
+        - ``status`` is one of ``PASS`` / ``FAIL`` / ``NEEDS_HUMAN_REVIEW``.
+    Postconditions:
+        - Derives title choices/outline/draft preview/plan summary/planning metrics,
+          calls ``complete_blog_job`` with COMPLETED (``status == "PASS"``) else
+          NEEDS_REVIEW, and publishes a terminal ``complete`` SSE event. Returns the
+          final job status string.
+    """
+    try:
+        from blogging.shared.blog_job_store import (
+            JOB_STATUS_COMPLETED,
+            JOB_STATUS_NEEDS_REVIEW,
+            complete_blog_job,
+        )
+        from blogging.shared.content_plan import (
+            content_plan_summary_text,
+            content_plan_to_outline_markdown,
+        )
+    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution.
+        from shared.blog_job_store import (
+            JOB_STATUS_COMPLETED,
+            JOB_STATUS_NEEDS_REVIEW,
+            complete_blog_job,
+        )
+        from shared.content_plan import content_plan_summary_text, content_plan_to_outline_markdown
+
+    plan = planning_phase_result.content_plan
+    outline = content_plan_to_outline_markdown(plan)
+    title_choices = [
+        {"title": tc.title, "probability_of_success": tc.probability_of_success}
+        for tc in plan.title_candidates
+    ]
+    draft_preview = draft_result.draft[:2000]
+    final_status = JOB_STATUS_COMPLETED if status == "PASS" else JOB_STATUS_NEEDS_REVIEW
+    if complete_blog_job is not None:
+        complete_blog_job(
+            job_id,
+            status=final_status,
+            title_choices=title_choices,
+            outline=outline,
+            draft_preview=draft_preview,
+            content_plan_summary=content_plan_summary_text(plan),
+            planning_iterations_used=planning_phase_result.planning_iterations_used,
+            parse_retry_count=planning_phase_result.parse_retry_count,
+            planning_wall_ms_total=planning_phase_result.planning_wall_ms_total,
+        )
+    _publish_terminal(job_id, "complete", status=final_status)
+    return final_status
+
+
+def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> None:
+    """
+    Run the full blog pipeline and update the job store. Used by API and Temporal activity.
+    request_dict: brief, title_concept (optional), audience (str or dict), tone_or_purpose,
+                  max_results, run_gates, max_rewrite_iterations,
+                  content_profile, series_context, length_notes, target_word_count (all optional).
+    """
+    try:
+        from agent_implementations.blog_writing_process_v2 import run_pipeline
+
+        from shared.content_profile import resolve_length_policy_from_request_dict
+    except ImportError:  # pragma: no cover - fallback for legacy 'blogging.*' import path; not exercised when running from the blogging package root.
+        try:
+            from blogging.agent_implementations.blog_writing_process_v2 import run_pipeline
+            from blogging.shared.content_profile import resolve_length_policy_from_request_dict
+        except ImportError as e:
+            logger.exception("Import failed for pipeline job %s", job_id)
+            _fail_job(job_id, str(e))
+            return
+
+    try:
+        from blogging.shared.blog_job_store import start_blog_job
+        from blogging.shared.errors import BloggingError, PlanningError
+    except ImportError:  # pragma: no cover - fallback for sibling-import path used when running from inside blogging/; first branch already covers the package case.
+        try:
+            from shared.blog_job_store import start_blog_job
+            from shared.errors import BloggingError, PlanningError
+        except ImportError:
+            logger.warning("Blog job store not available; pipeline will run without job updates")
+            start_blog_job = None
+            BloggingError = Exception
+            PlanningError = Exception
+
+    work_dir = _get_run_artifacts_base() / job_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    brief_input = build_brief_input(request_dict)
+    job_updater = make_job_updater(job_id)
+
+    if start_blog_job is not None:
+        start_blog_job(job_id)
+    job_updater(work_dir=str(work_dir))
+
+    hb = start_pipeline_heartbeat(job_id)
 
     try:
         length_policy = resolve_length_policy_from_request_dict(request_dict)
@@ -243,32 +356,12 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
             job_id=job_id,
             length_policy=length_policy,
         )
-        plan = planning_phase_result.content_plan
-        outline = content_plan_to_outline_markdown(plan)
-        title_choices = [
-            {"title": tc.title, "probability_of_success": tc.probability_of_success}
-            for tc in plan.title_candidates
-        ]
-        draft_preview = draft_result.draft[:2000]
-        final_status = JOB_STATUS_COMPLETED if status == "PASS" else JOB_STATUS_NEEDS_REVIEW
-        if complete_blog_job is not None:
-            complete_blog_job(
-                job_id,
-                status=final_status,
-                title_choices=title_choices,
-                outline=outline,
-                draft_preview=draft_preview,
-                content_plan_summary=content_plan_summary_text(plan),
-                planning_iterations_used=planning_phase_result.planning_iterations_used,
-                parse_retry_count=planning_phase_result.parse_retry_count,
-                planning_wall_ms_total=planning_phase_result.planning_wall_ms_total,
-            )
-        _publish_terminal(job_id, "complete", status=final_status)
+        finalize_blog_job(job_id, planning_phase_result, draft_result, status)
     except CancelledError:
         raise
     except PlanningError as e:
         if _is_external_cancellation(e):
-            _mark_cancelled()
+            mark_job_cancelled(job_id)
             return
         logger.exception("Planning failed for job %s", job_id)
         _fail_job(
@@ -282,14 +375,14 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
         if _is_external_cancellation(
             e
         ):  # pragma: no cover - extremely narrow race-only branch; the cancellation path is already exercised via the PlanningError variant above.
-            _mark_cancelled()
+            mark_job_cancelled(job_id)
             return
         logger.exception("Pipeline failed for job %s", job_id)
         _fail_job(job_id, str(e), failed_phase=getattr(e, "phase", None))
         _publish_terminal(job_id, "error", error=str(e), failed_phase=getattr(e, "phase", None))
     except Exception as e:
         if _is_external_cancellation(e):
-            _mark_cancelled()
+            mark_job_cancelled(job_id)
             return
         logger.exception("Unexpected error in pipeline for job %s", job_id)
         _fail_job(job_id, str(e))
