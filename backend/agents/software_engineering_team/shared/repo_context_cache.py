@@ -24,14 +24,17 @@ Invariants:
       both identical would not be detected, but a merge/commit always rewrites
       the file (advancing mtime), so this cannot occur in the swarm's usage.
     - The internal ``_entries`` holds an entry for exactly the currently-eligible,
-      successfully-rendered files (removed files are evicted by the wholesale
-      replacement on each ``read``), so the cache cannot grow without bound or
-      resurrect stale content.
+      successfully-rendered files that fall *within* the char budget on this call
+      (removed files and files pushed beyond the budget are evicted by the
+      wholesale replacement on each ``read``), so the cache cannot grow without
+      bound or resurrect stale content — and never stores the hundreds of MB of
+      never-emitted tail files a large repo would otherwise render on the first
+      task.
 
 Postconditions (``read``):
     - Returns the same value the matching ``read_repo_code_budgeted`` call would,
-      applying the same whole-file char budget (the next chunk that would exceed
-      ``max_chars`` stops the briefing — never a partial file).
+      applying the same whole-file char budget during rendering (the next chunk
+      that would exceed ``max_chars`` stops the briefing — never a partial file).
 """
 
 from __future__ import annotations
@@ -53,18 +56,24 @@ class RepoContextCache:
     """Incremental cache over the budgeted repo briefing that re-reads only changed files.
 
     On each :meth:`read` it re-enumerates eligible files (a cheap ``os.walk`` +
-    ``stat``), reuses a cached rendered part whenever ``(st_mtime_ns, st_size)``
-    is unchanged, re-renders (re-reads the file) only when the key differs or the
-    file is new, then applies the same whole-file char budget as
-    :func:`shared_repo_context.read_repo_code_budgeted`. Entries for files no
-    longer eligible are dropped by the wholesale ``_entries`` replacement.
+    ``stat``), renders them in sorted order reusing a cached part whenever
+    ``(st_mtime_ns, st_size)`` is unchanged (re-reading only when the key differs
+    or the file is new), and applies the same whole-file char budget as
+    :func:`shared_repo_context.read_repo_code_budgeted` *during* rendering — the
+    first chunk that would exceed ``max_chars`` stops the briefing, so tail
+    files beyond the budget are never rendered or cached (a large repo never
+    reads+stores hundreds of MB of never-emitted tail files on the first task).
+    Entries for files no longer eligible, or pushed beyond the budget, are
+    dropped by the wholesale ``_entries`` replacement.
 
     Preconditions (``read``):
         - ``repo_path`` is an existing directory.
     Postconditions (``read``):
         - Returns the same value the matching ``read_repo_code_budgeted`` call
           would for the current on-disk state; ``_entries`` then holds an entry
-          for exactly the currently-eligible, successfully-rendered files.
+          for exactly the currently-eligible, successfully-rendered files that
+          fall within the char budget (tail files beyond the budget are not
+          cached, matching the fresh walk which never reads past the cutoff).
     Invariants:
         - See module docstring: output is byte-identical to the fresh walk; the
           freshness key is ``(st_mtime_ns, st_size)``; ``_entries`` is bounded to
@@ -95,7 +104,8 @@ class RepoContextCache:
         """
         eligible = self._enumerate_eligible(repo_path)
         fresh: Dict[Path, _Entry] = {}
-        rendered_parts: list[str] = []
+        parts: list[str] = []
+        total = 0
         for f in eligible:
             try:
                 st = f.stat()
@@ -114,23 +124,23 @@ class RepoContextCache:
                     # Unreadable: drop from cache and skip, mirroring the fresh walk.
                     continue
                 part = rendered
-            # Cache every eligible, successfully-rendered file (including those
-            # beyond the char budget) so unchanged tail files are not re-read on
-            # the next call; only the emitted slice is bounded below.
-            fresh[f] = (*key, part)
-            rendered_parts.append(part)
-        # Replace wholesale so entries for now-ineligible/removed files are evicted.
-        self._entries = fresh
-        # Apply the whole-file char budget over the sorted parts (same semantics as
-        # read_repo_code_budgeted: the next chunk that would exceed max_chars stops
-        # the briefing — never a partial file).
-        parts: list[str] = []
-        total = 0
-        for part in rendered_parts:
+            # Whole-file char budget applied *during* rendering — same semantics as
+            # read_repo_code_budgeted: the next chunk that would exceed max_chars
+            # stops the briefing (never a partial file). We break before caching,
+            # so tail files beyond the budget are never stored: a large repo cannot
+            # read+cache hundreds of MB of never-emitted tail files on the first
+            # task. (An uncached over-budget file is read this call to learn its
+            # length, matching the fresh walk which reads it before its budget
+            # check; a cached one reuses its cached length. Either is then evicted,
+            # never emitted or retained.)
             if total + len(part) > self._max_chars:
                 break
+            fresh[f] = (*key, part)
             parts.append(part)
             total += len(part)
+        # Replace wholesale so entries for now-ineligible/removed/beyond-budget
+        # files are evicted; the cache is bounded to the emitted (within-budget) set.
+        self._entries = fresh
         return "\n".join(parts) if parts else self._empty
 
     def _enumerate_eligible(self, repo_path: Path) -> list[Path]:
@@ -146,7 +156,8 @@ class RepoContextCache:
 
         Preconditions: ``repo_path`` is an existing directory.
         Postconditions: returns the sorted eligible file list (no cap; the char
-          budget applied later in :meth:`read` is the only limit).
+          budget applied during rendering in :meth:`read` bounds what is emitted
+          and cached, not what is enumerated).
         """
         eligible: list[Path] = []
         try:

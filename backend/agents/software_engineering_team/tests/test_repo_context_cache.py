@@ -129,6 +129,40 @@ def test_empty_repo_returns_empty_sentinel(tmp_path: Path) -> None:
     assert cache.read(tmp_path) == read_repo_code_budgeted(tmp_path, **_kwargs())
 
 
+def test_tail_files_beyond_budget_are_not_read_or_cached(tmp_path: Path) -> None:
+    """Files beyond the char budget — and everything after them in sort order —
+    are neither read nor cached on the first call. The budget is applied *during*
+    rendering, so a large repo cannot read+store hundreds of MB of never-emitted
+    tail files on the first task. The first over-budget file is read once (to
+    learn its length, matching the fresh walk) but not emitted or cached; files
+    after it are never touched."""
+    (tmp_path / "a.py").write_text("A" * 50)  # emitted (within budget)
+    (tmp_path / "b.py").write_text("B" * 50)  # over-budget file: read once, not cached
+    (tmp_path / "c.py").write_text("C" * 50)  # tail: never read, never cached
+    (tmp_path / "d.py").write_text("D" * 50)  # tail: never read, never cached
+    kwargs = {"extensions": {".py"}, "exclude_dirs": set(), "max_chars": 70}
+    cache = RepoContextCache(**kwargs)
+
+    reads: list[Path] = []
+    real_read_text = Path.read_text
+
+    def _spy(self: Path, *a, **k):
+        reads.append(self)
+        return real_read_text(self, *a, **k)
+
+    with patch.object(Path, "read_text", _spy):
+        cached = cache.read(tmp_path)
+    fresh = read_repo_code_budgeted(tmp_path, **kwargs)
+    assert cached == fresh  # byte-identical to the fresh walk
+    assert "a.py" in cached and "b.py" not in cached
+    # a.py (emitted) and b.py (the over-budget file, read to learn its length)
+    # are read; c.py and d.py (strictly past the cutoff) are never read.
+    read_names = {p.name for p in reads}
+    assert read_names == {"a.py", "b.py"}
+    # Only the emitted file is cached; the over-budget file and tail files are not.
+    assert set(cache._entries.keys()) == {tmp_path / "a.py"}
+
+
 def test_stat_failure_skips_file_without_raising(tmp_path: Path) -> None:
     """A file that vanishes *between enumeration and the read-loop stat* is skipped
     (the read-loop ``f.stat()`` raises OSError → except → continue), not raised.

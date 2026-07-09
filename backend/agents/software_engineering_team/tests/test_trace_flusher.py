@@ -42,8 +42,11 @@ class _Rec:
 
 
 @pytest.fixture(autouse=True)
-def _reset_flusher():
-    """Start each test with an empty buffer and no registered observer/heartbeat."""
+def _reset_flusher(monkeypatch):
+    """Start each test with an empty buffer, no registered observer/heartbeat,
+    and the trace sink enabled (SE_TRACE_TO_POSTGRES=1) so the observer exercises
+    the enqueue path by default; tests that want the disabled-sink path delenv it."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "1")
     trace_flusher._reset_for_test()
     yield
     trace_flusher._reset_for_test()
@@ -80,6 +83,42 @@ def test_observer_ignores_non_se_and_missing_job() -> None:
 
     trace_flusher._trace_observer(_Rec(team="software_engineering_team"))
     assert trace_flusher._buffer_size() == 1
+
+
+def test_observer_skips_when_sink_disabled(monkeypatch) -> None:
+    """When SE_TRACE_TO_POSTGRES is off (the default), the observer skips the
+    per-call _record_to_row + enqueue work — the drain would drop these rows
+    anyway (write_rows re-checks the flag), and on a high-throughput job
+    buffering them would fill the buffer and emit drop warnings for rows that
+    are never persisted."""
+    monkeypatch.delenv("SE_TRACE_TO_POSTGRES", raising=False)
+    trace_flusher._trace_observer(_Rec())
+    assert trace_flusher._buffer_size() == 0
+
+
+def test_overflow_warning_throttled_to_once_per_burst(monkeypatch, caplog) -> None:
+    """A sustained over-cap burst logs the overflow WARNING once, not on every
+    over-cap call. The throttle flag is set on the first overflow and only
+    resets once a non-overflow call drops the buffer below cap, so a DB outage
+    or sustained burst cannot flood the log."""
+    monkeypatch.setenv("SE_TRACE_BUFFER_MAX", "2")
+    caplog.set_level("WARNING", logger="software_engineering_team.shared.trace_flusher")
+
+    for i in range(5):
+        trace_flusher._trace_observer(_Rec(task_id=f"t{i}"))
+
+    warnings = [r for r in caplog.records if "dropping oldest" in r.message]
+    assert len(warnings) == 1  # only the first over-cap call warns
+    # Cap is 2: t3, t4 remain after the five-call burst.
+    assert trace_flusher._buffer_size() == 2
+    assert [r[4] for r in trace_flusher._snapshot_buffer()] == ["t3", "t4"]
+
+    # The throttle stays armed while overflow continues: a further over-cap call
+    # does not warn again (the flag only resets on a non-overflow call).
+    caplog.clear()
+    trace_flusher._trace_observer(_Rec(task_id="t9"))  # buffer at cap → still overflows
+    warnings2 = [r for r in caplog.records if "dropping oldest" in r.message]
+    assert len(warnings2) == 0
 
 
 def test_buffer_overflow_drops_oldest_and_warns(monkeypatch, caplog) -> None:

@@ -15,7 +15,13 @@ pool is closed (see ``api/lifecycle.py`` → ``shared_app/factory.py``).
 
 Invariants:
     - The deque never exceeds ``SE_TRACE_BUFFER_MAX`` entries; overflow drops
-      the oldest row and logs at WARNING (bounded memory, never blocks callers).
+      the oldest row and logs at WARNING once per sustained burst (throttled so
+      a DB outage or sustained burst cannot flood the log; bounded memory,
+      never blocks callers).
+    - When the Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES`` off,
+      the default) the observer enqueues nothing — the drain would drop these
+      rows anyway, so buffering them only adds per-call work and can fill the
+      buffer with never-persisted rows.
     - A flush failure never raises into the heartbeat thread or the caller; it
       is logged at DEBUG and the rows are dropped (telemetry must not break the
       LLM call path or the flusher).
@@ -76,8 +82,16 @@ def _trace_observer(record: Any) -> None:
     contribute, so this stays a no-op for other teams sharing the process. The
     row tuple is built eagerly (snapshotting the record's fields), so a later
     mutation of the record by the caller cannot corrupt the buffered row.
+
+    Skips the per-call ``_record_to_row`` + enqueue work entirely when the
+    Postgres trace sink is disabled (``SE_TRACE_TO_POSTGRES`` off, the default):
+    the background drain would drop these rows anyway (``write_rows`` re-checks
+    the flag), and on a high-throughput job buffering them would fill the buffer
+    and emit drop warnings for rows that are never persisted.
     """
     global _overflow_warned
+    if not trace_store._trace_enabled():
+        return
     team = getattr(record, "team", "") or ""
     if not getattr(record, "job_id", "") or team not in _SE_TEAMS:
         return
@@ -90,11 +104,18 @@ def _trace_observer(record: Any) -> None:
             _buffer.popleft()
             dropped += 1
         overflowed = dropped > 0
-        if overflowed and not _overflow_warned:
+        # Throttle the overflow warning to once per sustained burst: warn only
+        # on the first over-cap call since the buffer last dropped below cap
+        # (which resets _overflow_warned). Without this, every over-cap call
+        # would log a WARNING — flooding logs during a DB outage or sustained
+        # burst. should_warn is decided under the lock; the log fires once,
+        # outside it.
+        should_warn = overflowed and not _overflow_warned
+        if should_warn:
             _overflow_warned = True
         elif not overflowed:
             _overflow_warned = False
-    if overflowed:
+    if should_warn:
         logger.warning(
             "SE trace buffer full (cap=%d); dropping oldest %d trace row(s)", cap, dropped
         )
