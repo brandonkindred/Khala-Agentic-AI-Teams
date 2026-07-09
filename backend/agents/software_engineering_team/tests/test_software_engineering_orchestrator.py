@@ -56,7 +56,9 @@ def test_run_build_verification_appends_fix_line_when_pytest_fails_with_test_err
         return_value=CommandResult(True, 0, "", ""),
     ):
         with patch("shared_command_runner.runner.run_pytest", return_value=mock_result):
-            ok, error_output = orchestrator._run_build_verification(tmp_path, "backend", "task-1")
+            from software_engineering_team import build_fix
+
+            ok, error_output = build_fix._run_build_verification(tmp_path, "backend", "task-1")
 
     assert ok is False
     assert "FIX: Preserve the /test-generic-error route" in error_output
@@ -376,7 +378,9 @@ def test_finalize_pauses_on_llm_connectivity(tmp_path: Path) -> None:
                 "id": "t1",
                 "status": "failed",
                 "title": "T1",
-                "revision_feedback": [{"reason": f"Implementation failed: {LLM_UNREACHABLE_AFTER_RETRIES}"}],
+                "revision_feedback": [
+                    {"reason": f"Implementation failed: {LLM_UNREACHABLE_AFTER_RETRIES}"}
+                ],
             }
         ],
     )
@@ -390,7 +394,9 @@ def test_finalize_noop_without_snapshot(tmp_path: Path) -> None:
 
     create_job("fin-nosnap", str(tmp_path))
     orchestrator._finalize_from_coding_snapshot("fin-nosnap")
-    assert "failed_tasks" not in get_job("fin-nosnap") or get_job("fin-nosnap").get("failed_tasks") in (None, [])
+    assert "failed_tasks" not in get_job("fin-nosnap") or get_job("fin-nosnap").get(
+        "failed_tasks"
+    ) in (None, [])
     # Unknown job is a clean no-op.
     orchestrator._finalize_from_coding_snapshot("fin-does-not-exist")
 

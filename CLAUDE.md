@@ -125,8 +125,6 @@ Each agent team has a **team-lead orchestrator** that coordinates role-separated
 
 **Per-task backend pipeline**: Feature branch → planning → code generation → write files → lint → build → code review → acceptance verifier → security review → QA → DbC → Tech Lead review → doc update → merge
 
-**Planning cache**: Short-circuits Design phase when spec, architecture, and project_overview are unchanged.
-
 ### Sub-Team Variants
 
 The first three live **inside** `backend/agents/software_engineering_team/`; Coding Team and Planning are standalone modules under `backend/agents/`:

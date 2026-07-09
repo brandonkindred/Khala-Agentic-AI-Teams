@@ -148,7 +148,7 @@ def test_run_build_verification_success(monkeypatch, tmp_path) -> None:
     from software_engineering_team import quality_gate_tools as q
 
     monkeypatch.setattr(
-        "software_engineering_team.orchestrator._run_build_verification",
+        "software_engineering_team.build_fix._run_build_verification",
         lambda repo_path, agent_type, task_id: (True, ""),
     )
     result = q.run_build_verification(tmp_path, "backend", "t1")
@@ -160,7 +160,7 @@ def test_run_build_verification_env_failure(monkeypatch, tmp_path) -> None:
     from software_engineering_team import quality_gate_tools as q
 
     monkeypatch.setattr(
-        "software_engineering_team.orchestrator._run_build_verification",
+        "software_engineering_team.build_fix._run_build_verification",
         lambda repo_path, agent_type, task_id: (False, "ENV:missing"),
     )
     result = q.run_build_verification(tmp_path, "backend", "t1")
@@ -174,7 +174,7 @@ def test_run_build_verification_exception(monkeypatch, tmp_path) -> None:
     def boom(*a, **kw):
         raise RuntimeError("nope")
 
-    monkeypatch.setattr("software_engineering_team.orchestrator._run_build_verification", boom)
+    monkeypatch.setattr("software_engineering_team.build_fix._run_build_verification", boom)
     result = q.run_build_verification(tmp_path, "backend", "t1")
     assert result.success is False
     assert "nope" in result.error

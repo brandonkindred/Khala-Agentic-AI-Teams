@@ -174,12 +174,12 @@ def run_build_verification(
 ) -> BuildResult:
     """Run build verification (syntax check, compilation, tests).
 
-    Delegates to the existing ``_run_build_verification`` in the orchestrator
+    Delegates to ``_run_build_verification`` in :mod:`software_engineering_team.build_fix`
     which handles frontend (ng build), backend (python syntax + pytest), and
     devops (YAML + docker build) paths.
     """
     try:
-        from software_engineering_team.orchestrator import _run_build_verification
+        from software_engineering_team.build_fix import _run_build_verification
 
         success, error = _run_build_verification(repo_path, agent_type, task_id)
         is_env = error.startswith("ENV:") if error else False

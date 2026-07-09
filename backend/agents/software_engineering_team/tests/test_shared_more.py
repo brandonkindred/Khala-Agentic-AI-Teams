@@ -1,12 +1,11 @@
 """More tests for assorted SE shared utility modules.
 
 Covers ``json_utils`` (text completion + JSON recovery + merge helpers),
-``planning_cache`` (hash key + set/get/miss), and ``deduplication``.
+and ``deduplication``.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -68,119 +67,6 @@ def test_dedupe_by_key_empty() -> None:
     from software_engineering_team.shared.deduplication import dedupe_by_key
 
     assert dedupe_by_key([], key_fn=lambda x: x) == []
-
-
-# ---------------------------------------------------------------------------
-# planning_cache
-# ---------------------------------------------------------------------------
-
-
-def test_compute_planning_cache_key_stable() -> None:
-    from software_engineering_team.shared.planning_cache import compute_planning_cache_key
-
-    k1 = compute_planning_cache_key("spec", "arch")
-    k2 = compute_planning_cache_key("spec", "arch")
-    assert k1 == k2
-    assert len(k1) == 24
-
-
-def test_compute_planning_cache_key_changes_with_inputs() -> None:
-    from software_engineering_team.shared.planning_cache import compute_planning_cache_key
-
-    base = compute_planning_cache_key("spec", "arch")
-    different_spec = compute_planning_cache_key("spec2", "arch")
-    different_arch = compute_planning_cache_key("spec", "arch2")
-    assert base != different_spec
-    assert base != different_arch
-
-
-def test_compute_planning_cache_key_includes_project_overview() -> None:
-    from software_engineering_team.shared.planning_cache import compute_planning_cache_key
-
-    a = compute_planning_cache_key("spec", "arch")
-    b = compute_planning_cache_key(
-        "spec",
-        "arch",
-        project_overview={"primary_goal": "g", "delivery_strategy": "s"},
-    )
-    assert a != b
-
-
-def test_compute_planning_cache_key_sprint_id_changes_key() -> None:
-    from software_engineering_team.shared.planning_cache import compute_planning_cache_key
-
-    a = compute_planning_cache_key("spec", "arch")
-    b = compute_planning_cache_key("spec", "arch", sprint_id="S1")
-    assert a != b
-
-
-def test_get_cached_plan_miss_when_missing(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import get_cached_plan
-
-    assert get_cached_plan(tmp_path, "abc") is None
-
-
-def test_set_and_get_cached_plan_roundtrip(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        get_cached_plan,
-        set_cached_plan,
-    )
-
-    assignment = SimpleNamespace(model_dump=lambda: {"tasks": [{"id": "t1"}]})
-    set_cached_plan(tmp_path, "cache_key", assignment, [{"req": "x"}], summary="ok")
-    cached = get_cached_plan(tmp_path, "cache_key")
-    assert cached is not None
-    assert cached["summary"] == "ok"
-    assert cached["assignment"]["tasks"]
-
-
-def test_set_cached_plan_accepts_dict(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        get_cached_plan,
-        set_cached_plan,
-    )
-
-    set_cached_plan(tmp_path, "k", {"tasks": []}, [], summary="")
-    cached = get_cached_plan(tmp_path, "k")
-    assert cached is not None
-
-
-def test_get_cached_plan_corrupt_returns_none(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        _cache_dir,
-        get_cached_plan,
-    )
-
-    cache_path = _cache_dir(tmp_path) / "corrupt.json"
-    cache_path.write_text("not json{", encoding="utf-8")
-    assert get_cached_plan(tmp_path, "corrupt") is None
-
-
-def test_get_cached_plan_key_mismatch_returns_none(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        _cache_dir,
-        get_cached_plan,
-    )
-
-    cache_path = _cache_dir(tmp_path) / "k.json"
-    cache_path.write_text('{"cache_key": "different"}', encoding="utf-8")
-    assert get_cached_plan(tmp_path, "k") is None
-
-
-def test_set_cached_plan_handles_unserializable(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        get_cached_plan,
-        set_cached_plan,
-    )
-
-    # Pass an assignment whose model_dump raises
-    class _Bad:
-        def model_dump(self):
-            raise RuntimeError("oops")
-
-    set_cached_plan(tmp_path, "k", _Bad(), [], summary="")
-    # No file written → still a cache miss
-    assert get_cached_plan(tmp_path, "k") is None
 
 
 # ---------------------------------------------------------------------------
