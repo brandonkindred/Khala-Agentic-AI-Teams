@@ -10,15 +10,24 @@ Postgres is disabled. Writes never raise into the LLM call path.
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Sequence
 
 from shared_postgres import pg_cursor
 from software_engineering_team.shared.env_config import env_bool, env_float
 
 logger = logging.getLogger(__name__)
+
+# The single INSERT statement shared by the one-shot and batched write paths.
+# Column order here is the contract; :func:`_record_to_row` produces the matching
+# positional tuple. Keeping both on this string means a column change is one edit.
+_INSERT_SQL = (
+    "INSERT INTO se_agent_traces (ts, team, agent_key, job_id, task_id, phase, model, "
+    "input_tokens, output_tokens, total_tokens, cost_usd, latency_ms, status, outcome, "
+    "objective, request_id) VALUES "
+    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+)
 
 
 def _trace_enabled() -> bool:
@@ -30,8 +39,49 @@ def _retention_days() -> float:
     return env_float("SE_TRACE_RETENTION_DAYS", 30.0, 0.0)
 
 
+def _record_to_row(record: Any) -> tuple:
+    """Build the 16-element positional tuple for ``_INSERT_SQL`` from a record.
+
+    Pure (no I/O): used both by :func:`write_trace` (single INSERT) and by the
+    batched trace flusher (``executemany``) so the two paths cannot drift on
+    column order. The row is resolved eagerly — the record's mutable fields are
+    snapshotted into the tuple here, so a caller mutating the record afterwards
+    cannot corrupt a buffered row.
+
+    Preconditions:
+        - ``record`` exposes the :class:`llm_service.telemetry.LLMCallRecord`
+          attributes (``timestamp``, ``team``, ``model``, token counts, etc.);
+          missing numeric fields default to 0/0.0, missing strings to "".
+    Postconditions:
+        - Returns a 16-element tuple in ``_INSERT_SQL`` column order.
+    """
+    # Use the record's own timestamp; fall back to *now* (not the 1970 epoch) for
+    # a missing/invalid value so the row stays inside cost-query windows.
+    raw_ts = getattr(record, "timestamp", None)
+    epoch = raw_ts if isinstance(raw_ts, (int, float)) and raw_ts > 0 else time.time()
+    ts = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    return (
+        ts,
+        getattr(record, "team", "") or "",
+        getattr(record, "agent_key", "") or "",
+        getattr(record, "job_id", "") or "",
+        getattr(record, "task_id", "") or "",
+        getattr(record, "phase", "") or "",
+        getattr(record, "model", "") or "",
+        int(getattr(record, "prompt_tokens", 0) or 0),
+        int(getattr(record, "completion_tokens", 0) or 0),
+        int(getattr(record, "total_tokens", 0) or 0),
+        float(getattr(record, "cost_usd", 0.0) or 0.0),
+        int(getattr(record, "latency_ms", 0) or 0),
+        getattr(record, "status", "") or "",
+        getattr(record, "outcome", "") or "",
+        getattr(record, "objective", "") or "",
+        getattr(record, "request_id", "") or "",
+    )
+
+
 def write_trace(record: Any) -> bool:
-    """Persist one LLM call ``record`` to ``se_agent_traces``.
+    """Persist one LLM call ``record`` to ``se_agent_traces`` (sync one-shot).
 
     Preconditions:
         - ``record`` exposes the :class:`llm_service.telemetry.LLMCallRecord`
@@ -46,40 +96,41 @@ def write_trace(record: Any) -> bool:
         with pg_cursor() as cur:
             if cur is None:
                 return False
-            # Use the record's own timestamp; fall back to *now* (not the 1970
-            # epoch) for a missing/invalid value so the row stays inside
-            # cost-query windows.
-            raw_ts = getattr(record, "timestamp", None)
-            epoch = raw_ts if isinstance(raw_ts, (int, float)) and raw_ts > 0 else time.time()
-            ts = datetime.fromtimestamp(epoch, tz=timezone.utc)
-            cur.execute(
-                "INSERT INTO se_agent_traces (ts, team, agent_key, job_id, task_id, phase, model, "
-                "input_tokens, output_tokens, total_tokens, cost_usd, latency_ms, status, outcome, "
-                "objective, request_id) VALUES "
-                "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    ts,
-                    getattr(record, "team", "") or "",
-                    getattr(record, "agent_key", "") or "",
-                    getattr(record, "job_id", "") or "",
-                    getattr(record, "task_id", "") or "",
-                    getattr(record, "phase", "") or "",
-                    getattr(record, "model", "") or "",
-                    int(getattr(record, "prompt_tokens", 0) or 0),
-                    int(getattr(record, "completion_tokens", 0) or 0),
-                    int(getattr(record, "total_tokens", 0) or 0),
-                    float(getattr(record, "cost_usd", 0.0) or 0.0),
-                    int(getattr(record, "latency_ms", 0) or 0),
-                    getattr(record, "status", "") or "",
-                    getattr(record, "outcome", "") or "",
-                    getattr(record, "objective", "") or "",
-                    getattr(record, "request_id", "") or "",
-                ),
-            )
+            cur.execute(_INSERT_SQL, _record_to_row(record))
         return True
     except Exception:
         logger.debug("failed to write se_agent_trace", exc_info=True)
         return False
+
+
+def write_rows(rows: Sequence[tuple]) -> int:
+    """Batch-persist pre-built trace row tuples via a single ``executemany``.
+
+    The batched path used by :mod:`trace_flusher`: each row is a tuple already
+    produced by :func:`_record_to_row`, so column order is fixed at the caller.
+    Disabled-sink / disabled-Postgres / failure cases return 0 (logged at
+    DEBUG) — a flush failure never raises into the flusher thread.
+
+    Preconditions:
+        - Every element of ``rows`` is a 16-element tuple in ``_INSERT_SQL``
+          column order (build them with :func:`_record_to_row`).
+    Postconditions:
+        - Returns the number of rows written; 0 when the sink or Postgres is
+          disabled or the write failed.
+    """
+    if not rows:
+        return 0
+    if not _trace_enabled():
+        return 0
+    try:
+        with pg_cursor() as cur:
+            if cur is None:
+                return 0
+            cur.executemany(_INSERT_SQL, list(rows))
+        return len(rows)
+    except Exception:
+        logger.debug("failed to batch-write %d se_agent_traces", len(rows), exc_info=True)
+        return 0
 
 
 def fetch_cost_since(cutoff: datetime) -> dict[str, Any]:
@@ -129,50 +180,9 @@ def prune_traces(retention_days: float | None = None) -> int:
         return 0
 
 
-# ---------------------------------------------------------------------------
-# llm_service observer wiring
-# ---------------------------------------------------------------------------
-
-_registered = False
-_register_lock = threading.Lock()
-
-
-# Exact SE team aliases (not a ``startswith`` prefix, so an unrelated team that
-# merely shares the prefix is never captured) — mirrors cost_tracker._cost_observer.
-# Both ids occur: attribution sets ``software_engineering`` while the job store's
-# JobServiceClient is constructed with ``software_engineering_team``.
-_SE_TEAMS = frozenset({"software_engineering", "software_engineering_team"})
-
-
-def _trace_observer(record: Any) -> None:
-    team = getattr(record, "team", "") or ""
-    if not getattr(record, "job_id", "") or team not in _SE_TEAMS:
-        return
-    write_trace(record)
-
-
-def register_trace_observer() -> None:
-    """Register the SE trace observer with :mod:`llm_service` (idempotent).
-
-    The observer itself is a no-op unless ``SE_TRACE_TO_POSTGRES`` is set, so
-    registering unconditionally at startup is safe and cheap.
-    """
-    global _registered
-    with _register_lock:
-        if _registered:
-            return
-        try:
-            from llm_service import register_call_observer
-
-            register_call_observer(_trace_observer)
-            _registered = True
-        except Exception:
-            logger.warning("could not register SE trace observer", exc_info=True)
-
-
 __all__ = [
     "write_trace",
+    "write_rows",
     "fetch_cost_since",
     "prune_traces",
-    "register_trace_observer",
 ]
