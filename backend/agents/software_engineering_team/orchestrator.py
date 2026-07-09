@@ -60,6 +60,7 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
+    JOB_STATUS_PAUSED_LLM_LIMIT,
     JOB_STATUS_RUNNING,
     LLM_SEMANTIC_EXHAUSTION,
     LLM_UNREACHABLE_AFTER_RETRIES,
@@ -1003,7 +1004,7 @@ def _finalize_from_coding_snapshot(job_id: str) -> None:
     if any(OLLAMA_WEEKLY_LIMIT_MESSAGE in r for r in latest_reasons):
         update_job(
             job_id,
-            status="paused_llm_limit",
+            status=JOB_STATUS_PAUSED_LLM_LIMIT,
             error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
             current_task=None,
         )

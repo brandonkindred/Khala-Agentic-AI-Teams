@@ -24,7 +24,10 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
 from llm_service import OLLAMA_WEEKLY_LIMIT_MESSAGE, LLMRateLimitError, get_client
-from software_engineering_team.shared.job_store import JOB_STATUS_FAILED
+from software_engineering_team.shared.job_store import (
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PAUSED_LLM_LIMIT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +130,9 @@ def resolve_spec_source(
             requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
         except LLMRateLimitError:
             logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
-            update_job_fn(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
+            update_job_fn(
+                job_id, status=JOB_STATUS_PAUSED_LLM_LIMIT, error=OLLAMA_WEEKLY_LIMIT_MESSAGE
+            )
             return None
         except Exception as e:
             logger.error("Spec parsing failed (LLM unavailable or returned invalid output): %s", e)
