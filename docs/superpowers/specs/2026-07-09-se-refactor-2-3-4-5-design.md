@@ -91,7 +91,7 @@ Low–medium. `commit_paths` and `_RepoContextCache` already exist and are produ
 - `llm_service/provider_store.py:636` — `select_active_entry` calls `reset_entry(entry.id)` synchronously on the call path when a limited entry's `reset_at` has elapsed; `reset_entry` (569-604) runs a conditional `UPDATE` + `commit()` + `clear_cache()`, cascading into a full list re-read + re-decrypt on the next call. `mark_exhausted` (537) is the companion sync write.
 - `_emit_otel_llm_span` (`telemetry.py:347-419`) is synchronous but must stay so for span context/latency correctness — out of scope per decision.
 
-### Approach (decision: batch traces + shutdown drain, AND fix provider_store reset_entry)
+### Approach (decision: batch traces + shutdown drain; provider reset deferred to a later PR)
 **(a) Batched trace flusher.** New `software_engineering_team/shared/trace_flusher.py`:
 - Bounded in-memory buffer (`collections.deque`, cap `SE_TRACE_BUFFER_MAX`, default 1000; overflow drops oldest + logs at WARNING — bounded memory, never blocks the caller).
 - `_trace_observer` (registered exactly as today via `register_call_observer`) **enqueues** a copied record into the deque instead of INSERTing. No DB I/O on the call path.
@@ -99,19 +99,21 @@ Low–medium. `commit_paths` and `_RepoContextCache` already exist and are produ
 - `drain()` + `unregister()` called from `_se_shutdown()` (`api/lifecycle.py:35-46`), which runs **before** `close_pool()` (verified at `shared_app/factory.py:130-139`) — so the final flush can still use the pool.
 - Column order + positional params preserved exactly from `trace_store.py:55-78`. `write_trace` remains as a sync one-shot for any non-observer caller (e.g. tests, manual tools).
 
-**(b) `reset_entry` / `mark_exhausted` off the call path.** In `llm_service/provider_store.py`: `select_active_entry` (line 636) no longer calls `reset_entry` synchronously. Expired-limited entries are queued to a background sweeper (a `BackgroundHeartbeat` in `llm_service`) that periodically runs the conditional `UPDATE … WHERE reset_at <= NOW()` + `clear_cache()`. Selection returns the (still-cached) entry immediately; the reset happens out-of-band. `mark_exhausted` (537) similarly moves its `UPDATE`+`clear_cache` to the sweeper. The sweeper no-ops when Postgres is off. This is the shared `llm_service` path used by all teams — guarded and unit-tested.
+This refactor is SE-scoped only (`software_engineering_team/shared` + `api/lifecycle.py`) — no shared `llm_service` changes, so no cross-team blast radius.
+
+**Deferred to a separate later PR (#4b):** moving `provider_store.reset_entry`/`mark_exhausted` off the LLM call path. That touches the shared `llm_service` used by all teams and is isolated to its own PR with its own issue.
 
 ### Behavior contract
 - Trace rows: identical contents, eventually-consistent within `SE_TRACE_FLUSH_INTERVAL_S` + drain-at-shutdown. No row loss on clean shutdown.
-- Provider failover: same selection result; resets now asynchronous but the conditional `WHERE reset_at <= NOW()` (DB clock) preserves the existing cross-container safety. No change to which provider is selected for a given call.
+- Provider failover: unchanged in this PR (reset_entry stays synchronous; deferred to #4b).
 
 ### Affected files
-- New: `software_engineering_team/shared/trace_flusher.py`; `llm_service/provider_sweeper.py` (or extend an existing llm_service module).
-- Modified: `shared/trace_store.py` (observer enqueues, keep `write_trace`); `api/lifecycle.py` (`_se_shutdown` drain/unregister); `llm_service/provider_store.py` (`select_active_entry`/`mark_exhausted` queue instead of sync write); `llm_service/factory.py` (start/stop sweeper with the client lifecycle).
-- Tests: flusher buffer/overflow/drain test; executemany column-order test; provider sweeper test (expired entry reset out-of-band); regression that the observer never blocks the call path.
+- New: `software_engineering_team/shared/trace_flusher.py`.
+- Modified: `shared/trace_store.py` (observer enqueues instead of INSERTing; keep `write_trace`); `api/lifecycle.py` (`_se_shutdown` drain/unregister).
+- Tests: flusher buffer/overflow/drain test; executemany column-order test; regression that the observer never blocks the LLM call path (zero DB I/O on enqueue).
 
 ### Risk
-Medium. #4b touches the shared `llm_service` used by every team. Mitigation: sweeper no-ops when Postgres off; existing failover tests must pass unchanged; add a test asserting the call path performs zero DB writes.
+Low. SE-scoped only; no shared `llm_service` changes. Mitigation: `write_trace` kept for non-observer callers; drain runs before `close_pool()`; existing trace tests pass against the batched path.
 
 ---
 
@@ -177,16 +179,19 @@ Low for deletions (verified dead). Medium for the build-fix extraction (touches 
 
 ## Implementation order
 
-1. **#5** — pure deletions + extraction; shrinks the file the other refactors touch. Lowest risk, unblocks cleaner diffs.
-2. **#4** — independent (llm_service + SE shared); no overlap with #2/#3 execution code.
-3. **#2** — collapses the review/execution fork.
-4. **#3** — builds on #2's execution skeleton (changed-path commits thread through the unified `run_gated_execution_impl`).
+Single PR, single tracking issue. Land the work in this commit order within the PR so each stage is independently testable and diffs stay reviewable:
 
-Each refactor lands as its own PR with `Closes #N` (an issue is opened first per project rule) and must keep the 90% line-coverage floor.
+1. **#5** — pure deletions + build-fix extraction; shrinks `orchestrator.py` before the other refactors touch it. Lowest risk, unblocks cleaner diffs.
+2. **#4a** — trace batching (SE-scoped); independent of #2/#3 execution code.
+3. **#2** — collapse the review/execution fork behind `ReviewConfig` + `run_gated_execution_impl`.
+4. **#3** — changed-path commits + `_RepoContextCache` port + streaming walk; builds on #2's unified execution skeleton.
+
+The PR body uses `Closes #N` against the single tracking issue. Coverage must stay at/above the 90% line floor across all four stages. #4b (provider_store reset off-path) is a separate future PR with its own issue.
 
 ## Non-goals (explicitly deferred)
 - Prompt caching for stable LLM context (#1 from the analysis) — separate effort.
 - `all_files` content eviction / paths-only deliver (#3 "also paths-only" option) — deferred per decision.
 - OTEL metric recording off-path — deferred per decision.
+- **#4b — `provider_store.reset_entry`/`mark_exhausted` off the LLM call path** — split into its own later PR (shared `llm_service` blast radius).
 - Converging backend/frontend gate models (#2 full-convergence option) — deferred per decision.
 - `TaskGraphService` RLock-over-HTTP-persist, `_pause_lock` over human wait, worktree-cleanup failure sweep, `MAX_DOCUMENTATION_ITERATIONS=100` — flagged in the analysis but out of scope here.
