@@ -332,36 +332,24 @@ def test_run_pipeline_job_artifacts_base_resolution(monkeypatch, tmp_path: Path)
 
 
 def test_publish_terminal_swallows_errors(monkeypatch) -> None:
-    """_publish_terminal returns silently when both event_bus paths fail."""
-    import builtins
-
-    real = builtins.__import__
-
-    def deny(name, *a, **kw):
-        if "event_bus" in name:
-            raise ImportError("nope")
-        return real(name, *a, **kw)
-
-    monkeypatch.setattr(builtins, "__import__", deny)
+    """_publish_terminal returns silently when the event-bus module is unavailable."""
     from shared import run_pipeline_job as rpj
 
+    def deny(name):
+        raise ImportError("nope")
+
+    monkeypatch.setattr(rpj, "_import_shared", deny)
     rpj._publish_terminal("jid", "complete", status="ok")  # must not raise
 
 
 def test_fail_job_swallows_errors(monkeypatch) -> None:
-    """_fail_job tolerates missing modules."""
-    import builtins
-
-    real = builtins.__import__
-
-    def deny(name, *a, **kw):
-        if "blog_job_store" in name:
-            raise ImportError("nope")
-        return real(name, *a, **kw)
-
-    monkeypatch.setattr(builtins, "__import__", deny)
+    """_fail_job tolerates a missing job-store module."""
     from shared import run_pipeline_job as rpj
 
+    def deny(name):
+        raise ImportError("nope")
+
+    monkeypatch.setattr(rpj, "_import_shared", deny)
     rpj._fail_job("jid", "err")
 
 
@@ -625,6 +613,7 @@ def test_temporal_constants_loaded() -> None:
     assert constants.ACTIVITY_DRAFT_STAGE
     assert constants.ACTIVITY_GATES_STAGE
     assert constants.ACTIVITY_FINALIZE
+    assert constants.ACTIVITY_FULL_PIPELINE
 
 
 def test_connect_temporal_client_no_address(monkeypatch) -> None:

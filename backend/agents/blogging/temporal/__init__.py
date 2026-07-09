@@ -13,6 +13,7 @@ from blogging.temporal.activities import (
     finalize_job_activity,
     gates_stage_activity,
     plan_stage_activity,
+    run_full_pipeline_activity,
 )
 from blogging.temporal.client import is_temporal_enabled
 from blogging.temporal.constants import TASK_QUEUE
@@ -24,6 +25,8 @@ ACTIVITIES = [
     draft_stage_activity,
     gates_stage_activity,
     finalize_job_activity,
+    # Legacy monolith, registered for drain-out of pre-decomposition histories.
+    run_full_pipeline_activity,
 ]
 
 __all__ = [
@@ -36,4 +39,5 @@ __all__ = [
     "gates_stage_activity",
     "is_temporal_enabled",
     "plan_stage_activity",
+    "run_full_pipeline_activity",
 ]

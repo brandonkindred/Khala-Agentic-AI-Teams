@@ -16,10 +16,16 @@ def test_pattern_a_exports_workflows_and_activities() -> None:
     from blogging import temporal as t
 
     assert t.WORKFLOWS == [t.BlogFullPipelineWorkflow]
-    assert len(t.ACTIVITIES) == 4
+    assert len(t.ACTIVITIES) == 5
 
     names = {activity._Definition.must_from_callable(a).name for a in t.ACTIVITIES}
-    assert names == {"blog_plan_stage", "blog_draft_stage", "blog_gates_stage", "blog_finalize"}
+    assert names == {
+        "blog_plan_stage",
+        "blog_draft_stage",
+        "blog_gates_stage",
+        "blog_finalize",
+        "run_blog_full_pipeline",
+    }
 
 
 def test_activities_match_constants() -> None:
@@ -35,6 +41,7 @@ def test_activities_match_constants() -> None:
         constants.ACTIVITY_DRAFT_STAGE,
         constants.ACTIVITY_GATES_STAGE,
         constants.ACTIVITY_FINALIZE,
+        constants.ACTIVITY_FULL_PIPELINE,
     }
 
 
@@ -101,6 +108,27 @@ def test_run_pipeline_invokes_three_stages_in_order(monkeypatch, tmp_path) -> No
     assert (ppr, draft, status) == ("ppr", "draft", "PASS")
 
 
+def test_load_required_guidelines_raises_when_missing(monkeypatch) -> None:
+    """Missing guideline files raise DraftError instead of silently emptying agents."""
+    import importlib
+
+    import pytest
+
+    v2 = importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+    monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "")
+    with pytest.raises(v2.DraftError):
+        v2._load_required_guidelines("run gate-driven rewrites")
+
+
+def test_load_required_guidelines_returns_contents(monkeypatch) -> None:
+    """Both guideline files present -> their contents are returned as a pair."""
+    import importlib
+
+    v2 = importlib.import_module("blogging.agent_implementations.blog_writing_process_v2")
+    monkeypatch.setattr(v2, "load_style_file", lambda *a, **kw: "ok")
+    assert v2._load_required_guidelines("start drafting") == ("ok", "ok")
+
+
 def test_run_pipeline_short_circuits_on_planning_abort(monkeypatch, tmp_path) -> None:
     """A planning abort tuple short-circuits before draft/gates run."""
     import importlib
@@ -149,7 +177,7 @@ def test_build_pipeline_context_seeds_inputs(monkeypatch, tmp_path) -> None:
 
 
 def test_fail_activity_external_cancellation_marks_cancelled(monkeypatch) -> None:
-    """External cancellation -> job marked cancelled, returns True (caller swallows)."""
+    """External cancellation -> job marked cancelled (error terminal, never re-raised)."""
     import importlib
 
     from blogging.temporal import activities as acts
@@ -159,12 +187,12 @@ def test_fail_activity_external_cancellation_marks_cancelled(monkeypatch) -> Non
     monkeypatch.setattr(rpj, "_is_external_cancellation", lambda e: True)
     monkeypatch.setattr(rpj, "mark_job_cancelled", lambda jid: marked.setdefault("job", jid))
 
-    assert acts._fail_activity("j1", ValueError("x"), "planning") is True
+    acts._fail_activity("j1", ValueError("x"), "planning")
     assert marked["job"] == "j1"
 
 
 def test_fail_activity_hard_error_fails_job(monkeypatch) -> None:
-    """A hard error fails the job (with phase) and returns False so the caller re-raises."""
+    """A hard error fails the job with the coarse stage name when the exception has no phase."""
     import importlib
 
     from blogging.temporal import activities as acts
@@ -177,9 +205,27 @@ def test_fail_activity_hard_error_fails_job(monkeypatch) -> None:
     )
     monkeypatch.setattr(rpj, "_publish_terminal", lambda *a, **kw: None)
 
-    assert acts._fail_activity("j1", ValueError("boom"), "gates") is False
+    acts._fail_activity("j1", ValueError("boom"), "gates")
     assert failed["jid"] == "j1"
     assert failed["kw"]["failed_phase"] == "gates"
+
+
+def test_fail_activity_prefers_exception_phase(monkeypatch) -> None:
+    """The exception's own phase attribute wins over the coarse stage name."""
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    failed: dict = {}
+    monkeypatch.setattr(rpj, "_is_external_cancellation", lambda e: False)
+    monkeypatch.setattr(rpj, "_fail_job", lambda jid, msg, **kw: failed.update(kw))
+    monkeypatch.setattr(rpj, "_publish_terminal", lambda *a, **kw: None)
+
+    exc = ValueError("brand violation")
+    exc.phase = "compliance"
+    acts._fail_activity("j1", exc, "gates")
+    assert failed["failed_phase"] == "compliance"
 
 
 def test_plan_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
@@ -215,11 +261,12 @@ def test_plan_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_workflow(monkeypatch, statuses):
+def _run_workflow(monkeypatch, statuses, patched=True):
     """Drive BlogFullPipelineWorkflow.run with a stubbed execute_activity.
 
-    ``statuses`` maps activity function name -> DTO returned by that activity.
-    Returns the ordered list of activity names the workflow scheduled.
+    ``statuses`` maps activity function name -> DTO returned by that activity;
+    ``patched`` is what the stubbed ``workflow.patched`` reports (False replays the
+    pre-decomposition history path). Returns the ordered activity names scheduled.
     """
     import asyncio
 
@@ -233,6 +280,7 @@ def _run_workflow(monkeypatch, statuses):
         return statuses.get(name, {})
 
     monkeypatch.setattr(wf.workflow, "execute_activity", fake_execute)
+    monkeypatch.setattr(wf.workflow, "patched", lambda _id: patched)
     asyncio.run(wf.BlogFullPipelineWorkflow().run("j1", {"brief": "x"}))
     return calls
 
@@ -272,6 +320,38 @@ def test_workflow_short_circuits_when_draft_not_pass(monkeypatch) -> None:
         },
     )
     assert calls == ["plan_stage_activity", "draft_stage_activity"]
+
+
+def test_workflow_skips_finalize_when_gates_fail(monkeypatch) -> None:
+    """A gates FAIL (job cancelled/failed mid-stage, draft=None) must skip finalize."""
+    calls = _run_workflow(
+        monkeypatch,
+        {
+            "plan_stage_activity": {"status": "PASS"},
+            "draft_stage_activity": {"status": "PASS"},
+            "gates_stage_activity": {"status": "FAIL", "draft": None},
+        },
+    )
+    assert calls == ["plan_stage_activity", "draft_stage_activity", "gates_stage_activity"]
+
+
+def test_workflow_finalizes_on_needs_human_review(monkeypatch) -> None:
+    """NEEDS_HUMAN_REVIEW is a quality outcome, not an abort — finalize still runs."""
+    calls = _run_workflow(
+        monkeypatch,
+        {
+            "plan_stage_activity": {"status": "PASS"},
+            "draft_stage_activity": {"status": "PASS"},
+            "gates_stage_activity": {"status": "NEEDS_HUMAN_REVIEW", "draft": {"draft": "d"}},
+        },
+    )
+    assert calls[-1] == "finalize_job_activity"
+
+
+def test_workflow_unpatched_replay_runs_legacy_monolith(monkeypatch) -> None:
+    """Pre-decomposition histories replay the single-activity path deterministically."""
+    calls = _run_workflow(monkeypatch, {"run_full_pipeline_activity": None}, patched=False)
+    assert calls == ["run_full_pipeline_activity"]
 
 
 # ---------------------------------------------------------------------------

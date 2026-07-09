@@ -51,11 +51,25 @@ class BlogFullPipelineWorkflow:
               serialized full-pipeline request.
         Postconditions:
             - On success each phase runs once and the finalize activity completes the
-              job store. A ``FAIL`` status from planning/draft (external cancellation)
-              short-circuits without finalizing — the job is already terminal. A
-              hard phase error propagates (Temporal retries per policy, then fails
-              the workflow).
+              job store. A ``FAIL`` status from any stage (cancelled/failed job)
+              short-circuits without finalizing — the job store is already terminal.
+              Histories recorded before the per-phase decomposition replay the
+              original single-activity path (via ``workflow.patched``) so in-flight
+              runs survive the deploy.
         """
+        if not workflow.patched("blog-per-phase-activities"):
+            # Drain-out branch: replays of pre-decomposition histories must
+            # re-schedule the original monolithic activity deterministically.
+            await workflow.execute_activity(
+                _activities.run_full_pipeline_activity,
+                args=[job_id, request_dict],
+                task_queue=TASK_QUEUE,
+                schedule_to_close_timeout=HITL_STAGE_TIMEOUT,
+                heartbeat_timeout=timedelta(minutes=5),
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            return
+
         planning = await workflow.execute_activity(
             _activities.plan_stage_activity,
             args=[job_id, request_dict],
@@ -86,6 +100,10 @@ class BlogFullPipelineWorkflow:
             heartbeat_timeout=timedelta(minutes=5),
             retry_policy=DEFAULT_RETRY_POLICY,
         )
+        # "FAIL" means the job was cancelled/failed mid-stage (already terminal,
+        # no final draft) — skip finalize. NEEDS_HUMAN_REVIEW still finalizes.
+        if gates.get("status") == "FAIL":
+            return
 
         await workflow.execute_activity(
             _activities.finalize_job_activity,

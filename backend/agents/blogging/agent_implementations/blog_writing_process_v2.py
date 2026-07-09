@@ -685,6 +685,32 @@ def _run_title_selection(
     return None
 
 
+def _load_required_guidelines(action: str) -> Tuple[str, str]:
+    """Load the writing-style and brand-spec guideline files, failing loudly if absent.
+
+    Preconditions:
+        - ``action`` is a short phrase for the error message (e.g. "start drafting").
+    Postconditions:
+        - Returns ``(writing_style_content, brand_spec_content)``, both non-empty.
+        - Raises ``DraftError`` naming each missing file when either cannot be
+          loaded — agents must never run with silently-empty guidelines.
+    """
+    writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
+    brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
+    if not writing_style_content or not brand_spec_content:
+        missing_parts: list[str] = []
+        if not writing_style_content:
+            missing_parts.append(f"writing guidelines ({STYLE_GUIDE_PATH})")
+        if not brand_spec_content:
+            missing_parts.append(f"brand guidelines ({BRAND_SPEC_PROMPT_PATH})")
+        missing_msg = ", ".join(missing_parts)
+        raise DraftError(
+            f"Cannot {action} without required guideline inputs. Missing: {missing_msg}.",
+            cause=ValueError(missing_msg),
+        )
+    return writing_style_content, brand_spec_content
+
+
 def _make_update(job_updater: Optional[JobUpdater]) -> Callable[..., None]:
     """Build the phase-progress ``_update`` callback bound to a job_updater.
 
@@ -1166,19 +1192,7 @@ def run_draft_stage(
     _update = _make_update(job_updater)
 
     # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
-    writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
-    brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
-    if not writing_style_content or not brand_spec_content:
-        missing_parts: list[str] = []
-        if not writing_style_content:
-            missing_parts.append(f"writing guidelines ({STYLE_GUIDE_PATH})")
-        if not brand_spec_content:
-            missing_parts.append(f"brand guidelines ({BRAND_SPEC_PROMPT_PATH})")
-        missing_msg = ", ".join(missing_parts)
-        raise DraftError(
-            f"Cannot start drafting without required guideline inputs. Missing: {missing_msg}.",
-            cause=ValueError(missing_msg),
-        )
+    writing_style_content, brand_spec_content = _load_required_guidelines("start drafting")
     draft_agent = BlogWriterAgent(
         llm_client=llm_client,
         writing_style_guide_content=writing_style_content,
@@ -1769,8 +1783,9 @@ def run_gates_stage(
         # during the draft stage are persisted to STYLE_GUIDE_PATH, so re-loading here
         # picks them up — this also makes the gates stage self-contained when it runs
         # as its own Temporal activity (a fresh process with no in-memory draft agent).
-        writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
-        brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
+        writing_style_content, brand_spec_content = _load_required_guidelines(
+            "run gate-driven rewrites"
+        )
         draft_agent = BlogWriterAgent(
             llm_client=llm_client,
             writing_style_guide_content=writing_style_content,

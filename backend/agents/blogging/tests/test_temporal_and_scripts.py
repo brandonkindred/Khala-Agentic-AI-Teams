@@ -393,8 +393,8 @@ def test_plan_stage_activity_abort_returns_fail(monkeypatch, tmp_path) -> None:
     assert out["status"] == "FAIL"
 
 
-def test_plan_stage_activity_error_fails_job_and_reraises(monkeypatch, tmp_path) -> None:
-    """A hard stage error fails the job and re-raises so Temporal retries."""
+def test_plan_stage_activity_error_fails_job_and_returns_fail(monkeypatch, tmp_path) -> None:
+    """A hard stage error fails the job and returns a FAIL DTO (terminal, no Temporal retry)."""
     acts, _ = _patch_context(monkeypatch, tmp_path)
 
     def boom(c):
@@ -405,11 +405,11 @@ def test_plan_stage_activity_error_fails_job_and_reraises(monkeypatch, tmp_path)
     monkeypatch.setattr(
         acts,
         "_fail_activity",
-        lambda job_id, exc, failed_phase: failed.update(job_id=job_id, phase=failed_phase) or False,
+        lambda job_id, exc, failed_phase: failed.update(job_id=job_id, phase=failed_phase),
     )
 
-    with pytest.raises(ValueError):
-        acts.plan_stage_activity("j1", {"brief": "x"})
+    out = acts.plan_stage_activity("j1", {"brief": "x"})
+    assert out["status"] == "FAIL"
     assert failed == {"job_id": "j1", "phase": "planning"}
 
 
@@ -498,14 +498,14 @@ class _FakeHeartbeat:
 
 
 def test_plan_stage_activity_swallows_external_cancellation(monkeypatch, tmp_path) -> None:
-    """External cancellation -> _fail_activity True -> FAIL DTO (not a raise); hb stopped."""
+    """External cancellation -> _fail_activity marks cancelled -> FAIL DTO; hb stopped."""
     import importlib
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
     rpj = importlib.import_module("blogging.shared.run_pipeline_job")
     hb = _FakeHeartbeat()
     monkeypatch.setattr(rpj, "start_pipeline_heartbeat", lambda job_id: hb)
-    monkeypatch.setattr(acts, "_fail_activity", lambda job_id, exc, failed_phase: True)
+    monkeypatch.setattr(acts, "_fail_activity", lambda job_id, exc, failed_phase: None)
 
     def boom(c):
         raise RuntimeError("wrapped cancel")
@@ -554,8 +554,8 @@ def test_draft_stage_activity_reraises_cancelled(monkeypatch, tmp_path) -> None:
         acts.draft_stage_activity("j1", {"brief": "x"}, {"planning_phase_result": {}})
 
 
-def test_gates_stage_activity_reraises_hard_error(monkeypatch, tmp_path) -> None:
-    """A hard gates error (not swallowed) re-raises after failing the job."""
+def test_gates_stage_activity_hard_error_returns_fail(monkeypatch, tmp_path) -> None:
+    """A hard gates error fails the job and returns a FAIL DTO so finalize is skipped."""
     import importlib
 
     acts, _ = _patch_context(monkeypatch, tmp_path)
@@ -565,7 +565,10 @@ def test_gates_stage_activity_reraises_hard_error(monkeypatch, tmp_path) -> None
         cp.PlanningPhaseResult, "model_validate", classmethod(lambda cls, d: _Dumpable(d))
     )
     monkeypatch.setattr(wm.WriterOutput, "model_validate", classmethod(lambda cls, d: _Dumpable(d)))
-    monkeypatch.setattr(acts, "_fail_activity", lambda job_id, exc, failed_phase: False)
+    failed: dict = {}
+    monkeypatch.setattr(
+        acts, "_fail_activity", lambda job_id, exc, failed_phase: failed.update(phase=failed_phase)
+    )
 
     def boom(c):
         raise ValueError("gate blew up")
@@ -573,12 +576,13 @@ def test_gates_stage_activity_reraises_hard_error(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(_v2(), "run_gates_stage", boom)
     planning = {"planning_phase_result": {"content_plan": {}}}
     draft = {"draft": {"draft": "d"}}
-    with pytest.raises(ValueError):
-        acts.gates_stage_activity("j1", {"brief": "x"}, planning, draft)
+    out = acts.gates_stage_activity("j1", {"brief": "x"}, planning, draft)
+    assert out["status"] == "FAIL"
+    assert failed == {"phase": "gates"}
 
 
-def test_finalize_job_activity_reraises_on_error(monkeypatch, tmp_path) -> None:
-    """finalize failing (non-cancellation) fails the job and re-raises."""
+def test_finalize_job_activity_swallows_error(monkeypatch, tmp_path) -> None:
+    """finalize failing (non-cancellation) fails the job and swallows — retrying cannot help."""
     import importlib
 
     from blogging.temporal import activities as acts
@@ -589,10 +593,65 @@ def test_finalize_job_activity_reraises_on_error(monkeypatch, tmp_path) -> None:
         raise ValueError("bad model")
 
     monkeypatch.setattr(cp.PlanningPhaseResult, "model_validate", classmethod(boom))
-    monkeypatch.setattr(acts, "_fail_activity", lambda job_id, exc, failed_phase: False)
+    failed: dict = {}
+    monkeypatch.setattr(
+        acts, "_fail_activity", lambda job_id, exc, failed_phase: failed.update(phase=failed_phase)
+    )
 
+    assert acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": None}) is None
+    assert failed == {"phase": "finalize"}
+
+
+# ---------------------------------------------------------------------------
+# temporal.activities.run_full_pipeline_activity (legacy drain-out monolith)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_full_pipeline_activity_delegates(monkeypatch) -> None:
+    """run_full_pipeline_activity delegates to run_blog_full_pipeline_job."""
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+    seen: dict = {}
+    monkeypatch.setattr(
+        rpj, "run_blog_full_pipeline_job", lambda job_id, req: seen.update(job_id=job_id, req=req)
+    )
+    acts.run_full_pipeline_activity("j1", {"brief": "x"})
+    assert seen == {"job_id": "j1", "req": {"brief": "x"}}
+
+
+def test_legacy_full_pipeline_activity_reraises_cancelled(monkeypatch) -> None:
+    import importlib
+
+    from temporalio.exceptions import CancelledError
+
+    from blogging.temporal import activities as acts
+
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+
+    def boom(job_id, req):
+        raise CancelledError("nope")
+
+    monkeypatch.setattr(rpj, "run_blog_full_pipeline_job", boom)
+    with pytest.raises(CancelledError):
+        acts.run_full_pipeline_activity("j", {})
+
+
+def test_legacy_full_pipeline_activity_reraises_other(monkeypatch) -> None:
+    import importlib
+
+    from blogging.temporal import activities as acts
+
+    rpj = importlib.import_module("blogging.shared.run_pipeline_job")
+
+    def boom(job_id, req):
+        raise ValueError("oops")
+
+    monkeypatch.setattr(rpj, "run_blog_full_pipeline_job", boom)
     with pytest.raises(ValueError):
-        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": None})
+        acts.run_full_pipeline_activity("j", {})
 
 
 # ---------------------------------------------------------------------------

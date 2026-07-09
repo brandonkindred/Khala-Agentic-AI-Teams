@@ -84,6 +84,29 @@ def _is_external_cancellation(exc: BaseException) -> bool:
     return False
 
 
+def _import_shared(name: str) -> Any:
+    """Import ``shared.<name>`` across the package/sibling execution layouts.
+
+    One resolver for the dual import paths every helper in this module needs
+    (installed-package ``blogging.shared.*`` vs in-tree sibling ``shared.*``),
+    so the fallback logic lives in exactly one place.
+
+    Preconditions:
+        - ``name`` is a module name under the blogging ``shared`` package
+          (e.g. ``"blog_job_store"``).
+    Postconditions:
+        - Returns the imported module, trying ``blogging.shared.<name>`` first and
+          falling back to the sibling ``shared.<name>`` path; propagates
+          ImportError when neither layout resolves.
+    """
+    import importlib
+
+    try:
+        return importlib.import_module(f"blogging.shared.{name}")
+    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution.
+        return importlib.import_module(f"shared.{name}")
+
+
 def build_brief_input(request_dict: Dict[str, Any]) -> Any:
     """Build a ``ResearchBriefInput`` from a serialized request dict.
 
@@ -114,15 +137,15 @@ def build_brief_input(request_dict: Dict[str, Any]) -> Any:
 
 
 def _resolve_update_blog_job() -> Optional[Callable[..., Any]]:
-    """Resolve ``update_blog_job`` across the package/sibling import paths (None if absent)."""
+    """Resolve ``update_blog_job`` across the package/sibling import paths (None if absent).
+
+    Preconditions: none.
+    Postconditions: returns the callable, or None when the job store is unavailable.
+    """
     try:
-        from blogging.shared.blog_job_store import update_blog_job
-    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution.
-        try:
-            from shared.blog_job_store import update_blog_job
-        except ImportError:
-            return None
-    return update_blog_job
+        return _import_shared("blog_job_store").update_blog_job
+    except ImportError:
+        return None
 
 
 def make_job_updater(job_id: str) -> Callable[..., None]:
@@ -147,12 +170,9 @@ def make_job_updater(job_id: str) -> Callable[..., None]:
                 logger.warning("Failed to update job %s: %s", job_id, e)
         # Broadcast to SSE subscribers
         try:
-            from blogging.shared.job_event_bus import publish
-        except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution; primary package path is the covered branch.
-            try:
-                from shared.job_event_bus import publish
-            except ImportError:
-                publish = None  # type: ignore[assignment]
+            publish = _import_shared("job_event_bus").publish
+        except ImportError:
+            publish = None
         if publish is not None:
             try:
                 publish(job_id, kwargs, event_type="update")
@@ -216,12 +236,9 @@ def mark_job_cancelled(job_id: str) -> bool:
     """
     logger.info("Pipeline cancelled for job %s", job_id)
     try:
-        from blogging.shared.blog_job_store import JOB_STATUS_CANCELLED
-    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution.
-        try:
-            from shared.blog_job_store import JOB_STATUS_CANCELLED
-        except ImportError:
-            JOB_STATUS_CANCELLED = "cancelled"
+        JOB_STATUS_CANCELLED = _import_shared("blog_job_store").JOB_STATUS_CANCELLED
+    except ImportError:
+        JOB_STATUS_CANCELLED = "cancelled"
     update_blog_job = _resolve_update_blog_job()
     if update_blog_job is not None:
         try:
@@ -258,23 +275,13 @@ def finalize_blog_job(
           NEEDS_REVIEW, and publishes a terminal ``complete`` SSE event. Returns the
           final job status string.
     """
-    try:
-        from blogging.shared.blog_job_store import (
-            JOB_STATUS_COMPLETED,
-            JOB_STATUS_NEEDS_REVIEW,
-            complete_blog_job,
-        )
-        from blogging.shared.content_plan import (
-            content_plan_summary_text,
-            content_plan_to_outline_markdown,
-        )
-    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution.
-        from shared.blog_job_store import (
-            JOB_STATUS_COMPLETED,
-            JOB_STATUS_NEEDS_REVIEW,
-            complete_blog_job,
-        )
-        from shared.content_plan import content_plan_summary_text, content_plan_to_outline_markdown
+    bjs = _import_shared("blog_job_store")
+    content_plan = _import_shared("content_plan")
+    JOB_STATUS_COMPLETED = bjs.JOB_STATUS_COMPLETED
+    JOB_STATUS_NEEDS_REVIEW = bjs.JOB_STATUS_NEEDS_REVIEW
+    complete_blog_job = bjs.complete_blog_job
+    content_plan_summary_text = content_plan.content_plan_summary_text
+    content_plan_to_outline_markdown = content_plan.content_plan_to_outline_markdown
 
     plan = planning_phase_result.content_plan
     outline = content_plan_to_outline_markdown(plan)
@@ -321,17 +328,15 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
             return
 
     try:
-        from blogging.shared.blog_job_store import start_blog_job
-        from blogging.shared.errors import BloggingError, PlanningError
-    except ImportError:  # pragma: no cover - fallback for sibling-import path used when running from inside blogging/; first branch already covers the package case.
-        try:
-            from shared.blog_job_store import start_blog_job
-            from shared.errors import BloggingError, PlanningError
-        except ImportError:
-            logger.warning("Blog job store not available; pipeline will run without job updates")
-            start_blog_job = None
-            BloggingError = Exception
-            PlanningError = Exception
+        start_blog_job = _import_shared("blog_job_store").start_blog_job
+        _errors = _import_shared("errors")
+        BloggingError = _errors.BloggingError
+        PlanningError = _errors.PlanningError
+    except ImportError:
+        logger.warning("Blog job store not available; pipeline will run without job updates")
+        start_blog_job = None
+        BloggingError = Exception
+        PlanningError = Exception
 
     work_dir = _get_run_artifacts_base() / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -395,15 +400,12 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
 def _publish_terminal(job_id: str, event_type: str, **kwargs: Any) -> None:
     """Publish a terminal SSE event and clean up subscribers."""
     try:
-        from blogging.shared.job_event_bus import cleanup_job, publish
-    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution; primary package path is the covered branch.
-        try:
-            from shared.job_event_bus import cleanup_job, publish
-        except ImportError:
-            return
+        bus = _import_shared("job_event_bus")
+    except ImportError:
+        return
     try:
-        publish(job_id, kwargs, event_type=event_type)
-        cleanup_job(job_id)
+        bus.publish(job_id, kwargs, event_type=event_type)
+        bus.cleanup_job(job_id)
     except Exception:  # pragma: no cover - defensive guard around SSE bus.
         pass
 
@@ -415,23 +417,12 @@ def _fail_job(
     planning_failure_reason: Optional[str] = None,
 ) -> None:
     try:
-        from blogging.shared.blog_job_store import fail_blog_job as fn
-
-        fn(
-            job_id,
-            error=error,
-            failed_phase=failed_phase,
-            planning_failure_reason=planning_failure_reason,
-        )
-    except ImportError:  # pragma: no cover - sibling-import fallback for in-tree execution; primary package path is the covered branch.
-        try:
-            from shared.blog_job_store import fail_blog_job as fn
-
-            fn(
-                job_id,
-                error=error,
-                failed_phase=failed_phase,
-                planning_failure_reason=planning_failure_reason,
-            )
-        except ImportError:
-            pass
+        fn = _import_shared("blog_job_store").fail_blog_job
+    except ImportError:
+        return
+    fn(
+        job_id,
+        error=error,
+        failed_phase=failed_phase,
+        planning_failure_reason=planning_failure_reason,
+    )

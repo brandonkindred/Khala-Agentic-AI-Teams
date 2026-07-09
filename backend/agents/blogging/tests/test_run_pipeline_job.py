@@ -210,3 +210,56 @@ def test_run_blog_full_pipeline_job_job_updater_failure_swallowed(
     rpj.run_blog_full_pipeline_job(job_id, {"brief": "hi", "audience": {"profession": "dev"}})
     job = bjs.get_blog_job(job_id)
     assert job["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Degraded-layout paths: _import_shared unavailable
+# ---------------------------------------------------------------------------
+
+
+def _deny_import(name):
+    raise ImportError("nope")
+
+
+def test_mark_job_cancelled_tolerates_missing_modules(monkeypatch) -> None:
+    """mark_job_cancelled still returns True when the shared modules are absent."""
+    from shared import run_pipeline_job as rpj
+
+    monkeypatch.setattr(rpj, "_import_shared", _deny_import)
+    assert rpj.mark_job_cancelled("jid") is True
+
+
+def test_mark_job_cancelled_swallows_update_errors(monkeypatch) -> None:
+    """A failing update_blog_job inside mark_job_cancelled is swallowed."""
+    from shared import run_pipeline_job as rpj
+
+    def raising_update(job_id, **kwargs):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(rpj, "_resolve_update_blog_job", lambda: raising_update)
+    assert rpj.mark_job_cancelled("jid") is True
+
+
+def test_make_job_updater_tolerates_missing_event_bus(monkeypatch) -> None:
+    """The updater never raises when the SSE bus module is absent."""
+    from shared import run_pipeline_job as rpj
+
+    monkeypatch.setattr(rpj, "_import_shared", _deny_import)
+    updater = rpj.make_job_updater("jid")
+    updater(status_text="ok")  # must not raise
+
+
+def test_run_blog_full_pipeline_job_degrades_without_job_store(monkeypatch, tmp_path: Path) -> None:
+    """With the shared modules unavailable, the run degrades to no-store mode without raising."""
+    from shared import run_pipeline_job as rpj
+
+    _setup_artifacts_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(rpj, "_import_shared", _deny_import)
+
+    ppr, draft, _ = _make_pipeline_doubles()
+    monkeypatch.setattr(
+        "agent_implementations.blog_writing_process_v2.run_pipeline",
+        lambda *a, **kw: (ppr, draft, "PASS"),
+    )
+
+    rpj.run_blog_full_pipeline_job("job-degraded", {"brief": "hi"})  # must not raise

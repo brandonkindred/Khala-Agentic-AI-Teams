@@ -64,17 +64,23 @@ def _build_pipeline_context(job_id: str, request_dict: Dict[str, Any]) -> Any:
     )
 
 
-def _fail_activity(job_id: str, exc: Exception, failed_phase: Optional[str]) -> bool:
+def _fail_activity(job_id: str, exc: Exception, failed_phase: Optional[str]) -> None:
     """Mirror ``run_blog_full_pipeline_job``'s error funnel for a single stage.
+
+    Handled pipeline errors are terminal, matching the pre-decomposition behavior
+    (``run_blog_full_pipeline_job`` swallowed them after failing the job, so the
+    activity completed and Temporal never retried): the caller returns a FAIL DTO
+    so the workflow short-circuits, and Temporal's retry policy stays reserved for
+    worker crashes and timeouts.
 
     Preconditions:
         - ``exc`` is the exception raised by a stage function.
     Postconditions:
-        - Returns True when ``exc`` is an external (Temporal) cancellation: the job
-          is marked cancelled and the caller should swallow the error.
-        - Otherwise marks the job failed (with ``failed_phase``/planning reason) and
-          publishes a terminal ``error`` event, then returns False so the caller
-          re-raises (letting Temporal retry within the workflow's retry policy).
+        - External (Temporal) cancellation: the job is marked cancelled.
+        - Otherwise the job is marked failed and a terminal ``error`` event is
+          published. The exception's own ``phase`` (e.g. ``compliance``) wins over
+          the coarse ``failed_phase`` stage name, preserving the pre-decomposition
+          granularity of the job store's ``failed_phase`` field.
     """
     from blogging.shared.run_pipeline_job import (
         _fail_job,
@@ -85,14 +91,13 @@ def _fail_activity(job_id: str, exc: Exception, failed_phase: Optional[str]) -> 
 
     if _is_external_cancellation(exc):
         mark_job_cancelled(job_id)
-        return True
+        return
 
     planning_failure_reason = getattr(exc, "failure_reason", None)
-    phase = failed_phase or getattr(exc, "phase", None)
+    phase = getattr(exc, "phase", None) or failed_phase
     logger.exception("Blog pipeline stage %r failed for job %s", failed_phase, job_id)
     _fail_job(job_id, str(exc), failed_phase=phase, planning_failure_reason=planning_failure_reason)
     _publish_terminal(job_id, "error", error=str(exc), failed_phase=phase)
-    return False
 
 
 @activity.defn(name="blog_plan_stage")
@@ -104,8 +109,10 @@ def plan_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[str, 
           full-pipeline request.
     Postconditions:
         - Starts the job, runs ``run_planning_stage``, and returns a serialized
-          ``PlanningStageResult``. Marks the job cancelled and returns a ``FAIL`` DTO
-          on external cancellation; fails the job and re-raises on any other error.
+          ``PlanningStageResult``. On any handled error the job is marked
+          cancelled/failed (via ``_fail_activity``) and a ``FAIL`` DTO is returned
+          so the workflow short-circuits; only Temporal-native ``CancelledError``
+          propagates.
     """
     from temporalio.exceptions import CancelledError
 
@@ -134,9 +141,8 @@ def plan_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[str, 
         logger.info("Blog plan stage cancelled for job %s", job_id)
         raise
     except Exception as e:
-        if _fail_activity(job_id, e, failed_phase="planning"):
-            return PlanningStageResult(status="FAIL").model_dump()
-        raise
+        _fail_activity(job_id, e, failed_phase="planning")
+        return PlanningStageResult(status="FAIL").model_dump()
     finally:
         if hb is not None:
             hb.stop()
@@ -155,8 +161,9 @@ def draft_stage_activity(
           ``status == "PASS"`` (the workflow short-circuits otherwise).
     Postconditions:
         - Runs ``run_draft_stage`` and returns a serialized ``DraftStageResult``.
-          Marks the job cancelled and returns a ``FAIL`` DTO on external
-          cancellation; fails the job and re-raises on any other error.
+          On any handled error the job is marked cancelled/failed (via
+          ``_fail_activity``) and a ``FAIL`` DTO is returned so the workflow
+          short-circuits; only Temporal-native ``CancelledError`` propagates.
     """
     from temporalio.exceptions import CancelledError
 
@@ -191,9 +198,8 @@ def draft_stage_activity(
         logger.info("Blog draft stage cancelled for job %s", job_id)
         raise
     except Exception as e:
-        if _fail_activity(job_id, e, failed_phase="draft"):
-            return DraftStageResult(status="FAIL").model_dump()
-        raise
+        _fail_activity(job_id, e, failed_phase="draft")
+        return DraftStageResult(status="FAIL").model_dump()
     finally:
         if hb is not None:
             hb.stop()
@@ -214,7 +220,9 @@ def gates_stage_activity(
     Postconditions:
         - Runs ``run_gates_stage`` and returns a serialized ``GatesStageResult``
           carrying the final draft and terminal status (PASS or NEEDS_HUMAN_REVIEW).
-          Fails the job and re-raises on error.
+          On any handled error the job is marked cancelled/failed (via
+          ``_fail_activity``) and a ``FAIL`` DTO is returned so the workflow skips
+          finalize; only Temporal-native ``CancelledError`` propagates.
     """
     from blog_writer_agent.models import WriterOutput
     from temporalio.exceptions import CancelledError
@@ -243,9 +251,8 @@ def gates_stage_activity(
         logger.info("Blog gates stage cancelled for job %s", job_id)
         raise
     except Exception as e:
-        if _fail_activity(job_id, e, failed_phase="gates"):
-            return GatesStageResult(status="FAIL").model_dump()
-        raise
+        _fail_activity(job_id, e, failed_phase="gates")
+        return GatesStageResult(status="FAIL").model_dump()
     finally:
         if hb is not None:
             hb.stop()
@@ -265,7 +272,10 @@ def finalize_job_activity(
     Postconditions:
         - Reconstructs the planning result and final draft and calls
           ``finalize_blog_job`` (COMPLETED when ``status == "PASS"``, else
-          NEEDS_REVIEW). Fails the job and re-raises on error.
+          NEEDS_REVIEW). On any handled error the job is marked cancelled/failed
+          (via ``_fail_activity``) and the error is swallowed — the job store is
+          already terminal, so retrying finalize cannot help; only Temporal-native
+          ``CancelledError`` propagates.
     """
     from blog_writer_agent.models import WriterOutput
     from temporalio.exceptions import CancelledError
@@ -282,5 +292,33 @@ def finalize_job_activity(
         logger.info("Blog finalize cancelled for job %s", job_id)
         raise
     except Exception as e:
-        if not _fail_activity(job_id, e, failed_phase="finalize"):
-            raise
+        _fail_activity(job_id, e, failed_phase="finalize")
+
+
+@activity.defn(name="run_blog_full_pipeline")
+def run_full_pipeline_activity(job_id: str, request_dict: Dict[str, Any]) -> None:
+    """Legacy whole-pipeline activity, kept registered for drain-out.
+
+    Workflow histories recorded before the per-phase decomposition contain a
+    single scheduled activity of this type; the workflow's unpatched replay
+    branch re-schedules it, so it must stay registered until those runs drain.
+
+    Preconditions:
+        - ``job_id`` identifies a created job record; ``request_dict`` is a
+          serialized full-pipeline request.
+    Postconditions:
+        - ``run_blog_full_pipeline_job`` has run to completion (it owns all job
+          store updates and error handling); re-raises whatever it raises.
+    """
+    from temporalio.exceptions import CancelledError
+
+    from blogging.shared.run_pipeline_job import run_blog_full_pipeline_job
+
+    try:
+        run_blog_full_pipeline_job(job_id, request_dict)
+    except CancelledError:
+        logger.info("Blog pipeline activity cancelled for job %s", job_id)
+        raise
+    except Exception:
+        logger.exception("Blog full pipeline activity failed for job %s", job_id)
+        raise
