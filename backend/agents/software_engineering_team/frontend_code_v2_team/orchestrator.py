@@ -48,7 +48,7 @@ _FRONTEND_REPO_EXTENSIONS = frozenset(
 _FRONTEND_REPO_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "dist", "build", ".angular"})
 # Character budget for the repo briefing (whole files only; the next chunk that
 # would exceed it stops the briefing).
-_REPO_BRIEFING_MAX_CHARS = 30_000
+_FRONTEND_REPO_BRIEFING_MAX_CHARS = 30_000
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
@@ -108,8 +108,9 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 
 class FrontendDevelopmentAgent:
     """
-    Frontend Development Agent: runs the 5-phase cycle (Planning → Execution →
-    Review → Problem-solving → Deliver). Used by FrontendCodeV2TeamLead after Setup.
+    Frontend Development Agent: runs the 4-phase cycle (Planning → Execution →
+    Documentation → Deliver) with per-microtask review gates embedded in the
+    Execution phase. Used by FrontendCodeV2TeamLead after it runs Setup.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
@@ -127,7 +128,7 @@ class FrontendDevelopmentAgent:
         return build_tool_runners(tool_agents)
 
     @staticmethod
-    def _read_repo_code(repo_path: Path, max_chars: int = _REPO_BRIEFING_MAX_CHARS) -> str:
+    def _read_repo_code(repo_path: Path, max_chars: int = _FRONTEND_REPO_BRIEFING_MAX_CHARS) -> str:
         """Read frontend source files from repo into a single string.
 
         Delegates to the shared budgeted scanner so every per-domain reader shares
@@ -561,7 +562,7 @@ class FrontendCodeV2TeamLead:
             cache = RepoContextCache(
                 extensions=_FRONTEND_REPO_EXTENSIONS,
                 exclude_dirs=_FRONTEND_REPO_EXCLUDE_DIRS,
-                max_chars=_REPO_BRIEFING_MAX_CHARS,
+                max_chars=_FRONTEND_REPO_BRIEFING_MAX_CHARS,
             )
             self._repo_context_caches[key] = cache
         return cache

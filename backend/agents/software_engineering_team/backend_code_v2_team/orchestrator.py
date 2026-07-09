@@ -17,6 +17,7 @@ from shared_repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
+from software_engineering_team.shared.text_utils import has_section_header
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 
 from .models import (
@@ -47,34 +48,7 @@ _BACKEND_REPO_EXTENSIONS = frozenset(
 _BACKEND_REPO_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "__pycache__", "venv", ".venv"})
 # Character budget for the repo briefing (whole files only; the next chunk that
 # would exceed it stops the briefing).
-_REPO_BRIEFING_MAX_CHARS = 30_000
-
-
-def _has_section_header(text: str, header: str) -> bool:
-    """True if ``header`` begins an uncommented line in ``text``.
-
-    Each line is stripped of leading whitespace; comment lines (first non-blank
-    char ``#``) and blank lines are skipped, so a literal ``[tool.ruff]`` (or
-    ``[tool.pytest`` / ``[flake8]``) sitting inside a commented-out block no
-    longer matches. ``header`` is matched as a leading prefix, so ``"[tool.pytest"``
-    covers ``[tool.pytest.ini_options]``.
-
-    Preconditions: ``text`` is a ``str`` (may be empty); ``header`` is a non-empty
-      ``str`` beginning with ``[``.
-    Postconditions: returns a ``bool``; never raises (reads only ``text``). This
-      hardens the ``_detect_tooling`` probes against commented-out config without
-      pulling in a TOML/INI parser (the runtime is Python 3.10 with no
-      ``tomllib``/``tomli``); a header inside a string *value* (not a comment)
-      can still match, but that is the contrived case the real build/lint gate
-      catches downstream.
-    """
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if stripped.startswith(header):
-            return True
-    return False
+_BACKEND_REPO_BRIEFING_MAX_CHARS = 30_000
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
@@ -113,8 +87,9 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 
 class BackendDevelopmentAgent:
     """
-    Backend Development Agent: runs the 5-phase cycle (Planning → Execution →
-    Review → Problem-solving → Deliver). Used by BackendCodeV2TeamLead after Setup.
+    Backend Development Agent: runs the 4-phase cycle (Planning → Execution →
+    Documentation → Deliver) with per-microtask review gates embedded in the
+    Execution phase. Used by BackendCodeV2TeamLead after it runs Setup.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:
@@ -133,7 +108,63 @@ class BackendDevelopmentAgent:
         return build_tool_runners(tool_agents)
 
     @staticmethod
-    def _read_repo_code(repo_path: Path, max_chars: int = _REPO_BRIEFING_MAX_CHARS) -> str:
+    def _build_progress_callback(update_job: Callable[..., None]) -> Callable[..., None]:
+        """Build the per-microtask progress callback handed to the execution loop.
+
+        Extracted from ``run_workflow`` so the phase-label mapping + progress
+        math are unit-isolated from the workflow body and the closure no longer
+        buries ~30 lines inside ``run_workflow``.
+
+        Preconditions: ``update_job`` is the run_workflow job-update callable
+          (forwards kwargs to the job updater; the run_workflow closure swallows
+          its failures).
+        Postconditions: returns a callback
+          ``(current_index, done, total, title, microtask_phase, phase_detail)
+          -> None`` that maps the microtask phase to a human label and reports
+          progress (15..75%% of the job) via ``update_job``; never raises into
+          the execution loop.
+        """
+        phase_labels = {
+            "coding": "Writing code",
+            "code_review": "Code review",
+            "qa_testing": "QA testing",
+            "security_testing": "Security testing",
+            "documentation": "Documentation",
+            "review": "Reviewing code",
+            "problem_solving": "Fixing issues",
+            "completed": "Completed",
+        }
+
+        def _progress_cb(
+            current_index: int,
+            done: int,
+            total: int,
+            title: str,
+            microtask_phase: str = "coding",
+            phase_detail: str = "",
+        ) -> None:
+            phase_label = phase_labels.get(
+                microtask_phase, microtask_phase.replace("_", " ").title()
+            )
+            status = f"{phase_label}: {title} ({current_index}/{total})"
+            if phase_detail:
+                status = f"{status} — {phase_detail}"
+            update_job(
+                current_phase="execution",
+                current_microtask=title,
+                current_microtask_phase=microtask_phase,
+                phase_detail=phase_detail,
+                current_microtask_index=current_index,
+                microtasks_completed=done,
+                microtasks_total=total,
+                progress=min(15 + int(done / max(total, 1) * 60), 75),
+                status_text=status,
+            )
+
+        return _progress_cb
+
+    @staticmethod
+    def _read_repo_code(repo_path: Path, max_chars: int = _BACKEND_REPO_BRIEFING_MAX_CHARS) -> str:
         """Read Python/Java source files from repo into a single string.
 
         Delegates to the shared budgeted scanner so every per-domain reader shares
@@ -179,16 +210,16 @@ class BackendDevelopmentAgent:
         config location that the file-name-only ``.flake8`` probe would miss.
 
         The ``[tool.ruff]`` / ``[tool.pytest`` / ``[flake8]`` checks are
-        line-anchored probes via ``_has_section_header`` (skip comment/blank
-        lines, match the header at the start of an uncommented line), not a
-        real parse: the target runtime is Python 3.10 (no ``tomllib``) and
-        ``tomli`` is not a dependency, so pulling in a parser for a pre-flight
-        best-effort gate is not worth the cost. Commenting out a config block
-        no longer matches (the common false-positive case); a header inside a
-        string *value* still can, but that is contrived for these section
-        headers, and the pre-flight only decides whether to fail the task
-        early for missing tooling, so a false positive errs toward proceeding
-        (a real build/lint gate still enforces correctness).
+        line-anchored probes via the shared ``has_section_header`` helper (skip
+        comment/blank lines, match the header at the start of an uncommented
+        line), not a real parse: the target runtime is Python 3.10 (no
+        ``tomllib``) and ``tomli`` is not a dependency, so pulling in a parser
+        for a pre-flight best-effort gate is not worth the cost. Commenting out
+        a config block no longer matches (the common false-positive case); a
+        header inside a string *value* still can, but that is contrived for
+        these section headers, and the pre-flight only decides whether to fail
+        the task early for missing tooling, so a false positive errs toward
+        proceeding (a real build/lint gate still enforces correctness).
 
         Preconditions: ``repo_path`` is a directory.
         Postconditions: returns two booleans. Raises ``AssertionError`` if the
@@ -211,12 +242,12 @@ class BackendDevelopmentAgent:
         has_lint = (
             (repo_path / "ruff.toml").exists()
             or (repo_path / ".flake8").exists()
-            or _has_section_header(pyproject_text, "[tool.ruff]")
-            or _has_section_header(setup_cfg_text, "[flake8]")
+            or has_section_header(pyproject_text, "[tool.ruff]")
+            or has_section_header(setup_cfg_text, "[flake8]")
         )
         has_test = (repo_path / "tests").is_dir() and (
             (repo_path / "pytest.ini").exists()
-            or _has_section_header(pyproject_text, "[tool.pytest")
+            or has_section_header(pyproject_text, "[tool.pytest")
         )
         return has_lint, has_test
 
@@ -380,41 +411,7 @@ class BackendDevelopmentAgent:
             status_text="Starting code implementation",
         )
 
-        def _progress_cb(
-            current_index: int,
-            done: int,
-            total: int,
-            title: str,
-            microtask_phase: str = "coding",
-            phase_detail: str = "",
-        ) -> None:
-            phase_labels = {
-                "coding": "Writing code",
-                "code_review": "Code review",
-                "qa_testing": "QA testing",
-                "security_testing": "Security testing",
-                "documentation": "Documentation",
-                "review": "Reviewing code",
-                "problem_solving": "Fixing issues",
-                "completed": "Completed",
-            }
-            phase_label = phase_labels.get(
-                microtask_phase, microtask_phase.replace("_", " ").title()
-            )
-            status = f"{phase_label}: {title} ({current_index}/{total})"
-            if phase_detail:
-                status = f"{status} — {phase_detail}"
-            _update_job(
-                current_phase="execution",
-                current_microtask=title,
-                current_microtask_phase=microtask_phase,
-                phase_detail=phase_detail,
-                current_microtask_index=current_index,
-                microtasks_completed=done,
-                microtasks_total=total,
-                progress=min(15 + int(done / max(total, 1) * 60), 75),
-                status_text=status,
-            )
+        progress_callback = self._build_progress_callback(_update_job)
 
         review_deps = ReviewDependencies(
             build_verifier=build_verifier,
@@ -436,7 +433,7 @@ class BackendDevelopmentAgent:
                 architecture=architecture,
                 existing_code=existing_code,
                 tool_runners=tool_runners,
-                progress_callback=_progress_cb,
+                progress_callback=progress_callback,
                 review_config=config,
                 review_deps=review_deps,
             )
@@ -597,7 +594,7 @@ class BackendCodeV2TeamLead:
             cache = RepoContextCache(
                 extensions=_BACKEND_REPO_EXTENSIONS,
                 exclude_dirs=_BACKEND_REPO_EXCLUDE_DIRS,
-                max_chars=_REPO_BRIEFING_MAX_CHARS,
+                max_chars=_BACKEND_REPO_BRIEFING_MAX_CHARS,
             )
             self._repo_context_caches[key] = cache
         return cache

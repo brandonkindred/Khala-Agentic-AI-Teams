@@ -9,6 +9,7 @@ re-exports it for callers and tests. See ``shared/stack_profile.py``.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from shared_repo_context.repo_utils import find_repo_files
@@ -18,6 +19,8 @@ from software_engineering_team.shared.v2_review import ReviewConfig
 
 from ..models import ToolAgentPhaseInput
 from ..prompts import TYPESCRIPT_CONVENTIONS
+
+logger = logging.getLogger(__name__)
 
 
 def _detect_language(repo_path: Path, task: Task) -> str:
@@ -42,13 +45,14 @@ def _detect_language(repo_path: Path, task: Task) -> str:
                     return "angular"
                 if '"react"' in content or "'react'" in content:
                     return "react"
-            except (OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError) as exc:
                 # Best-effort substring probe on the raw text (no json.loads),
                 # so only file-read (OSError) and decode (UnicodeDecodeError)
                 # failures can land here — a malformed package.json just means
                 # no stack signal was found and the repo walk / task-text
-                # heuristics decide instead.
-                pass
+                # heuristics decide instead. Logged at DEBUG (mirroring
+                # _detect_tooling) so a real config problem stays observable.
+                logger.debug("[%s] failed to read/decode package.json: %s", repo_path, exc)
         # Pruned os.walk (find_repo_files) so a checkout with a large
         # node_modules/.git/dist/.angular is never descended into while probing
         # for tsconfig / *.ts / *.tsx — the same I/O discipline as
