@@ -24,6 +24,9 @@ max-statements = 130
 # Complexity debt: pre-existing functions above the thresholds above. Exempted
 # per-rule (paths are relative to agents/); refactor and remove to ratchet down.
 "software_engineering_team/orchestrator.py" = ["C901", "PLR0915"]
+# _try_build_fix_one_at_a_time was moved verbatim from orchestrator.py (its
+# complexity moved with the code); tracked for decomposition under a follow-up.
+"software_engineering_team/build_fix.py" = ["C901", "PLR0915"]
 "llm_service/clients/ollama.py" = ["C901", "PLR0915"]
 "team_assistant/api.py" = ["C901", "PLR0915"]
 "investment_team/api/main.py" = ["PLR0915"]
