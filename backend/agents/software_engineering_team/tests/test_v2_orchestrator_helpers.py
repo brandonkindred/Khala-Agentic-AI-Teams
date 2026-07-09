@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def test_be_build_tool_agents():
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
@@ -377,3 +379,36 @@ def test_be_detect_tooling_matches_indented_section_header(tmp_path: Path):
     (tmp_path / "pytest.ini").write_text("[pytest]")
     has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
     assert has_lint and has_test
+
+
+def _toml_parser_available() -> bool:
+    try:
+        import tomllib  # noqa: F401  Python 3.11+ stdlib
+
+        return True
+    except ModuleNotFoundError:
+        try:
+            import tomli  # noqa: F401  optional backport
+
+            return True
+        except ModuleNotFoundError:
+            return False
+
+
+@pytest.mark.skipif(not _toml_parser_available(), reason="no tomllib/tomli parser available")
+def test_be_detect_tooling_toml_multiline_string_header_not_a_false_positive(tmp_path: Path):
+    """A ``[tool.ruff]`` line that lives inside a multi-line string value in
+    ``pyproject.toml`` (not a real table) must NOT satisfy the lint pre-flight —
+    the ``toml_has_section`` parse sees it is a string, not a table, closing the
+    multi-line-string false positive the line-anchored text scan would hit."""
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry]\nname = "app"\ndescription = """\n[tool.ruff]\n"""\n'
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pytest.ini").write_text("[pytest]")
+    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    assert not has_lint and has_test

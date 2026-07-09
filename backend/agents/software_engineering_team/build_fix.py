@@ -11,14 +11,12 @@ Invariants:
       ``EXCEPTION_HANDLER_TEST_PATTERNS``.
     - Neither function raises into the build gate: failures return ``(False, summary)``.
 
-Side effect on import: this module prepends its own directory to ``sys.path``
-(the ``_team_dir`` / ``sys.path.insert`` block below) so the per-team subpackages
-(``backend_code_v2_team`` etc.) import as top-level names — the same bootstrap
-``orchestrator.py`` uses. This runs at import time, so merely importing
-``build_fix`` (e.g. for static analysis or test discovery) mutates ``sys.path``
-globally. It is a pre-existing pattern carried over from the orchestrator and
-kept deliberately so this module's imports resolve identically; do not remove
-it without a matching change to ``orchestrator.py``.
+No ``sys.path`` mutation on import: per-team imports (``backend_code_v2_team`` /
+``frontend_code_v2_team`` prompts and templates) use absolute
+``software_engineering_team.*`` package paths, so importing this module — for
+static analysis, test discovery, or as a transitive dependency — leaves the
+interpreter path untouched (unlike the pre-existing ``sys.path.insert``
+bootstrap still used in ``orchestrator.py``).
 """
 
 from __future__ import annotations
@@ -27,12 +25,6 @@ import logging
 import sys
 from pathlib import Path
 from typing import Dict
-
-# Make the per-team subpackages (``backend_code_v2_team`` etc.) importable as
-# top-level names, mirroring the sys.path bootstrap in ``orchestrator.py``.
-_team_dir = Path(__file__).resolve().parent
-if str(_team_dir) not in sys.path:
-    sys.path.insert(0, str(_team_dir))
 
 from strands import Agent  # noqa: E402
 
@@ -439,18 +431,22 @@ def _try_build_fix_one_at_a_time(
         logger.warning("Build fix: could not get model: %s", e)
         return False, result.error_summary if result is not None else "Build failed"
 
-    from backend_code_v2_team.output_templates import parse_problem_solving_single_issue_template
+    from software_engineering_team.backend_code_v2_team.output_templates import (
+        parse_problem_solving_single_issue_template,
+    )
 
     if prompt_module == "frontend_code_v2_team.prompts":
-        from frontend_code_v2_team.prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT
+        from software_engineering_team.frontend_code_v2_team.prompts import (
+            PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT,
+        )
 
         language_conventions = ""
     else:
-        from backend_code_v2_team.prompts import (
+        from software_engineering_team.backend_code_v2_team.prompts import (
             JAVA_CONVENTIONS,
             PYTHON_CONVENTIONS,
         )
-        from backend_code_v2_team.prompts import (
+        from software_engineering_team.backend_code_v2_team.prompts import (
             PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT,
         )
 

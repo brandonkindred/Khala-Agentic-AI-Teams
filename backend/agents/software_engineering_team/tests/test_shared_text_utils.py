@@ -1,6 +1,17 @@
 """Unit tests for the shared line-anchored config-section probe."""
 
-from software_engineering_team.shared.text_utils import has_section_header
+import pytest
+
+from software_engineering_team.shared import text_utils
+from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
+
+# toml_has_section uses a real parser only when stdlib tomllib (3.11+) or the
+# tomli backport is importable; on 3.10-without-tomli it falls back to the text
+# scan. The parser-path assertions below assert parser behaviour, so skip them
+# where no parser is present (the fallback is covered by the has_section_header
+# tests above).
+_TOML_AVAILABLE = text_utils._toml is not None
+_toml_only = pytest.mark.skipif(not _TOML_AVAILABLE, reason="no tomllib/tomli parser available")
 
 
 class TestHasSectionHeader:
@@ -46,3 +57,56 @@ class TestHasSectionHeader:
 
     def test_missing_header_returns_false(self):
         assert has_section_header("[metadata]\nname = app\n", "[tool.ruff]") is False
+
+
+class TestTomlHasSection:
+    """Tests for toml_has_section (real-parser path + text fallback)."""
+
+    def test_real_table_present_matches_exact_header(self):
+        assert toml_has_section("[tool.ruff]\nline-length = 120\n", "[tool.ruff]") is True
+
+    def test_prefix_header_matches_nested_table(self):
+        # "[tool.pytest" must cover a real [tool.pytest.ini_options] table.
+        assert (
+            toml_has_section("[tool.pytest.ini_options]\nminversion = 7\n", "[tool.pytest") is True
+        )
+
+    def test_absent_table_returns_false(self):
+        assert toml_has_section("[tool.poetry]\nname = 'app'\n", "[tool.ruff]") is False
+
+    def test_empty_text_returns_false(self):
+        assert toml_has_section("", "[tool.ruff]") is False
+
+    def test_invalid_toml_falls_back_to_text_scan_and_matches(self):
+        # Duplicate key makes this invalid TOML, so the parse fails and we fall
+        # back to the line-anchored text scan, which still sees [tool.ruff] at
+        # line start.
+        assert (
+            toml_has_section("[tool.ruff]\nline-length = 120\nline-length = 200\n", "[tool.ruff]")
+            is True
+        )
+
+    def test_invalid_toml_without_header_returns_false(self):
+        # Invalid TOML (duplicate key) with no [tool.ruff] line: the text
+        # fallback finds no matching header.
+        assert (
+            toml_has_section('[tool.poetry]\nname = "app"\nname = "other"\n', "[tool.ruff]")
+            is False
+        )
+
+    @_toml_only
+    def test_header_inside_multiline_string_is_not_a_false_positive(self):
+        # The win over has_section_header: a [tool.ruff] line that lives inside
+        # a multi-line string value is a string, not a table — the parser must
+        # not report the table as present.
+        text = '[tool.poetry]\nname = "app"\ndescription = """\n[tool.ruff]\n"""\n'
+        assert toml_has_section(text, "[tool.ruff]") is False
+
+    @_toml_only
+    def test_real_table_alongside_multiline_string_with_header_matches(self):
+        # A genuine [tool.ruff] table plus a decoy header inside a string: the
+        # real table is detected (True), driven by the parser, not the decoy.
+        text = (
+            '[tool.ruff]\nline-length = 120\n[tool.poetry]\ndescription = """\n[tool.ruff]\n"""\n'
+        )
+        assert toml_has_section(text, "[tool.ruff]") is True

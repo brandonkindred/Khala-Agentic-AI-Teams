@@ -17,7 +17,7 @@ from shared_repo_context import read_repo_code_budgeted
 from software_engineering_team.shared.git_utils import checkout_branch
 from software_engineering_team.shared.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
-from software_engineering_team.shared.text_utils import has_section_header
+from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
 from software_engineering_team.shared.tool_agent_runners import build_tool_runners
 
 from .models import (
@@ -209,16 +209,18 @@ class BackendDevelopmentAgent:
         recognises a ``[flake8]`` section in ``setup.cfg`` — a common flake8
         config location that the file-name-only ``.flake8`` probe would miss.
 
-        The ``[tool.ruff]`` / ``[tool.pytest`` / ``[flake8]`` checks are
-        line-anchored probes via the shared ``has_section_header`` helper (skip
-        comment/blank lines, match the header at the start of an uncommented
-        line), not a real parse: the target runtime is Python 3.10 (no
-        ``tomllib``) and ``tomli`` is not a dependency, so pulling in a parser
-        for a pre-flight best-effort gate is not worth the cost. Commenting out
-        a config block no longer matches (the common false-positive case); a
-        header inside a string *value* still can, but that is contrived for
-        these section headers, and the pre-flight only decides whether to fail
-        the task early for missing tooling, so a false positive errs toward
+        The ``[tool.ruff]`` / ``[tool.pytest`` pyproject checks use the shared
+        ``toml_has_section`` helper: a real TOML parse (stdlib ``tomllib`` on
+        Python 3.11+, the ``tomli`` backport if installed) that asks whether the
+        table actually exists, so a section header appearing inside a
+        multi-line string value can no longer produce a false positive; on
+        Python 3.10 without ``tomli`` (or on unparseable TOML) it falls back to
+        the line-anchored ``has_section_header`` text scan. The ``[flake8]``
+        ``setup.cfg`` probe stays on ``has_section_header`` (INI has no
+        multi-line strings, so the text scan is exact there). No hard dependency
+        is added: 3.11+ stdlib covers the real runtime, and 3.10 keeps the prior
+        best-effort text probe. The pre-flight only decides whether to fail the
+        task early for missing tooling, so a residual false positive errs toward
         proceeding (a real build/lint gate still enforces correctness).
 
         Preconditions: ``repo_path`` is a directory.
@@ -242,12 +244,11 @@ class BackendDevelopmentAgent:
         has_lint = (
             (repo_path / "ruff.toml").exists()
             or (repo_path / ".flake8").exists()
-            or has_section_header(pyproject_text, "[tool.ruff]")
+            or toml_has_section(pyproject_text, "[tool.ruff]")
             or has_section_header(setup_cfg_text, "[flake8]")
         )
         has_test = (repo_path / "tests").is_dir() and (
-            (repo_path / "pytest.ini").exists()
-            or has_section_header(pyproject_text, "[tool.pytest")
+            (repo_path / "pytest.ini").exists() or toml_has_section(pyproject_text, "[tool.pytest")
         )
         return has_lint, has_test
 
