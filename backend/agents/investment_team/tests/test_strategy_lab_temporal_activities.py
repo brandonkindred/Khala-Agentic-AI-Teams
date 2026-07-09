@@ -417,6 +417,32 @@ def test_resolve_symbols_activity_reuses_market_data_service(monkeypatch):
     assert result == ["AAPL", "MSFT"]
 
 
+def test_resolve_readiness_prices_activity_returns_last_close_per_symbol(monkeypatch):
+    from investment_team.market_data_service import MarketDataService, OHLCVBar
+
+    def _fake_fetch_ohlcv(self, symbol, asset_class, days=365):
+        if symbol == "AAPL":
+            return [OHLCVBar(**_bar_dict(close=150.0))]
+        return []
+
+    monkeypatch.setattr(MarketDataService, "fetch_ohlcv", _fake_fetch_ohlcv)
+
+    result = act.resolve_readiness_prices_activity(["AAPL", "MSFT"], "stocks")
+    assert result == {"AAPL": 150.0}
+
+
+def test_resolve_readiness_prices_activity_skips_failing_symbols(monkeypatch):
+    from investment_team.market_data_service import MarketDataService
+
+    def _fake_fetch_ohlcv(self, symbol, asset_class, days=365):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(MarketDataService, "fetch_ohlcv", _fake_fetch_ohlcv)
+
+    result = act.resolve_readiness_prices_activity(["AAPL"], "stocks")
+    assert result == {}
+
+
 def test_fetch_market_data_activity_uses_fresh_service_instance(monkeypatch):
     from investment_team.market_data_service import MarketDataService
 
@@ -542,7 +568,186 @@ def test_persist_record_activity_delegates_to_api_main(monkeypatch):
     assert captured == {"record_id": "rec-2"}
 
 
+# ---------------------------------------------------------------------------
+# Composite activities (wrap a whole orchestrator sub-pipeline verbatim)
+# ---------------------------------------------------------------------------
+
+
+def test_run_alignment_audit_activity_reuses_orchestrator_method(monkeypatch):
+    from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    captured = {}
+
+    def _fake_audit(self, spec, code, trades, metrics, prior_attempts, *, market_data, config):
+        captured["spec_id"] = spec.strategy_id
+        captured["market_data_keys"] = list(market_data.keys())
+        return TradeAlignmentReport(aligned=True), []
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_alignment_audit", _fake_audit)
+
+    result = act.run_alignment_audit_activity(
+        spec=_spec_dict(),
+        code="code",
+        trades=[_trade_record_dict()],
+        metrics=_backtest_result_dict(),
+        prior_attempts=[],
+        market_data={"AAPL": [_bar_dict()]},
+        config=_backtest_config_dict(),
+    )
+    assert result["report"]["aligned"] is True
+    assert result["gate_results"] == []
+    assert captured["spec_id"] == "strat-1"
+    assert captured["market_data_keys"] == ["AAPL"]
+
+
+def test_run_verification_and_analysis_activity_round_trips_convergence_tracker(monkeypatch):
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    captured = {}
+
+    def _fake_orchestrate(self, **kwargs):
+        captured["trial_count_in"] = self.convergence_tracker.trial_count
+        self.convergence_tracker.increment_trials(1)
+        return kwargs["metrics"], True, "narrative text"
+
+    monkeypatch.setattr(
+        StrategyLabOrchestrator, "_orchestrate_verification_and_analysis", _fake_orchestrate
+    )
+
+    result = act.run_verification_and_analysis_activity(
+        spec=_spec_dict(),
+        trades=[_trade_record_dict()],
+        metrics=_backtest_result_dict(),
+        market_data={"AAPL": [_bar_dict()]},
+        config=_backtest_config_dict(),
+        execution_succeeded=True,
+        trades_aligned=True,
+        alignment_reports=[],
+        all_gate_results=[],
+        runtime_lookahead_violation=False,
+        open_position_entry_reasons=[],
+        refinement_attempts=[],
+        rationale="why",
+        convergence_tracker_state={"trial_count": 5},
+    )
+    assert captured["trial_count_in"] == 5
+    assert result["is_winning"] is True
+    assert result["narrative"] == "narrative text"
+    assert result["convergence_tracker_state"]["trial_count"] == 6
+
+
+def test_assemble_record_activity_reuses_orchestrator_method(monkeypatch):
+    from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _fake_assemble(self, **kwargs):
+        self.convergence_tracker.increment_trials(1)
+        return StrategyLabRecord(
+            lab_record_id="rec-1",
+            strategy=kwargs["spec"],
+            backtest={
+                "backtest_id": "bt-1",
+                "strategy_id": kwargs["spec"].strategy_id,
+                "strategy": kwargs["spec"],
+                "config": kwargs["config"],
+                "submitted_by": "test",
+                "submitted_at": "2023-01-01T00:00:00Z",
+                "completed_at": "2023-01-01T01:00:00Z",
+                "result": kwargs["metrics"],
+            },
+            is_winning=kwargs["is_winning"],
+            strategy_rationale=kwargs["rationale"],
+            analysis_narrative=kwargs["narrative"],
+            created_at="2023-01-01T00:00:00Z",
+        )
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_assemble_record", _fake_assemble)
+
+    result = act.assemble_record_activity(
+        {
+            "spec": _spec_dict(),
+            "code": "code",
+            "config": _backtest_config_dict(),
+            "metrics": _backtest_result_dict(),
+            "trades": [_trade_record_dict()],
+            "narrative": "narrative",
+            "original_spec": _spec_dict(),
+            "original_code": "code",
+            "rationale": "why",
+            "requested_symbols": ["AAPL"],
+            "fetched_symbols": ["AAPL"],
+            "provider_used": {"AAPL": "yahoo"},
+            "max_rounds_exhausted": False,
+            "execution_succeeded": True,
+            "is_winning": True,
+            "trades_aligned": True,
+            "refinement_rounds": 0,
+            "alignment_rounds": 0,
+            "all_gate_results": [],
+            "design_context": {"rounds": 1, "critiques": [], "stop_reason": "ready"},
+            "drift_collector": {"spec_history": [], "code_history": [], "gate_timeline": []},
+            "convergence_tracker_state": {},
+        }
+    )
+    assert result["record"]["lab_record_id"] == "rec-1"
+    assert result["convergence_tracker_state"]["trial_count"] == 1
+
+
+def test_build_short_circuit_record_activity_reuses_orchestrator_method(monkeypatch):
+    from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _fake_build(self, **kwargs):
+        self.convergence_tracker.increment_trials(1)
+        return StrategyLabRecord(
+            lab_record_id="rec-sc-1",
+            strategy=kwargs["spec"],
+            backtest={
+                "backtest_id": "bt-sc-1",
+                "strategy_id": kwargs["spec"].strategy_id,
+                "strategy": kwargs["spec"],
+                "config": kwargs["config"],
+                "submitted_by": "test",
+                "submitted_at": "2023-01-01T00:00:00Z",
+                "completed_at": "2023-01-01T01:00:00Z",
+                "result": _backtest_result_dict(),
+                "status": kwargs["short_circuit_status"],
+            },
+            is_winning=False,
+            strategy_rationale=kwargs["rationale"],
+            analysis_narrative=kwargs["short_circuit_reason"],
+            created_at="2023-01-01T00:00:00Z",
+        )
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_build_short_circuit_record", _fake_build)
+
+    result = act.build_short_circuit_record_activity(
+        {
+            "spec": _spec_dict(),
+            "config": _backtest_config_dict(),
+            "code": "",
+            "original_spec": _spec_dict(),
+            "original_code": "",
+            "rationale": "why",
+            "all_gate_results": [],
+            "refinement_attempts": [],
+            "short_circuit_status": "failed: design_not_ready",
+            "short_circuit_reason": "not ready",
+            "convergence_tracker_state": {},
+        }
+    )
+    assert result["record"]["lab_record_id"] == "rec-sc-1"
+    assert result["record"]["is_winning"] is False
+    assert result["convergence_tracker_state"]["trial_count"] == 1
+
+
 def test_activities_list_contains_every_activity():
-    assert len(act.ACTIVITIES) == 16
+    assert len(act.ACTIVITIES) == 21
     assert act.design_generate_activity in act.ACTIVITIES
     assert act.persist_record_activity in act.ACTIVITIES
+    assert act.resolve_readiness_prices_activity in act.ACTIVITIES
+    assert act.run_alignment_audit_activity in act.ACTIVITIES
+    assert act.run_verification_and_analysis_activity in act.ACTIVITIES
+    assert act.assemble_record_activity in act.ACTIVITIES
+    assert act.build_short_circuit_record_activity in act.ACTIVITIES

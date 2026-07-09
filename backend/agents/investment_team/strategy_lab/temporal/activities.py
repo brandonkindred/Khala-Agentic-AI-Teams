@@ -508,6 +508,42 @@ def resolve_symbols_activity(spec: dict) -> List[str]:
         raise _map_exception_to_application_error(exc) from exc
 
 
+@activity.defn(name="strategy_lab_resolve_readiness_prices")
+def resolve_readiness_prices_activity(symbols: List[str], asset_class: str) -> Dict[str, float]:
+    """Fetch a short recent-close price sample for ``SpecReadinessGate`` Rule 5.
+
+    Preconditions:
+        ``symbols`` is the resolved trading universe for a spec (the same
+        list ``resolve_symbols_activity`` returns for that spec);
+        ``asset_class`` is the spec's asset class.
+    Postconditions:
+        Returns ``{symbol: last_close}`` for every symbol with a fetchable
+        recent bar; a symbol with no data or a fetch error is simply omitted
+        (the caller's ``market_sample_provider`` closure treats a missing key
+        as ``float("nan")``, matching
+        ``StrategyLabOrchestrator._readiness_price_provider``'s fail-closed
+        contract exactly — this activity never raises for a per-symbol fetch
+        failure, only for an unexpected exception outside the per-symbol loop).
+    """
+    from investment_team.market_data_service import MarketDataService
+
+    service = MarketDataService()
+    prices: Dict[str, float] = {}
+    try:
+        for symbol in symbols:
+            try:
+                bars = service.fetch_ohlcv(symbol, asset_class, days=5)
+            except Exception:  # noqa: BLE001 — per-symbol fail-closed, mirrors the orchestrator
+                continue
+            if bars:
+                close = float(bars[-1].close)
+                if close > 0:
+                    prices[symbol] = close
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
+    return prices
+
+
 @activity.defn(name="strategy_lab_fetch_market_data")
 def fetch_market_data_activity(
     symbols: List[str],
@@ -653,6 +689,353 @@ def persist_record_activity(record: dict) -> None:
         raise _map_exception_to_application_error(exc) from exc
 
 
+# ---------------------------------------------------------------------------
+# Composite activities — wrap a whole orchestrator sub-pipeline verbatim
+# rather than decomposing it further. Each covers a phase with either no
+# bounded per-round retry loop of its own (verification/analysis: a single
+# linear pass) or an I/O callback bound deep inside a synchronous gate
+# (the alignment audit's near-miss adjudicator) — in both cases decomposing
+# further would mean re-deriving internal gate-wiring logic instead of
+# reusing it, for no durability benefit (see the plan's Stage 3 design notes).
+# Each constructs its own throwaway ``StrategyLabOrchestrator()`` purely to
+# call the existing instance method unmodified.
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="strategy_lab_run_alignment_audit")
+def run_alignment_audit_activity(
+    spec: dict,
+    code: str,
+    trades: List[dict],
+    metrics: dict,
+    prior_attempts: List[str],
+    market_data: Dict[str, List[dict]],
+    config: dict,
+) -> Dict[str, Any]:
+    """Run one round of ``StrategyLabOrchestrator._run_alignment_audit``.
+
+    Preconditions:
+        ``spec`` is a ``StrategySpec`` JSON dump; ``trades`` is a list of
+        ``TradeRecord`` JSON dumps; ``metrics`` is a ``BacktestResult`` JSON
+        dump; ``market_data`` maps symbol to a list of ``OHLCVBar`` JSON
+        dumps; ``config`` is a ``BacktestConfig`` JSON dump.
+    Postconditions:
+        Returns ``{"report": TradeAlignmentReport JSON dump, "gate_results":
+        [QualityGateResult JSON dump, ...]}``. Wraps the deterministic
+        alignment gate (whose near-miss adjudication calls
+        ``TradeAlignmentAgent.adjudicate_near_miss`` as a *synchronous
+        callback* mid-check — a shape that cannot be driven from workflow
+        code, since a plain Python callback cannot ``await`` an activity)
+        plus the fail-closed ``propose_code_fix`` LLM call. Raises
+        ``ApplicationError`` only on a genuinely unexpected exception —
+        the method itself already falls closed on any agent/parse failure.
+    """
+    from investment_team.market_data_service import OHLCVBar
+    from investment_team.models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    spec_obj = StrategySpec.parse_persisted(spec)
+    trade_objs = [TradeRecord(**t) for t in trades]
+    metrics_obj = BacktestResult(**metrics)
+    config_obj = BacktestConfig(**config)
+    market_data_bars = {sym: [OHLCVBar(**bar) for bar in bars] for sym, bars in market_data.items()}
+    orch = StrategyLabOrchestrator()
+    try:
+        report, gate_results = orch._run_alignment_audit(
+            spec_obj,
+            code,
+            trade_objs,
+            metrics_obj,
+            prior_attempts,
+            market_data=market_data_bars,
+            config=config_obj,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
+    return {
+        "report": report.model_dump(mode="json"),
+        "gate_results": [g.model_dump(mode="json") for g in gate_results],
+    }
+
+
+@activity.defn(name="strategy_lab_run_verification_and_analysis")
+def run_verification_and_analysis_activity(
+    spec: dict,
+    trades: List[dict],
+    metrics: dict,
+    market_data: Optional[Dict[str, List[dict]]],
+    config: dict,
+    execution_succeeded: bool,
+    trades_aligned: bool,
+    alignment_reports: List[dict],
+    all_gate_results: List[dict],
+    runtime_lookahead_violation: bool,
+    open_position_entry_reasons: List[str],
+    refinement_attempts: List[str],
+    rationale: str,
+    convergence_tracker_state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Run ``StrategyLabOrchestrator._orchestrate_verification_and_analysis`` whole.
+
+    Preconditions:
+        ``spec``/``trades``/``metrics``/``config`` are the corresponding
+        models' JSON dumps; ``market_data`` (may be ``None``) maps symbol to
+        a list of ``OHLCVBar`` JSON dumps; ``alignment_reports`` is a list of
+        ``TradeAlignmentReport`` JSON dumps; ``all_gate_results`` is a list
+        of ``QualityGateResult`` JSON dumps already accumulated this attempt;
+        ``convergence_tracker_state`` is
+        ``dto.convergence_tracker_to_wire``'s output for the batch-level
+        tracker (this phase both reads ``trial_count`` and increments it via
+        ``increment_trials`` before the acceptance gate runs).
+    Postconditions:
+        Returns ``{"metrics": ..., "is_winning": bool, "narrative": str,
+        "all_gate_results": [...] (extended), "convergence_tracker_state":
+        ...} (updated)``. Verification never raises (gate/walk-forward
+        failures degrade to a fallback internally); the analysis call
+        likewise falls back to a deterministic summary on any LLM failure.
+        Raises ``ApplicationError`` only on a genuinely unexpected exception.
+    """
+    from investment_team.market_data_service import OHLCVBar
+    from investment_team.models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
+    from investment_team.strategy_lab.agents.alignment import TradeAlignmentReport
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+    from investment_team.strategy_lab.temporal.dto import (
+        convergence_tracker_from_wire,
+        convergence_tracker_to_wire,
+    )
+
+    spec_obj = StrategySpec.parse_persisted(spec)
+    trade_objs = [TradeRecord(**t) for t in trades]
+    metrics_obj = BacktestResult(**metrics)
+    config_obj = BacktestConfig(**config)
+    market_data_bars = (
+        {sym: [OHLCVBar(**bar) for bar in bars] for sym, bars in market_data.items()}
+        if market_data
+        else None
+    )
+    alignment_report_objs = [TradeAlignmentReport.model_validate(r) for r in alignment_reports]
+    gate_result_objs = [QualityGateResult.model_validate(g) for g in all_gate_results]
+
+    orch = StrategyLabOrchestrator()
+    orch.convergence_tracker = convergence_tracker_from_wire(convergence_tracker_state)
+    try:
+        new_metrics, is_winning, narrative = orch._orchestrate_verification_and_analysis(
+            spec=spec_obj,
+            trades=trade_objs,
+            metrics=metrics_obj,
+            market_data=market_data_bars,
+            config=config_obj,
+            execution_succeeded=execution_succeeded,
+            trades_aligned=trades_aligned,
+            alignment_reports=alignment_report_objs,
+            all_gate_results=gate_result_objs,
+            runtime_lookahead_violation=runtime_lookahead_violation,
+            open_position_entry_reasons=open_position_entry_reasons,
+            refinement_attempts=refinement_attempts,
+            rationale=rationale,
+            emit=lambda *_a, **_kw: None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
+    return {
+        "metrics": new_metrics.model_dump(mode="json"),
+        "is_winning": is_winning,
+        "narrative": narrative,
+        "all_gate_results": [g.model_dump(mode="json") for g in gate_result_objs],
+        "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
+    }
+
+
+@activity.defn(name="strategy_lab_assemble_record")
+def assemble_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Run ``StrategyLabOrchestrator._assemble_record`` to build the final record.
+
+    Preconditions:
+        ``params`` carries every keyword ``_assemble_record`` accepts
+        (JSON-shaped): ``spec``, ``code``, ``config``, ``metrics``,
+        ``trades``, ``narrative``, ``original_spec``, ``original_code``,
+        ``rationale``, ``requested_symbols``, ``fetched_symbols``,
+        ``provider_used``, ``max_rounds_exhausted``, ``execution_succeeded``,
+        ``is_winning``, ``trades_aligned``, ``refinement_rounds``,
+        ``alignment_rounds``, ``all_gate_results``,
+        ``ran_on_non_conforming_code``, ``design_context`` (a dict with
+        ``rounds``/``critiques``/``stop_reason``/``loop_telemetry``),
+        ``alignment_findings``, ``phase_back_count``, ``drift_collector`` (a
+        dict with ``spec_history``/``code_history``/``gate_timeline``, each a
+        list of ``SpecRevision``/``CodeRevision``/``GateEvent`` JSON dumps),
+        and ``convergence_tracker_state``
+        (``dto.convergence_tracker_to_wire``'s output).
+    Postconditions:
+        Returns ``{"record": StrategyLabRecord JSON dump,
+        "convergence_tracker_state": ...} (updated by the one
+        ``self.convergence_tracker.record(...)`` mutation this method
+        performs)``. Raises ``ApplicationError`` on an unexpected exception.
+    """
+    from investment_team.models import (
+        AlignmentFinding,
+        BacktestConfig,
+        BacktestResult,
+        CodeRevision,
+        GateEvent,
+        SpecRevision,
+        StrategySpec,
+        TradeRecord,
+    )
+    from investment_team.strategy_lab._orchestrator_helpers import (
+        _DesignPersistContext,
+        _DriftCollector,
+    )
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+    from investment_team.strategy_lab.temporal.dto import (
+        convergence_tracker_from_wire,
+        convergence_tracker_to_wire,
+    )
+
+    design_context_data = params["design_context"]
+    design_context = _DesignPersistContext(
+        rounds=design_context_data.get("rounds", 0),
+        critiques=[
+            SpecCritique.model_validate(c) for c in design_context_data.get("critiques", [])
+        ],
+        stop_reason=design_context_data.get("stop_reason", ""),
+        loop_telemetry=design_context_data.get("loop_telemetry", {}),
+    )
+    drift_data = params["drift_collector"]
+    drift_collector = _DriftCollector(
+        spec_history=[SpecRevision(**d) for d in drift_data.get("spec_history", [])],
+        code_history=[CodeRevision(**d) for d in drift_data.get("code_history", [])],
+        gate_timeline=[GateEvent(**d) for d in drift_data.get("gate_timeline", [])],
+    )
+
+    orch = StrategyLabOrchestrator()
+    orch.convergence_tracker = convergence_tracker_from_wire(params["convergence_tracker_state"])
+    try:
+        record = orch._assemble_record(
+            spec=StrategySpec.parse_persisted(params["spec"]),
+            code=params["code"],
+            config=BacktestConfig(**params["config"]),
+            metrics=BacktestResult(**params["metrics"]),
+            trades=[TradeRecord(**t) for t in params["trades"]],
+            narrative=params["narrative"],
+            original_spec=StrategySpec.parse_persisted(params["original_spec"]),
+            original_code=params["original_code"],
+            rationale=params["rationale"],
+            requested_symbols=params["requested_symbols"],
+            fetched_symbols=params["fetched_symbols"],
+            provider_used=params["provider_used"],
+            max_rounds_exhausted=params["max_rounds_exhausted"],
+            execution_succeeded=params["execution_succeeded"],
+            is_winning=params["is_winning"],
+            trades_aligned=params["trades_aligned"],
+            refinement_rounds=params["refinement_rounds"],
+            alignment_rounds=params["alignment_rounds"],
+            all_gate_results=[
+                QualityGateResult.model_validate(g) for g in params["all_gate_results"]
+            ],
+            emit=lambda *_a, **_kw: None,
+            ran_on_non_conforming_code=params.get("ran_on_non_conforming_code", False),
+            design_context=design_context,
+            alignment_findings=[
+                AlignmentFinding.model_validate(f) for f in (params.get("alignment_findings") or [])
+            ],
+            phase_back_count=params.get("phase_back_count", 0),
+            drift_collector=drift_collector,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
+    return {
+        "record": record.model_dump(mode="json"),
+        "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
+    }
+
+
+@activity.defn(name="strategy_lab_build_short_circuit_record")
+def build_short_circuit_record_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Run ``StrategyLabOrchestrator._build_short_circuit_record``.
+
+    Preconditions:
+        ``params`` carries every keyword ``_build_short_circuit_record``
+        accepts (JSON-shaped), mirroring :func:`assemble_record_activity`'s
+        ``params`` shape minus the fields a short-circuit never has
+        (``metrics``/``trades``/``narrative``/symbol audit/etc.): ``spec``,
+        ``config``, ``code``, ``original_spec``, ``original_code``,
+        ``rationale``, ``all_gate_results``, ``refinement_attempts``,
+        ``short_circuit_status``, ``short_circuit_reason``,
+        ``design_context``, ``phase_back_count``, ``drift_collector``, and
+        ``convergence_tracker_state``.
+    Postconditions:
+        Returns ``{"record": ..., "convergence_tracker_state": ...}``
+        (updated by the ``count_asset_class=False`` tracker mutation this
+        method performs). Raises ``ApplicationError`` on an unexpected
+        exception.
+    """
+    from investment_team.models import (
+        BacktestConfig,
+        CodeRevision,
+        GateEvent,
+        SpecRevision,
+        StrategySpec,
+    )
+    from investment_team.strategy_lab._orchestrator_helpers import (
+        _DesignPersistContext,
+        _DriftCollector,
+    )
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+    from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+    from investment_team.strategy_lab.temporal.dto import (
+        convergence_tracker_from_wire,
+        convergence_tracker_to_wire,
+    )
+
+    design_context_data = params.get("design_context") or {}
+    design_context = _DesignPersistContext(
+        rounds=design_context_data.get("rounds", 0),
+        critiques=[
+            SpecCritique.model_validate(c) for c in design_context_data.get("critiques", [])
+        ],
+        stop_reason=design_context_data.get("stop_reason", ""),
+        loop_telemetry=design_context_data.get("loop_telemetry", {}),
+    )
+    drift_data = params.get("drift_collector") or {}
+    drift_collector = _DriftCollector(
+        spec_history=[SpecRevision(**d) for d in drift_data.get("spec_history", [])],
+        code_history=[CodeRevision(**d) for d in drift_data.get("code_history", [])],
+        gate_timeline=[GateEvent(**d) for d in drift_data.get("gate_timeline", [])],
+    )
+
+    orch = StrategyLabOrchestrator()
+    orch.convergence_tracker = convergence_tracker_from_wire(params["convergence_tracker_state"])
+    try:
+        record = orch._build_short_circuit_record(
+            spec=StrategySpec.parse_persisted(params["spec"]),
+            config=BacktestConfig(**params["config"]),
+            code=params["code"],
+            original_spec=StrategySpec.parse_persisted(params["original_spec"]),
+            original_code=params["original_code"],
+            rationale=params["rationale"],
+            all_gate_results=[
+                QualityGateResult.model_validate(g) for g in params["all_gate_results"]
+            ],
+            refinement_attempts=params["refinement_attempts"],
+            short_circuit_status=params["short_circuit_status"],
+            short_circuit_reason=params["short_circuit_reason"],
+            emit=lambda *_a, **_kw: None,
+            design_context=design_context,
+            phase_back_count=params.get("phase_back_count", 0),
+            drift_collector=drift_collector,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _map_exception_to_application_error(exc) from exc
+    return {
+        "record": record.model_dump(mode="json"),
+        "convergence_tracker_state": convergence_tracker_to_wire(orch.convergence_tracker),
+    }
+
+
 ACTIVITIES = [
     design_generate_activity,
     design_revise_activity,
@@ -665,11 +1048,16 @@ ACTIVITIES = [
     zero_trade_repair_activity,
     run_strategy_code_activity,
     resolve_symbols_activity,
+    resolve_readiness_prices_activity,
     fetch_market_data_activity,
     compute_regime_summary_activity,
     persist_run_state_activity,
     snapshot_prior_records_activity,
     persist_record_activity,
+    run_alignment_audit_activity,
+    run_verification_and_analysis_activity,
+    assemble_record_activity,
+    build_short_circuit_record_activity,
 ]
 
 __all__ = [
@@ -677,6 +1065,8 @@ __all__ = [
     "alignment_near_miss_activity",
     "alignment_propose_fix_activity",
     "analysis_activity",
+    "assemble_record_activity",
+    "build_short_circuit_record_activity",
     "code_synthesis_activity",
     "compute_regime_summary_activity",
     "design_generate_activity",
@@ -686,8 +1076,11 @@ __all__ = [
     "persist_record_activity",
     "persist_run_state_activity",
     "refinement_activity",
+    "resolve_readiness_prices_activity",
     "resolve_symbols_activity",
+    "run_alignment_audit_activity",
     "run_strategy_code_activity",
+    "run_verification_and_analysis_activity",
     "snapshot_prior_records_activity",
     "zero_trade_repair_activity",
 ]
