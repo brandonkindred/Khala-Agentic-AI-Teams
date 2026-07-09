@@ -169,27 +169,6 @@ def test_get_task_stats_computes_percent_with_completed_tasks(monkeypatch):
     assert stats["percent"] == 50.0
 
 
-def test_parse_traceback_for_crash_extracts_top_frame():
-    """Parse traceback for crash extracts top frame."""
-    try:
-        raise KeyError("missing")
-    except KeyError as exc:
-        path, line, func = orchestrator._parse_traceback_for_crash(exc)
-    assert path is not None
-    assert isinstance(line, int)
-    assert func is not None
-
-
-def test_parse_traceback_for_crash_handles_exception_without_tb():
-    """Parse traceback for crash handles exception without tb."""
-    exc = KeyError("missing")
-    # No __traceback__ → returns (None, None, None)
-    path, line, func = orchestrator._parse_traceback_for_crash(exc)
-    assert path is None
-    assert line is None
-    assert func is None
-
-
 # ---------------------------------------------------------------------------
 # api/main helpers
 # ---------------------------------------------------------------------------

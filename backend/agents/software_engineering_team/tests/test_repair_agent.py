@@ -106,17 +106,3 @@ def test_repair_agent_returns_empty_when_no_fix() -> None:
     )
     assert not result.suggested_fixes
     assert result.summary
-
-
-def test_parse_traceback_for_crash_extracts_location() -> None:
-    """_parse_traceback_for_crash extracts file_path, line_number, function_name."""
-    import orchestrator
-
-    try:
-        raise NameError("test")
-    except NameError as e:
-        file_path, line_number, func_name = orchestrator._parse_traceback_for_crash(e)
-    assert file_path
-    assert "test_repair_agent" in str(file_path) or "orchestrator" in str(file_path)
-    assert line_number is not None
-    assert isinstance(line_number, int)

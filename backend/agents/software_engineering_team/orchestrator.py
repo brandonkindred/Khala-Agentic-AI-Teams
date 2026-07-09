@@ -19,7 +19,6 @@ import logging
 # Path setup when run as module
 import sys
 import time
-import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -405,32 +404,6 @@ def _get_task_stats() -> Dict[str, Any]:
         "total": total,
         "percent": percent,
     }
-
-
-def _parse_traceback_for_crash(
-    exception: BaseException,
-) -> tuple[str | None, int | None, str | None]:
-    """
-    Extract file_path, line_number, and function_name from the exception traceback.
-    Returns the last frame (where the exception occurred) as (file_path, line_number, function_name).
-    """
-    tb = exception.__traceback__
-    if tb is None:
-        return None, None, None
-    frames = traceback.extract_tb(tb)
-    if not frames:
-        return None, None, None
-    last = frames[-1]
-    # Use relative path for display (e.g. backend_agent/agent.py)
-    filename = last.filename
-    if filename:
-        # Try to shorten to module-style path
-        for part in ("software_engineering_team", "agent_implementations"):
-            if part in filename:
-                idx = filename.find(part)
-                filename = filename[idx:]
-                break
-    return filename, last.lineno, last.name or None
 
 
 def _get_agents() -> Dict[str, Any]:
