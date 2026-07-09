@@ -13,7 +13,9 @@ from pathlib import Path
 
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.stack_profile import StackProfile
+from software_engineering_team.shared.v2_review import ReviewConfig
 
+from ..models import ToolAgentPhaseInput
 from ..prompts import TYPESCRIPT_CONVENTIONS
 
 
@@ -63,4 +65,49 @@ PROFILE = StackProfile(
     conventions_by_language={"_default": TYPESCRIPT_CONVENTIONS},
     has_language_conventions=False,
     detect_language=_detect_language,
+)
+
+
+# ---------------------------------------------------------------------------
+# Review config: the knobs that select frontend behaviour in the shared
+# ``shared.v2_review.run_review`` / ``run_microtask_review`` bodies.
+# ---------------------------------------------------------------------------
+
+
+def _frontend_summary_review(passed: bool, build_ok: bool, lint_ok: bool, n_issues: int, n_critical: int) -> str:
+    return f"Review {'passed' if passed else 'failed'}; {n_issues} issue(s)."
+
+
+def _frontend_summary_microtask(
+    microtask_id: str, passed: bool, build_ok: bool, lint_ok: bool, n_issues: int, n_critical: int
+) -> str:
+    return f"Microtask {microtask_id} review {'passed' if passed else 'failed'}; {n_issues} issue(s)."
+
+
+def _frontend_microtask_intro(microtask_id: str, n_files: int) -> str:
+    return (
+        f"Microtask review for {microtask_id} ({n_files} files). "
+        "Next step -> Build verification, lint, code review"
+    )
+
+
+REVIEW_CONFIG = ReviewConfig(
+    lint_agent_type="frontend",
+    build_verify_label="frontend_code_v2",
+    build_fail_recommendation_review="Fix build errors; consider triggering Build Specialist.",
+    # Frontend keeps the raw linter severity (no remap).
+    lint_severity_remap=None,
+    # Frontend uses kind.value verbatim (no "tool_" prefix) and a blank rec.
+    tool_rec_source_prefix=None,
+    tool_rec_recommendation_uses_rec=False,
+    # Frontend omits existing_code/spec_context/language on the tool phase input.
+    tool_phase_includes_context=False,
+    # Frontend run-review `passed` includes lint_ok.
+    passed_includes_lint_review=True,
+    # Frontend run-review does not log its summary line.
+    log_review_summary=False,
+    tool_phase_input_factory=ToolAgentPhaseInput,
+    summary_review=_frontend_summary_review,
+    summary_microtask=_frontend_summary_microtask,
+    microtask_intro=_frontend_microtask_intro,
 )

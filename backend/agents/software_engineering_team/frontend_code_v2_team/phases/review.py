@@ -14,13 +14,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import LLMClient
+from software_engineering_team.shared import v2_review
 from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
 from software_engineering_team.shared.llm_review import run_llm_review
 from software_engineering_team.shared.models import Task
-from software_engineering_team.shared.review_progress import (
-    build_disk_repo_reader,
-    call_code_review_agent,
-)
 from software_engineering_team.shared.review_utils import (
     DOC_QUALITY_THRESHOLD,
     MANY_CHUNKS_WARN_THRESHOLD,
@@ -31,21 +28,19 @@ from software_engineering_team.shared.review_utils import (
 from software_engineering_team.shared.review_utils import (
     run_documentation_self_review as _shared_run_documentation_self_review,
 )
-from software_engineering_team.shared.security_service import any_blocking
 from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 
 from ..models import (
     DocumentationSelfReviewResult,
     ExecutionResult,
     Microtask,
-    Phase,
     ReviewIssue,
     ReviewResult,
     ToolAgentKind,
-    ToolAgentPhaseInput,
 )
 from ..output_templates import parse_documentation_self_review_template, parse_review_template
 from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT, REVIEW_PROMPT
+from ._profile import REVIEW_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -185,139 +180,39 @@ def run_review(
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     language: str = "typescript",
 ) -> ReviewResult:
-    """Execute the Review phase. Uses passed-in quality agents when available."""
-    task_id = task.id
-    issues: List[ReviewIssue] = []
+    """Execute the Review phase. Uses passed-in quality agents when available.
 
-    build_ok, build_msg = _run_build_verification(repo_path, build_verifier, task_id)
-    if not build_ok:
-        issues.append(
-            ReviewIssue(
-                source="build",
-                severity="critical",
-                description=f"Build failed: {build_msg}",
-                recommendation="Fix build errors; consider triggering Build Specialist.",
-            )
-        )
+    Thin delegate over the shared ``v2_review.run_review`` body, passing this
+    team's :data:`REVIEW_CONFIG` and the per-team runner wrappers. The wrappers
+    (``_run_llm_review`` / ``_run_qa_agent`` / ``_run_security_agent`` /
+    ``_run_build_verification``) are the patch surface for ``Agent`` /
+    ``resolve_text_mode_strands_model`` and inject this team's prompt/parser and
+    ``ReviewIssue`` factory, so they stay per-team.
 
-    lint_ok = True
-    if linting_tool_agent is not None:
-        try:
-            from linting_tool_agent.models import LintToolInput as _LintInput
-
-            lint_result = linting_tool_agent.run(
-                _LintInput(
-                    repo_path=str(repo_path),
-                    agent_type="frontend",
-                    task_id=task_id,
-                    task_description=task.description or "",
-                )
-            )
-            if lint_result and not getattr(
-                lint_result.execution_result, "success", getattr(lint_result, "passed", True)
-            ):
-                lint_ok = False
-                for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
-                    issues.append(
-                        ReviewIssue(
-                            source="lint",
-                            severity=getattr(li, "severity", "medium"),
-                            description=getattr(li, "message", str(li)),
-                            file_path=getattr(li, "file_path", ""),
-                            recommendation="",
-                        )
-                    )
-        except Exception as exc:
-            logger.warning("[%s] Linting tool agent failed: %s", task_id, exc)
-
-    if code_review_agent is not None:
-        try:
-            from code_review_agent.models import CodeReviewInput as _CRInput
-
-            # files= keeps per-file attribution and lets the coordinator bound
-            # its own prompts — no header parsing, no upstream truncation.
-            cr_input = _CRInput(
-                files=execution_result.files,
-                task_description=task.description or "",
-                task_requirements=task.requirements or "",
-                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
-                language=language,
-            )
-            cr_result = call_code_review_agent(
-                code_review_agent, cr_input, None, repo_reader=build_disk_repo_reader(repo_path)
-            )
-            for item in getattr(cr_result, "issues", []):
-                issues.append(
-                    ReviewIssue(
-                        source="code_review",
-                        severity=getattr(item, "severity", "medium"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "file_path", ""),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Code review agent failed: %s. Next step -> Using LLM fallback for code review",
-                task_id,
-                exc,
-            )
-            issues.extend(_run_llm_review(llm=llm, task=task, files=execution_result.files))
-    else:
-        issues.extend(_run_llm_review(llm=llm, task=task, files=execution_result.files))
-
-    if qa_agent is not None:
-        issues.extend(
-            _run_qa_agent(
-                qa_agent=qa_agent,
-                files=execution_result.files,
-                language=language,
-                task_description=task.description or "",
-                task_id=task_id,
-            )
-        )
-
-    if security_agent is not None:
-        issues.extend(
-            _run_security_agent(
-                security_agent=security_agent,
-                files=execution_result.files,
-                language=language,
-                task_description=task.description or "",
-                task_id=task_id,
-            )
-        )
-
-    if tool_agents:
-        phase_inp = ToolAgentPhaseInput(
-            phase=Phase.REVIEW,
-            repo_path=str(repo_path),
-            current_files=execution_result.files,
-            review_issues=issues,
-            task_title=task.title or "",
-            task_description=task.description or "",
-        )
-        for kind, agent in tool_agents.items():
-            if not hasattr(agent, "review"):
-                continue
-            try:
-                out = agent.review(phase_inp)
-                if out.issues:
-                    issues.extend(out.issues)
-                if out.recommendations:
-                    for r in out.recommendations:
-                        issues.append(
-                            ReviewIssue(
-                                source=kind.value, severity="info", description=r, recommendation=""
-                            )
-                        )
-            except Exception as exc:
-                logger.warning("[%s] Tool agent %s review() failed: %s", task_id, kind.value, exc)
-
-    passed = build_ok and lint_ok and not any_blocking(issues)
-    summary = f"Review {'passed' if passed else 'failed'}; {len(issues)} issue(s)."
-    return ReviewResult(
-        passed=passed, issues=issues, build_ok=build_ok, lint_ok=lint_ok, summary=summary
+    Preconditions:
+        - ``execution_result`` exposes ``.files: Dict[str, str]``.
+    Postconditions:
+        - See ``software_engineering_team.shared.v2_review.run_review``: returns
+          a :class:`ReviewResult` whose ``passed`` reflects the frontend policy
+          (build + lint + no blocking issue).
+    """
+    return v2_review.run_review(
+        config=REVIEW_CONFIG,
+        llm=llm,
+        task=task,
+        execution_result=execution_result,
+        repo_path=repo_path,
+        build_verifier=build_verifier,
+        qa_agent=qa_agent,
+        security_agent=security_agent,
+        code_review_agent=code_review_agent,
+        linting_tool_agent=linting_tool_agent,
+        tool_agents=tool_agents,
+        language=language,
+        llm_review_fn=_run_llm_review,
+        qa_agent_fn=_run_qa_agent,
+        security_agent_fn=_run_security_agent,
+        build_verify_fn=_run_build_verification,
     )
 
 
@@ -337,191 +232,38 @@ def run_microtask_review(
     detail_callback: Optional[Callable[[str], None]] = None,
     language: str = "typescript",
 ) -> ReviewResult:
+    """Run full review on a single microtask's output files.
+
+    Thin delegate over the shared ``v2_review.run_microtask_review`` body with
+    this team's :data:`REVIEW_CONFIG` and per-team runner wrappers (the patch
+    surface for ``Agent`` / ``resolve_text_mode_strands_model``).
+
+    Preconditions:
+        - ``microtask`` exposes ``.id`` / ``.title`` / ``.description``.
+    Postconditions:
+        - See ``software_engineering_team.shared.v2_review.run_microtask_review``:
+          returns a :class:`ReviewResult` scoped to ``files`` whose ``passed``
+          requires ``build_ok`` AND ``lint_ok`` AND no blocking issue.
     """
-    Run full review on a single microtask's output files.
-
-    This function performs the same checks as run_review() but is scoped to the
-    files produced by a single microtask, enabling per-microtask quality gates.
-
-    Args:
-        detail_callback: Optional callback to report detailed status messages
-            (e.g., "Running build verification...", "Running linter...").
-    """
-    task_id = task.id
-    microtask_id = microtask.id
-    issues: List[ReviewIssue] = []
-
-    logger.info(
-        "[%s] Microtask review for %s (%d files). Next step -> Build verification, lint, code review",
-        task_id,
-        microtask_id,
-        len(files),
-    )
-
-    if detail_callback:
-        detail_callback("Running build verification...")
-    build_ok, build_msg = _run_build_verification(repo_path, build_verifier, task_id)
-    if not build_ok:
-        issues.append(
-            ReviewIssue(
-                source="build",
-                severity="critical",
-                description=f"Build failed after microtask {microtask_id}: {build_msg}",
-                recommendation="Fix build errors before proceeding.",
-            )
-        )
-
-    lint_ok = True
-    if linting_tool_agent is not None:
-        if detail_callback:
-            detail_callback("Running linter...")
-        try:
-            from linting_tool_agent.models import LintToolInput as _LintInput
-
-            lint_result = linting_tool_agent.run(
-                _LintInput(
-                    repo_path=str(repo_path),
-                    agent_type="frontend",
-                    task_id=task_id,
-                    task_description=f"Microtask: {microtask.title or microtask_id}",
-                )
-            )
-            if lint_result and not getattr(
-                lint_result.execution_result, "success", getattr(lint_result, "passed", True)
-            ):
-                lint_ok = False
-                for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
-                    file_path = getattr(li, "file_path", "")
-                    if files and file_path and file_path not in files:
-                        continue
-                    issues.append(
-                        ReviewIssue(
-                            source="lint",
-                            severity=getattr(li, "severity", "medium"),
-                            description=getattr(li, "message", str(li)),
-                            file_path=file_path,
-                            recommendation="",
-                        )
-                    )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Linting tool agent failed for microtask %s: %s", task_id, microtask_id, exc
-            )
-
-    if code_review_agent is not None:
-        if detail_callback:
-            detail_callback("Running code review...")
-        try:
-            from code_review_agent.models import CodeReviewInput as _CRInput
-
-            # files= keeps per-file attribution and lets the coordinator bound
-            # its own prompts — no header parsing, no upstream truncation.
-            cr_input = _CRInput(
-                files=files,
-                task_description=f"Microtask: {microtask.description or microtask.title}",
-                task_requirements=task.requirements or "",
-                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
-                language=language,
-            )
-            cr_result = call_code_review_agent(
-                code_review_agent,
-                cr_input,
-                detail_callback,
-                repo_reader=build_disk_repo_reader(repo_path),
-            )
-            for item in getattr(cr_result, "issues", []):
-                issues.append(
-                    ReviewIssue(
-                        source="code_review",
-                        severity=getattr(item, "severity", "medium"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "file_path", ""),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Code review agent failed for microtask %s: %s. Next step -> Using LLM fallback for code review",
-                task_id,
-                microtask_id,
-                exc,
-            )
-            issues.extend(_run_llm_review(llm=llm, task=task, files=files))
-    else:
-        if detail_callback:
-            detail_callback("Running code review...")
-        issues.extend(_run_llm_review(llm=llm, task=task, files=files))
-
-    microtask_desc = f"Microtask: {microtask.description or microtask.title}"
-    microtask_ctx = f" for microtask {microtask_id}"
-
-    if qa_agent is not None:
-        if detail_callback:
-            detail_callback("Running QA check...")
-        issues.extend(
-            _run_qa_agent(
-                qa_agent=qa_agent,
-                files=files,
-                language=language,
-                task_description=microtask_desc,
-                task_id=task_id,
-                context=microtask_ctx,
-            )
-        )
-
-    if security_agent is not None:
-        if detail_callback:
-            detail_callback("Running security scan...")
-        issues.extend(
-            _run_security_agent(
-                security_agent=security_agent,
-                files=files,
-                language=language,
-                task_description=microtask_desc,
-                task_id=task_id,
-                context=microtask_ctx,
-            )
-        )
-
-    if tool_agents:
-        phase_inp = ToolAgentPhaseInput(
-            phase=Phase.REVIEW,
-            microtask=microtask,
-            repo_path=str(repo_path),
-            current_files=files,
-            review_issues=issues,
-            task_title=task.title or "",
-            task_description=f"Microtask: {microtask.description or microtask.title}",
-            task_id=task_id,
-        )
-        for kind, agent in tool_agents.items():
-            if not hasattr(agent, "review"):
-                continue
-            try:
-                out = agent.review(phase_inp)
-                if out.issues:
-                    issues.extend(out.issues)
-                if out.recommendations:
-                    for r in out.recommendations:
-                        issues.append(
-                            ReviewIssue(
-                                source=kind.value, severity="info", description=r, recommendation=""
-                            )
-                        )
-            except Exception as exc:
-                logger.warning(
-                    "[%s] Tool agent %s review() failed for microtask %s: %s",
-                    task_id,
-                    kind.value,
-                    microtask_id,
-                    exc,
-                )
-
-    passed = build_ok and lint_ok and not any_blocking(issues)
-    summary = f"Microtask {microtask_id} review {'passed' if passed else 'failed'}; {len(issues)} issue(s)."
-    logger.info("[%s] %s", task_id, summary)
-    return ReviewResult(
-        passed=passed, issues=issues, build_ok=build_ok, lint_ok=lint_ok, summary=summary
+    return v2_review.run_microtask_review(
+        config=REVIEW_CONFIG,
+        llm=llm,
+        task=task,
+        microtask=microtask,
+        repo_path=repo_path,
+        files=files,
+        build_verifier=build_verifier,
+        qa_agent=qa_agent,
+        security_agent=security_agent,
+        code_review_agent=code_review_agent,
+        linting_tool_agent=linting_tool_agent,
+        tool_agents=tool_agents,
+        detail_callback=detail_callback,
+        language=language,
+        llm_review_fn=_run_llm_review,
+        qa_agent_fn=_run_qa_agent,
+        security_agent_fn=_run_security_agent,
+        build_verify_fn=_run_build_verification,
     )
 
 

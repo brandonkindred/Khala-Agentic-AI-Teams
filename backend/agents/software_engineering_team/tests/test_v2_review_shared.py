@@ -1,0 +1,478 @@
+"""Branch coverage for the shared code-v2 review body (``shared.v2_review``).
+
+The per-team review tests (``test_v2_review_phase`` / ``test_v2_fe_review_phase``)
+exercise the shared ``run_review`` / ``run_microtask_review`` through the per-team
+delegates and pin the externally observable behaviour. They do not, however,
+drive every branch of the shared body — the microtask path's lint / code-review /
+tool-agent / build-fail / detail-callback branches and the ``run_review`` lint
+exception path are not reachable through those tests' agent combos. This file
+calls the shared functions directly with a synthetic :class:`ReviewConfig` and
+stub runners so each branch is exercised on its own, independent of the
+per-team ``Agent`` patch surface.
+
+Preconditions:
+    - The synthetic ``ReviewConfig`` uses a ``tool_phase_input_factory`` that
+      accepts arbitrary kwargs, so both the context and no-context variants are
+      callable without binding a per-team ``ToolAgentPhaseInput``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Callable, Dict, Optional, Tuple
+from unittest.mock import MagicMock
+
+from software_engineering_team.shared.v2_models import ReviewIssue
+from software_engineering_team.shared.v2_review import (
+    ReviewConfig,
+    run_microtask_review,
+    run_review,
+)
+
+
+def _task() -> SimpleNamespace:
+    return SimpleNamespace(
+        id="t1",
+        title="T",
+        description="desc",
+        requirements="reqs",
+        acceptance_criteria=["AC"],
+    )
+
+
+def _microtask() -> SimpleNamespace:
+    return SimpleNamespace(id="mt-1", title="MT", description="mdesc")
+
+
+def _execution_result(files: Dict[str, str]) -> SimpleNamespace:
+    return SimpleNamespace(files=files)
+
+
+def _build_config(
+    *,
+    lint_severity_remap: Optional[Dict[str, str]] = None,
+    tool_rec_source_prefix: Optional[str] = None,
+    tool_rec_recommendation_uses_rec: bool = False,
+    tool_phase_includes_context: bool = False,
+    passed_includes_lint_review: bool = True,
+    log_review_summary: bool = False,
+) -> ReviewConfig:
+    """A synthetic config with a permissive tool-phase-input factory.
+
+    Postconditions: returns a frozen ``ReviewConfig`` whose
+    ``tool_phase_input_factory`` accepts any kwargs (returns a SimpleNamespace),
+    so both context and no-context variants are callable without a per-team
+    ``ToolAgentPhaseInput``.
+    """
+    return ReviewConfig(
+        lint_agent_type="backend",
+        build_verify_label="backend_code_v2",
+        build_fail_recommendation_review="fix it",
+        lint_severity_remap=lint_severity_remap,
+        tool_rec_source_prefix=tool_rec_source_prefix,
+        tool_rec_recommendation_uses_rec=tool_rec_recommendation_uses_rec,
+        tool_phase_includes_context=tool_phase_includes_context,
+        passed_includes_lint_review=passed_includes_lint_review,
+        log_review_summary=log_review_summary,
+        tool_phase_input_factory=lambda **kw: SimpleNamespace(**kw),
+        summary_review=lambda passed, build_ok, lint_ok, n, c: (
+            f"r:{passed},{build_ok},{lint_ok},{n},{c}"
+        ),
+        summary_microtask=lambda mid, passed, build_ok, lint_ok, n, c: (
+            f"m:{mid},{passed},{build_ok},{lint_ok},{n},{c}"
+        ),
+        microtask_intro=lambda mid, n: f"intro:{mid}:{n}",
+    )
+
+
+def _noop_runners() -> Dict[str, Any]:
+    """Stub runners that return no issues and never touch an LLM/agent."""
+    return {
+        "llm_review_fn": lambda *, llm, task, files: [],
+        "qa_agent_fn": lambda *, qa_agent, files, language, task_description, task_id, context="": [],
+        "security_agent_fn": lambda *, security_agent, files, language, task_description, task_id, context="": [],
+        "build_verify_fn": _build_verify_fn,
+    }
+
+
+def _build_verify_fn(
+    repo_path: Path, build_verifier: Optional[Callable], task_id: str
+) -> Tuple[bool, str]:
+    """Mirror of the per-team ``_run_build_verification`` for the stub config."""
+    if build_verifier is None:
+        return True, "No build verifier provided; skipping."
+    try:
+        return build_verifier(repo_path, "backend_code_v2", task_id)
+    except Exception as exc:
+        return False, str(exc)
+
+
+# ---------------------------------------------------------------------------
+# run_review branches
+# ---------------------------------------------------------------------------
+
+
+def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path) -> None:
+    """A raising linting tool agent is logged and skipped (run_review lint except)."""
+    config = _build_config()
+
+    def _boom(*a, **kw):
+        raise RuntimeError("lint crashed")
+
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        linting_tool_agent=MagicMock(run=_boom),
+        language="python",
+        **_noop_runners(),
+    )
+    assert result.passed  # lint failure was swallowed; no blocking issue
+
+
+def test_run_review_lint_fail_with_remap_blocks(tmp_path: Path) -> None:
+    """A failing lint with a severity remap maps 'error' -> 'high' (blocking)."""
+    config = _build_config(
+        lint_severity_remap={"error": "high", "warning": "medium", "info": "low"}
+    )
+
+    class _LintIssue:
+        severity = "error"
+        message = "syntax"
+        file_path = "x.py"
+
+    lint_agent = MagicMock()
+    lint_agent.run.return_value = MagicMock(
+        execution_result=MagicMock(success=False), passed=False, linter_issues=[_LintIssue()]
+    )
+
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        linting_tool_agent=lint_agent,
+        language="python",
+        **_noop_runners(),
+    )
+    assert result.lint_ok is False
+    lint_issues = [i for i in result.issues if i.source == "lint"]
+    assert lint_issues and lint_issues[0].severity == "high"  # remap applied
+
+
+def test_run_review_log_summary_branch(tmp_path: Path, caplog) -> None:
+    """``log_review_summary=True`` emits the INFO summary line."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="software_engineering_team.shared.v2_review")
+    config = _build_config(log_review_summary=True)
+
+    run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        language="python",
+        **_noop_runners(),
+    )
+    assert any("passed=" in r.message for r in caplog.records)
+
+
+def test_run_review_tool_agents_recommendations_and_raise(tmp_path: Path) -> None:
+    """Tool agents contribute issues + recommendation issues; a raising agent is skipped."""
+    from software_engineering_team.backend_code_v2_team.models import (
+        ToolAgentKind,
+        ToolAgentPhaseOutput,
+    )
+
+    config = _build_config(
+        tool_rec_source_prefix="tool_",
+        tool_rec_recommendation_uses_rec=True,
+        tool_phase_includes_context=True,
+    )
+
+    good = MagicMock()
+    good.review.return_value = ToolAgentPhaseOutput(
+        issues=[
+            ReviewIssue(
+                source="tool_qa", severity="low", description="from tool", recommendation="ok"
+            )
+        ],
+        recommendations=["add tests"],
+    )
+    raising = MagicMock()
+    raising.review.side_effect = RuntimeError("boom")
+    bare = object()  # no .review method
+
+    result = run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={
+            ToolAgentKind.TESTING_QA: good,
+            ToolAgentKind.SECURITY: raising,
+            ToolAgentKind.GENERAL: bare,
+        },
+        language="python",
+        **_noop_runners(),
+    )
+    # recommendation became a tool_-prefixed info issue carrying the rec.
+    rec = [i for i in result.issues if i.description == "add tests"]
+    assert rec and rec[0].source == "tool_testing_qa" and rec[0].recommendation == "add tests"
+    assert any(i.description == "from tool" for i in result.issues)  # out.issues folded in
+
+
+# ---------------------------------------------------------------------------
+# run_microtask_review branches
+# ---------------------------------------------------------------------------
+
+
+def test_microtask_build_fail(tmp_path: Path) -> None:
+    """A failing build verifier in the microtask path appends a critical build issue."""
+    config = _build_config()
+    result = run_microtask_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        build_verifier=lambda *a, **k: (False, "compile error"),
+        language="python",
+        **_noop_runners(),
+    )
+    assert result.build_ok is False
+    assert any(i.source == "build" and i.severity == "critical" for i in result.issues)
+
+
+def test_microtask_lint_fail_and_raise_and_detail_callback(tmp_path: Path) -> None:
+    """Microtask lint: detail_callback fires, a failing lint maps severity, a raising
+    lint agent is logged-and-skipped."""
+    config = _build_config(lint_severity_remap={"error": "high"})
+
+    class _LintIssue:
+        severity = "error"
+        message = "syntax"
+        file_path = "x.py"
+
+    class _OutOfScopeLintIssue:
+        # file_path not in the microtask's ``files`` -> filtered out by `continue`.
+        severity = "error"
+        message = "ignored"
+        file_path = "other.py"
+
+    lint_agent = MagicMock()
+    lint_agent.run.return_value = MagicMock(
+        execution_result=MagicMock(success=False),
+        passed=False,
+        linter_issues=[_LintIssue(), _OutOfScopeLintIssue()],
+    )
+
+    details: list[str] = []
+    result = run_microtask_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        linting_tool_agent=lint_agent,
+        detail_callback=details.append,
+        language="python",
+        **_noop_runners(),
+    )
+    assert result.lint_ok is False
+    lint_issues = [i for i in result.issues if i.source == "lint"]
+    assert [i for i in lint_issues if i.severity == "high"]
+    assert not any(i.description == "ignored" for i in lint_issues)  # out-of-scope filtered out
+    assert "Running linter..." in details
+
+
+def test_microtask_lint_agent_raises_is_swallowed(tmp_path: Path) -> None:
+    """A raising microtask lint agent is logged and skipped (microtask lint except)."""
+    config = _build_config()
+
+    def _boom(*a, **kw):
+        raise RuntimeError("lint crashed")
+
+    result = run_microtask_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        linting_tool_agent=MagicMock(run=_boom),
+        language="python",
+        **_noop_runners(),
+    )
+    assert result.lint_ok  # raise swallowed; lint stayed ok
+
+
+def test_microtask_code_review_agent_path_and_raise(tmp_path: Path) -> None:
+    """The microtask code-review-agent path folds its issues; a raise falls back to LLM."""
+    config = _build_config()
+
+    class _Issue:
+        severity = "medium"
+        description = "magic"
+        file_path = "x.py"
+        recommendation = "fix"
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[_Issue()])
+
+    details: list[str] = []
+    result = run_microtask_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        detail_callback=details.append,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files: [
+            ReviewIssue(source="code_review", severity="low", description="llm")
+        ],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    assert any(i.source == "code_review" and i.description == "magic" for i in result.issues)
+    assert "Running code review..." in details
+
+    # Now the agent raises -> LLM fallback fires.
+    cr_agent.run.side_effect = RuntimeError("crash")
+    result2 = run_microtask_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files: [
+            ReviewIssue(source="code_review", severity="low", description="llm")
+        ],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    assert any(i.description == "llm" for i in result2.issues)
+
+
+def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:
+    """The microtask QA/security branches emit their detail-callback messages."""
+    config = _build_config()
+
+    details: list[str] = []
+    result = run_microtask_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        qa_agent=MagicMock(),
+        security_agent=MagicMock(),
+        detail_callback=details.append,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files: [],
+        qa_agent_fn=lambda *, qa_agent, files, language, task_description, task_id, context="": [
+            ReviewIssue(source="qa", severity="low", description="bug")
+        ],
+        security_agent_fn=lambda *, security_agent, files, language, task_description, task_id, context="": [
+            ReviewIssue(source="security", severity="low", description="vuln")
+        ],
+        build_verify_fn=_build_verify_fn,
+    )
+    assert "Running QA check..." in details
+    assert "Running security scan..." in details
+    assert any(i.source == "qa" for i in result.issues)
+    assert any(i.source == "security" for i in result.issues)
+
+
+def test_microtask_tool_agents_no_context_variant(tmp_path: Path) -> None:
+    """Microtask tool agents fold issues + recommendation issues with the no-context
+    (frontend-style) config: ``source`` is ``kind.value`` verbatim and rec is blank."""
+    from software_engineering_team.frontend_code_v2_team.models import (
+        ToolAgentKind,
+        ToolAgentPhaseOutput,
+    )
+
+    config = _build_config(tool_rec_source_prefix=None, tool_rec_recommendation_uses_rec=False)
+
+    tool_agent = MagicMock()
+    tool_agent.review.return_value = ToolAgentPhaseOutput(
+        issues=[ReviewIssue(source="security", severity="low", description="from tool")],
+        recommendations=["add tests"],
+    )
+
+    result = run_microtask_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"app.ts": "code"},
+        tool_agents={ToolAgentKind.SECURITY: tool_agent},
+        language="typescript",
+        **_noop_runners(),
+    )
+    rec = [i for i in result.issues if i.description == "add tests"]
+    assert (
+        rec and rec[0].source == "security" and rec[0].recommendation == ""
+    )  # no prefix, blank rec
+    assert any(i.description == "from tool" for i in result.issues)
+
+
+def test_microtask_tool_agent_raises_is_skipped(tmp_path: Path) -> None:
+    """A raising microtask tool agent is logged and skipped (failure_context path)."""
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+
+    config = _build_config()
+    raising = MagicMock()
+    raising.review.side_effect = RuntimeError("boom")
+
+    result = run_microtask_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"app.ts": "code"},
+        tool_agents={ToolAgentKind.SECURITY: raising},
+        language="typescript",
+        **_noop_runners(),
+    )
+    assert result is not None  # did not raise
+
+
+def test_microtask_intro_logged(tmp_path: Path, caplog) -> None:
+    """The microtask opening INFO line uses the config's ``microtask_intro``."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="software_engineering_team.shared.v2_review")
+    config = _build_config()
+
+    run_microtask_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        language="python",
+        **_noop_runners(),
+    )
+    assert any("intro:mt-1:1" in r.message for r in caplog.records)
