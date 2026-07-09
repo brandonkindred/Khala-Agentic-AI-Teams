@@ -941,12 +941,35 @@ def list_branding_jobs(running_only: bool = False) -> BrandJobListResponse:
     return BrandJobListResponse(jobs=items)
 
 
+def _signal_branding_cancel(job_id: str) -> None:
+    """Best-effort: deliver the ``cancel`` signal to a running BrandingWorkflow.
+
+    The job-store cancel flag is the source of truth (honored cooperatively at
+    each phase boundary by ``check_branding_cancelled_activity``); this signal
+    just makes the cancel Temporal-native so it is observed without waiting on the
+    next between-phase job-service poll. Any failure (Temporal disabled, worker
+    unavailable, workflow already gone) is swallowed — the flag still stops the run.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+
+        if not is_temporal_enabled():
+            return
+        from branding_team.temporal.constants import WORKFLOW_ID_PREFIX
+        from shared_temporal import signal_workflow_sync
+
+        signal_workflow_sync(f"{WORKFLOW_ID_PREFIX}{job_id}", "cancel")
+    except Exception:
+        logger.debug("branding cancel signal not delivered for job %s", job_id, exc_info=True)
+
+
 @app.post("/branding/jobs/{job_id}/cancel")
 def cancel_branding_job(job_id: str) -> Dict[str, Any]:
     data = get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if cancel_job(job_id):
+        _signal_branding_cancel(job_id)
         return {"job_id": job_id, "status": JOB_STATUS_CANCELLED, "success": True}
     return {
         "job_id": job_id,
