@@ -140,16 +140,18 @@ def test_fetch_cost_empty_without_postgres() -> None:
 
 
 def test_trace_observer_ignores_non_se(monkeypatch) -> None:
-    """The trace observer does not write traces for non-SE teams."""
-    calls: list = []
-    monkeypatch.setattr(trace_store, "write_trace", lambda rec: calls.append(rec) or True)
+    """The trace observer does not enqueue traces for non-SE teams."""
+    from software_engineering_team.shared import trace_flusher
+
+    trace_flusher._reset_for_test()
 
     class _Rec:
         team = "blogging"
         job_id = "j"
 
-    trace_store._trace_observer(_Rec())
-    assert calls == []  # other team → not written
+    trace_flusher._trace_observer(_Rec())
+    assert trace_flusher._buffer_size() == 0  # other team → not enqueued
+    trace_flusher._reset_for_test()
 
 
 def test_trace_retention_days_env(monkeypatch) -> None:

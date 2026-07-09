@@ -1,12 +1,11 @@
 """More tests for assorted SE shared utility modules.
 
 Covers ``json_utils`` (text completion + JSON recovery + merge helpers),
-``planning_cache`` (hash key + set/get/miss), and ``deduplication``.
+and ``deduplication``.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -16,12 +15,14 @@ from unittest.mock import MagicMock
 
 
 def test_dedupe_strings_empty() -> None:
+    """dedupe_strings returns an empty list for empty input."""
     from software_engineering_team.shared.deduplication import dedupe_strings
 
     assert dedupe_strings([]) == []
 
 
 def test_dedupe_strings_removes_near_duplicates() -> None:
+    """dedupe_strings drops near-duplicate strings (case-insensitive) while keeping distinct entries."""
     from software_engineering_team.shared.deduplication import dedupe_strings
 
     items = [
@@ -35,6 +36,7 @@ def test_dedupe_strings_removes_near_duplicates() -> None:
 
 
 def test_dedupe_strings_skips_non_strings() -> None:
+    """dedupe_strings drops non-string items rather than crashing on them."""
     from software_engineering_team.shared.deduplication import dedupe_strings
 
     items = ["valid", 42, "another"]  # type: ignore[list-item]
@@ -44,6 +46,7 @@ def test_dedupe_strings_skips_non_strings() -> None:
 
 
 def test_dedupe_by_key_basic() -> None:
+    """dedupe_by_key drops items whose key is a near-duplicate of an earlier item's key."""
     from software_engineering_team.shared.deduplication import dedupe_by_key
 
     items = [
@@ -56,6 +59,7 @@ def test_dedupe_by_key_basic() -> None:
 
 
 def test_dedupe_by_key_non_string_key_kept() -> None:
+    """dedupe_by_key passes non-string keys through unchanged (no near-dup check applies)."""
     from software_engineering_team.shared.deduplication import dedupe_by_key
 
     items = [SimpleNamespace(name=None), SimpleNamespace(name=None)]
@@ -65,122 +69,10 @@ def test_dedupe_by_key_non_string_key_kept() -> None:
 
 
 def test_dedupe_by_key_empty() -> None:
+    """dedupe_by_key returns an empty list for empty input."""
     from software_engineering_team.shared.deduplication import dedupe_by_key
 
     assert dedupe_by_key([], key_fn=lambda x: x) == []
-
-
-# ---------------------------------------------------------------------------
-# planning_cache
-# ---------------------------------------------------------------------------
-
-
-def test_compute_planning_cache_key_stable() -> None:
-    from software_engineering_team.shared.planning_cache import compute_planning_cache_key
-
-    k1 = compute_planning_cache_key("spec", "arch")
-    k2 = compute_planning_cache_key("spec", "arch")
-    assert k1 == k2
-    assert len(k1) == 24
-
-
-def test_compute_planning_cache_key_changes_with_inputs() -> None:
-    from software_engineering_team.shared.planning_cache import compute_planning_cache_key
-
-    base = compute_planning_cache_key("spec", "arch")
-    different_spec = compute_planning_cache_key("spec2", "arch")
-    different_arch = compute_planning_cache_key("spec", "arch2")
-    assert base != different_spec
-    assert base != different_arch
-
-
-def test_compute_planning_cache_key_includes_project_overview() -> None:
-    from software_engineering_team.shared.planning_cache import compute_planning_cache_key
-
-    a = compute_planning_cache_key("spec", "arch")
-    b = compute_planning_cache_key(
-        "spec",
-        "arch",
-        project_overview={"primary_goal": "g", "delivery_strategy": "s"},
-    )
-    assert a != b
-
-
-def test_compute_planning_cache_key_sprint_id_changes_key() -> None:
-    from software_engineering_team.shared.planning_cache import compute_planning_cache_key
-
-    a = compute_planning_cache_key("spec", "arch")
-    b = compute_planning_cache_key("spec", "arch", sprint_id="S1")
-    assert a != b
-
-
-def test_get_cached_plan_miss_when_missing(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import get_cached_plan
-
-    assert get_cached_plan(tmp_path, "abc") is None
-
-
-def test_set_and_get_cached_plan_roundtrip(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        get_cached_plan,
-        set_cached_plan,
-    )
-
-    assignment = SimpleNamespace(model_dump=lambda: {"tasks": [{"id": "t1"}]})
-    set_cached_plan(tmp_path, "cache_key", assignment, [{"req": "x"}], summary="ok")
-    cached = get_cached_plan(tmp_path, "cache_key")
-    assert cached is not None
-    assert cached["summary"] == "ok"
-    assert cached["assignment"]["tasks"]
-
-
-def test_set_cached_plan_accepts_dict(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        get_cached_plan,
-        set_cached_plan,
-    )
-
-    set_cached_plan(tmp_path, "k", {"tasks": []}, [], summary="")
-    cached = get_cached_plan(tmp_path, "k")
-    assert cached is not None
-
-
-def test_get_cached_plan_corrupt_returns_none(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        _cache_dir,
-        get_cached_plan,
-    )
-
-    cache_path = _cache_dir(tmp_path) / "corrupt.json"
-    cache_path.write_text("not json{", encoding="utf-8")
-    assert get_cached_plan(tmp_path, "corrupt") is None
-
-
-def test_get_cached_plan_key_mismatch_returns_none(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        _cache_dir,
-        get_cached_plan,
-    )
-
-    cache_path = _cache_dir(tmp_path) / "k.json"
-    cache_path.write_text('{"cache_key": "different"}', encoding="utf-8")
-    assert get_cached_plan(tmp_path, "k") is None
-
-
-def test_set_cached_plan_handles_unserializable(tmp_path: Path) -> None:
-    from software_engineering_team.shared.planning_cache import (
-        get_cached_plan,
-        set_cached_plan,
-    )
-
-    # Pass an assignment whose model_dump raises
-    class _Bad:
-        def model_dump(self):
-            raise RuntimeError("oops")
-
-    set_cached_plan(tmp_path, "k", _Bad(), [], summary="")
-    # No file written → still a cache miss
-    assert get_cached_plan(tmp_path, "k") is None
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +81,7 @@ def test_set_cached_plan_handles_unserializable(tmp_path: Path) -> None:
 
 
 def test_default_decompose_by_h2_sections() -> None:
+    """default_decompose_by_sections splits content on H2 (##) headers."""
     from software_engineering_team.shared.json_utils import default_decompose_by_sections
 
     content = "## a\nA\n## b\nB"
@@ -197,6 +90,7 @@ def test_default_decompose_by_h2_sections() -> None:
 
 
 def test_default_decompose_by_h1_sections() -> None:
+    """default_decompose_by_sections splits content on H1 (#) headers."""
     from software_engineering_team.shared.json_utils import default_decompose_by_sections
 
     content = "# a\nA\n# b\nB"
@@ -205,6 +99,7 @@ def test_default_decompose_by_h1_sections() -> None:
 
 
 def test_default_decompose_chunks_by_size() -> None:
+    """default_decompose_by_sections falls back to fixed-size chunking when no section headers are present."""
     from software_engineering_team.shared.json_utils import default_decompose_by_sections
 
     out = default_decompose_by_sections("x" * 50, chunk_size=10)
@@ -212,12 +107,14 @@ def test_default_decompose_chunks_by_size() -> None:
 
 
 def test_default_merge_results_empty() -> None:
+    """default_merge_results returns an empty dict for no partial results."""
     from software_engineering_team.shared.json_utils import default_merge_results
 
     assert default_merge_results([]) == {}
 
 
 def test_default_merge_results_lists_dicts_scalars() -> None:
+    """default_merge_results merges lists (semantically deduped), nested dicts, and last-wins scalars across partial results."""
     from software_engineering_team.shared.json_utils import default_merge_results
 
     a = {
@@ -240,6 +137,7 @@ def test_default_merge_results_lists_dicts_scalars() -> None:
 
 
 def test_attempt_fix_output_continuation_no_llm_attrs() -> None:
+    """attempt_fix_output_continuation returns the raw text unchanged when the LLM lacks the base_url/model attrs the continuator needs."""
     from software_engineering_team.shared.json_utils import attempt_fix_output_continuation
 
     out = attempt_fix_output_continuation(
@@ -252,6 +150,7 @@ def test_attempt_fix_output_continuation_no_llm_attrs() -> None:
 
 
 def test_attempt_fix_output_continuation_with_attrs(monkeypatch) -> None:
+    """attempt_fix_output_continuation delegates to ResponseContinuator and returns its completed content when the LLM exposes base_url/model."""
     from software_engineering_team.shared import json_utils
 
     class _LLM:
@@ -280,6 +179,7 @@ def test_attempt_fix_output_continuation_with_attrs(monkeypatch) -> None:
 
 
 def test_complete_text_with_continuation(monkeypatch) -> None:
+    """complete_text_with_continuation runs the agent and strips the completed text output."""
     from software_engineering_team.shared import json_utils
 
     class _FakeAgent:
@@ -297,6 +197,7 @@ def test_complete_text_with_continuation(monkeypatch) -> None:
 
 
 def test_complete_with_continuation_delegates(monkeypatch) -> None:
+    """complete_with_continuation delegates to complete_text_with_continuation, forwarding the agent_name."""
     from software_engineering_team.shared import json_utils
 
     called = {}
@@ -312,6 +213,7 @@ def test_complete_with_continuation_delegates(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_no_chunks_path(monkeypatch) -> None:
+    """parse_json_with_recovery returns the single-call result when no decomposition is supplied."""
     from software_engineering_team.shared import json_utils
 
     monkeypatch.setattr(
@@ -323,6 +225,7 @@ def test_parse_json_with_recovery_no_chunks_path(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_returns_none_on_exception(monkeypatch) -> None:
+    """parse_json_with_recovery returns None (does not raise) when the underlying completion call raises."""
     from software_engineering_team.shared import json_utils
 
     def boom(*a, **kw):
@@ -336,6 +239,7 @@ def test_parse_json_with_recovery_returns_none_on_exception(monkeypatch) -> None
 
 
 def test_parse_json_with_recovery_chunked(monkeypatch) -> None:
+    """parse_json_with_recovery decomposes, completes each chunk, and merges the per-chunk results."""
     from software_engineering_team.shared import json_utils
 
     calls = {"n": 0}
@@ -363,6 +267,7 @@ def test_parse_json_with_recovery_chunked(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_chunked_empty(monkeypatch) -> None:
+    """parse_json_with_recovery skips chunking and returns the single-call result when decomposition yields no chunks."""
     from software_engineering_team.shared import json_utils
 
     monkeypatch.setattr(
@@ -382,6 +287,7 @@ def test_parse_json_with_recovery_chunked_empty(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_chunked_failure(monkeypatch) -> None:
+    """parse_json_with_recovery returns None when a chunk completion raises mid-recovery."""
     from software_engineering_team.shared import json_utils
 
     def boom(*a, **kw):

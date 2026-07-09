@@ -56,7 +56,9 @@ def test_run_build_verification_appends_fix_line_when_pytest_fails_with_test_err
         return_value=CommandResult(True, 0, "", ""),
     ):
         with patch("shared_command_runner.runner.run_pytest", return_value=mock_result):
-            ok, error_output = orchestrator._run_build_verification(tmp_path, "backend", "task-1")
+            from software_engineering_team import build_fix
+
+            ok, error_output = build_fix._run_build_verification(tmp_path, "backend", "task-1")
 
     assert ok is False
     assert "FIX: Preserve the /test-generic-error route" in error_output
@@ -376,7 +378,9 @@ def test_finalize_pauses_on_llm_connectivity(tmp_path: Path) -> None:
                 "id": "t1",
                 "status": "failed",
                 "title": "T1",
-                "revision_feedback": [{"reason": f"Implementation failed: {LLM_UNREACHABLE_AFTER_RETRIES}"}],
+                "revision_feedback": [
+                    {"reason": f"Implementation failed: {LLM_UNREACHABLE_AFTER_RETRIES}"}
+                ],
             }
         ],
     )
@@ -390,7 +394,9 @@ def test_finalize_noop_without_snapshot(tmp_path: Path) -> None:
 
     create_job("fin-nosnap", str(tmp_path))
     orchestrator._finalize_from_coding_snapshot("fin-nosnap")
-    assert "failed_tasks" not in get_job("fin-nosnap") or get_job("fin-nosnap").get("failed_tasks") in (None, [])
+    assert "failed_tasks" not in get_job("fin-nosnap") or get_job("fin-nosnap").get(
+        "failed_tasks"
+    ) in (None, [])
     # Unknown job is a clean no-op.
     orchestrator._finalize_from_coding_snapshot("fin-does-not-exist")
 
@@ -480,64 +486,10 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
     assert len(arch_inputs_received) == 0
 
 
-def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path) -> None:
-    """When Planning workflow fails (success=False), job is marked failed."""
-    (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
-    job_id = "test-planning-total-fail"
-    update_job_calls = []
-
-    def capture_update_job(jid, **kwargs):
-        update_job_calls.append((jid, kwargs))
-
-    mock_agents = {
-        "architecture": MagicMock(),
-        "tech_lead": MagicMock(),
-        "devops": MagicMock(),
-        "backend": MagicMock(),
-        "frontend": MagicMock(),
-        "git_setup": MagicMock(),
-        "integration": MagicMock(),
-        "acceptance_verifier": MagicMock(),
-        "qa": MagicMock(),
-        "security": MagicMock(),
-        "accessibility": MagicMock(),
-        "code_review": MagicMock(),
-        "dbc_comments": MagicMock(),
-        "documentation": MagicMock(),
-    }
-
-    mock_pra_result = MagicMock()
-    mock_pra_result.success = True
-    mock_pra_result.final_spec_content = "# Test\n\nSpec."
-    mock_pra_result.iterations = 1
-    mock_pra_agent = MagicMock()
-    mock_pra_agent.run_workflow.return_value = mock_pra_result
-
-    with patch("orchestrator.update_job", side_effect=capture_update_job):
-        with patch("orchestrator._get_agents", return_value=mock_agents):
-            with patch(
-                "spec_parser.parse_spec_with_llm",
-                return_value=ProductRequirements(
-                    title="Test",
-                    description="Desc",
-                    acceptance_criteria=[],
-                    constraints=[],
-                ),
-            ):
-                with patch(
-                    "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
-                    return_value=mock_pra_agent,
-                ):
-                    with patch("planning_team.orchestrator.run_workflow") as mock_run_planning:
-                        mock_run_planning.return_value = {
-                            "success": False,
-                            "failure_reason": "Planning failed",
-                        }
-                        orchestrator.run_orchestrator(job_id, str(tmp_path))
-
-    failed_calls = [(jid, kw) for jid, kw in update_job_calls if kw.get("status") == "failed"]
-    assert len(failed_calls) >= 1
-    assert "planning" in failed_calls[0][1].get("error", "").lower()
+# ``test_run_orchestrator_fails_job_when_project_planning_raises`` previously
+# duplicated this planning-failure path with weaker assertions (no architecture-
+# not-called check). Removed because the case is fully covered above: the second
+# copy added no coverage and only duplicated setup.
 
 
 def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers(
@@ -643,3 +595,10 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
     assert call["plan_input"].architecture_overview == "Backend FastAPI; frontend Angular."
     mock_agents["tech_lead"].run.assert_not_called()
     mock_agents["architecture"].run.assert_not_called()
+    # The code-v2 team leads are not invoked either: the main path delegates
+    # per-task work to the coding team (patched above). Asserted on
+    # ``run_workflow`` — the v2 team-lead entry method — rather than ``.run`` so
+    # the guard is meaningful (a MagicMock tracks attributes independently, so
+    # ``.run.assert_not_called`` would pass even if ``run_workflow`` ran).
+    mock_agents["frontend_code_v2"].run_workflow.assert_not_called()
+    mock_agents["backend"].run_workflow.assert_not_called()

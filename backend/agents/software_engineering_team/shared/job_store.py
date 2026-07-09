@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 # SE-specific statuses (not in shared job_service_client)
 JOB_STATUS_AGENT_CRASH = "agent_crash"
+JOB_STATUS_PAUSED_LLM_LIMIT = "paused_llm_limit"
 JOB_STATUS_PAUSED_LLM_CONNECTIVITY = "paused_llm_connectivity"
 # Terminal-success status the coding team can hand back when an SE job delegates to it and the work
 # was already done (no changes needed). It reaches SE run-team jobs unchanged, so SE must treat it

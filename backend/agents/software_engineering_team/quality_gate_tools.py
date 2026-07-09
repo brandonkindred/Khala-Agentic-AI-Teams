@@ -19,6 +19,7 @@ Usage from an implementation worker, orchestrator, or Temporal activity::
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -174,12 +175,12 @@ def run_build_verification(
 ) -> BuildResult:
     """Run build verification (syntax check, compilation, tests).
 
-    Delegates to the existing ``_run_build_verification`` in the orchestrator
+    Delegates to ``_run_build_verification`` in :mod:`software_engineering_team.build_fix`
     which handles frontend (ng build), backend (python syntax + pytest), and
     devops (YAML + docker build) paths.
     """
     try:
-        from software_engineering_team.orchestrator import _run_build_verification
+        from software_engineering_team.build_fix import _run_build_verification
 
         success, error = _run_build_verification(repo_path, agent_type, task_id)
         is_env = error.startswith("ENV:") if error else False
@@ -215,6 +216,19 @@ def run_linting(
         return LintResult(passed=True)  # non-blocking
 
 
+# Directories pruned from the DbC-comments LLM-context file collection. Kept as
+# an explicit frozenset so the collection preserves the exact pre-refactor
+# ``rglob`` post-filter exclusion semantics (``node_modules`` / ``.git`` /
+# ``__pycache__`` / ``venv``). The win over ``rglob("*")`` is that ``os.walk``
+# prunes these in place — the traversal never descends into them — instead of
+# enumerating every entry under them and discarding after the fact, the same
+# redundant I/O the streamed repo-walk refactor removed elsewhere.
+_DBC_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "__pycache__", "venv"})
+
+# Code-file suffixes the DbC-comments agent is fed.
+_DBC_CODE_SUFFIXES = frozenset({".py", ".ts", ".js", ".java"})
+
+
 def run_dbc_comments(
     repo_path: Path,
     task_id: str,
@@ -231,23 +245,31 @@ def run_dbc_comments(
 
         from software_engineering_team.shared.git_utils import write_files_and_commit
 
-        # Read code from repo, stopping once the prompt budget (100k chars) is filled
+        # Streamed os.walk with in-place dir pruning so the traversal never
+        # descends into node_modules/.git/__pycache__/venv — the prior
+        # ``sorted(rglob("*"))`` materialized every entry under those subtrees
+        # before the post-filter discarded them. Sorting dirnames/filenames keeps
+        # the file order deterministic. ``is_file()`` guards against special
+        # files (fifos/sockets) that ``rglob`` would also have skipped and that
+        # would otherwise block ``read_text``. Stops once the 100k-char prompt
+        # budget is filled.
         code_parts: list[str] = []
         total_chars = 0
-        for f in sorted(repo_path.rglob("*")):
-            if not f.is_file():
-                continue
-            if f.suffix not in {".py", ".ts", ".js", ".java"}:
-                continue
-            if any(skip in f.parts for skip in ("node_modules", ".git", "__pycache__", "venv")):
-                continue
-            try:
-                content = f.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            part = f"--- {f.relative_to(repo_path)} ---\n{content}"
-            code_parts.append(part)
-            total_chars += len(part) + 1  # +1 for the join separator
+        for dirpath, dirnames, filenames in os.walk(repo_path):
+            dirnames[:] = sorted(d for d in dirnames if d not in _DBC_EXCLUDE_DIRS)
+            for name in sorted(filenames):
+                f = Path(dirpath) / name
+                if f.suffix not in _DBC_CODE_SUFFIXES or not f.is_file():
+                    continue
+                try:
+                    content = f.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                part = f"--- {f.relative_to(repo_path)} ---\n{content}"
+                code_parts.append(part)
+                total_chars += len(part) + 1  # +1 for the join separator
+                if total_chars >= 100_000:
+                    break
             if total_chars >= 100_000:
                 break
         code = "\n".join(code_parts)[:100_000]

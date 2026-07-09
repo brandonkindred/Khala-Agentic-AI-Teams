@@ -294,7 +294,23 @@ figure.
 When truthy (`true`/`1`/`yes`; default off), each SE-attributed LLM call is also
 persisted as a row in `se_agent_traces` — the substrate the metrics endpoint
 reads for per-job and total spend, so cost metrics work even without an OTLP
-collector. No-op when Postgres is disabled.
+collector. No-op when Postgres is disabled. Traces are written off the LLM call
+path: the observer enqueues into a bounded in-memory buffer and a background
+heartbeat drains it via batched `executemany` (see `SE_TRACE_FLUSH_INTERVAL_S`
+and `SE_TRACE_BUFFER_MAX`); a final drain runs at shutdown before the Postgres
+pool closes, so no row is lost on a clean shutdown.
+
+### SE_TRACE_FLUSH_INTERVAL_S
+Seconds between background drains of the in-memory trace buffer to
+`se_agent_traces` (default `2`, mirroring `SE_COST_FLUSH_INTERVAL_S`; garbage →
+`2`, negatives clamped to `0` which floors the loop at `0.1s` so it never
+busy-loops). The observer does zero DB I/O on the LLM call path; rows are
+eventually consistent within this interval.
+
+### SE_TRACE_BUFFER_MAX
+Maximum number of trace rows held in memory before the oldest is dropped
+(default `1000`; floor `1`). Overflow drops the oldest row and logs a WARNING
+once per burst — bounded memory, never blocks the caller.
 
 ### SE_TRACE_RETENTION_DAYS
 Retention window for `se_agent_traces` rows used by `trace_store.prune_traces`

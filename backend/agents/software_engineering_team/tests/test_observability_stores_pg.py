@@ -207,3 +207,42 @@ def test_trace_write_and_cost(_schema, monkeypatch) -> None:
     summary = trace_store.fetch_cost_since(datetime.now(tz=timezone.utc) - timedelta(days=1))
     assert summary["total_cost_usd"] == pytest.approx(0.42)
     assert summary["by_job"]["j9"] == pytest.approx(0.42)
+
+
+def test_write_rows_batch_roundtrip(_schema, monkeypatch) -> None:
+    """The batched executemany path writes rows identical to the one-shot path."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
+    from software_engineering_team.shared import trace_store
+
+    recs = [
+        type(
+            "_R",
+            (),
+            {
+                "timestamp": datetime.now(tz=timezone.utc).timestamp(),
+                "team": "software_engineering",
+                "agent_key": "backend",
+                "job_id": "jB",
+                "task_id": f"t{i}",
+                "phase": "execution",
+                "model": "m",
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "cost_usd": 0.01 * (i + 1),
+                "latency_ms": 100,
+                "status": "success",
+                "outcome": "success",
+                "objective": "o",
+                "request_id": f"r{i}",
+            },
+        )()
+        for i in range(3)
+    ]
+    rows = [trace_store._record_to_row(r) for r in recs]
+
+    assert trace_store.write_rows(rows) == 3
+    assert trace_store.write_rows([]) == 0  # empty batch is a no-op
+
+    summary = trace_store.fetch_cost_since(datetime.now(tz=timezone.utc) - timedelta(days=1))
+    assert summary["by_job"]["jB"] == pytest.approx(0.01 + 0.02 + 0.03)
