@@ -50,6 +50,33 @@ _BACKEND_REPO_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "__pycache__", "
 _REPO_BRIEFING_MAX_CHARS = 30_000
 
 
+def _has_section_header(text: str, header: str) -> bool:
+    """True if ``header`` begins an uncommented line in ``text``.
+
+    Each line is stripped of leading whitespace; comment lines (first non-blank
+    char ``#``) and blank lines are skipped, so a literal ``[tool.ruff]`` (or
+    ``[tool.pytest`` / ``[flake8]``) sitting inside a commented-out block no
+    longer matches. ``header`` is matched as a leading prefix, so ``"[tool.pytest"``
+    covers ``[tool.pytest.ini_options]``.
+
+    Preconditions: ``text`` is a ``str`` (may be empty); ``header`` is a non-empty
+      ``str`` beginning with ``[``.
+    Postconditions: returns a ``bool``; never raises (reads only ``text``). This
+      hardens the ``_detect_tooling`` probes against commented-out config without
+      pulling in a TOML/INI parser (the runtime is Python 3.10 with no
+      ``tomllib``/``tomli``); a header inside a string *value* (not a comment)
+      can still match, but that is the contrived case the real build/lint gate
+      catches downstream.
+    """
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith(header):
+            return True
+    return False
+
+
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     """Build team-owned tool agent instances (for plan/execute/review/problem_solve/deliver).
 
@@ -152,15 +179,16 @@ class BackendDevelopmentAgent:
         config location that the file-name-only ``.flake8`` probe would miss.
 
         The ``[tool.ruff]`` / ``[tool.pytest`` / ``[flake8]`` checks are
-        deliberate substring probes, not a real parse: the target runtime is
-        Python 3.10 (no ``tomllib``) and ``tomli`` is not a dependency, so
-        pulling in a parser for a pre-flight best-effort gate is not worth the
-        cost. The known limitation is a false positive when that literal
-        substring appears inside a string or comment in the probed file —
-        contrived in practice for these specific section headers, and the
-        pre-flight only decides whether to fail the task early for missing
-        tooling, so a false positive errs toward proceeding (a real build/lint
-        gate still enforces correctness).
+        line-anchored probes via ``_has_section_header`` (skip comment/blank
+        lines, match the header at the start of an uncommented line), not a
+        real parse: the target runtime is Python 3.10 (no ``tomllib``) and
+        ``tomli`` is not a dependency, so pulling in a parser for a pre-flight
+        best-effort gate is not worth the cost. Commenting out a config block
+        no longer matches (the common false-positive case); a header inside a
+        string *value* still can, but that is contrived for these section
+        headers, and the pre-flight only decides whether to fail the task
+        early for missing tooling, so a false positive errs toward proceeding
+        (a real build/lint gate still enforces correctness).
 
         Preconditions: ``repo_path`` is a directory.
         Postconditions: returns two booleans. Raises ``AssertionError`` if the
@@ -183,11 +211,12 @@ class BackendDevelopmentAgent:
         has_lint = (
             (repo_path / "ruff.toml").exists()
             or (repo_path / ".flake8").exists()
-            or "[tool.ruff]" in pyproject_text
-            or "[flake8]" in setup_cfg_text
+            or _has_section_header(pyproject_text, "[tool.ruff]")
+            or _has_section_header(setup_cfg_text, "[flake8]")
         )
         has_test = (repo_path / "tests").is_dir() and (
-            (repo_path / "pytest.ini").exists() or "[tool.pytest" in pyproject_text
+            (repo_path / "pytest.ini").exists()
+            or _has_section_header(pyproject_text, "[tool.pytest")
         )
         return has_lint, has_test
 

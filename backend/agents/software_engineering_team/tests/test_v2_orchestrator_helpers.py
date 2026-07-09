@@ -345,3 +345,35 @@ def test_be_detect_tooling_setup_cfg_without_flake8_section_is_not_lint(tmp_path
     (tmp_path / "pytest.ini").write_text("[pytest]")
     has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
     assert not has_lint and has_test
+
+
+def test_be_detect_tooling_ignores_commented_out_section_headers(tmp_path: Path):
+    """A section header inside a comment (``# [tool.ruff]``) is not treated as
+    real config — the line-anchored probe skips comment lines, so a
+    commented-out block no longer produces a false positive."""
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    (tmp_path / "pyproject.toml").write_text(
+        '# [tool.ruff] commented out\n#   [flake8] also commented\n[tool.poetry]\nname = "app"\n'
+    )
+    (tmp_path / "setup.cfg").write_text("# [flake8]\n# max-line-length = 100\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pytest.ini").write_text("[pytest]")
+    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    assert not has_lint and has_test
+
+
+def test_be_detect_tooling_matches_indented_section_header(tmp_path: Path):
+    """A section header with leading whitespace still matches — stripping the
+    line before the prefix check keeps real (lightly indented) config working."""
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    (tmp_path / "pyproject.toml").write_text("  [tool.ruff]\n  line-length = 120\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pytest.ini").write_text("[pytest]")
+    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    assert has_lint and has_test
