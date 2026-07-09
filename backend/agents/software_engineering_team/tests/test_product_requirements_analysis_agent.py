@@ -9,9 +9,6 @@ import pytest
 from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
 from product_requirements_analysis_agent.agent import (
     MAX_GAP_ROUNDS,
-    SOP_PHASE1_QUESTIONS,
-    _context_discovery_fallback_questions,
-    _sop_phase1_fallback_questions,
 )
 from product_requirements_analysis_agent.models import (
     AnalysisPhase,
@@ -26,6 +23,11 @@ from product_requirements_analysis_agent.models import (
     SpecReviewResult,
     ToolGapAnalysis,
     ToolRecommendation,
+)
+from product_requirements_analysis_agent.question_data import (
+    SOP_PHASE1_QUESTIONS,
+    _context_discovery_fallback_questions,
+    _sop_phase1_fallback_questions,
 )
 
 from llm_service.clients.dummy import DummyLLMClient

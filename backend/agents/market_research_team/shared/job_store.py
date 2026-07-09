@@ -1,11 +1,13 @@
-"""Job store for the Market Research team — backed by JobServiceClient."""
+"""Job store for the Market Research team — backed by JobServiceClient.
+
+The standard create/get/update/list + cancel/is-cancelled/delete + shutdown-sweep
+wrappers come from the shared ``job_store_factory`` so this module only owns the
+team's client singleton.
+"""
 
 from __future__ import annotations
 
-import logging
-import os
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from job_service_client import (
     JOB_STATUS_CANCELLED,
@@ -15,6 +17,7 @@ from job_service_client import (
     JOB_STATUS_RUNNING,
     JobServiceClient,
 )
+from job_store_factory import make_status_job_store
 
 __all__ = [
     "JOB_STATUS_CANCELLED",
@@ -32,57 +35,24 @@ __all__ = [
     "update_job",
 ]
 
-logger = logging.getLogger(__name__)
-
-DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
-
 _client_instance: Optional[JobServiceClient] = None
 
 
-def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
+def _client() -> JobServiceClient:
     global _client_instance
     if _client_instance is None:
         _client_instance = JobServiceClient(team="market_research_team")
     return _client_instance
 
 
-def create_job(job_id: str, **fields: Any) -> None:
-    _client().create_job(job_id, status=JOB_STATUS_PENDING, **fields)
-
-
-def get_job(job_id: str) -> Optional[Dict[str, Any]]:
-    return _client().get_job(job_id)
-
-
-def update_job(job_id: str, **fields: Any) -> None:
-    _client().update_job(job_id, **fields)
-
-
-def list_jobs(statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    return _client().list_jobs(statuses=statuses)
-
-
-def cancel_job(job_id: str) -> bool:
-    job = _client().get_job(job_id)
-    if job is None or job.get("status") not in {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}:
-        return False
-    _client().update_job(job_id, status=JOB_STATUS_CANCELLED)
-    return True
-
-
-def is_job_cancelled(job_id: str) -> bool:
-    """Return True if the job exists and has been marked cancelled."""
-    job = _client().get_job(job_id)
-    return job is not None and job.get("status") == JOB_STATUS_CANCELLED
-
-
-def delete_job(job_id: str) -> bool:
-    return bool(_client().delete_job(job_id))
-
-
-def mark_all_running_jobs_failed(reason: str) -> None:
-    """Mark all pending or running jobs as failed (e.g. on server shutdown)."""
-    try:
-        _client().mark_all_active_jobs_failed(reason)
-    except Exception as e:  # pragma: no cover
-        logger.warning("mark_all_running_jobs_failed: %s", e)
+# Standard status wrappers, bound to this team's client. The lambda resolves
+# ``_client`` by name on every call so tests can monkeypatch ``job_store._client``.
+_store = make_status_job_store(lambda: _client())
+create_job = _store.create_job
+get_job = _store.get_job
+update_job = _store.update_job
+list_jobs = _store.list_jobs
+cancel_job = _store.cancel_job
+is_job_cancelled = _store.is_job_cancelled
+delete_job = _store.delete_job
+mark_all_running_jobs_failed = _store.mark_all_running_jobs_failed
