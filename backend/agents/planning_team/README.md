@@ -57,6 +57,39 @@ folder (never read as source). Every run is confined to a fresh directory under
 reduced to a single sanitized segment, so a supplied path can never write outside
 the cache root. At least one of `initial_brief`/`spec_content` is required.
 
+## Execution model (thread vs Temporal)
+
+`POST /run` records a job and dispatches the pipeline one of two ways, deciding on
+`TEMPORAL_ADDRESS`:
+
+- **Thread mode** (default, `TEMPORAL_ADDRESS` unset): the orchestrator
+  (`orchestrator.run_workflow`) runs all phases in a background thread.
+- **Temporal mode** (`TEMPORAL_ADDRESS` set): `PlanningWorkflow` (`temporal/`) drives
+  the **same phase sequence**, but **each phase is its own `@activity.defn`** so
+  Temporal records, times out, retries and (for the long PRA / AI-Systems polls)
+  heartbeats every phase independently — not one opaque black-box activity.
+
+The two paths share the phase functions in `phases/`, so they produce the same
+handoff (a parity test pins this). The mutable phase `context` crosses each
+activity boundary as a JSON-native dict — the activity wrappers re-hydrate models
+inside the phase functions and normalize `ClientContext`/`HandoffPackage` back to
+dicts on the way out. Progress and terminal status are written to the durable job
+store, so a completed run survives a worker restart and the API keeps polling
+`GET /status/{job_id}`.
+
+| Phase activity | Timeout | Retry |
+|----------------|---------|-------|
+| `intake` / `synthesis` / `finalize` | 5 min | up to 3 (deterministic, safe) |
+| `discovery` / `requirements` / `market_research` | 1 h | 1 (non-idempotent LLM/HTTP) |
+| `document_production` / `sub_agent_provisioning` | 2 h (+ 5 min heartbeat) | 1 (writes files / submits external jobs) |
+
+The worker is registered via `shared_temporal.start_team_worker` (Pattern A:
+`temporal/__init__.py` exports `WORKFLOWS`/`ACTIVITIES`) and started per uvicorn
+worker by the `team_service` entrypoint (`TEAM_TEMPORAL_WORKER_MODULE` /
+`TEAM_TEMPORAL_WORKER_FUNC`), with the API lifespan as a standalone-dev backstop.
+The task queue is `planning` (override with `TEMPORAL_TASK_QUEUE_PLANNING`); large
+handoffs can enable the shared gzip payload codec via `TEMPORAL_PAYLOAD_COMPRESSION`.
+
 ## How downstream teams use the handoff
 
 - **Dev / UI / UX**: Consume the handoff package: `client_context_document_path`, `validated_spec_path`, `prd_path`, and `architecture_overview`. All paths are under the same `repo_path` (e.g. `plan/client_context.md`, `plan/product_analysis/validated_spec.md`, `plan/product_analysis/product_requirements_document.md`).
@@ -87,6 +120,14 @@ planning_team/
 ├── shared/
 │   ├── __init__.py
 │   └── job_store.py
+├── temporal/           # Durable execution: PlanningWorkflow + one activity per phase
+│   ├── __init__.py     # WORKFLOWS / ACTIVITIES (Pattern A export contract)
+│   ├── activities.py   # @activity.defn per phase (intake … finalize)
+│   ├── workflows.py    # PlanningWorkflow: phase state machine
+│   ├── worker.py       # start_planning_temporal_worker_thread (shared_temporal)
+│   ├── start_workflow.py  # sync → workflow dispatch bridge
+│   ├── client.py
+│   └── constants.py    # TASK_QUEUE, WORKFLOW_ID_PREFIX
 └── api/
     ├── __init__.py
     └── main.py
