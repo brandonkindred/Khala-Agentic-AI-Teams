@@ -31,7 +31,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from branding_team.temporal import activities as _activities
-    from branding_team.temporal.constants import PHASE_SEQUENCE, TASK_QUEUE
+    from branding_team.temporal.constants import PHASE_SEQUENCE, TASK_QUEUE, stop_index
 
 # Per-phase graph runs make many LLM calls; llm_service already fails over on
 # transient provider errors, so one bounded retry is enough here — and because a
@@ -86,14 +86,25 @@ class BrandingWorkflow:
     def cancel(self) -> None:
         """Request cooperative cancellation of the run.
 
-        The flag is checked between phases, so a cancel that arrives mid-run
-        short-circuits before the next (expensive) phase activity is dispatched.
+        Preconditions:
+            - None (a Temporal signal handler takes no caller-supplied state).
+        Postconditions:
+            - Sets ``_cancel_requested``; the flag is checked between phases, so a
+              cancel that arrives mid-run short-circuits before the next
+              (expensive) phase activity is dispatched. Idempotent.
         """
         self._cancel_requested = True
 
     @workflow.query
     def progress(self) -> Dict[str, Any]:
-        """Return the current ``{phase, fraction, cancel_requested}`` snapshot."""
+        """Return the current progress snapshot.
+
+        Preconditions:
+            - None (read-only query; must not mutate workflow state).
+        Postconditions:
+            - Returns ``{phase, fraction, cancel_requested}`` reflecting the last
+              ``_advance`` call and the cancel flag; no side effects.
+        """
         return {
             "phase": self._phase,
             "fraction": self._fraction,
@@ -101,6 +112,13 @@ class BrandingWorkflow:
         }
 
     def _advance(self, phase: str, fraction: float) -> None:
+        """Update the queryable progress snapshot.
+
+        Preconditions:
+            - ``fraction`` is in ``[0.0, 1.0]``.
+        Postconditions:
+            - ``progress()`` subsequently reports ``phase``/``fraction``.
+        """
         self._phase = phase
         self._fraction = fraction
 
@@ -120,23 +138,27 @@ class BrandingWorkflow:
               FAILED row and re-raises so the workflow reflects the failure.
         """
         job_id = payload["job_id"]
-        target_phase = payload.get("target_phase")
-        stop_idx = PHASE_SEQUENCE.index(target_phase) if target_phase else len(PHASE_SEQUENCE) - 1
-        phases: List[str] = PHASE_SEQUENCE[: stop_idx + 1]
-
-        self._advance("starting", 0.02)
-        proceed = await workflow.execute_activity(
-            _activities.begin_branding_job_activity,
-            args=[job_id],
-            task_queue=TASK_QUEUE,
-            start_to_close_timeout=_SHORT_TIMEOUT,
-            retry_policy=_DEFAULT_RETRY,
-        )
-        if not proceed:  # already cancelled at entry — terminal, not a failure
-            self._advance("cancelled", 1.0)
-            return
+        # target_phase="complete" (BrandPhase.COMPLETE) is a valid enum value the
+        # API accepts; stop_index maps it (and any non-runnable value) to "run all
+        # phases", matching the thread path instead of raising ValueError.
+        phases: List[str] = PHASE_SEQUENCE[: stop_index(payload.get("target_phase")) + 1]
 
         try:
+            # begin is inside the try so a begin failure records a FAILED row,
+            # mirroring the old _run_branding_core whose RUNNING transition and
+            # FAILED except-branch lived in one try.
+            self._advance("starting", 0.02)
+            proceed = await workflow.execute_activity(
+                _activities.begin_branding_job_activity,
+                args=[job_id],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=_SHORT_TIMEOUT,
+                retry_policy=_DEFAULT_RETRY,
+            )
+            if not proceed:  # already cancelled at entry — terminal, not a failure
+                self._advance("cancelled", 1.0)
+                return
+
             prior_outputs: Dict[str, Any] = {}
             phase_count = len(phases) or 1
             for i, phase in enumerate(phases):
@@ -170,15 +192,19 @@ class BrandingWorkflow:
             self._advance("done", 1.0)
         except Exception as exc:  # noqa: BLE001 — record the failure, then re-raise
             # Mirror the except-branch of the old _run_branding_core: mark the job
-            # FAILED (cancel-guarded inside the activity) and let the failure fail
-            # the workflow, carrying the real cause.
-            await workflow.execute_activity(
-                _activities.mark_branding_failed_activity,
-                args=[job_id, str(exc)],
-                task_queue=TASK_QUEUE,
-                start_to_close_timeout=_SHORT_TIMEOUT,
-                retry_policy=_DEFAULT_RETRY,
-            )
+            # FAILED (cancel-guarded inside the activity), then re-raise so the
+            # workflow reflects the real cause. The mark-failed dispatch is
+            # best-effort — its own failure must not mask the original exception.
+            try:
+                await workflow.execute_activity(
+                    _activities.mark_branding_failed_activity,
+                    args=[job_id, str(exc)],
+                    task_queue=TASK_QUEUE,
+                    start_to_close_timeout=_SHORT_TIMEOUT,
+                    retry_policy=_DEFAULT_RETRY,
+                )
+            except Exception:  # noqa: BLE001 — never mask the original pipeline error
+                pass
             raise
 
     async def _cancelled(self, job_id: str) -> bool:
@@ -203,11 +229,19 @@ class BrandingWorkflow:
     ) -> tuple[Any, Any]:
         """Run the enabled integrations concurrently; return ``(mr, da)`` results.
 
+        Preconditions:
+            - ``payload`` carries the ``include_market_research`` /
+              ``include_design_assets`` flags and the mission; ``prior_outputs``
+              maps completed phase value strings to their output dicts (used to
+              pass ``strategic_core`` to design assets).
         Postconditions:
             - Returns ``(competitive_snapshot, design_asset_result)``; each is the
-              activity's dict result, or ``None`` when its integration flag is off.
-              Gathering enabled integrations concurrently mirrors thread mode's
-              ``_gather_integrations``.
+              activity's dict result, or ``None`` when its flag is off. Gathering
+              enabled integrations concurrently mirrors thread mode's
+              ``_gather_integrations``, including its asymmetry: market research is
+              best-effort (a Temporal-level activity failure — timeout/crash/retry
+              exhaustion — degrades to ``None`` rather than failing the run), while
+              a design-asset failure propagates.
         """
         coros = []
         kinds: List[str] = []
@@ -237,10 +271,16 @@ class BrandingWorkflow:
         competitive_snapshot: Any = None
         design_asset_result: Any = None
         if coros:
-            results = await asyncio.gather(*coros)
+            # return_exceptions so a market-research failure can be absorbed
+            # (best-effort) without cancelling the concurrent design-assets call.
+            results = await asyncio.gather(*coros, return_exceptions=True)
             for kind, result in zip(kinds, results):
                 if kind == "mr":
-                    competitive_snapshot = result
+                    # Best-effort: a failed MR activity degrades to None (thread mode).
+                    competitive_snapshot = None if isinstance(result, BaseException) else result
                 else:
+                    # Design-asset errors propagate, matching thread mode.
+                    if isinstance(result, BaseException):
+                        raise result
                     design_asset_result = result
         return competitive_snapshot, design_asset_result

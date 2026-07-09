@@ -958,7 +958,11 @@ def _signal_branding_cancel(job_id: str) -> None:
         from branding_team.temporal.constants import WORKFLOW_ID_PREFIX
         from shared_temporal import signal_workflow_sync
 
-        signal_workflow_sync(f"{WORKFLOW_ID_PREFIX}{job_id}", "cancel")
+        # client_ready_timeout_s=0 so the cancel endpoint never blocks waiting for
+        # the worker client — the signal is only an optimization (the job-store
+        # cancel flag already stops the run at the next phase boundary), so if the
+        # worker isn't immediately reachable we skip it rather than hang the request.
+        signal_workflow_sync(f"{WORKFLOW_ID_PREFIX}{job_id}", "cancel", client_ready_timeout_s=0)
     except Exception:
         logger.debug("branding cancel signal not delivered for job %s", job_id, exc_info=True)
 

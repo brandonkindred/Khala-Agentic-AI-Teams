@@ -180,9 +180,13 @@ def finalize_branding_activity(
           via the orchestrator's shared ``_assemble_team_output`` (same assembly as
           thread mode).
         - The brand-version append is gated by the ``"finalized"`` checkpoint so a
-          finalize retry never duplicates it; the COMPLETED write is idempotent and
-          always applied unless the job was cancelled (cancel is terminal, not
-          completed).
+          finalize retry that runs after the checkpoint is durably written does not
+          re-append. The append and the checkpoint are two separate job-service
+          calls, so a crash in the narrow window between them can still re-append
+          on retry (``append_brand_version`` is not idempotent); the gate is a
+          best-effort dedup, not an exactly-once guarantee.
+        - The COMPLETED write is idempotent and always applied unless the job was
+          cancelled (cancel is terminal, not completed).
     """
     from branding_team.api.main import (
         JOB_STATUS_COMPLETED,
@@ -203,7 +207,7 @@ def finalize_branding_activity(
         StrategicCoreOutput,
         VisualIdentityOutput,
     )
-    from branding_team.temporal.constants import PHASE_SEQUENCE
+    from branding_team.temporal.constants import stop_index
     from shared_temporal import load_checkpoint, save_checkpoint
 
     job_id = payload["job_id"]
@@ -213,8 +217,7 @@ def finalize_branding_activity(
     client_id = payload.get("client_id")
     brand_id = payload.get("brand_id")
 
-    target_phase = payload.get("target_phase")
-    stop_idx = PHASE_SEQUENCE.index(target_phase) if target_phase else len(PHASE_SEQUENCE) - 1
+    stop_idx = stop_index(payload.get("target_phase"))
 
     def _model(cls: type, key: str) -> Any:
         data = phase_outputs.get(key)
@@ -244,9 +247,12 @@ def finalize_branding_activity(
         stop_idx=stop_idx,
     )
 
-    # Gate the non-idempotent persistence so a finalize retry cannot append a
-    # duplicate brand version. The COMPLETED write below is idempotent, so it is
-    # left outside the gate and always applied (unless the job was cancelled).
+    # Best-effort dedup of the non-idempotent brand-version append: the checkpoint
+    # is written right after the append so a later retry skips it. Append-then-
+    # checkpoint (rather than the reverse) is deliberate — a crash in between can
+    # duplicate a version, but never drops one. The COMPLETED write below is
+    # idempotent, so it is left outside the gate and always applied (unless the
+    # job was cancelled).
     if not load_checkpoint(_CHECKPOINT_TEAM, job_id, _FINALIZED_CHECKPOINT):
         if client_id and brand_id:
             branding_store.append_brand_version(client_id, brand_id, output)

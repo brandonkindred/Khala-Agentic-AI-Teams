@@ -70,6 +70,30 @@ def test_phase_sequence_matches_brand_phase_values() -> None:
     ]
 
 
+def test_phase_sequence_derives_from_canonical_phase_order() -> None:
+    """PHASE_SEQUENCE (temporal, value strings) must not drift from the canonical
+    PHASE_ORDER (graphs/shared, enums). Asserting equality here catches a reorder
+    or insertion in one that is not mirrored in the other."""
+    from branding_team.graphs.shared import PHASE_ORDER
+    from branding_team.temporal.constants import PHASE_SEQUENCE
+
+    assert PHASE_SEQUENCE == [p.value for p in PHASE_ORDER]
+
+
+def test_stop_index_maps_non_runnable_phase_to_all() -> None:
+    """stop_index maps None / COMPLETE / any non-runnable value to the last phase
+    (run all), mirroring thread mode's phase_index fallback — the guard that keeps
+    target_phase='complete' from raising ValueError in the workflow."""
+    from branding_team.temporal.constants import PHASE_SEQUENCE, stop_index
+
+    last = len(PHASE_SEQUENCE) - 1
+    assert stop_index(None) == last
+    assert stop_index("complete") == last  # BrandPhase.COMPLETE — not a pipeline phase
+    assert stop_index("bogus") == last
+    assert stop_index("strategic_core") == 0
+    assert stop_index("governance") == last
+
+
 # ---------------------------------------------------------------------------
 # worker.py
 # ---------------------------------------------------------------------------
@@ -410,9 +434,9 @@ def test_finalize_activity_skips_completion_when_cancelled(monkeypatch) -> None:
     ):
         activities.finalize_branding_activity(_phase_payload(), {}, None, None)
 
-    # Cancelled mid-finalize is terminal — no COMPLETED transition.
-    for _, kwargs in mock_update.call_args_list:
-        assert kwargs.get("status") != main_mod.JOB_STATUS_COMPLETED
+    # Cancelled mid-finalize is terminal: finalize returns at the cancel guard
+    # without ever calling update_job, so there is no COMPLETED transition.
+    mock_update.assert_not_called()
 
 
 def test_mark_failed_activity_writes_failed_row() -> None:
@@ -543,17 +567,23 @@ def _drive_workflow(
     payload: dict,
     *,
     begin: bool = True,
+    begin_error: bool = False,
     cancel_after: int | None = None,
     cancel_flag: bool = False,
     phase_error: str | None = None,
     mr_result=None,
     da_result=None,
+    mr_error: bool = False,
+    da_error: bool = False,
+    mark_failed_error: bool = False,
 ):
     """Run BrandingWorkflow.run with workflow.execute_activity monkeypatched.
 
     Returns a namespace of ``calls`` (one dict per execute_activity), ``prior``
-    (per-phase snapshot of prior_outputs at dispatch time), ``instance`` (the
-    workflow for a post-run progress query), and ``error`` (raised exception).
+    (per-phase snapshot of prior_outputs at dispatch time), ``finalize`` (the
+    finalize args), ``instance`` (the workflow for a post-run progress query), and
+    ``error`` (the exception that escaped run()). The ``*_error`` flags make the
+    corresponding fake activity raise, exercising the failure/degradation paths.
     """
     from branding_team.temporal import workflows as wf
 
@@ -583,6 +613,8 @@ def _drive_workflow(
             }
         )
         if activity_fn is A.begin_branding_job_activity:
+            if begin_error:
+                raise RuntimeError("begin-boom")
             return begin
         if activity_fn is A.check_branding_cancelled_activity:
             state["checks"] += 1
@@ -594,8 +626,12 @@ def _drive_workflow(
                 raise RuntimeError(f"boom-{phase}")
             return {"_out": phase}
         if activity_fn is A.run_market_research_activity:
+            if mr_error:
+                raise RuntimeError("mr-boom")
             return mr_result
         if activity_fn is A.run_design_assets_activity:
+            if da_error:
+                raise RuntimeError("da-boom")
             return da_result
         if activity_fn is A.finalize_branding_activity:
             finalize_args["payload"] = args[0]
@@ -604,6 +640,8 @@ def _drive_workflow(
             finalize_args["design_asset_result"] = args[3]
             return None
         if activity_fn is A.mark_branding_failed_activity:
+            if mark_failed_error:
+                raise RuntimeError("markfailed-boom")
             return None
         return None
 
@@ -749,6 +787,74 @@ def test_workflow_uses_bounded_retry_tiers() -> None:
     assert by_name["run_branding_phase_activity"]["heartbeat"] == timedelta(minutes=5)
     assert by_name["begin_branding_job_activity"]["retry"].maximum_attempts == 3
     assert by_name["finalize_branding_activity"]["retry"].maximum_attempts == 3
+
+
+def test_workflow_target_phase_complete_runs_all_phases() -> None:
+    """Regression: target_phase='complete' (BrandPhase.COMPLETE) must run all
+    phases (like thread mode), not raise ValueError and wedge the job."""
+    from branding_team.temporal.constants import PHASE_SEQUENCE
+
+    result = _drive_workflow(_phase_payload(target_phase="complete"))
+
+    phases_run = [c["args"][1] for c in result.calls if c["name"] == "run_branding_phase_activity"]
+    assert phases_run == PHASE_SEQUENCE
+    assert "finalize_branding_activity" in _names(result)
+    assert result.error is None
+    assert result.instance.progress()["phase"] == "done"
+
+
+def test_workflow_market_research_failure_degrades_to_none() -> None:
+    """A Temporal-level market-research failure is best-effort: it degrades to
+    competitive_snapshot=None and the run still finalizes (matches thread mode)."""
+    result = _drive_workflow(
+        _phase_payload(include_market_research=True, include_design_assets=True),
+        mr_error=True,
+        da_result={"request_id": "da"},
+    )
+
+    assert result.error is None
+    assert "finalize_branding_activity" in _names(result)
+    assert result.finalize["competitive_snapshot"] is None
+    # Design assets still succeeds concurrently.
+    assert result.finalize["design_asset_result"] == {"request_id": "da"}
+
+
+def test_workflow_design_assets_failure_fails_the_run() -> None:
+    """Design-asset errors propagate (unlike market research), failing the run
+    via mark_failed — matching thread mode where design-asset errors are raised."""
+    result = _drive_workflow(
+        _phase_payload(include_design_assets=True),
+        da_error=True,
+    )
+
+    assert isinstance(result.error, RuntimeError)
+    assert "mark_branding_failed_activity" in _names(result)
+    assert "finalize_branding_activity" not in _names(result)
+
+
+def test_workflow_mark_failed_failure_does_not_mask_original_error() -> None:
+    """If mark_branding_failed_activity itself fails, the original pipeline error
+    must still propagate (not be replaced by the mark-failed error)."""
+    result = _drive_workflow(
+        _phase_payload(),
+        phase_error="strategic_core",
+        mark_failed_error=True,
+    )
+
+    assert "mark_branding_failed_activity" in _names(result)
+    # The escaping error is the original phase error, not 'markfailed-boom'.
+    assert isinstance(result.error, RuntimeError)
+    assert "boom-strategic_core" in str(result.error)
+
+
+def test_workflow_begin_failure_marks_failed() -> None:
+    """A begin failure (exception, not a cancel) is now inside the try, so it
+    records a FAILED row instead of leaving the job silently PENDING."""
+    result = _drive_workflow(_phase_payload(), begin_error=True)
+
+    assert "mark_branding_failed_activity" in _names(result)
+    assert "run_branding_phase_activity" not in _names(result)
+    assert isinstance(result.error, RuntimeError)
 
 
 # ---------------------------------------------------------------------------
