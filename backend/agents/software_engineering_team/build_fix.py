@@ -10,6 +10,15 @@ Invariants:
     - ``_run_build_verification`` is the only consumer of
       ``EXCEPTION_HANDLER_TEST_PATTERNS``.
     - Neither function raises into the build gate: failures return ``(False, summary)``.
+
+Side effect on import: this module prepends its own directory to ``sys.path``
+(the ``_team_dir`` / ``sys.path.insert`` block below) so the per-team subpackages
+(``backend_code_v2_team`` etc.) import as top-level names — the same bootstrap
+``orchestrator.py`` uses. This runs at import time, so merely importing
+``build_fix`` (e.g. for static analysis or test discovery) mutates ``sys.path``
+globally. It is a pre-existing pattern carried over from the orchestrator and
+kept deliberately so this module's imports resolve identically; do not remove
+it without a matching change to ``orchestrator.py``.
 """
 
 from __future__ import annotations

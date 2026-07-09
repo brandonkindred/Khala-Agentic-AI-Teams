@@ -60,6 +60,13 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     this module expensive to import and reintroduce a circular import. Keeping
     them lazy bounds the import cost to actual runs, so they are not hoisted to
     module scope.
+
+    Preconditions: ``llm`` is a configured ``LLMClient`` (not ``None``) — agents
+      that need an LLM (documentation, testing, security, UI/UX, accessibility,
+      performance, architecture, build) are constructed with it.
+    Postconditions: returns a ``Dict[ToolAgentKind, Any]`` mapping every
+      ``ToolAgentKind`` this team uses to a constructed agent instance; does
+      not raise on the happy path.
     """
     from software_engineering_team.shared.tool_agent_git_branch import (
         GitBranchManagementToolAgent,

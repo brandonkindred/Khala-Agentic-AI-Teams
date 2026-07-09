@@ -42,7 +42,12 @@ def _detect_language(repo_path: Path, task: Task) -> str:
                     return "angular"
                 if '"react"' in content or "'react'" in content:
                     return "react"
-            except Exception:
+            except (OSError, UnicodeDecodeError):
+                # Best-effort substring probe on the raw text (no json.loads),
+                # so only file-read (OSError) and decode (UnicodeDecodeError)
+                # failures can land here — a malformed package.json just means
+                # no stack signal was found and the repo walk / task-text
+                # heuristics decide instead.
                 pass
         # Pruned os.walk (find_repo_files) so a checkout with a large
         # node_modules/.git/dist/.angular is never descended into while probing
