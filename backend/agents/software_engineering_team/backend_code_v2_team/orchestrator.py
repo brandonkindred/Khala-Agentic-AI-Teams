@@ -147,17 +147,20 @@ class BackendDevelopmentAgent:
         Detects ruff/flake8 (or a ``[tool.ruff]`` block in ``pyproject.toml``) as
         lint, and a ``tests`` dir with a pytest config (``pytest.ini`` or a
         ``[tool.pytest`` block in ``pyproject.toml``) as testing. Reads
-        ``pyproject.toml`` once and reuses it for both probes.
+        ``pyproject.toml`` once and reuses it for both probes. Lint also
+        recognises a ``[flake8]`` section in ``setup.cfg`` — a common flake8
+        config location that the file-name-only ``.flake8`` probe would miss.
 
-        The ``[tool.ruff]`` / ``[tool.pytest`` checks are deliberate substring
-        probes, not a TOML parse: the target runtime is Python 3.10 (no
-        ``tomllib``) and ``tomli`` is not a dependency, so pulling in a parser
-        for a pre-flight best-effort gate is not worth the cost. The known
-        limitation is a false positive when that literal substring appears inside
-        a string or comment in ``pyproject.toml`` — contrived in practice for
-        these specific section headers, and the pre-flight only decides whether
-        to fail the task early for missing tooling, so a false positive errs
-        toward proceeding (a real build/lint gate still enforces correctness).
+        The ``[tool.ruff]`` / ``[tool.pytest`` / ``[flake8]`` checks are
+        deliberate substring probes, not a real parse: the target runtime is
+        Python 3.10 (no ``tomllib``) and ``tomli`` is not a dependency, so
+        pulling in a parser for a pre-flight best-effort gate is not worth the
+        cost. The known limitation is a false positive when that literal
+        substring appears inside a string or comment in the probed file —
+        contrived in practice for these specific section headers, and the
+        pre-flight only decides whether to fail the task early for missing
+        tooling, so a false positive errs toward proceeding (a real build/lint
+        gate still enforces correctness).
 
         Preconditions: ``repo_path`` is a directory.
         Postconditions: returns two booleans. Raises ``AssertionError`` if the
@@ -171,10 +174,17 @@ class BackendDevelopmentAgent:
             if pyproject_path.exists()
             else ""
         )
+        setup_cfg_path = repo_path / "setup.cfg"
+        setup_cfg_text = (
+            setup_cfg_path.read_text(encoding="utf-8", errors="replace")
+            if setup_cfg_path.exists()
+            else ""
+        )
         has_lint = (
             (repo_path / "ruff.toml").exists()
             or (repo_path / ".flake8").exists()
             or "[tool.ruff]" in pyproject_text
+            or "[flake8]" in setup_cfg_text
         )
         has_test = (repo_path / "tests").is_dir() and (
             (repo_path / "pytest.ini").exists() or "[tool.pytest" in pyproject_text

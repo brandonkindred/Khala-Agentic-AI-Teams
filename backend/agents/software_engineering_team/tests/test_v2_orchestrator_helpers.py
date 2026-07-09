@@ -316,3 +316,32 @@ def test_be_detect_tooling_flake8_satisfies_lint(tmp_path: Path):
     (tmp_path / "pytest.ini").write_text("[pytest]")
     has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
     assert has_lint and has_test
+
+
+def test_be_detect_tooling_setup_cfg_flake8_section_satisfies_lint(tmp_path: Path):
+    """A ``[flake8]`` section in ``setup.cfg`` counts as lint config — a common
+    flake8 location the file-name-only ``.flake8`` probe would miss (false
+    negative)."""
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    (tmp_path / "setup.cfg").write_text("[metadata]\nname=app\n\n[flake8]\nmax-line-length=100\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pytest.ini").write_text("[pytest]")
+    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    assert has_lint and has_test
+
+
+def test_be_detect_tooling_setup_cfg_without_flake8_section_is_not_lint(tmp_path: Path):
+    """A ``setup.cfg`` with no ``[flake8]`` section does not satisfy lint — the
+    probe keys off the section header, not the file's mere presence."""
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    (tmp_path / "setup.cfg").write_text("[metadata]\nname=app\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pytest.ini").write_text("[pytest]")
+    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    assert not has_lint and has_test

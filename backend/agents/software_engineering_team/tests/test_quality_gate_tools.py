@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 
 def test_default_llm_getter_returns_strands_model(monkeypatch) -> None:
+    """The default llm_getter returns the strands model for the requested agent key."""
     from software_engineering_team import quality_gate_tools
 
     sentinel = object()
@@ -40,6 +41,7 @@ class _ReviewResult:
 
 
 def test_run_code_review_happy_path(monkeypatch) -> None:
+    """run_code_review returns an approved result with issues and summary when the downstream agent succeeds."""
     from software_engineering_team import quality_gate_tools as q
 
     monkeypatch.setattr(
@@ -123,6 +125,7 @@ def test_run_code_review_default_task_requirements_list(monkeypatch) -> None:
 
 
 def test_run_code_review_exception_returns_failed(monkeypatch) -> None:
+    """run_code_review fails closed (approved=False, 'Review failed' summary) when the downstream agent raises."""
     from software_engineering_team import quality_gate_tools as q
 
     def boom(*a, **kw):
@@ -150,6 +153,7 @@ def test_run_code_review_exception_returns_failed(monkeypatch) -> None:
 
 
 def test_run_build_verification_success(monkeypatch, tmp_path) -> None:
+    """run_build_verification reports success and no env failure when the build verifier returns (True, '')."""
     from software_engineering_team import quality_gate_tools as q
 
     monkeypatch.setattr(
@@ -162,6 +166,7 @@ def test_run_build_verification_success(monkeypatch, tmp_path) -> None:
 
 
 def test_run_build_verification_env_failure(monkeypatch, tmp_path) -> None:
+    """run_build_verification flags an environment (non-build) failure when the verifier returns an 'ENV:' error."""
     from software_engineering_team import quality_gate_tools as q
 
     monkeypatch.setattr(
@@ -174,6 +179,7 @@ def test_run_build_verification_env_failure(monkeypatch, tmp_path) -> None:
 
 
 def test_run_build_verification_exception(monkeypatch, tmp_path) -> None:
+    """run_build_verification reports a failed result carrying the exception message when the verifier raises."""
     from software_engineering_team import quality_gate_tools as q
 
     def boom(*a, **kw):
@@ -201,6 +207,7 @@ class _LintResultModel:
 
 
 def test_run_linting_happy_path(monkeypatch, tmp_path) -> None:
+    """run_linting surfaces the lint agent's pass/issue result unchanged when the agent runs."""
     from software_engineering_team import quality_gate_tools as q
 
     fake_agent = SimpleNamespace(run=lambda path: _LintResultModel())
@@ -211,6 +218,7 @@ def test_run_linting_happy_path(monkeypatch, tmp_path) -> None:
 
 
 def test_run_linting_exception_non_blocking(monkeypatch, tmp_path) -> None:
+    """run_linting is non-blocking: an exploding lint agent yields passed=True rather than raising."""
     from software_engineering_team import quality_gate_tools as q
 
     def boom(*a, **kw):
@@ -229,6 +237,7 @@ def test_run_linting_exception_non_blocking(monkeypatch, tmp_path) -> None:
 
 
 def test_run_dbc_comments_no_code_returns_compliant(monkeypatch, tmp_path) -> None:
+    """run_dbc_comments returns compliant when there is no code to annotate (empty repo)."""
     from software_engineering_team import quality_gate_tools as q
 
     # Empty repo (no .py/.ts files) → code stays empty → returns compliant
@@ -237,6 +246,7 @@ def test_run_dbc_comments_no_code_returns_compliant(monkeypatch, tmp_path) -> No
 
 
 def test_run_dbc_comments_already_compliant(monkeypatch, tmp_path) -> None:
+    """run_dbc_comments returns compliant when the agent reports the code already has DbC comments."""
     from software_engineering_team import quality_gate_tools as q
 
     (tmp_path / "a.py").write_text("def x(): pass")
@@ -257,6 +267,7 @@ def test_run_dbc_comments_already_compliant(monkeypatch, tmp_path) -> None:
 
 
 def test_run_dbc_comments_writes_files(monkeypatch, tmp_path) -> None:
+    """run_dbc_comments writes the agent's patched files via the git helper and reports comments_added when the agent produces edits."""
     from software_engineering_team import quality_gate_tools as q
 
     (tmp_path / "a.py").write_text("def x(): pass")
@@ -290,6 +301,7 @@ def test_run_dbc_comments_writes_files(monkeypatch, tmp_path) -> None:
 
 
 def test_run_dbc_comments_exception_non_blocking(monkeypatch, tmp_path) -> None:
+    """run_dbc_comments is non-blocking: an agent error returns compliant=True rather than raising."""
     from software_engineering_team import quality_gate_tools as q
 
     (tmp_path / "a.py").write_text("x")
@@ -306,6 +318,7 @@ def test_run_dbc_comments_exception_non_blocking(monkeypatch, tmp_path) -> None:
 
 
 def test_run_dbc_comments_skips_excluded_paths(monkeypatch, tmp_path) -> None:
+    """run_dbc_comments skips excluded paths (node_modules, non-code) so an otherwise-empty repo is compliant."""
     from software_engineering_team import quality_gate_tools as q
 
     # Files in excluded folders should be skipped, leaving code empty → compliant
@@ -322,6 +335,7 @@ def test_run_dbc_comments_skips_excluded_paths(monkeypatch, tmp_path) -> None:
 
 
 def test_run_qa_check_passed(monkeypatch) -> None:
+    """run_qa_check reports passed when the QA agent finds no bugs."""
     from software_engineering_team import quality_gate_tools as q
 
     class _Bug:
@@ -341,6 +355,7 @@ def test_run_qa_check_passed(monkeypatch) -> None:
 
 
 def test_run_qa_check_with_bugs(monkeypatch) -> None:
+    """run_qa_check reports not-passed with bugs when the QA agent finds a high-severity bug."""
     from software_engineering_team import quality_gate_tools as q
 
     class _Bug:
@@ -361,6 +376,7 @@ def test_run_qa_check_with_bugs(monkeypatch) -> None:
 
 
 def test_run_qa_check_exception_non_blocking(monkeypatch) -> None:
+    """run_qa_check is non-blocking: an agent error yields passed=True rather than raising."""
     from software_engineering_team import quality_gate_tools as q
 
     monkeypatch.setattr(
@@ -379,6 +395,7 @@ def test_run_qa_check_exception_non_blocking(monkeypatch) -> None:
 
 
 def test_run_security_scan_clean(monkeypatch) -> None:
+    """run_security_scan reports passed when the security agent finds no vulnerabilities."""
     from software_engineering_team import quality_gate_tools as q
 
     class _Result:
@@ -395,6 +412,7 @@ def test_run_security_scan_clean(monkeypatch) -> None:
 
 
 def test_run_security_scan_with_vulns(monkeypatch) -> None:
+    """run_security_scan reports not-passed when the agent finds a high-severity vulnerability."""
     from software_engineering_team import quality_gate_tools as q
 
     class _Vuln:
@@ -415,6 +433,7 @@ def test_run_security_scan_with_vulns(monkeypatch) -> None:
 
 
 def test_run_security_scan_exception_non_blocking(monkeypatch) -> None:
+    """run_security_scan is non-blocking: an agent error yields passed=True rather than raising."""
     from software_engineering_team import quality_gate_tools as q
 
     monkeypatch.setattr(
@@ -433,6 +452,7 @@ def test_run_security_scan_exception_non_blocking(monkeypatch) -> None:
 
 
 def test_run_acceptance_verification_accepted(monkeypatch) -> None:
+    """run_acceptance_verification surfaces accepted=True and the agent's reasoning when the verifier accepts."""
     from software_engineering_team import quality_gate_tools as q
 
     class _Result:
@@ -454,6 +474,7 @@ def test_run_acceptance_verification_accepted(monkeypatch) -> None:
 
 
 def test_run_acceptance_verification_exception(monkeypatch) -> None:
+    """run_acceptance_verification fails closed (accepted=False, reasoning carries the error) when the verifier raises."""
     from software_engineering_team import quality_gate_tools as q
 
     def boom(**kw):

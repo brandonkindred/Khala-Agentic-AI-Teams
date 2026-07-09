@@ -15,12 +15,14 @@ from unittest.mock import MagicMock
 
 
 def test_dedupe_strings_empty() -> None:
+    """dedupe_strings returns an empty list for empty input."""
     from software_engineering_team.shared.deduplication import dedupe_strings
 
     assert dedupe_strings([]) == []
 
 
 def test_dedupe_strings_removes_near_duplicates() -> None:
+    """dedupe_strings drops near-duplicate strings (case-insensitive) while keeping distinct entries."""
     from software_engineering_team.shared.deduplication import dedupe_strings
 
     items = [
@@ -34,6 +36,7 @@ def test_dedupe_strings_removes_near_duplicates() -> None:
 
 
 def test_dedupe_strings_skips_non_strings() -> None:
+    """dedupe_strings drops non-string items rather than crashing on them."""
     from software_engineering_team.shared.deduplication import dedupe_strings
 
     items = ["valid", 42, "another"]  # type: ignore[list-item]
@@ -43,6 +46,7 @@ def test_dedupe_strings_skips_non_strings() -> None:
 
 
 def test_dedupe_by_key_basic() -> None:
+    """dedupe_by_key drops items whose key is a near-duplicate of an earlier item's key."""
     from software_engineering_team.shared.deduplication import dedupe_by_key
 
     items = [
@@ -55,6 +59,7 @@ def test_dedupe_by_key_basic() -> None:
 
 
 def test_dedupe_by_key_non_string_key_kept() -> None:
+    """dedupe_by_key passes non-string keys through unchanged (no near-dup check applies)."""
     from software_engineering_team.shared.deduplication import dedupe_by_key
 
     items = [SimpleNamespace(name=None), SimpleNamespace(name=None)]
@@ -64,6 +69,7 @@ def test_dedupe_by_key_non_string_key_kept() -> None:
 
 
 def test_dedupe_by_key_empty() -> None:
+    """dedupe_by_key returns an empty list for empty input."""
     from software_engineering_team.shared.deduplication import dedupe_by_key
 
     assert dedupe_by_key([], key_fn=lambda x: x) == []
@@ -75,6 +81,7 @@ def test_dedupe_by_key_empty() -> None:
 
 
 def test_default_decompose_by_h2_sections() -> None:
+    """default_decompose_by_sections splits content on H2 (##) headers."""
     from software_engineering_team.shared.json_utils import default_decompose_by_sections
 
     content = "## a\nA\n## b\nB"
@@ -83,6 +90,7 @@ def test_default_decompose_by_h2_sections() -> None:
 
 
 def test_default_decompose_by_h1_sections() -> None:
+    """default_decompose_by_sections splits content on H1 (#) headers."""
     from software_engineering_team.shared.json_utils import default_decompose_by_sections
 
     content = "# a\nA\n# b\nB"
@@ -91,6 +99,7 @@ def test_default_decompose_by_h1_sections() -> None:
 
 
 def test_default_decompose_chunks_by_size() -> None:
+    """default_decompose_by_sections falls back to fixed-size chunking when no section headers are present."""
     from software_engineering_team.shared.json_utils import default_decompose_by_sections
 
     out = default_decompose_by_sections("x" * 50, chunk_size=10)
@@ -98,12 +107,14 @@ def test_default_decompose_chunks_by_size() -> None:
 
 
 def test_default_merge_results_empty() -> None:
+    """default_merge_results returns an empty dict for no partial results."""
     from software_engineering_team.shared.json_utils import default_merge_results
 
     assert default_merge_results([]) == {}
 
 
 def test_default_merge_results_lists_dicts_scalars() -> None:
+    """default_merge_results merges lists (semantically deduped), nested dicts, and last-wins scalars across partial results."""
     from software_engineering_team.shared.json_utils import default_merge_results
 
     a = {
@@ -126,6 +137,7 @@ def test_default_merge_results_lists_dicts_scalars() -> None:
 
 
 def test_attempt_fix_output_continuation_no_llm_attrs() -> None:
+    """attempt_fix_output_continuation returns the raw text unchanged when the LLM lacks the base_url/model attrs the continuator needs."""
     from software_engineering_team.shared.json_utils import attempt_fix_output_continuation
 
     out = attempt_fix_output_continuation(
@@ -138,6 +150,7 @@ def test_attempt_fix_output_continuation_no_llm_attrs() -> None:
 
 
 def test_attempt_fix_output_continuation_with_attrs(monkeypatch) -> None:
+    """attempt_fix_output_continuation delegates to ResponseContinuator and returns its completed content when the LLM exposes base_url/model."""
     from software_engineering_team.shared import json_utils
 
     class _LLM:
@@ -166,6 +179,7 @@ def test_attempt_fix_output_continuation_with_attrs(monkeypatch) -> None:
 
 
 def test_complete_text_with_continuation(monkeypatch) -> None:
+    """complete_text_with_continuation runs the agent and strips the completed text output."""
     from software_engineering_team.shared import json_utils
 
     class _FakeAgent:
@@ -183,6 +197,7 @@ def test_complete_text_with_continuation(monkeypatch) -> None:
 
 
 def test_complete_with_continuation_delegates(monkeypatch) -> None:
+    """complete_with_continuation delegates to complete_text_with_continuation, forwarding the agent_name."""
     from software_engineering_team.shared import json_utils
 
     called = {}
@@ -198,6 +213,7 @@ def test_complete_with_continuation_delegates(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_no_chunks_path(monkeypatch) -> None:
+    """parse_json_with_recovery returns the single-call result when no decomposition is supplied."""
     from software_engineering_team.shared import json_utils
 
     monkeypatch.setattr(
@@ -209,6 +225,7 @@ def test_parse_json_with_recovery_no_chunks_path(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_returns_none_on_exception(monkeypatch) -> None:
+    """parse_json_with_recovery returns None (does not raise) when the underlying completion call raises."""
     from software_engineering_team.shared import json_utils
 
     def boom(*a, **kw):
@@ -222,6 +239,7 @@ def test_parse_json_with_recovery_returns_none_on_exception(monkeypatch) -> None
 
 
 def test_parse_json_with_recovery_chunked(monkeypatch) -> None:
+    """parse_json_with_recovery decomposes, completes each chunk, and merges the per-chunk results."""
     from software_engineering_team.shared import json_utils
 
     calls = {"n": 0}
@@ -249,6 +267,7 @@ def test_parse_json_with_recovery_chunked(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_chunked_empty(monkeypatch) -> None:
+    """parse_json_with_recovery skips chunking and returns the single-call result when decomposition yields no chunks."""
     from software_engineering_team.shared import json_utils
 
     monkeypatch.setattr(
@@ -268,6 +287,7 @@ def test_parse_json_with_recovery_chunked_empty(monkeypatch) -> None:
 
 
 def test_parse_json_with_recovery_chunked_failure(monkeypatch) -> None:
+    """parse_json_with_recovery returns None when a chunk completion raises mid-recovery."""
     from software_engineering_team.shared import json_utils
 
     def boom(*a, **kw):
