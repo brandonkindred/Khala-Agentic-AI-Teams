@@ -38,6 +38,12 @@ EXCEPTION_HANDLER_TEST_PATTERNS = (
     "test_error_handlers",
 )
 
+# One-at-a-time build-fix loop knobs. Named (not inline magic numbers) so the
+# retry ceiling and the repo-briefing char budget are discoverable and single-
+# sourced; both are integration-only (this module runs the live build/LLM loop).
+_MAX_BUILD_FIX_ATTEMPTS = 15
+_BUILD_FIX_MAX_CODE_CHARS = 30_000
+
 
 def _run_build_verification(
     repo_path: Path,
@@ -253,6 +259,11 @@ def _try_build_fix_one_at_a_time(
         run_python_syntax_check,
     )
 
+    # Set in the frontend/backend branches below; checked in the model-error
+    # fallback so a future branch that skips assignment degrades to a plain
+    # "Build failed" message rather than a NameError.
+    result = None
+
     if (
         agent_type == "frontend"
     ):  # pragma: no cover  # integration-only: invokes ng build + LLM repair loop
@@ -377,7 +388,7 @@ def _try_build_fix_one_at_a_time(
         "backend": (".py",),
     }
     exts = ext_map.get(agent_type, (".py",))
-    max_chars = 30_000
+    max_chars = _BUILD_FIX_MAX_CODE_CHARS
     total = 0
     for ext in exts:
         for f in project_dir.rglob(f"*{ext}"):
@@ -406,9 +417,7 @@ def _try_build_fix_one_at_a_time(
         _build_fix_model = get_strands_model("build_fix_specialist", response_format="text")
     except Exception as e:
         logger.warning("Build fix: could not get model: %s", e)
-        return False, result.error_summary if agent_type == "frontend" else (
-            result.error_summary if "result" in dir() else "Build failed"
-        )
+        return False, result.error_summary if result is not None else "Build failed"
 
     from backend_code_v2_team.output_templates import parse_problem_solving_single_issue_template
 
@@ -427,7 +436,7 @@ def _try_build_fix_one_at_a_time(
 
         language_conventions = JAVA_CONVENTIONS if language == "java" else PYTHON_CONVENTIONS
 
-    max_fix_attempts = 15
+    max_fix_attempts = _MAX_BUILD_FIX_ATTEMPTS
     for attempt in range(
         max_fix_attempts
     ):  # pragma: no cover  # integration-only: LLM fix loop reruns build/test after each repair

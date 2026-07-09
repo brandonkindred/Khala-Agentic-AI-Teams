@@ -229,6 +229,40 @@ def test_run_review_tool_agents_recommendations_and_raise(tmp_path: Path) -> Non
     assert any(i.description == "from tool" for i in result.issues)  # out.issues folded in
 
 
+def test_run_review_threads_repo_path_into_tool_agents(tmp_path: Path) -> None:
+    """Full-review tool agents receive the checkout's repo_path, not the empty default.
+
+    Regression guard: the collapsed ``run_review`` must pass ``tool_repo_path`` so
+    ``ToolAgentPhaseInput.repo_path`` matches the contract ``run_microtask_review``
+    (and the pre-collapse backend/frontend implementations) gave full-review tool
+    agents — losing it silently drops repository context in the full Review phase.
+    """
+    from software_engineering_team.backend_code_v2_team.models import (
+        ToolAgentKind,
+        ToolAgentPhaseOutput,
+    )
+
+    config = _build_config()
+    captured: dict = {}
+    good = MagicMock()
+    good.review.side_effect = lambda phase_inp: (
+        captured.update(repo_path=phase_inp.repo_path)
+        or ToolAgentPhaseOutput(issues=[], recommendations=[])
+    )
+
+    run_review(
+        config=config,
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        tool_agents={ToolAgentKind.TESTING_QA: good},
+        language="python",
+        **_noop_runners(),
+    )
+    assert captured["repo_path"] == str(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # run_microtask_review branches
 # ---------------------------------------------------------------------------

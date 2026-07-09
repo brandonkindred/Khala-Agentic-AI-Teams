@@ -360,6 +360,7 @@ def run_review(
         task_id=task_id,
         task_description=task.description or "",
         current_files=execution_result.files,
+        tool_repo_path=str(repo_path),
         language=language,
     )
 

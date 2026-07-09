@@ -37,8 +37,6 @@ from .phases.setup import configure_quality_tooling, run_setup
 
 logger = logging.getLogger(__name__)
 
-MAX_REVIEW_ITERATIONS = 15
-
 # Frontend repo-briefing filter contract: the extensions read into the development
 # agent's context and the directories pruned from the walk. Single-sourced here so
 # the fresh-walk ``_read_repo_code`` and the incremental ``RepoContextCache`` the
@@ -114,7 +112,7 @@ class FrontendDevelopmentAgent:
         return build_tool_runners(tool_agents)
 
     @staticmethod
-    def _read_repo_code(repo_path: Path, max_chars: int = 30_000) -> str:
+    def _read_repo_code(repo_path: Path, max_chars: int = _REPO_BRIEFING_MAX_CHARS) -> str:
         """Read frontend source files from repo into a single string.
 
         Delegates to the shared budgeted scanner so every per-domain reader shares

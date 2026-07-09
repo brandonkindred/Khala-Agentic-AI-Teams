@@ -36,8 +36,6 @@ from .phases.setup import configure_quality_tooling, run_setup
 
 logger = logging.getLogger(__name__)
 
-MAX_REVIEW_ITERATIONS = 15
-
 # Backend repo-briefing filter contract: the extensions read into the development
 # agent's context and the directories pruned from the walk. Single-sourced here so
 # the fresh-walk ``_read_repo_code`` and the incremental ``RepoContextCache`` the
@@ -55,7 +53,15 @@ _REPO_BRIEFING_MAX_CHARS = 30_000
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
-    """Build team-owned tool agent instances (for plan/execute/review/problem_solve/deliver)."""
+    """Build team-owned tool agent instances (for plan/execute/review/problem_solve/deliver).
+
+    The tool-agent imports are deferred to call time on purpose: each adapter
+    pulls in heavy strands/llm_service machinery, and constructing them here at
+    module import would make the orchestrator expensive to import (and would
+    eagerly build agents even on paths that never run a workflow). Keeping them
+    lazy bounds the import cost to actual runs, so they are not hoisted to the
+    top of the module.
+    """
     from software_engineering_team.shared.tool_agent_git_branch import (
         GitBranchManagementToolAgent,
     )
@@ -102,7 +108,7 @@ class BackendDevelopmentAgent:
         return build_tool_runners(tool_agents)
 
     @staticmethod
-    def _read_repo_code(repo_path: Path, max_chars: int = 30_000) -> str:
+    def _read_repo_code(repo_path: Path, max_chars: int = _REPO_BRIEFING_MAX_CHARS) -> str:
         """Read Python/Java source files from repo into a single string.
 
         Delegates to the shared budgeted scanner so every per-domain reader shares
@@ -200,22 +206,19 @@ class BackendDevelopmentAgent:
         # ── Pre-flight: verify linting & testing are configured ───────
         # Runs after the feature-branch checkout so it validates the branch that
         # will actually be edited, not whatever branch setup last left checked out.
+        # Read pyproject.toml once (if present) and reuse it for both the ruff and
+        # pytest config probes rather than reading it from disk twice.
+        _pyproject = repo_path / "pyproject.toml"
+        _pyproject_text = (
+            _pyproject.read_text(encoding="utf-8", errors="replace") if _pyproject.exists() else ""
+        )
         _has_lint = (
             (repo_path / "ruff.toml").exists()
             or (repo_path / ".flake8").exists()
-            or (
-                (repo_path / "pyproject.toml").exists()
-                and "[tool.ruff]"
-                in (repo_path / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
-            )
+            or "[tool.ruff]" in _pyproject_text
         )
         _has_test = (repo_path / "tests").is_dir() and (
-            (repo_path / "pytest.ini").exists()
-            or (
-                (repo_path / "pyproject.toml").exists()
-                and "[tool.pytest"
-                in (repo_path / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
-            )
+            (repo_path / "pytest.ini").exists() or "[tool.pytest" in _pyproject_text
         )
         if not _has_lint or not _has_test:
             missing = []

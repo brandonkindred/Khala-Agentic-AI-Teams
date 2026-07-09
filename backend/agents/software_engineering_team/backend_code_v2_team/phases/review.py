@@ -345,7 +345,10 @@ def run_code_review_phase(
                 lint_result.execution_result, "success", getattr(lint_result, "passed", True)
             ):
                 lint_ok = False
-                _lint_severity_map = {"error": "high", "warning": "medium", "info": "low"}
+                # Reuse the shared backend lint-severity remap (REVIEW_CONFIG.lint_severity_remap)
+                # rather than a local duplicate so the mapping cannot drift from the one
+                # run_review / run_microtask_review apply.
+                _lint_severity_map = REVIEW_CONFIG.lint_severity_remap
                 for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
                     file_path = getattr(li, "file_path", "")
                     if files and file_path and file_path not in files:
