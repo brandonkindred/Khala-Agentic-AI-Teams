@@ -65,7 +65,6 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     update_job,
 )
 from software_engineering_team.shared.plan_dir import ensure_plan_dir  # noqa: E402
-from software_engineering_team.shared.task_utils import task_requirements  # noqa: E402
 
 try:
     from unified_api.slack_notifier import notify_open_questions as slack_notify_open_questions
@@ -484,8 +483,6 @@ def _lazy_init_frontend_code_v2_team():
 
     return FrontendCodeV2TeamLead(get_client("frontend"))
 
-
-_task_requirements = task_requirements
 
 MAX_REVIEW_ITERATIONS = 15
 MAX_CLARIFICATION_REFINEMENTS = 10  # Max times to refine a task based on specialist clarification

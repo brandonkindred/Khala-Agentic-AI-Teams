@@ -254,3 +254,65 @@ def test_fe_detect_tooling_rejects_placeholder_and_unparseable(tmp_path: Path):
     (tmp_path / "package.json").write_text("not json {")
     has_lint, has_test = FrontendDevelopmentAgent._detect_tooling(tmp_path)
     assert has_lint and not has_test  # unparseable package.json → no test detected
+
+
+# ---------------------------------------------------------------------------
+# BackendDevelopmentAgent._detect_tooling
+# ---------------------------------------------------------------------------
+
+
+def test_be_detect_tooling_nothing_configured(tmp_path: Path):
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    assert BackendDevelopmentAgent._detect_tooling(tmp_path) == (False, False)
+
+
+def test_be_detect_tooling_ruff_toml_and_pytest_ini(tmp_path: Path):
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    (tmp_path / "ruff.toml").write_text("")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pytest.ini").write_text("[pytest]")
+    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    assert has_lint and has_test
+
+
+def test_be_detect_tooling_pyproject_blocks(tmp_path: Path):
+    """A pyproject.toml carrying [tool.ruff] + [tool.pytest] blocks satisfies both."""
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.ruff]\nline-length = 120\n[tool.pytest.ini_options]\n"
+    )
+    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    assert has_lint and has_test
+
+
+def test_be_detect_tooling_tests_dir_required_for_test(tmp_path: Path):
+    """Lint alone (ruff.toml) without a tests dir reports lint=True, test=False."""
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    (tmp_path / "ruff.toml").write_text("")
+    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    assert has_lint and not has_test
+
+
+def test_be_detect_tooling_flake8_satisfies_lint(tmp_path: Path):
+    from software_engineering_team.backend_code_v2_team.orchestrator import (
+        BackendDevelopmentAgent,
+    )
+
+    (tmp_path / ".flake8").write_text("[flake8]")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "pytest.ini").write_text("[pytest]")
+    has_lint, has_test = BackendDevelopmentAgent._detect_tooling(tmp_path)
+    assert has_lint and has_test

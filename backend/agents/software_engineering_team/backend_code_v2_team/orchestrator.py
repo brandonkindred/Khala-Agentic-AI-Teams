@@ -44,9 +44,7 @@ logger = logging.getLogger(__name__)
 _BACKEND_REPO_EXTENSIONS = frozenset(
     {".py", ".java", ".kt", ".yaml", ".yml", ".json", ".toml", ".cfg", ".txt"}
 )
-_BACKEND_REPO_EXCLUDE_DIRS = frozenset(
-    {"node_modules", ".git", "__pycache__", "venv", ".venv"}
-)
+_BACKEND_REPO_EXCLUDE_DIRS = frozenset({"node_modules", ".git", "__pycache__", "venv", ".venv"})
 # Character budget for the repo briefing (whole files only; the next chunk that
 # would exceed it stops the briefing).
 _REPO_BRIEFING_MAX_CHARS = 30_000
@@ -140,6 +138,32 @@ class BackendDevelopmentAgent:
             return self._repo_context_cache.read(repo_path)
         return self._read_repo_code(repo_path)
 
+    @staticmethod
+    def _detect_tooling(repo_path: Path) -> Tuple[bool, bool]:
+        """Return ``(has_lint, has_test)`` for the configured backend tooling.
+
+        Detects ruff/flake8 (or a ``[tool.ruff]`` block in ``pyproject.toml``) as
+        lint, and a ``tests`` dir with a pytest config (``pytest.ini`` or a
+        ``[tool.pytest`` block in ``pyproject.toml``) as testing. Reads
+        ``pyproject.toml`` once and reuses it for both probes.
+
+        Preconditions: ``repo_path`` is a directory.
+        Postconditions: returns two booleans; never raises.
+        """
+        _pyproject = repo_path / "pyproject.toml"
+        _pyproject_text = (
+            _pyproject.read_text(encoding="utf-8", errors="replace") if _pyproject.exists() else ""
+        )
+        has_lint = (
+            (repo_path / "ruff.toml").exists()
+            or (repo_path / ".flake8").exists()
+            or "[tool.ruff]" in _pyproject_text
+        )
+        has_test = (repo_path / "tests").is_dir() and (
+            (repo_path / "pytest.ini").exists() or "[tool.pytest" in _pyproject_text
+        )
+        return has_lint, has_test
+
     def run_workflow(
         self,
         *,
@@ -206,20 +230,7 @@ class BackendDevelopmentAgent:
         # ── Pre-flight: verify linting & testing are configured ───────
         # Runs after the feature-branch checkout so it validates the branch that
         # will actually be edited, not whatever branch setup last left checked out.
-        # Read pyproject.toml once (if present) and reuse it for both the ruff and
-        # pytest config probes rather than reading it from disk twice.
-        _pyproject = repo_path / "pyproject.toml"
-        _pyproject_text = (
-            _pyproject.read_text(encoding="utf-8", errors="replace") if _pyproject.exists() else ""
-        )
-        _has_lint = (
-            (repo_path / "ruff.toml").exists()
-            or (repo_path / ".flake8").exists()
-            or "[tool.ruff]" in _pyproject_text
-        )
-        _has_test = (repo_path / "tests").is_dir() and (
-            (repo_path / "pytest.ini").exists() or "[tool.pytest" in _pyproject_text
-        )
+        _has_lint, _has_test = self._detect_tooling(repo_path)
         if not _has_lint or not _has_test:
             missing = []
             if not _has_lint:

@@ -41,14 +41,15 @@ Per-team instances live in each team's `phases/_profile.py` next to the existing
 **Kept per-team (no convergence):**
 - Backend keeps `run_code_review_phase` / `run_qa_testing_phase` / `run_security_testing_phase` / `run_documentation_review_phase` with per-phase retry counts (`code_review_max_retries`/`qa_max_retries`/`security_max_retries`) and `IN_CODE_REVIEW`/`IN_QA_TESTING`/`IN_SECURITY_TESTING` statuses. These become thin callers of the shared `run_*` helpers.
 - Frontend keeps its unified `run_microtask_review` filtering issues by `i.source in {"qa","security"}` with a single `IN_REVIEW` status and single `max_retries`.
-- Each team's `run_execution_with_review_gates` becomes a thin orchestrator over the shared skeleton + its own gate-model glue. The shared microtask-loop skeleton (dep-check, progress emission, `while not phase_failed` cycle, documentation self-review, rollback) moves to `shared/phases/execution.py` as `run_gated_execution_impl(*, config, gate_runner, ...)` parameterized by a `GateRunner` strategy each team supplies.
+- Each team's `run_execution_with_review_gates` becomes a thin orchestrator over the shared skeleton + its own gate-model glue. The shared microtask-loop skeleton (dep-check, progress emission, `while not phase_failed` cycle, documentation self-review, rollback) moves to `shared/phases/execution.py` as `run_gated_execution_impl(*, config, gate_runner, ...)` parameterized by a `GateRunner` strategy each team supplies. **Deferred to a follow-up issue:** the `run_gated_execution_impl` skeleton is out of scope for this PR — only the `run_review` / `run_microtask_review` collapse (the `shared/v2_review.py` body) ships here. The execution-loop skeleton is tracked separately and re-introduced in its own PR.
 
 **Behavior contract:** Identical review outcomes for both teams. The divergent knobs are preserved 1:1 in `ReviewConfig`; no gate model is changed.
 
 ### Affected files
 - New: `software_engineering_team/shared/v2_review.py`
-- Modified: `shared/phases/execution.py` (new `run_gated_execution_impl`); both teams' `phases/review.py`, `phases/execution.py`, `phases/_profile.py`, `phases/problem_solving.py` (delegates unchanged), `orchestrator.py`
-- Tests: `tests/test_v2_review_phase.py`, `tests/test_v2_fe_review_phase.py`, execution tests — updated to the shared functions; new tests for `ReviewConfig` divergence coverage.
+- Modified: both teams' `phases/review.py`, `phases/_profile.py`, `phases/problem_solving.py` (delegates unchanged), `orchestrator.py`
+- Deferred (follow-up issue): `shared/phases/execution.py` (`run_gated_execution_impl`) and both teams' `phases/execution.py` convergence — the execution-loop skeleton collapse does not ship in this PR.
+- Tests: `tests/test_v2_review_phase.py`, `tests/test_v2_fe_review_phase.py` — updated to the shared functions; new tests for `ReviewConfig` divergence coverage.
 
 ### Risk
 Medium. The divergent knobs must be preserved exactly (severity remap, source prefix, ToolAgentPhaseInput fields). Test coverage on both teams' review outcomes is the guardrail.
@@ -65,7 +66,7 @@ Medium. The divergent knobs must be preserved exactly (severity remap, source pr
 ### Approach (decision: safe wins only)
 Three behavior-preserving changes. `all_files` retention is unchanged (the orchestrator documentation phase feeds `exec_result.files` contents to the review LLM, and deliver re-writes files — both need contents; per decision we do not touch that contract).
 
-**(a) Incremental git commits via `commit_paths`.** `commit_paths(repo_path, paths, message) -> (bool, str)` (already production-used in `shared/phases/setup.py` and both teams' `setup.py`) stages only the named paths. Track the changed-path set per batch-fix cycle and commit only those. The orchestrator's final commit and deliver's commit likewise move to `commit_paths`. `write_files_and_commit` (with `git add -A`) is kept for callers that genuinely write a full set (setup phase), but the execution-loop and deliver call sites move off it.
+**(a) Incremental git commits via `commit_paths`.** ~~`commit_paths(repo_path, paths, message) -> (bool, str)` (already production-used in `shared/phases/setup.py` and both teams' `setup.py`) stages only the named paths. Track the changed-path set per batch-fix cycle and commit only those. The orchestrator's final commit and deliver's commit likewise move to `commit_paths`. `write_files_and_commit` (with `git add -A`) is kept for callers that genuinely write a full set (setup phase), but the execution-loop and deliver call sites move off it.~~ **Deferred to a follow-up issue:** part (a) does not ship in this PR. The whole-tree commits it targets were already eliminated by the prior `shared/` collapse (commit `aaf2f117`), so the incremental-`commit_paths` wiring no longer buys a meaningful win and is deferred. Parts (b) and (c) ship here.
 
 **(b) Port `_RepoContextCache`.** New `software_engineering_team/shared/repo_context_cache.py` lifts the incremental `(mtime_ns, size, rendered_part)` cache from `coding_team/orchestrator.py:369-423` (key by `(st.st_mtime_ns, st.st_size)`, re-render only changed files, wholesale-replace `self._entries` to evict removed files, cap eligible files). The cache is constructed once per job at the coding-team worker seam (`v2_team_worker.py:375`, which currently `del`s the `repo_context` arg) and threaded into the `*DevelopmentAgent`. `_read_repo_code` consults the cache instead of re-walking.
 
@@ -76,11 +77,12 @@ Same files written, same commits, same `existing_code` string. Only the amount o
 
 ### Affected files
 - New: `software_engineering_team/shared/repo_context_cache.py`
-- Modified: `shared_repo_context/repo_utils.py`; both v2 `orchestrator.py` (`_read_repo_code`); both v2 `phases/execution.py` (write/commit sites); `coding_team/v2_team_worker.py` (thread the cache instead of discarding); `shared/phases/deliver.py` commit site.
-- Tests: streaming-walk test, repo-context-cache test, changed-paths-commit test.
+- Modified: `shared_repo_context/repo_utils.py`; both v2 `orchestrator.py` (`_read_repo_code`); `coding_team/v2_team_worker.py` (thread the cache instead of discarding).
+- Deferred (follow-up issue): part (a) — both v2 `phases/execution.py` write/commit sites and `shared/phases/deliver.py` moving to `commit_paths` do not ship in this PR.
+- Tests: streaming-walk test, repo-context-cache test.
 
 ### Risk
-Low–medium. `commit_paths` and `_RepoContextCache` already exist and are production-proven; this is wiring. Guard: assert committed path set equals the changed-path set; assert cached `existing_code` equals fresh-walk output for the same on-disk state.
+Low–medium. `_RepoContextCache` already exists and is production-proven; this is wiring. Guard: assert cached `existing_code` equals fresh-walk output for the same on-disk state. (Part (a)'s `commit_paths` wiring is deferred — see above.)
 
 ---
 
@@ -183,10 +185,10 @@ Single PR, single tracking issue. Land the work in this commit order within the 
 
 1. **#5** — pure deletions + build-fix extraction; shrinks `orchestrator.py` before the other refactors touch it. Lowest risk, unblocks cleaner diffs.
 2. **#4a** — trace batching (SE-scoped); independent of #2/#3 execution code.
-3. **#2** — collapse the review/execution fork behind `ReviewConfig` + `run_gated_execution_impl`.
-4. **#3** — changed-path commits + `_RepoContextCache` port + streaming walk; builds on #2's unified execution skeleton.
+3. **#2** — collapse the **review** fork behind `ReviewConfig` (the `shared/v2_review.py` body). The **execution**-fork collapse (`run_gated_execution_impl`) is deferred to a follow-up issue (see Non-goals).
+4. **#3** — `_RepoContextCache` port + streaming walk. The changed-path `commit_paths` wiring (part (a)) is deferred to a follow-up issue (see Non-goals).
 
-The PR body uses `Closes #N` against the single tracking issue. Coverage must stay at/above the 90% line floor across all four stages. #4b (provider_store reset off-path) is a separate future PR with its own issue.
+The PR body uses `Closes #N` against the single tracking issue. Coverage must stay at/above the 90% line floor across the stages that ship. #4b (provider_store reset off-path) is a separate future PR with its own issue.
 
 ## Non-goals (explicitly deferred)
 - Prompt caching for stable LLM context (#1 from the analysis) — separate effort.
@@ -194,4 +196,6 @@ The PR body uses `Closes #N` against the single tracking issue. Coverage must st
 - OTEL metric recording off-path — deferred per decision.
 - **#4b — `provider_store.reset_entry`/`mark_exhausted` off the LLM call path** — split into its own later PR (shared `llm_service` blast radius).
 - Converging backend/frontend gate models (#2 full-convergence option) — deferred per decision.
+- **#2 execution skeleton — `run_gated_execution_impl` in `shared/phases/execution.py`** — the execution-loop fork collapse is split into a follow-up issue; this PR ships only the `run_review` / `run_microtask_review` collapse in `shared/v2_review.py`.
+- **#3 part (a) — incremental `commit_paths` wiring** — the execution-loop and deliver commit sites moving to `commit_paths` is split into a follow-up issue; the whole-tree commits it targeted were already eliminated by the prior `shared/` collapse (commit `aaf2f117`), so it no longer buys a meaningful win. Parts (b) and (c) ship here.
 - `TaskGraphService` RLock-over-HTTP-persist, `_pause_lock` over human wait, worktree-cleanup failure sweep, `MAX_DOCUMENTATION_ITERATIONS=100` — flagged in the analysis but out of scope here.
