@@ -30,6 +30,7 @@ from shared_temporal.client import (
 )
 from shared_temporal.runner import (
     cancel_workflow_sync,
+    execute_workflow_sync,
     run_team_job,
     signal_workflow_sync,
     start_workflow_sync,
@@ -41,6 +42,7 @@ __all__ = [
     "TEAM_TEMPORAL_MODULES",
     "cancel_workflow_sync",
     "connect_temporal_client",
+    "execute_workflow_sync",
     "signal_workflow_sync",
     "start_all_team_workers",
     "get_temporal_address",

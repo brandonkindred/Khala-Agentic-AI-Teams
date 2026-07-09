@@ -1,24 +1,46 @@
 """Hermetic route-level tests for the Agent Studio Stage-1 endpoints.
 
-A fresh ``FastAPI`` app mounts only the agent-studio router, and the service is
-injected via FastAPI's ``dependency_overrides`` — wired to a scripted assistant +
-fake registry, so no live LLM, Postgres, or process-wide registry is touched.
-``backend/conftest.py`` already puts ``agents/`` on ``sys.path``; imports below
-rely on that rather than manipulating the path here.
+Agent Studio is Temporal-only: each handler dispatches its operation as a workflow →
+activity. These tests exercise the full router → dispatch → activity → service →
+response path **in-process, without a Temporal cluster**, by:
+
+  * patching ``agent_studio.runtime.get_studio_service`` so the activities delegate to
+    a scripted assistant + fake registry (no live LLM / Postgres), and
+  * patching ``agent_studio.temporal.dispatch.execute_workflow_sync`` with an inline
+    stand-in that runs the workflow's single activity directly and reproduces
+    Temporal's exception wrapping, so the dispatch layer's ``ValueError`` → 400 /
+    ``LookupError`` → 404 translation is genuinely exercised.
+
+``backend/conftest.py`` already puts ``agents/`` on ``sys.path``.
 """
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 
+import agent_studio.temporal.dispatch as dispatch_mod
 from agent_studio.assistant import AgentDesignerAgent
 from agent_studio.service import AgentStudioService
 from agent_studio.store import AgentStudioConversationStore
+from agent_studio.temporal.workflows import (
+    CloneFromRegistryWorkflow,
+    SaveAgentWorkflow,
+    SendMessageWorkflow,
+    StartConversationWorkflow,
+    clone_from_registry_activity,
+    save_agent_activity,
+    send_message_activity,
+    start_conversation_activity,
+)
 from agent_studio.testing import FakeRegistry, seed_manifest
+from unified_api.routes.agent_studio import router
 
 _DRAFT_REPLY = """\
 Drafted it.
@@ -32,22 +54,31 @@ Drafted it.
 ```
 """
 
+# Map each workflow's run method to the single activity it executes, so the inline
+# stand-in can run that activity directly (mirroring the workflow's one-activity body).
+_WF_TO_ACTIVITY = {
+    StartConversationWorkflow.run: start_conversation_activity,
+    SendMessageWorkflow.run: send_message_activity,
+    CloneFromRegistryWorkflow.run: clone_from_registry_activity,
+    SaveAgentWorkflow.run: save_agent_activity,
+}
 
-def _make_client(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
-    """Build a TestClient for a fresh app with ``service`` injected as the dependency.
 
-    Each call gets its own ``FastAPI`` instance, so the override is scoped to that
-    app and there's no cross-test leakage to clean up. Pass
-    ``raise_server_exceptions=False`` to let the app's exception handler turn an
-    unhandled error into a 500 response (instead of re-raising into the test) when
-    asserting on server-error mapping.
+def _inline_execute(workflow_run: Any, *args: Any, workflow_id: str, task_queue: str, **_: Any) -> Any:
+    """In-process stand-in for ``execute_workflow_sync``.
+
+    Runs the workflow's single activity directly and reproduces Temporal's failure
+    wrapping: a typed ``ApplicationError`` (the activity's translated contract error)
+    is preserved as the ``WorkflowFailureError`` cause; any other activity exception
+    is wrapped as ``ApplicationError(type=<class name>)`` exactly as Temporal would.
     """
-    from unified_api.routes.agent_studio import get_agent_studio_service, router
-
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_agent_studio_service] = lambda: service
-    return TestClient(app, raise_server_exceptions=raise_server_exceptions)
+    activity_fn = _WF_TO_ACTIVITY[workflow_run]
+    try:
+        return activity_fn(*args)
+    except ApplicationError as exc:
+        raise WorkflowFailureError(cause=exc) from exc
+    except Exception as exc:
+        raise WorkflowFailureError(cause=ApplicationError(str(exc), type=type(exc).__name__)) from exc
 
 
 def _service(reply: str, registry: FakeRegistry) -> AgentStudioService:
@@ -68,9 +99,28 @@ def registry() -> FakeRegistry:
 
 
 @pytest.fixture()
-def client(registry: FakeRegistry) -> TestClient:
+def make_client(monkeypatch: pytest.MonkeyPatch):
+    """Factory: a TestClient whose Temporal dispatch runs activities in-process.
+
+    Installs the two patches (runtime singleton + inline execute) via ``monkeypatch``
+    so they auto-revert after the test. Each call builds a fresh app so there is no
+    cross-test router leakage.
+    """
+
+    def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
+        monkeypatch.setattr("agent_studio.runtime.get_studio_service", lambda: service)
+        monkeypatch.setattr(dispatch_mod, "execute_workflow_sync", _inline_execute)
+        app = FastAPI()
+        app.include_router(router)
+        return TestClient(app, raise_server_exceptions=raise_server_exceptions)
+
+    return _factory
+
+
+@pytest.fixture()
+def client(registry: FakeRegistry, make_client) -> TestClient:
     """Default client: a service whose assistant always returns ``_DRAFT_REPLY``."""
-    return _make_client(_service(_DRAFT_REPLY, registry))
+    return make_client(_service(_DRAFT_REPLY, registry))
 
 
 def test_start_new_conversation(client: TestClient) -> None:
@@ -152,15 +202,15 @@ def test_send_message_updates_definition(client: TestClient) -> None:
     assert resp.json()["definition"]["name"] == "my.agent"
 
 
-def test_send_message_cannot_rewrite_server_owned_fields(registry: FakeRegistry) -> None:
+def test_send_message_cannot_rewrite_server_owned_fields(registry: FakeRegistry, make_client) -> None:
     """Spec: the model can't rewrite server-owned ``mode``/``cloned_from``.
 
-    Start a refine conversation, then have the assistant emit an ``agent`` block
-    that tries to flip ``mode`` to ``new`` and overwrite ``cloned_from`` — the
-    response definition must keep ``refine`` and the original source id.
+    Start a refine conversation, then have the assistant emit an ``agent`` block that
+    tries to flip ``mode`` to ``new`` and overwrite ``cloned_from`` — the response
+    definition must keep ``refine`` and the original source id.
     """
     reply = 'Updated.\n\n```agent\n{"name": "x", "role": "r", "mode": "new", "cloned_from": "other"}\n```'
-    client = _make_client(_service(reply, registry))
+    client = make_client(_service(reply, registry))
 
     started = client.post(
         "/api/agent-studio/conversations",
@@ -193,11 +243,11 @@ def test_send_message_rejects_empty_body(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
-def test_send_message_value_error_is_400() -> None:
-    """A service ``ValueError`` maps to 400 (not an unhandled 500)."""
+def test_send_message_value_error_is_400(registry: FakeRegistry, make_client) -> None:
+    """A service ``ValueError`` maps to 400 (not an unhandled 500) through Temporal."""
     service = Mock(spec=AgentStudioService)
     service.send_message.side_effect = ValueError("bad input")
-    client = _make_client(service)
+    client = make_client(service)
     resp = client.post("/api/agent-studio/conversations/x/messages", json={"message": "hi"})
     assert resp.status_code == 400
 
@@ -233,9 +283,9 @@ def test_save_agent_registers(client: TestClient, registry: FakeRegistry) -> Non
 def test_save_agent_same_name_reports_not_created(client: TestClient, registry: FakeRegistry) -> None:
     """Re-saving the same name updates in place and reports ``created`` false.
 
-    The second save must actually overwrite the registered manifest, not just
-    report ``created=False`` — assert the registry now holds the edited role
-    (manifest ``summary`` mirrors ``definition.role``).
+    The second save must actually overwrite the registered manifest, not just report
+    ``created=False`` — assert the registry now holds the edited role (manifest
+    ``summary`` mirrors ``definition.role``).
     """
     payload = {"name": "Dup", "role": "Does a thing"}
     first = client.post("/api/agent-studio/agents", json=payload).json()
@@ -305,16 +355,17 @@ def test_save_agent_not_ready_is_400(client: TestClient) -> None:
     assert resp.status_code == 400
 
 
-def test_save_agent_unexpected_error_is_500() -> None:
+def test_save_agent_unexpected_error_is_500(registry: FakeRegistry, make_client) -> None:
     """An unmapped service error surfaces as a 500, not a swallowed success.
 
-    Only ``ValueError`` (→400) is caught in the route; any other exception must
-    propagate to FastAPI's default 500 handler. ``raise_server_exceptions=False``
-    lets the TestClient return that 500 instead of re-raising into the test.
+    Only ``ValueError``/``LookupError`` markers are translated back to a native
+    exception (→ 400/404); any other activity failure re-raises the
+    ``WorkflowFailureError``, which the route does not catch → FastAPI's default 500.
+    ``raise_server_exceptions=False`` lets the TestClient return that 500.
     """
     service = Mock(spec=AgentStudioService)
     service.save_agent.side_effect = RuntimeError("registry exploded")
-    client = _make_client(service, raise_server_exceptions=False)
+    client = make_client(service, raise_server_exceptions=False)
     resp = client.post(
         "/api/agent-studio/agents",
         json={"name": "Boom", "role": "Explodes"},
@@ -322,21 +373,10 @@ def test_save_agent_unexpected_error_is_500() -> None:
     assert resp.status_code == 500
 
 
-def test_default_dependency_returns_module_service() -> None:
-    """The un-overridden dependency resolves the process-wide default service.
-
-    Checked directly (rather than via a live request) so the test stays hermetic —
-    a real request would invoke the default service's live LLM/registry.
-    """
-    import unified_api.routes.agent_studio as routes_mod
-
-    assert routes_mod.get_agent_studio_service() is routes_mod._service
-
-
-def test_bad_typed_agent_block_returns_200_not_500(registry: FakeRegistry) -> None:
+def test_bad_typed_agent_block_returns_200_not_500(registry: FakeRegistry, make_client) -> None:
     """A wrong-typed field in the LLM block doesn't 500 — the turn 200s, draft unchanged."""
     bad_reply = 'Sure.\n\n```agent\n{"name": 123}\n```'
-    client = _make_client(_service(bad_reply, registry))
+    client = make_client(_service(bad_reply, registry))
 
     started = client.post("/api/agent-studio/conversations", json={"mode": "new"}).json()
     resp = client.post(
