@@ -49,13 +49,16 @@ def _json_safe(value: Any) -> Any:
         - ``value`` is a phase ``context`` value: a scalar, list, dict, or a
           pydantic model (e.g. ``ClientContext``/``HandoffPackage``/``OpenQuestion``).
     Postconditions:
-        - Models become ``model_dump(mode="json")`` dicts and lists are converted
-          element-wise; everything else is returned unchanged. The result is
+        - Models become ``model_dump(mode="json")`` dicts; lists and dict values
+          are converted element-wise (recursively, so a model nested inside a dict
+          is normalized too); everything else is returned unchanged. The result is
           JSON-serializable so it can cross the Temporal activity boundary under
           the default data converter.
     """
     if isinstance(value, list):
         return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
     return value
@@ -101,8 +104,6 @@ def _guarded(
     progress: int,
     status_text: str,
     work: Callable[[], Any],
-    *,
-    status: Optional[str] = None,
 ) -> Any:
     """Report phase progress, run ``work``, and mark the job FAILED on error.
 
@@ -110,23 +111,27 @@ def _guarded(
         - ``job_id`` refers to an existing job; ``progress`` is 0..100; ``work`` is
           a zero-arg callable performing the phase's work and returning its result.
     Postconditions:
-        - The job row's ``current_phase``/``progress``/``status_text`` (and
-          ``status`` when supplied — the first activity flips it to RUNNING) are
-          updated, then ``work()`` runs and its result is returned.
-        - If ``work`` raises, the job is marked FAILED and the exception is
-          re-raised unchanged (so the workflow's RetryPolicy governs re-attempts).
+        - The job row's ``current_phase``/``progress``/``status_text`` are updated;
+          ``status`` is (re-)asserted to RUNNING and any stale ``error`` is cleared,
+          so a prior phase's transient FAILED (left by a retried attempt) self-heals
+          and a finished run never carries a leftover error.
+        - This progress write is INSIDE the guard, so if it (or ``work``) raises,
+          the job is marked FAILED and the exception is re-raised unchanged (the
+          workflow's RetryPolicy governs re-attempts). Keeping it inside the guard
+          means a failing progress write can no longer leave the job stuck
+          non-terminal.
     """
-    from planning_team.shared.job_store import update_job
+    from planning_team.shared.job_store import JOB_STATUS_RUNNING, update_job
 
-    fields: Dict[str, Any] = {
-        "current_phase": phase,
-        "progress": progress,
-        "status_text": status_text,
-    }
-    if status is not None:
-        fields["status"] = status
-    update_job(job_id, **fields)
     try:
+        update_job(
+            job_id,
+            current_phase=phase,
+            progress=progress,
+            status_text=status_text,
+            status=JOB_STATUS_RUNNING,
+            error=None,
+        )
         return work()
     except Exception as exc:
         _fail(job_id, exc)
@@ -153,7 +158,6 @@ def intake_activity(
     """
     from planning_team.models import Phase
     from planning_team.phases import run_intake
-    from planning_team.shared.job_store import JOB_STATUS_RUNNING
 
     def _work() -> Dict[str, Any]:
         context_update, _ = run_intake(
@@ -164,7 +168,7 @@ def intake_activity(
         )
         return _merge_context({}, context_update)
 
-    return _guarded(job_id, Phase.INTAKE.value, 5, "Intake", _work, status=JOB_STATUS_RUNNING)
+    return _guarded(job_id, Phase.INTAKE.value, 5, "Intake", _work)
 
 
 @activity.defn(name="planning_discovery")
@@ -283,8 +287,11 @@ def document_production_activity(
         - Writes the client-context doc and initial spec under the workspace, and
           (when ``use_product_analysis``) submits the Product Requirements Analysis
           job and blocks on its completion — with a background heartbeat so the long
-          poll is not mistaken for a stalled worker. Returns ``context`` with a
-          JSON-native ``handoff_package`` merged in.
+          poll is not mistaken for a stalled worker. Folds any surfaced
+          ``open_questions``/``resolved_questions`` onto the handoff, then returns a
+          *slimmed* context (``{repo_path, handoff_package}``) — the only keys the
+          remaining phases read — so the raw brief/spec are not re-serialized across
+          later activity boundaries.
         - PRA clarification questions are auto-answered with defaults (parity with
           the current HTTP Temporal path: no user ``answer_callback``); the
           architecture step is not run here (it is a gated non-HTTP feature).
@@ -314,14 +321,23 @@ def document_production_activity(
                 run_architecture_fn=None,
             )
         merged = _merge_context(context, context_update)
-        # Carry any planning-surfaced questions onto the handoff so a downstream
-        # team can escalate unanswered ones instead of auto-deciding (mirrors the
-        # orchestrator; typically a no-op today since PRA resolves answers inline).
+        # Carry any *externally-resolved* questions onto the handoff, mirroring the
+        # orchestrator exactly. This is intentionally a ``setdefault`` no-op today:
+        # HandoffPackage seeds both keys with ``[]``, and that empty handoff is
+        # load-bearing — the SE orchestrator pauses the whole run for user input
+        # when ``handoff.open_questions`` is non-empty, and the requirements phase
+        # always emits (default) questions, so populating them here would pause
+        # every SE-driven run. Kept identical to the thread path for parity.
         handoff = merged.get("handoff_package")
         if isinstance(handoff, dict):
             handoff.setdefault("open_questions", list(merged.get("open_questions") or []))
             handoff.setdefault("resolved_questions", list(merged.get("resolved_questions") or []))
-        return merged
+        # Slim the context for the remaining hops: only repo_path + handoff_package
+        # are read downstream (sub-agent provisioning reads repo_path; finalize
+        # reads handoff_package). Dropping the now-unused raw brief/spec and the
+        # duplicated top-level client_context keeps the per-activity Temporal
+        # payload well under the blob limit for large plans.
+        return {"repo_path": merged.get("repo_path"), "handoff_package": handoff}
 
     return _guarded(job_id, Phase.DOCUMENT_PRODUCTION.value, 45, "Document production", _work)
 

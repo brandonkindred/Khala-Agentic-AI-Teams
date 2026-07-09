@@ -85,10 +85,16 @@ def test_discovery_activity_refines_client_context(tmp_path, job_store, dummy_ll
 
     assert dummy_llm.complete_text.called
     assert ctx["client_context"]["problem_summary"] == "Need X"
-    assert (
-        "job-1",
-        {"current_phase": "discovery", "progress": 15, "status_text": "Discovery"},
-    ) in [(jid, f) for jid, f in job_store["update"]]
+    # The discovery progress write reports its phase/progress and (re)asserts
+    # RUNNING while clearing any stale error.
+    discovery_updates = [
+        f for jid, f in job_store["update"] if f.get("current_phase") == "discovery"
+    ]
+    assert discovery_updates
+    assert discovery_updates[0]["progress"] == 15
+    assert discovery_updates[0]["status_text"] == "Discovery"
+    assert discovery_updates[0]["status"] == "running"
+    assert discovery_updates[0]["error"] is None
 
 
 def test_requirements_activity_adds_open_questions(tmp_path, job_store, dummy_llm):
@@ -279,3 +285,13 @@ def test_activity_sequence_matches_orchestrator_handoff(tmp_path, monkeypatch, j
         ctx["handoff_package"]["client_context"] == orch_result["handoff_package"]["client_context"]
     )
     assert ctx["handoff_package"]["client_context"]["problem_summary"] == "Need X"
+    # The handoff's open/resolved questions must stay identical across the thread
+    # and Temporal paths (both empty today — the SE gate pauses on non-empty
+    # open_questions, so this empty handoff is deliberately preserved).
+    assert (
+        ctx["handoff_package"]["open_questions"] == orch_result["handoff_package"]["open_questions"]
+    )
+    assert (
+        ctx["handoff_package"]["resolved_questions"]
+        == orch_result["handoff_package"]["resolved_questions"]
+    )
