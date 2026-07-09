@@ -329,6 +329,43 @@ def test_run_dbc_comments_skips_excluded_paths(monkeypatch, tmp_path) -> None:
     assert result.compliant is True
 
 
+def test_run_dbc_comments_prunes_excluded_dirs_in_place(monkeypatch, tmp_path) -> None:
+    """The streamed os.walk prunes excluded subtrees (node_modules/.git/
+    __pycache__/venv) in place, so their files never reach the agent's code
+    context, while top-level code is still collected."""
+    from software_engineering_team import quality_gate_tools as q
+
+    (tmp_path / "keep.py").write_text("KEEP_TOP_LEVEL = 1")
+    for excl in ("node_modules", ".git", "__pycache__", "venv"):
+        d = tmp_path / excl
+        d.mkdir()
+        (d / "leak.py").write_text(f"LEAK_{excl} = 1")
+
+    captured = {}
+
+    class _Result:
+        already_compliant = True
+        files = {}
+        comments_added = 0
+        comments_updated = 0
+        suggested_commit_message = ""
+
+    def fake_run(inp):
+        captured["code"] = inp.code
+        return _Result()
+
+    fake_agent = SimpleNamespace(run=fake_run)
+    monkeypatch.setattr(
+        "technical_writers.dbc_comments_agent.DbcCommentsAgent", lambda llm: fake_agent
+    )
+    q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
+
+    code = captured["code"]
+    assert "KEEP_TOP_LEVEL" in code  # top-level code is collected
+    for excl in ("node_modules", ".git", "__pycache__", "venv"):
+        assert f"LEAK_{excl}" not in code  # excluded subtree pruned, never read
+
+
 # ---------------------------------------------------------------------------
 # run_qa_check
 # ---------------------------------------------------------------------------
