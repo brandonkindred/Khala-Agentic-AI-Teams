@@ -1,0 +1,192 @@
+# SE Team Refactor — #2, #3, #4, #5 Design
+
+**Status:** Approved 2026-07-09
+**Scope:** Four independent refactors of the software engineering team that reduce code complexity (#2, #5), improve performance (#3, #4), and reduce memory/disk pressure (#3). None change externally observable behavior except where explicitly noted (deleting dead code and correcting stale docs).
+
+All file paths and line numbers below were verified against the working tree on 2026-07-08/09.
+
+---
+
+## Refactor #2 — Collapse the backend/frontend code-v2 review fork
+
+### Problem
+`backend_code_v2_team` and `frontend_code_v2_team` carry ~1,800 lines of near-duplicate review/execution/orchestrator code. The recent `shared/` collapse (commit aaf2f117) explicitly deferred the review-phase fork. What remains:
+
+- `phases/review.py`: backend 1059 lines vs frontend 580. `_run_llm_review`, `_run_qa_agent`, `_run_security_agent`, `_run_build_verification` are byte-identical wrappers (differing only in a literal build-label string and the team's injected `ReviewIssue`/prompts). `run_review` and `run_microtask_review` are duplicated with divergences in: `language` default, `lint_agent_type`, build-verify label, blocking predicate (`is_blocking` vs `any_blocking`), lint severity remap (backend yes, frontend no), `ToolAgentPhaseInput` field set (backend includes `existing_code`/`spec_context`/`language`, frontend omits), and recommendation-issue `source` prefix (`tool_` vs none). `run_documentation_self_review` is functionally identical in both (thin delegates to shared `review_utils`).
+- `phases/execution.py`: `run_execution_with_review_gates` duplicated (backend 165-752, frontend 134-725), identical signature, identical skeleton (microtask dep-check → coding → `while not phase_failed` code-review/QA/security gates → documentation self-review → rollback), differing in which review functions are called and the gate model.
+- `orchestrator.py`: backend 574 vs frontend 575; `*DevelopmentAgent.run_workflow` and `*TeamLead.run_workflow` scaffolds are byte-aligned in ordering, differing in tool-agent roster, `_read_repo_code` extension/exclude sets, and pre-flight detection.
+
+### Approach (decision: parameterize, keep both gate models)
+Move the genuinely shared code into `software_engineering_team/shared/v2_review.py`; preserve the two different gate models as thin per-team glue.
+
+**New `ReviewConfig` (frozen dataclass):**
+```python
+@dataclass(frozen=True)
+class ReviewConfig:
+    language: str                          # "python" | "typescript"
+    lint_agent_type: str                   # "backend" | "frontend"
+    build_verify_label: str                # "backend_code_v2" | "frontend_code_v2"
+    blocking: Callable[[str], bool]        # is_blocking | any_blocking
+    severity_remap: Mapping[str, str] | None  # backend _lint_severity_map | None
+    tool_phase_fields: frozenset[str]      # {"existing_code","spec_context","language"} | frozenset()
+    source_prefix: str | None              # "tool_" | None
+```
+Per-team instances live in each team's `phases/_profile.py` next to the existing `StackProfile`.
+
+**Moved to shared `v2_review.py`:**
+- `_run_llm_review`, `_run_qa_agent`, `_run_security_agent`, `_run_build_verification` — take `config` for the build-label; inject the team's `ReviewIssue`/prompts via parameters.
+- `run_documentation_self_review` — the existing thin delegate moves into shared; per-team copies deleted.
+- `run_review(config, ...)` and `run_microtask_review(config, ...)` — single shared implementations; all divergent branches read from `config`.
+
+**Kept per-team (no convergence):**
+- Backend keeps `run_code_review_phase` / `run_qa_testing_phase` / `run_security_testing_phase` / `run_documentation_review_phase` with per-phase retry counts (`code_review_max_retries`/`qa_max_retries`/`security_max_retries`) and `IN_CODE_REVIEW`/`IN_QA_TESTING`/`IN_SECURITY_TESTING` statuses. These become thin callers of the shared `run_*` helpers.
+- Frontend keeps its unified `run_microtask_review` filtering issues by `i.source in {"qa","security"}` with a single `IN_REVIEW` status and single `max_retries`.
+- Each team's `run_execution_with_review_gates` becomes a thin orchestrator over the shared skeleton + its own gate-model glue. The shared microtask-loop skeleton (dep-check, progress emission, `while not phase_failed` cycle, documentation self-review, rollback) moves to `shared/phases/execution.py` as `run_gated_execution_impl(*, config, gate_runner, ...)` parameterized by a `GateRunner` strategy each team supplies.
+
+**Behavior contract:** Identical review outcomes for both teams. The divergent knobs are preserved 1:1 in `ReviewConfig`; no gate model is changed.
+
+### Affected files
+- New: `software_engineering_team/shared/v2_review.py`
+- Modified: `shared/phases/execution.py` (new `run_gated_execution_impl`); both teams' `phases/review.py`, `phases/execution.py`, `phases/_profile.py`, `phases/problem_solving.py` (delegates unchanged), `orchestrator.py`
+- Tests: `tests/test_v2_review_phase.py`, `tests/test_v2_fe_review_phase.py`, execution tests — updated to the shared functions; new tests for `ReviewConfig` divergence coverage.
+
+### Risk
+Medium. The divergent knobs must be preserved exactly (severity remap, source prefix, ToolAgentPhaseInput fields). Test coverage on both teams' review outcomes is the guardrail.
+
+---
+
+## Refactor #3 — Stop redundant I/O and repo walks (safe wins only)
+
+### Problem
+- `write_microtask_output_or_fail` and every batch-fix cycle (execution.py:299/407/529/607) re-write the *entire* `microtask_files` dict via `write_files_and_commit` → `git add -A` (whole-tree stage). O(M·F·R) writes.
+- The v2 orchestrators' `_read_repo_code` (backend `orchestrator.py:83-95`, frontend `orchestrator.py:97-120`) calls `read_repo_code_budgeted` fresh on every `run_workflow` (one per task) — N full repo walks for N tasks — even though `coding_team/orchestrator.py:369-423` already maintains an incremental `_RepoContextCache` that the v2 worker discards at `v2_team_worker.py:375`.
+- `shared_repo_context/repo_utils.py:140-151` materializes the full `rglob("*")` walk into a `List[Path]` before the budgeted read loop.
+
+### Approach (decision: safe wins only)
+Three behavior-preserving changes. `all_files` retention is unchanged (the orchestrator documentation phase feeds `exec_result.files` contents to the review LLM, and deliver re-writes files — both need contents; per decision we do not touch that contract).
+
+**(a) Incremental git commits via `commit_paths`.** `commit_paths(repo_path, paths, message) -> (bool, str)` (already production-used in `shared/phases/setup.py` and both teams' `setup.py`) stages only the named paths. Track the changed-path set per batch-fix cycle and commit only those. The orchestrator's final commit and deliver's commit likewise move to `commit_paths`. `write_files_and_commit` (with `git add -A`) is kept for callers that genuinely write a full set (setup phase), but the execution-loop and deliver call sites move off it.
+
+**(b) Port `_RepoContextCache`.** New `software_engineering_team/shared/repo_context_cache.py` lifts the incremental `(mtime_ns, size, rendered_part)` cache from `coding_team/orchestrator.py:369-423` (key by `(st.st_mtime_ns, st.st_size)`, re-render only changed files, wholesale-replace `self._entries` to evict removed files, cap eligible files). The cache is constructed once per job at the coding-team worker seam (`v2_team_worker.py:375`, which currently `del`s the `repo_context` arg) and threaded into the `*DevelopmentAgent`. `_read_repo_code` consults the cache instead of re-walking.
+
+**(c) Stream `read_repo_code_budgeted`.** Replace the materialized `rglob("*")` walk with a lazy `os.walk` that prunes excluded dirs in-place and stops at the char budget — mirroring `_RepoContextCache`'s `_enumerate_context_files`. Same output (same files, same sort order, same budget semantics).
+
+### Behavior contract
+Same files written, same commits, same `existing_code` string. Only the amount of I/O and walking changes.
+
+### Affected files
+- New: `software_engineering_team/shared/repo_context_cache.py`
+- Modified: `shared_repo_context/repo_utils.py`; both v2 `orchestrator.py` (`_read_repo_code`); both v2 `phases/execution.py` (write/commit sites); `coding_team/v2_team_worker.py` (thread the cache instead of discarding); `shared/phases/deliver.py` commit site.
+- Tests: streaming-walk test, repo-context-cache test, changed-paths-commit test.
+
+### Risk
+Low–medium. `commit_paths` and `_RepoContextCache` already exist and are production-proven; this is wiring. Guard: assert committed path set equals the changed-path set; assert cached `existing_code` equals fresh-walk output for the same on-disk state.
+
+---
+
+## Refactor #4 — Move trace persistence and provider resets off the LLM hot path
+
+### Problem
+- `software_engineering_team/shared/trace_store.py:147` — `_trace_observer` calls `write_trace(record)` synchronously, which opens `pg_cursor()` and runs a single-row 16-column `INSERT INTO se_agent_traces` (`trace_store.py:55-78`) on the LLM-call thread. When `SE_TRACE_TO_POSTGRES` is on, **every LLM call does a blocking Postgres round-trip before returning** — contradicting the guidance at `llm_service/telemetry.py:25-28`.
+- `llm_service/provider_store.py:636` — `select_active_entry` calls `reset_entry(entry.id)` synchronously on the call path when a limited entry's `reset_at` has elapsed; `reset_entry` (569-604) runs a conditional `UPDATE` + `commit()` + `clear_cache()`, cascading into a full list re-read + re-decrypt on the next call. `mark_exhausted` (537) is the companion sync write.
+- `_emit_otel_llm_span` (`telemetry.py:347-419`) is synchronous but must stay so for span context/latency correctness — out of scope per decision.
+
+### Approach (decision: batch traces + shutdown drain, AND fix provider_store reset_entry)
+**(a) Batched trace flusher.** New `software_engineering_team/shared/trace_flusher.py`:
+- Bounded in-memory buffer (`collections.deque`, cap `SE_TRACE_BUFFER_MAX`, default 1000; overflow drops oldest + logs at WARNING — bounded memory, never blocks the caller).
+- `_trace_observer` (registered exactly as today via `register_call_observer`) **enqueues** a copied record into the deque instead of INSERTing. No DB I/O on the call path.
+- A `BackgroundHeartbeat` (`shared_concurrency/heartbeat.py`, existing primitive) drains the deque on interval `SE_TRACE_FLUSH_INTERVAL_S` (default 2.0, mirrors `SE_COST_FLUSH_INTERVAL_S`) using `pg_cursor()` + `cur.executemany` with the existing 16-column INSERT. Failures swallowed + logged (never raise into the flusher thread).
+- `drain()` + `unregister()` called from `_se_shutdown()` (`api/lifecycle.py:35-46`), which runs **before** `close_pool()` (verified at `shared_app/factory.py:130-139`) — so the final flush can still use the pool.
+- Column order + positional params preserved exactly from `trace_store.py:55-78`. `write_trace` remains as a sync one-shot for any non-observer caller (e.g. tests, manual tools).
+
+**(b) `reset_entry` / `mark_exhausted` off the call path.** In `llm_service/provider_store.py`: `select_active_entry` (line 636) no longer calls `reset_entry` synchronously. Expired-limited entries are queued to a background sweeper (a `BackgroundHeartbeat` in `llm_service`) that periodically runs the conditional `UPDATE … WHERE reset_at <= NOW()` + `clear_cache()`. Selection returns the (still-cached) entry immediately; the reset happens out-of-band. `mark_exhausted` (537) similarly moves its `UPDATE`+`clear_cache` to the sweeper. The sweeper no-ops when Postgres is off. This is the shared `llm_service` path used by all teams — guarded and unit-tested.
+
+### Behavior contract
+- Trace rows: identical contents, eventually-consistent within `SE_TRACE_FLUSH_INTERVAL_S` + drain-at-shutdown. No row loss on clean shutdown.
+- Provider failover: same selection result; resets now asynchronous but the conditional `WHERE reset_at <= NOW()` (DB clock) preserves the existing cross-container safety. No change to which provider is selected for a given call.
+
+### Affected files
+- New: `software_engineering_team/shared/trace_flusher.py`; `llm_service/provider_sweeper.py` (or extend an existing llm_service module).
+- Modified: `shared/trace_store.py` (observer enqueues, keep `write_trace`); `api/lifecycle.py` (`_se_shutdown` drain/unregister); `llm_service/provider_store.py` (`select_active_entry`/`mark_exhausted` queue instead of sync write); `llm_service/factory.py` (start/stop sweeper with the client lifecycle).
+- Tests: flusher buffer/overflow/drain test; executemany column-order test; provider sweeper test (expired entry reset out-of-band); regression that the observer never blocks the call path.
+
+### Risk
+Medium. #4b touches the shared `llm_service` used by every team. Mitigation: sweeper no-ops when Postgres off; existing failover tests must pass unchanged; add a test asserting the call path performs zero DB writes.
+
+---
+
+## Refactor #5 — Finish decomposing `orchestrator.py`
+
+### Problem
+`software_engineering_team/orchestrator.py` is 2103 lines. Commit d72cec0c moved Discovery out but left ~900 lines of dead/test-only legacy helpers and a ~560-line live build-fix cluster inline.
+
+### Verified dead code (zero production callers)
+| Function | Lines | Callers |
+|---|---|---|
+| `_run_tech_lead_review` | 698-764 | none (not even tests) |
+| `_run_code_review` | 766-799 | `test_orchestrator_review_input.py` only |
+| `_pop_runnable_task` | 1360-1378 | `test_orchestrator_helpers_coverage.py` only |
+| `_maybe_ship_sprint_release` | 1381-~1513 | `test_release_hook.py` only |
+| `_log_task_completion_banner` | 420-455 | `test_orchestrator_helpers_coverage.py` only |
+| `_log_agent_crash_banner` | 484-510 | `test_orchestrator_helpers_coverage.py`, `test_repair_agent.py` |
+| `_apply_repair_fixes` | 513-548 | `test_orchestrator_helpers_coverage.py`, `test_repair_agent.py` |
+| `_log_task_breakdown` | 551-596 | `test_orchestrator_helpers_coverage.py` only |
+
+`shared/planning_cache.py` (`get_cached_plan`/`set_cached_plan`/`compute_planning_cache_key`) has zero production callers — referenced only by `tests/test_shared_more.py` and `tests/test_planning_cache_sprint_id.py`.
+
+### Verified live code
+- `_run_build_verification` (802-997) — production caller `quality_gate_tools.py:182,184` (imported + called); also `test_software_engineering_orchestrator.py:59`, `test_quality_gate_tools.py` (monkeypatch).
+- `_try_build_fix_one_at_a_time` (1000-~1358) — called internally by `_run_build_verification` at orchestrator.py:838/874/925; transitively live.
+- `_build_coding_team_plan_input` (668-695) — `run_orchestrator:1858`, `temporal/activities.py:570`.
+- `_read_repo_code` (664, alias) — `run_orchestrator:1855`, `temporal/activities.py:566`.
+- Call chain: `run_orchestrator` → `run_coding_team_orchestrator` → `swarm_implementation.py:534` → `SECodeEngineProvider.run_build_verification` (`coding_engine_provider.py:65`) → `quality_gate_tools.run_build_verification` (`:170`) → `orchestrator._run_build_verification` (`:184`) → `_try_build_fix_one_at_a_time`.
+
+### Approach (decision: delete dead + delete release hook + fix docs + extract build-fix)
+**(a) Delete the 8 dead functions** and their test-only call sites. For each affected test file, keep tests that exercise live code, drop tests that exist solely for deleted functions:
+- `test_orchestrator_helpers_coverage.py` — drop `_pop_runnable_task`/`_log_task_completion_banner`/`_log_agent_crash_banner`/`_apply_repair_fixes`/`_log_task_breakdown` cases; keep any live-code cases.
+- `test_orchestrator_review_input.py` — exists solely for `_run_code_review`; delete the file.
+- `test_release_hook.py` — exists solely for `_maybe_ship_sprint_release`; delete the file.
+- `test_repair_agent.py` — keep live portions, drop the `_log_agent_crash_banner`/`_apply_repair_fixes` cases.
+
+**(b) Delete `shared/planning_cache.py`** + `tests/test_planning_cache_sprint_id.py` + the planning-cache cases in `test_shared_more.py`.
+
+**(c) Delete `_maybe_ship_sprint_release`** + `test_release_hook.py`; correct the stale docs:
+- `CLAUDE.md` §Architecture "Planning cache: Short-circuits Design phase…" → remove.
+- `CLAUDE.md`/`docs/ARCHITECTURE.md` §11 Product Delivery Loop — stop claiming a live release hook; state that the SE-side release hook is not currently wired (a future feature).
+
+**(d) Extract the build-fix cluster** to new `software_engineering_team/build_fix.py` containing `_run_build_verification` + `_try_build_fix_one_at_a_time` (names preserved — `quality_gate_tools.py:170` already defines a *public* `run_build_verification` wrapper that calls the underscore form, so the extracted function keeps its `_`-prefix to avoid a name collision with that wrapper). Update:
+- `quality_gate_tools.py:182` import → `from software_engineering_team.build_fix import _run_build_verification`.
+- `test_software_engineering_orchestrator.py`, `test_quality_gate_tools.py` monkeypatch targets.
+- Any other verified importer (none production beyond `quality_gate_tools`).
+
+After (a)+(d), `orchestrator.py` drops from 2103 → ~1100–1200 lines.
+
+### Behavior contract
+No change to live paths. Dead code removal is behavior-preserving by definition. Doc corrections align docs with the verified runtime.
+
+### Affected files
+- New: `software_engineering_team/build_fix.py` (exports `_run_build_verification`, `_try_build_fix_one_at_a_time`)
+- Modified: `software_engineering_team/orchestrator.py` (shrink); `software_engineering_team/quality_gate_tools.py` (import); `CLAUDE.md`; `docs/ARCHITECTURE.md` §11.
+- Deleted: `software_engineering_team/shared/planning_cache.py`; `tests/test_planning_cache_sprint_id.py`; `tests/test_orchestrator_review_input.py`; `tests/test_release_hook.py`.
+- Modified tests: `tests/test_orchestrator_helpers_coverage.py`; `tests/test_repair_agent.py`; `tests/test_shared_more.py`.
+
+### Risk
+Low for deletions (verified dead). Medium for the build-fix extraction (touches a live production import + tests) — mitigated by keeping the public name stable and re-pointing imports atomically.
+
+---
+
+## Implementation order
+
+1. **#5** — pure deletions + extraction; shrinks the file the other refactors touch. Lowest risk, unblocks cleaner diffs.
+2. **#4** — independent (llm_service + SE shared); no overlap with #2/#3 execution code.
+3. **#2** — collapses the review/execution fork.
+4. **#3** — builds on #2's execution skeleton (changed-path commits thread through the unified `run_gated_execution_impl`).
+
+Each refactor lands as its own PR with `Closes #N` (an issue is opened first per project rule) and must keep the 90% line-coverage floor.
+
+## Non-goals (explicitly deferred)
+- Prompt caching for stable LLM context (#1 from the analysis) — separate effort.
+- `all_files` content eviction / paths-only deliver (#3 "also paths-only" option) — deferred per decision.
+- OTEL metric recording off-path — deferred per decision.
+- Converging backend/frontend gate models (#2 full-convergence option) — deferred per decision.
+- `TaskGraphService` RLock-over-HTTP-persist, `_pause_lock` over human wait, worktree-cleanup failure sweep, `MAX_DOCUMENTATION_ITERATIONS=100` — flagged in the analysis but out of scope here.
