@@ -239,6 +239,132 @@ def _enforce_cap_and_rank(
     return [entry[0] for entry in capped[:target_count]]
 
 
+# ---------------------------------------------------------------------------
+# Deep-research shared stages (module-level so the Temporal deep-research
+# activities can reuse them without constructing a full orchestrator, and so
+# the sync ``deep_research_only`` path and the async workflow stay single-source).
+# ---------------------------------------------------------------------------
+
+
+def default_dossier_url(dossier_id: str) -> str:
+    """Fallback dossier URL matching the unified-api mount (``/api/sales``).
+
+    Preconditions:
+        - ``dossier_id`` is a non-empty dossier id.
+    Postconditions:
+        - Returns the relative retrieval path; used when no request-scoped
+          ``url_for`` builder is available (the async job path and background
+          thread path have no FastAPI request context).
+    """
+    return f"/api/sales/dossiers/{dossier_id}"
+
+
+def rank_and_assign_ids(
+    mapped: List[tuple[Prospect, float]], max_per_company: int, target_prospects: int
+) -> List[Prospect]:
+    """Cap per company, rank, trim to ``target_prospects``, and assign ids.
+
+    Preconditions:
+        - ``mapped`` is the list of ``(prospect, confidence)`` pairs from the
+          decision-maker stage.
+    Postconditions:
+        - Returns the ranked prospects (≤ ``target_prospects``); every returned
+          prospect has a non-empty ``id`` (a fresh ``prs_<uuid12>`` is minted
+          for any that lacked one) so dossiers can reference them.
+    """
+    final = _enforce_cap_and_rank(mapped, max_per_company, target_prospects)
+    for p in final:
+        if not p.id:
+            p.id = f"prs_{uuid4().hex[:12]}"
+    return final
+
+
+def assemble_and_persist_deep_research(
+    *,
+    product_name: str,
+    final_prospects: List[Prospect],
+    dossiers: dict[str, ProspectDossier],
+    extra_notes: List[str],
+    target_prospects: int,
+    dossier_url_builder: Optional[Callable[[str], str]] = None,
+    persist: bool = True,
+) -> DeepResearchResult:
+    """Assemble the ranked result, best-effort persisting dossiers + the list.
+
+    The single Stage-5 implementation, shared by ``deep_research_only`` (sync)
+    and the Temporal finalize activity (async).
+
+    Preconditions:
+        - ``dossiers`` is keyed by ``prospect.id``; ``final_prospects`` is the
+          ranked list (possibly empty for an early-exit — no companies / no
+          decision-makers).
+    Postconditions:
+        - Returns a ``DeepResearchResult`` whose entries are the ranked
+          prospects that produced a dossier; prospects without one are dropped
+          with a note. A shortfall note is added when a non-empty ranked list
+          is shorter than ``target_prospects``.
+        - When ``persist`` and there is at least one entry, dossiers and the
+          list are saved via ``DossierStore`` (best-effort; a store outage is
+          logged, not raised). An empty result is never persisted.
+    """
+    build_url = dossier_url_builder or default_dossier_url
+    run_notes = list(extra_notes)
+    if final_prospects and len(final_prospects) < target_prospects:
+        run_notes.append(
+            f"Only {len(final_prospects)} qualifying prospects after per-company cap "
+            f"(target was {target_prospects})."
+        )
+
+    store = None
+    if persist and final_prospects:
+        try:
+            from .dossier_store import DossierStore
+
+            store = DossierStore()
+        except Exception:
+            logger.warning("DossierStore unavailable; continuing without persistence")
+            store = None
+
+    entries: List[ProspectListEntry] = []
+    rank = 0
+    for p in final_prospects:
+        dossier = dossiers.get(p.id)
+        if dossier is None:
+            run_notes.append(f"No dossier produced for prospect {p.id} ({p.contact_name}).")
+            continue
+        if store is not None:
+            try:
+                dossier = store.save_dossier(dossier)
+            except Exception:
+                logger.exception("Failed to persist dossier %s", dossier.dossier_id)
+        p.dossier_id = dossier.dossier_id
+        rank += 1
+        entries.append(
+            ProspectListEntry(
+                rank=rank,
+                prospect=p,
+                dossier_id=dossier.dossier_id,
+                dossier_url=build_url(dossier.dossier_id),
+            )
+        )
+
+    result = DeepResearchResult(
+        list_id="",
+        product_name=product_name,
+        generated_at=datetime.now(tz=timezone.utc).isoformat(),
+        total_prospects=len(entries),
+        companies_represented=len({e.prospect.company_name for e in entries}),
+        entries=entries,
+        notes="; ".join(run_notes),
+    )
+    if store is not None and entries:
+        try:
+            result = store.save_prospect_list(result)
+        except Exception:
+            logger.exception("Failed to persist prospect list")
+    return result
+
+
 def _build_fallback_variant(prospect: Prospect) -> OutreachVariant:
     """Minimal company_soft_opener variant.
 
@@ -1324,6 +1450,80 @@ class SalesPodOrchestrator:
     # Deep-research prospecting: top-N list + per-prospect dossiers
     # ------------------------------------------------------------------
 
+    def map_company_one(
+        self,
+        company: Prospect,
+        icp_json: str,
+        product_name: str,
+        value_proposition: str,
+        max_per_company: int,
+        insights_ctx: Optional[str],
+    ) -> List[tuple[Prospect, float]]:
+        """Map one company's decision-makers into ``(prospect, confidence)`` pairs.
+
+        The per-company unit of the deep-research map stage — shared by the
+        thread-pool fan-out (``deep_research_only``) and the
+        ``deep_research_map_company_one`` Temporal activity. Raises on failure;
+        callers decide whether to skip (thread mode returns ``[]``; the activity
+        re-raises so Temporal can retry).
+
+        Postconditions:
+            - Returns the company's decision-maker entries (may be empty if the
+              agent found none).
+        """
+        dm_list = self.decision_maker_mapper.map_contacts(
+            company.model_dump_json(indent=2),
+            icp_json,
+            product_name,
+            value_proposition,
+            max_per_company,
+            insights_ctx,
+        )
+        return _decision_makers_to_entries(dm_list, company)
+
+    def build_dossier_one(
+        self,
+        prospect: Prospect,
+        product_name: str,
+        value_proposition: str,
+        insights_ctx: Optional[str],
+    ) -> ProspectDossier:
+        """Build one prospect's dossier (fully-formed, with ids). Raises on failure.
+
+        The per-prospect unit of the deep-research dossier stage — shared by
+        ``deep_research_only`` and the ``deep_research_build_dossier_one``
+        activity.
+
+        Preconditions:
+            - ``prospect`` has a non-empty ``id`` (assigned by
+              :func:`rank_and_assign_ids` before this stage).
+        Postconditions:
+            - Returns a ``ProspectDossier`` tied to ``prospect`` with
+              ``prospect_id``, a ``dsr_<uuid12>`` ``dossier_id``, a
+              ``generated_at`` timestamp, and name/title/company/linkedin
+              back-filled from the prospect where the agent left them blank.
+        """
+        dossier = self.dossier_builder.build(
+            prospect.model_dump_json(indent=2),
+            product_name,
+            value_proposition,
+            insights_ctx,
+        )
+        dossier.prospect_id = prospect.id
+        if not dossier.full_name and prospect.contact_name:
+            dossier.full_name = prospect.contact_name
+        if not dossier.current_title and prospect.contact_title:
+            dossier.current_title = prospect.contact_title
+        if not dossier.current_company:
+            dossier.current_company = prospect.company_name
+        if not dossier.linkedin_url and prospect.linkedin_url:
+            dossier.linkedin_url = prospect.linkedin_url
+        if not dossier.dossier_id:
+            dossier.dossier_id = f"dsr_{uuid4().hex[:12]}"
+        if not dossier.generated_at:
+            dossier.generated_at = datetime.now(tz=timezone.utc).isoformat()
+        return dossier
+
     def deep_research_only(
         self,
         request: DeepResearchRequest,
@@ -1347,17 +1547,11 @@ class SalesPodOrchestrator:
         unified-api mount; this is a reasonable fallback but not guaranteed
         to match every deployment.
         """
-        if dossier_url_builder is None:
-
-            def dossier_url_builder(dossier_id: str) -> str:
-                return f"/api/sales/dossiers/{dossier_id}"
-
         ctx = self._load_insights_ctx()
         icp_json = request.icp.model_dump_json(indent=2)
         # Request more companies than needed so that dedupe, failures, and
         # the per-company cap leave enough prospects to hit the target.
         companies_requested = min(100, max(40, request.target_prospects))
-        run_notes: List[str] = []
 
         # Stage 1 — company shortlist
         try:
@@ -1374,41 +1568,38 @@ class SalesPodOrchestrator:
             logger.exception("sales.deep_research.company_stage_failed")
             companies = []
         if not companies:
-            run_notes.append("No companies returned by the prospector agent.")
-            return DeepResearchResult(
-                list_id="",
+            return assemble_and_persist_deep_research(
                 product_name=request.product_name,
-                generated_at=datetime.now(tz=timezone.utc).isoformat(),
-                total_prospects=0,
-                companies_represented=0,
-                entries=[],
-                notes="; ".join(run_notes),
+                final_prospects=[],
+                dossiers={},
+                extra_notes=["No companies returned by the prospector agent."],
+                target_prospects=request.target_prospects,
+                dossier_url_builder=dossier_url_builder,
+                persist=persist,
             )
 
-        # Stage 2 — map decision-makers per company (bounded concurrency)
-        mapped: List[tuple[Prospect, float]] = []
-
+        # Stage 2 — map decision-makers per company (bounded concurrency).
+        # parallel_map copies this thread's context per task so the LLM
+        # attribution/request-id contextvars propagate into the workers (raw
+        # threads don't; see llm_service.attribution). Order is preserved;
+        # _map_one returns a list (never None) so skip_none is off.
         def _map_one(company: Prospect) -> List[tuple[Prospect, float]]:
             try:
-                dm_list = self.decision_maker_mapper.map_contacts(
-                    company.model_dump_json(indent=2),
+                return self.map_company_one(
+                    company,
                     icp_json,
                     request.product_name,
                     request.value_proposition,
                     request.max_per_company,
                     ctx,
                 )
-                return _decision_makers_to_entries(dm_list, company)
             except Exception:
                 logger.exception(
                     "decision-maker mapping failed for company %s", company.company_name
                 )
                 return []
 
-        # parallel_map runs each call inside a fresh copy of this thread's context
-        # so the LLM attribution/request-id contextvars propagate into the workers
-        # (raw threads don't copy them; see llm_service.attribution). Order is
-        # preserved; _map_one returns a list (never None) so skip_none is off.
+        mapped: List[tuple[Prospect, float]] = []
         for entries in parallel_map(
             companies,
             _map_one,
@@ -1418,65 +1609,34 @@ class SalesPodOrchestrator:
             mapped.extend(entries)
 
         if not mapped:
-            run_notes.append("No decision-makers identified across the company shortlist.")
-            return DeepResearchResult(
-                list_id="",
+            return assemble_and_persist_deep_research(
                 product_name=request.product_name,
-                generated_at=datetime.now(tz=timezone.utc).isoformat(),
-                total_prospects=0,
-                companies_represented=0,
-                entries=[],
-                notes="; ".join(run_notes),
+                final_prospects=[],
+                dossiers={},
+                extra_notes=["No decision-makers identified across the company shortlist."],
+                target_prospects=request.target_prospects,
+                dossier_url_builder=dossier_url_builder,
+                persist=persist,
             )
 
-        # Stage 3 — enforce ≤max_per_company, rank, trim to target
-        final_prospects = _enforce_cap_and_rank(
+        # Stage 3 — enforce cap, rank, trim, and assign stable prospect ids
+        final_prospects = rank_and_assign_ids(
             mapped, request.max_per_company, request.target_prospects
         )
-        if len(final_prospects) < request.target_prospects:
-            run_notes.append(
-                f"Only {len(final_prospects)} qualifying prospects after per-company cap "
-                f"(target was {request.target_prospects})."
-            )
 
-        # Assign stable prospect IDs before dossier building so dossiers can
-        # reference them.
-        for p in final_prospects:
-            if not p.id:
-                p.id = f"prs_{uuid4().hex[:12]}"
-
-        # Stage 4 — build dossiers (bounded concurrency; network-heavy)
+        # Stage 4 — build dossiers (bounded concurrency; network-heavy).
+        # parallel_map copies this thread's context per task (see above);
+        # completion order is fine — results feed a dict keyed by prospect id.
         def _build_one(p: Prospect) -> tuple[Prospect, Optional[ProspectDossier]]:
             try:
-                dossier = self.dossier_builder.build(
-                    p.model_dump_json(indent=2),
-                    request.product_name,
-                    request.value_proposition,
-                    ctx,
+                return p, self.build_dossier_one(
+                    p, request.product_name, request.value_proposition, ctx
                 )
-                # Ensure the dossier is tied to the prospect we asked about —
-                # the model is instructed to set prospect_id but we enforce it
-                # here so later persistence + lookups always work.
-                dossier.prospect_id = p.id
-                if not dossier.full_name and p.contact_name:
-                    dossier.full_name = p.contact_name
-                if not dossier.current_title and p.contact_title:
-                    dossier.current_title = p.contact_title
-                if not dossier.current_company:
-                    dossier.current_company = p.company_name
-                if not dossier.linkedin_url and p.linkedin_url:
-                    dossier.linkedin_url = p.linkedin_url
-                return p, dossier
             except Exception:
                 logger.exception("dossier building failed for prospect %s", p.id)
                 return p, None
 
         dossiers: dict[str, ProspectDossier] = {}
-        # parallel_map copies this thread's context per task so attribution
-        # propagates into the workers (raw threads don't copy contextvars; see
-        # llm_service.attribution). Completion order is fine here — results feed a
-        # dict keyed by prospect id. _build_one always returns a tuple (so
-        # skip_none is off), though the dossier element may be None on failure.
         for p, dossier in parallel_map(
             final_prospects,
             _build_one,
@@ -1484,62 +1644,16 @@ class SalesPodOrchestrator:
             preserve_order=False,
             skip_none=False,
         ):
-            if dossier is None:
-                continue
-            # Ensure dossier has IDs before potential persistence.
-            if not dossier.dossier_id:
-                dossier.dossier_id = f"dsr_{uuid4().hex[:12]}"
-            if not dossier.generated_at:
-                dossier.generated_at = datetime.now(tz=timezone.utc).isoformat()
-            dossier.prospect_id = p.id
-            dossiers[p.id] = dossier
+            if dossier is not None:
+                dossiers[p.id] = dossier
 
-        # Stage 5 — persist (best-effort) and assemble the result
-        store = None
-        if persist:
-            try:
-                from .dossier_store import DossierStore
-
-                store = DossierStore()
-            except Exception:
-                logger.warning("DossierStore unavailable; continuing without persistence")
-                store = None
-
-        entries: List[ProspectListEntry] = []
-        rank = 0
-        for p in final_prospects:
-            dossier = dossiers.get(p.id)
-            if dossier is None:
-                run_notes.append(f"No dossier produced for prospect {p.id} ({p.contact_name}).")
-                continue
-            if store is not None:
-                try:
-                    dossier = store.save_dossier(dossier)
-                except Exception:
-                    logger.exception("Failed to persist dossier %s", dossier.dossier_id)
-            p.dossier_id = dossier.dossier_id
-            rank += 1
-            entries.append(
-                ProspectListEntry(
-                    rank=rank,
-                    prospect=p,
-                    dossier_id=dossier.dossier_id,
-                    dossier_url=dossier_url_builder(dossier.dossier_id),
-                )
-            )
-
-        result = DeepResearchResult(
-            list_id="",
+        # Stage 5 — assemble + persist (best-effort)
+        return assemble_and_persist_deep_research(
             product_name=request.product_name,
-            generated_at=datetime.now(tz=timezone.utc).isoformat(),
-            total_prospects=len(entries),
-            companies_represented=len({e.prospect.company_name for e in entries}),
-            entries=entries,
-            notes="; ".join(run_notes),
+            final_prospects=final_prospects,
+            dossiers=dossiers,
+            extra_notes=[],
+            target_prospects=request.target_prospects,
+            dossier_url_builder=dossier_url_builder,
+            persist=persist,
         )
-        if store is not None:
-            try:
-                result = store.save_prospect_list(result)
-            except Exception:
-                logger.exception("Failed to persist prospect list")
-        return result
