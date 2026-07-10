@@ -136,24 +136,14 @@ def _guarded(
         - ``max_attempts`` matches the phase's Temporal RetryPolicy (see
           ``constants.RETRYABLE_MAX_ATTEMPTS`` / ``SINGLE_ATTEMPT``).
     Postconditions:
-        - The job row's ``current_phase``/``progress``/``status_text`` are updated;
-          ``status`` is written only when supplied. Only the intake phase supplies
-          it (PENDING → RUNNING); every later phase leaves ``status`` untouched so a
-          concurrent ``cancelled`` is never clobbered. (Accepted narrow race: a
-          cancel landing between the API's ``create_job`` and intake's RUNNING write
-          would be overwritten — no planning caller cancels jobs today, and a real
-          canceller should also send a Temporal cancel to the workflow.)
-        - The progress write happens BEFORE ``work()`` (inside the guard, so a
-          failing progress write still marks the job FAILED and cannot leave it
-          stuck non-terminal). A consequence is that on terminal failure the job's
-          ``current_phase``/``progress`` reflect the phase that was *attempted* when
-          it failed, not a completed phase — a deliberate trade-off (progress is a
-          best-effort hint, and pointing at the failing phase is the useful signal).
+        - Updates ``current_phase``/``progress``/``status_text``, and writes
+          ``status`` only when supplied (only intake supplies it, PENDING → RUNNING).
+        - The progress write is inside the guard, so a failing progress write still
+          marks the job FAILED rather than leaving it stuck non-terminal.
         - On error, the job is marked FAILED only on the *final* Temporal attempt
-          (``_is_final_attempt``); a retry that later succeeds therefore never
-          leaves behind a transient FAILED status or a stale ``error``. The
-          exception is always re-raised so Temporal's RetryPolicy governs
-          re-attempts.
+          (``_is_final_attempt``); a retry that later succeeds therefore never leaves
+          a transient FAILED status or a stale ``error`` behind. The exception is
+          always re-raised so Temporal's RetryPolicy governs re-attempts.
     """
     from planning_team.shared.job_store import update_job
 
@@ -163,8 +153,17 @@ def _guarded(
         "status_text": status_text,
     }
     if status is not None:
+        # Only intake supplies status (PENDING → RUNNING); later phases leave it
+        # untouched so they never clobber a concurrent ``cancelled``. Accepted narrow
+        # race: a cancel landing in the create_job→intake window is overwritten — no
+        # planning caller cancels jobs today, and a real canceller should also send a
+        # Temporal cancel to the workflow.
         fields["status"] = status
     try:
+        # Progress is written BEFORE work(), inside the guard, so a failing progress
+        # write is still marked FAILED. Trade-off: on terminal failure
+        # current_phase/progress point at the phase that was *attempted* when it
+        # failed (a best-effort hint, not a completed-phase record).
         update_job(job_id, **fields)
         return work()
     except Exception as exc:
