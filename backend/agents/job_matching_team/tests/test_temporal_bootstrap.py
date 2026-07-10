@@ -76,6 +76,28 @@ def test_team_registered_in_temporal_modules():
     assert TEAM_TEMPORAL_MODULES.get("job_matching") == "job_matching_team.temporal"
 
 
+def test_activities_registered_include_all_phases_and_legacy():
+    """The worker must register every decomposed phase activity plus the legacy
+    monolith (kept for in-flight-history drain-out), so both the current
+    multi-activity workflow and any straddling old history can resolve their
+    activities on the shared task queue."""
+    from job_matching_team.temporal import ACTIVITIES
+
+    registered = {a.__name__ for a in ACTIVITIES}
+    assert registered == {
+        "prepare_scan_activity",
+        "build_queries_activity",
+        "scan_activity",
+        "rank_activity",
+        "finalize_scan_activity",
+        "fail_scan_activity",
+        "run_scan_activity",
+    }
+    # Legacy monolith stays registered last for drain-out; the workflow no
+    # longer schedules it.
+    assert ACTIVITIES[-1].__name__ == "run_scan_activity"
+
+
 def test_worker_module_exposes_team_service_entrypoint():
     """team_service/entrypoint.py looks up ``TEAM_TEMPORAL_WORKER_FUNC`` on
     ``TEAM_TEMPORAL_WORKER_MODULE``. Keep that contract pinned so a rename can't

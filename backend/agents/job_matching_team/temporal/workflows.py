@@ -1,15 +1,26 @@
-"""Temporal workflow + activity for the job matching team.
+"""Temporal workflow + per-step activities for the job matching team.
+
+The scan pipeline is decomposed into individually annotated activities —
+prepare-run, build-queries, scan, rank, finalize (plus a terminal failure
+bookkeeper) — orchestrated by :class:`JobMatchingWorkflow`. Each phase is a
+durable, independently-retryable Temporal activity, so a worker crash resumes
+from the last completed phase instead of re-running the whole scan. Every phase
+maps onto the same specialist agent / store call the thread-mode
+``JobMatchingOrchestrator`` makes, so both execution modes stay behaviourally
+identical.
 
 Kept in its own module (separate from the package ``__init__``) so the
-temporalio workflow sandbox can re-import the workflow class without
-executing any non-deterministic top-level code (e.g. ``os.getenv``,
-worker bootstrap). Co-locating ``start_team_worker``/``is_temporal_enabled``
-with the workflow class trips the sandbox with
-``__call__ on os.getenv restricted`` during workflow registration.
+temporalio workflow sandbox can re-import the workflow class without executing
+any non-deterministic top-level code (e.g. ``os.getenv``, worker bootstrap).
+Every heavy/team import therefore lives inside an activity function body, and
+only JSON-native values cross the activity boundary — the shared data converter
+has no pydantic support, so each activity reconstructs its models
+(``Model.model_validate``) and returns ``.model_dump(mode="json")``.
 
-The activity mirrors the API's thread-mode ``_run_scan_background`` so the
-job-store state machine (PENDING -> RUNNING -> COMPLETED/FAILED) is
-identical whether a scan runs on a daemon thread or a Temporal worker.
+The legacy monolithic :func:`run_scan_activity` is retained (and still
+registered — see ``temporal/__init__.py``) purely so any workflow history
+recorded before this decomposition can still resolve the activity while it
+drains; the current workflow no longer schedules it.
 """
 
 from __future__ import annotations
@@ -19,26 +30,304 @@ from typing import Any
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
+
+# Bounded so a non-idempotent phase can't retry-storm on a crash. A phase that
+# raises a deterministic (business) failure exhausts these attempts and then
+# bubbles to the workflow, which records the run + job FAILED via
+# ``fail_scan_activity`` — the same terminal state the monolith recorded inline.
+DEFAULT_RETRY_POLICY = RetryPolicy(maximum_attempts=3)
+
+# Per-phase start_to_close budgets. ``scan`` does the bulk of the network/LLM
+# work (search + fetch + per-posting extraction), so it keeps the original
+# 30-minute budget; the surrounding phases are comfortably shorter.
+_PREPARE_TIMEOUT = timedelta(minutes=2)
+_BUILD_QUERIES_TIMEOUT = timedelta(minutes=5)
+_SCAN_TIMEOUT = timedelta(minutes=30)
+_RANK_TIMEOUT = timedelta(minutes=20)
+_FINALIZE_TIMEOUT = timedelta(minutes=2)
+_FAIL_TIMEOUT = timedelta(minutes=2)
+
+
+@activity.defn(name="job_matching_prepare_scan")
+def prepare_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    """Open a scan: idempotent-replay guard, RUNNING transition, profile + run row.
+
+    Reconstructs the request, resolves the effective profile, mints a ``run_id``
+    and creates the Postgres run row, and (when ``exclude_seen``) loads the seen
+    fingerprints — all the setup the orchestrator does before the specialist
+    phases run. Returns a JSON-native dict the workflow threads into the
+    downstream activities.
+
+    Preconditions:
+        * ``job_id`` refers to a job row already created by ``POST /scan``.
+        * ``request`` is the JSON dump of a :class:`JobMatchRequest`.
+    Postconditions:
+        * ``{"status": "already_completed", "result": <stored>}`` when the job is
+          already COMPLETED (idempotent replay — no RUNNING flap, no run row).
+        * ``{"status": "cancelled"}`` when the job was CANCELLED before start.
+        * Otherwise ``{"status": "ready", ...}`` carrying ``run_id``, the
+          serialised effective ``profile``, the ``skip`` fingerprint list,
+          ``store_ok`` (False when the run row could not be created — persistence
+          is best-effort and never aborts the scan), and the request's
+          ``max_queries``/``max_roles``/``top_n``; the job row is set RUNNING.
+    """
+    from uuid import uuid4
+
+    from job_matching_team.models import JobMatchRequest
+    from job_matching_team.profile.loader import load_job_seeker_profile
+    from job_matching_team.shared.job_store import (
+        JOB_STATUS_CANCELLED,
+        JOB_STATUS_COMPLETED,
+        JOB_STATUS_RUNNING,
+        get_job,
+        update_job,
+    )
+    from job_matching_team.store import get_store
+
+    # Idempotent replay + pre-run cancellation, ported from the monolith: a retry
+    # that lands on an already-COMPLETED job returns the stored result without
+    # re-running; a job cancelled before start never flips to RUNNING.
+    existing = get_job(job_id)
+    if existing is not None:
+        status = existing.get("status")
+        if status == JOB_STATUS_COMPLETED:
+            return {"status": "already_completed", "result": existing.get("result") or {}}
+        if status == JOB_STATUS_CANCELLED:
+            return {"status": "cancelled"}
+
+    req = JobMatchRequest(**request)
+    update_job(job_id, status=JOB_STATUS_RUNNING)
+
+    effective = load_job_seeker_profile().merged_with(req.profile_overrides)
+    run_id = str(uuid4())
+
+    store_ok = True
+    store = get_store()
+    try:
+        store.create_run(run_id, effective, req)
+    except Exception:  # noqa: BLE001 - persistence must not abort the scan
+        activity.logger.warning("Failed to create run row %s", run_id, exc_info=True)
+        store_ok = False
+
+    skip: list[str] = []
+    if req.exclude_seen and store_ok:
+        try:
+            skip = sorted(store.seen_fingerprints())
+        except Exception:  # noqa: BLE001 - seen-set lookup is best-effort
+            activity.logger.warning("seen_fingerprints lookup failed", exc_info=True)
+
+    return {
+        "status": "ready",
+        "run_id": run_id,
+        "profile": effective.model_dump(mode="json"),
+        "skip": skip,
+        "store_ok": store_ok,
+        "max_queries": req.max_queries,
+        "max_roles": req.max_roles,
+        "top_n": req.top_n,
+    }
+
+
+@activity.defn(name="job_matching_build_queries")
+def build_queries_activity(profile: dict[str, Any], max_queries: int, job_id: str) -> list[str]:
+    """Build the search queries for a scan (LLM with deterministic fallback).
+
+    Preconditions:
+        * ``profile`` is the JSON dump of a :class:`JobSeekerProfile`.
+        * ``max_queries >= 1``.
+    Postconditions:
+        * Returns up to ``max_queries`` unique, non-empty query strings. Every
+          LLM call is stamped with the job_matching team + ``job_id`` for
+          telemetry attribution.
+    """
+    from job_matching_team.agents.query_builder import QueryBuilderAgent
+    from job_matching_team.profile.model import JobSeekerProfile
+    from llm_service import llm_attribution
+
+    prof = JobSeekerProfile.model_validate(profile)
+    with llm_attribution(team="job_matching", job_id=job_id):
+        return QueryBuilderAgent().build(prof, max_queries=max_queries)
+
+
+@activity.defn(name="job_matching_scan")
+def scan_activity(
+    queries: list[str], max_roles: int, skip: list[str], job_id: str
+) -> list[dict[str, Any]]:
+    """Search, fetch, and extract up to ``max_roles`` unique postings.
+
+    Preconditions:
+        * ``queries`` is the list from :func:`build_queries_activity`.
+        * ``max_roles >= 1``; ``skip`` is a list of fingerprints to exclude
+          (rebuilt to a set here — the boundary carries JSON, not Python sets).
+    Postconditions:
+        * Returns the serialised (JSON-native) postings — a fingerprint-deduped
+          list of length ``<= max_roles`` excluding any fingerprint in ``skip``.
+    """
+    from job_matching_team.agents.scanner import JobScannerAgent
+    from llm_service import llm_attribution
+
+    with llm_attribution(team="job_matching", job_id=job_id):
+        postings = JobScannerAgent().scan(queries, max_roles=max_roles, skip_fingerprints=set(skip))
+    return [p.model_dump(mode="json") for p in postings]
+
+
+@activity.defn(name="job_matching_rank")
+def rank_activity(
+    postings: list[dict[str, Any]], profile: dict[str, Any], top_n: int, job_id: str
+) -> dict[str, Any]:
+    """Score every posting and return the top-N plus scan totals.
+
+    Preconditions:
+        * ``postings`` is the list from :func:`scan_activity`; ``profile`` is a
+          serialised :class:`JobSeekerProfile`; ``top_n >= 1``.
+    Postconditions:
+        * ``{"top": [...], "total_found": len(postings),
+          "scanned_fingerprints": [...]}`` — ``top`` is the ranked best-first
+          top-N (serialised :class:`RankedJob`); ``total_found`` counts every
+          scanned posting; ``scanned_fingerprints`` lists all their fingerprints
+          (so ``exclude_seen`` can suppress them on later runs).
+    """
+    from job_matching_team.agents.ranker import JobRankerAgent
+    from job_matching_team.models import JobPosting
+    from job_matching_team.profile.model import JobSeekerProfile
+    from llm_service import llm_attribution
+
+    prof = JobSeekerProfile.model_validate(profile)
+    parsed = [JobPosting.model_validate(p).ensure_fingerprint() for p in postings]
+    with llm_attribution(team="job_matching", job_id=job_id):
+        ranked = JobRankerAgent().rank(parsed, prof)
+    top = ranked[:top_n]
+    return {
+        "top": [r.model_dump(mode="json") for r in top],
+        "total_found": len(parsed),
+        "scanned_fingerprints": [p.fingerprint for p in parsed],
+    }
+
+
+@activity.defn(name="job_matching_finalize_scan")
+def finalize_scan_activity(
+    job_id: str,
+    run_id: str,
+    top: list[dict[str, Any]],
+    total_found: int,
+    scanned_fingerprints: list[str],
+    profile: dict[str, Any],
+    store_ok: bool,
+) -> dict[str, Any]:
+    """Persist results, build the response, and drive the job store to COMPLETED.
+
+    Preconditions:
+        * ``run_id`` was returned by :func:`prepare_scan_activity`.
+        * ``top`` / ``profile`` are serialised :class:`RankedJob` /
+          :class:`JobSeekerProfile`.
+    Postconditions:
+        * When ``store_ok``, the run row is saved (completed) with ``top`` and
+          ``total_found``; a save failure marks the run failed instead (results
+          persistence never blocks the response).
+        * Returns the serialised :class:`JobMatchResponse`, and sets the job
+          COMPLETED with it — unless the job was cancelled mid-run, in which case
+          it returns ``{}`` and leaves the job untouched.
+    """
+    from job_matching_team.models import JobMatchResponse, RankedJob
+    from job_matching_team.profile.model import JobSeekerProfile
+    from job_matching_team.shared.job_store import (
+        JOB_STATUS_COMPLETED,
+        is_job_cancelled,
+        update_job,
+    )
+
+    ranked = [RankedJob.model_validate(r) for r in top]
+    if store_ok:
+        from job_matching_team.store import get_store
+
+        store = get_store()
+        try:
+            store.save_results(
+                run_id,
+                ranked,
+                total_found=total_found,
+                scanned_fingerprints=scanned_fingerprints,
+            )
+        except Exception:  # noqa: BLE001 - persistence failure must not lose the response
+            activity.logger.warning("Failed to save results for run %s", run_id, exc_info=True)
+            # Don't leave the run stuck RUNNING; record the persistence failure.
+            try:
+                store.mark_failed(run_id, "persisting results failed")
+            except Exception:  # noqa: BLE001
+                activity.logger.warning(
+                    "Failed to mark run %s failed after save error", run_id, exc_info=True
+                )
+
+    payload = JobMatchResponse(
+        run_id=run_id,
+        ranked_jobs=ranked,
+        total_found=total_found,
+        total_ranked=len(ranked),
+        profile_snapshot=JobSeekerProfile.model_validate(profile),
+    ).model_dump(mode="json")
+
+    if is_job_cancelled(job_id):
+        return {}
+    update_job(job_id, status=JOB_STATUS_COMPLETED, result=payload)
+    return payload
+
+
+@activity.defn(name="job_matching_fail_scan")
+def fail_scan_activity(job_id: str, run_id: str, error: str, store_ok: bool) -> None:
+    """Record a failed scan on both the run row and the job store (best effort).
+
+    Invoked by the workflow when a pipeline phase exhausts its retries. Mirrors
+    the monolith's failure branch: mark the run FAILED (when persisted) and the
+    job FAILED (unless cancelled). All bookkeeping is guarded — a store/job-store
+    outage here must not re-raise into Temporal and re-run the non-idempotent
+    scan, so failures to record are swallowed.
+
+    Postconditions:
+        * The run row is FAILED when ``store_ok`` and reachable; the job row is
+          FAILED unless it was cancelled or the job store is unreachable.
+        * Never raises.
+    """
+    from job_matching_team.shared.job_store import (
+        JOB_STATUS_FAILED,
+        is_job_cancelled,
+        update_job,
+    )
+
+    if store_ok:
+        try:
+            from job_matching_team.store import get_store
+
+            get_store().mark_failed(run_id, error)
+        except Exception:  # noqa: BLE001 - failure bookkeeping is best-effort
+            activity.logger.warning("Failed to mark run %s failed", run_id, exc_info=True)
+
+    try:
+        if not is_job_cancelled(job_id):
+            update_job(job_id, status=JOB_STATUS_FAILED, error=error)
+    except Exception:  # noqa: BLE001 - job store unreachable; do not re-raise into Temporal
+        activity.logger.warning(
+            "Could not record FAILED status for scan %s (job store unreachable)",
+            job_id,
+            exc_info=True,
+        )
 
 
 @activity.defn(name="job_matching_run_scan")
 def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """Run one scan on the Temporal worker, keeping the job store in sync.
+    """Legacy single-activity scan — retained only for in-flight history drain-out.
 
-    Reconstructs the request + orchestrator inside the activity because
-    neither is serialisable across the Temporal boundary. Mirrors the API's
-    ``_run_scan_background``: it drives the shared job store through
-    RUNNING -> COMPLETED (or FAILED) and honours cooperative cancellation.
+    Superseded by the decomposed prepare -> build_queries -> scan -> rank ->
+    finalize activities that :class:`JobMatchingWorkflow` now schedules. It is
+    kept registered so a workflow history recorded before the decomposition can
+    still resolve ``job_matching_run_scan`` while it drains; new workflows never
+    schedule it.
 
-    Business exceptions are recorded on the job store as FAILED and
-    **swallowed** (not re-raised), so a deterministic failure does not trigger
-    Temporal's retry loop. A genuine worker/process crash leaves the activity
-    task unfinished, which Temporal retries (bounded — see the workflow's
-    ``RetryPolicy``) — that is what makes an in-flight scan survive a restart.
-    A retry that lands on an already-COMPLETED job short-circuits and returns
-    the stored result, so a crash that lost only the activity result never
-    re-runs a finished scan; a crash mid-run (before COMPLETED) re-runs, bounded
-    by the retry policy.
+    Runs one scan on the Temporal worker, keeping the job store in sync.
+    Reconstructs the request + orchestrator inside the activity because neither
+    is serialisable across the Temporal boundary. Business exceptions are
+    recorded on the job store as FAILED and **swallowed** (not re-raised), so a
+    deterministic failure does not trigger Temporal's retry loop.
 
     Preconditions:
         * ``job_id`` refers to a job row already created by ``POST /scan``.
@@ -66,18 +355,11 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
 
     req = JobMatchRequest(**request)
     try:
-        # Idempotent replay: if a prior attempt already COMPLETED this scan (a
-        # crash after update_job(COMPLETED) but before Temporal recorded the
-        # result triggers a retry), return the stored result instead of
-        # re-running — no status flap, no duplicate scan/LLM spend.
         existing = get_job(job_id)
         if existing is not None:
             status = existing.get("status")
             if status == JOB_STATUS_COMPLETED:
                 return existing.get("result") or {}
-            # Derive the pre-run cancellation check from the row we just read
-            # instead of a second job-service round-trip. The post-run check
-            # below still needs a fresh read (cancellation can happen mid-scan).
             if status == JOB_STATUS_CANCELLED:
                 return {}
         update_job(job_id, status=JOB_STATUS_RUNNING)
@@ -89,11 +371,6 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
         return payload
     except Exception as exc:  # noqa: BLE001 - recorded on the job store, not re-raised
         activity.logger.exception("Job matching scan %s failed", job_id)
-        # Best-effort FAILED write. The bookkeeping itself makes job-service HTTP
-        # calls, so if the store outage IS the failure being handled, guard it:
-        # a re-raise here would escape the activity and trigger Temporal retries
-        # that re-run the non-idempotent scan — the opposite of the swallow
-        # contract. If we can't record the failure, leave the row as-is.
         try:
             if not is_job_cancelled(job_id):
                 update_job(job_id, status=JOB_STATUS_FAILED, error=str(exc))
@@ -110,34 +387,90 @@ def run_scan_activity(job_id: str, request: dict[str, Any]) -> dict[str, Any]:
 class JobMatchingWorkflow:
     @workflow.run
     async def run(self, job_id: str, request: dict[str, Any]) -> dict[str, Any]:
-        """Execute one scan as a durable workflow, delegating to the activity.
+        """Execute one scan as a durable workflow of per-phase activities.
+
+        Sequences prepare -> build_queries -> scan -> rank -> finalize, each a
+        separately-retryable Temporal activity, and records a terminal failure
+        via ``fail_scan`` when any phase exhausts its retries.
 
         Preconditions:
             * ``job_id`` refers to a job row already created by ``POST /scan``.
             * ``request`` is the JSON dump of a :class:`JobMatchRequest`. The
               ``(job_id, request)`` argument order is part of the contract — a
-              change would break deterministic replay of in-flight histories
-              (pinned by ``test_activity_signature_takes_job_id_first``).
+              change would break deterministic replay of in-flight histories and
+              the dispatch bridge (pinned by
+              ``test_workflow_run_delegates_through_phases`` and
+              ``test_start_job_matching_workflow_delegates_to_shared_bridge``).
         Postconditions:
-            * Returns the activity's result — the serialised
-              :class:`JobMatchResponse` on success, else ``{}``. The activity
-              owns all job-store writes; this method performs none.
+            * Returns the serialised :class:`JobMatchResponse` on success, the
+              stored result on idempotent replay of an already-COMPLETED job, or
+              ``{}`` when the job was cancelled or a phase failed. The activities
+              own every job-store / run-row write; this method performs none.
 
-        Trade-offs (shared with the sibling Temporal teams):
-            * The activity is a synchronous scan with no heartbeat, so a run that
-              exceeds ``start_to_close_timeout`` (30 min) is timed out while its
-              worker thread keeps running, and the retry re-runs the scan — a
-              slow scan can execute more than once (bounded by
-              ``maximum_attempts``). Scans are expected to finish well within
-              30 min; raise the timeout rather than lean on the retry if that
-              stops holding.
+        Trade-offs:
+            * Each phase is bounded to ``DEFAULT_RETRY_POLICY`` (3 attempts). The
+              phases are not individually idempotent, so a crash mid-phase re-runs
+              that phase (bounded); a deterministic failure exhausts the attempts
+              and is recorded FAILED via ``fail_scan``. End state matches the
+              monolith (job + run FAILED, no retry storm); only the path differs.
         """
-        return await workflow.execute_activity(
-            run_scan_activity,
+        prep = await workflow.execute_activity(
+            prepare_scan_activity,
             args=[job_id, request],
-            start_to_close_timeout=timedelta(minutes=30),
-            # The activity swallows business failures (records FAILED, returns),
-            # so retries only fire on a worker/process crash. Bound them: the scan
-            # is not idempotent, so unlimited retries would re-run full scans.
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            start_to_close_timeout=_PREPARE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY_POLICY,
         )
+        status = prep.get("status")
+        if status == "already_completed":
+            return prep.get("result") or {}
+        if status == "cancelled":
+            return {}
+
+        run_id = prep["run_id"]
+        profile = prep["profile"]
+        store_ok = prep["store_ok"]
+        try:
+            queries = await workflow.execute_activity(
+                build_queries_activity,
+                args=[profile, prep["max_queries"], job_id],
+                start_to_close_timeout=_BUILD_QUERIES_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            postings = await workflow.execute_activity(
+                scan_activity,
+                args=[queries, prep["max_roles"], prep["skip"], job_id],
+                start_to_close_timeout=_SCAN_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            ranked = await workflow.execute_activity(
+                rank_activity,
+                args=[postings, profile, prep["top_n"], job_id],
+                start_to_close_timeout=_RANK_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+            return await workflow.execute_activity(
+                finalize_scan_activity,
+                args=[
+                    job_id,
+                    run_id,
+                    ranked["top"],
+                    ranked["total_found"],
+                    ranked["scanned_fingerprints"],
+                    profile,
+                    store_ok,
+                ],
+                start_to_close_timeout=_FINALIZE_TIMEOUT,
+                retry_policy=DEFAULT_RETRY_POLICY,
+            )
+        except ActivityError as exc:
+            # A phase exhausted its bounded retries (a genuine crash or a
+            # deterministic failure). Record the run + job FAILED via an activity
+            # (all store / job-store I/O must happen off the workflow thread),
+            # then return {} — the failure is terminal, not retried by the caller.
+            await workflow.execute_activity(
+                fail_scan_activity,
+                args=[job_id, run_id, str(exc), store_ok],
+                start_to_close_timeout=_FAIL_TIMEOUT,
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+            return {}
