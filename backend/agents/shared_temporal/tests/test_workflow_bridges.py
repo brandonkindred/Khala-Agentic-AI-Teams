@@ -160,3 +160,49 @@ def test_bridges_are_exported():
     assert shared_temporal.signal_workflow_sync is runner.signal_workflow_sync
     assert shared_temporal.cancel_workflow_sync is runner.cancel_workflow_sync
     assert shared_temporal.execute_workflow_sync is runner.execute_workflow_sync
+    assert shared_temporal.execute_workflow_async is runner.execute_workflow_async
+
+
+# ---------------------------------------------------------------------------
+# execute_workflow_async — non-blocking execute-and-wait for async callers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_returns_result(running_loop):
+    """The async bridge schedules on the worker loop and awaits the result
+    without blocking the caller's loop."""
+    captured: dict = {}
+    sentinel = {"handle": "warm"}
+    client_mod.set_temporal_client(_FakeExecClient(captured, sentinel))
+    client_mod.set_temporal_loop(running_loop)
+
+    out = await runner.execute_workflow_async(object(), "a1", workflow_id="wid", task_queue="q")
+
+    assert out is sentinel
+    assert captured["id"] == "wid"
+    assert captured["task_queue"] == "q"
+    assert captured["args"] == ["a1"]
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_requires_non_empty_ids():
+    with pytest.raises(AssertionError):
+        await runner.execute_workflow_async(object(), workflow_id="", task_queue="q")
+    with pytest.raises(AssertionError):
+        await runner.execute_workflow_async(object(), workflow_id="wid", task_queue="")
+
+
+@pytest.mark.asyncio
+async def test_execute_workflow_async_raises_when_no_worker():
+    prev_c, prev_l = client_mod.get_temporal_client(), client_mod.get_temporal_loop()
+    client_mod.set_temporal_client(None)
+    client_mod.set_temporal_loop(None)
+    try:
+        with pytest.raises(RuntimeError, match="worker"):
+            await runner.execute_workflow_async(
+                object(), workflow_id="wid", task_queue="q", client_ready_timeout_s=0.05
+            )
+    finally:
+        client_mod.set_temporal_client(prev_c)
+        client_mod.set_temporal_loop(prev_l)

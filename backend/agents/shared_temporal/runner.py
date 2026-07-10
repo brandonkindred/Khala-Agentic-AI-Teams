@@ -155,6 +155,63 @@ def execute_workflow_sync(
     return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=execute_timeout_s)
 
 
+async def execute_workflow_async(
+    workflow_run: Any,
+    *args: Any,
+    workflow_id: str,
+    task_queue: str,
+    client_ready_timeout_s: float | None = None,
+    execute_timeout_s: float = EXECUTE_WORKFLOW_TIMEOUT_S,
+) -> Any:
+    """Start a Temporal workflow and await its RESULT from an ``async`` caller.
+
+    The non-blocking sibling of :func:`execute_workflow_sync`, for callers that are
+    already running on an event loop (e.g. FastAPI ``async def`` route handlers).
+    ``execute_workflow_sync`` blocks the calling thread with ``Future.result()`` —
+    from an async route that would freeze the API event loop for the whole workflow.
+    This helper instead schedules the coroutine on the worker loop and bridges the
+    resulting ``concurrent.futures.Future`` back into the caller's loop with
+    ``asyncio.wrap_future``, so the caller's loop stays free to serve other requests.
+
+    Preconditions:
+        - Invoked from within a running event loop (there is a current loop to await on).
+        - ``workflow_id`` and ``task_queue`` are non-empty; ``workflow_id`` is unique
+          per invocation (execute-and-wait does not reuse ids for idempotency).
+        - ``args`` are Temporal-serializable.
+
+    Postconditions:
+        - Returns the workflow's return value once it completes.
+        - The client-readiness poll (which uses ``time.sleep``) runs in a worker
+          thread via ``asyncio.to_thread`` so it never blocks the caller's loop.
+
+    Invariants:
+        - Schedules the workflow coroutine on the worker's shared event loop via
+          ``run_coroutine_threadsafe`` — it never creates a second loop, and the
+          worker-bound Temporal client is only ever awaited on the worker loop.
+
+    Raises:
+        - ``RuntimeError`` if the worker's client never becomes available.
+        - ``asyncio.TimeoutError`` if the workflow does not finish within
+          ``execute_timeout_s``.
+        - ``temporalio.client.WorkflowFailureError`` if the workflow itself fails.
+    """
+    assert workflow_id, "workflow_id must be non-empty"
+    assert task_queue, "task_queue must be non-empty"
+    # _await_client blocks (time.sleep poll); offload it so the caller's loop is free.
+    client, loop = await asyncio.to_thread(_await_client, client_ready_timeout_s)
+    coro = client.execute_workflow(
+        workflow_run, args=list(args), id=workflow_id, task_queue=task_queue
+    )
+    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=execute_timeout_s)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # Best-effort: abandon the cross-loop future. The workflow keeps running
+        # server-side (Temporal is durable); we just stop waiting on it here.
+        fut.cancel()
+        raise
+
+
 def signal_workflow_sync(
     workflow_id: str,
     signal_name: str,

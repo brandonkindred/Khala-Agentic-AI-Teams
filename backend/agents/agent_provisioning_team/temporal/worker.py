@@ -27,6 +27,7 @@ from agent_provisioning_team.temporal.activities import (
     compensate_activity_v2,
     credentials_activity_v2,
     deliver_activity_v2,
+    deprovision_activity,
     documentation_activity_v2,
     provision_tool_activity,
     run_provisioning_activity,
@@ -34,7 +35,18 @@ from agent_provisioning_team.temporal.activities import (
 )
 from agent_provisioning_team.temporal.client import is_temporal_enabled
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
+from agent_provisioning_team.temporal.sandbox_activities import (
+    sandbox_acquire_activity,
+    sandbox_reap_activity,
+    sandbox_teardown_activity,
+)
+from agent_provisioning_team.temporal.sandbox_workflows import (
+    SandboxAcquireWorkflow,
+    SandboxReaperWorkflow,
+    SandboxTeardownWorkflow,
+)
 from agent_provisioning_team.temporal.workflows import (
+    AgentDeprovisioningWorkflow,
     AgentProvisioningWorkflow,
     AgentProvisioningWorkflowV2,
 )
@@ -89,7 +101,14 @@ def create_agent_provisioning_worker(client: Optional[object] = None) -> Optiona
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[AgentProvisioningWorkflow, AgentProvisioningWorkflowV2],
+        workflows=[
+            AgentProvisioningWorkflow,
+            AgentProvisioningWorkflowV2,
+            AgentDeprovisioningWorkflow,
+            SandboxAcquireWorkflow,
+            SandboxTeardownWorkflow,
+            SandboxReaperWorkflow,
+        ],
         activities=[
             run_provisioning_activity,
             setup_activity_v2,
@@ -99,6 +118,10 @@ def create_agent_provisioning_worker(client: Optional[object] = None) -> Optiona
             documentation_activity_v2,
             deliver_activity_v2,
             compensate_activity_v2,
+            deprovision_activity,
+            sandbox_acquire_activity,
+            sandbox_teardown_activity,
+            sandbox_reap_activity,
         ],
         activity_executor=_activity_executor,
         max_concurrent_activities=8,

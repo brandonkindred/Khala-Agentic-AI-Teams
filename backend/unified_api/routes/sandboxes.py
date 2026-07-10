@@ -23,12 +23,14 @@ from agent_provisioning_team.sandbox import (
     SandboxHandle,
     SandboxMetrics,
     UnknownAgentError,
-    acquire,
     list_active,
     metrics,
     status,
-    teardown,
 )
+
+# Temporal-aware mutators (durable workflows when Temporal is enabled, direct
+# in-process calls otherwise). Read-only routes below stay direct.
+from agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox, teardown_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,7 @@ async def sandbox_metrics() -> SandboxMetrics:
 @router.post("/{agent_id}/warm", response_model=SandboxHandle)
 async def warm_sandbox(agent_id: str) -> SandboxHandle:
     try:
-        return await acquire(agent_id)
+        return await acquire_sandbox(agent_id)
     except UnknownAgentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except DockerUnavailableError as exc:
@@ -67,5 +69,5 @@ async def get_status(agent_id: str) -> SandboxHandle:
 
 @router.delete("/{agent_id}")
 async def delete_sandbox(agent_id: str) -> dict[str, str]:
-    await teardown(agent_id)
+    await teardown_sandbox(agent_id)
     return {"agent_id": agent_id, "status": "torn down"}

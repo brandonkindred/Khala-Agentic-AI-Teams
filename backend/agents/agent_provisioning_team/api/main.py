@@ -86,6 +86,23 @@ def _temporal_starter():
     return start_provisioning_workflow if is_temporal_enabled() else None
 
 
+def _deprovision_starter():
+    """Return ``run_deprovision_workflow`` when ``DELETE /environments/{id}``
+    should run the deprovision as a durable Temporal workflow, else ``None`` so
+    the caller falls back to the in-process ``orchestrator.deprovision`` call.
+
+    Mirrors :func:`_temporal_starter`: honors the ``PROVISION_THREAD_FALLBACK``
+    escape hatch and returns ``None`` on import error or when Temporal is off."""
+    if _provision_thread_fallback():
+        return None
+    try:
+        from agent_provisioning_team.temporal.client import is_temporal_enabled
+        from agent_provisioning_team.temporal.start_workflow import run_deprovision_workflow
+    except ImportError:
+        return None
+    return run_deprovision_workflow if is_temporal_enabled() else None
+
+
 _executor: Optional[ThreadPoolExecutor] = None
 _shutdown_event: threading.Event = threading.Event()
 _inflight: Dict[str, Future] = {}
@@ -564,7 +581,16 @@ def deprovision_agent(
     agent_id: str,
     force: bool = Query(False, description="Force removal even if errors occur"),
 ) -> DeprovisionResponse:
-    """Deprovision an agent and remove all resources."""
+    """Deprovision an agent and remove all resources.
+
+    Runs as a durable ``AgentDeprovisioningWorkflow`` when Temporal is enabled
+    (execute-and-wait, so the response is unchanged), and falls back to the
+    in-process ``orchestrator.deprovision`` call otherwise. This handler is a
+    sync ``def`` — FastAPI runs it in its threadpool — so the blocking
+    execute-and-wait dispatch does not stall the event loop."""
+    starter = _deprovision_starter()
+    if starter is not None:
+        return DeprovisionResponse.model_validate(starter(agent_id, force))
     return orchestrator.deprovision(agent_id, force=force)
 
 

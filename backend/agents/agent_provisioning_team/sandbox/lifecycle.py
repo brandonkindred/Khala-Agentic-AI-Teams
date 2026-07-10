@@ -25,6 +25,7 @@ import logging
 import math
 import os
 import shutil
+import threading
 import time
 from collections import Counter, deque
 from datetime import datetime
@@ -142,6 +143,15 @@ class Lifecycle:
         self._state_file = state_file or state_file_path()
         self._state: dict[str, SandboxState] = state_mod.load(self._state_file)
         self._locks: dict[str, asyncio.Lock] = {}
+        # Thread-safety invariant: every read/iteration of ``_state`` and every
+        # ``_persist()`` is serialized by this lock. Needed once acquire/teardown/
+        # reap run on the Temporal worker's event loop (a different OS thread)
+        # while status/note_activity/list_active/metrics stay on the API loop.
+        # The per-agent ``asyncio.Lock``s above guard the long docker critical
+        # sections; this lock only wraps the brief synchronous dict-write/persist
+        # bursts (never held across an ``await``). RLock so ``_persist()`` can be
+        # called from inside a critical section that already holds it.
+        self._state_lock = threading.RLock()
         # Observability counters (issue #302). In-process only — reset on restart.
         self._boot_ms_samples: deque[int] = deque(maxlen=_BOOT_MS_WINDOW)
         self._torn_down_total: int = 0
@@ -172,12 +182,14 @@ class Lifecycle:
                         agent_id,
                         exc_info=True,
                     )
-                    existing.last_used_at = now()
-                    self._persist()
+                    with self._state_lock:
+                        existing.last_used_at = now()
+                        self._persist()
                     return SandboxHandle.from_state(existing)
                 if still_running:
-                    existing.last_used_at = now()
-                    self._persist()
+                    with self._state_lock:
+                        existing.last_used_at = now()
+                        self._persist()
                     return SandboxHandle.from_state(existing)
                 logger.info(
                     "Sandbox for %s marked WARM but container %s is gone; re-provisioning",
@@ -202,7 +214,8 @@ class Lifecycle:
 
             logger.info("Provisioning sandbox for %s (container %s)", agent_id, container_name)
             st = state_mod.new_state(agent_id=agent_id, team=team, container_name=container_name)
-            self._state[agent_id] = st
+            with self._state_lock:
+                self._state[agent_id] = st
 
             cold_start = time.perf_counter()
             try:
@@ -213,9 +226,10 @@ class Lifecycle:
                 st.container_id = container_id
                 st.host_port = host_port
                 await self._wait_healthy(host_port)
-                st.status = SandboxStatus.WARM
-                st.last_used_at = now()
-                self._persist()
+                with self._state_lock:
+                    st.status = SandboxStatus.WARM
+                    st.last_used_at = now()
+                    self._persist()
                 boot_ms = int((time.perf_counter() - cold_start) * 1000)
                 logger.info(
                     "%s agent_id=%s team=%s image=%s boot_ms=%d",
@@ -229,9 +243,10 @@ class Lifecycle:
                 return SandboxHandle.from_state(st, boot_ms=boot_ms)
             except Exception as exc:
                 logger.exception("Sandbox provisioning failed for %s", agent_id)
-                st.status = SandboxStatus.ERROR
-                st.error = str(exc)
-                self._persist()
+                with self._state_lock:
+                    st.status = SandboxStatus.ERROR
+                    st.error = str(exc)
+                    self._persist()
                 return SandboxHandle.from_state(st)
 
     async def status(self, agent_id: str) -> SandboxHandle:
@@ -259,8 +274,9 @@ class Lifecycle:
             and st.container_id
             and not await provisioner_mod.is_running(st.container_id)
         ):
-            st.status = SandboxStatus.COLD
-            self._persist()
+            with self._state_lock:
+                st.status = SandboxStatus.COLD
+                self._persist()
         return SandboxHandle.from_state(st)
 
     async def teardown(self, agent_id: str) -> None:
@@ -283,20 +299,24 @@ class Lifecycle:
             # container is confirmed gone so we don't leave 0400 files on the
             # host when an agent never runs again.
             provisioner_mod.cleanup_secrets_file(st.container_name)
-            self._state.pop(agent_id, None)
-            self._persist()
+            with self._state_lock:
+                self._state.pop(agent_id, None)
+                self._persist()
 
     async def list_active(self) -> list[SandboxHandle]:
         """Return a handle for every sandbox currently tracked in state."""
-        return [SandboxHandle.from_state(st) for st in list(self._state.values())]
+        with self._state_lock:
+            snapshot = list(self._state.values())
+        return [SandboxHandle.from_state(st) for st in snapshot]
 
     async def note_activity(self, agent_id: str) -> None:
         """Bump ``last_used_at`` for ``agent_id``. Called after a successful invoke."""
         st = self._state.get(agent_id)
         if st is None:
             return
-        st.last_used_at = now()
-        self._persist()
+        with self._state_lock:
+            st.last_used_at = now()
+            self._persist()
 
     async def metrics(self) -> SandboxMetrics:
         """Return a live snapshot of the sandbox pool (issue #302).
@@ -304,7 +324,8 @@ class Lifecycle:
         All counters are in-process and reset when the unified API restarts;
         historical per-invocation data lives in ``agent_console_runs``.
         """
-        snapshot = list(self._state.values())
+        with self._state_lock:
+            snapshot = list(self._state.values())
         current = now()
 
         by_team: Counter[str] = Counter(st.team for st in snapshot)
@@ -362,7 +383,9 @@ class Lifecycle:
         """
         torn_down: list[str] = []
         current = now()
-        for agent_id, st in list(self._state.items()):
+        with self._state_lock:
+            items = list(self._state.items())
+        for agent_id, st in items:
             if st.status != SandboxStatus.WARM:
                 continue
             idle = (current - st.last_used_at).total_seconds()
@@ -408,10 +431,11 @@ class Lifecycle:
                 backoff = min(backoff * 1.5, 5.0)
 
     def _persist(self) -> None:
-        try:
-            state_mod.save(self._state_file, self._state)
-        except OSError as exc:
-            logger.warning("Could not persist sandbox state: %s", exc)
+        with self._state_lock:
+            try:
+                state_mod.save(self._state_file, self._state)
+            except OSError as exc:
+                logger.warning("Could not persist sandbox state: %s", exc)
 
 
 # Module-level free-function wrappers over a process-wide singleton — Phase 3

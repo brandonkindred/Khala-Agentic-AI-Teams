@@ -403,3 +403,40 @@ def compensate_activity_v2(
         for t in succeeded_tools
     ]
     orch._compensate(agent_id, shims)
+
+
+# ---------------------------------------------------------------------------
+# Deprovision — single activity wrapping the orchestrator's teardown
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="agent_provisioning_deprovision")
+def deprovision_activity(agent_id: str, force: bool = False) -> Dict[str, Any]:
+    """Deprovision an agent's resources durably.
+
+    Thin durable wrapper over ``ProvisioningOrchestrator.deprovision`` — which
+    already deprovisions each tool, tears down the Docker environment, and
+    removes encrypted credentials + the environment record, aggregating
+    best-effort errors. Kept as a single activity (v1-style) rather than a
+    per-tool fan-out because deprovision is fast and the existing method already
+    reports per-tool success in its ``details``.
+
+    Preconditions:
+        * ``agent_id`` is a non-empty string identifying a (possibly already
+          partially removed) agent.
+        * Runs inside a Temporal activity worker for the Agent Provisioning
+          task queue.
+    Postconditions:
+        * Returns ``DeprovisionResponse.model_dump()`` — a JSON-serializable dict
+          with ``agent_id``/``success``/``details``/``error``. Cleanup is
+          best-effort: ``success`` is ``True`` when no tool errored or ``force``
+          was set. The activity does not raise on partial-cleanup failure (the
+          response carries the error), so Temporal does not retry a run that was
+          intentionally reported as a soft failure.
+    """
+    from agent_provisioning_team.orchestrator import ProvisioningOrchestrator
+
+    assert agent_id, "agent_id must be non-empty"
+    activity.heartbeat("deprovision")
+    response = ProvisioningOrchestrator().deprovision(agent_id, force=force)
+    return response.model_dump()

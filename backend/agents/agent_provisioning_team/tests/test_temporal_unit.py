@@ -235,7 +235,17 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
     assert kwargs["task_queue"] == worker_mod.TASK_QUEUE
     assert worker_mod.AgentProvisioningWorkflow in kwargs["workflows"]
     assert worker_mod.AgentProvisioningWorkflowV2 in kwargs["workflows"]
-    assert len(kwargs["activities"]) == 8
+    # Deprovision + sandbox lifecycle workflows are registered too.
+    assert worker_mod.AgentDeprovisioningWorkflow in kwargs["workflows"]
+    assert worker_mod.SandboxAcquireWorkflow in kwargs["workflows"]
+    assert worker_mod.SandboxTeardownWorkflow in kwargs["workflows"]
+    assert worker_mod.SandboxReaperWorkflow in kwargs["workflows"]
+    # 8 provisioning activities + deprovision + 3 sandbox activities.
+    assert len(kwargs["activities"]) == 12
+    assert worker_mod.deprovision_activity in kwargs["activities"]
+    assert worker_mod.sandbox_acquire_activity in kwargs["activities"]
+    assert worker_mod.sandbox_teardown_activity in kwargs["activities"]
+    assert worker_mod.sandbox_reap_activity in kwargs["activities"]
 
 
 def test_start_worker_thread_no_op_when_disabled() -> None:

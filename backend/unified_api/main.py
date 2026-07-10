@@ -448,13 +448,27 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     health_task = asyncio.create_task(_health_check_loop())
     logger.info("Started background health checker (interval=%ds)", _HEALTH_CHECK_INTERVAL)
 
-    # 4. Start the Agent Console sandbox idle reaper.
+    # 4. Start the Agent Console sandbox idle reaper. When Temporal is enabled it
+    #    runs as a durable, single-instance SandboxReaperWorkflow (survives
+    #    restarts); otherwise it's an in-process asyncio task (thread mode). The
+    #    task handle stays None in Temporal mode so shutdown doesn't try to cancel
+    #    a workflow that is meant to keep running.
     sandbox_reaper_task: asyncio.Task | None = None
     try:
-        from agent_provisioning_team.sandbox import run_idle_reaper
+        from agent_provisioning_team.temporal.sandbox_dispatch import (
+            sandbox_temporal_enabled,
+            start_sandbox_reaper_workflow,
+        )
 
-        sandbox_reaper_task = asyncio.create_task(run_idle_reaper())
-        logger.info("Started Agent Console sandbox idle reaper")
+        if sandbox_temporal_enabled():
+            # start_workflow_sync blocks briefly on client-ready; keep it off the loop.
+            await asyncio.to_thread(start_sandbox_reaper_workflow)
+            logger.info("Started Agent Console sandbox idle reaper (Temporal workflow)")
+        else:
+            from agent_provisioning_team.sandbox import run_idle_reaper
+
+            sandbox_reaper_task = asyncio.create_task(run_idle_reaper())
+            logger.info("Started Agent Console sandbox idle reaper (in-process)")
     except Exception:
         logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)
 

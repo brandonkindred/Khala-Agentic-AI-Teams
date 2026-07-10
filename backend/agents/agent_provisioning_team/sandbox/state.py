@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -245,9 +246,31 @@ def load(path: Path) -> dict[str, SandboxState]:
 
 
 def save(path: Path, state: dict[str, SandboxState]) -> None:
-    """Atomically persist ``state`` to ``path`` (tmpfile + rename)."""
+    """Atomically persist ``state`` to ``path`` (tmpfile + rename).
+
+    Preconditions:
+        * ``state`` may be mutated concurrently by another thread. The caller is
+          expected to hold the ``Lifecycle`` state lock, but this function is
+          defensive regardless.
+    Postconditions:
+        * ``path`` reflects a consistent snapshot of ``state``. The snapshot is
+          taken with ``list(state.items())`` **before** serialization so a
+          concurrent insert/pop can't raise ``RuntimeError: dictionary changed
+          size during iteration``. The temp file name embeds pid + a random
+          suffix so two processes/threads writing the same ``path`` never share
+          a temp file or race their ``os.replace``.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {agent_id: s.model_dump(mode="json") for agent_id, s in state.items()}
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    # Snapshot first — never iterate the live dict during the comprehension.
+    snapshot = list(state.items())
+    payload = {agent_id: s.model_dump(mode="json") for agent_id, s in snapshot}
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        # If write/replace failed partway, don't leave the unique temp file behind.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
