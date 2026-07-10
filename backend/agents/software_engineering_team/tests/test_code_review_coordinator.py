@@ -196,6 +196,8 @@ def test_run_coordinator_with_multi_file_code_merges_chunk_summaries() -> None:
         [
             {"approved": True, "issues": [], "summary": "Chunk 1 OK"},
             {"approved": True, "issues": [], "summary": "Chunk 2 OK"},
+            # Synthesis pass: empty summary → None → fall back to concatenation.
+            {"summary": "", "spec_compliance_notes": "ignored"},
         ]
     )
 
