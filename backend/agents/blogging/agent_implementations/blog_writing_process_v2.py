@@ -869,6 +869,22 @@ def run_pipeline(
     the same stage functions run as independent Temporal activities when orchestrated
     by ``BlogFullPipelineWorkflow``. The signature and return contract are unchanged.
 
+    Preconditions:
+        - ``brief`` is a valid ``ResearchBriefInput``.
+        - ``llm_client``/``length_policy`` may be None; each is resolved here before
+          the shared ``PipelineContext`` is built (default Strands model; policy
+          derived from content_profile/series_context/length_notes/target_word_count).
+    Postconditions:
+        - Runs the three stages in order over one ``PipelineContext`` and returns
+          ``(planning_phase_result, draft_result, status)`` (see Returns).
+        - Short-circuits and forwards a stage's abort result unchanged when a stage
+          aborts (planning/draft) — the later stages do not run.
+    Invariants:
+        - Each stage's preconditions are met by the previous stage's postconditions:
+          planning populates ``plan``/``planning_phase_result`` before draft reads
+          them; draft populates ``draft_result`` before gates reads it. The
+          ``PipelineContext`` is the single shared carrier of that state.
+
     Args:
         brief: The research brief input describing the blog topic.
         work_dir: Optional directory for artifact persistence.

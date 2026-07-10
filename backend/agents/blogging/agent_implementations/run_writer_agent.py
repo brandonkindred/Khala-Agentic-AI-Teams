@@ -10,6 +10,12 @@ import logging
 from pathlib import Path
 
 from blog_writer_agent import BlogWriterAgent, WriterInput
+from shared.content_plan import (
+    ContentPlan,
+    ContentPlanSection,
+    RequirementsAnalysis,
+    TitleCandidate,
+)
 from shared.style_loader import load_style_file
 
 from llm_service import get_strands_model
@@ -56,8 +62,33 @@ Minimal code example for a simple agent.
 Recap and one practical next step.
 """
 
+    # A minimal but valid ContentPlan so the example is runnable end-to-end
+    # (WriterInput requires a real content_plan). Replace with a plan produced by
+    # the planning agent for a non-placeholder run.
+    content_plan = ContentPlan(
+        overarching_topic="Building an AI Agent with Strands",
+        narrative_flow="Introduce agents, set up, build a minimal agent, then wrap up.",
+        sections=[
+            ContentPlanSection(
+                title="Introduction to AI Agents and Strands",
+                coverage_description="Explain agentic AI and Strands as a beginner-friendly SDK.",
+                order=0,
+            ),
+            ContentPlanSection(
+                title="Setup and Basic Agent Creation",
+                coverage_description="Install steps and a minimal agent code example.",
+                order=1,
+            ),
+        ],
+        title_candidates=[
+            TitleCandidate(title="Build Your First AI Agent", probability_of_success=0.7)
+        ],
+        requirements_analysis=RequirementsAnalysis(
+            plan_acceptable=True, scope_feasible=True, research_gaps=[]
+        ),
+    )
     draft_input = WriterInput(
-        content_plan=None,  # type: ignore[arg-type]  # test harness — provide a real ContentPlan
+        content_plan=content_plan,
         audience="Beginners to AI Agents",
         tone_or_purpose="Educational",
     )

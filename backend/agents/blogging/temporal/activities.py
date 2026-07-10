@@ -162,7 +162,11 @@ def _run_stage(
     Postconditions:
         - Returns ``body()``'s DTO on success. On any handled error the job is
           marked cancelled/failed (via ``_fail_activity`` with ``failed_phase``)
-          and ``fail_dto()`` is returned. Re-raises ``CancelledError``.
+          and ``fail_dto()`` is returned. Re-raises a native ``CancelledError``; a
+          rewrapped external cancellation is detected by ``_fail_activity`` via the
+          exception chain and routed to ``mark_job_cancelled`` (job cancelled, not
+          failed), so the "body must not catch CancelledError" contract is enforced
+          structurally, not just documented.
     """
     from temporalio.exceptions import CancelledError
 
@@ -179,6 +183,11 @@ def _run_stage(
         logger.info("Blog %s stage cancelled for job %s", failed_phase, job_id)
         raise
     except Exception as e:
+        # The "body must not catch CancelledError" contract is enforced structurally
+        # (not just documented) by _fail_activity: it inspects the exception chain via
+        # _is_external_cancellation, so a body that swallowed an external cancellation
+        # and re-raised it as another type is routed to mark_job_cancelled (job marked
+        # cancelled, not failed) rather than being recorded as a genuine failure.
         _fail_activity(job_id, e, failed_phase=failed_phase)
         return fail_dto()
     finally:

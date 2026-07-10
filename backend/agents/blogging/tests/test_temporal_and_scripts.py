@@ -856,19 +856,23 @@ def test_run_writer_agent_main_smoke(monkeypatch, capsys) -> None:
 
     from blog_writer_agent.models import WriterOutput
 
-    # The script constructs WriterInput with content_plan=None which raises.
-    # We mock the BlogWriterAgent so the bug is bypassed.
+    # Stub only the agent's LLM-backed run (no network); the script now builds a
+    # real, valid WriterInput/ContentPlan, so WriterInput validation is exercised
+    # for real rather than mocked away.
+    captured_input: dict = {}
+
     class _Stub:
         def __init__(self, *a, **kw):
             pass
 
         def run(self, inp):
+            captured_input["inp"] = inp
             return WriterOutput(draft="# Draft\n\nBody.")
 
     monkeypatch.setattr(mod, "BlogWriterAgent", _Stub)
-    # Also patch WriterInput so the missing content_plan validation is skipped
-    monkeypatch.setattr(mod, "WriterInput", lambda **kw: type("X", (), {"draft": "..."})())
 
     mod.main()
     captured = capsys.readouterr()
     assert "Draft" in captured.out
+    # The real WriterInput was constructed with a valid content_plan (no mask).
+    assert captured_input["inp"].content_plan is not None
