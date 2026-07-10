@@ -110,6 +110,7 @@ def test_activities_list_exposes_every_stage_activity():
         "close_one_activity",
         "coach_activity",
         "report_progress_activity",
+        "mark_failed_activity",
         "finalize_sales_pipeline_activity",
     }
 
@@ -129,15 +130,17 @@ def test_worker_module_exposes_team_service_entrypoint():
 
 
 def test_max_concurrent_activities_env_parsing(monkeypatch):
-    """The fan-out ceiling is env-tunable, defaulting on unset/garbage/non-positive."""
+    """The fan-out ceiling is env-tunable (shared env_int parser): a valid value
+    is honoured, unset/garbage falls back to the default, and a non-positive
+    value is clamped up to the floor of 1."""
     from sales_team.temporal import worker as worker_mod
 
     monkeypatch.setenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", "16")
     assert worker_mod._max_concurrent_activities() == 16
     monkeypatch.setenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", "nan")
-    assert worker_mod._max_concurrent_activities() == 8
+    assert worker_mod._max_concurrent_activities() == 8  # garbage → default
     monkeypatch.setenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", "0")
-    assert worker_mod._max_concurrent_activities() == 8
+    assert worker_mod._max_concurrent_activities() == 1  # clamped to floor
     monkeypatch.delenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", raising=False)
     assert worker_mod._max_concurrent_activities() == 8
 

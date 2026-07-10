@@ -19,6 +19,7 @@ from sales_team.temporal.activities import (
     discovery_one_activity,
     finalize_sales_pipeline_activity,
     load_dossiers_activity,
+    mark_failed_activity,
     nurture_one_activity,
     outreach_one_activity,
     prepare_sales_pipeline_activity,
@@ -42,6 +43,7 @@ ACTIVITIES = [
     close_one_activity,
     coach_activity,
     report_progress_activity,
+    mark_failed_activity,
     finalize_sales_pipeline_activity,
 ]
 TASK_QUEUE = "sales-queue"
@@ -58,6 +60,7 @@ __all__ = [
     "discovery_one_activity",
     "finalize_sales_pipeline_activity",
     "load_dossiers_activity",
+    "mark_failed_activity",
     "nurture_one_activity",
     "outreach_one_activity",
     "prepare_sales_pipeline_activity",

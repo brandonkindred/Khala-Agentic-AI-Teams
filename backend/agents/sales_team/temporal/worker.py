@@ -14,9 +14,9 @@ hook in docker-compose.
 from __future__ import annotations
 
 import logging
-import os
 
 from sales_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
+from shared_env_config import env_int
 from shared_temporal import is_temporal_enabled, start_team_worker
 
 logger = logging.getLogger(__name__)
@@ -31,16 +31,19 @@ _DEFAULT_MAX_CONCURRENT_ACTIVITIES = 8
 def _max_concurrent_activities() -> int:
     """Resolve the worker's concurrent-activity ceiling from the environment.
 
-    Postconditions: returns ``SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES`` when it
-    parses to a positive int, else the documented default (garbage/≤0 →
-    default).
+    Preconditions:
+        - none (environment may be unset or garbage).
+    Postconditions:
+        - Returns ``SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES`` when it parses to
+          a positive int, else the documented default (unset/garbage/≤0 →
+          default), via the shared ``env_int`` parser (which warns on a
+          set-but-unparseable value).
     """
-    raw = os.getenv("SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", "")
-    try:
-        val = int(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_MAX_CONCURRENT_ACTIVITIES
-    return val if val > 0 else _DEFAULT_MAX_CONCURRENT_ACTIVITIES
+    return env_int(
+        "SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES",
+        _DEFAULT_MAX_CONCURRENT_ACTIVITIES,
+        floor=1,
+    )
 
 
 def start_sales_temporal_worker_thread() -> bool:

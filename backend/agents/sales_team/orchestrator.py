@@ -6,8 +6,9 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import cached_property
 from typing import Callable, List, Optional
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from shared_concurrency import parallel_map
 
@@ -54,16 +55,15 @@ from .models import (
     StageOutcome,
 )
 from .outcome_store import load_current_insights, record_stage_outcome
-from .routing import PIPELINE_STAGE_ORDER, partition_qualified, stage_should_run
+from .routing import STAGE_PROGRESS, index_by_prospect_id, partition_qualified, stage_should_run
 
 logger = logging.getLogger(__name__)
 
 UpdateCallback = Callable[[str, int], None]
 
-# Re-exported from ``routing`` (the single source of truth) so existing imports
-# of ``orchestrator._STAGE_ORDER`` keep working while the ordering itself is
-# shared with the Temporal workflow.
-_STAGE_ORDER = PIPELINE_STAGE_ORDER
+# Summary emitted when the pipeline halts with no prospects — shared verbatim
+# by ``run()`` and the Temporal finalize activity.
+NO_PROSPECTS_SUMMARY = "No prospects found or provided. Pipeline halted."
 
 # Default length of a generated nurture sequence, in days. A 90-day (one quarter)
 # cadence is the standard B2B nurture window; named here so it isn't an inline
@@ -304,6 +304,150 @@ def _wrap_outreach_sequence(
     return seq
 
 
+def load_dossiers_for_prospects(prospects: List[Prospect]) -> dict[str, ProspectDossier]:
+    """Batch-load saved dossiers for *prospects*, keyed by prospect id.
+
+    Module-level so the Temporal ``sales_load_dossiers`` activity (a pure DB
+    read) can call it without constructing an orchestrator.
+
+    Preconditions:
+        - ``prospects`` is a list of ``Prospect`` (ids may be empty).
+    Postconditions:
+        - Returns ``{prospect_id: dossier}`` for prospects with a saved
+          dossier; prospects without one (or with empty ids) are absent.
+        - Never raises: a store outage returns ``{}`` (logged), so callers
+          treat a missing map as "no personalization basis", not an error.
+    """
+    ids = [p.id for p in prospects if p.id]
+    if not ids:
+        return {}
+    try:
+        from .dossier_store import DossierStore
+
+        return DossierStore().get_dossiers_by_prospect_ids(ids)
+    except Exception as exc:
+        logger.warning(
+            "DossierStore unavailable for outreach dossier lookup — skipping all "
+            "outreach for this run. Error: %s",
+            exc,
+        )
+        return {}
+
+
+def coach_review(
+    prospects: List[Prospect],
+    product_name: str,
+    insights_ctx: Optional[str],
+    coach: Optional[SalesCoachAgent] = None,
+) -> Optional[PipelineCoachingReport]:
+    """Generate the pipeline coaching report — best-effort.
+
+    Module-level so the Temporal ``sales_coach`` activity can run coaching with
+    only a ``SalesCoachAgent`` instead of the full orchestrator.
+
+    Preconditions:
+        - ``prospects`` is the full prospect list for the run.
+    Postconditions:
+        - Returns the report, or ``None`` on any coaching failure (logged) —
+          coaching never fails a pipeline run in either execution mode.
+    """
+    prospects_json = json.dumps([p.model_dump() for p in prospects], indent=2)
+    try:
+        agent = coach if coach is not None else SalesCoachAgent()
+        return agent.review(prospects_json, product_name, "", insights_ctx)
+    except Exception:
+        logger.exception("sales.coaching.failed")
+        return None
+
+
+def _prospecting_outcome_id(job_id: str, prospect: Prospect) -> str:
+    """Deterministic outcome id for one prospect's prospecting outcome.
+
+    Derived from the job + prospect identity so an at-least-once replay of the
+    recording step overwrites the same outcome-store file instead of minting a
+    duplicate (the store writes one file per ``outcome_id``).
+
+    Postconditions:
+        - Returns a stable UUID string for the same ``(job_id, prospect)``
+          pair; distinct prospects in a job get distinct ids.
+    """
+    key = prospect.id or f"{prospect.company_name}:{prospect.contact_name or ''}"
+    return str(uuid5(NAMESPACE_URL, f"sales-prospecting-outcome:{job_id}:{key}"))
+
+
+def record_prospecting_outcomes(prospects: List[Prospect], job_id: str) -> None:
+    """Auto-record each identified prospect as a PROSPECTING / CONVERTED outcome.
+
+    Seeds the outcome store so the learning engine has data before manual
+    deal outcomes arrive. Module-level so the Temporal finalize activity can
+    record outcomes without constructing an orchestrator.
+
+    Preconditions:
+        - ``job_id`` identifies the pipeline run the prospects came from.
+    Postconditions:
+        - One outcome per prospect, written with a deterministic
+          ``outcome_id`` so replays are idempotent (same file overwritten).
+        - Never raises: individual write failures are logged and skipped.
+    """
+    for p in prospects:
+        try:
+            record_stage_outcome(
+                StageOutcome(
+                    outcome_id=_prospecting_outcome_id(job_id, p),
+                    pipeline_job_id=job_id,
+                    company_name=p.company_name,
+                    industry=p.industry,
+                    stage=PipelineStage.PROSPECTING,
+                    outcome=OutcomeResult.CONVERTED,
+                    icp_match_score=p.icp_match_score,
+                )
+            )
+        except Exception as exc:
+            logger.debug("Could not auto-record prospecting outcome: %s", exc)
+
+
+def build_pipeline_summary(
+    entry_stage_value: str,
+    *,
+    prospects: int,
+    outreach_sequences: int,
+    qualified_leads: int,
+    nurture_sequences: int,
+    discovery_plans: int,
+    proposals: int,
+    closing_strategies: int,
+    insights_version: Optional[int],
+    insights_total_outcomes: int,
+) -> str:
+    """Assemble the completion summary string for a pipeline run.
+
+    The single source of the user-facing summary — shared verbatim by the
+    thread path (``run()``) and the Temporal finalize activity so the two
+    modes can never report differently.
+
+    Preconditions:
+        - Counts are the lengths of the corresponding result collections.
+    Postconditions:
+        - Returns the summary, including the learning-insights note when
+          ``insights_total_outcomes > 0``.
+    """
+    insights_note = (
+        f" (learning insights v{insights_version} applied)"
+        if insights_total_outcomes > 0
+        else " (no learning history yet — record outcomes to improve future runs)"
+    )
+    return (
+        f"Sales pod completed pipeline from '{entry_stage_value}' stage{insights_note}. "
+        f"Prospects identified: {prospects}. "
+        f"Outreach sequences generated: {outreach_sequences}. "
+        f"Leads qualified: {qualified_leads}. "
+        f"Nurture sequences: {nurture_sequences}. "
+        f"Discovery plans: {discovery_plans}. "
+        f"Proposals written: {proposals}. "
+        f"Closing strategies: {closing_strategies}."
+    )
+
+
 class SalesPodOrchestrator:
     """Coordinates all sales pod agents through the full pipeline.
 
@@ -317,19 +461,65 @@ class SalesPodOrchestrator:
 
     def __init__(self, config: Optional[SalesPipelineConfig] = None) -> None:
         self.config = config or SalesPipelineConfig()
-        self.prospector = ProspectorAgent()
-        self.outreach = OutreachAgent()
-        self.qualifier = LeadQualifierAgent()
-        self.nurture = NurtureAgent()
-        self.discovery = DiscoveryAgent()
-        self.proposal = ProposalAgent()
-        self.closer = CloserAgent()
-        self.coach = SalesCoachAgent()
-        self.decision_maker_mapper = DecisionMakerMapperAgent()
-        self.dossier_builder = DossierBuilderAgent()
-        self.learning_engine = LearningEngine()
-        self.outreach_critic = OutreachCriticAgent()
-        self.proposal_critic = ProposalCriticAgent()
+
+    # Specialists are lazy ``cached_property``s rather than eager ``__init__``
+    # constructions: each agent resolves an LLM client at construction, and the
+    # Temporal per-prospect activities build a fresh orchestrator per call —
+    # eager construction would resolve all 13 clients to use one. Instances
+    # remain assignable (tests inject mocks) because ``cached_property`` is a
+    # non-data descriptor: instance ``__dict__`` entries take precedence.
+
+    @cached_property
+    def prospector(self) -> ProspectorAgent:
+        return ProspectorAgent()
+
+    @cached_property
+    def outreach(self) -> OutreachAgent:
+        return OutreachAgent()
+
+    @cached_property
+    def qualifier(self) -> LeadQualifierAgent:
+        return LeadQualifierAgent()
+
+    @cached_property
+    def nurture(self) -> NurtureAgent:
+        return NurtureAgent()
+
+    @cached_property
+    def discovery(self) -> DiscoveryAgent:
+        return DiscoveryAgent()
+
+    @cached_property
+    def proposal(self) -> ProposalAgent:
+        return ProposalAgent()
+
+    @cached_property
+    def closer(self) -> CloserAgent:
+        return CloserAgent()
+
+    @cached_property
+    def coach(self) -> SalesCoachAgent:
+        return SalesCoachAgent()
+
+    @cached_property
+    def decision_maker_mapper(self) -> DecisionMakerMapperAgent:
+        return DecisionMakerMapperAgent()
+
+    @cached_property
+    def dossier_builder(self) -> DossierBuilderAgent:
+        return DossierBuilderAgent()
+
+    @cached_property
+    def learning_engine(self) -> LearningEngine:
+        return LearningEngine()
+
+    @cached_property
+    def outreach_critic(self) -> OutreachCriticAgent:
+        return OutreachCriticAgent()
+
+    @cached_property
+    def proposal_critic(self) -> ProposalCriticAgent:
+        return ProposalCriticAgent()
 
     def _should_run(self, stage: PipelineStage, entry: PipelineStage) -> bool:
         return stage_should_run(stage, entry)
@@ -477,34 +667,23 @@ class SalesPodOrchestrator:
     def load_dossiers_for_prospects(self, prospects: List[Prospect]) -> dict[str, ProspectDossier]:
         """Batch-load dossiers for the prospects we're about to run outreach on.
 
-        Returns a map keyed by prospect.id. Prospects without a saved dossier
-        are simply absent from the map — the caller decides whether to skip
-        them. Safe to call when Postgres is unreachable (returns empty map).
-
-        Public so HTTP handlers can build the ``dossier_map`` argument for
+        Delegates to the module-level :func:`load_dossiers_for_prospects` (the
+        single implementation, also used by the Temporal activity). Public so
+        HTTP handlers can build the ``dossier_map`` argument for
         :meth:`outreach_only` by prospect id.
-        """
-        ids = [p.id for p in prospects if p.id]
-        if not ids:
-            return {}
-        try:
-            from .dossier_store import DossierStore
 
-            return DossierStore().get_dossiers_by_prospect_ids(ids)
-        except Exception as exc:
-            logger.warning(
-                "DossierStore unavailable for outreach dossier lookup — skipping all "
-                "outreach for this run. Error: %s",
-                exc,
-            )
-            return {}
+        Postconditions:
+            - Returns ``{prospect_id: dossier}``; never raises (store outage
+              returns ``{}``).
+        """
+        return load_dossiers_for_prospects(prospects)
 
     # ------------------------------------------------------------------
     # Per-stage methods — each owns a single pipeline phase
     # ------------------------------------------------------------------
 
     def _run_prospecting(self, ctx: _RunContext) -> List[Prospect]:
-        ctx.update("prospecting", 5)
+        ctx.update("prospecting", STAGE_PROGRESS["prospecting"][0])
         logger.info("Sales pod [%s]: prospecting stage", ctx.job_id)
         if ctx.request.existing_prospects:
             prospects = ctx.request.existing_prospects
@@ -518,7 +697,7 @@ class SalesPodOrchestrator:
                 ctx.insights_ctx,
             )
             prospects = list(prospects_result.prospects)
-        ctx.update("prospecting", 15)
+        ctx.update("prospecting", STAGE_PROGRESS["prospecting"][1])
         return prospects
 
     def _map_prospects_parallel(
@@ -578,7 +757,7 @@ class SalesPodOrchestrator:
         ctx: _RunContext,
         prospects: List[Prospect],
     ) -> tuple[List[OutreachSequence], dict[str, ProspectDossier]]:
-        ctx.update("outreach", 20)
+        ctx.update("outreach", STAGE_PROGRESS["outreach"][0])
         logger.info("Sales pod [%s]: outreach stage for %d prospects", ctx.job_id, len(prospects))
         dossier_map = self.load_dossiers_for_prospects(prospects)
 
@@ -602,7 +781,7 @@ class SalesPodOrchestrator:
                 return None
 
         sequences = self._map_prospects_parallel(prospects, _one)
-        ctx.update("outreach", 35)
+        ctx.update("outreach", STAGE_PROGRESS["outreach"][1])
         return sequences, dossier_map
 
     def qualify_one(self, p: Prospect, ctx: _RunContext) -> QualificationScore:
@@ -627,7 +806,7 @@ class SalesPodOrchestrator:
         ctx: _RunContext,
         prospects: List[Prospect],
     ) -> List[QualificationScore]:
-        ctx.update("qualification", 40)
+        ctx.update("qualification", STAGE_PROGRESS["qualification"][0])
         logger.info("Sales pod [%s]: qualification stage", ctx.job_id)
 
         def _one(p: Prospect) -> Optional[QualificationScore]:
@@ -638,7 +817,7 @@ class SalesPodOrchestrator:
                 return None
 
         qualified = self._map_prospects_parallel(prospects, _one)
-        ctx.update("qualification", 50)
+        ctx.update("qualification", STAGE_PROGRESS["qualification"][1])
         return qualified
 
     def nurture_one(self, p: Prospect, ctx: _RunContext) -> NurtureSequence:
@@ -663,7 +842,7 @@ class SalesPodOrchestrator:
         ctx: _RunContext,
         nurture_prospects: List[Prospect],
     ) -> List[NurtureSequence]:
-        ctx.update("nurturing", 55)
+        ctx.update("nurturing", STAGE_PROGRESS["nurturing"][0])
         logger.info("Sales pod [%s]: nurturing %d prospects", ctx.job_id, len(nurture_prospects))
 
         def _one(p: Prospect) -> Optional[NurtureSequence]:
@@ -674,7 +853,7 @@ class SalesPodOrchestrator:
                 return None
 
         nurture_seqs = self._map_prospects_parallel(nurture_prospects, _one)
-        ctx.update("nurturing", 62)
+        ctx.update("nurturing", STAGE_PROGRESS["nurturing"][1])
         return nurture_seqs
 
     def discovery_one(
@@ -726,13 +905,13 @@ class SalesPodOrchestrator:
               an empty JSON object (``"{}"``) is passed to ``discovery.prepare``,
               which is expected to handle this gracefully.
         """
-        ctx.update("discovery", 65)
+        ctx.update("discovery", STAGE_PROGRESS["discovery"][0])
         logger.info(
             "Sales pod [%s]: discovery stage for %d prospects",
             ctx.job_id,
             len(qualified_prospects),
         )
-        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect and q.prospect.id}
+        qual_by_prospect_id = index_by_prospect_id(qualified, lambda q: q.prospect)
 
         def _one(p: Prospect) -> Optional[DiscoveryPlan]:
             try:
@@ -742,7 +921,7 @@ class SalesPodOrchestrator:
                 return None
 
         plans = self._map_prospects_parallel(qualified_prospects, _one)
-        ctx.update("discovery", 75)
+        ctx.update("discovery", STAGE_PROGRESS["discovery"][1])
         return plans
 
     def proposal_one(
@@ -782,13 +961,13 @@ class SalesPodOrchestrator:
         qualified: List[QualificationScore],
         dossier_map: dict[str, ProspectDossier],
     ) -> List[SalesProposal]:
-        ctx.update("proposal", 78)
+        ctx.update("proposal", STAGE_PROGRESS["proposal"][0])
         logger.info(
             "Sales pod [%s]: proposal stage for %d prospects",
             ctx.job_id,
             len(qualified_prospects),
         )
-        qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect and q.prospect.id}
+        qual_by_prospect_id = index_by_prospect_id(qualified, lambda q: q.prospect)
         if not dossier_map:
             dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
 
@@ -802,7 +981,7 @@ class SalesPodOrchestrator:
                 return None
 
         proposals = self._map_prospects_parallel(qualified_prospects, _one)
-        ctx.update("proposal", 87)
+        ctx.update("proposal", STAGE_PROGRESS["proposal"][1])
         return proposals
 
     def close_one(
@@ -854,11 +1033,9 @@ class SalesPodOrchestrator:
               an empty JSON object (``"{}"``) is passed to ``closer.develop_strategy``,
               which is expected to handle this gracefully.
         """
-        ctx.update("negotiation", 90)
+        ctx.update("negotiation", STAGE_PROGRESS["negotiation"][0])
         logger.info("Sales pod [%s]: closing strategy stage", ctx.job_id)
-        proposal_by_prospect_id = {
-            prop.prospect.id: prop for prop in proposals if prop.prospect and prop.prospect.id
-        }
+        proposal_by_prospect_id = index_by_prospect_id(proposals, lambda prop: prop.prospect)
 
         def _one(p: Prospect) -> Optional[ClosingStrategy]:
             try:
@@ -868,7 +1045,7 @@ class SalesPodOrchestrator:
                 return None
 
         strategies = self._map_prospects_parallel(qualified_prospects, _one)
-        ctx.update("negotiation", 95)
+        ctx.update("negotiation", STAGE_PROGRESS["negotiation"][1])
         return strategies
 
     def _run_coaching(
@@ -876,14 +1053,9 @@ class SalesPodOrchestrator:
         ctx: _RunContext,
         prospects: List[Prospect],
     ) -> Optional[PipelineCoachingReport]:
-        ctx.update("coaching", 97)
+        ctx.update("coaching", STAGE_PROGRESS["coaching"][0])
         logger.info("Sales pod [%s]: generating coaching report", ctx.job_id)
-        prospects_json = json.dumps([p.model_dump() for p in prospects], indent=2)
-        try:
-            return self.coach.review(prospects_json, ctx.product, "", ctx.insights_ctx)
-        except Exception:
-            logger.exception("sales.coaching.failed")
-            return None
+        return coach_review(prospects, ctx.product, ctx.insights_ctx, coach=self.coach)
 
     # ------------------------------------------------------------------
     # Pipeline driver — dispatches to stage methods and assembles result
@@ -922,7 +1094,7 @@ class SalesPodOrchestrator:
 
         if not prospects:
             logger.warning("Sales pod [%s]: no prospects found — stopping pipeline", job_id)
-            result.summary = "No prospects found or provided. Pipeline halted."
+            result.summary = NO_PROSPECTS_SUMMARY
             return result
 
         # Stage 2 — Outreach
@@ -962,20 +1134,19 @@ class SalesPodOrchestrator:
         result.coaching_report = self._run_coaching(ctx, prospects)
         self._record_prospecting_outcomes(prospects, job_id)
 
-        insights_note = (
-            f" (learning insights v{current_insights.insights_version} applied)"
-            if current_insights and current_insights.total_outcomes_analyzed > 0
-            else " (no learning history yet — record outcomes to improve future runs)"
-        )
-        result.summary = (
-            f"Sales pod completed pipeline from '{ctx.entry.value}' stage{insights_note}. "
-            f"Prospects identified: {len(result.prospects)}. "
-            f"Outreach sequences generated: {len(result.outreach_sequences)}. "
-            f"Leads qualified: {len(result.qualified_leads)}. "
-            f"Nurture sequences: {len(result.nurture_sequences)}. "
-            f"Discovery plans: {len(result.discovery_plans)}. "
-            f"Proposals written: {len(result.proposals)}. "
-            f"Closing strategies: {len(result.closing_strategies)}."
+        result.summary = build_pipeline_summary(
+            ctx.entry.value,
+            prospects=len(result.prospects),
+            outreach_sequences=len(result.outreach_sequences),
+            qualified_leads=len(result.qualified_leads),
+            nurture_sequences=len(result.nurture_sequences),
+            discovery_plans=len(result.discovery_plans),
+            proposals=len(result.proposals),
+            closing_strategies=len(result.closing_strategies),
+            insights_version=(current_insights.insights_version if current_insights else None),
+            insights_total_outcomes=(
+                current_insights.total_outcomes_analyzed if current_insights else 0
+            ),
         )
 
         ctx.update("completed", 100)
@@ -983,25 +1154,12 @@ class SalesPodOrchestrator:
         return result
 
     def _record_prospecting_outcomes(self, prospects: List[Prospect], job_id: str) -> None:
-        """Auto-record each identified prospect as a PROSPECTING / CONVERTED stage outcome.
+        """Auto-record prospecting outcomes — delegates to the module function.
 
-        This seeds the outcome store so the learning engine has data even before
-        the user manually records deal-level outcomes.
+        Postconditions: same as :func:`record_prospecting_outcomes` (idempotent
+        per prospect, never raises).
         """
-        for p in prospects:
-            try:
-                record_stage_outcome(
-                    StageOutcome(
-                        pipeline_job_id=job_id,
-                        company_name=p.company_name,
-                        industry=p.industry,
-                        stage=PipelineStage.PROSPECTING,
-                        outcome=OutcomeResult.CONVERTED,
-                        icp_match_score=p.icp_match_score,
-                    )
-                )
-            except Exception as exc:
-                logger.debug("Could not auto-record prospecting outcome: %s", exc)
+        record_prospecting_outcomes(prospects, job_id)
 
     # ------------------------------------------------------------------
     # Convenience single-stage methods (used by standalone API endpoints)

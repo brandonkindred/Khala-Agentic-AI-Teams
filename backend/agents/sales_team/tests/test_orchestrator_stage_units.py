@@ -207,6 +207,62 @@ def test_proposal_one_delegates_to_critic_helper(orch, ctx):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Lazy specialist agents (cached_property) + idempotent outcome recording
+# ---------------------------------------------------------------------------
+
+
+def test_agents_resolve_lazily_cache_and_are_overridable():
+    """Every specialist is a lazy ``cached_property``: it resolves on first
+    access, caches (same instance twice), and stays assignable for tests."""
+    from sales_team.agents import ProspectorAgent
+
+    o = orch_mod.SalesPodOrchestrator()
+    slots = (
+        "prospector",
+        "outreach",
+        "qualifier",
+        "nurture",
+        "discovery",
+        "proposal",
+        "closer",
+        "coach",
+        "decision_maker_mapper",
+        "dossier_builder",
+        "learning_engine",
+        "outreach_critic",
+        "proposal_critic",
+    )
+    for slot in slots:
+        agent = getattr(o, slot)
+        assert agent is not None
+        assert getattr(o, slot) is agent  # cached
+    assert isinstance(o.prospector, ProspectorAgent)
+
+    o.prospector = "sentinel"  # instance dict wins over the descriptor
+    assert o.prospector == "sentinel"
+
+
+def test_record_prospecting_outcomes_is_idempotent(monkeypatch):
+    """Deterministic outcome ids make a replay overwrite the same store files
+    instead of double-recording (which would skew learning stats)."""
+    ids: list[list[str]] = []
+
+    def _capture(outcome):
+        ids[-1].append(outcome.outcome_id)
+        return outcome
+
+    monkeypatch.setattr("sales_team.orchestrator.record_stage_outcome", _capture)
+    prospects = [Prospect(id="prs_1", company_name="A"), Prospect(id="prs_2", company_name="B")]
+
+    for _ in range(2):
+        ids.append([])
+        orch_mod.record_prospecting_outcomes(prospects, "job-xyz")
+
+    assert ids[0] == ids[1]  # same ids both runs
+    assert len(set(ids[0])) == 2  # distinct per prospect
+
+
 def test_run_qualification_skips_failing_prospect(orch, ctx):
     """The stage's ``_one`` closure still catches and drops a failing prospect,
     so a single failure does not abort the whole stage."""

@@ -21,9 +21,11 @@ import-clean (no ``os.getenv`` at import), keeping it sandbox-safe.
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Tuple, TypeVar
 
 from .models import PipelineStage, Prospect, QualificationScore
+
+_T = TypeVar("_T")
 
 # The ordered pipeline stages. ``entry_stage`` selects the first stage to run;
 # every stage at or after it in this list runs (subject to per-stage data
@@ -39,6 +41,23 @@ PIPELINE_STAGE_ORDER: List[PipelineStage] = [
     PipelineStage.PROPOSAL,
     PipelineStage.NEGOTIATION,
 ]
+
+# Single source of truth for the (entry_pct, exit_pct) progress band each stage
+# reports to the job store. Both execution modes read from here — the thread
+# orchestrator via ``ctx.update`` and the Temporal workflow via its progress
+# gates — so the numbers cannot drift between modes. Keys are plain stage
+# strings (``PipelineStage`` values plus the non-stage ``"coaching"`` step) so
+# the deterministic workflow can index with raw request strings.
+STAGE_PROGRESS: Dict[str, Tuple[int, int]] = {
+    "prospecting": (5, 15),
+    "outreach": (20, 35),
+    "qualification": (40, 50),
+    "nurturing": (55, 62),
+    "discovery": (65, 75),
+    "proposal": (78, 87),
+    "negotiation": (90, 95),
+    "coaching": (97, 97),
+}
 
 
 def stage_should_run(stage: "PipelineStage | str", entry: "PipelineStage | str") -> bool:
@@ -89,15 +108,44 @@ def is_disqualify(recommended_action: str) -> bool:
     return recommended_action.lower().startswith("disqualify")
 
 
+def _partition(
+    qualified: List[_T],
+    prospects: List[Any],
+    action_of: Callable[[_T], str],
+    prospect_of: Callable[[_T], Any],
+) -> Tuple[List[Any], List[Any]]:
+    """Shared advance/nurture partition core.
+
+    Preconditions:
+        - ``action_of``/``prospect_of`` are pure accessors for a score's
+          recommended action string and embedded prospect.
+
+    Postconditions:
+        - Empty ``qualified`` → ``([], list(prospects))``.
+        - Otherwise ``(nurture, advance)`` prospects; ``disqualify`` scores
+          drop out of both lists.
+    """
+    if not qualified:
+        return [], list(prospects)
+    nurture = [
+        prospect_of(q)
+        for q in qualified
+        if not is_advance(action_of(q)) and not is_disqualify(action_of(q))
+    ]
+    advance = [prospect_of(q) for q in qualified if is_advance(action_of(q))]
+    return nurture, advance
+
+
 def partition_qualified(
     qualified: List[QualificationScore],
     prospects: List[Prospect],
 ) -> Tuple[List[Prospect], List[Prospect]]:
     """Split scored leads into ``(nurture_prospects, qualified_prospects)``.
 
-    This is the object-based routing used by the thread orchestrator; the
-    Temporal workflow applies the identical rule on plain dicts via
-    :func:`is_advance` / :func:`is_disqualify`.
+    Object-based variant used by the thread orchestrator; the Temporal
+    workflow applies the identical rule on plain dicts via
+    :func:`partition_qualified_dicts`. Both delegate to one core so the
+    routing rule cannot drift between execution modes.
 
     Preconditions:
         - ``qualified`` is a list of ``QualificationScore`` (may be empty).
@@ -112,13 +160,63 @@ def partition_qualified(
           neither ``advance`` nor ``disqualify``; ``disqualify`` scores drop out
           of both lists.
     """
-    if not qualified:
-        return [], list(prospects)
-    advance = [q for q in qualified if is_advance(q.recommended_action)]
-    nurture_prospects = [
-        q.prospect
-        for q in qualified
-        if not is_advance(q.recommended_action) and not is_disqualify(q.recommended_action)
-    ]
-    qualified_prospects = [q.prospect for q in advance]
-    return nurture_prospects, qualified_prospects
+    return _partition(qualified, prospects, lambda q: q.recommended_action, lambda q: q.prospect)
+
+
+def partition_qualified_dicts(
+    qualified: List[Mapping[str, Any]],
+    prospects: List[Mapping[str, Any]],
+) -> Tuple[List[Any], List[Any]]:
+    """Dict-based :func:`partition_qualified` for the Temporal workflow.
+
+    Preconditions:
+        - Each entry in ``qualified`` is a serialized ``QualificationScore``
+          (has ``recommended_action`` and ``prospect`` keys).
+
+    Postconditions:
+        - Identical routing semantics to :func:`partition_qualified` (shared
+          core), operating on and returning plain dicts. Pure and
+          sandbox-safe — callable from inside a Temporal workflow.
+    """
+    return _partition(
+        qualified, prospects, lambda q: q["recommended_action"], lambda q: q["prospect"]
+    )
+
+
+def index_by_prospect_id(items: Iterable[_T], prospect_of: Callable[[_T], Any]) -> Dict[str, _T]:
+    """Index score/proposal-like objects by their embedded prospect's id.
+
+    Preconditions:
+        - ``prospect_of`` returns the embedded prospect (object with ``.id``)
+          or ``None``.
+
+    Postconditions:
+        - Entries whose prospect is missing or has an empty ``id`` are skipped
+          (never keyed under ``""``); on duplicate ids the last entry wins,
+          matching the pre-decomposition comprehension behaviour.
+    """
+    out: Dict[str, _T] = {}
+    for item in items:
+        prospect = prospect_of(item)
+        if prospect is not None and prospect.id:
+            out[prospect.id] = item
+    return out
+
+
+def index_dicts_by_prospect_id(items: Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Dict-based :func:`index_by_prospect_id` for the Temporal workflow.
+
+    Preconditions:
+        - Each item is a serialized model with a ``prospect`` key (a dict with
+          an ``id`` key, or ``None``).
+
+    Postconditions:
+        - Same skip-empty/skip-missing semantics as the object variant; pure
+          and sandbox-safe.
+    """
+    out: Dict[str, Any] = {}
+    for item in items:
+        prospect = item.get("prospect")
+        if prospect and prospect.get("id"):
+            out[prospect["id"]] = item
+    return out
