@@ -68,9 +68,7 @@ def test_run_title_selection_replaces_disliked_with_llm_replacement(
     class _LLM:
         def complete_json(self, prompt, **_kw):
             state["call"] += 1
-            return {
-                "titles": [{"title": "Better Title", "probability_of_success": 0.9}]
-            }
+            return {"titles": [{"title": "Better Title", "probability_of_success": 0.9}]}
 
     plan_with_reader = _plan(target_reader="senior eng")
 
@@ -93,9 +91,7 @@ def test_run_title_selection_replaces_disliked_with_llm_replacement(
     assert state["call"] >= 1
 
 
-def test_run_title_selection_llm_failure_falls_back_to_removal(
-    monkeypatch, patched_client
-) -> None:
+def test_run_title_selection_llm_failure_falls_back_to_removal(monkeypatch, patched_client) -> None:
     """If LLM raises while generating a replacement, the disliked title is REMOVED.
     Then the user selects another title (= loves it) and we return it."""
     import agent_implementations.blog_writing_process_v2 as v2

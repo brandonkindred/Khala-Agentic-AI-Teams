@@ -257,13 +257,20 @@ def start_blog_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
-    """Mark a job as running with start timestamp."""
-    update_blog_job(
-        job_id,
-        cache_dir=cache_dir,
-        status=JOB_STATUS_RUNNING,
-        started_at=datetime.now(timezone.utc).isoformat(),
-    )
+    """Mark a job as running with a start timestamp.
+
+    Idempotent and retry-safe: this merges fields onto the existing job row (it does
+    not create the row, so there is no uniqueness/"already exists" check that could
+    raise), and it preserves the original ``started_at`` when the job has already been
+    started. That makes it safe to call again after a worker crash / Temporal activity
+    retry — a second call re-asserts ``status = running`` without resetting the
+    recorded start time.
+    """
+    fields: Dict[str, Any] = {"status": JOB_STATUS_RUNNING}
+    existing = get_blog_job(job_id, cache_dir=cache_dir) or {}
+    if not existing.get("started_at"):
+        fields["started_at"] = datetime.now(timezone.utc).isoformat()
+    update_blog_job(job_id, cache_dir=cache_dir, **fields)
 
 
 def complete_blog_job(
@@ -477,7 +484,12 @@ def add_story_agent_message(
         merge_fields={"waiting_for_story_input": True},
         append_to={
             "story_chat_history": [
-                {"role": "agent", "content": content, "gap_index": gap_index, "gap_round": gap_round}
+                {
+                    "role": "agent",
+                    "content": content,
+                    "gap_index": gap_index,
+                    "gap_round": gap_round,
+                }
             ]
         },
     )
