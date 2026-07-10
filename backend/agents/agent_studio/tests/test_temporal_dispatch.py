@@ -204,3 +204,13 @@ def test_translate_is_cycle_safe() -> None:
     b.__cause__ = a
     wf_fail = WorkflowFailureError(cause=a)
     assert dispatch._translate_workflow_failure(wf_fail) is None
+
+
+def test_translate_and_dispatch_handle_none_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``WorkflowFailureError`` with no cause chain (``cause=None``) returns ``None``
+    from the walk (no raise) and is re-raised as-is by the dispatch layer."""
+    assert dispatch._translate_workflow_failure(WorkflowFailureError(cause=None)) is None
+
+    _raise(monkeypatch, WorkflowFailureError(cause=None))
+    with pytest.raises(WorkflowFailureError):
+        dispatch.send_message("c", "hi")
