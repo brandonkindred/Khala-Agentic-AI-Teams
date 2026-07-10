@@ -145,6 +145,11 @@ export class IntegrationsApiService {
   /**
    * GET /api/integrations/github/repos — every repository the stored PAT can
    * access (the token's own authorization configuration is the source of truth).
+   *
+   * Unlike the `/github` config methods above, this deliberately omits
+   * `SKIP_NOTIFY`: the repo list is a prerequisite for the coding-team and
+   * code-review pages, so a failure should surface through the global error
+   * toast rather than fail silently and leave those pages ambiguously empty.
    */
   getGitHubRepos(): Observable<GitHubRepoItem[]> {
     return this.http.get<GitHubRepoItem[]>(`${this.baseUrl}/github/repos`);

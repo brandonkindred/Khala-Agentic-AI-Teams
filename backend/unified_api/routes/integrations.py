@@ -1183,6 +1183,11 @@ _GITHUB_MAX_REPO_PAGES = 20
 # dependencies on a single issue, far beyond any realistic case.
 _GITHUB_DEPENDENCY_PER_PAGE = 100
 _GITHUB_MAX_DEPENDENCY_PAGES = 10
+# Per-request timeout (seconds) for direct GitHub REST calls (repos/issues/pulls
+# listing). One constant so the latency budget is tuned in a single place; the
+# coding-team-service calls use their own longer timeouts (those are a different
+# upstream with different latency characteristics).
+_GITHUB_HTTP_TIMEOUT = 15.0
 
 
 def _parse_dependency_concurrency(raw: str | None) -> int:
@@ -1681,6 +1686,10 @@ def _resolve_github_target(
     Preconditions:
         - The GitHub integration is enabled; the PAT prerequisite is exactly
           :func:`_resolve_github_access`'s (``token_override`` is forwarded verbatim).
+          ``token_override`` exists for the webhook caller in
+          ``github_events_handler.py``, which has already resolved the PAT and passes
+          it through; every in-module route handler calls with ``token_override=None``
+          and lets this function resolve the token.
         - ``owner``/``repo`` are the caller-requested target repository, or
           ``None``/blank to fall back to the configured default owner/repo (the
           legacy single-repo settings, kept as an optional default).
@@ -1772,7 +1781,7 @@ async def _collect_github_pages(
     return raw, has_more
 
 
-def _build_repo_item(raw: dict[str, Any]) -> GitHubRepoItem:
+def _build_github_repo_item(raw: dict[str, Any]) -> GitHubRepoItem:
     """Map a raw GitHub repository payload onto the picker's repo model.
 
     Preconditions: ``raw`` is a repository object from ``GET /user/repos`` (carries at
@@ -1823,7 +1832,7 @@ async def list_github_repos() -> list[GitHubRepoItem]:
     headers = _github_api_headers(token)
     base_url = f"{_GITHUB_API_BASE}/user/repos"
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_repos, has_more = await _collect_github_pages(
             client,
             base_url,
@@ -1835,7 +1844,7 @@ async def list_github_repos() -> list[GitHubRepoItem]:
     # Keep exactly the items with a usable string name (GitHub always sends one);
     # anything else can't be addressed as owner/name by the downstream routes.
     items = [
-        _build_repo_item(raw)
+        _build_github_repo_item(raw)
         for raw in raw_repos
         if isinstance(raw, dict) and isinstance(raw.get("name"), str) and raw["name"]
     ]
@@ -1887,7 +1896,7 @@ async def list_github_issues(
     headers = _github_api_headers(token)
     base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_pages, has_more = await _collect_github_pages(
             client,
             base_url,
@@ -1968,7 +1977,7 @@ async def list_github_pulls(
     headers = _github_api_headers(token)
     base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=_GITHUB_HTTP_TIMEOUT) as client:
         raw_pulls, has_more = await _collect_github_pages(
             client,
             base_url,
@@ -2281,6 +2290,21 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, pla
         lock_file.close()
 
 
+def _require_coding_team_url() -> str:
+    """Return the configured coding-team service URL or raise a 503.
+
+    Preconditions: none.
+    Postconditions: returns the stripped ``CODING_TEAM_SERVICE_URL`` when set to a
+        non-blank value; raises ``HTTPException(503)`` otherwise. Single source for
+        the "downstream configured?" check shared by the three coding-team routes so
+        their failure mode cannot drift.
+    """
+    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
+    if not coding_team_url:
+        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+    return coding_team_url
+
+
 @router.post("/github/run-issue", response_model=RunGitHubIssueResponse)
 async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueResponse:
     """Start the coding team on a specific GitHub issue.
@@ -2303,9 +2327,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
 
     # Validate the downstream is configured before the (slow) clone, so a
     # misconfiguration fails fast instead of after a multi-second checkout.
-    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
-    if not coding_team_url:
-        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+    coding_team_url = _require_coding_team_url()
 
     # Namespace the checkout per-issue (unless the operator pins an explicit
     # repo_path for this target repo) so two issues of the same repo get isolated
@@ -2429,9 +2451,7 @@ async def _start_pr_review(
     # it's read here, with the same 503-vs-400 reachability handling as the UI route.
     cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, token, owner, repo)
 
-    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
-    if not coding_team_url:
-        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+    coding_team_url = _require_coding_team_url()
 
     payload: dict[str, Any] = {
         "owner": owner,
@@ -2533,9 +2553,7 @@ async def list_github_reviews(
     """
     _cfg, _token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
 
-    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
-    if not coding_team_url:
-        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+    coding_team_url = _require_coding_team_url()
 
     params: dict[str, Any] = {"owner": owner, "repo": repo, "limit": limit}
     if pr_number is not None:

@@ -102,6 +102,18 @@ export interface GitHubConfigResponse {
   token_configured: boolean;
   default_label: string;
   /**
+   * @deprecated Legacy configured default owner. Repository access now comes from
+   * the PAT's own authorization; the UI never reads this. Typed as optional so the
+   * compiler flags any accidental new usage.
+   */
+  owner?: string;
+  /**
+   * @deprecated Legacy configured default repo. Repository access now comes from
+   * the PAT's own authorization; the UI never reads this. Typed as optional so the
+   * compiler flags any accidental new usage.
+   */
+  repo?: string;
+  /**
    * True when a webhook signing secret is configured (stored credential or
    * GITHUB_WEBHOOK_SECRET env var), used to verify "@khala review" PR-comment
    * webhooks delivered to POST /api/integrations/github/events.

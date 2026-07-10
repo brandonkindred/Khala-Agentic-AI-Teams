@@ -4,6 +4,7 @@ import {
   HttpTestingController,
 } from '@angular/common/http/testing';
 import { IntegrationsApiService } from './integrations-api.service';
+import { SKIP_ERROR_NOTIFY } from '../core/error-handler.interceptor';
 import { environment } from '../../environments/environment';
 
 describe('IntegrationsApiService', () => {
@@ -177,6 +178,24 @@ describe('IntegrationsApiService', () => {
     expect(req.request.params.keys().length).toBe(0);
     req.flush(repos);
     expect(emitted).toEqual(repos);
+  });
+
+  it('getGitHubRepos does NOT suppress the global error toast (no SKIP_NOTIFY)', () => {
+    // Unlike the /github config methods, a repos-list failure must surface through
+    // the global toast (the list is a prerequisite for the coding-team/code-review
+    // pages), so the request must carry SKIP_ERROR_NOTIFY at its default of false.
+    service.getGitHubRepos().subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github/repos`);
+    expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(false);
+    req.flush([]);
+  });
+
+  it('getGitHubConfig DOES suppress the global error toast (SKIP_NOTIFY)', () => {
+    // Contrast: the config read renders its own inline error, so it opts out.
+    service.getGitHubConfig().subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github`);
+    expect(req.request.context.get(SKIP_ERROR_NOTIFY)).toBe(true);
+    req.flush({ enabled: false, token_configured: false, default_label: '' });
   });
 
   it('getGitHubIssues GET with no options sends no params', () => {
