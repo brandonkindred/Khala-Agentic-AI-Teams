@@ -9,6 +9,7 @@ Supports job_updater callback for UI phase tracking.
 """
 
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -87,6 +88,13 @@ DRAFT_EDITOR_ITERATIONS = 500
 MAX_REWRITE_ITERATIONS = 100
 # After this many copy-edit revisions without editor approval, escalate to the user
 COPY_EDIT_ESCALATION_THRESHOLD = 10
+
+# Poll cadence (seconds) for every human-in-the-loop wait loop (draft feedback,
+# uncertainty answers, title selection). One value keeps the loops consistent and
+# configurable in one place. This is independent of the Temporal activity heartbeat:
+# ``start_pipeline_heartbeat`` runs a background thread that heartbeats on its own
+# schedule, so these blocking sleeps never risk a heartbeat timeout.
+HITL_POLL_INTERVAL_S = int(os.getenv("BLOGGING_HITL_POLL_INTERVAL_S", "10"))
 
 # Default model - use environment variable or this default
 DEFAULT_MODEL = "deepseek-v4-pro:cloud"
@@ -667,7 +675,7 @@ def _run_title_selection(
                     )
                     continue
 
-                time.sleep(5)
+                time.sleep(HITL_POLL_INTERVAL_S)
 
             job_data = get_blog_job(job_id) or {}
             selected_title = job_data.get("selected_title")
@@ -1098,7 +1106,7 @@ def run_planning_stage(
                     job_data = get_blog_job(job_id)
                     if job_data and job_data.get("status") in ("failed", "cancelled"):
                         return planning_phase_result, None, "FAIL"
-                    time.sleep(10)
+                    time.sleep(HITL_POLL_INTERVAL_S)
 
                 feedback_data = get_user_draft_feedback(job_id)
                 if not feedback_data:
@@ -1364,7 +1372,7 @@ def run_draft_stage(
                         job_data = get_blog_job(job_id)
                         if job_data and job_data.get("status") in ("failed", "cancelled"):
                             return planning_phase_result, draft_result, "FAIL"
-                        time.sleep(10)
+                        time.sleep(HITL_POLL_INTERVAL_S)
 
                     # ── Step 2: Revise draft with the user's answers ──────
                     job_data = get_blog_job(job_id)
@@ -1426,7 +1434,7 @@ def run_draft_stage(
                     job_data = get_blog_job(job_id)
                     if job_data and job_data.get("status") in ("failed", "cancelled"):
                         return planning_phase_result, draft_result, "FAIL"
-                    time.sleep(20)
+                    time.sleep(HITL_POLL_INTERVAL_S)
 
                 # Process user feedback in a loop until approved
                 while True:
@@ -1528,7 +1536,7 @@ def run_draft_stage(
                         job_data = get_blog_job(job_id)
                         if job_data and job_data.get("status") in ("failed", "cancelled"):
                             return planning_phase_result, draft_result, "FAIL"
-                        time.sleep(2)
+                        time.sleep(HITL_POLL_INTERVAL_S)
 
         else:
             # Copy edit loop
@@ -1649,7 +1657,7 @@ def run_draft_stage(
                         job_data = get_blog_job(job_id)
                         if job_data and job_data.get("status") in ("failed", "cancelled"):
                             return planning_phase_result, draft_result, "FAIL"
-                        time.sleep(2)
+                        time.sleep(HITL_POLL_INTERVAL_S)
 
                     esc_feedback = get_user_draft_feedback(job_id)
                     if esc_feedback and esc_feedback.get("approved"):
@@ -1776,9 +1784,7 @@ def run_draft_stage(
     return None
 
 
-def run_gates_stage(
-    ctx: "_PipelineContext",
-) -> Optional[Tuple[PlanningPhaseResult, Optional["WriterOutput"], PipelineStatus]]:
+def run_gates_stage(ctx: "_PipelineContext") -> None:
     """Gates stage: validators, fact-check, compliance, rewrite loop, and finalize.
 
     Preconditions:

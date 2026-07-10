@@ -319,7 +319,8 @@ def test_pipeline_heartbeat_loop_runs_body_directly(
 
     job_id = str(uuid.uuid4())[:8]
     bjs.create_blog_job(job_id, "brief")
-    rpj_run = __import__("shared.run_pipeline_job", fromlist=["run_blog_full_pipeline_job"])
+    from shared import run_pipeline_job as rpj_run
+
     rpj_run.run_blog_full_pipeline_job(job_id, {"brief": "hi"})
 
     assert body_calls["n"] >= 1
