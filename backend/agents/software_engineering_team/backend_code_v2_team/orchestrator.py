@@ -668,6 +668,7 @@ class BackendCodeV2TeamLead:
         result.execution_result = inner.execution_result
         result.review_result = inner.review_result
         result.problem_solving_result = inner.problem_solving_result
+        result.documentation_result = inner.documentation_result
         result.deliver_result = inner.deliver_result
         result.final_files = inner.final_files
         result.summary = inner.summary
