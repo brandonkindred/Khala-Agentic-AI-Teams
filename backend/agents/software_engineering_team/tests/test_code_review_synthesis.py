@@ -212,14 +212,29 @@ def test_synthesize_success_returns_result() -> None:
     assert result.spec_compliance_notes == "merged notes"
 
 
-def test_synthesize_returns_none_on_missing_keys() -> None:
-    client = _PayloadClient({"summary": "only a summary"})
+def test_synthesize_returns_none_on_missing_summary() -> None:
+    client = _PayloadClient({"spec_compliance_notes": "notes but no summary"})
     assert (
         synthesize_review_findings(
             client, input_data=_input(), approved=True, issues=[], chunk_summaries=["s1", "s2"]
         )
         is None
     )
+
+
+def test_synthesize_allows_empty_spec_notes() -> None:
+    """A missing/empty ``spec_compliance_notes`` is a valid result — it means the
+    reviewers recorded no spec gaps, and the spec-compliance section is omitted."""
+    for payload in ({"summary": "only a summary"}, {"summary": "s", "spec_compliance_notes": ""}):
+        result = synthesize_review_findings(
+            _PayloadClient(payload),
+            input_data=_input(),
+            approved=True,
+            issues=[],
+            chunk_summaries=["s1", "s2"],
+        )
+        assert isinstance(result, SynthesisResult)
+        assert result.spec_compliance_notes == ""
 
 
 def test_synthesize_returns_none_on_empty_values() -> None:
@@ -280,15 +295,15 @@ def _two_chunk_files() -> Dict[str, str]:
 
 
 class _NoNotesClient(DummyLLMClient):
-    """Per-chunk summaries but never spec notes → synthesis returns None."""
+    """Per-chunk summaries, but the synthesis pass yields an empty summary → None."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         if "### a.py ###" in prompt:
             return {"approved": True, "issues": [], "summary": "alpha summary"}
         if "### b.py ###" in prompt:
             return {"approved": True, "issues": [], "summary": "beta summary"}
-        # Synthesis pass: missing spec_compliance_notes → None → fall back.
-        return {"summary": "ignored", "missing_notes": True}
+        # Synthesis pass: empty summary → None → fall back to concatenation.
+        return {"summary": "", "spec_compliance_notes": "ignored"}
 
 
 class _SynthOkClient(DummyLLMClient):

@@ -112,8 +112,15 @@ _SHARED_OUTPUT_SECTION = (
     "file-wide or structural issues.\n"
     '  - "description": string (clear description of the issue)\n'
     '  - "suggestion": string (concrete fix recommendation)\n'
-    '- "summary": string (overall review summary - what\'s good, what needs work)\n'
-    '- "spec_compliance_notes": string (how well the code meets the spec and acceptance criteria)\n\n'
+    '- "summary": string. A brief, high-level overview for the developer. Do NOT restate what the '
+    "PR does or is meant to accomplish. When any issue was found, do NOT praise the implementation "
+    "(do not call it sound, well-structured, or well-implemented) and do NOT claim it aligns with "
+    "the spec; instead name which functional areas or parts of the code have issues and call out "
+    "any common theme across them, without re-listing the individual findings (they are posted as "
+    "their own comments). When there are no issues, a single short sentence.\n"
+    '- "spec_compliance_notes": string. List ONLY concrete spec or acceptance-criteria gaps '
+    "(missing or unmet requirements), briefly. If there are no spec gaps, return an empty string "
+    '"" — do not write reassuring "meets the spec" prose.\n\n'
     "**Severity definitions (consistent with QA and Security agents):**\n"
     "- **critical**: Code is broken, has security vulnerabilities, or fundamentally wrong (e.g., "
     "code won't compile, missing core logic, data loss risk)\n"

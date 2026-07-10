@@ -55,6 +55,16 @@ def test_all_profiles_share_the_json_output_contract() -> None:
         assert _SHARED_OUTPUT_SECTION in prompt
 
 
+def test_summary_guidance_enforces_brevity_and_no_praise() -> None:
+    """The shared output contract steers the summary toward a brief, high-level
+    overview and forbids restating the PR or praising it when issues exist."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert "Do NOT restate what the PR does or is meant to accomplish" in prompt
+    assert "common theme across them" in prompt
+    # Spec-compliance notes are gaps-only and empty when there are none.
+    assert 'return an empty string "" — do not write reassuring "meets the spec" prose' in prompt
+
+
 @pytest.mark.parametrize(
     ("profile", "anchor"),
     [

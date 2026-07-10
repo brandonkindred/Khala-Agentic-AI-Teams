@@ -43,13 +43,17 @@ class SynthesisResult(BaseModel):
     """The narrative produced by one successful synthesis pass.
 
     Invariants:
-        - Both fields are non-empty strings; ``synthesize_review_findings``
-          returns ``None`` rather than a result with an empty field.
+        - ``summary`` is a non-empty string; ``synthesize_review_findings``
+          returns ``None`` rather than a result with an empty ``summary``.
+        - ``spec_compliance_notes`` may be empty: an empty string means the
+          reviewers recorded no spec/acceptance-criteria gaps, and downstream
+          rendering omits the spec-compliance section entirely.
     """
 
     summary: str = Field(description="Unified review summary across all passes")
     spec_compliance_notes: str = Field(
-        description="Unified spec/acceptance-criteria narrative across all passes"
+        default="",
+        description="Consolidated spec/acceptance-criteria gaps, or '' when there are none",
     )
 
 
@@ -155,10 +159,11 @@ def synthesize_review_findings(
           reviewers' actual evidence rather than reconstructing it.
 
     Postconditions:
-        - Returns a ``SynthesisResult`` with two non-empty strings on success.
-        - Returns ``None`` on ANY failure — exception, malformed JSON, missing
-          ``summary``/``spec_compliance_notes`` keys, or empty/whitespace-only
-          values — so the caller falls back to deterministic concatenation.
+        - Returns a ``SynthesisResult`` with a non-empty ``summary`` on success;
+          ``spec_compliance_notes`` may be empty (no spec gaps were recorded).
+        - Returns ``None`` on ANY failure — exception, malformed JSON, a missing
+          ``summary`` key, or an empty/whitespace-only ``summary`` — so the caller
+          falls back to deterministic concatenation.
         - Never raises, and never mutates ``issues`` or the verdict.
     """
     try:
@@ -177,8 +182,8 @@ def synthesize_review_findings(
 
         summary = str(data.get("summary", "") or "").strip()
         spec_notes = str(data.get("spec_compliance_notes", "") or "").strip()
-        if not summary or not spec_notes:
-            logger.warning("ReviewSynthesis: missing/empty summary or spec notes; falling back")
+        if not summary:
+            logger.warning("ReviewSynthesis: missing/empty summary; falling back")
             return None
 
         return SynthesisResult(summary=summary, spec_compliance_notes=spec_notes)
