@@ -83,5 +83,11 @@ def test_worker_start_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
     monkeypatch.setattr("agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread", _boom)
+    infos, warns = _capture_logs(monkeypatch)
+
     # Must not raise — startup is log-and-continue.
     main._start_agent_studio_temporal_worker()
+
+    # The swallowed exception is surfaced as a WARNING (not a silent success line).
+    assert any("failed to start" in m for m in warns)
+    assert infos == []
