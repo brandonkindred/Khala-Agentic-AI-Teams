@@ -36,6 +36,7 @@ from shared.blog_job_store import (
 )
 from shared.brand_spec import load_brand_spec_prompt
 from shared.content_plan import (
+    ContentPlan,
     PlanningInput,
     PlanningPhaseResult,
     content_plan_to_content_brief_markdown,
@@ -226,25 +227,9 @@ def run_planning(
         PlanningError: If content planning fails.
     """
 
-    def _update(
-        phase: BlogPhase,
-        sub_progress: float = 0.0,
-        status_text: str = "",
-        **kwargs: Any,
-    ) -> None:
-        if job_updater:
-            try:
-                progress = get_phase_progress(phase, sub_progress)
-                job_updater(
-                    phase=phase.value,
-                    progress=progress,
-                    status_text=status_text,
-                    **kwargs,
-                )
-            except CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("Failed to update job status: %s", e)
+    # Same progress-callback as the stage functions use; _make_update is the single
+    # source of the swallow-but-reraise-CancelledError update logic.
+    _update = _make_update(job_updater)
 
     _update(
         BlogPhase.PLANNING,
@@ -813,8 +798,12 @@ class PipelineContext:
 
     brief: ResearchBriefInput
     work_dir: Optional[Union[str, Path]]
+    # ``Any`` is deliberate: the LLM client is one of several unrelated concrete
+    # types (a Strands model wrapper, a FailoverLLMClient, a DummyLLMClient) with no
+    # shared base. ``Optional`` because it may be None at construction — __post_init__
+    # rejects that, so every stage that runs sees a resolved client.
     llm_client: Any
-    length_policy: LengthPolicy
+    length_policy: Optional[LengthPolicy]
     series_context: Optional[SeriesContext]
     job_id: Optional[str]
     job_updater: Optional[JobUpdater]
@@ -822,9 +811,9 @@ class PipelineContext:
     max_rewrite_iterations: int
     run_gates: bool
     planning_phase_result: Optional[PlanningPhaseResult] = None
-    plan: Any = None
+    plan: Optional[ContentPlan] = None
     elicited_stories_text: Optional[str] = None
-    draft_result: Any = None
+    draft_result: Optional["WriterOutput"] = None
     status: PipelineStatus = "PASS"
 
     def __post_init__(self) -> None:
@@ -1854,6 +1843,11 @@ def run_gates_stage(ctx: "PipelineContext") -> None:
     Postconditions:
         - Sets ``ctx.draft_result`` (final) and ``ctx.status`` (PASS or
           NEEDS_HUMAN_REVIEW). Always returns None (no early aborts).
+        - When ``run_gates`` is True but ``work_dir`` is None the gates cannot run
+          (they persist artifacts under ``work_dir``): they are skipped with a
+          ``logger.info`` and ``ctx.status`` stays PASS — a "gates requested but not
+          executable" result rather than "gates passed". Callers that require gates
+          to actually run must supply a ``work_dir``.
     Raises:
         DraftError: when gates are enabled but the guideline files required for
             gate-driven rewrites cannot be loaded, or when a rewrite iteration
