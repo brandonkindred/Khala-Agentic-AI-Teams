@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from planning_team.models import AnsweredQuestion, HandoffPackage, OpenQuestion
-from planning_team.orchestrator import _resolve_pra_answers
+from planning_team.orchestrator import resolve_pra_answers
 
 _Q = [
     {
@@ -16,7 +16,7 @@ _Q = [
 
 
 def test_resolve_uses_answer_callback_when_present():
-    out = _resolve_pra_answers(
+    out = resolve_pra_answers(
         _Q,
         answer_callback=lambda qs: [{"question_id": "q1", "selected_option_id": "a"}],
         auto_answer_questions=True,
@@ -25,24 +25,24 @@ def test_resolve_uses_answer_callback_when_present():
 
 
 def test_resolve_auto_answers_default_option_when_enabled():
-    out = _resolve_pra_answers(_Q, answer_callback=None, auto_answer_questions=True)
+    out = resolve_pra_answers(_Q, answer_callback=None, auto_answer_questions=True)
     assert out == [{"question_id": "q1", "selected_option_id": "b"}]  # the is_default option
 
 
 def test_resolve_auto_answers_first_option_when_no_default():
     qs = [{"id": "q1", "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]}]
-    out = _resolve_pra_answers(qs, answer_callback=None, auto_answer_questions=True)
+    out = resolve_pra_answers(qs, answer_callback=None, auto_answer_questions=True)
     assert out == [{"question_id": "q1", "selected_option_id": "a"}]
 
 
 def test_resolve_fails_closed_when_gated_without_callback():
     with pytest.raises(RuntimeError, match="decisions must be made by the user"):
-        _resolve_pra_answers(_Q, answer_callback=None, auto_answer_questions=False)
+        resolve_pra_answers(_Q, answer_callback=None, auto_answer_questions=False)
 
 
 def test_resolve_no_questions_is_noop():
-    assert _resolve_pra_answers([], answer_callback=None, auto_answer_questions=False) == []
-    assert _resolve_pra_answers([], answer_callback=None, auto_answer_questions=True) == []
+    assert resolve_pra_answers([], answer_callback=None, auto_answer_questions=False) == []
+    assert resolve_pra_answers([], answer_callback=None, auto_answer_questions=True) == []
 
 
 def test_handoff_package_carries_questions():
