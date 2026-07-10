@@ -39,6 +39,19 @@ def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) 
         ``batch_size``/``batch_count``/``max_parallel``, ``benchmark_symbol``,
         ``exclude_asset_classes``, paper-trading flags, ``start_cycle_offset``).
     """
+    # Intentional coupling to two api.main helpers, both bound to state/config the
+    # API module legitimately owns:
+    #   - ``_rehydrate_active_run_offset`` reads and repopulates the in-memory run
+    #     registry (``_active_runs``/``_lock``/``_get_run_state``);
+    #   - ``_clamp_max_parallel`` applies ``_MAX_CONCURRENT_CYCLES``, whose sibling
+    #     constants (``_MAX_PARALLEL``/``_MAX_BATCH_COUNT``) are the ``RunStrategyLabRequest``
+    #     Pydantic ``le=`` bounds, so they cannot move without moving the schema.
+    # We import them here (rather than reimplementing) so the Temporal batch runs
+    # with byte-for-byte the same offset/clamp the thread-mode worker uses — the
+    # deliberate risk being that a signature change to either goes uncaught until a
+    # dispatch. Extracting the run registry into a public store shared by both
+    # modules is tracked as a follow-up; it is out of scope for this cutover, which
+    # by design leaves the thread-mode/API path untouched.
     from investment_team.api.main import (
         _clamp_max_parallel,
         _rehydrate_active_run_offset,
