@@ -62,17 +62,45 @@ from .trend_scheduler import get_latest_digest, run_trend_job, start_scheduler, 
 # ---------------------------------------------------------------------------
 
 
+logger = logging.getLogger(__name__)
+
+
+def _startup() -> None:
+    """Start the trend scheduler and (best-effort) the Temporal worker backstop.
+
+    The team_service entrypoint normally starts the worker via
+    ``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC``; this lifespan
+    hook is the standalone / all-in-one (supervisord) backstop so Temporal mode is
+    active there too. A no-op when Temporal is disabled.
+
+    Postconditions:
+        - The trend scheduler is started; the Temporal worker thread is started when
+          Temporal is enabled. A worker-start failure is logged, never fatal.
+    """
+    start_scheduler()
+    try:
+        from social_media_marketing_team.temporal.worker import (
+            start_social_marketing_temporal_worker_thread,
+        )
+
+        start_social_marketing_temporal_worker_thread()
+    except Exception:
+        logger.warning(
+            "social marketing Temporal worker start (lifespan backstop) failed",
+            exc_info=True,
+        )
+
+
 app = create_team_app(
     service_name="social-media-marketing-team",
     team_key="social_marketing",
     title="Social Media Marketing Team API",
     version="1.0.0",
     postgres_schema=SCHEMA,
-    on_startup=start_scheduler,
+    on_startup=_startup,
     on_shutdown=stop_scheduler,
 )
 
-logger = logging.getLogger(__name__)
 try:
     _job_manager = JobServiceClient(team="social_media_marketing_team")
     _stale_monitor_stop = start_stale_job_monitor(
@@ -597,8 +625,9 @@ def resume_marketing_job(job_id: str) -> RunMarketingTeamResponse:
         )
 
     request = RunMarketingTeamRequest(**payload)
+    brand_ctx = _fetch_and_validate_brand(request.client_id, request.brand_id)
     _job_manager.update_job(job_id, status=JOB_STATUS_RUNNING, error=None, current_stage="resuming")
-    dispatch_msg = _dispatch_job(job_id, request)
+    dispatch_msg = _dispatch_job(job_id, request, brand_ctx)
     return RunMarketingTeamResponse(
         job_id=job_id, status="running", message=f"Job resumed. {dispatch_msg}"
     )
@@ -622,6 +651,7 @@ def restart_marketing_job(job_id: str) -> RunMarketingTeamResponse:
         )
 
     request = RunMarketingTeamRequest(**payload)
+    brand_ctx = _fetch_and_validate_brand(request.client_id, request.brand_id)
     _job_manager.update_job(
         job_id,
         status=JOB_STATUS_PENDING,
@@ -629,7 +659,7 @@ def restart_marketing_job(job_id: str) -> RunMarketingTeamResponse:
         progress=0,
         current_stage="restart_queued",
     )
-    dispatch_msg = _dispatch_job(job_id, request)
+    dispatch_msg = _dispatch_job(job_id, request, brand_ctx)
     return RunMarketingTeamResponse(
         job_id=job_id, status="running", message=f"Job restarted. {dispatch_msg}"
     )

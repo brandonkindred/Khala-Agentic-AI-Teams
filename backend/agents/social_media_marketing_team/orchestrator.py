@@ -21,8 +21,10 @@ from .models import (
     CampaignStatus,
     ConceptIdea,
     ContentPlan,
+    ExperimentPlan,
     HumanReview,
     Platform,
+    PlatformExecutionPlan,
     TeamOutput,
 )
 
@@ -129,9 +131,7 @@ class SocialMediaMarketingOrchestrator:
             "Validate repeatable content themes that improve engagement and follower growth."
         )
         if goals.brand_objectives:
-            objective = (
-                f"{objective} Ground strategy in brand objectives: {goals.brand_objectives}"
-            )
+            objective = f"{objective} Ground strategy in brand objectives: {goals.brand_objectives}"
 
         proposal = CampaignProposal(
             campaign_name=f"{goals.brand_name} multi-platform growth sprint",
@@ -220,6 +220,21 @@ class SocialMediaMarketingOrchestrator:
             f"(score={proposal.consensus_score:.2f})."
         )
         return proposal
+
+    def build_consensus_proposal(self, goals: BrandGoals) -> CampaignProposal:
+        """Build the initial proposal and drive it through the consensus loop.
+
+        The collaboration phase of the pipeline, exposed as a single call so both
+        thread mode (``run``) and the Temporal ``consensus_stage_activity`` share
+        one implementation.
+
+        Preconditions:
+            - ``goals`` is a fully populated ``BrandGoals``.
+        Postconditions:
+            - Returns a ``CampaignProposal`` whose ``consensus_score`` reflects the
+              final collaboration round (consensus reached or max rounds exhausted).
+        """
+        return self._reach_consensus(self._build_initial_proposal(goals))
 
     @staticmethod
     def _calibrate_probabilities(
@@ -333,15 +348,56 @@ class SocialMediaMarketingOrchestrator:
             approved_ideas=approved[:required_posts],
         )
 
-    def run(
-        self,
-        goals: BrandGoals,
-        human_review: HumanReview,
-        performance: CampaignPerformanceSnapshot | None = None,
-        brand_id: str = "",
-    ) -> TeamOutput:
-        proposal = self._reach_consensus(self._build_initial_proposal(goals))
+    def build_platform_plans(
+        self, goals: BrandGoals, campaign_name: str, num_ideas: int
+    ) -> List[PlatformExecutionPlan]:
+        """Fan out the content plan to every platform specialist.
 
+        Preconditions:
+            - ``goals`` is a fully populated ``BrandGoals``; ``num_ideas >= 0``.
+        Postconditions:
+            - Returns one ``PlatformExecutionPlan`` per configured platform
+              specialist, in specialist order.
+        """
+        return [
+            specialist.create_execution_plan(goals, campaign_name, num_ideas)
+            for specialist in self.platform_specialists
+        ]
+
+    def build_experiment(self, campaign_name: str, ideas: List[ConceptIdea]) -> ExperimentPlan:
+        """Design the control/variant experiment plan for the approved ideas.
+
+        Preconditions:
+            - ``ideas`` is the list of approved concept ideas (possibly empty).
+        Postconditions:
+            - Returns an ``ExperimentPlan`` with control/variant arms.
+        """
+        return self.experiment_designer.build_experiment_plan(campaign_name, ideas)
+
+    def assemble_team_output(
+        self,
+        proposal: CampaignProposal,
+        human_review: HumanReview,
+        content_plan: ContentPlan | None = None,
+        platform_plans: List[PlatformExecutionPlan] | None = None,
+        experiment_plan: ExperimentPlan | None = None,
+        performance: CampaignPerformanceSnapshot | None = None,
+        winners_retrieved: int = 0,
+    ) -> TeamOutput:
+        """Assemble the final ``TeamOutput`` for either pipeline outcome.
+
+        Single source of truth for the two return branches so thread mode and the
+        Temporal ``finalize_stage_activity`` produce identical results.
+
+        Preconditions:
+            - When ``human_review.approved`` is False the downstream artifacts
+              (``content_plan``/``platform_plans``/``experiment_plan``) are ignored.
+            - When ``human_review.approved`` is True, ``content_plan`` and
+              ``experiment_plan`` must be provided.
+        Postconditions:
+            - Returns a ``NEEDS_REVISION`` output (proposal only) when not approved,
+              otherwise an ``APPROVED_FOR_TESTING`` output carrying the full plan.
+        """
         if not human_review.approved:
             return TeamOutput(
                 status=CampaignStatus.NEEDS_REVISION,
@@ -350,27 +406,43 @@ class SocialMediaMarketingOrchestrator:
                 llm_model_name=self.llm_model_name,
             )
 
-        winners = self._load_winners(brand_id, proposal, goals)
-        content_plan = self._plan_content(proposal, goals, performance, winners=winners)
-        platform_plans = [
-            specialist.create_execution_plan(
-                goals, proposal.campaign_name, len(content_plan.approved_ideas)
-            )
-            for specialist in self.platform_specialists
-        ]
-        experiment_plan = self.experiment_designer.build_experiment_plan(
-            proposal.campaign_name,
-            content_plan.approved_ideas,
-        )
-
         return TeamOutput(
             status=CampaignStatus.APPROVED_FOR_TESTING,
             proposal=proposal,
             human_feedback=human_review.feedback or "Approved for campaign testing.",
             content_plan=content_plan,
-            platform_execution_plans=platform_plans,
+            platform_execution_plans=platform_plans or [],
             llm_model_name=self.llm_model_name,
             experiment_plan=experiment_plan,
             ingested_performance=(performance.observations if performance else []),
+            winners_retrieved=winners_retrieved,
+        )
+
+    def run(
+        self,
+        goals: BrandGoals,
+        human_review: HumanReview,
+        performance: CampaignPerformanceSnapshot | None = None,
+        brand_id: str = "",
+    ) -> TeamOutput:
+        proposal = self.build_consensus_proposal(goals)
+
+        if not human_review.approved:
+            return self.assemble_team_output(proposal, human_review)
+
+        winners = self._load_winners(brand_id, proposal, goals)
+        content_plan = self._plan_content(proposal, goals, performance, winners=winners)
+        platform_plans = self.build_platform_plans(
+            goals, proposal.campaign_name, len(content_plan.approved_ideas)
+        )
+        experiment_plan = self.build_experiment(proposal.campaign_name, content_plan.approved_ideas)
+
+        return self.assemble_team_output(
+            proposal,
+            human_review,
+            content_plan=content_plan,
+            platform_plans=platform_plans,
+            experiment_plan=experiment_plan,
+            performance=performance,
             winners_retrieved=len(winners),
         )

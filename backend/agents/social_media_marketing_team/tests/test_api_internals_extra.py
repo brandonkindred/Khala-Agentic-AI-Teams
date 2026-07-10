@@ -101,9 +101,7 @@ def test_app_lifespan_registers_schema_runs_scheduler_and_closes_pool(
 # ---------------------------------------------------------------------------
 
 
-def test_delete_marketing_job_race_returns_404(
-    monkeypatch: pytest.MonkeyPatch, fake_jobs
-) -> None:
+def test_delete_marketing_job_race_returns_404(monkeypatch: pytest.MonkeyPatch, fake_jobs) -> None:
     """get_job sees the job, but delete_job races and returns False -> 404."""
     fake_jobs.create_job(
         "race-1",
@@ -119,16 +117,13 @@ def test_delete_marketing_job_race_returns_404(
 
 
 # ---------------------------------------------------------------------------
-# Resume / restart happy paths — _dispatch_job is called with the wrong
-# arity, so the route raises TypeError and the request fails with 500.
-# This is current production behaviour and we lock it in to ensure the
-# resume/restart endpoints' validate->update->dispatch sequence is exercised.
+# Resume / restart happy paths — each re-fetches the brand and dispatches with
+# the full (job_id, request, brand_ctx) signature, exercising the
+# validate->update->dispatch sequence.
 # ---------------------------------------------------------------------------
 
 
-def test_resume_happy_path_dispatches(
-    monkeypatch: pytest.MonkeyPatch, fake_jobs
-) -> None:
+def test_resume_happy_path_dispatches(monkeypatch: pytest.MonkeyPatch, fake_jobs) -> None:
     payload = {
         "client_id": "c",
         "brand_id": "b",
@@ -146,12 +141,16 @@ def test_resume_happy_path_dispatches(
     captured: dict[str, Any] = {}
 
     def _fake_dispatch(*args, **kwargs):
-        # Production signature requires brand_ctx; observed call site has only
-        # 2 positional args. Accept both to remain robust to either path.
+        # Resume re-fetches the brand and passes brand_ctx as the 3rd positional
+        # arg (job_id, request, brand_ctx).
         captured["args"] = args
         captured["kwargs"] = kwargs
         return "OK"
 
+    brand_ctx = _MOCK_BRAND_CTX
+    monkeypatch.setattr(
+        api_main, "_fetch_and_validate_brand", lambda client_id, brand_id: brand_ctx
+    )
     monkeypatch.setattr(api_main, "_dispatch_job", _fake_dispatch)
 
     client = TestClient(app)
@@ -160,11 +159,10 @@ def test_resume_happy_path_dispatches(
     job = fake_jobs.get_job("res-ok")
     assert job["status"] == "running"
     assert captured["args"][0] == "res-ok"
+    assert captured["args"][2] is brand_ctx
 
 
-def test_restart_happy_path_dispatches(
-    monkeypatch: pytest.MonkeyPatch, fake_jobs
-) -> None:
+def test_restart_happy_path_dispatches(monkeypatch: pytest.MonkeyPatch, fake_jobs) -> None:
     payload = {
         "client_id": "c",
         "brand_id": "b",
@@ -186,6 +184,10 @@ def test_restart_happy_path_dispatches(
         captured["kwargs"] = kwargs
         return "OK"
 
+    brand_ctx = _MOCK_BRAND_CTX
+    monkeypatch.setattr(
+        api_main, "_fetch_and_validate_brand", lambda client_id, brand_id: brand_ctx
+    )
     monkeypatch.setattr(api_main, "_dispatch_job", _fake_dispatch)
 
     client = TestClient(app)
@@ -194,6 +196,7 @@ def test_restart_happy_path_dispatches(
     job = fake_jobs.get_job("rst-ok")
     assert job["status"] == "pending"
     assert job["progress"] == 0
+    assert captured["args"][2] is brand_ctx
 
 
 # ---------------------------------------------------------------------------
