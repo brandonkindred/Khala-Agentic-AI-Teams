@@ -124,15 +124,78 @@ describe('IntegrationsApiService', () => {
     req.flush({});
   });
 
-  it('getGitHubRepos GET', () => {
-    service.getGitHubRepos().subscribe();
+  it('getGitHubConfig GET', () => {
+    const mockConfig = { enabled: true, token_configured: true, default_label: '' };
+    service.getGitHubConfig().subscribe((res) => {
+      expect(res).toEqual(mockConfig);
+    });
+    const req = httpMock.expectOne(`${baseUrl}/github`);
+    expect(req.request.method).toBe('GET');
+    req.flush(mockConfig);
+  });
+
+  it('updateGitHubConfig PUT with body (no repository fields — access comes from the PAT)', () => {
+    const body = { enabled: true, token: 'ghp_x', default_label: '', repo_path: '', webhook_secret: '' };
+    service.updateGitHubConfig(body).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github`);
+    expect(req.request.method).toBe('PUT');
+    expect(req.request.body).toEqual(body);
+    expect('owner' in (req.request.body as Record<string, unknown>)).toBe(false);
+    expect('repo' in (req.request.body as Record<string, unknown>)).toBe(false);
+    req.flush({ enabled: true, token_configured: true, default_label: '' });
+  });
+
+  it('deleteGitHubConfig DELETE', () => {
+    service.deleteGitHubConfig().subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github`);
+    expect(req.request.method).toBe('DELETE');
+    req.flush({ enabled: false, token_configured: false, default_label: '' });
+  });
+
+  it('getGitHubRepos GET emits the typed repo list', () => {
+    const repos = [
+      {
+        owner: 'acme',
+        name: 'widget',
+        full_name: 'acme/widget',
+        private: true,
+        archived: false,
+        html_url: 'https://github.com/acme/widget',
+        description: '',
+        default_branch: 'main',
+        open_issues_count: 4,
+        pushed_at: '2026-07-01T00:00:00Z',
+      },
+    ];
+    let emitted: unknown;
+    service.getGitHubRepos().subscribe((res) => {
+      emitted = res;
+    });
     const req = httpMock.expectOne(`${baseUrl}/github/repos`);
     expect(req.request.method).toBe('GET');
+    req.flush(repos);
+    expect(emitted).toEqual(repos);
+  });
+
+  it('getGitHubIssues GET with no options sends no params', () => {
+    service.getGitHubIssues().subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github/issues`);
+    expect(req.request.method).toBe('GET');
+    expect(req.request.params.keys().length).toBe(0);
+    req.flush([]);
+  });
+
+  it('getGitHubIssues GET with only a label param', () => {
+    service.getGitHubIssues({ label: 'bug' }).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/issues`);
+    expect(req.request.params.get('label')).toBe('bug');
+    expect(req.request.params.has('owner')).toBe(false);
+    expect(req.request.params.has('repo')).toBe(false);
     req.flush([]);
   });
 
   it('getGitHubIssues GET with owner/repo params', () => {
-    service.getGitHubIssues(undefined, 'acme', 'widget').subscribe();
+    service.getGitHubIssues({ owner: 'acme', repo: 'widget' }).subscribe();
     const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/issues`);
     expect(req.request.method).toBe('GET');
     expect(req.request.params.get('owner')).toBe('acme');
@@ -140,15 +203,24 @@ describe('IntegrationsApiService', () => {
     req.flush([]);
   });
 
-  it('getGitHubPullRequests GET', () => {
+  it('runGitHubIssue POST with body', () => {
+    service.runGitHubIssue({ issue_number: 7, owner: 'acme', repo: 'widget' }).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github/run-issue`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ issue_number: 7, owner: 'acme', repo: 'widget' });
+    req.flush({ job_id: 'j1', issue_number: 7, issue_url: 'u', status: 'pending', message: '' });
+  });
+
+  it('getGitHubPullRequests GET with no options sends no params', () => {
     service.getGitHubPullRequests().subscribe();
     const req = httpMock.expectOne(`${baseUrl}/github/pulls`);
     expect(req.request.method).toBe('GET');
+    expect(req.request.params.keys().length).toBe(0);
     req.flush([]);
   });
 
   it('getGitHubPullRequests GET with owner/repo params', () => {
-    service.getGitHubPullRequests('acme', 'widget').subscribe();
+    service.getGitHubPullRequests({ owner: 'acme', repo: 'widget' }).subscribe();
     const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/pulls`);
     expect(req.request.method).toBe('GET');
     expect(req.request.params.get('owner')).toBe('acme');
@@ -164,16 +236,16 @@ describe('IntegrationsApiService', () => {
     req.flush({ job_id: 'j1', pr_number: 7, pr_url: 'u', status: 'pending', message: '' });
   });
 
-  it('getGitHubReviewHistory GET without pr_number', () => {
+  it('getGitHubReviewHistory GET with no options sends no params', () => {
     service.getGitHubReviewHistory().subscribe();
     const req = httpMock.expectOne(`${baseUrl}/github/reviews`);
     expect(req.request.method).toBe('GET');
-    expect(req.request.params.has('pr_number')).toBe(false);
+    expect(req.request.params.keys().length).toBe(0);
     req.flush([]);
   });
 
   it('getGitHubReviewHistory GET with pr_number param', () => {
-    service.getGitHubReviewHistory(7).subscribe();
+    service.getGitHubReviewHistory({ prNumber: 7 }).subscribe();
     const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/reviews`);
     expect(req.request.method).toBe('GET');
     expect(req.request.params.get('pr_number')).toBe('7');
@@ -181,10 +253,19 @@ describe('IntegrationsApiService', () => {
   });
 
   it('getGitHubReviewHistory GET with owner/repo params', () => {
-    service.getGitHubReviewHistory(undefined, 'acme', 'widget').subscribe();
+    service.getGitHubReviewHistory({ owner: 'acme', repo: 'widget' }).subscribe();
     const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/reviews`);
     expect(req.request.method).toBe('GET');
     expect(req.request.params.has('pr_number')).toBe(false);
+    expect(req.request.params.get('owner')).toBe('acme');
+    expect(req.request.params.get('repo')).toBe('widget');
+    req.flush([]);
+  });
+
+  it('getGitHubReviewHistory GET with pr_number AND owner/repo params', () => {
+    service.getGitHubReviewHistory({ prNumber: 42, owner: 'acme', repo: 'widget' }).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/reviews`);
+    expect(req.request.params.get('pr_number')).toBe('42');
     expect(req.request.params.get('owner')).toBe('acme');
     expect(req.request.params.get('repo')).toBe('widget');
     req.flush([]);

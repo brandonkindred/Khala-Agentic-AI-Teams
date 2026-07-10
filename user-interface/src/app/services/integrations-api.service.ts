@@ -150,15 +150,18 @@ export class IntegrationsApiService {
     return this.http.get<GitHubRepoItem[]>(`${this.baseUrl}/github/repos`);
   }
 
-  /** GET /api/integrations/github/issues — open issues for one accessible repo. */
-  getGitHubIssues(label?: string, owner?: string, repo?: string): Observable<GitHubIssueItem[]> {
+  /**
+   * GET /api/integrations/github/issues — open issues for one accessible repo.
+   * Omitting `owner`/`repo` falls back to the backend's legacy configured default.
+   */
+  getGitHubIssues(options: { label?: string; owner?: string; repo?: string } = {}): Observable<GitHubIssueItem[]> {
     const params: Record<string, string> = {};
-    if (label) {
-      params['label'] = label;
+    if (options.label) {
+      params['label'] = options.label;
     }
-    if (owner && repo) {
-      params['owner'] = owner;
-      params['repo'] = repo;
+    if (options.owner && options.repo) {
+      params['owner'] = options.owner;
+      params['repo'] = options.repo;
     }
     return this.http.get<GitHubIssueItem[]>(`${this.baseUrl}/github/issues`, { params });
   }
@@ -168,12 +171,15 @@ export class IntegrationsApiService {
     return this.http.post<RunGitHubIssueResponse>(`${this.baseUrl}/github/run-issue`, body);
   }
 
-  /** GET /api/integrations/github/pulls — open PRs for one accessible repo. */
-  getGitHubPullRequests(owner?: string, repo?: string): Observable<GitHubPullRequestItem[]> {
+  /**
+   * GET /api/integrations/github/pulls — open PRs for one accessible repo.
+   * Omitting `owner`/`repo` falls back to the backend's legacy configured default.
+   */
+  getGitHubPullRequests(options: { owner?: string; repo?: string } = {}): Observable<GitHubPullRequestItem[]> {
     const params: Record<string, string> = {};
-    if (owner && repo) {
-      params['owner'] = owner;
-      params['repo'] = repo;
+    if (options.owner && options.repo) {
+      params['owner'] = options.owner;
+      params['repo'] = options.repo;
     }
     return this.http.get<GitHubPullRequestItem[]>(`${this.baseUrl}/github/pulls`, { params });
   }
@@ -186,15 +192,18 @@ export class IntegrationsApiService {
   /**
    * GET /api/integrations/github/reviews — persisted code-review history for one
    * accessible repository (optionally filtered to one PR), newest-first.
+   * Omitting `owner`/`repo` falls back to the backend's legacy configured default.
    */
-  getGitHubReviewHistory(prNumber?: number, owner?: string, repo?: string): Observable<CodeReviewRunItem[]> {
+  getGitHubReviewHistory(
+    options: { prNumber?: number; owner?: string; repo?: string } = {},
+  ): Observable<CodeReviewRunItem[]> {
     const params: Record<string, string> = {};
-    if (prNumber !== undefined) {
-      params['pr_number'] = String(prNumber);
+    if (options.prNumber !== undefined) {
+      params['pr_number'] = String(options.prNumber);
     }
-    if (owner && repo) {
-      params['owner'] = owner;
-      params['repo'] = repo;
+    if (options.owner && options.repo) {
+      params['owner'] = options.owner;
+      params['repo'] = options.repo;
     }
     return this.http.get<CodeReviewRunItem[]>(`${this.baseUrl}/github/reviews`, { params });
   }

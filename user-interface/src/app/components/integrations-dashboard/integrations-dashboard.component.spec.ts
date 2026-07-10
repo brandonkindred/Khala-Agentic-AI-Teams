@@ -61,7 +61,7 @@ describe('IntegrationsDashboardComponent', () => {
     }));
     apiSpy.getGoogleBrowserLoginStatus.mockReturnValue(of({ configured: false }));
     apiSpy.getMediumConfig.mockReturnValue(of({ enabled: false }));
-    apiSpy.getGitHubConfig.mockReturnValue(of({ enabled: false, token_configured: false, owner: '', repo: '', default_label: '' }));
+    apiSpy.getGitHubConfig.mockReturnValue(of({ enabled: false, token_configured: false, default_label: '' }));
     apiSpy.getTradingViewConfig.mockReturnValue(
       of({ enabled: false, mcp_server_url: '', tool_name: 'get_ohlcv', auth_token_configured: false }),
     );
@@ -101,7 +101,7 @@ describe('IntegrationsDashboardComponent', () => {
 
   it('flags the GitHub credential store as unreachable from the API', () => {
     apiSpy.getGitHubConfig.mockReturnValue(
-      of({ enabled: true, token_configured: false, owner: 'acme', repo: 'widget', default_label: '', credential_store_unreachable: true }),
+      of({ enabled: true, token_configured: false, default_label: '', credential_store_unreachable: true }),
     );
     component.loadGitHubConfig();
     expect(component.githubStoreUnreachable).toBe(true);
@@ -109,7 +109,7 @@ describe('IntegrationsDashboardComponent', () => {
 
   it('reflects the webhook-secret configured flag from the API on load', () => {
     apiSpy.getGitHubConfig.mockReturnValue(
-      of({ enabled: true, token_configured: true, owner: 'acme', repo: 'widget', default_label: '', webhook_secret_configured: true }),
+      of({ enabled: true, token_configured: true, default_label: '', webhook_secret_configured: true }),
     );
     component.githubWebhookSecret = 'leftover';
     component.loadGitHubConfig();
@@ -120,7 +120,7 @@ describe('IntegrationsDashboardComponent', () => {
 
   it('sends the webhook secret on save and clears the input afterwards', () => {
     apiSpy.updateGitHubConfig.mockReturnValue(
-      of({ enabled: true, token_configured: true, owner: 'acme', repo: 'widget', default_label: '', webhook_secret_configured: true }),
+      of({ enabled: true, token_configured: true, default_label: '', webhook_secret_configured: true }),
     );
     component.githubEnabled = true;
     component.githubWebhookSecret = 'whsec_abc';
@@ -132,9 +132,35 @@ describe('IntegrationsDashboardComponent', () => {
     expect(component.githubWebhookSecret).toBe('');
   });
 
+  it('disconnectGitHub clears state via DELETE and resets the secret inputs', () => {
+    apiSpy.deleteGitHubConfig.mockReturnValue(
+      of({ enabled: false, token_configured: false, default_label: '', webhook_secret_configured: false }),
+    );
+    component.githubEnabled = true;
+    component.githubTokenConfigured = true;
+    component.githubWebhookSecretConfigured = true;
+    component.githubPat = 'ghp_pending';
+    component.githubWebhookSecret = 'whsec_pending';
+    component.disconnectGitHub();
+    expect(apiSpy.deleteGitHubConfig).toHaveBeenCalled();
+    expect(component.githubEnabled).toBe(false);
+    expect(component.githubTokenConfigured).toBe(false);
+    expect(component.githubWebhookSecretConfigured).toBe(false);
+    expect(component.githubPat).toBe('');
+    expect(component.githubWebhookSecret).toBe('');
+    expect(component.githubDisconnecting).toBe(false);
+  });
+
+  it('disconnectGitHub surfaces an error on failure', () => {
+    apiSpy.deleteGitHubConfig.mockReturnValue(throwError(() => ({ error: { detail: 'store down' } })));
+    component.disconnectGitHub();
+    expect(component.githubError).toBe('store down');
+    expect(component.githubDisconnecting).toBe(false);
+  });
+
   it('defaults the GitHub store-unreachable flag to false when absent', () => {
     apiSpy.getGitHubConfig.mockReturnValue(
-      of({ enabled: false, token_configured: false, owner: '', repo: '', default_label: '' }),
+      of({ enabled: false, token_configured: false, default_label: '' }),
     );
     component.loadGitHubConfig();
     expect(component.githubStoreUnreachable).toBe(false);
@@ -142,7 +168,7 @@ describe('IntegrationsDashboardComponent', () => {
 
   it('clears a stale GitHub store-unreachable flag when a reload fails', () => {
     apiSpy.getGitHubConfig.mockReturnValue(
-      of({ enabled: true, token_configured: false, owner: 'acme', repo: 'widget', default_label: '', credential_store_unreachable: true }),
+      of({ enabled: true, token_configured: false, default_label: '', credential_store_unreachable: true }),
     );
     component.loadGitHubConfig();
     expect(component.githubStoreUnreachable).toBe(true);

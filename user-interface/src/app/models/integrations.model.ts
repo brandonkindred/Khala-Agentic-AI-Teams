@@ -90,17 +90,16 @@ export interface GoogleBrowserLoginCredentialsBody {
   password: string;
 }
 
-/** GitHub config response (GET /api/integrations/github). */
+/**
+ * GitHub config response (GET /api/integrations/github). Repository access is
+ * defined by the PAT's own authorization configuration — pages list every
+ * accessible repo via GET /api/integrations/github/repos and pass an explicit
+ * owner/repo per request, so no repository fields are modelled here (the backend
+ * still returns a legacy optional default owner/repo, which the UI ignores).
+ */
 export interface GitHubConfigResponse {
   enabled: boolean;
   token_configured: boolean;
-  /**
-   * Legacy optional default repository. Repository access itself is defined by the
-   * PAT's own authorization configuration — pages list every accessible repo via
-   * GET /api/integrations/github/repos and pass an explicit owner/repo per request.
-   */
-  owner: string;
-  repo: string;
   default_label: string;
   /**
    * True when a webhook signing secret is configured (stored credential or
@@ -116,12 +115,13 @@ export interface GitHubConfigResponse {
   credential_store_unreachable?: boolean;
 }
 
-/** Request body for PUT /api/integrations/github. */
+/**
+ * Request body for PUT /api/integrations/github. No repository fields: which
+ * repositories the integration can reach is decided by the PAT's own
+ * authorization configuration, never configured in Khala.
+ */
 export interface GitHubConfigUpdate {
   enabled: boolean;
-  /** Optional legacy default repository; repository access comes from the PAT itself. */
-  owner?: string;
-  repo?: string;
   token: string;
   default_label: string;
   repo_path: string;

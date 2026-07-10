@@ -355,7 +355,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // two lists never drift.
     this.refreshTrigger$.next();
     this.integrationsApi
-      .getGitHubIssues(undefined, repo.owner, repo.name)
+      .getGitHubIssues({ owner: repo.owner, repo: repo.name })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
       next: (issues) => {
@@ -427,7 +427,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       : `Depends on ${this.allDepRefs(issue)} (all complete)`;
   }
 
-  /** Rebuild the Running/Recent run-row view-models from the current `runningRuns`/`recentRuns`. */
+  /**
+   * Rebuild the Running/Recent run-row view-models from the current `runningRuns`/`recentRuns`.
+   *
+   * Preconditions: `runningRuns`/`recentRuns` reflect the snapshot being rendered.
+   * Postconditions: `runningRunVms`/`recentRunVms` are fresh `toRunVm` mappings of those lists.
+   */
   private buildRunVms(): void {
     this.runningRunVms = this.runningRuns.map((r) => this.toRunVm(r));
     this.recentRunVms = this.recentRuns.map((r) => this.toRunVm(r));
@@ -437,7 +442,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Build one run row's view-model so the template binds plain fields instead of calling helpers.
    *
    * Preconditions: none.
-   * Postconditions: returns a `RunRowVm`; `detail` is null for a terminal run (no live status line).
+   * Postconditions: returns a `RunRowVm`; `detail` is null for a terminal run (no live status
+   * line) and `repoLabel` is `''` when the run carries no GitHub context.
    */
   private toRunVm(run: CodingTeamJobListItem): RunRowVm {
     const ctx = run.github_context;
@@ -453,7 +459,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     };
   }
 
-  /** Rebuild the visible issue-row view-models (current page × current "In progress" chip set). */
+  /**
+   * Rebuild the visible issue-row view-models (current page × current "In progress" chip set).
+   *
+   * Preconditions: `issues`/`pageIndex`/`pageSize`/`activeIssueKeys` reflect the state to render.
+   * Postconditions: `pagedIssueVms` matches the current `pagedIssues` slice one-to-one.
+   */
   private recomputeIssueVms(): void {
     this.pagedIssueVms = this.pagedIssues.map((issue) => ({
       issue,

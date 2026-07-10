@@ -213,7 +213,7 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     this.pullError = null;
     this.expandedPrNumber = null;
     this.integrationsApi
-      .getGitHubPullRequests(repo.owner, repo.name)
+      .getGitHubPullRequests({ owner: repo.owner, repo: repo.name })
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (pulls) => {
@@ -251,7 +251,7 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
    */
   private hydrateReviews(repo: GitHubRepoItem): void {
     this.integrationsApi
-      .getGitHubReviewHistory(undefined, repo.owner, repo.name)
+      .getGitHubReviewHistory({ owner: repo.owner, repo: repo.name })
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (items) => {

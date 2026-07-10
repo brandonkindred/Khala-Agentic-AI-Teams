@@ -1616,9 +1616,11 @@ def _resolve_github_access(token_override: str | None = None) -> tuple[dict[str,
           verbatim; only the JSON-only ``enabled`` setting is validated.
           Blocking I/O — async callers offload via ``asyncio.to_thread``.
     """
-    # JSON-only settings (no credential read) are always checked first.
+    # JSON-only settings (no credential read) are always checked first. .get()
+    # defensively: a malformed/legacy config record missing the key must read as
+    # disabled, never as a KeyError → opaque 500.
     cfg = get_github_config_meta()
-    if not cfg["enabled"]:
+    if not cfg.get("enabled"):
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
     # A pre-resolved PAT is always a non-empty string; both ``None`` and ``""`` mean "no
     # override, read from the store" — an empty string is never a valid token to forward,
@@ -1699,12 +1701,16 @@ def _resolve_github_target(
         return cfg, token, req_owner, req_repo
     if req_owner or req_repo:
         raise HTTPException(status_code=400, detail="GitHub owner and repo must be provided together.")
-    if not cfg["owner"] or not cfg["repo"]:
+    # .get() defensively: a malformed/legacy config record missing a key must surface
+    # as this clean 400, never as a KeyError → opaque 500 (matching _repo_path_override).
+    cfg_owner = cfg.get("owner", "")
+    cfg_repo = cfg.get("repo", "")
+    if not cfg_owner or not cfg_repo:
         raise HTTPException(
             status_code=400,
             detail="GitHub owner/repo not specified — pass owner/repo or configure a default repository.",
         )
-    return cfg, token, cfg["owner"], cfg["repo"]
+    return cfg, token, cfg_owner, cfg_repo
 
 
 def _github_api_headers(token: str) -> dict[str, str]:
@@ -1723,14 +1729,14 @@ async def _collect_github_pages(
     headers: dict[str, str],
     params: dict[str, Any],
     max_pages: int,
-    not_found_detail: str,
+    not_found_message: str,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Fetch every page of a GitHub list endpoint, mapping HTTP errors to HTTPException.
 
     Postconditions:
         - Returns ``(raw_items, has_more)`` where ``has_more`` is True iff the page
           cap (rather than the end of the list) stopped pagination. 401/404/non-200
-          responses raise ``HTTPException`` (401/404/502) — ``not_found_detail`` is the
+          responses raise ``HTTPException`` (401/404/502) — ``not_found_message`` is the
           caller-supplied 404 message (a repository-scoped listing names the repo; the
           account-scoped repo listing names the token). Shared by the repo-, issue- and
           PR-listing routes so their pagination and error mapping cannot drift.
@@ -1743,7 +1749,7 @@ async def _collect_github_pages(
             if resp.status_code == 401:
                 raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
             if resp.status_code == 404:
-                raise HTTPException(status_code=404, detail=not_found_detail)
+                raise HTTPException(status_code=404, detail=not_found_message)
             if resp.status_code != 200:
                 raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
             raw.extend(resp.json())
@@ -1809,9 +1815,15 @@ async def list_github_repos() -> list[GitHubRepoItem]:
             headers,
             params,
             _GITHUB_MAX_REPO_PAGES,
-            not_found_detail="GitHub did not recognize the stored token's account.",
+            not_found_message="GitHub did not recognize the stored token's account.",
         )
-    items = [_build_repo_item(raw) for raw in raw_repos if isinstance(raw, dict) and (raw.get("name") or "")]
+    # Keep exactly the items with a usable string name (GitHub always sends one);
+    # anything else can't be addressed as owner/name by the downstream routes.
+    items = [
+        _build_repo_item(raw)
+        for raw in raw_repos
+        if isinstance(raw, dict) and isinstance(raw.get("name"), str) and raw["name"]
+    ]
 
     if has_more:
         logger.warning(
@@ -1853,7 +1865,8 @@ async def list_github_issues(
     cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
-    use_label = label or cfg["default_label"]
+    # .get() defensively: a config saved before this field existed must not KeyError → 500.
+    use_label = label or cfg.get("default_label")
     if use_label:
         params["labels"] = use_label
     headers = _github_api_headers(token)
@@ -1866,7 +1879,7 @@ async def list_github_issues(
             headers,
             params,
             _GITHUB_MAX_ISSUE_PAGES,
-            not_found_detail=f"Repository {owner}/{repo} not found.",
+            not_found_message=f"Repository {owner}/{repo} not found.",
         )
         # Exclude pull requests (the issues endpoint returns both).
         raw_issues = [raw for raw in raw_pages if "pull_request" not in raw]
@@ -1947,7 +1960,7 @@ async def list_github_pulls(
             headers,
             params,
             _GITHUB_MAX_PR_PAGES,
-            not_found_detail=f"Repository {owner}/{repo} not found.",
+            not_found_message=f"Repository {owner}/{repo} not found.",
         )
     items = [_build_pull_request_item(raw) for raw in raw_pulls]
 
@@ -2045,9 +2058,16 @@ def _resolve_repo_path(cfg: dict[str, Any], owner: str, repo: str, issue_number:
 
     # Defense-in-depth: owner/repo become path components below, so reject any
     # value that could traverse out of the workspace (a real GitHub owner/repo
-    # never contains these).
+    # never contains these). Same character rules as _validate_repo_component so
+    # the two validation layers can never disagree on what is acceptable.
     for label, value in (("owner", owner), ("repo", repo)):
-        if "/" in value or "\\" in value or "\x00" in value or value in ("..", ".") or value.strip() != value:
+        if (
+            "/" in value
+            or "\\" in value
+            or "\x00" in value
+            or value in ("..", ".")
+            or any(ch.isspace() for ch in value)
+        ):
             raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
 
     # Enforce the documented precondition: a non-positive issue_number would yield

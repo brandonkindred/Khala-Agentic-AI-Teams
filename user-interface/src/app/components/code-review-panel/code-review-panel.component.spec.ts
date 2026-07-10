@@ -59,16 +59,12 @@ const REPO: GitHubRepoItem = {
 const CONFIGURED: GitHubConfigResponse = {
   enabled: true,
   token_configured: true,
-  owner: 'acme',
-  repo: 'widgets',
   default_label: 'ai',
 };
 
 const UNCONFIGURED: GitHubConfigResponse = {
   enabled: false,
   token_configured: false,
-  owner: '',
-  repo: '',
   default_label: '',
 };
 
@@ -142,17 +138,21 @@ describe('CodeReviewPanelComponent', () => {
     expect(integrationsSpy.getGitHubRepos).toHaveBeenCalled();
     expect(component.repos.length).toBe(1);
     // The expanded repo scopes both the PR list and the review history.
-    expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalledWith('acme', 'widgets');
-    expect(integrationsSpy.getGitHubReviewHistory).toHaveBeenCalledWith(undefined, 'acme', 'widgets');
+    expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets' });
+    expect(integrationsSpy.getGitHubReviewHistory).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets' });
     expect(component.pulls.length).toBe(3);
     expect(component.pullsLoaded).toBe(true);
   });
 
-  it('is configured with token alone — no owner/repo required (PAT defines access)', async () => {
-    integrationsSpy.getGitHubConfig.mockReturnValue(of({ ...CONFIGURED, owner: '', repo: '' }));
+  it('renders the repo-list error banner in the DOM', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(
+      throwError(() => ({ error: { detail: 'bad credentials' } })),
+    );
     await setup();
-    expect(component.githubConfigured).toBe(true);
-    expect(integrationsSpy.getGitHubRepos).toHaveBeenCalled();
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('app-inline-banner[variant="error"]');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('bad credentials');
   });
 
   it('does not load repos when GitHub is unconfigured', async () => {
@@ -206,6 +206,33 @@ describe('CodeReviewPanelComponent', () => {
     component.onPageChange({ pageIndex: 1, pageSize: 10, length: 25 });
     expect(component.pageIndex).toBe(1);
     expect(component.pagedPulls[0].number).toBe(11);
+  });
+
+  it('handles pagination edge cases: page-size change, out-of-bounds page, empty list', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(of(makePulls(25)));
+    await setup();
+    // Changing the page size re-slices the visible window from the new index.
+    component.onPageChange({ pageIndex: 0, pageSize: 25, length: 25 });
+    expect(component.pagedPulls.length).toBe(25);
+    // A page index beyond the available items yields an empty slice, not a crash.
+    component.onPageChange({ pageIndex: 9, pageSize: 10, length: 25 });
+    expect(component.pagedPulls).toEqual([]);
+    // An empty PR list always pages to an empty slice.
+    component.pulls = [];
+    component.onPageChange({ pageIndex: 0, pageSize: 10, length: 0 });
+    expect(component.pagedPulls).toEqual([]);
+  });
+
+  it('renders the PR-list error banner inside the expanded repo panel', async () => {
+    integrationsSpy.getGitHubPullRequests.mockReturnValue(
+      throwError(() => ({ error: { detail: 'rate limited' } })),
+    );
+    await setup();
+    fixture.detectChanges();
+    const panel = fixture.nativeElement.querySelector('.cr-repo-pulls');
+    const banner = panel?.querySelector('app-inline-banner[variant="error"]');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('rate limited');
   });
 
   // -------------------------------------------------------------------------

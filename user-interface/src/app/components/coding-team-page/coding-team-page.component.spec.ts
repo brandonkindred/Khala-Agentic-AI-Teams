@@ -42,8 +42,6 @@ function issueWith(overrides: Partial<GitHubIssueItem>): GitHubIssueItem {
 const CONFIGURED: GitHubConfigResponse = {
   enabled: true,
   token_configured: true,
-  owner: 'acme',
-  repo: 'widgets',
   default_label: 'ai',
 };
 
@@ -187,19 +185,21 @@ describe('CodingTeamPageComponent', () => {
     expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
   });
 
-  it('is configured with token alone — no owner/repo required (PAT defines access)', async () => {
-    integrationsSpy.getGitHubConfig.mockReturnValue(
-      of({ ...CONFIGURED, owner: '', repo: '' }),
+  it('renders the repo-list error banner in the GitHub view', async () => {
+    integrationsSpy.getGitHubRepos.mockReturnValue(
+      throwError(() => ({ error: { detail: 'bad credentials' } })),
     );
     await setup();
-    expect(component.githubConfigured).toBe(true);
-    expect(integrationsSpy.getGitHubRepos).toHaveBeenCalled();
+    showView('github');
+    const banner = fixture.nativeElement.querySelector('app-inline-banner[variant="error"]');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('bad credentials');
   });
 
   it('loads the expanded repo\'s issues, scoped by owner/repo', async () => {
     await setup();
     expandFirstRepo();
-    expect(integrationsSpy.getGitHubIssues).toHaveBeenCalledWith(undefined, 'acme', 'widgets');
+    expect(integrationsSpy.getGitHubIssues).toHaveBeenCalledWith({ owner: 'acme', repo: 'widgets' });
     expect(component.issuesLoaded).toBe(true);
     expect(component.issues.length).toBe(3);
   });
