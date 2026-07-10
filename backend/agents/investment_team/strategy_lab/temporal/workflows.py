@@ -74,22 +74,25 @@ _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
 
 
 async def _exec(
-    name: str,
+    fn: Any,
     /,
     *,
     params: Optional[Dict[str, Any]] = None,
     timeout: timedelta = _ACTIVITY_TIMEOUT,
 ) -> Any:
-    """Thin ``workflow.execute_activity`` wrapper keyed by activity function name.
+    """Thin ``workflow.execute_activity`` wrapper.
+
+    Takes the activity function *object* directly (e.g. ``act.run_design_attempt_activity``)
+    rather than a string name, so a typo is a ``NameError`` at import/analysis
+    time instead of a runtime failure.
 
     Preconditions:
-        ``name`` names a function attribute of the ``activities`` module.
-        ``params`` is the single positional dict the activity expects, or
-        ``None`` for a no-argument activity.
+        ``fn`` is an ``@activity.defn``-decorated function from the
+        ``activities`` module. ``params`` is the single positional dict the
+        activity expects, or ``None`` for a no-argument activity.
     Postconditions:
         Returns the activity's result, retried per ``_ACTIVITY_RETRY``.
     """
-    fn = getattr(act, name)
     args = [params] if params is not None else []
     return await workflow.execute_activity(
         fn,
@@ -161,10 +164,10 @@ class StrategyLabCycleWorkflow:
         # flag once (or reuse a batch-provided one).
         wf_config = cycle_input.get("workflow_config")
         if wf_config is None:
-            wf_config = await _exec("resolve_workflow_config_activity")
+            wf_config = await _exec(act.resolve_workflow_config_activity)
         regime_summary = None
         if wf_config.get("regime_summary_enabled"):
-            regime_summary = await _exec("compute_regime_summary_activity")
+            regime_summary = await _exec(act.compute_regime_summary_activity)
         # Re-entry bound threaded from the config activity (see the
         # module-level note) rather than imported from ``orchestrator``.
         max_reentries = int(wf_config.get("max_design_reentries", _MAX_DESIGN_REENTRIES_FALLBACK))
@@ -187,7 +190,7 @@ class StrategyLabCycleWorkflow:
 
         for design_attempt in range(max_reentries + 1):
             outcome = await _exec(
-                "run_design_attempt_activity",
+                act.run_design_attempt_activity,
                 params={
                     "prior_records": prior_records,
                     "config": config_dict,
@@ -248,7 +251,7 @@ class StrategyLabCycleWorkflow:
                 "code path; please file an issue with the run logs."
             )
         result = await _exec(
-            "build_short_circuit_record_activity",
+            act.build_short_circuit_record_activity,
             params={
                 "spec": last_spec_dict,
                 "config": config_dict,

@@ -199,6 +199,60 @@ class ConvergenceTracker:
         clone._trial_count_at_snapshot = self._trial_count
         return clone
 
+    # ------------------------------------------------------------------
+    # Wire serialization (for crossing a Temporal activity/workflow boundary)
+    # ------------------------------------------------------------------
+
+    def to_wire_dict(self) -> dict:
+        """Serialize this tracker to a JSON-safe dict.
+
+        Kept on the class (rather than reaching into private attributes from an
+        external module) so the wire contract stays co-located with the internal
+        representation it depends on.
+
+        Postconditions:
+            Returns a dict round-trippable by :meth:`from_wire_dict` into an
+            equivalent tracker — same window/history size, signatures,
+            failure-mode counts, asset-class history, trial count, and
+            snapshot-baseline trial count (the last is required for
+            :meth:`merge_from` to fold only the per-cycle delta after a round
+            trip). Sets are emitted as sorted lists so the output is
+            deterministic across runs.
+        """
+        return {
+            "window_size": self._window_size,
+            "max_history": self._max_history,
+            "signatures": [sorted(sig) for sig in self._signatures],
+            "failure_modes": dict(self._failure_modes),
+            "asset_class_history": list(self._asset_class_history),
+            "trial_count": self._trial_count,
+            "trial_count_at_snapshot": self._trial_count_at_snapshot,
+        }
+
+    @classmethod
+    def from_wire_dict(cls, data: dict) -> "ConvergenceTracker":
+        """Reconstruct a tracker from :meth:`to_wire_dict`'s output.
+
+        Preconditions:
+            ``data`` is either ``{}`` (yields a fresh tracker) or a dict
+            produced by :meth:`to_wire_dict`.
+        Postconditions:
+            Returns a tracker with state equivalent to the serialized one.
+            ``trial_count_at_snapshot`` defaults to ``trial_count`` for dicts
+            predating that field, so a round trip is never worse than treating
+            the whole count as the snapshot baseline.
+        """
+        tracker = cls(
+            window_size=data.get("window_size", 5),
+            max_history=data.get("max_history", 50),
+        )
+        tracker._signatures = [set(sig) for sig in data.get("signatures", [])]
+        tracker._failure_modes = Counter(data.get("failure_modes", {}))
+        tracker._asset_class_history = list(data.get("asset_class_history", []))
+        tracker._trial_count = data.get("trial_count", 0)
+        tracker._trial_count_at_snapshot = data.get("trial_count_at_snapshot", tracker._trial_count)
+        return tracker
+
     def merge_from(self, other: "ConvergenceTracker") -> None:
         """Fold a cycle snapshot's trial-count delta back into this tracker.
 

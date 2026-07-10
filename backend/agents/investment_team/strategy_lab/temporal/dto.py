@@ -1,16 +1,17 @@
 """Wire-format helpers for cross-boundary state that isn't already a Pydantic model.
 
-``ConvergenceTracker`` predates the Temporal port and has no JSON-safe
-serialization of its own (it holds a ``Counter`` and ``Set[str]`` values,
-neither directly JSON-serializable) — these two functions round-trip it
-through a plain dict so it can cross a workflow input/output or
-activity-result boundary. Kept separate from ``activities.py``/``workflows.py``
-so both can import from here without duplicating the shape.
+``ConvergenceTracker`` predates the Temporal port and holds a ``Counter`` and
+``Set[str]`` values that aren't directly JSON-serializable. The actual
+serialization now lives on the class itself
+(``ConvergenceTracker.to_wire_dict`` / ``from_wire_dict``) so the wire contract
+stays co-located with the internal representation it depends on. These two
+functions are thin adapters kept for import ergonomics — both ``activities.py``
+and ``workflows.py`` import them from here without depending on the tracker
+class directly at their module top.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from typing import Any, Dict
 
 
@@ -20,22 +21,10 @@ def convergence_tracker_to_wire(tracker: Any) -> Dict[str, Any]:
     Preconditions:
         ``tracker`` is a ``quality_gates.convergence_tracker.ConvergenceTracker``.
     Postconditions:
-        Returns a dict round-trippable by :func:`convergence_tracker_from_wire`
-        into an equivalent tracker (same window/history size, signatures,
-        failure-mode counts, asset-class history, trial count, **and
-        snapshot-baseline trial count** — the last is required for
-        ``merge_from`` to fold only the per-cycle delta rather than the whole
-        trial total after a round trip through this wire format).
+        Returns ``tracker.to_wire_dict()`` — a dict round-trippable by
+        :func:`convergence_tracker_from_wire`.
     """
-    return {
-        "window_size": tracker._window_size,
-        "max_history": tracker._max_history,
-        "signatures": [sorted(sig) for sig in tracker._signatures],
-        "failure_modes": dict(tracker._failure_modes),
-        "asset_class_history": list(tracker._asset_class_history),
-        "trial_count": tracker._trial_count,
-        "trial_count_at_snapshot": tracker._trial_count_at_snapshot,
-    }
+    return tracker.to_wire_dict()
 
 
 def convergence_tracker_from_wire(data: Dict[str, Any]) -> Any:
@@ -45,23 +34,12 @@ def convergence_tracker_from_wire(data: Dict[str, Any]) -> Any:
         ``data`` is either ``{}`` (fresh tracker) or a dict produced by
         :func:`convergence_tracker_to_wire`.
     Postconditions:
-        Returns a ``ConvergenceTracker`` with state equivalent to the one
-        that was serialized.
+        Returns a ``ConvergenceTracker`` with state equivalent to the one that
+        was serialized.
     """
     from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
 
-    tracker = ConvergenceTracker(
-        window_size=data.get("window_size", 5),
-        max_history=data.get("max_history", 50),
-    )
-    tracker._signatures = [set(sig) for sig in data.get("signatures", [])]
-    tracker._failure_modes = Counter(data.get("failure_modes", {}))
-    tracker._asset_class_history = list(data.get("asset_class_history", []))
-    tracker._trial_count = data.get("trial_count", 0)
-    # Default to trial_count for dicts predating this field so a round trip is
-    # never worse than treating the whole count as the snapshot baseline.
-    tracker._trial_count_at_snapshot = data.get("trial_count_at_snapshot", tracker._trial_count)
-    return tracker
+    return ConvergenceTracker.from_wire_dict(data)
 
 
 __all__ = ["convergence_tracker_from_wire", "convergence_tracker_to_wire"]
