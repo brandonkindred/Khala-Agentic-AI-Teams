@@ -1,0 +1,206 @@
+"""Unit tests for the interactive advisory activities.
+
+The happy paths of most activities are exercised end-to-end by the route tests
+in ``test_api_routes.py`` (the autouse ``_temporal_dispatch_inline`` fixture runs
+each activity in-process). These tests pin the pieces the routes pre-check and
+therefore never reach through the app: the ``ApplicationError`` branches for
+missing entities, plus the two activities with no store dependency.
+"""
+
+from __future__ import annotations
+
+import pytest
+from temporalio.exceptions import ApplicationError
+
+
+def test_committee_memo_activity_drafts_memo() -> None:
+    from investment_team.temporal.advisory import committee_memo_activity
+
+    result = committee_memo_activity(
+        {
+            "user_id": "u1",
+            "recommendation": "Increase equity allocation",
+            "rationale": "Long horizon, high risk tolerance",
+            "dissenting_views": ["watch drawdown"],
+        }
+    )
+    memo = result["memo"]
+    assert memo["prepared_for_user_id"] == "u1"
+    assert memo["recommendation"] == "Increase equity allocation"
+    assert memo["dissenting_views"] == ["watch drawdown"]
+
+
+def test_advisor_start_activity_persists_session(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import advisor_start_activity
+
+    store: dict = {}
+    monkeypatch.setattr(api_main, "_advisor_sessions", store)
+
+    result = advisor_start_activity({"session_id": "adv-1", "user_id": "u1"})
+
+    assert result["advisor_message"]
+    assert result["session"]["session_id"] == "adv-1"
+    assert "adv-1" in store
+
+
+def test_advisor_message_activity_advances_session(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import advisor_message_activity, advisor_start_activity
+
+    store: dict = {}
+    monkeypatch.setattr(api_main, "_advisor_sessions", store)
+    advisor_start_activity({"session_id": "adv-1", "user_id": "u1"})
+
+    result = advisor_message_activity({"session_id": "adv-1", "message": "hello"})
+
+    assert "advisor_message" in result
+    assert "session_status" in result
+    assert "current_topic" in result
+    assert isinstance(result["missing_fields"], list)
+
+
+def test_advisor_message_activity_missing_session_raises(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import advisor_message_activity
+
+    monkeypatch.setattr(api_main, "_advisor_sessions", {})
+    with pytest.raises(ApplicationError, match="not found"):
+        advisor_message_activity({"session_id": "nope", "message": "hi"})
+
+
+def test_advisor_complete_activity_missing_session_raises(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import advisor_complete_activity
+
+    monkeypatch.setattr(api_main, "_advisor_sessions", {})
+    with pytest.raises(ApplicationError, match="not found"):
+        advisor_complete_activity({"session_id": "nope"})
+
+
+def test_advisor_complete_activity_incomplete_session_raises(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import advisor_complete_activity, advisor_start_activity
+
+    store: dict = {}
+    monkeypatch.setattr(api_main, "_advisor_sessions", store)
+    # A freshly started session has no collected profile data yet.
+    advisor_start_activity({"session_id": "adv-1", "user_id": "u1"})
+
+    with pytest.raises(ApplicationError, match="missing required fields"):
+        advisor_complete_activity({"session_id": "adv-1"})
+
+
+def test_advisor_complete_activity_builds_ips(monkeypatch) -> None:
+    from investment_team.agents import FinancialAdvisorAgent
+    from investment_team.api import main as api_main
+    from investment_team.models import AdvisorSessionStatus
+    from investment_team.temporal.advisory import advisor_complete_activity
+
+    # A fully-collected session so build_ips succeeds (mirrors test_advisor_agent).
+    session = FinancialAdvisorAgent().start_session("adv-1", "u1")
+    c = session.collected
+    c.risk_tolerance = "medium"
+    c.max_drawdown_tolerance_pct = 20.0
+    c.time_horizon_years = 10
+    c.annual_gross_income = 120000
+    c.total_net_worth = 200000
+    c.investable_assets = 150000
+
+    sessions = {"adv-1": session}
+    profiles: dict = {}
+    monkeypatch.setattr(api_main, "_advisor_sessions", sessions)
+    monkeypatch.setattr(api_main, "_profiles", profiles)
+
+    result = advisor_complete_activity({"session_id": "adv-1"})
+
+    assert result["user_id"] == "u1"
+    assert result["ips"]["profile"]["user_id"] == "u1"
+    assert "u1" in profiles
+    assert session.status == AdvisorSessionStatus.COMPLETED
+
+
+def test_as_model_passthrough_and_coercion() -> None:
+    from investment_team.temporal.advisory import _as_model
+
+    class _HasParse:
+        @classmethod
+        def parse_persisted(cls, raw):
+            return ("parsed", raw)
+
+    class _HasValidate:
+        @classmethod
+        def model_validate(cls, raw):
+            return ("validated", raw)
+
+    # None short-circuits.
+    assert _as_model(_HasParse, None) is None
+    # An existing instance passes through untouched.
+    inst = _HasValidate()
+    assert _as_model(_HasValidate, inst) is inst
+    # A dict is coerced via parse_persisted when available, else model_validate.
+    assert _as_model(_HasParse, {"a": 1}) == ("parsed", {"a": 1})
+    assert _as_model(_HasValidate, {"b": 2}) == ("validated", {"b": 2})
+
+
+def test_create_proposal_activity_missing_ips_raises(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import create_proposal_activity
+
+    monkeypatch.setattr(api_main, "_profiles", {})
+    with pytest.raises(ApplicationError, match="No IPS"):
+        create_proposal_activity(
+            {
+                "proposal_id": "prop-1",
+                "request": {"user_id": "u1", "prepared_by": "a", "objective": "x"},
+            }
+        )
+
+
+def test_validate_proposal_activity_missing_entities_raise(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import validate_proposal_activity
+
+    monkeypatch.setattr(api_main, "_proposals", {})
+    monkeypatch.setattr(api_main, "_profiles", {})
+    with pytest.raises(ApplicationError, match="Proposal .* not found"):
+        validate_proposal_activity({"proposal_id": "prop-1", "user_id": "u1"})
+
+    # Proposal present but IPS missing.
+    monkeypatch.setattr(api_main, "_proposals", {"prop-1": {"proposal_id": "prop-1"}})
+    with pytest.raises(ApplicationError, match="No IPS"):
+        validate_proposal_activity({"proposal_id": "prop-1", "user_id": "u1"})
+
+
+def test_validate_strategy_activity_missing_strategy_raises(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import validate_strategy_activity
+
+    monkeypatch.setattr(api_main, "_strategies", {})
+    with pytest.raises(ApplicationError, match="Strategy .* not found"):
+        validate_strategy_activity({"strategy_id": "s1", "request": {}})
+
+
+def test_promotion_decision_activity_missing_entities_raise(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.advisory import promotion_decision_activity
+
+    base = {
+        "strategy_id": "s1",
+        "user_id": "u1",
+        "proposer_agent_id": "p",
+        "approver_agent_id": "a",
+    }
+    monkeypatch.setattr(api_main, "_strategies", {})
+    monkeypatch.setattr(api_main, "_validations", {})
+    monkeypatch.setattr(api_main, "_profiles", {})
+    with pytest.raises(ApplicationError, match="Strategy .* not found"):
+        promotion_decision_activity(dict(base))
+
+    monkeypatch.setattr(api_main, "_strategies", {"s1": {"strategy_id": "s1"}})
+    with pytest.raises(ApplicationError, match="no validation report"):
+        promotion_decision_activity(dict(base))
+
+    monkeypatch.setattr(api_main, "_validations", {"s1": {"strategy_id": "s1"}})
+    with pytest.raises(ApplicationError, match="No IPS"):
+        promotion_decision_activity(dict(base))

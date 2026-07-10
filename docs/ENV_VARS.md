@@ -169,6 +169,26 @@ Temporal namespace.
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
 
+### Investment team Temporal queues (no env var)
+The investment team runs three Temporal queues, all booted from
+`investment_team.temporal.worker.start_investment_temporal_worker_thread` (each on
+a distinct team key, since `start_team_worker` is idempotent per team key):
+
+- `investment-queue` — the ad hoc single-backtest `InvestmentBacktestWorkflow`
+  and the long-running `PaperTradingWorkflow` (cancel via a `stop` signal).
+- `strategy-lab-queue` — the fine-grained Strategy Lab batch/cycle workflows
+  (tuned by `STRATEGY_LAB_MAX_CONCURRENT_ACTIVITIES`).
+- `investment-advisory-queue` — the interactive proposal / validation / promotion
+  / committee-memo / advisor-session workflows, dispatched execute-and-wait so a
+  multi-hour backtest activity can't head-of-line-block a quick request.
+
+The paper-trading (`/strategy-lab/paper-trade`, `/stop`) and orchestrator/advisor
+endpoints (`/proposals/*`, `/strategies/*`, `/promotions/decide`, `/memos`,
+`/advisor/sessions/*`) are **Temporal-only**: with `TEMPORAL_ADDRESS` unset (or no
+connected worker) they return HTTP 503 rather than falling back to in-process
+execution. The backtest and Strategy Lab run endpoints keep their thread
+fallback.
+
 ### SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Ceiling on how many sales activities the sales
 Temporal worker runs at once. The sales pipeline fans each stage out into one

@@ -17,7 +17,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from investment_team.agents import (
-    AgentIdentity,
     FinancialAdvisorAgent,
     InvestmentCommitteeAgent,
     PolicyGuardianAgent,
@@ -32,7 +31,6 @@ from investment_team.models import (
     IPS,
     WINNING_THRESHOLD,
     AdvisorSession,
-    AdvisorSessionStatus,
     BacktestConfig,
     BacktestRecord,
     BacktestResult,
@@ -45,7 +43,6 @@ from investment_team.models import (
     PaperTradingStatus,
     PaperTradingVerdict,
     PortfolioConstraints,
-    PortfolioPosition,
     PortfolioProposal,
     PromotionDecision,
     RiskTolerance,
@@ -56,9 +53,7 @@ from investment_team.models import (
     TradeRecord,
     UserGoal,
     UserPreferences,
-    ValidationCheck,
     ValidationReport,
-    ValidationStatus,
     WorkflowMode,
 )
 from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
@@ -709,7 +704,7 @@ def get_profile(user_id: str) -> GetProfileResponse:
 
 @app.post("/proposals/create", response_model=CreateProposalResponse)
 def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
-    """Create a new portfolio proposal."""
+    """Create a new portfolio proposal (runs as a Temporal workflow)."""
     with _lock:
         ips = _profiles.get(request.user_id)
 
@@ -717,34 +712,14 @@ def create_proposal(request: CreateProposalRequest) -> CreateProposalResponse:
         raise HTTPException(status_code=404, detail=f"No IPS found for user {request.user_id}")
 
     proposal_id = f"prop-{uuid.uuid4().hex[:8]}"
-
-    positions = [
-        PortfolioPosition(
-            symbol=p.get("symbol", ""),
-            asset_class=p.get("asset_class", ""),
-            weight_pct=p.get("weight_pct", 0.0),
-            rationale=p.get("rationale", ""),
-        )
-        for p in request.positions
-    ]
-
-    proposal = PortfolioProposal(
-        proposal_id=proposal_id,
-        prepared_by=request.prepared_by,
-        ips_version=ips.profile.schema_version,
-        data_snapshot_id=f"snap-{_now()}",
-        objective=request.objective,
-        positions=positions,
-        expected_return_pct=request.expected_return_pct,
-        expected_volatility_pct=request.expected_volatility_pct,
-        expected_max_drawdown_pct=request.expected_max_drawdown_pct,
-        assumptions=request.assumptions,
+    result = _execute_advisory(
+        "create_proposal",
+        {"proposal_id": proposal_id, "request": request.model_dump(mode="json")},
+        key=proposal_id,
     )
-
-    with _lock:
-        _proposals[proposal_id] = proposal
-
-    return CreateProposalResponse(proposal_id=proposal_id, proposal=proposal)
+    return CreateProposalResponse(
+        proposal_id=proposal_id, proposal=PortfolioProposal.model_validate(result["proposal"])
+    )
 
 
 @app.get("/proposals/{proposal_id}", response_model=GetProposalResponse)
@@ -771,12 +746,15 @@ def validate_proposal(
     if not ips:
         raise HTTPException(status_code=404, detail=f"No IPS found for user {request.user_id}")
 
-    violations = _policy_guardian.check_portfolio(ips, proposal)
-
+    result = _execute_advisory(
+        "validate_proposal",
+        {"proposal_id": proposal_id, "user_id": request.user_id},
+        key=proposal_id,
+    )
     return ValidateProposalResponse(
         proposal_id=proposal_id,
-        valid=len(violations) == 0,
-        violations=violations,
+        valid=result["valid"],
+        violations=result["violations"],
     )
 
 
@@ -811,9 +789,13 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
             status_code=422, detail=exc.errors(include_url=False, include_context=False)
         ) from exc
 
-    with _lock:
-        _strategies[strategy_id] = strategy
-
+    # Persist through the Temporal workflow (Temporal-only). The strategy was
+    # already constructed/validated above, so return that instance verbatim.
+    _execute_advisory(
+        "create_strategy",
+        {"strategy_id": strategy_id, "strategy": strategy.model_dump(mode="json")},
+        key=strategy_id,
+    )
     return CreateStrategyResponse(strategy_id=strategy_id, strategy=strategy)
 
 
@@ -828,65 +810,16 @@ def validate_strategy(
     if not strategy:
         raise HTTPException(status_code=404, detail=f"Strategy {strategy_id} not found")
 
-    checks = []
-    if request.checks:
-        for c in request.checks:
-            try:
-                status = ValidationStatus(c.get("status", "pass"))
-            except ValueError:
-                status = ValidationStatus.PASS
-            checks.append(
-                ValidationCheck(
-                    name=c.get("name", ""),
-                    status=status,
-                    details=c.get("details", ""),
-                )
-            )
-    else:
-        checks = [
-            ValidationCheck(
-                name="backtest_quality", status=ValidationStatus.PASS, details="Sharpe > 1.0"
-            ),
-            ValidationCheck(
-                name="walk_forward",
-                status=ValidationStatus.PASS,
-                details="Out-of-sample Sharpe > 0.8",
-            ),
-            ValidationCheck(
-                name="stress_test", status=ValidationStatus.PASS, details="Max DD within limits"
-            ),
-            ValidationCheck(
-                name="transaction_cost_model",
-                status=ValidationStatus.PASS,
-                details="Net return positive",
-            ),
-            ValidationCheck(
-                name="liquidity_impact",
-                status=ValidationStatus.PASS,
-                details="Minimal market impact",
-            ),
-        ]
-
-    validation = ValidationReport(
-        strategy_id=strategy_id,
-        generated_by="validation_agent",
-        data_snapshot_id=f"snap-{_now()}",
-        backtest_period=request.backtest_period,
-        scenario_set=request.scenario_set,
-        checks=checks,
-        summary="Validation completed.",
+    result = _execute_advisory(
+        "validate_strategy",
+        {"strategy_id": strategy_id, "request": request.model_dump(mode="json")},
+        key=strategy_id,
     )
-
-    with _lock:
-        _validations[strategy_id] = validation
-
-    failures = [c.details for c in checks if c.status == ValidationStatus.FAIL]
-
     return ValidateStrategyResponse(
         strategy_id=strategy_id,
-        validation=validation,
-        passed=len(failures) == 0,
-        failures=failures,
+        validation=ValidationReport.model_validate(result["validation"]),
+        passed=result["passed"],
+        failures=result["failures"],
     )
 
 
@@ -1098,24 +1031,24 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
     if not ips:
         raise HTTPException(status_code=404, detail=f"No IPS found for user {request.user_id}")
 
-    approver = AgentIdentity(
-        agent_id=request.approver_agent_id,
-        role=request.approver_role,
-        version=request.approver_version,
+    result = _execute_advisory(
+        "promotion_decision",
+        {
+            "strategy_id": request.strategy_id,
+            "user_id": request.user_id,
+            "proposer_agent_id": request.proposer_agent_id,
+            "approver_agent_id": request.approver_agent_id,
+            "approver_role": request.approver_role,
+            "approver_version": request.approver_version,
+            "risk_veto": request.risk_veto,
+            "human_live_approval": request.human_live_approval,
+        },
+        key=request.strategy_id,
     )
-
-    decision = _orchestrator.promotion_decision(
-        state=_workflow_state,
-        strategy=strategy,
-        validation=validation,
-        ips=ips,
-        proposer_agent_id=request.proposer_agent_id,
-        approver=approver,
-        risk_veto=request.risk_veto,
-        human_live_approval=request.human_live_approval,
+    return PromotionDecisionResponse(
+        strategy_id=request.strategy_id,
+        decision=PromotionDecision.model_validate(result["decision"]),
     )
-
-    return PromotionDecisionResponse(strategy_id=request.strategy_id, decision=decision)
 
 
 @app.get("/workflow/status", response_model=WorkflowStatusResponse)
@@ -1147,15 +1080,18 @@ def workflow_queues() -> QueuesResponse:
 
 @app.post("/memos", response_model=CreateMemoResponse)
 def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
-    """Generate an investment committee memo."""
-    memo = _committee_agent.draft_memo(
-        user_id=request.user_id,
-        recommendation=request.recommendation,
-        rationale=request.rationale,
-        dissenting_views=request.dissenting_views,
+    """Generate an investment committee memo (runs as a Temporal workflow)."""
+    result = _execute_advisory(
+        "committee_memo",
+        {
+            "user_id": request.user_id,
+            "recommendation": request.recommendation,
+            "rationale": request.rationale,
+            "dissenting_views": request.dissenting_views,
+        },
+        key=request.user_id,
     )
-
-    return CreateMemoResponse(memo=memo)
+    return CreateMemoResponse(memo=InvestmentCommitteeMemo.model_validate(result["memo"]))
 
 
 # ---------------------------------------------------------------------------
@@ -1857,6 +1793,83 @@ def _dispatch_backtest_run(
         start_backtest_workflow(job_id, strategy, config, submitted_by, notes)
 
     return _dispatch_via_temporal(_start)
+
+
+def _require_temporal() -> None:
+    """Raise HTTP 503 when Temporal is unavailable.
+
+    The paper-trading and advisory/orchestrator endpoints are Temporal-only (no
+    in-process fallback), so they cannot run without a connected worker. This
+    turns "``TEMPORAL_ADDRESS`` unset / support absent" into a clean 503 instead
+    of a slow ``RuntimeError`` from the dispatch bridge.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns ``None`` when Temporal is enabled; otherwise raises
+        ``HTTPException(503)``.
+    """
+    try:
+        from shared_temporal import is_temporal_enabled
+    except ImportError as exc:  # pragma: no cover - shared_temporal always present
+        raise HTTPException(
+            status_code=503, detail="Temporal support is unavailable for this endpoint."
+        ) from exc
+    if not is_temporal_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="This endpoint requires a running Temporal worker (TEMPORAL_ADDRESS unset).",
+        )
+
+
+def _start_paper_trading(session_id: str, payload: Dict[str, Any]) -> None:
+    """Dispatch ``PaperTradingWorkflow`` for a session (Temporal-only, fire-and-forget).
+
+    Preconditions:
+        - ``session_id`` names a session already created in ``running`` status.
+        - ``payload`` satisfies ``run_paper_trading_activity``'s preconditions.
+    Postconditions:
+        - The durable workflow is started. Raises ``HTTPException(503)`` when
+          Temporal is disabled/unavailable.
+    """
+    _require_temporal()
+    from investment_team.temporal.start_workflow import start_paper_trading_workflow
+
+    start_paper_trading_workflow(session_id, payload)
+
+
+def _signal_paper_trading_stop(session_id: str) -> None:
+    """Signal ``PaperTradingWorkflow`` to stop a session (Temporal-only, idempotent).
+
+    Preconditions:
+        - ``session_id`` names a session whose workflow was started via
+          :func:`_start_paper_trading`.
+    Postconditions:
+        - The ``stop`` signal is delivered. Raises ``HTTPException(503)`` when
+          Temporal is disabled/unavailable.
+    """
+    _require_temporal()
+    from investment_team.temporal.start_workflow import signal_paper_trading_stop
+
+    signal_paper_trading_stop(session_id)
+
+
+def _execute_advisory(op: str, payload: Dict[str, Any], *, key: str) -> Dict[str, Any]:
+    """Execute an interactive advisory workflow and return its result (Temporal-only).
+
+    Preconditions:
+        - ``op`` is a known advisory operation; ``payload`` satisfies the
+          corresponding activity's preconditions; ``key`` is a stable id for the
+          logical operation.
+    Postconditions:
+        - Returns the workflow's result dict. Raises ``HTTPException(503)`` when
+          Temporal is disabled/unavailable; propagates the workflow failure
+          otherwise.
+    """
+    _require_temporal()
+    from investment_team.temporal.start_workflow import execute_advisory_workflow
+
+    return execute_advisory_workflow(op, payload, key=key)
 
 
 def _get_run_state(run_id: str) -> Optional[Dict[str, Any]]:
@@ -3334,8 +3347,8 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         )
 
     strategy = lab_record.strategy
-    backtest_record = lab_record.backtest
-
+    # The backtest record is re-derived inside run_paper_trading_activity (the
+    # legacy path needs it); the route only validates winning status + code here.
     strategy_code = lab_record.strategy_code or getattr(strategy, "strategy_code", None)
     if not strategy_code:
         raise HTTPException(
@@ -3396,34 +3409,21 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     with _lock:
         _paper_trading_sessions[session_id] = running_session
 
-    # 3 — Kick off background worker. The live path (PR 2) is gated behind
-    # INVESTMENT_LIVE_PAPER_ENABLED so operators opt in; otherwise the legacy
-    # recent-OHLCV replay path remains the default.
-    if use_live:
-        thread = threading.Thread(
-            target=_run_live_paper_trading_background,
-            args=(session_id, request.lab_record_id, strategy, request),
-            name=f"live-paper-trade-{session_id}",
-            daemon=False,
-        )
-    else:
-        thread = threading.Thread(
-            target=_run_paper_trading_background,
-            args=(
-                session_id,
-                request.lab_record_id,
-                strategy,
-                strategy_code,
-                backtest_record,
-                request.lookback_days,
-                request.initial_capital,
-                request.transaction_cost_bps,
-                request.slippage_bps,
-            ),
-            name=f"paper-trade-{session_id}",
-            daemon=False,
-        )
-    thread.start()
+    # 3 — Dispatch the durable paper-trading workflow (Temporal-only). The live
+    # path (PR 2) is gated behind INVESTMENT_LIVE_PAPER_ENABLED so operators opt
+    # in; otherwise the legacy recent-OHLCV replay path runs. Both execute inside
+    # ``run_paper_trading_activity`` on the investment task queue, so a worker
+    # crash resumes/records via the persisted session rather than a lost thread.
+    _start_paper_trading(
+        session_id,
+        {
+            "session_id": session_id,
+            "lab_record_id": request.lab_record_id,
+            "use_live": use_live,
+            "request": request.model_dump(mode="json"),
+            "max_hours": request.max_hours,
+        },
+    )
 
     return PaperTradingResponse(
         session=running_session,
@@ -3607,16 +3607,20 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
         )
     with _lock:
         raw = _paper_trading_sessions.get(session_id)
-        if raw is None:
-            raise HTTPException(
-                status_code=404, detail=f"Paper trading session '{session_id}' not found."
-            )
-        session = PaperTradingSession.parse_persisted(raw)
-        controller = _live_paper_stop_controllers.get(session_id)
-        if controller is not None:
-            controller.request_stop()
-            session.user_stop_requested_at = datetime.now(tz=timezone.utc).isoformat()
-            _paper_trading_sessions[session_id] = session
+    if raw is None:
+        raise HTTPException(
+            status_code=404, detail=f"Paper trading session '{session_id}' not found."
+        )
+    session = PaperTradingSession.parse_persisted(raw)
+
+    # Deliver the stop durably: the ``stop`` signal cancels the running
+    # ``PaperTradingWorkflow`` activity, which trips the session's StopController
+    # so the live loop ends at the next bar (replacing the old in-process poke).
+    _signal_paper_trading_stop(session_id)
+
+    session.user_stop_requested_at = datetime.now(tz=timezone.utc).isoformat()
+    with _lock:
+        _paper_trading_sessions[session_id] = session
     return PaperTradingResponse(
         session=session,
         message="Stop requested. Poll the session to see the final state.",
@@ -3798,17 +3802,17 @@ class CompleteAdvisorSessionResponse(BaseModel):
 
 @app.post("/advisor/sessions", response_model=StartAdvisorSessionResponse)
 def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSessionResponse:
-    """Start a new financial advisor conversation to build an investment profile."""
+    """Start a new financial advisor conversation (runs as a Temporal workflow)."""
     session_id = f"adv-{uuid.uuid4().hex[:8]}"
-    session = _advisor_agent.start_session(session_id=session_id, user_id=request.user_id)
-
-    with _lock:
-        _advisor_sessions[session_id] = session
-
+    result = _execute_advisory(
+        "advisor_start",
+        {"session_id": session_id, "user_id": request.user_id},
+        key=session_id,
+    )
     return StartAdvisorSessionResponse(
         session_id=session_id,
-        advisor_message=session.messages[0].content,
-        session=session,
+        advisor_message=result["advisor_message"],
+        session=AdvisorSession.model_validate(result["session"]),
     )
 
 
@@ -3823,17 +3827,16 @@ def send_advisor_message(
     if not session:
         raise HTTPException(status_code=404, detail=f"Advisor session {session_id} not found")
 
-    reply = _advisor_agent.handle_message(session, request.message)
-    missing = _advisor_agent.missing_fields(session.collected)
-
-    with _lock:
-        _advisor_sessions[session_id] = session
-
+    result = _execute_advisory(
+        "advisor_message",
+        {"session_id": session_id, "message": request.message},
+        key=session_id,
+    )
     return SendAdvisorMessageResponse(
-        advisor_message=reply,
-        session_status=session.status.value,
-        current_topic=session.current_topic.value,
-        missing_fields=missing,
+        advisor_message=result["advisor_message"],
+        session_status=result["session_status"],
+        current_topic=result["current_topic"],
+        missing_fields=result["missing_fields"],
     )
 
 
@@ -3856,11 +3859,16 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
     if all required fields have been collected.
     """
     with _lock:
-        session = _advisor_sessions.get(session_id)
+        raw_session = _advisor_sessions.get(session_id)
 
-    if not session:
+    if not raw_session:
         raise HTTPException(status_code=404, detail=f"Advisor session {session_id} not found")
 
+    session = (
+        raw_session
+        if isinstance(raw_session, AdvisorSession)
+        else AdvisorSession.model_validate(raw_session)
+    )
     missing = _advisor_agent.missing_fields(session.collected)
     if missing:
         raise HTTPException(
@@ -3868,14 +3876,7 @@ def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
             detail=f"Cannot finalize — missing required fields: {', '.join(missing)}",
         )
 
-    try:
-        ips = _advisor_agent.build_ips(session)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    with _lock:
-        _profiles[session.user_id] = ips
-        session.status = AdvisorSessionStatus.COMPLETED
-        _advisor_sessions[session_id] = session
-
-    return CompleteAdvisorSessionResponse(user_id=session.user_id, ips=ips)
+    result = _execute_advisory("advisor_complete", {"session_id": session_id}, key=session_id)
+    return CompleteAdvisorSessionResponse(
+        user_id=result["user_id"], ips=IPS.model_validate(result["ips"])
+    )

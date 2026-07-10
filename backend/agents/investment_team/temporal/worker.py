@@ -11,7 +11,14 @@ from __future__ import annotations
 
 import logging
 
-from investment_team.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
+from investment_team.temporal import (
+    ACTIVITIES,
+    ADVISORY_ACTIVITIES,
+    ADVISORY_TASK_QUEUE,
+    ADVISORY_WORKFLOWS,
+    TASK_QUEUE,
+    WORKFLOWS,
+)
 from shared_temporal import is_temporal_enabled, start_team_worker
 
 logger = logging.getLogger(__name__)
@@ -20,16 +27,23 @@ logger = logging.getLogger(__name__)
 def start_investment_temporal_worker_thread() -> bool:
     """Start the investment Temporal workers (no-op when disabled).
 
-    Boots two workers on distinct queues from this single entrypoint (the one the
-    team_service entrypoint / lifespan backstop invokes), so every deployment path
-    gets both:
+    Boots three workers on distinct queues from this single entrypoint (the one
+    the team_service entrypoint / lifespan backstop invokes), so every deployment
+    path gets all of them:
 
       - the coarse ``investment-queue`` worker (this module's ``WORKFLOWS`` /
-        ``ACTIVITIES`` — the ad hoc single-backtest ``InvestmentBacktestWorkflow``);
+        ``ACTIVITIES`` — the ad hoc single-backtest ``InvestmentBacktestWorkflow``
+        and the long-running ``PaperTradingWorkflow``);
       - the fine-grained ``strategy-lab-queue`` worker
         (``StrategyLabBatchWorkflow`` + its ``StrategyLabCycleWorkflow`` children
         and every per-step activity), started via the strategy-lab package's own
-        ``start_strategy_lab_temporal_worker_thread``.
+        ``start_strategy_lab_temporal_worker_thread``;
+      - the ``investment-advisory-queue`` worker (the interactive
+        proposal/validation/promotion/memo/advisor workflows), on its own team
+        key so short calls never queue behind a multi-hour backtest activity.
+
+    Each queue uses a distinct team key because ``start_team_worker`` is
+    idempotent *per team key*.
 
     Preconditions:
         - None; safe to call unconditionally and repeatedly.
@@ -47,6 +61,12 @@ def start_investment_temporal_worker_thread() -> bool:
         ACTIVITIES,
         task_queue=TASK_QUEUE,
     )
+    advisory_started = start_team_worker(
+        "investment_advisory",
+        ADVISORY_WORKFLOWS,
+        ADVISORY_ACTIVITIES,
+        task_queue=ADVISORY_TASK_QUEUE,
+    )
     # Boot the Strategy Lab worker on its own queue from the same hook; imported
     # lazily to avoid dragging the strategy-lab graph into this module at import.
     from investment_team.strategy_lab.temporal.worker import (
@@ -54,4 +74,4 @@ def start_investment_temporal_worker_thread() -> bool:
     )
 
     strategy_lab_started = start_strategy_lab_temporal_worker_thread()
-    return investment_started or strategy_lab_started
+    return investment_started or advisory_started or strategy_lab_started

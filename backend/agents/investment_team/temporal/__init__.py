@@ -15,6 +15,16 @@ import-time side effect.
 
 from __future__ import annotations
 
+from investment_team.temporal.advisory import (
+    ADVISORY_ACTIVITIES,
+    ADVISORY_TASK_QUEUE,
+    ADVISORY_WORKFLOW_ID_PREFIX,
+    ADVISORY_WORKFLOWS,
+)
+from investment_team.temporal.paper_trading import (
+    PaperTradingWorkflow,
+    run_paper_trading_activity,
+)
 from investment_team.temporal.workflows import (
     InvestmentBacktestWorkflow,
     run_backtest_activity,
@@ -22,17 +32,24 @@ from investment_team.temporal.workflows import (
 
 # The Strategy Lab batch run moved to the fine-grained
 # ``investment_team.strategy_lab.temporal`` package (``strategy-lab-queue``); this
-# coarse queue now serves only the ad hoc single-backtest workflow.
-WORKFLOWS = [InvestmentBacktestWorkflow]
-ACTIVITIES = [run_backtest_activity]
+# coarse ``investment-queue`` now serves the ad hoc single-backtest workflow and
+# the long-running paper-trading workflow (both coarse, one long activity each).
+WORKFLOWS = [InvestmentBacktestWorkflow, PaperTradingWorkflow]
+ACTIVITIES = [run_backtest_activity, run_paper_trading_activity]
 TASK_QUEUE = "investment-queue"
 WORKFLOW_ID_PREFIX = "investment-"
 
 __all__ = [
     "ACTIVITIES",
+    "ADVISORY_ACTIVITIES",
+    "ADVISORY_TASK_QUEUE",
+    "ADVISORY_WORKFLOWS",
+    "ADVISORY_WORKFLOW_ID_PREFIX",
     "InvestmentBacktestWorkflow",
+    "PaperTradingWorkflow",
     "TASK_QUEUE",
     "WORKFLOWS",
     "WORKFLOW_ID_PREFIX",
     "run_backtest_activity",
+    "run_paper_trading_activity",
 ]
