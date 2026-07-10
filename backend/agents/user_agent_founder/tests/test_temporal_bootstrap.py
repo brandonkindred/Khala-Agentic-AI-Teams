@@ -1,22 +1,22 @@
 """Regression tests for the user_agent_founder Temporal bootstrap.
 
-Two bugs were fixed together here. Both have to be guarded:
+Guards the migration hazards the wiring was designed to avoid:
 
-1. **Race on first request.** Importing ``user_agent_founder.temporal``
-   used to call ``shared_temporal.start_team_worker(...)`` at module
-   load. The worker thread connected the Temporal client asynchronously,
-   so the very first ``start_founder_workflow`` call lost the race and
-   raised ``RuntimeError: Temporal client not available``. The package
-   must no longer self-bootstrap a worker at import time — boot is the
-   team_service entrypoint's job (or the API lifespan as a backstop).
+1. **Self-bootstrap at import time.** Importing ``user_agent_founder.temporal``
+   used to call ``shared_temporal.start_team_worker(...)`` at module load. The
+   worker thread connects the Temporal client asynchronously, so the first
+   ``start_founder_workflow`` call lost the race and raised ``RuntimeError:
+   Temporal client not available``. Boot is now the team_service entrypoint's job
+   (or the API lifespan as a backstop).
 
-2. **Workflow sandbox blocks ``os.getenv``.** The temporalio sandbox
-   re-imports the workflow module to load ``UserAgentFounderWorkflow``.
-   The previous ``__init__.py`` called ``is_temporal_enabled()`` —
-   which calls ``os.getenv("TEMPORAL_ADDRESS")`` — at module level, and
-   the sandbox aborted with ``__call__ on os.getenv restricted``. Both
-   the package ``__init__`` and the dedicated ``workflows`` module must
-   load without invoking ``os.getenv``.
+2. **Workflow sandbox restrictions.** The temporalio sandbox re-imports the
+   workflow module to load ``UserAgentFounderWorkflow``. The package ``__init__``
+   and the ``workflows`` module (and its passthrough imports) must register
+   inside the real sandbox without a ``RestrictedWorkflowAccessError``.
+
+3. **Full activity registration.** The decomposition introduced per-step
+   activities; guard that every one is exported so a rename can't silently drop
+   one from the worker's registration.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ def test_importing_temporal_package_does_not_call_start_team_worker():
     _purge("user_agent_founder.temporal")
     with mock.patch.object(shared_temporal, "start_team_worker") as patched:
         importlib.import_module("user_agent_founder.temporal")
+        importlib.import_module("user_agent_founder.temporal.activities")
         importlib.import_module("user_agent_founder.temporal.workflows")
         importlib.import_module("user_agent_founder.temporal.start_workflow")
         assert patched.call_count == 0, (
@@ -49,32 +50,46 @@ def test_importing_temporal_package_does_not_call_start_team_worker():
         )
 
 
-def test_workflows_module_does_not_call_os_getenv_at_import_time():
-    """The workflow module is reimported by the temporalio sandbox.
-
-    Anything the sandbox restricts (``os.getenv``, time/random, etc.)
-    must not be invoked at module top level — it has to live inside
-    activity bodies or the worker bootstrap.
+def test_workflow_registers_in_temporalio_sandbox():
+    """Ground truth for sandbox safety: ``UserAgentFounderWorkflow`` (which imports
+    the team's activities under ``workflow.unsafe.imports_passed_through()``) must
+    import and instantiate inside the real ``SandboxedWorkflowRunner`` with
+    ``shared_temporal``'s passthrough restrictions, with no
+    ``RestrictedWorkflowAccessError``. This exercises exactly what the worker does
+    at boot — a stronger check than an ``os.getenv`` import-spy proxy.
     """
-    _purge("user_agent_founder.temporal")
-    import os
+    import asyncio
 
-    with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
-        importlib.import_module("user_agent_founder.temporal.workflows")
-        # Allow any getenv calls that come from temporalio itself loading;
-        # what we care about is that *our* module didn't add new ones.
-        # The cheap check: walking the call stack inside the spy is brittle,
-        # so instead assert workflows.py loaded clean (no exception).
-        # Also reimport the package __init__ — that path is what the sandbox
-        # actually replays.
-        spy.reset_mock()
-        importlib.import_module("user_agent_founder.temporal")
-        # The package __init__ must not call os.getenv at all.
-        assert spy.call_count == 0, (
-            f"user_agent_founder.temporal.__init__ called os.getenv "
-            f"{spy.call_count} time(s) at import — this trips the temporalio "
-            f"workflow sandbox during workflow registration."
-        )
+    import temporalio.workflow as _wf
+
+    from shared_temporal.worker import _build_workflow_runner
+
+    _purge("user_agent_founder.temporal")
+    from user_agent_founder.temporal import WORKFLOWS
+
+    async def _prepare() -> None:
+        runner = _build_workflow_runner()
+        for wfc in WORKFLOWS:
+            runner.prepare_workflow(_wf._Definition.must_from_class(wfc))
+
+    asyncio.run(_prepare())
+
+
+def test_activities_list_exposes_every_step_activity():
+    """The worker registers the whole ``ACTIVITIES`` list; guard that all seven
+    fine-grained activities are exported so a rename can't silently drop one."""
+    from user_agent_founder.temporal import ACTIVITIES
+
+    names = {getattr(a, "__name__", None) for a in ACTIVITIES}
+    assert names == {
+        "begin_run_activity",
+        "generate_spec_activity",
+        "start_phase_activity",
+        "poll_phase_activity",
+        "answer_questions_activity",
+        "finalize_run_activity",
+        "mark_failed_activity",
+    }
 
 
 def test_worker_module_exposes_team_service_entrypoint():
@@ -106,8 +121,7 @@ def test_worker_start_is_no_op_when_temporal_disabled(monkeypatch):
 def test_start_workflow_waits_for_client_then_raises(monkeypatch):
     """When the worker is genuinely not running, the helper must time out
     with the original error message — not raise immediately and not wait
-    forever. The wait window is what makes the lifespan-backstop case
-    work; the eventual failure is what surfaces config bugs in CI.
+    forever.
     """
     from user_agent_founder.temporal import start_workflow as sw
 
@@ -120,3 +134,61 @@ def test_start_workflow_waits_for_client_then_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Temporal client not available"):
         sw._wait_for_client()
+
+
+def test_cancel_founder_workflow_signals_the_workflow(monkeypatch):
+    """The cancel helper delivers the ``cancel`` signal to the founder workflow id."""
+    from user_agent_founder.temporal import WORKFLOW_ID_PREFIX
+    from user_agent_founder.temporal import start_workflow as sw
+
+    captured: dict = {}
+
+    def _fake_signal(workflow_id, signal_name, *args, **_kw):
+        captured.update(workflow_id=workflow_id, signal_name=signal_name, args=args)
+
+    monkeypatch.setattr(sw, "signal_workflow_sync", _fake_signal)
+
+    sw.cancel_founder_workflow("run-abc")
+
+    assert captured["workflow_id"] == f"{WORKFLOW_ID_PREFIX}run-abc"
+    assert captured["signal_name"] == "cancel"
+
+
+def test_start_founder_workflow_dispatches_with_prefixed_id(monkeypatch):
+    """The start helper starts ``UserAgentFounderWorkflow`` with the prefixed id
+    and the team task queue, on the worker's shared loop."""
+    from unittest.mock import MagicMock
+
+    from user_agent_founder.temporal import (
+        TASK_QUEUE,
+        WORKFLOW_ID_PREFIX,
+        UserAgentFounderWorkflow,
+    )
+    from user_agent_founder.temporal import start_workflow as sw
+
+    fake_client = MagicMock(name="client")
+    fake_loop = object()
+    monkeypatch.setattr(sw, "_wait_for_client", lambda *a, **k: (fake_client, fake_loop))
+
+    class _Fut:
+        def result(self, timeout=None):
+            return None
+
+    captured: dict = {}
+
+    def _fake_run_coroutine_threadsafe(coro, loop):
+        captured["loop"] = loop
+        coro.close()  # the MagicMock coroutine stand-in; avoid a warning
+        return _Fut()
+
+    monkeypatch.setattr(sw.asyncio, "run_coroutine_threadsafe", _fake_run_coroutine_threadsafe)
+
+    sw.start_founder_workflow("run-1")
+
+    fake_client.start_workflow.assert_called_once()
+    args, kwargs = fake_client.start_workflow.call_args
+    assert args[0] is UserAgentFounderWorkflow.run
+    assert args[1] == "run-1"
+    assert kwargs["id"] == f"{WORKFLOW_ID_PREFIX}run-1"
+    assert kwargs["task_queue"] == TASK_QUEUE
+    assert captured["loop"] is fake_loop

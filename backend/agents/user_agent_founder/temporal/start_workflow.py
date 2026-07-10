@@ -11,7 +11,7 @@ import logging
 import time
 from typing import Any
 
-from shared_temporal import get_temporal_client, get_temporal_loop
+from shared_temporal import get_temporal_client, get_temporal_loop, signal_workflow_sync
 from user_agent_founder.temporal import (
     TASK_QUEUE,
     WORKFLOW_ID_PREFIX,
@@ -69,3 +69,25 @@ def start_founder_workflow(run_id: str) -> None:
         )
     )
     logger.info("Started UserAgentFounderWorkflow id=%s", workflow_id)
+
+
+def cancel_founder_workflow(run_id: str) -> None:
+    """Signal ``UserAgentFounderWorkflow`` to cancel cooperatively.
+
+    Delivers the ``cancel`` signal so the workflow's poll loops short-circuit at
+    the next tick instead of continuing to spend on target-team polls/answers.
+    The API cancel route already writes the terminal CANCELLED state; this only
+    stops the in-flight workflow.
+
+    Preconditions:
+        - ``run_id`` refers to a run whose workflow may be running (a no-op if it
+          has already ended — signalling a terminal workflow is accepted by the
+          server / surfaces as a handled error the caller treats as best-effort).
+    Postconditions:
+        - The ``cancel`` signal is delivered to workflow id
+          ``f"{WORKFLOW_ID_PREFIX}{run_id}"`` (raises ``RuntimeError`` only if the
+          worker client never becomes available).
+    """
+    workflow_id = f"{WORKFLOW_ID_PREFIX}{run_id}"
+    signal_workflow_sync(workflow_id, "cancel")
+    logger.info("Signalled cancel to UserAgentFounderWorkflow id=%s", workflow_id)
