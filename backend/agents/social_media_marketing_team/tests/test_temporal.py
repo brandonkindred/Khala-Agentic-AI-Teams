@@ -380,6 +380,48 @@ def test_consensus_stage_activity_brand_error_non_retryable(
     assert fake_job_client.get_job("job-brand")["status"] == "failed"
 
 
+def test_consensus_stage_activity_unexpected_brand_error_marks_failed_and_reraises(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """An unexpected (retryable) brand-fetch error marks the job failed and re-raises.
+
+    Unlike a missing/incomplete brand (non-retryable), a network/timeout fault is
+    retryable, but the job store must still reflect the failure rather than sit in
+    ``running`` until the stale monitor fires.
+    """
+    from social_media_marketing_team.temporal import activities as amod
+
+    monkeypatch.setattr(
+        "social_media_marketing_team.adapters.branding.fetch_brand",
+        lambda client_id, brand_id: (_ for _ in ()).throw(RuntimeError("branding API 502")),
+    )
+    fake_job_client.create_job("job-brand-net", status="pending")
+
+    with pytest.raises(RuntimeError):
+        amod.consensus_stage_activity("job-brand-net", _req())
+    assert fake_job_client.get_job("job-brand-net")["status"] == "failed"
+
+
+def test_consensus_stage_activity_cancelled_brand_fetch_maps_to_cancelled(
+    monkeypatch: pytest.MonkeyPatch, fake_job_client
+) -> None:
+    """A cancellation during brand fetch is surfaced as cancelled, not failed."""
+    from temporalio.exceptions import CancelledError
+
+    from social_media_marketing_team.temporal import activities as amod
+
+    monkeypatch.setattr(
+        "social_media_marketing_team.adapters.branding.fetch_brand",
+        lambda client_id, brand_id: (_ for _ in ()).throw(RuntimeError("interrupted")),
+    )
+    monkeypatch.setattr(amod, "_is_cancelled", lambda: True)
+    fake_job_client.create_job("job-brand-cx", status="pending")
+
+    with pytest.raises(CancelledError):
+        amod.consensus_stage_activity("job-brand-cx", _req())
+    assert fake_job_client.get_job("job-brand-cx")["status"] == "cancelled"
+
+
 def test_consensus_stage_activity_body_error_returns_fail_dto(
     monkeypatch: pytest.MonkeyPatch, fake_job_client
 ) -> None:
@@ -560,7 +602,7 @@ def test_finalize_stage_activity_approved(monkeypatch: pytest.MonkeyPatch, fake_
     platform = amod.platform_stage_activity("job-5", req, consensus, content)
     experiment = amod.experiment_stage_activity("job-5", req, consensus, content)
 
-    amod.finalize_stage_activity("job-5", req, consensus, content, platform, experiment)
+    amod.finalize_stage_activity("job-5", req, consensus, True, content, platform, experiment)
 
     job = fake_job_client.get_job("job-5")
     assert job["status"] == "completed"
@@ -581,7 +623,7 @@ def test_finalize_stage_activity_needs_revision(
     consensus = amod.consensus_stage_activity("job-6", req)
 
     # Unapproved path: only consensus ran; finalize produces NEEDS_REVISION.
-    amod.finalize_stage_activity("job-6", req, consensus)
+    amod.finalize_stage_activity("job-6", req, consensus, False)
 
     job = fake_job_client.get_job("job-6")
     assert job["status"] == "completed"
@@ -603,7 +645,7 @@ def test_finalize_stage_activity_approved_missing_content_non_retryable(
     consensus = amod.consensus_stage_activity("job-6b", req)
 
     with pytest.raises(ApplicationError) as exc:
-        amod.finalize_stage_activity("job-6b", req, consensus, content=None)
+        amod.finalize_stage_activity("job-6b", req, consensus, True, content=None)
     assert exc.value.non_retryable is True
 
 
@@ -635,7 +677,7 @@ def test_finalize_stage_activity_store_failure_last_attempt_marks_failed(
     )
 
     with pytest.raises(RuntimeError):
-        amod.finalize_stage_activity("job-7", req, consensus, content, platform, experiment)
+        amod.finalize_stage_activity("job-7", req, consensus, True, content, platform, experiment)
     assert marked == {"job": "job-7", "phase": "finalize"}
 
 
@@ -664,7 +706,7 @@ def test_finalize_stage_activity_store_failure_not_last_attempt_reraises(
     monkeypatch.setattr(amod, "_fail_activity", lambda *a, **k: fail_called.setdefault("hit", True))
 
     with pytest.raises(RuntimeError):
-        amod.finalize_stage_activity("job-7b", req, consensus, content, platform, experiment)
+        amod.finalize_stage_activity("job-7b", req, consensus, True, content, platform, experiment)
     assert "hit" not in fail_called  # not marked failed while retries remain
 
 
@@ -699,7 +741,7 @@ def test_finalize_cancellederror_maps_to_cancelled(
         monkeypatch, fake_job_client, "job-8", CancelledError("cancelled")
     )
     with pytest.raises(CancelledError):
-        amod.finalize_stage_activity("job-8", req, consensus, content, platform, experiment)
+        amod.finalize_stage_activity("job-8", req, consensus, True, content, platform, experiment)
     assert fake_job_client.get_job("job-8")["status"] == "cancelled"
 
 
@@ -713,7 +755,7 @@ def test_finalize_store_error_while_cancelled_maps_to_cancelled(
     )
     monkeypatch.setattr(amod, "_is_cancelled", lambda: True)
     with pytest.raises(CancelledError):
-        amod.finalize_stage_activity("job-8b", req, consensus, content, platform, experiment)
+        amod.finalize_stage_activity("job-8b", req, consensus, True, content, platform, experiment)
     assert fake_job_client.get_job("job-8b")["status"] == "cancelled"
 
 

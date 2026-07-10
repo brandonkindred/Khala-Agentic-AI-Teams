@@ -217,9 +217,14 @@ def consensus_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[
     Postconditions:
         - Updates job progress to 30, returns a serialized ``ConsensusStageResult``
           (proposal + resolved goals + brand name). A brand error marks the job
-          failed and raises a non-retryable ``ApplicationError``; any other handled
-          stage error marks the job failed and returns a ``FAIL`` DTO.
+          failed and raises a non-retryable ``ApplicationError``. An unexpected
+          brand-fetch error (network/timeout/etc.) marks the job failed and
+          re-raises so Temporal can still retry a transient fault while the store
+          reflects the failure. Any other handled stage error marks the job failed
+          and returns a ``FAIL`` DTO.
     """
+    from temporalio.exceptions import CancelledError
+
     from social_media_marketing_team.adapters.branding import (
         BrandIncompleteError,
         BrandNotFoundError,
@@ -231,7 +236,7 @@ def consensus_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[
 
     # Rebuild the request and re-fetch the brand OUTSIDE the funnel: a malformed
     # request is a code/schema defect and a brand error is permanent -- both must
-    # surface (as a raised ApplicationError) rather than read as a pipeline FAIL.
+    # surface (as a raised error) rather than read as a pipeline FAIL.
     request = RunMarketingTeamRequest(**request_dict)
     try:
         brand_data = fetch_brand(request.client_id, request.brand_id)
@@ -241,6 +246,18 @@ def consensus_stage_activity(job_id: str, request_dict: Dict[str, Any]) -> Dict[
     except (BrandNotFoundError, BrandIncompleteError) as exc:
         _fail_activity(job_id, exc, "brand_validation")
         raise ApplicationError(str(exc), non_retryable=True) from exc
+    except Exception as exc:
+        # Unexpected brand-fetch errors (network/timeout/RuntimeError from the
+        # branding API) are retryable, but the job store must still reflect the
+        # failure rather than sit in "running" until the stale monitor fires --
+        # mirroring the thread-mode ``_run_team_job`` funnel. Re-raise so Temporal
+        # can still retry a transient fault; surface an in-flight cancellation as a
+        # cancellation rather than a failure.
+        if _is_cancelled():
+            _mark_cancelled(job_id)
+            raise CancelledError("consensus brand fetch cancelled") from exc
+        _fail_activity(job_id, exc, "brand_validation")
+        raise
 
     _update_job(
         job_id,
@@ -407,20 +424,24 @@ def finalize_stage_activity(
     job_id: str,
     request_dict: Dict[str, Any],
     consensus: Dict[str, Any],
+    approved: bool,
     content: Optional[Dict[str, Any]] = None,
     platform: Optional[Dict[str, Any]] = None,
     experiment: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Finalize: assemble ``TeamOutput`` and complete the job store.
 
-    Handles both outcomes: when the request was not human-approved the downstream
-    artifacts are absent and a ``NEEDS_REVISION`` output is produced; otherwise the
-    full ``APPROVED_FOR_TESTING`` output is assembled from the stage DTOs.
+    Handles both outcomes: when ``approved`` is False the downstream artifacts are
+    absent and a ``NEEDS_REVISION`` output is produced; otherwise the full
+    ``APPROVED_FOR_TESTING`` output is assembled from the stage DTOs. The
+    human-gate decision is made once, in the workflow, and passed in via
+    ``approved`` -- this activity never re-derives it (single source of truth).
 
     Preconditions:
-        - ``consensus`` is a serialized ``ConsensusStageResult``. When the request's
-          ``human_approved_for_testing`` is True, ``content`` is a present serialized
-          ``ContentPlanStageResult`` (``platform``/``experiment`` may be absent).
+        - ``consensus`` is a serialized ``ConsensusStageResult``. ``approved`` is the
+          workflow's human-gate decision. When ``approved`` is True, ``content`` is a
+          present serialized ``ContentPlanStageResult`` (``platform``/``experiment``
+          may be absent).
     Postconditions:
         - The job store entry is marked completed (progress 100) with the serialized
           ``TeamOutput`` result. A malformed or missing required input DTO raises a
@@ -452,7 +473,7 @@ def finalize_stage_activity(
     proposal = CampaignProposal.model_validate(consensus["proposal"])
     brand_name = consensus.get("brand_name", "")
     human_review = HumanReview(
-        approved=request.human_approved_for_testing,
+        approved=approved,
         feedback=request.human_feedback,
     )
 

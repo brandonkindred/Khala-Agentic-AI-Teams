@@ -114,13 +114,16 @@ class SocialMarketingTeamWorkflow:
         if consensus.get("status") == "FAIL":
             return
 
-        # Human gate: read the static request flag directly (replay-safe). An
+        # Human gate: the workflow is the single decision point. Read the static
+        # request flag directly (replay-safe) and thread the decision into finalize
+        # as an explicit ``approved`` flag so the activity never re-derives it. An
         # unapproved run finalizes NEEDS_REVISION without the downstream stages,
         # matching orchestrator.run's early return.
-        if not request_dict.get("human_approved_for_testing"):
+        approved = bool(request_dict.get("human_approved_for_testing"))
+        if not approved:
             await workflow.execute_activity(
                 _activities.finalize_stage_activity,
-                args=[job_id, request_dict, consensus],
+                args=[job_id, request_dict, consensus, approved],
                 **_STAGE_ACTIVITY_OPTS,
             )
             return
@@ -151,6 +154,6 @@ class SocialMarketingTeamWorkflow:
 
         await workflow.execute_activity(
             _activities.finalize_stage_activity,
-            args=[job_id, request_dict, consensus, content, platform, experiment],
+            args=[job_id, request_dict, consensus, approved, content, platform, experiment],
             **_STAGE_ACTIVITY_OPTS,
         )
