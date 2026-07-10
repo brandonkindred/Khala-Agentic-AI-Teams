@@ -26,6 +26,7 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
     "investment": "investment_team.temporal",
     "sales": "sales_team.temporal",
     "road_trip_planning": "road_trip_planning_team.temporal",
+    "nutrition_meal_planning": "nutrition_meal_planning_team.temporal",
     "startup_advisor": "startup_advisor.temporal",
     "user_agent_founder": "user_agent_founder.temporal",
     "agentic_team_provisioning": "agentic_team_provisioning.temporal",

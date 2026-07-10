@@ -47,6 +47,14 @@ Data is persisted in Postgres (tables `nutrition_profiles`, `nutrition_conversat
 
 Uses the Personal Assistant team’s LLM client (`personal_assistant_team.shared.llm`) for completion and JSON extraction. Requires `personal_assistant_team` to be available when the API runs.
 
+## Durable execution (Temporal)
+
+All three async job endpoints — `POST /plan/nutrition`, `POST /plan/nutrition/{client_id}/regenerate`, and `POST /plan/meals` — run as Temporal workflows/activities when `TEMPORAL_ADDRESS` is set, and fall back to daemon threads otherwise. The wiring follows the shared `shared_temporal` pattern (annotation-based):
+
+- `temporal/workflows.py` defines one `@workflow.defn` class and one `@activity.defn` function per job kind (`NutritionPlanWorkflow`/`run_nutrition_plan_activity`, `NutritionRegenerateWorkflow`/`run_nutrition_regenerate_activity`, `NutritionMealPlanWorkflow`/`run_meal_plan_activity`). Each activity delegates to the neutral `pipeline.py` core (shared with the thread path) so job-store bookkeeping and cancel semantics live in one place and the durable worker never imports the FastAPI app.
+- `temporal/__init__.py` exports `WORKFLOWS`/`ACTIVITIES`/`TASK_QUEUE` (queue `nutrition_meal_planning-queue`); the worker boots via `temporal/worker.py::start_nutrition_temporal_worker_thread` (docker-compose `TEAM_TEMPORAL_WORKER_*` hook) with the API lifespan as a standalone backstop.
+- Regardless of mode, job status is written to the durable `JobServiceClient` store and polled at `GET /jobs/{job_id}`, so a completed run survives a worker/process restart.
+
 ## Khala platform
 
 This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
