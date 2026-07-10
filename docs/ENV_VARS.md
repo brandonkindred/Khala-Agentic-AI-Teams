@@ -169,6 +169,24 @@ Temporal namespace.
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
 
+### SALES_TEMPORAL_MAX_CONCURRENT_ACTIVITIES
+Int (default `8`, floor `1`). Ceiling on how many sales activities the sales
+Temporal worker runs at once. The sales pipeline fans each stage out into one
+activity per prospect, so this — not the old in-process
+`SalesPipelineConfig.pipeline_stage_workers` thread pool — bounds fan-out
+throughput; the default matches that pool's width (`8`) so wall-clock is
+preserved. Parsed via the shared `env_int` (unset/garbage/`≤0` → default, with a
+warning on a set-but-unparseable value). Only read by the sales worker.
+
+### SALES_TEMPORAL_HEARTBEAT_INTERVAL_S
+Float seconds (default `30`, clamped to `[1, 60]`). How often each long sales
+LLM activity emits `activity.heartbeat` so Temporal can detect a hung activity
+faster than its full timeout. The ceiling is one third of the fixed 180s
+activity heartbeat timeout, guaranteeing at least ~3 beats per window regardless
+of configuration — so a mis-set value can never make a healthy activity
+heartbeat-timeout. Parsed via the shared `env_float` (unset/garbage/non-finite →
+default, with a warning on a set-but-unparseable value).
+
 ### Code review agent: Temporal by default
 **The code review agent runs Temporal by default** (unlike the other teams, which
 only switch on when `TEMPORAL_ADDRESS` is set): `CodeReviewAgent.run` dispatches
