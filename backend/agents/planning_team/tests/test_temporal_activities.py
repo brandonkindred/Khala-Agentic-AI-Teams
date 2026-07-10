@@ -85,16 +85,15 @@ def test_discovery_activity_refines_client_context(tmp_path, job_store, dummy_ll
 
     assert dummy_llm.complete_text.called
     assert ctx["client_context"]["problem_summary"] == "Need X"
-    # The discovery progress write reports its phase/progress and (re)asserts
-    # RUNNING while clearing any stale error.
+    # The discovery progress write reports its phase/progress; non-intake phases
+    # deliberately leave `status` untouched (so a concurrent cancel isn't clobbered).
     discovery_updates = [
         f for jid, f in job_store["update"] if f.get("current_phase") == "discovery"
     ]
     assert discovery_updates
     assert discovery_updates[0]["progress"] == 15
     assert discovery_updates[0]["status_text"] == "Discovery"
-    assert discovery_updates[0]["status"] == "running"
-    assert discovery_updates[0]["error"] is None
+    assert "status" not in discovery_updates[0]
 
 
 def test_requirements_activity_adds_open_questions(tmp_path, job_store, dummy_llm):
@@ -240,6 +239,44 @@ def test_activity_marks_job_failed_and_reraises(tmp_path, monkeypatch, job_store
         A.discovery_activity("job-1", ctx)
 
     assert job_store["failed"] == [("job-1", "no LLM configured")]
+
+
+def test_progress_write_failure_marks_job_failed(monkeypatch, job_store):
+    """The progress write is INSIDE the guard, so a failing update_job (e.g. a
+    job-store blip) still marks the job FAILED instead of leaving it stuck."""
+    from planning_team.shared import job_store as js
+
+    def _boom_update(job_id, **fields):
+        raise RuntimeError("job store down")
+
+    monkeypatch.setattr(js, "update_job", _boom_update)
+
+    with pytest.raises(RuntimeError, match="job store down"):
+        A.discovery_activity("job-1", {"client_context": {}})
+
+    assert job_store["failed"] == [("job-1", "job store down")]
+
+
+def test_non_final_attempt_does_not_mark_failed(monkeypatch, job_store):
+    """On a non-final Temporal attempt, a retryable phase's failure does NOT mark
+    the job FAILED (Temporal will retry) — only the final attempt marks it, so a
+    retry that later succeeds never leaves a transient FAILED / stale error."""
+
+    class _Info:
+        attempt = 1  # discovery is SAFE_RETRY (max 3) → attempt 1 is not final
+
+    monkeypatch.setattr(A.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(A.activity, "info", lambda: _Info())
+
+    def _boom(agent_key=None):
+        raise RuntimeError("transient")
+
+    monkeypatch.setattr("llm_service.get_client", _boom)
+
+    with pytest.raises(RuntimeError, match="transient"):
+        A.discovery_activity("job-1", {"client_context": {}})
+
+    assert job_store["failed"] == []
 
 
 # --------------------------------------------------------------------------- #

@@ -25,7 +25,11 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from planning_team.temporal import activities as _activities
-    from planning_team.temporal.constants import TASK_QUEUE
+    from planning_team.temporal.constants import (
+        RETRYABLE_MAX_ATTEMPTS,
+        SINGLE_ATTEMPT,
+        TASK_QUEUE,
+    )
 
 # --- Per-phase timeouts -----------------------------------------------------
 #: Deterministic/cheap phases (intake, synthesis, finalize).
@@ -41,19 +45,22 @@ EXTERNAL_TIMEOUT = timedelta(hours=2)
 HEARTBEAT_TIMEOUT = timedelta(minutes=5)
 
 # --- Per-phase retry policies ----------------------------------------------
-#: Deterministic phases are safe to retry (no external side effects).
+#: Idempotent phases are safe to retry: intake/synthesis/finalize (deterministic)
+#: and discovery/requirements (pure LLM extraction — they write nothing and submit
+#: nothing, so a transient LLM/network blip the llm_service failover doesn't absorb
+#: should not fail the whole plan). ``maximum_attempts`` is shared with the
+#: activities' final-attempt check via ``RETRYABLE_MAX_ATTEMPTS``.
 SAFE_RETRY = RetryPolicy(
-    maximum_attempts=3,
+    maximum_attempts=RETRYABLE_MAX_ATTEMPTS,
     initial_interval=timedelta(seconds=5),
     maximum_interval=timedelta(minutes=1),
     backoff_coefficient=2.0,
 )
-#: LLM / side-effecting phases run once: the LLM calls are non-idempotent (and
-#: llm_service already fails over on transient provider errors internally), and
-#: document production writes files + submits a PRA job, so a workflow-level
-#: retry must not re-run them. A failure surfaces as a failed workflow + FAILED
-#: job row for explicit resubmission rather than being auto-retried.
-NO_RETRY = RetryPolicy(maximum_attempts=1)
+#: Non-idempotent phases run once: market research submits a research request, and
+#: document production writes files + submits a PRA job, so a workflow-level retry
+#: must not re-run them. A failure surfaces as a failed workflow + FAILED job row
+#: for explicit resubmission rather than being auto-retried.
+NO_RETRY = RetryPolicy(maximum_attempts=SINGLE_ATTEMPT)
 
 
 @workflow.defn(name="PlanningWorkflow")
@@ -101,7 +108,7 @@ class PlanningWorkflow:
             args=[job_id, context],
             task_queue=TASK_QUEUE,
             start_to_close_timeout=LLM_TIMEOUT,
-            retry_policy=NO_RETRY,
+            retry_policy=SAFE_RETRY,
         )
 
         context = await workflow.execute_activity(
@@ -109,7 +116,7 @@ class PlanningWorkflow:
             args=[job_id, context],
             task_queue=TASK_QUEUE,
             start_to_close_timeout=LLM_TIMEOUT,
-            retry_policy=NO_RETRY,
+            retry_policy=SAFE_RETRY,
         )
 
         market_evidence: Optional[Dict[str, Any]] = None
@@ -130,6 +137,10 @@ class PlanningWorkflow:
             retry_policy=SAFE_RETRY,
         )
 
+        # From here ``context`` is SLIM: document_production returns only
+        # ``{repo_path, handoff_package}`` (the raw brief/spec are dropped to keep
+        # the payload small). The two phases below read only those keys — do not add
+        # a phase after this that expects the full pre-document-production context.
         context = await workflow.execute_activity(
             _activities.document_production_activity,
             args=[job_id, context, use_product_analysis],

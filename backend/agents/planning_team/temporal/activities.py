@@ -34,6 +34,8 @@ from typing import Any, Callable, Dict, Optional
 
 from temporalio import activity
 
+from planning_team.temporal.constants import RETRYABLE_MAX_ATTEMPTS, SINGLE_ATTEMPT
+
 logger = logging.getLogger(__name__)
 
 #: Background-heartbeat cadence (seconds) for the long external-poll phases
@@ -98,43 +100,69 @@ def _fail(job_id: str, exc: BaseException) -> None:
     mark_job_failed(job_id, error=str(exc))
 
 
+def _is_final_attempt(max_attempts: int) -> bool:
+    """Return True when the current activity attempt is the last one allowed.
+
+    Preconditions:
+        - ``max_attempts`` is the ``maximum_attempts`` of the phase's RetryPolicy
+          (>= 1). It MUST match the policy the workflow assigns this activity, or
+          the FAILED marking fires on the wrong attempt.
+    Postconditions:
+        - Inside a Temporal worker, returns ``activity.info().attempt >= max_attempts``
+          — i.e. Temporal will not retry after this attempt.
+        - Outside a worker (direct call in unit tests), returns True so a failure
+          still surfaces the FAILED marking rather than being silently swallowed.
+    """
+    if not activity.in_activity():
+        return True
+    return activity.info().attempt >= max_attempts
+
+
 def _guarded(
     job_id: str,
     phase: str,
     progress: int,
     status_text: str,
     work: Callable[[], Any],
+    *,
+    max_attempts: int,
+    status: Optional[str] = None,
 ) -> Any:
-    """Report phase progress, run ``work``, and mark the job FAILED on error.
+    """Report phase progress, run ``work``, and mark the job FAILED on final failure.
 
     Preconditions:
         - ``job_id`` refers to an existing job; ``progress`` is 0..100; ``work`` is
           a zero-arg callable performing the phase's work and returning its result.
+        - ``max_attempts`` matches the phase's Temporal RetryPolicy (see
+          ``constants.RETRYABLE_MAX_ATTEMPTS`` / ``SINGLE_ATTEMPT``).
     Postconditions:
         - The job row's ``current_phase``/``progress``/``status_text`` are updated;
-          ``status`` is (re-)asserted to RUNNING and any stale ``error`` is cleared,
-          so a prior phase's transient FAILED (left by a retried attempt) self-heals
-          and a finished run never carries a leftover error.
-        - This progress write is INSIDE the guard, so if it (or ``work``) raises,
-          the job is marked FAILED and the exception is re-raised unchanged (the
-          workflow's RetryPolicy governs re-attempts). Keeping it inside the guard
-          means a failing progress write can no longer leave the job stuck
-          non-terminal.
+          ``status`` is written only when supplied (the intake phase flips it to
+          RUNNING). Non-terminal phases deliberately do NOT touch ``status``, so a
+          concurrent ``cancelled`` is never clobbered.
+        - This progress write is INSIDE the guard, so a failing progress write can
+          no longer leave the job stuck non-terminal.
+        - On error, the job is marked FAILED only on the *final* Temporal attempt
+          (``_is_final_attempt``); a retry that later succeeds therefore never
+          leaves behind a transient FAILED status or a stale ``error``. The
+          exception is always re-raised so Temporal's RetryPolicy governs
+          re-attempts.
     """
-    from planning_team.shared.job_store import JOB_STATUS_RUNNING, update_job
+    from planning_team.shared.job_store import update_job
 
+    fields: Dict[str, Any] = {
+        "current_phase": phase,
+        "progress": progress,
+        "status_text": status_text,
+    }
+    if status is not None:
+        fields["status"] = status
     try:
-        update_job(
-            job_id,
-            current_phase=phase,
-            progress=progress,
-            status_text=status_text,
-            status=JOB_STATUS_RUNNING,
-            error=None,
-        )
+        update_job(job_id, **fields)
         return work()
     except Exception as exc:
-        _fail(job_id, exc)
+        if _is_final_attempt(max_attempts):
+            _fail(job_id, exc)
         raise
 
 
@@ -158,6 +186,7 @@ def intake_activity(
     """
     from planning_team.models import Phase
     from planning_team.phases import run_intake
+    from planning_team.shared.job_store import JOB_STATUS_RUNNING
 
     def _work() -> Dict[str, Any]:
         context_update, _ = run_intake(
@@ -168,7 +197,16 @@ def intake_activity(
         )
         return _merge_context({}, context_update)
 
-    return _guarded(job_id, Phase.INTAKE.value, 5, "Intake", _work)
+    # First phase: flip PENDING → RUNNING. Later phases leave status untouched.
+    return _guarded(
+        job_id,
+        Phase.INTAKE.value,
+        5,
+        "Intake",
+        _work,
+        max_attempts=RETRYABLE_MAX_ATTEMPTS,
+        status=JOB_STATUS_RUNNING,
+    )
 
 
 @activity.defn(name="planning_discovery")
@@ -190,7 +228,9 @@ def discovery_activity(job_id: str, context: Dict[str, Any]) -> Dict[str, Any]:
         context_update, _ = run_discovery(context, get_client("planning"))
         return _merge_context(context, context_update)
 
-    return _guarded(job_id, Phase.DISCOVERY.value, 15, "Discovery", _work)
+    return _guarded(
+        job_id, Phase.DISCOVERY.value, 15, "Discovery", _work, max_attempts=RETRYABLE_MAX_ATTEMPTS
+    )
 
 
 @activity.defn(name="planning_requirements")
@@ -211,7 +251,14 @@ def requirements_activity(job_id: str, context: Dict[str, Any]) -> Dict[str, Any
         context_update, _ = run_requirements(context, get_client("planning"))
         return _merge_context(context, context_update)
 
-    return _guarded(job_id, Phase.REQUIREMENTS.value, 25, "Requirements", _work)
+    return _guarded(
+        job_id,
+        Phase.REQUIREMENTS.value,
+        25,
+        "Requirements",
+        _work,
+        max_attempts=RETRYABLE_MAX_ATTEMPTS,
+    )
 
 
 @activity.defn(name="planning_market_research")
@@ -245,7 +292,13 @@ def market_research_activity(job_id: str, context: Dict[str, Any]) -> Optional[D
             return None
         return market_research_to_evidence(mr_data)
 
-    return _guarded(job_id, Phase.SYNTHESIS.value, 30, "Market research", _work)
+    # Market research is a step of the synthesis phase (the orchestrator reports it
+    # under a single SYNTHESIS update too), so report the same phase/progress as
+    # synthesis_activity rather than inventing a distinct sub-phase. Submitting a
+    # research request is non-idempotent → single attempt.
+    return _guarded(
+        job_id, Phase.SYNTHESIS.value, 35, "Synthesis", _work, max_attempts=SINGLE_ATTEMPT
+    )
 
 
 @activity.defn(name="planning_synthesis")
@@ -270,7 +323,9 @@ def synthesis_activity(
         context_update, _ = run_synthesis(context, market_research_evidence=market_evidence)
         return _merge_context(context, context_update)
 
-    return _guarded(job_id, Phase.SYNTHESIS.value, 35, "Synthesis", _work)
+    return _guarded(
+        job_id, Phase.SYNTHESIS.value, 35, "Synthesis", _work, max_attempts=RETRYABLE_MAX_ATTEMPTS
+    )
 
 
 @activity.defn(name="planning_document_production")
@@ -339,7 +394,14 @@ def document_production_activity(
         # payload well under the blob limit for large plans.
         return {"repo_path": merged.get("repo_path"), "handoff_package": handoff}
 
-    return _guarded(job_id, Phase.DOCUMENT_PRODUCTION.value, 45, "Document production", _work)
+    return _guarded(
+        job_id,
+        Phase.DOCUMENT_PRODUCTION.value,
+        45,
+        "Document production",
+        _work,
+        max_attempts=SINGLE_ATTEMPT,
+    )
 
 
 @activity.defn(name="planning_sub_agent_provisioning")
@@ -387,6 +449,7 @@ def sub_agent_provisioning_activity(
         90,
         "Sub-agent provisioning (optional)",
         _work,
+        max_attempts=SINGLE_ATTEMPT,
     )
 
 
@@ -415,4 +478,14 @@ def finalize_planning_activity(job_id: str, context: Dict[str, Any]) -> Dict[str
         )
         return {"success": True, "summary": summary}
 
-    return _guarded(job_id, Phase.SUB_AGENT_PROVISIONING.value, 100, "Complete", _work)
+    # current_phase stays at the last real phase (sub_agent_provisioning); the
+    # completion signal is status=completed + status_text="Complete". This matches
+    # the thread-mode orchestrator, so both paths report an identical terminal state.
+    return _guarded(
+        job_id,
+        Phase.SUB_AGENT_PROVISIONING.value,
+        100,
+        "Complete",
+        _work,
+        max_attempts=RETRYABLE_MAX_ATTEMPTS,
+    )
