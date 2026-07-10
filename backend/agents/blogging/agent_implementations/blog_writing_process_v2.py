@@ -1269,6 +1269,13 @@ def run_draft_stage(
           ``ctx.elicited_stories_text``) and returns None.
         - Returns a terminal ``(planning_phase_result, draft_result, "FAIL")`` tuple
           if the job was cancelled/failed while awaiting user review.
+    Raises:
+        DraftError: when the required guideline files cannot be loaded
+            (via ``_load_required_guidelines``, phase="draft") or when draft /
+            copy-edit generation fails.
+        BloggingError: any other blogging-domain failure raised by the draft or
+            copy-edit agents propagates unchanged.
+        CancelledError: a Temporal-native cancellation propagates (never swallowed).
     """
     assert ctx.plan is not None, "run_draft_stage requires ctx.plan (set by the planning stage)"
     brief = ctx.brief

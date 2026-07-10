@@ -154,7 +154,12 @@ def _run_stage(
           serialized DTO dict; ``fail_dto`` builds the stage's FAIL DTO dict.
         - ``body`` MUST NOT catch Temporal ``CancelledError`` — this funnel handles
           it (re-raising so cancellation propagates). Swallowing it in ``body`` would
-          convert an external cancellation into a spurious FAIL.
+          convert an external cancellation into a spurious FAIL. A best-effort
+          backstop below catches the common case where a body rewraps the
+          cancellation *while preserving the exception chain*; a body that breaks the
+          chain (``raise Other(...) from None``) can still defeat detection, so the
+          "must not catch" rule remains a real contract, not something the funnel can
+          fully guarantee.
         - Anything ``body`` does that is infrastructure setup rather than pipeline
           work (e.g. starting the job, rebuilding an input DTO) belongs OUTSIDE this
           funnel, so its failures propagate to Temporal for retry instead of being
@@ -163,10 +168,12 @@ def _run_stage(
         - Returns ``body()``'s DTO on success. On any handled error the job is
           marked cancelled/failed (via ``_fail_activity`` with ``failed_phase``)
           and ``fail_dto()`` is returned. Re-raises a native ``CancelledError``; a
-          rewrapped external cancellation is detected by ``_fail_activity`` via the
-          exception chain and routed to ``mark_job_cancelled`` (job cancelled, not
-          failed), so the "body must not catch CancelledError" contract is enforced
-          structurally, not just documented.
+          rewrapped external cancellation that keeps its ``__cause__``/``__context__``
+          chain is detected by ``_fail_activity`` via ``_is_external_cancellation``
+          and routed to ``mark_job_cancelled`` (job cancelled, not failed). This is a
+          best-effort backstop, not a guarantee: a body that severs the chain can
+          still be recorded as a failure, so callers must honor the "must not catch
+          CancelledError" precondition.
     """
     from temporalio.exceptions import CancelledError
 
@@ -357,7 +364,9 @@ def finalize_job_activity(
           NEEDS_REVIEW). Unlike the stage activities, nothing is terminal before
           finalize runs, so a transient store error must not permanently fail a
           successful pipeline: the store call re-raises (letting Temporal retry)
-          until the final attempt, which marks the job failed and swallows.
+          until the final attempt, which marks the job failed and then re-raises so
+          the workflow (and Temporal) also reflect the finalize failure rather than
+          completing as if it succeeded.
         - A malformed input DTO raises out of the activity (a code/schema defect
           must fail loudly, not read as a retryable store error) — matching the
           draft/gates contract.
@@ -380,11 +389,15 @@ def finalize_job_activity(
         logger.info("Blog finalize cancelled for job %s", job_id)
         raise
     except Exception as e:
-        # Nothing is terminal yet; retry transient store errors, marking the job
-        # failed only once Temporal has no attempt left.
+        # Nothing is terminal yet; retry transient store errors while Temporal has
+        # attempts left.
         if not _is_last_attempt():
             raise
+        # Final attempt: record the terminal failure in the job store AND re-raise
+        # so the workflow (and Temporal) also reflect that finalize failed, rather
+        # than the activity completing as if finalization had succeeded.
         _fail_activity(job_id, e, failed_phase="finalize")
+        raise
 
 
 @activity.defn(name="run_blog_full_pipeline")

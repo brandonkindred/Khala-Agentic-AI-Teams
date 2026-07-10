@@ -641,7 +641,8 @@ def _patch_finalize(monkeypatch):
 
 
 def test_finalize_job_activity_marks_failed_on_last_attempt(monkeypatch, tmp_path) -> None:
-    """On the final Temporal attempt a transient store error fails the job and swallows."""
+    """On the final Temporal attempt a transient store error marks the job failed AND
+    re-raises, so the workflow also reflects the finalize failure (not a silent swallow)."""
     acts, rpj = _patch_finalize(monkeypatch)
 
     def _raise(*a, **kw):
@@ -654,10 +655,9 @@ def test_finalize_job_activity_marks_failed_on_last_attempt(monkeypatch, tmp_pat
         acts, "_fail_activity", lambda job_id, exc, failed_phase: failed.update(phase=failed_phase)
     )
 
-    assert (
-        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": {"d": 1}}) is None
-    )
-    assert failed == {"phase": "finalize"}
+    with pytest.raises(RuntimeError, match="store down"):
+        acts.finalize_job_activity("j1", {"planning_phase_result": {}}, {"draft": {"d": 1}})
+    assert failed == {"phase": "finalize"}  # job still marked failed before propagating
 
 
 def test_finalize_job_activity_reraises_before_last_attempt(monkeypatch, tmp_path) -> None:
