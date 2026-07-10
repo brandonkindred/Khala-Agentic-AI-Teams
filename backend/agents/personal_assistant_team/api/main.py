@@ -17,10 +17,8 @@ from pydantic import BaseModel, Field
 
 from llm_service import LLMNotConfiguredError
 
+from ..core import get_orchestrator
 from ..models import AssistantRequest
-from ..orchestrator.agent import PersonalAssistantOrchestrator
-from ..shared.credential_store import CredentialStore
-from ..shared.llm import get_llm_client
 from ..shared.pa_job_store import (
     PA_JOB_STATUS_COMPLETED,
     PA_JOB_STATUS_FAILED,
@@ -34,7 +32,6 @@ from ..shared.pa_job_store import (
     list_jobs,
     update_job,
 )
-from ..shared.user_profile_store import UserProfileStore
 
 try:
     from unified_api.slack_notifier import notify_pa_response as slack_notify_pa_response
@@ -105,14 +102,16 @@ async def serve_ui():
     )
 
 
-# Resolve the LLM lazily so the service can start (and serve health checks /
-# the /llm-config setup flow) even when no provider is configured yet. A
-# missing provider then fails an individual agent run rather than crashing
-# container startup at import time.
-llm = get_llm_client("personal_assistant", lazy=True)
-credential_store = CredentialStore()
-profile_store = UserProfileStore()
-orchestrator = PersonalAssistantOrchestrator(llm, credential_store, profile_store)
+# One shared orchestrator instance for both runtime modes: thread mode uses it
+# directly here, and (in the same process) the Temporal activities resolve the
+# same singleton via ``core.get_orchestrator``. It resolves the LLM lazily so
+# the service can start (and serve health checks / the /llm-config setup flow)
+# even when no provider is configured yet — a missing provider then fails an
+# individual agent run rather than crashing container startup at import time.
+orchestrator = get_orchestrator()
+llm = orchestrator.llm
+credential_store = orchestrator.credential_store
+profile_store = orchestrator.profile_store
 
 
 class ProfileUpdateBody(BaseModel):

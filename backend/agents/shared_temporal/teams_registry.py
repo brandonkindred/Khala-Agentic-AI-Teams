@@ -21,6 +21,7 @@ TEAM_TEMPORAL_MODULES: dict[str, str] = {
     # Already-Temporal teams are registered via their own startup hooks; this
     # registry covers teams migrated by the shared_temporal rollout.
     "market_research": "market_research_team.temporal",
+    "personal_assistant": "personal_assistant_team.temporal",
     "accessibility_audit": "accessibility_audit_team.temporal",
     "branding": "branding_team.temporal",
     "investment": "investment_team.temporal",
