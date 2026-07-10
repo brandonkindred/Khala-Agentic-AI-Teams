@@ -267,8 +267,43 @@ def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
 # ---------------------------------------------------------------------------
 
 
+def _start_agent_studio_temporal_worker() -> None:
+    """Start the in-process Agent Studio Temporal worker.
+
+    Agent Studio is an in-process team (mounted on this app, not a separate
+    ``team_service`` container), so its worker runs here and its activity threads
+    share this process's :class:`AgentStudioService` singleton. Gated only on the team
+    being enabled — Agent Studio assumes Temporal is always configured. The worker is a
+    daemon thread (no shutdown handle needed); log-and-continue on failure, matching
+    the other lifespan startup steps.
+
+    Postconditions:
+        - Logs at INFO only when a worker actually started; when ``start_team_worker``
+          returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker), logs a WARNING
+          instead of a misleading success line, since Agent Studio is Temporal-only and
+          its requests will fail until Temporal is configured. Startup is not aborted
+          (that would take down every other team for one in-process team's config).
+    """
+    if not TEAM_CONFIGS["agent_studio"].enabled:
+        return
+    try:
+        from agent_studio.temporal.worker import start_agent_studio_temporal_worker_thread
+
+        started = start_agent_studio_temporal_worker_thread()
+    except Exception:
+        logger.warning("Agent Studio Temporal worker failed to start", exc_info=True)
+        return
+    if started:
+        logger.info("Started Agent Studio Temporal worker")
+    else:
+        logger.warning(
+            "Agent Studio Temporal worker NOT started (TEMPORAL_ADDRESS unset); "
+            "Agent Studio requests will fail until Temporal is configured."
+        )
+
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot
     """Application lifespan: register own Postgres schemas, mount assistant sub-apps,
     then register proxy routes.
 
@@ -454,6 +489,9 @@ async def lifespan(app: FastAPI):
         logger.info("Started Agent Cognition scheduler")
     except Exception:
         logger.warning("Agent Cognition scheduler failed to start", exc_info=True)
+
+    # 8. Start the Agent Studio Temporal worker (in-process team; see helper).
+    _start_agent_studio_temporal_worker()
 
     yield
 
