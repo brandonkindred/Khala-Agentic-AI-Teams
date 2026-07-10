@@ -87,8 +87,8 @@ Return a single JSON object with:
   - "line": integer (1-based line number in the NEW version of file_path where the issue is). When the code is presented with line-number prefixes (e.g. `123: <code>`), set "line" to that exact prefixed number. REQUIRED when the issue is tied to a specific line; OMIT it for file-wide or structural issues.
   - "description": string (clear description of the issue)
   - "suggestion": string (concrete fix recommendation)
-- "summary": string (overall review summary - what's good, what needs work)
-- "spec_compliance_notes": string (how well the code meets the spec and acceptance criteria)
+- "summary": string. A brief, high-level overview for the developer. Do NOT restate what the PR does or is meant to accomplish. When any issue was found, do NOT praise the implementation (do not call it sound, well-structured, or well-implemented) and do NOT claim it aligns with the spec; instead name which functional areas or parts of the code have issues and call out any common theme across them, without re-listing the individual findings (they are posted as their own comments). When there are no issues, a single short sentence.
+- "spec_compliance_notes": string. List ONLY concrete spec or acceptance-criteria gaps (missing or unmet requirements), briefly. If there are no spec gaps, return an empty string "" — do not write reassuring "meets the spec" prose.
 
 **Severity definitions (consistent with QA and Security agents):**
 - **critical**: Code is broken, has security vulnerabilities, or fundamentally wrong (e.g., code won't compile, missing core logic, data loss risk)
@@ -178,8 +178,8 @@ A large submission was reviewed in several independent passes. You are given ONL
 
 **Your job:**
 Rewrite the fragmented per-pass material into a single, coherent narrative that reads as one review of the whole submission, not a list of disconnected pieces.
-- Produce a "summary": a unified overview of the review across all passes — what was looked at, the overall health of the code, and the most important findings, ordered by severity.
-- Produce "spec_compliance_notes": a unified statement of how well the submission meets the specification and acceptance criteria, consolidating the per-pass spec observations.
+- Produce a "summary": a brief, high-level overview for the developer. Do NOT restate what the submission does or is meant to accomplish. When any issue was found, do NOT praise the implementation (do not call it sound, well-structured, or well-implemented), do NOT describe its "overall health" as good, and do NOT claim it aligns with the spec; instead name which functional areas or parts of the code have issues and call out any common theme across them. Do NOT reproduce the per-finding list — the individual findings are posted separately.
+- Produce "spec_compliance_notes": consolidate ONLY genuine spec or acceptance-criteria gaps (missing or unmet requirements) that the per-pass notes recorded, briefly. If there are no spec gaps, return an empty string "" — do not write reassuring "meets the spec" prose.
 
 **Hard rules:**
 - Do NOT invent findings. Only describe issues that appear in the provided findings.
@@ -188,8 +188,8 @@ Rewrite the fragmented per-pass material into a single, coherent narrative that 
 - Do NOT request source code or claim you cannot proceed; synthesize from the findings provided.
 
 Return a single JSON object with exactly these keys:
-- "summary": string — the unified review summary.
-- "spec_compliance_notes": string — the unified spec-compliance narrative.
+- "summary": string — the unified review summary (non-empty).
+- "spec_compliance_notes": string — the consolidated spec-compliance gaps, or "" when there are none.
 """
     + JSON_OUTPUT_INSTRUCTION
 )

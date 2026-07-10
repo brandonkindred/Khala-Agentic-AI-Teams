@@ -322,6 +322,14 @@ def test_build_review_body_is_summary_only() -> None:
     assert "General findings" not in body
 
 
+def test_build_review_body_omits_spec_section_when_notes_empty() -> None:
+    # With findings present but no spec gaps, the reviewer returns empty spec
+    # notes and the body carries only the high-level summary — no spec section.
+    body = build_review_body("Issues cluster in the auth flow.", "", issue_count=2)
+    assert body == "Issues cluster in the auth flow."
+    assert "Spec compliance" not in body
+
+
 def test_build_review_body_zero_issues_is_short_and_affirmational() -> None:
     assert (
         build_review_body("", "", issue_count=0) == "No issues found — the code is of good quality."
