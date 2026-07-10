@@ -134,3 +134,28 @@ def test_save_agent_activity_translates_value_error(service: Mock) -> None:
         save_agent_activity(AgentDefinition(name="X", role="Y").model_dump())
     assert ei.value.type == "ValueError"
     assert ei.value.non_retryable is True
+
+
+# ── subclass markers ─────────────────────────────────────────────────────────────
+
+
+def test_activity_maps_valueerror_subclass_to_base_marker(service: Mock) -> None:
+    """A ``ValueError`` *subclass* maps to the base ``"ValueError"`` marker so the
+    dispatch layer still translates it to 400 (not a 500 on an unrecognized name)."""
+
+    class _CustomBadInput(ValueError):
+        pass
+
+    service.start_conversation.side_effect = _CustomBadInput("bad")
+    with pytest.raises(ApplicationError) as ei:
+        start_conversation_activity("new", None, None)
+    assert ei.value.type == "ValueError"
+
+
+def test_activity_maps_lookuperror_subclass_to_base_marker(service: Mock) -> None:
+    """A ``LookupError`` subclass (``KeyError``) maps to the base ``"LookupError"``
+    marker so the dispatch layer still translates it to 404."""
+    service.send_message.side_effect = KeyError("missing")
+    with pytest.raises(ApplicationError) as ei:
+        send_message_activity("c", "hi")
+    assert ei.value.type == "LookupError"

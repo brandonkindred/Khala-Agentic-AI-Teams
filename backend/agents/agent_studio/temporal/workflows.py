@@ -46,17 +46,26 @@ SINGLE_ATTEMPT = RetryPolicy(maximum_attempts=1)
 def _to_application_error(exc: Exception) -> ApplicationError:
     """Re-shape a service ``ValueError``/``LookupError`` as a typed ApplicationError.
 
-    The ``type`` marker (the exception's class name) lets the dispatch layer rebuild
-    the native exception, preserving the route's ``ValueError`` → 400 / ``LookupError``
-    → 404 contract through Temporal. ``non_retryable=True`` because these are caller
-    errors (bad input / unknown id) — retrying cannot help.
+    The ``type`` marker lets the dispatch layer rebuild the native exception,
+    preserving the route's ``ValueError`` → 400 / ``LookupError`` → 404 contract
+    through Temporal. ``non_retryable=True`` because these are caller errors (bad input
+    / unknown id) — retrying cannot help.
+
+    The marker is the matching **base** contract name, not ``type(exc).__name__``: a
+    ``ValueError``/``LookupError`` *subclass* (which the activities' ``except
+    (ValueError, LookupError)`` still catches) must map to ``"ValueError"``/
+    ``"LookupError"`` so the dispatch layer translates it back to 400/404 rather than
+    falling through to a 500 on an unrecognized subclass name.
 
     Preconditions:
-        - ``exc`` is a ``ValueError`` or ``LookupError`` (the service's contract).
+        - ``exc`` is a ``ValueError`` or ``LookupError`` (or subclass) — the activities
+          only call this from an ``except (ValueError, LookupError)`` clause.
     Postconditions:
-        - Returns an ``ApplicationError`` whose ``type`` is ``type(exc).__name__``.
+        - Returns an ``ApplicationError`` whose ``type`` is ``"ValueError"`` when
+          ``exc`` is a ``ValueError`` (family) else ``"LookupError"``.
     """
-    return ApplicationError(str(exc), type=type(exc).__name__, non_retryable=True)
+    marker = "ValueError" if isinstance(exc, ValueError) else "LookupError"
+    return ApplicationError(str(exc), type=marker, non_retryable=True)
 
 
 # ── Activities ──────────────────────────────────────────────────────────────────

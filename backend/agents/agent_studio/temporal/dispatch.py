@@ -17,6 +17,7 @@ re-raised as-is (→ 500).
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import uuid
 from collections.abc import Callable
@@ -103,11 +104,19 @@ def _execute(workflow_run: Callable[..., Any], *args: Any, workflow_id: str) -> 
           workflow, Temporal raises ``WorkflowAlreadyStartedError``; that is re-raised as
           a ``RuntimeError`` naming the offending id rather than surfacing the raw
           Temporal error (which the route would not map, yielding an opaque 500).
+        - If the workflow does not finish within the dispatch timeout,
+          ``execute_workflow_sync`` raises ``concurrent.futures.TimeoutError``; that is
+          re-raised as a ``RuntimeError`` naming the workflow, again to avoid an opaque
+          500 with an unhelpful message.
     """
     try:
         return execute_workflow_sync(
             workflow_run, *args, workflow_id=workflow_id, task_queue=TASK_QUEUE
         )
+    except concurrent.futures.TimeoutError as exc:
+        raise RuntimeError(
+            f"Agent Studio workflow {workflow_id} did not complete within the dispatch timeout"
+        ) from exc
     except WorkflowAlreadyStartedError as exc:
         # Unreachable in normal operation — every dispatch mints a fresh uuid — but
         # execute_workflow_sync documents id-uniqueness as a caller precondition, so a

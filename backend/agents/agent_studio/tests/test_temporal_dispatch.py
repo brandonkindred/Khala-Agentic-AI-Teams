@@ -139,6 +139,16 @@ def test_dispatch_surfaces_duplicate_workflow_id(monkeypatch: pytest.MonkeyPatch
         dispatch.start_conversation("new", None, None)
 
 
+def test_dispatch_surfaces_workflow_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workflow timeout (``concurrent.futures.TimeoutError``) surfaces as a clear
+    ``RuntimeError`` rather than an opaque unhandled error."""
+    import concurrent.futures
+
+    _raise(monkeypatch, concurrent.futures.TimeoutError())
+    with pytest.raises(RuntimeError, match="did not complete within"):
+        dispatch.start_conversation("new", None, None)
+
+
 # ── _translate_workflow_failure directly ─────────────────────────────────────────
 
 
