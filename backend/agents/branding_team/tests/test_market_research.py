@@ -1,0 +1,143 @@
+"""Non-integration tests for the market-research adapter.
+
+The adapter talks to the Market Research team over HTTP; these tests fake
+``httpx.AsyncClient`` (no network, no job service, no Postgres) to exercise the
+submit → poll → map flow, the unconfigured short-circuit, and the failure paths.
+"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from branding_team.adapters import market_research as mr
+from branding_team.models import BrandingMission, CompetitiveSnapshot
+
+
+def _mission() -> BrandingMission:
+    return BrandingMission(
+        company_name="Acme",
+        company_description="A company that builds developer tools",
+        target_audience="developers",
+        differentiators=["speed", "clarity"],
+    )
+
+
+class _FakeResp:
+    def __init__(self, payload: dict, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self) -> dict:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise httpx.HTTPError(f"status {self.status_code}")
+
+
+class _FakeAsyncClient:
+    """Fake httpx.AsyncClient: one POST (submit) then queued GET (status) responses."""
+
+    def __init__(self, submit: _FakeResp, statuses: list[_FakeResp]) -> None:
+        self._submit = submit
+        self._statuses = list(statuses)
+
+    async def __aenter__(self) -> "_FakeAsyncClient":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+    async def post(self, url: str, **_kw: object) -> _FakeResp:
+        return self._submit
+
+    async def get(self, url: str, **_kw: object) -> _FakeResp:
+        return self._statuses.pop(0)
+
+
+def _patch_client(monkeypatch, submit: _FakeResp, statuses: list[_FakeResp]) -> None:
+    monkeypatch.setattr(mr.httpx, "AsyncClient", lambda: _FakeAsyncClient(submit, statuses))
+
+
+# ---------------------------------------------------------------------------
+# pure helpers
+# ---------------------------------------------------------------------------
+
+
+def test_build_payload_shapes_request() -> None:
+    payload = mr._build_payload(_mission())
+    assert "Acme" in payload["product_concept"]
+    assert payload["target_users"] == "developers"
+    assert "speed" in payload["business_goal"]
+    assert payload["human_approved"] is True
+
+
+def test_map_to_competitive_snapshot_extracts_fields() -> None:
+    snap = mr._map_to_competitive_snapshot(
+        {
+            "mission_summary": "summary text",
+            "recommendation": {"rationale": ["r1"], "verdict": "go"},
+            "insights": [{"pain_points": ["p1", "p2"]}],
+            "market_signals": [{"signal": "BrandX"}],
+        }
+    )
+    assert isinstance(snap, CompetitiveSnapshot)
+    assert snap.summary == "summary text"
+    assert "r1" in snap.insights
+    assert "p1" in snap.insights
+    assert "BrandX" in snap.similar_brands
+    assert snap.source == "market_research_team"
+
+
+def test_map_to_competitive_snapshot_defaults_summary() -> None:
+    snap = mr._map_to_competitive_snapshot({})
+    assert snap.summary == "Competitive context requested."
+
+
+# ---------------------------------------------------------------------------
+# request flow
+# ---------------------------------------------------------------------------
+
+
+def test_request_returns_none_when_unconfigured(monkeypatch) -> None:
+    monkeypatch.delenv("UNIFIED_API_BASE_URL", raising=False)
+    monkeypatch.delenv("BRANDING_MARKET_RESEARCH_URL", raising=False)
+    assert mr.request_market_research(_mission()) is None
+
+
+def test_request_success_returns_snapshot(monkeypatch) -> None:
+    monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
+    _patch_client(
+        monkeypatch,
+        submit=_FakeResp({"job_id": "j1"}),
+        statuses=[_FakeResp({"status": "completed", "result": {"mission_summary": "done"}})],
+    )
+    snap = mr.request_market_research(_mission())
+    assert isinstance(snap, CompetitiveSnapshot)
+    assert snap.summary == "done"
+
+
+def test_request_raises_when_no_job_id(monkeypatch) -> None:
+    monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
+    _patch_client(monkeypatch, submit=_FakeResp({}), statuses=[])
+    with pytest.raises(RuntimeError, match="no job_id"):
+        mr.request_market_research(_mission())
+
+
+def test_request_raises_on_terminal_failure(monkeypatch) -> None:
+    monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
+    _patch_client(
+        monkeypatch,
+        submit=_FakeResp({"job_id": "j2"}),
+        statuses=[_FakeResp({"status": "failed", "error": "boom"})],
+    )
+    with pytest.raises(RuntimeError, match="ended with status failed"):
+        mr.request_market_research(_mission())
+
+
+def test_request_wraps_transport_errors(monkeypatch) -> None:
+    monkeypatch.setenv("UNIFIED_API_BASE_URL", "http://svc")
+    _patch_client(monkeypatch, submit=_FakeResp({}, status_code=500), statuses=[])
+    with pytest.raises(RuntimeError, match="Market research request failed"):
+        mr.request_market_research(_mission())
